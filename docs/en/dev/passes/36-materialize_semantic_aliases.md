@@ -57,7 +57,10 @@ its own fresh MemRef. This pass closes that gap:
    producer's destination, check independent reads of the target's physical
    window that can recur through an enclosing loop, including reads outside the
    inner For's lexical lifetime. Binding a loop initializer to a carry is not
-   itself an independent data observation.
+   itself an independent data observation. An actual read of a bound For carry
+   is attributed to its initializer's logical definition (following nested For
+   bindings), so each enclosing While entry preserves the original seed. While
+   carries retain their own definition because they advance across backedges.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.

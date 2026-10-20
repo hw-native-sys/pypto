@@ -1287,6 +1287,33 @@ class TopDownRetargeter {
                                  const std::vector<StmtPtr>& loops) {
     recurring_alias_read_index_.clear();
     recurring_physical_read_index_.clear();
+    // An observed For carry consumes its initializer's logical version on
+    // each enclosing-loop entry. Its own header is too late a definition to
+    // detect that recurrence. Follow nested For bindings with path compression
+    // so the total lookup cost stays O(N log N). Stop at While carries: those
+    // advance across their own backedge rather than restart the initializer.
+    std::map<VarPtr, VarPtr> observed_versions;
+    auto observed_version = [&](const VarPtr& var) {
+      std::vector<VarPtr> path;
+      VarPtr current = var;
+      while (observed_versions.find(current) == observed_versions.end()) {
+        const auto def = defs_.find(current);
+        if (def == defs_.end() || def->second.kind != VarDef::kIterArg ||
+            !As<ForStmt>(def->second.control_stmt)) {
+          break;
+        }
+        auto initial = AsVarLike(def->second.iter_arg->initValue_);
+        if (!initial) break;
+        path.push_back(current);
+        current = initial;
+      }
+      if (auto cached = observed_versions.find(current); cached != observed_versions.end()) {
+        current = cached->second;
+      }
+      for (const auto& carry : path) observed_versions[carry] = current;
+      observed_versions[var] = current;
+      return current;
+    };
     std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;
     ordered_reads.reserve(reads.size());
     for (const auto& [stmt, vars] : reads) {
@@ -1325,7 +1352,7 @@ class TopDownRetargeter {
       }
       while (!loop_stack.empty() && loop_stack.back().second <= position) loop_stack.pop_back();
       for (const auto& var : *vars) {
-        const auto def = defs_.find(var);
+        const auto def = defs_.find(observed_version(var));
         const auto recurring =
             def == defs_.end()
                 ? loop_stack.begin()  // Incoming handles predate even a root loop at order zero.
@@ -1348,7 +1375,7 @@ class TopDownRetargeter {
     for (const auto& [loop, vars] : condition_reads) {
       const size_t begin = stmt_order_.at(loop);
       for (const auto& var : vars) {
-        const auto def = defs_.find(var);
+        const auto def = defs_.find(observed_version(var));
         if (def == defs_.end() || def->second.order < begin) {
           const auto interval = std::make_pair(begin, stmt_end_order_.at(loop) + 1);
           recurring_events[ResolveAliasRoot(var).get()].push_back(interval);

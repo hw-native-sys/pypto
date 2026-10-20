@@ -5179,6 +5179,40 @@ class SharedSuffix:
 class TestWhileNestedAliasTraversal:
     """Scalar while wrappers must preserve nested alias rules and their safety checks."""
 
+    @pytest.mark.parametrize("read_carry", [False, True], ids=["unused_binding", "observed_carry"])
+    @pytest.mark.parametrize("seed_scope", ["outside", "inside"])
+    def test_nested_for_carry_observes_initializer_version(self, read_carry, seed_scope):
+        """An observed carry needs the original seed on every enclosing While entry."""
+        seed = "        seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Vec)\n"
+        outside = seed if seed_scope == "outside" else ""
+        inside = "    " + seed if seed_scope == "inside" else ""
+        producer = (
+            "pl.tile.add(carry, carry)"
+            if read_carry
+            else "pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Vec)"
+        )
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, pool: pl.Tensor[[16, 32], pl.FP32], waves: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
+{outside}        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < waves)
+{inside}            for _i, (carry,) in pl.range(2, init_values=(seed,)):
+                replacement = {producer}
+                result = pl.yield_(replacement)
+            _used = pl.tile.store(result, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        if read_carry and seed_scope == "outside":
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+        else:
+            assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+
     def test_scalar_while_retargets_nested_mat_carry(self):
         """An inner For's reload still writes directly into its Mat carry buffer."""
 

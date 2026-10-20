@@ -49,6 +49,8 @@ program = passes.materialize_semantic_aliases()(program)
    标量 while 不会使嵌套 For carry 绕过既有的重定向及活跃性检查。改变 producer 的
    目标之前，还会检查通过外层循环可重复的目标物理窗口独立读取，包括内层 For 的
    词法生命周期之外的读取。仅把 initializer 绑定为 carry 不算独立的数据观测。
+   实际读取 For carry 时，会沿嵌套 For 绑定追溯到 initializer 的逻辑定义，保证每次
+   进入外层 While 时仍能取得原始 seed。While carry 会沿回边更新，因此保留自身的定义。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
