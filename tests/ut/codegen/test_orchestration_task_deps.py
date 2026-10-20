@@ -1364,20 +1364,12 @@ def test_spmd_submit_950_backend_selects_runtime_launch_method(tmp_path, runtime
     _assert_orchestration_compiles(main_cpp, runtime_name=passes.runtime_kind_to_name(runtime), arch="a5")
     assert f"params_t0.launch_spec.{method}(4);" in code, code
 
-    # The Python backend's explicit runtime must also reach C++ when a caller's
-    # outer context targets the other ABI, and the outer context must survive.
+    # The Python backend must retain a matching caller context across codegen.
     with passes.PassContext([], runtime=runtime):
+        context = passes.PassContext.current()
         program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
-    outer_runtime = (
-        passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-        if runtime == passes.RuntimeKind.HOST_BUILD_GRAPH
-        else passes.RuntimeKind.HOST_BUILD_GRAPH
-    )
-    with passes.PassContext([], runtime=outer_runtime):
         files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
-        current_context = passes.PassContext.current()
-        assert current_context is not None
-        assert current_context.get_runtime() == outer_runtime
+        assert passes.PassContext.current() is context
     main_cpp.write_text(files["orchestration/main.cpp"])
     _assert_orchestration_compiles(main_cpp, runtime_name=passes.runtime_kind_to_name(runtime), arch="a5")
 

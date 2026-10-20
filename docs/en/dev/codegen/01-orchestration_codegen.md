@@ -85,9 +85,9 @@ and the TensorMap/RingBuffer context through `current_runtime()`.
 Launch counts also follow the selected runtime ABI: HBG uses `set_block_num()`
 on both architectures, while A5 TensorMap/RingBuffer uses `set_core_num()`.
 The backend handler reads this choice from `PassContext.runtime`. The Python
-backend scopes its requested runtime during ordinary orchestration and builtin
-spec generation, preserving the caller's other pass options and restoring its
-context afterwards.
+backend creates a temporary codegen context when no context is active, and
+reuses an existing context when its runtime matches. A conflicting runtime is
+rejected before code generation; lowering and codegen must target the same ABI.
 
 ### Phase 2–3: Entry Points
 

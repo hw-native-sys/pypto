@@ -84,8 +84,9 @@ Graph 代码还会包含 `host_build_graph/host/graph_boundary_match.h`。
 
 启动数量也遵循所选运行时 ABI：HBG 在两种架构上都使用 `set_block_num()`，
 而 A5 TensorMap/RingBuffer 使用 `set_core_num()`。后端处理器从
-`PassContext.runtime` 读取这个选择。Python 后端在普通编排和内建规格生成期间，
-为请求的运行时建立临时上下文，保留调用方的其他 Pass 选项，并在结束后恢复原上下文。
+`PassContext.runtime` 读取这个选择。Python 后端在没有活动上下文时，
+为代码生成建立临时上下文；已有上下文的运行时一致时，直接复用该上下文。
+运行时冲突会在代码生成前报错；降级（Lowering）和代码生成必须使用相同的 ABI。
 
 ### 阶段 2–3：入口点
 

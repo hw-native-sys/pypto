@@ -1801,21 +1801,18 @@ def multi_chip_orch_names(transformed_program: _ir_core.Program) -> list[str]:
     return orch_names if len(orch_names) > 1 else []
 
 
-def _codegen_pass_context(runtime: _passes.RuntimeKind) -> _passes.PassContext:
-    """Bind codegen's runtime ABI while retaining the caller's other pass options."""
+def _codegen_pass_context(runtime: _passes.RuntimeKind) -> AbstractContextManager[_passes.PassContext]:
+    """Provide codegen's runtime ABI without overriding an active context."""
     current = _passes.PassContext.current()
     if current is None:
         return _passes.PassContext([], runtime=runtime)
-    return _passes.PassContext(
-        current.get_instruments(),
-        verification_level=current.get_verification_level(),
-        diagnostic_phase=current.get_diagnostic_phase(),
-        disabled_diagnostics=current.get_disabled_diagnostics(),
-        memory_planner=current.get_memory_planner(),
-        enable_pypto_l0c_double_buffer=current.get_enable_pypto_l0c_double_buffer(),
-        runtime=runtime,
-        enable_buffer_ir=current.get_enable_buffer_ir(),
-    )
+    if current.get_runtime() != runtime:
+        raise RuntimeError(
+            f"generate() runtime {_passes.runtime_kind_to_name(runtime)!r} conflicts with the active "
+            f"PassContext runtime {_passes.runtime_kind_to_name(current.get_runtime())!r}. "
+            "Use the same runtime for lowering and code generation."
+        )
+    return nullcontext(current)
 
 
 def generate(
@@ -1854,10 +1851,14 @@ def generate(
             when ``skip_ptoas=True``.
         runtime: Simpler runtime ABI to target; its wire name is written to
             ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``.
-            None uses ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``.
+            None uses ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``. Must match the
+            runtime of an active ``PassContext``.
 
     Returns:
         Dict mapping relative file paths to their content.
+
+    Raises:
+        RuntimeError: The requested runtime differs from the active ``PassContext`` runtime.
     """
     if memory_planner is None:
         memory_planner = _passes.MemoryPlanner.PYPTO
@@ -1866,14 +1867,42 @@ def generate(
     if runtime is None:
         runtime = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
 
-    # Check for distributed functions (level >= HOST = Linqu level 3)
-    has_distributed = any(
-        f.level is not None and _ir_core.level_to_linqu_level(f.level) >= 3
-        for f in transformed_program.functions.values()
-    )
+    # The pass pipeline's context can end before codegen. Supply its runtime to
+    # C++ here, but reject conflicting settings before generating any artifacts.
+    with _codegen_pass_context(runtime):
+        # Check for distributed functions (level >= HOST = Linqu level 3)
+        has_distributed = any(
+            f.level is not None and _ir_core.level_to_linqu_level(f.level) >= 3
+            for f in transformed_program.functions.values()
+        )
 
-    if has_distributed:
-        return _generate_with_distributed(
+        if has_distributed:
+            return _generate_with_distributed(
+                transformed_program,
+                output_dir,
+                skip_ptoas,
+                memory_planner=memory_planner,
+                emit_source_loc=emit_source_loc,
+                dump_ptoas_passes=dump_ptoas_passes,
+                runtime=runtime,
+            )
+
+        # L2-only program with multiple Orchestrations: emit each as a
+        # self-contained sub-build under ``next_levels/{orch_name}/``.
+        # ``_generate_single_chip`` assumes at most one Orchestration; the
+        # per-orch split here keeps that invariant.
+        if multi_chip_orch_names(transformed_program):
+            return _generate_multi_chip(
+                transformed_program,
+                output_dir,
+                skip_ptoas,
+                memory_planner=memory_planner,
+                emit_source_loc=emit_source_loc,
+                dump_ptoas_passes=dump_ptoas_passes,
+                runtime=runtime,
+            )
+
+        return _generate_single_chip(
             transformed_program,
             output_dir,
             skip_ptoas,
@@ -1882,31 +1911,6 @@ def generate(
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
         )
-
-    # L2-only program with multiple Orchestrations: emit each as a
-    # self-contained sub-build under ``next_levels/{orch_name}/``.
-    # ``_generate_single_chip`` assumes at most one Orchestration; the
-    # per-orch split here keeps that invariant.
-    if multi_chip_orch_names(transformed_program):
-        return _generate_multi_chip(
-            transformed_program,
-            output_dir,
-            skip_ptoas,
-            memory_planner=memory_planner,
-            emit_source_loc=emit_source_loc,
-            dump_ptoas_passes=dump_ptoas_passes,
-            runtime=runtime,
-        )
-
-    return _generate_single_chip(
-        transformed_program,
-        output_dir,
-        skip_ptoas,
-        memory_planner=memory_planner,
-        emit_source_loc=emit_source_loc,
-        dump_ptoas_passes=dump_ptoas_passes,
-        runtime=runtime,
-    )
 
 
 def _generate_with_distributed(
@@ -1934,10 +1938,7 @@ def _generate_with_distributed(
 
     # 1. L3 HOST orchestrator → orchestration/host_orch.py
     cg = _codegen_core.DistributedCodegen()
-    # Builtin launch specs are selected by the backend handler through
-    # PassContext, so the explicit codegen runtime must reach this C++ call too.
-    with _codegen_pass_context(runtime):
-        orch_code = cg.generate(transformed_program)
+    orch_code = cg.generate(transformed_program)
     result_files["orchestration/host_orch.py"] = orch_code
     result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs(), runtime))
 
@@ -2342,7 +2343,7 @@ def _generate_single_chip(
     # Orchestration + config
     if orch_func is not None:
         try:
-            with _profiling_stage(prof, "orchestration_codegen"), _codegen_pass_context(runtime):
+            with _profiling_stage(prof, "orchestration_codegen"):
                 orch_result = _codegen_core.generate_orchestration(transformed_program, orch_func)
             result_files[f"orchestration/{orch_func.name}.cpp"] = (
                 f"// Orchestration Function: {orch_func.name}\n"

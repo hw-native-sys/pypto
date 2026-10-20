@@ -272,24 +272,16 @@ def test_collective_builtins_compile_against_runtime(tmp_path, runtime, ascend_b
             pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
             return 0
 
-    with passes.PassContext([]):
+    with passes.PassContext([], runtime=runtime):
+        context = passes.PassContext.current()
         program = passes.materialize_comm_domain_scopes()(Prog)
         program = passes.lower_host_tensor_collectives()(program)
         program = passes.materialize_dist_tensor_ctx()(program)
         program = passes.derive_call_directions()(program)
         program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
-    # Deliberately disagree with generate(runtime=...) to cover propagation to
-    # C++ builtin-spec generation, rather than choosing the method in the test.
-    outer_runtime = (
-        passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-        if runtime == passes.RuntimeKind.HOST_BUILD_GRAPH
-        else passes.RuntimeKind.HOST_BUILD_GRAPH
-    )
-    with passes.PassContext([], runtime=outer_runtime):
+        # Lowering and builtin codegen must target the same runtime ABI.
         files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
-        current_context = passes.PassContext.current()
-        assert current_context is not None
-        assert current_context.get_runtime() == outer_runtime
+        assert passes.PassContext.current() is context
     arch = "a5" if ascend_backend == BackendType.Ascend950 else "a2a3"
     for variant in ("all_to_all_v__fp32", "allreduce__sum__fp32"):
         entry_cpp = tmp_path / f"{variant}.cpp"
