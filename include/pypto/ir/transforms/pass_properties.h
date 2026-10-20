@@ -168,8 +168,8 @@ inline const PassProperties kSimplifyProperties{};
 // degree-9 Horner polynomial), packed tile.tquant_mx, and explicit-signal InCore
 // pld.tensor.allreduce; host-level allreduce is skipped and lowered later by
 // LowerHostTensorCollectives.
-// Future composite ops add a rule to the file-local dispatch table in
-// lower_composite_ops_pass.cpp. The pass operates within existing op
+// Future composite ops add a rule to the function-local dispatch table in
+// lower_composite/lower_composite_rules.cpp. The pass operates within existing op
 // vocabularies, so it neither requires nor produces nor invalidates any
 // IRProperty.
 

@@ -891,13 +891,15 @@ Pass Simplify();
 /**
  * @brief Decompose composite tile/distributed ops into primitive ops.
  *
- * Lowering rules live in a file-local dispatch table inside
- * ``src/ir/transforms/lower_composite_ops_pass.cpp``. Today the pass handles
+ * Lowering rules are selected by the function-local dispatch table in
+ * ``src/ir/transforms/lower_composite/lower_composite_rules.cpp``.
+ * Today the pass handles
  * ``tile.sin`` / ``tile.cos``, packed ``tile.tquant_mx``, and explicit-signal
  * InCore ``pld.tensor.allreduce``; host-level allreduce is skipped and lowered
  * later by ``LowerHostTensorCollectives``. Future single-result composite ops
- * (softmax, gelu, layernorm, ...) are added by appending a rule function + one
- * dispatch-table row. Multi-result rules may also need projection remapping in
+ * (softmax, gelu, layernorm, ...) add a rule function in the appropriate
+ * ``lower_composite/`` module, a declaration in ``lower_composite_rules.h``,
+ * and a dispatch-table row. Multi-result rules may also need projection remapping in
  * the mutator, as ``tile.tquant_mx`` does.
  *
  * FP32-only for the trig rules — non-FP32 inputs are rejected at
