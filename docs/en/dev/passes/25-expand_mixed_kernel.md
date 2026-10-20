@@ -43,7 +43,7 @@ Group parameter list. Producer-local SSA variables are never copied into a
 consumer body.
 
 Computed Tensor results have already been materialized by
-[`ConvertTensorToTileOps`](11-convert_tensor_to_tile_ops.md) as explicit `Out`
+[`ConvertTensorToTileOps`](12-convert_tensor_to_tile_ops.md) as explicit `Out`
 parameters and stores. That pass exposes internal output storage through Group
 parameters and allocates it in the outer caller, even when the Group does not
 return it. Existing complete-parameter writebacks reuse their original storage.

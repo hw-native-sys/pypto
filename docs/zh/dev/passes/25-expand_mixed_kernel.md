@@ -38,7 +38,7 @@ active lane 共用同一份 `CoreTaskArgs` payload。因此，两个已编译 ke
 统一的 Group 形参。producer 局部的 SSA 变量不会直接复制到 consumer 函数体。
 
 新计算的 Tensor 结果已由
-[`ConvertTensorToTileOps`](11-convert_tensor_to_tile_ops.md) 转为显式 `Out` 形参
+[`ConvertTensorToTileOps`](12-convert_tensor_to_tile_ops.md) 转为显式 `Out` 形参
 和 store。该 Pass 将内部输出存储提升为 Group 形参，由外层调用者分配，即使 Group
 不返回它也可以传递。已有完整参数的写回复用原存储。这同样覆盖 `Call`/`Submit`
 的乱序 tuple 返回、直接传入的 `pair[i]`，以及局部 tuple 别名或嵌套 tuple 投影。
