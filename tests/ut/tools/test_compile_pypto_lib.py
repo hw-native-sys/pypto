@@ -253,6 +253,35 @@ def test_unreadable_receipt_fails_without_aborting(library, tmp_path, monkeypatc
     assert result["compilations"] == []
 
 
+@pytest.mark.parametrize(
+    ("child", "passed"), [("ok", True), ("bad", False), ("empty", False), ("exit", False)]
+)
+def test_self_spawned_entry_preserves_audit_and_child_arguments(library, tmp_path, child, passed):
+    # Mirrors entries that dispatch --case=all into independent processes.
+    # The wrapper must preserve each child's arguments and retain failures
+    # even when the parent ignores its exit status or reports success.
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "from golden import run\n"
+        "if '--child' not in sys.argv:\n"
+        "    run('ok', [])\n"
+        "    subprocess.run([sys.executable, __file__, '--child', 'ok'], check=True)\n"
+        f"    subprocess.run(args=[sys.executable, Path(__file__), '--child', {child!r}], check=False)\n"
+        "else:\n"
+        "    assert sys.argv[1] == '--child'\n"
+        "    if sys.argv[2] != 'empty':\n"
+        "        run(sys.argv[2], [])\n"
+        "    if sys.argv[2] == 'exit':\n"
+        "        raise SystemExit(3)\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert result["passed"] is passed
+    statuses = [record["passed"] for record in result["compilations"]]
+    assert statuses == ([True, True, True, False] if child == "exit" else [True, True, passed])
+
+
 def test_entry_arguments_preserve_declared_ranks(tmp_path):
     script = tmp_path / "distributed.py"
     script.write_text('# ci: devices=4\nparser.add_argument("--compile-only")\n')
