@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
@@ -376,6 +377,8 @@ void BindPass(nb::module_& m) {
       .def("get_disabled_diagnostics", &PassContext::GetDisabledDiagnostics,
            "Get the diagnostic checks suppressed by this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
+      .def("get_backend", &PassContext::GetBackend, nb::rv_policy::reference,
+           "Get the configured backend for operator queries; does not bind a new target")
       .def("get_memory_planner", &PassContext::GetMemoryPlanner,
            "Get the memory planner selection for this context")
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,

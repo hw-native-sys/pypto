@@ -116,3 +116,32 @@ handler.get_extra_ptoas_flags()            # list[str]
 运行时相关的 Python 模块（`pypto.runtime.runner`、`pypto.ir.compiled_program`、
 `pypto.backend.pto_backend`）现在通过这些访问器来获取后端行为，不再直接判断
 `BackendType`，与 C++ 改造保持一致。
+
+## Select 算子规则
+
+`tile.sel` 与 `tile.sels` 在 `BackendOpInfo::scratch_plan_func` 注册 scratch
+规划函数；TSELS 还在 `validate_func` 注册原有 dtype 与 MemRef 别名检查。
+`PTOCodegen` 在输出 Tile PTO 前调用验证函数。两后端共享 `pto_ops_select.cpp`，
+具体规则在注册阶段绑定。原有 `GetTselScratchSpec`、`GetTselsScratchSpec`、
+`SupportsTselDataType`、`SupportsTselsDataType` 四个 handler 虚接口已移除。
+
+Pass 经 `PassContext::GetBackend()` 查询算子规则。该入口保留现有全局目标解析语义，
+不引入 context 独立持有目标的机制。未配置后端的独立 select lowering 仍使用历史
+A5 scratch 几何，并保留原有不按后端限制 dtype 的行为。
+
+```python
+from pypto import DataType, backend
+
+target = backend.get_backend_instance(backend.BackendType.Ascend910)
+plan = target.plan_op_scratch("tile.sels", DataType.FP16, source_cols=128)
+# Required：FP16 [1, 128]，一整行物理源数据。
+```
+
+`Required` 携带以元素为单位的只读 `TileScratchSpec`；`NotRequired` 明确表示无需
+scratch；`Unknown` 表示缺少查询所需信息；`Unsupported` 表示候选不支持。
+已注册但没有规划函数的算子返回 `None`，未注册算子报错。查询不读取全局 target、
+不创建 IR，也不分配内存。
+
+合成规格与显式操作数保持区分：调用者提供的 scratch 原样传递，包括 A5 接受的其他
+dtype 占位空间。本次迁移保留既有编译器检查，不增加 scratch 精确几何校验，不改变
+PTOAS 校验。生命周期和复用决策仍由现有内存分配与 IR workspace/alias 元数据处理。

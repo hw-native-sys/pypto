@@ -139,10 +139,49 @@ def get_buffer_elementwise_recipe_names() -> list[str]:
     """
     ...
 
+class OpScratchStatus:
+    """Outcome of a registered scratch query; Unknown means missing input information."""
+
+    Required: OpScratchStatus
+    NotRequired: OpScratchStatus
+    Unknown: OpScratchStatus
+    Unsupported: OpScratchStatus
+
+class TileScratchSpec:
+    """Read-only synthesis geometry for a Vec scratch tile, in elements."""
+
+    @property
+    def dtype(self) -> ir.DataType: ...
+    @property
+    def rows(self) -> int: ...
+    @property
+    def cols(self) -> int: ...
+
+class OpScratchPlan:
+    """Read-only query result; only Required carries a scratch spec."""
+
+    @property
+    def status(self) -> OpScratchStatus: ...
+    @property
+    def spec(self) -> TileScratchSpec | None: ...
+    @property
+    def reason(self) -> str: ...
+
 class Backend:
     """Abstract backend base class."""
 
     def get_type_name(self) -> str: ...
+    def plan_op_scratch(
+        self, op_name: str, source_dtype: ir.DataType | None = None, source_cols: int | None = None
+    ) -> OpScratchPlan | None:
+        """Plan compiler-created scratch without consulting the global backend.
+
+        An unregistered operator raises ValueError. None means the registered
+        operator has no scratch rule, not that it needs no scratch. Missing
+        physical dimensions can return Unknown. Specs describe synthesis;
+        they are not exact-shape requirements for caller-provided scratch.
+        """
+
     def get_registered_op_names(self) -> list[str]:
         """Return registered operator names in sorted order, including target exclusions.
 

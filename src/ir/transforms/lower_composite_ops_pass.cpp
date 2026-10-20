@@ -293,11 +293,12 @@ ExprPtr LowerTileSelectRule(const CallPtr& call, const std::vector<ExprPtr>& arg
     // takes the path below and the flattener collapses it with everything else.
     const bool rank_ok = true_tile->shape_.size() == 2;
     auto src_cols = As<ConstInt>(true_tile->shape_.back());
-    const bool dtype_ok = handler == nullptr || handler->SupportsTselsDataType(true_tile->dtype_);
+    const auto scratch = tile_conversion_utils::PlanSelectScratch(
+        "tile.sels", {true_tile->dtype_, src_cols ? std::optional<int64_t>(src_cols->value_) : std::nullopt});
     ExprPtr scalar = RetypeSelectScalar(args[2], GetTselsScalarDataType(true_tile->dtype_), span);
-    if (rank_ok && dtype_ok && src_cols && scalar) {
-      auto tmp = BindSelectScratch(
-          tile_conversion_utils::TselsScratchSpec(true_tile->dtype_, src_cols->value_), b, span);
+    if (rank_ok && src_cols && scalar && scratch.status == backend::OpScratchStatus::Required) {
+      INTERNAL_CHECK_SPAN(scratch.spec.has_value(), span) << "Internal error: missing TSELS scratch spec";
+      auto tmp = BindSelectScratch(*scratch.spec, b, span);
       return reg.Create("tile.sels", {mask, args[1], tmp, scalar}, span);
     }
   }
@@ -307,14 +308,16 @@ ExprPtr LowerTileSelectRule(const CallPtr& call, const std::vector<ExprPtr>& arg
   // A2/A3 8-bit is the case in practice: tsel, tsels and texpands are all 16-bit
   // and up there, so report it here instead of emitting IR ptoas will reject.
   const auto& shaped = true_tile ? true_tile : false_tile;
-  CHECK_SPAN(handler == nullptr || handler->SupportsTselDataType(shaped->dtype_), span)
+  const auto scratch = tile_conversion_utils::PlanSelectScratch("tile.sel", {shaped->dtype_, std::nullopt});
+  CHECK_SPAN(scratch.status == backend::OpScratchStatus::Required, span)
       << "tile.select cannot select " << shaped->dtype_.ToString() << " values on backend '"
       << (handler != nullptr ? handler->GetPtoTargetArch() : "unknown")
       << "': neither pto.tsel nor pto.tsels has a form for that element type there. Cast the operands "
          "to a wider type before selecting";
   ExprPtr on_true = true_tile ? args[1] : MaterializeSelectScalar(args[1], shaped, "sel_true", b, span);
   ExprPtr on_false = false_tile ? args[2] : MaterializeSelectScalar(args[2], shaped, "sel_false", b, span);
-  auto tmp = BindSelectScratch(tile_conversion_utils::TselScratchSpec(), b, span);
+  INTERNAL_CHECK_SPAN(scratch.spec.has_value(), span) << "Internal error: missing TSEL scratch spec";
+  auto tmp = BindSelectScratch(*scratch.spec, b, span);
   return reg.Create("tile.sel", {mask, on_true, on_false, tmp}, span);
 }
 

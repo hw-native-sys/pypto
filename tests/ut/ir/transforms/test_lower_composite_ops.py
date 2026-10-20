@@ -25,7 +25,7 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import tile as _ir_ops_tile
 from pypto.language.parser.diagnostics.exceptions import ParserError
@@ -3834,6 +3834,20 @@ def test_tile_select_keeps_8bit_on_tsels_on_a5(ascend_backend):
     assert _OP_TILE_SELS in names
     assert _OP_TILE_FULL not in names
     assert ((1, 32), pl.UINT8) in _select_scratch_shapes(After)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_tile_select_bf16_uses_registered_tsel_fallback(ascend_backend):
+    """Neither TSELS implementation accepts BF16; a scalar must be materialized."""
+    after = passes.lower_composite_ops()(_build_select_before(dtype=pl.BF16))
+    names = _collect_op_names(after)
+    assert ir.get_op("tile.sels").name not in names
+    assert ir.get_op("tile.sel").name in names
+    assert ir.get_op("tile.full").name in names
+    target = backend.get_backend_instance(backend.get_backend_type())
+    plan = target.plan_op_scratch("tile.sel", DataType.BF16)
+    assert plan is not None and plan.spec is not None
+    assert ((plan.spec.rows, plan.spec.cols), plan.spec.dtype) in _select_scratch_shapes(after)
 
 
 if __name__ == "__main__":

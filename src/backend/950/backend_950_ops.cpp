@@ -25,6 +25,7 @@
  *     });
  *
  * static const bool kOpsRegistered = [] {
+ *   RegisterSelectOps(Backend950::Instance(), BackendType::Ascend950);
  *   RegisterPTOOps(Backend950::Instance(), {"tile.matmul"});
  *   return true;
  * }();
@@ -38,6 +39,7 @@ namespace pypto {
 namespace backend {
 
 static const bool kOpsRegistered = [] {
+  RegisterSelectOps(Backend950::Instance(), BackendType::Ascend950);
   RegisterPTOOps(Backend950::Instance());
   return true;
 }();

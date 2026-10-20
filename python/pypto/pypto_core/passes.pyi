@@ -13,6 +13,7 @@ from enum import Enum
 from types import TracebackType
 from typing import Any, overload
 
+from pypto.pypto_core.backend import Backend
 from pypto.pypto_core.ir import Function, Program, Span, Stmt
 
 class IRProperty(Enum):
@@ -333,6 +334,10 @@ class PassContext:
 
     def get_disabled_diagnostics(self) -> DiagnosticCheckSet:
         """Get the diagnostic checks suppressed by this context."""
+        ...
+
+    def get_backend(self) -> Backend:
+        """Return the configured backend; raise ValueError when none is configured."""
         ...
 
     def get_memory_planner(self) -> MemoryPlanner:

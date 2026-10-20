@@ -369,10 +369,12 @@ void PassContext::RunAfterPipeline(const ProgramPtr& program) {
 
 PassContext* PassContext::Current() { return current_; }
 
+const backend::Backend* PassContext::GetBackend() const { return backend::BackendConfig::GetBackend(); }
+
 const backend::BackendHandler* PassContext::GetBackendHandler() const {
   // Handler ownership lives with the Backend itself; PassContext is just a
   // convenient access path that satisfies the "pass-context-config" rule.
-  return backend::BackendConfig::GetBackend()->GetHandler();
+  return GetBackend()->GetHandler();
 }
 
 }  // namespace ir

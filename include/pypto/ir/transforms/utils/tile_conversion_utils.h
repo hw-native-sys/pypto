@@ -15,12 +15,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/op_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -121,26 +124,28 @@ inline const backend::BackendHandler* ActiveBackendHandler() {
   return ctx != nullptr ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
 }
 
-/// Geometry of the scratch tile `pto.tsel` takes as its 4th operand.
-///
-/// `tile.sel` / `tile.sels` make the *tile* caller supply that operand, because
-/// tile buffer lifetimes are user-managed there. Every lowering that synthesizes
-/// one instead — the tensor conversions, `tile.select` — has to size it the same
-/// way, and the sizing is architecture-defined, so it lives on BackendHandler.
-/// Without a configured backend, fall back to the A5 geometry.
-inline backend::TileScratchSpec TselScratchSpec() {
-  const auto* handler = ActiveBackendHandler();
-  if (handler != nullptr) return handler->GetTselScratchSpec();
-  return {DataType::UINT8, 1, 32};
+/// Query the registered select rule before constructing a Call. Standalone
+/// IR passes historically use A5 geometry and no dtype gate without a target;
+/// preserve that fallback here, without assigning defaults to other backends.
+inline backend::OpScratchPlan PlanSelectScratch(const std::string& op_name,
+                                                const backend::OpScratchRequest& request) {
+  if (!backend::BackendConfig::IsConfigured()) {
+    return {backend::OpScratchStatus::Required, backend::TileScratchSpec{DataType::UINT8, 1, 32}, ""};
+  }
+  const auto* ctx = PassContext::Current();
+  const auto* target = ctx ? ctx->GetBackend() : backend::BackendConfig::GetBackend();
+  const auto plan = target->PlanOpScratch(op_name, request);
+  INTERNAL_CHECK(plan.has_value()) << "Internal error: missing scratch rule for " << op_name;
+  return *plan;
 }
 
-/// Geometry of the scratch tile `pto.tsels` takes as its 3rd operand. Unlike
-/// TSEL's it depends on the source tile — A2/A3 sizes it against one complete
-/// physical source row, in the source dtype.
-inline backend::TileScratchSpec TselsScratchSpec(DataType src_dtype, int64_t src_cols) {
-  const auto* handler = ActiveBackendHandler();
-  if (handler != nullptr) return handler->GetTselsScratchSpec(src_dtype, src_cols);
-  return {DataType::UINT8, 1, 32};
+/// TSEL synthesis is source-independent. Existing tensor conversions need
+/// only the geometry, whereas composite select also supplies the source dtype.
+inline backend::TileScratchSpec TselScratchSpec() {
+  const auto plan = PlanSelectScratch("tile.sel", {});
+  INTERNAL_CHECK(plan.status == backend::OpScratchStatus::Required && plan.spec)
+      << "Internal error: TSEL scratch geometry must be known";
+  return *plan.spec;
 }
 
 }  // namespace pypto::ir::tile_conversion_utils

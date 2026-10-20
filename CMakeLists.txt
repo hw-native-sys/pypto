@@ -384,6 +384,7 @@ set(PYPTO_SOURCES
     src/backend/common/buffer_view_semantics.cpp
     src/backend/common/pto_ops_common.cpp
     src/backend/common/pto_ops_shared.cpp
+    src/backend/common/pto_ops_select.cpp
     src/backend/common/pto_ops_elementwise.cpp
     src/backend/common/pto_ops_datamove.cpp
     src/backend/common/pto_ops_memory.cpp

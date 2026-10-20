@@ -17,12 +17,14 @@
 | ------ | ----------------- | --- |
 | Verification level | `PassContext([], VerificationLevel.BASIC)` | Global set/get functions |
 | Pass instruments | `PassContext([VerificationInstrument(...)])` | Global registries |
-| Backend behaviour dispatch | `PassContext::GetBackendHandler()` (delegates to the configured `Backend`) | `if (GetBackendType() == ...)` branches in passes |
+| Backend behaviour dispatch | `PassContext::GetBackend()` for registered op rules; `GetBackendHandler()` for remaining behaviour | `if (GetBackendType() == ...)` branches in passes |
 | Future: logging level | `PassContext(..., log_level=...)` | Global log config |
 
 ### Backend dispatch
 
-Per-backend behaviour (codegen target arch, runtime API names, hazard
+Select dtype/scratch rules live with the registered backend operators and are
+queried through `PassContext::GetBackend()`. Other per-backend behaviour
+(codegen target arch, runtime API names, hazard
 workarounds, cross-core layout rules, ...) lives on a `BackendHandler` virtual
 interface. Passes never branch on `BackendType` directly; instead they call:
 

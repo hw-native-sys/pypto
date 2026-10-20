@@ -2453,6 +2453,10 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
   // in the enclosing statement; otherwise keep the statement span, which is the
   // trustworthy one for any Call a pass rebuilt.
   SpanScope call_loc(this, SpanContains(current_span_, op->span_) ? &op->span_ : nullptr);
+  if (op_info->validate_func) {
+    const auto result = GetCurrentResultVar();
+    (*op_info->validate_func)(op, result ? result->GetType() : nullptr);
+  }
   std::string mlir_line = op_info->codegen_func(op, *this);
   if (!mlir_line.empty()) {
     Emit(mlir_line);

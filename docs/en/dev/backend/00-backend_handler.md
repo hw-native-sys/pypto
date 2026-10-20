@@ -67,6 +67,41 @@ to global state.
 | `GetL0cMAlignment(dtype)` | physical M-row alignment shared by L0C tiling, dbC capacity, and allocation | 32 for INT32; otherwise 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
 
+## Select operator rules
+
+`tile.sel` and `tile.sels` register their scratch planners in
+`BackendOpInfo::scratch_plan_func`; TSELS also registers its existing dtype and
+MemRef alias checks in `validate_func`. `PTOCodegen` invokes the validator before
+Tile PTO emission. Both backends share `pto_ops_select.cpp`, with target-local
+rules bound once at registration. The four select-specific handler virtuals
+(`GetTselScratchSpec`, `GetTselsScratchSpec`, `SupportsTselDataType`, and
+`SupportsTselsDataType`) have been removed.
+
+Passes use `PassContext::GetBackend()` to query operator rules. This accessor
+retains the existing global target resolution; it does not introduce per-context
+target ownership. Standalone select lowering with no configured backend retains
+its historical A5 scratch geometry and ungated dtype behavior.
+
+```python
+from pypto import DataType, backend
+
+target = backend.get_backend_instance(backend.BackendType.Ascend910)
+plan = target.plan_op_scratch("tile.sels", DataType.FP16, source_cols=128)
+# Required: FP16 [1, 128], one physical source row.
+```
+
+`Required` carries a read-only `TileScratchSpec` in element units; `NotRequired`
+explicitly means no scratch. `Unknown` means necessary input information is
+missing, and `Unsupported` rejects a candidate. A registered op without a
+planner returns `None`; an unregistered op raises an error. No query reads the
+global target, creates IR, or allocates memory.
+
+Synthesis and explicit operands remain distinct: caller-owned scratch is passed
+through unchanged, including A5 placeholders with other dtypes. This migration
+preserves existing compiler checks; it does not add exact scratch-geometry
+validation or change PTOAS checks. Memory allocation and the existing IR
+workspace/alias metadata remain responsible for lifetime and reuse decisions.
+
 ## Memory capacity source
 
 `BackendHandler::GetCapacityBytes(memory_space)` reads `Backend::GetMemSize()`

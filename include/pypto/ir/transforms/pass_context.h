@@ -26,6 +26,7 @@
 namespace pypto {
 
 namespace backend {
+class Backend;
 class BackendHandler;
 }  // namespace backend
 
@@ -391,6 +392,10 @@ class PassContext {
    * @return Pointer to current context, or nullptr if none
    */
   static PassContext* Current();
+
+  /// Access registered operator rules through the same target resolution as
+  /// GetBackendHandler; this does not introduce per-context target ownership.
+  [[nodiscard]] const backend::Backend* GetBackend() const;
 
   /**
    * @brief Convenience accessor for the currently configured BackendHandler.

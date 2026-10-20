@@ -19,6 +19,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -184,11 +185,33 @@ void BindBackend(nb::module_& m) {
       .def("get_min_l0_tile_dim", &BackendHandler::GetMinL0TileDim,
            "Minimum legal value for L0 tile dimensions m, n, k");
 
+  nb::enum_<backend::OpScratchStatus>(backend_mod, "OpScratchStatus")
+      .value("Required", backend::OpScratchStatus::Required)
+      .value("NotRequired", backend::OpScratchStatus::NotRequired)
+      .value("Unknown", backend::OpScratchStatus::Unknown)
+      .value("Unsupported", backend::OpScratchStatus::Unsupported);
+  nb::class_<backend::TileScratchSpec>(backend_mod, "TileScratchSpec")
+      .def_ro("dtype", &backend::TileScratchSpec::dtype)
+      .def_ro("rows", &backend::TileScratchSpec::rows)
+      .def_ro("cols", &backend::TileScratchSpec::cols);
+  nb::class_<backend::OpScratchPlan>(backend_mod, "OpScratchPlan")
+      .def_ro("status", &backend::OpScratchPlan::status)
+      .def_ro("spec", &backend::OpScratchPlan::spec)
+      .def_ro("reason", &backend::OpScratchPlan::reason);
+
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
       .def("get_registered_op_names", &Backend::GetRegisteredOpNames,
            "Get a sorted snapshot of this backend's registered operator names")
+      .def(
+          "plan_op_scratch",
+          [](const Backend& target, const std::string& op_name, std::optional<DataType> source_dtype,
+             std::optional<int64_t> source_cols) {
+            return target.PlanOpScratch(op_name, {source_dtype, source_cols});
+          },
+          nb::arg("op_name"), nb::arg("source_dtype") = nb::none(), nb::arg("source_cols") = nb::none(),
+          "Plan compiler-created scratch using this backend's registered rule; None means no rule")
       .def("get_handler", &Backend::GetHandler, nb::rv_policy::reference,
            "Get the per-backend BackendHandler singleton")
       .def("export_to_file", &Backend::ExportToFile, nb::arg("path"), "Export backend to msgpack file")

@@ -307,13 +307,6 @@ static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t ari
   return "";
 }
 
-static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = AsPto(codegen_base);
-  CheckArity(op, "pto.tsel", 4);
-  codegen.Emit("pto.tsel " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
 // pto.ttrans ins(%src, %tmp : tile_type, tile_type). IR form: tile.transpose(src, axis0, axis1, tmp).
 // tmp is pre-allocated by an IR-level tile.create so the memory allocator gives it a real UB
 // address before codegen (required at --pto-level=level3).
@@ -838,45 +831,6 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   return "";
 }
 
-static std::string MakeSelsCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = AsPto(codegen_base);
-  CheckArity(op, "pto.tsels", 4);
-  auto mask_type = As<ir::TileType>(op->args_[0]->GetType());
-  auto src_type = As<ir::TileType>(op->args_[1]->GetType());
-  auto tmp_type = As<ir::TileType>(op->args_[2]->GetType());
-  INTERNAL_CHECK(mask_type && src_type && tmp_type);
-  const auto* handler = codegen.GetBackendHandler();
-  const bool is_a5 = handler->GetPtoTargetArch() == "a5";
-  CHECK_SPAN(handler->SupportsTselsDataType(src_type->dtype_), op->span_)
-      << "tile.sels with integer src dtype " << src_type->dtype_.ToString()
-      << " is only supported on the 'a5' backend; A2/A3 supports 16/32-bit integers, FP16, and FP32";
-
-  auto dst_var = codegen.GetCurrentResultVar();
-  INTERNAL_CHECK_SPAN(dst_var, op->span_) << "Internal error: tile.sels requires an assignment target";
-  auto dst_type = As<ir::TileType>(dst_var->GetType());
-  INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: tile.sels result must be a TileType";
-
-  std::vector<std::pair<std::string_view, std::shared_ptr<const ir::TileType>>> operands = {
-      {"mask", mask_type}, {"src", src_type}, {"tmp", tmp_type}, {"dst", dst_type}};
-  std::vector<std::pair<std::string_view, ir::MemRefPtr>> regions;
-  regions.reserve(operands.size());
-  for (const auto& [name, type] : operands) {
-    INTERNAL_CHECK_SPAN(type->memref_.has_value(), op->span_)
-        << "Internal error: tile.sels " << name << " must carry a MemRef before PTO codegen";
-    regions.emplace_back(name, *type->memref_);
-  }
-  CHECK_SPAN(!ir::MemRef::MayAlias(regions[0].second, regions[3].second), op->span_)
-      << "tile.sels requires mask and dst to use non-overlapping memory regions";
-  if (!is_a5) {
-    for (const size_t other : {size_t{0}, size_t{1}}) {
-      CHECK_SPAN(!ir::MemRef::MayAlias(regions[2].second, regions[other].second), op->span_)
-          << "tile.sels on A2/A3 requires tmp not to overlap mask or src, but tmp overlaps "
-          << regions[other].first;
-    }
-  }
-  return MakeNaryCodegenPTO("pto.tsels", 4, op, codegen_base);
-}
-
 static std::string MakePreluCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, "pto.tprelu", 3);
@@ -1127,15 +1081,6 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     reg_entry.set_output_layout(ir::TileLayout::row_major);
   }
 
-  if (exclude_ops.count("tile.sels") == 0) {
-    auto entry = backend.RegisterOp("tile.sels");
-    entry.f_codegen(MakeSelsCodegenPTO);
-    for (size_t i = 0; i < 4; ++i) {
-      entry.set_input_layout(i, ir::TileLayout::row_major);
-    }
-    entry.set_output_layout(ir::TileLayout::row_major);
-  }
-
   if (exclude_ops.count("tile.prelu") == 0) {
     auto entry = backend.RegisterOp("tile.prelu");
     entry.f_codegen(MakePreluCodegenPTO);
@@ -1268,18 +1213,6 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileTransposeCodegenPTO(op, codegen);
   });
-
-  if (exclude_ops.count("tile.sel") == 0) {
-    backend.RegisterOp("tile.sel")
-        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeTileSelCodegenPTO(op, codegen);
-        })
-        .set_input_layout(0, ir::TileLayout::row_major)
-        .set_input_layout(1, ir::TileLayout::row_major)
-        .set_input_layout(2, ir::TileLayout::row_major)
-        .set_input_layout(3, ir::TileLayout::row_major)
-        .set_output_layout(ir::TileLayout::row_major);
-  }
 
   reg("tile.col_expand", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeSingleOperandCodegenPTO({"tile.col_expand", "pto.tcolexpand", 1, ""}, op, codegen);

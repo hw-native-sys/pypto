@@ -20,7 +20,10 @@ from pypto.pypto_core.backend import (
     Die,
     # Components
     Mem,
+    OpScratchPlan,
+    OpScratchStatus,
     SoC,
+    TileScratchSpec,
     # Backend configuration
     get_backend_instance,
     get_backend_type,
@@ -37,6 +40,9 @@ __all__ = [
     "Cluster",
     "Die",
     "SoC",
+    "OpScratchPlan",
+    "OpScratchStatus",
+    "TileScratchSpec",
     "Backend",
     "Backend910B",
     "Backend950",

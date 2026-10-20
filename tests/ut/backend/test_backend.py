@@ -10,7 +10,7 @@
 """Tests for Backend, SoC construction, and serialization."""
 
 import pytest
-from pypto import ir
+from pypto import DataType, backend, ir, passes
 from pypto.backend import (
     Cluster,
     Core,
@@ -116,6 +116,92 @@ class TestSoCStructure:
         assert soc.total_die_count() == 2
         assert soc.total_cluster_count() == 6
         assert soc.total_core_count() == 12
+
+
+@pytest.mark.parametrize("target_type", [backend.BackendType.Ascend910, backend.BackendType.Ascend950])
+@pytest.mark.parametrize(
+    "configured_type", [None, backend.BackendType.Ascend910, backend.BackendType.Ascend950]
+)
+def test_select_scratch_query_uses_owning_backend(target_type, configured_type):
+    """Registered rules must not accidentally consult the process-global target."""
+    backend.reset_for_testing()
+    try:
+        if configured_type is not None:
+            backend.set_backend_type(configured_type)
+        target = backend.get_backend_instance(target_type)
+        for columns in (16, 128, 256):
+            plan = target.plan_op_scratch("tile.sels", DataType.FP16, columns)
+            assert plan is not None and plan.status == backend.OpScratchStatus.Required
+            assert plan.spec is not None
+            expected = (
+                (DataType.FP16, 1, columns)
+                if target_type == backend.BackendType.Ascend910
+                else (DataType.UINT8, 1, 32)
+            )
+            assert (plan.spec.dtype, plan.spec.rows, plan.spec.cols) == expected
+        assert backend.is_backend_configured() == (configured_type is not None)
+        if configured_type is not None:
+            assert backend.get_backend_type() == configured_type
+            assert passes.PassContext([]).get_backend() is backend.get_backend_instance(configured_type)
+    finally:
+        backend.reset_for_testing()
+
+
+def test_scratch_query_distinguishes_missing_rule_unknown_and_unsupported():
+    target = backend.get_backend_instance(backend.BackendType.Ascend910)
+    # A registered operation without migrated rules is not a no-scratch verdict.
+    assert target.plan_op_scratch("tile.add") is None
+    with pytest.raises(ValueError, match="not registered"):
+        target.plan_op_scratch("tile.not_registered")
+    with pytest.raises(ValueError, match="not registered"):
+        target.plan_op_scratch("tile.matmul_mx")
+
+    for dtype, columns, expected in (
+        (None, None, backend.OpScratchStatus.Unknown),
+        (DataType.FP16, None, backend.OpScratchStatus.Unknown),
+        (DataType.INT8, 128, backend.OpScratchStatus.Unsupported),
+        (DataType.FP16, 0, backend.OpScratchStatus.Unsupported),
+    ):
+        plan = target.plan_op_scratch("tile.sels", dtype, columns)
+        assert plan is not None and plan.status == expected
+        assert plan.spec is None and plan.reason
+
+    # A5's fixed recipe needs no column count once the source type is known.
+    a5 = backend.get_backend_instance(backend.BackendType.Ascend950)
+    plan = a5.plan_op_scratch("tile.sels", DataType.FP16)
+    assert plan is not None and plan.status == backend.OpScratchStatus.Required
+
+
+@pytest.mark.parametrize("target_type", [backend.BackendType.Ascend910, backend.BackendType.Ascend950])
+@pytest.mark.parametrize(
+    "dtype", [DataType.INT8, DataType.UINT8, DataType.FP16, DataType.FP32, DataType.BF16]
+)
+def test_select_scratch_candidate_dtype_gate(target_type, dtype):
+    """BF16 must use TSEL; byte values have neither form on A2/A3."""
+    target = backend.get_backend_instance(target_type)
+    byte_supported = target_type == backend.BackendType.Ascend950 or dtype not in (
+        DataType.INT8,
+        DataType.UINT8,
+    )
+    for name, supported in (
+        ("tile.sel", byte_supported),
+        ("tile.sels", byte_supported and dtype != DataType.BF16),
+    ):
+        plan = target.plan_op_scratch(name, dtype, 128)
+        assert plan is not None
+        assert plan.status == (
+            backend.OpScratchStatus.Required if supported else backend.OpScratchStatus.Unsupported
+        )
+        assert (plan.spec is not None) == supported
+
+
+def test_select_scratch_geometry_is_a_read_only_snapshot():
+    target = backend.get_backend_instance(backend.BackendType.Ascend910)
+    plan = target.plan_op_scratch("tile.sel")
+    assert plan is not None and plan.spec is not None
+    assert (plan.spec.dtype, plan.spec.rows, plan.spec.cols) == (DataType.UINT32, 1, 16)
+    with pytest.raises(AttributeError):
+        setattr(plan.spec, "cols", 1)
 
 
 if __name__ == "__main__":
