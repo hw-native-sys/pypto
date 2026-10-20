@@ -102,7 +102,9 @@ precompile workers and debug recompilation preserve the effective value.
 ## Runtime-valid default selection
 
 Runtime valid shapes are enabled for straight-line Vec load/store, allocation-backed
-`set_validshape`, and matching-shape elementwise recipes from the table above.
+`set_validshape` with an assigned result, and matching-shape elementwise recipes
+from the table above. Standalone setters retain Tile IR, since metadata version
+tracking requires an explicit SSA result.
 Valid expressions must match structurally across arithmetic operands and result;
 two `-1` descriptor dimensions alone do not prove matching runtime values.
 A forward SSA analysis rejects uses of old metadata versions after a setter,

@@ -993,5 +993,33 @@ class UnsupportedDynamic:
     assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("valid_cols", ["16", "cols"])
+def test_standalone_valid_shape_setter_remains_tile(tmp_path, planner, valid_cols):
+    program = pl.parse_program(f"""
+@pl.program
+class StandaloneSetter:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[16, 32], pl.FP32], cols: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
+        whole = pl.load(x, [0, 0], [16, 32])
+        pl.tile.set_validshape(whole, 16, {valid_cols})
+        return pl.store(whole, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Functional
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "standalone_setter.pto"
+        source.write_text(
+            codegen.PTOCodegen().generate(
+                lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+            )
+        )
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(
+            str(source), str(tmp_path / "standalone_setter.cpp"), ["--pto-arch=a2", f"--pto-level={level}"]
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

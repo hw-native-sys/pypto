@@ -77,8 +77,9 @@ False:       两种 kernel                 => Tile
 
 ## 运行时 valid 的默认选择
 
-默认支持直线区域中的 Vec load/store、allocation-backed `set_validshape` 和上表中
-形状相同的逐元素配方。算术输入与结果的 valid 表达式须结构相等；两个 descriptor
+默认支持直线区域中的 Vec load/store、结果被赋值的 allocation-backed `set_validshape`
+和上表中形状相同的逐元素配方。独立 setter 语句继续 Tile，因为元数据版本跟踪需要显式
+SSA 结果。算术输入与结果的 valid 表达式须结构相等；两个 descriptor
 维度都是 `-1` 不代表实际运行时值相等。前向 SSA 分析拒绝 setter 之后再次使用旧
 元数据版本，包括普通别名及从该版本切出的窗口；当前版本可以有多个消费者。
 带动态 valid 状态的用户控制流、窗口 setter、动态 valid 的 relabel/assemble、嵌套

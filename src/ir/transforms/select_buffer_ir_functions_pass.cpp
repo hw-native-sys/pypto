@@ -222,6 +222,15 @@ class BufferKernelSupport : public IRVisitor {
     if (alias != tensor_aliases_.end()) tensor_aliases_.emplace(assign->var_.get(), alias->second);
   }
 
+  void VisitStmt_(const EvalStmtPtr& eval) override {
+    if (auto call = As<Call>(eval->expr_); call && IsOp(call, "tile.set_validshape")) {
+      // Metadata version tracking and lowering require an explicit SSA result.
+      supported = false;
+      return;
+    }
+    IRVisitor::VisitStmt_(eval);
+  }
+
   void VisitStmt_(const ReturnStmtPtr& ret) override {
     // Buffer lowering erases store-result and plain GM aliases. Its codegen ABI
     // requires the resulting parameter type to match the declared result,
