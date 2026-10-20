@@ -106,6 +106,27 @@ remain in the program; placeholder bounds do not replace runtime extents.
 `synthesized` records an automatically generated placeholder symbol and retains
 its existing annotation-overlay and helper-return behavior.
 
+### Tile parameters in JIT inline helpers
+
+An inline helper can take an explicitly typed on-chip Tile:
+
+```python
+@pl.jit.inline(auto_scope=False)
+def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]) -> pl.Tile:
+    return tile
+```
+
+Specialization preserves the declared shape, dtype, and memory space, folding
+module and closure constants in the annotation. When a postponed annotation
+uses the helper's own `pl.constexpr` parameter, that call's constexpr binding is
+substituted before the annotation is evaluated; it takes precedence over a
+same-named module or closure constant. Different bindings produce separate
+helper specializations.
+
+Inlining substitutes the caller's Tile without copying it, preserving the
+caller's valid shape. This does not relax type checking for incompatible Tile
+arguments or add Tile parameters to device dispatch interfaces.
+
 ### Compile options and diagnostic requests
 
 JIT calls and `kernel.compile()` resolve compile options before looking up an

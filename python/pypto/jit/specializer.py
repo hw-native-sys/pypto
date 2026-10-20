@@ -38,6 +38,7 @@ import ast
 import copy
 import enum
 import functools
+import importlib
 import inspect
 import textwrap
 import types
@@ -49,6 +50,7 @@ from typing import Any, cast
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
 from pypto.language.typing.array import Array as _LangArray
+from pypto.language.typing.tile import Tile as _LangTile
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
 
@@ -1585,7 +1587,11 @@ class _BodyTransformer(ast.NodeTransformer):
 # ---------------------------------------------------------------------------
 
 
-def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr:
+def _fold_const_names(
+    node: ast.expr,
+    py_globals: Mapping[str, Any],
+    constexpr_values: Mapping[str, str] | None = None,
+) -> ast.expr:
     """Replace ``Name`` nodes bound to renderable free values with their source form.
 
     An explicit tuple / scalar return annotation is copied into the generated
@@ -1598,12 +1604,19 @@ def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr
     carries concrete extents and a dtype held in a constant (``pl.Tensor[[64],
     DTYPE]``) survives too.
 
+    A helper's own ``pl.constexpr`` bindings take precedence over free names.
+    Substitute their already-rendered source before evaluating a parameter
+    annotation, so a Tile shape can refer to a constexpr parameter even when
+    that name is absent from the defining namespace.
+
     The input AST is left untouched (a deep copy is transformed) because
     ``func_def`` is shared with the body specialization pass.
     """
 
     class _Folder(ast.NodeTransformer):
         def visit_Name(self, node: ast.Name) -> ast.expr:
+            if constexpr_values and node.id in constexpr_values:
+                return ast.copy_location(ast.parse(constexpr_values[node.id], mode="eval").body, node)
             return _fold_free_name(node.id, py_globals, node) or node
 
     return _Folder().visit(copy.deepcopy(node))
@@ -2185,27 +2198,36 @@ class Specializer:
         decorator = self._build_decorator(ctx)
 
         # Non-tensor, non-scalar params with an evaluable typed annotation
-        # (e.g. ``tids: pl.Array[N, pl.TASK_ID]``) — render the annotation with
-        # closure constants folded so the generated source stays parseable.
+        # (e.g. ``tids: pl.Array[N, pl.TASK_ID]`` or an inline ``pl.Tile``) —
+        # fold constexpr and closure constants before evaluating the annotation.
         #
-        # The annotation is evaluated in a builtins-free namespace: only the
-        # function's own module globals are exposed (``pl`` plus the int/float
-        # constants that fold into ``Array`` extents), never Python builtins.
-        # Type-form annotations never need builtins, so stripping them keeps the
-        # best-effort eval from running anything beyond pure type construction.
-        ann_globals: dict[str, Any] = {**ctx.py_globals, "__builtins__": {}}
+        # Keep the function's own namespace and a canonical ``pl`` fallback
+        # for names emitted by constant folding (e.g. ``DTYPE`` -> ``pl.BF16``
+        # when the function imports the DSL under another alias). As before,
+        # best-effort annotation evaluation has no Python builtins.
+        ann_globals: dict[str, Any] = {
+            "pl": importlib.import_module("pypto.language"),
+            **ctx.py_globals,
+            "__builtins__": {},
+        }
         scalar_dtype_strs = {
             name: _scalar_dtype_source(text, ann_globals) for name, text in scalar_dtype_strs.items()
         }
-        array_param_anns: dict[str, str] = {}
+        extra_param_anns: dict[str, str] = {}
         for arg in func_def.args.args:
             if arg.arg == "self" or arg.annotation is None:
                 continue
             if arg.arg in tensor_params or arg.arg in scalar_dtype_strs:
                 continue
-            ann_obj = _eval_annotation(ast.unparse(arg.annotation), ann_globals)
+            annotation = _fold_const_names(arg.annotation, ctx.py_globals, ctx.constexpr_values)
+            ann_source = ast.unparse(annotation)
+            ann_obj = _eval_annotation(ann_source, ann_globals)
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
-                array_param_anns[arg.arg] = f"pl.Array[{ann_obj.extent}, {_array_dtype_str(ann_obj.dtype)}]"
+                extra_param_anns[arg.arg] = f"pl.Array[{ann_obj.extent}, {_array_dtype_str(ann_obj.dtype)}]"
+            elif is_inline and isinstance(ann_obj, _LangTile):
+                # Keep the declared type; inlining substitutes the caller's
+                # actual Tile, including its valid shape, without a Tile copy.
+                extra_param_anns[arg.arg] = ann_source
 
         params = self._build_params(
             all_param_names,
@@ -2216,7 +2238,7 @@ class Specializer:
             distributed_params,
             ctx,
             is_inline=is_inline,
-            extra_anns=array_param_anns,
+            extra_anns=extra_param_anns,
         )
 
         # Infer return type

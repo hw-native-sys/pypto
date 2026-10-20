@@ -22,6 +22,8 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import backend
+from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit._arguments import (
@@ -59,8 +61,8 @@ from pypto.language.parser.diagnostics.exceptions import (
     ParserTypeError,
     UnsupportedFeatureError,
 )
-from pypto.pypto_core import DataType, InternalError, ir
-from pypto.runtime.runner import RunConfig
+from pypto.pypto_core import DataType, InternalError, ir, passes
+from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # ---------------------------------------------------------------------------
 # Decoration tests (no torch needed)
@@ -3930,6 +3932,191 @@ class TestInlineFuncIntegration:
             return y
 
         entry.compile(torch.zeros(16, 64), torch.zeros(16, 64))
+
+
+class TestInlineTileAnnotations:
+    """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
+
+    @staticmethod
+    def _dynamic_entries():
+        M = pl.dynamic("INLINE_TILE_ROWS")
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(t: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return t
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            valid_rows = pl.min(pl.tensor.dim(src, 0), 8)
+            tile = pl.load(src, [0, 0], [8, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        @jit.incore
+        def baseline_incore(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            valid_rows = pl.min(pl.tensor.dim(src, 0), 8)
+            tile = pl.load(src, [0, 0], [8, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Vec)
+            return pl.store(tile, [0, 0], dst)
+
+        @jit
+        def baseline(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            return baseline_incore(src, dst)
+
+        return entry, baseline
+
+    @staticmethod
+    def _assert_tile_type(ty: ir.Type, rows: int) -> ir.TileType:
+        assert isinstance(ty, ir.TileType)
+        assert len(ty.shape) == 2
+        for dim, expected in zip(ty.shape, (rows, 64)):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == expected
+        assert ty.dtype == DataType.FP32
+        assert ty.memory_space == ir.MemorySpace.Vec
+        return ty
+
+    @staticmethod
+    def _tile_calls(program: ir.Program) -> list[ir.Call]:
+        calls: list[ir.Call] = []
+        load_name = ir.get_op("tile.load").name
+        store_name = ir.get_op("tile.store").name
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name in (load_name, store_name):
+                    calls.append(op)
+                super().visit_call(op)
+
+        Collector().visit_program(program)
+        return calls
+
+    def test_dynamic_tensor_to_inline_tile_preserves_type_and_valid_shape(self):
+        """The helper's static allocation shape must not erase its caller's valid rows."""
+        torch = pytest.importorskip("torch")
+        entry, _ = self._dynamic_entries()
+        program = entry.specialize(torch.empty(3, 64), torch.empty(3, 64))
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        self._assert_tile_type(helper.params[0].type, 8)
+
+        # Runtime samples supply dtype/rank, not a fixed value for M. Both
+        # Tensor boundaries remain dynamic while the on-core Tile stays 8x64.
+        for name in ("entry", "copy_incore"):
+            func = program.get_function(name)
+            assert func is not None
+            for param in func.params:
+                assert isinstance(param.type, ir.TensorType)
+                assert not isinstance(param.type.shape[0], ir.ConstInt)
+                assert isinstance(param.type.shape[1], ir.ConstInt)
+                assert param.type.shape[1].value == 64
+
+        inlined = passes.inline_functions()(program)
+        assert inlined.get_function("keep_tile") is None
+        calls = self._tile_calls(inlined)
+        assert len(calls) == 2
+        load, store = calls
+        stored_type = self._assert_tile_type(store.args[0].type, 8)
+        actual_view = stored_type.get_effective_tile_view()
+        assert not isinstance(actual_view.valid_shape[0], ir.ConstInt)
+        # The formal annotation has no view. Inlining must retain the actual
+        # argument's dynamic view instead of restoring an implicit 8x64 view.
+        ir.assert_structural_equal(load.type, store.args[0].type, enable_auto_mapping=True)
+
+    def test_inline_tile_compiles_like_direct_load_store(self, tmp_path):
+        """The Tile identity helper adds no storage or memory-space transfer."""
+        torch = pytest.importorskip("torch")
+        entry, baseline = self._dynamic_entries()
+        sources: list[str] = []
+        for kernel, name in ((entry, "inline"), (baseline, "baseline")):
+            output_dir = tmp_path / name
+            compiled = kernel.compile(
+                torch.empty(3, 64),
+                torch.empty(3, 64),
+                config=RunConfig(
+                    backend_type=BackendType.Ascend910,
+                    execution_mode=ExecutionMode.SIM,
+                    codegen_only=True,
+                    save_kernels_dir=str(output_dir),
+                ),
+            )
+            assert isinstance(compiled, CompiledProgram)
+            pto_files = list(output_dir.rglob("*.pto"))
+            assert pto_files
+            sources.append("\n".join(path.read_text() for path in pto_files))
+            if find_ptoas_binary() is not None:
+                cpp_files = list((output_dir / "kernels").rglob("*.cpp"))
+                assert cpp_files
+                assert all("TMOV" not in path.read_text() for path in cpp_files)
+
+        for source in sources:
+            assert source.count("pto.tload ") == 1
+            assert source.count("pto.tstore ") == 1
+            assert "pto.tmov" not in source
+            assert "v_row=?" in source
+        # An inline return can introduce a second tile declaration for its
+        # alias. Both declarations must address the baseline's single buffer.
+        allocation_addresses = [
+            set(re.findall(r"pto\.alloc_tile addr = (%[\w.$]+)", source)) for source in sources
+        ]
+        assert len(allocation_addresses[0]) == len(allocation_addresses[1]) == 1
+        # Match operation lines, excluding type names such as !pto.tile_buf.
+        tile_op_pattern = r"^\s*(?:%[\w.$]+\s*=\s*)?(pto\.t\w+)\b"
+        assert re.findall(tile_op_pattern, sources[0], re.MULTILINE) == re.findall(
+            tile_op_pattern, sources[1], re.MULTILINE
+        )
+
+    def test_inline_tile_shape_uses_each_constexpr_binding(self, tmp_path):
+        """Two calls to one helper resolve its Tile annotation independently."""
+        # This ambient value makes Python's eager annotation legal. The JIT
+        # must fold each call's ROWS first, rather than capture this value or
+        # reuse the first helper specialization at the second call site.
+        ROWS = 99
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(t: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
+            return t
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[24, 64], pl.FP32], dst: pl.Out[pl.Tensor[[24, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            second = pl.load(src, [8, 0], [16, 64], target_memory=pl.Mem.Vec)
+            first = keep_tile(first, 8)
+            second = keep_tile(second, 16)
+            dst = pl.store(first, [0, 0], dst)
+            return pl.store(second, [8, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[24, 64], pl.FP32], dst: pl.Out[pl.Tensor[[24, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        program = entry.specialize()
+        for name, rows in (("keep_tile", 8), ("keep_tile__2", 16)):
+            helper = program.get_function(name)
+            assert helper is not None
+            assert len(helper.params) == 1
+            self._assert_tile_type(helper.params[0].type, rows)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910,
+                execution_mode=ExecutionMode.SIM,
+                codegen_only=True,
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+        pto_files = list(tmp_path.rglob("*.pto"))
+        assert pto_files
+        source = "\n".join(path.read_text() for path in pto_files)
+        assert source.count("pto.tload ") == 2
+        assert source.count("pto.tstore ") == 2
+        assert "rows=8, cols=64" in source
+        assert "rows=16, cols=64" in source
+        assert "rows=99" not in source
 
 
 class TestOpaqueFuncIntegration:

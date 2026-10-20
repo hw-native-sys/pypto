@@ -2151,6 +2151,20 @@ class TestArrayParamAnnotation:
         assert "buf: pl.Array[4, pl.BF16]" in out
         assert "BFLOAT16" not in out
 
+    def test_array_with_module_alias_and_dtype_constant(self):
+        """Folded dtype names remain evaluable without an original ``pl`` binding."""
+        src = """
+            def kernel(buf: p.Array[4, DTYPE]):
+                return buf
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["buf"],
+            {},
+            py_globals={"p": pl, "DTYPE": pl.BF16},
+        )
+        assert "buf: pl.Array[4, pl.BF16]" in out
+
     def test_generated_source_is_parseable(self):
         """The generated source is syntactically valid Python and carries no
         bare (unannotated) parameter — the concrete regression guard."""
@@ -2212,6 +2226,112 @@ class TestArrayParamAnnotation:
         # `len(...)` is unavailable without builtins -> eval fails -> no Array
         # annotation is emitted for `x` (best-effort, no execution, no crash).
         assert "x: pl.Array" not in out
+
+
+class TestInlineTileParamAnnotations:
+    """Explicit Tile parameters must survive JIT signature specialization."""
+
+    @pytest.mark.parametrize("dtype", ["FP32", "BF16"])
+    def test_explicit_tile_annotation_preserved(self, dtype):
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: pl.Tile[[8, 64], pl.{dtype}, pl.MemorySpace.Vec]) -> pl.Tile:
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+
+        source = specialize("_TestClass", [ctx])
+
+        assert f"tile: pl.Tile[[8, 64], pl.{dtype}, pl.MemorySpace.Vec]" in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        tile_type = func.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        for dim, extent in zip(tile_type.shape, [8, 64], strict=True):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == extent
+        assert tile_type.dtype == getattr(DataType, dtype)
+        assert tile_type.memory_space == ir.MemorySpace.Vec
+
+    def test_module_and_closure_constants_folded(self):
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(tile: pl.Tile[SHAPE, DTYPE, SPACE]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl, "SHAPE": [8, 64], "DTYPE": pl.BF16, "SPACE": pl.Mem.Vec}
+
+        source = specialize("_TestClass", [ctx])
+
+        assert "tile: pl.Tile[[8, 64], pl.BF16, pl.Mem.Vec]" in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        assert isinstance(func.params[0].type, ir.TileType)
+
+    @pytest.mark.parametrize("rows", [4, 8])
+    @pytest.mark.parametrize("shadowed", [False, True])
+    def test_constexpr_folded_before_annotation_evaluation(self, rows, shadowed):
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(tile: pl.Tile[[ROWS * 2, 64], DTYPE, SPACE],
+                              ROWS: pl.constexpr, DTYPE: pl.constexpr, SPACE: pl.constexpr):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile", "ROWS", "DTYPE", "SPACE"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+        if shadowed:
+            ctx.py_globals.update(ROWS=99, DTYPE=pl.FP32, SPACE=pl.Mem.Acc)
+        ctx.constexpr_values = {"ROWS": str(rows), "DTYPE": "pl.BF16", "SPACE": "pl.Mem.Vec"}
+
+        source = specialize("_TestClass", [ctx])
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+
+        assert len(func.params) == 1
+        tile_type = func.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        for dim, extent in zip(tile_type.shape, [rows * 2, 64], strict=True):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == extent
+        assert tile_type.dtype == DataType.BF16
+        assert tile_type.memory_space == ir.MemorySpace.Vec
+        assert "ROWS" not in source and "DTYPE" not in source and "SPACE" not in source
+
+    def test_tile_annotation_retention_is_inline_only(self):
+        ctx = _make_ctx(
+            "kernel",
+            """
+                def kernel(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]):
+                    return tile
+            """,
+            func_type="incore",
+            param_names=["tile"],
+        )
+        ctx.py_globals = {"pl": pl}
+
+        source = specialize("_TestClass", [ctx])
+
+        assert "def kernel(self, tile):" in source
 
 
 class TestTensorLayoutAnnotation:
