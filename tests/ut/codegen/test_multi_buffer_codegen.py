@@ -965,5 +965,58 @@ def test_int8_auto_tile_k_matches_native_operand_boxing(M, N, K, dbc, backend_ty
     assert output.is_file()
 
 
+@pytest.mark.parametrize(
+    "planner,dbc",
+    [
+        (passes.MemoryPlanner.PYPTO, False),
+        (passes.MemoryPlanner.PYPTO, True),
+        (passes.MemoryPlanner.DSA_RP, False),
+        (passes.MemoryPlanner.PTOAS, False),
+    ],
+    ids=["pypto", "pypto-dbc", "dsa-rp", "ptoas"],
+)
+@pytest.mark.parametrize("dtype,out_dtype", [(pl.BF16, pl.FP32), (pl.FP16, pl.FP32), (pl.INT8, pl.INT32)])
+@pytest.mark.parametrize("M,N,K", [(48, 400, 128), (48, 17, 128), (17, 400, 512), (7, 7, 128)])
+def test_auto_tile_padded_output_has_no_empty_native_partitions(
+    M, N, K, dtype, out_dtype, planner, dbc, tmp_path
+):
+    """Whole padding boxes must not become zero-valid output tiles in either grid route."""
+    physical_m, physical_n = 64, 416
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], dtype],
+            b: pl.Tensor[[K, N], dtype],
+            out: pl.Out[pl.Tensor[[M, N], out_dtype]],
+        ) -> pl.Tensor[[M, N], out_dtype]:
+            at = pl.load(a, [0, 0], [physical_m, K], valid_shape=[M, K], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [K, physical_n], valid_shape=[K, N], target_memory=pl.Mem.Mat)
+            product = pl.tile.matmul(at, bt)
+            return pl.store(product, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    fixed_addresses = planner != passes.MemoryPlanner.PTOAS
+    mlir = codegen.PTOCodegen().generate(
+        ir.Program([func], func.name, optimized.span), emit_tile_addr=fixed_addresses
+    )
+    assert "pto.tmatmul" in mlir
+    assert not re.search(r"v_(?:row|col)=0(?:[,>])", mlir), mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "padded_output.pto"
+    output = tmp_path / "padded_output.cpp"
+    source.write_text(mlir)
+    level = "level3" if fixed_addresses else "level2"
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", f"--pto-level={level}", "--enable-insert-sync"])
+    assert output.is_file()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

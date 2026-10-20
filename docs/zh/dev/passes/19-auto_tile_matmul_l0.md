@@ -134,6 +134,22 @@ drain 也以相同方式浮动。若 `PassManager` 在一个 planner
 
 完整的设计依据（带宽 / MAD 数值的 perf-sim 推导、stationarity 与双缓冲的结论）见 chooser 头文件 `l0_tile_chooser.h` 以及 perf-sim 研究文档 `DESIGN_SPACE.md`。`ChooseL0Tile` 的最优解在 `tests/ut/ir/transforms/test_l0_tile_chooser.py` 中由对**同一代价模型**的暴力重新枚举来验证——这是对**求解器**（确认它找到模型的全局最小）的独立检查，而非模型与硬件的对照。
 
+### 静态有效输出边界
+
+对于受支持的局部直接存储（direct-store）或 Mat 暂存（Mat-scratch）消费者，
+chooser 和两种输出网格发射器使用相同的、按对齐要求扩展的静态有效 M/N 矩形。
+完整的纯填充块只属于存储，不属于输出工作：物理列数为 416、有效 N=17 的源
+只需要对齐后的前缀，而不应生成有效 N=0 的输出 tile。
+最后一个部分有效的对齐块仍然保留，并携带原有有效范围。
+输入存储块和 Mat-scratch 分配保留物理形状；组装后的暂存结果在复用前恢复
+生产者的有效矩形。
+
+此处理不会缩小任意调用者持有的累加器、返回的 tile 或不支持的消费者。
+已驻留 Bias 的操作数仍要求完整 N；无法重建加载快照的 Mat bias 保留原有网格。
+符号有效范围保持已有的物理边界策略，
+不猜测运行时范围，也不新增动态空 tile 的降低逻辑。
+chooser 的代价系数、K 搜索和 dbC 策略均不改变。
+
 ## 示例
 
 ### 普通 `tile.matmul`

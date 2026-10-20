@@ -659,12 +659,295 @@ def test_peeled_and_predicated_emit_the_same_output_grid(peeled, predicated):
         ir.assert_structural_equal(peeled_store, predicated_store, True)
 
 
+def test_padding_only_output_columns_are_not_grid_work():
+    """The chooser and emitter must agree on a complete, nonempty valid output grid."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            product = pl.tile.matmul(a, b)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            for mi, (outer,) in pl.pipeline(
+                0, 16, 16, init_values=(out,), stage=2, attrs={"pipeline_overlap_stores": False}
+            ):
+                left = pl.tile.extract(a, mi, 0, [16, 256], target_memory=pl.Mem.Left)
+                for ni, (inner,) in pl.pipeline(
+                    0, 16, 16, init_values=(outer,), stage=2, attrs={"pipeline_overlap_stores": False}
+                ):
+                    right = pl.tile.extract(b, 0, ni, [256, 16], target_memory=pl.Mem.Right)
+                    product = pl.tile.matmul(left, right)
+                    stored = pl.tile.store(product, [mi, ni], inner)
+                    inner_result = pl.yield_(stored)
+                outer_result = pl.yield_(inner_result)
+            return outer_result
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
+@pytest.mark.parametrize("accumulate", [False, True], ids=["returned-result", "caller-accumulator"])
+def test_padded_result_without_a_grid_consumer_keeps_physical_shape(accumulate):
+    """Logical bounds must not change a caller-owned accumulator or a returned tile's ABI."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            seed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])],
+        ) -> pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])]:
+            product = pl.tile.matmul(a, b)
+            return product
+
+    @pl.program
+    class Accumulating:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            seed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])],
+        ) -> pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])]:
+            product = pl.tile.matmul_acc(seed, a, b)
+            return product
+
+    before = Accumulating if accumulate else Before
+    after = passes.auto_tile_matmul_l0()(before)
+    ir.assert_structural_equal(after, before)
+
+
+def test_padded_accumulator_with_a_store_keeps_caller_shape():
+    """Even a sole store does not authorize slicing an arbitrary accumulator."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            seed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            product = pl.tile.matmul_acc(seed, a, b)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Before)
+
+
+def test_padded_accumulator_k_only_rewrite_keeps_physical_shape():
+    """K tiling must preserve the full caller-owned Acc box, not just its valid prefix."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[2048, 16])],
+            seed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            product = pl.tile.matmul_acc(seed, a, b)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[2048, 16])],
+            seed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc, pl.TileView(valid_shape=[16, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            for ko, (acc,) in pl.pipeline(0, 2048, 256, stage=2, init_values=(seed,)):
+                left = pl.tile.extract(a, 0, ko, [16, 256], target_memory=pl.Mem.Left)
+                right = pl.tile.extract(b, ko, 0, [256, 64], target_memory=pl.Mem.Right)
+                updated = pl.tile.matmul_acc(acc, left, right)
+                product = pl.yield_(updated)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
+def test_padded_bias_resident_operand_keeps_full_n():
+    """A resident Bias vector cannot be windowed just because output columns are padding."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            bias: pl.Tile[[1, 64], pl.FP32, pl.Mem.Bias, pl.TileView(valid_shape=[1, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            product = pl.tile.matmul_bias(a, b, bias)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Before)
+
+
+def test_padded_mat_bias_without_a_snapshot_keeps_its_k_only_rewrite():
+    """Trimming N must not discard a legal full-width bias/K schedule when reload is impossible."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 512], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[512, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[512, 16])],
+            bias: pl.Tile[[1, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[1, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            product = pl.tile.matmul_bias(a, b, bias)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 512], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[512, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[512, 16])],
+            bias: pl.Tile[[1, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[1, 16])],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            bias_l0 = pl.tile.move(bias, target_memory=pl.Mem.Bias)
+            left0 = pl.tile.extract(a, 0, 0, [16, 256], target_memory=pl.Mem.Left)
+            right0 = pl.tile.extract(b, 0, 0, [256, 64], target_memory=pl.Mem.Right)
+            first = pl.tile.matmul_bias(left0, right0, bias_l0)
+            left1 = pl.tile.extract(a, 0, 256, [16, 256], target_memory=pl.Mem.Left)
+            right1 = pl.tile.extract(b, 256, 0, [256, 64], target_memory=pl.Mem.Right)
+            product = pl.tile.matmul_acc(first, left1, right1)
+            stored = pl.tile.store(product, [0, 0], out)
+            return stored
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
+def test_physical_output_below_minimum_n_is_not_expanded():
+    """The existing unsupported sub-fractal shape must not grow to the minimum tile width."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[128, 8], pl.BF16, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+        ) -> pl.Tensor[[16, 8], pl.FP32]:
+            product = pl.tile.matmul(a, b)
+            return pl.tile.store(product, [0, 0], out)
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Before)
+
+
+def test_mat_scratch_restores_valid_reduction_extent():
+    """A full-size Mat allocation must not expose unwritten columns to its consumer."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat],
+            b: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[64, 13])],
+            e: pl.Tile[[64, 16], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 16])],
+            out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            product = pl.tile.matmul(a, b)
+            result = pl.tile.matmul(product, e)
+            stored = pl.tile.store(result, [0, 0], out)
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat],
+            b: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[64, 13])],
+            e: pl.Tile[[64, 16], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 16])],
+            out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            scratch = pl.tile.create([64, 64], dtype=pl.FP32, target_memory=pl.Mem.Mat)
+            for mi, (outer,) in pl.pipeline(
+                0, 64, 64, init_values=(scratch,), stage=2, attrs={"pipeline_overlap_stores": False}
+            ):
+                left = pl.tile.extract(a, mi, 0, [64, 64], target_memory=pl.Mem.Left)
+                for ni, (inner,) in pl.pipeline(
+                    0, 16, 16, init_values=(outer,), stage=2, attrs={"pipeline_overlap_stores": False}
+                ):
+                    right = pl.tile.extract(b, 0, ni, [64, 16], target_memory=pl.Mem.Right)
+                    product = pl.tile.matmul(left, right)
+                    assembled = pl.tile.assemble(inner, product, [mi, ni])
+                    inner_result = pl.yield_(assembled)
+                outer_result = pl.yield_(inner_result)
+            valid_scratch = pl.tile.set_validshape(outer_result, 64, 13)
+            result = pl.tile.matmul(valid_scratch, e)
+            stored = pl.tile.store(result, [0, 0], out)
+            return stored
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
 def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     """Explicit M/N grid offsets intersect, rather than reset, valid_shape.
 
-    The physical output is 288 columns but only 272 are logical. AutoTile must
-    therefore keep the final physical 32-column panel at valid N=16 even though
-    that panel is emitted by BuildSplitKGrid with a nonzero output offset.
+    The physical output is 288 columns but only 272 are logical. The emitted
+    stores must cover those 272 columns exactly once, not turn the final
+    complete padding block into additional work. Source storage stays 288 wide.
     """
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
@@ -705,16 +988,33 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     after = passes.auto_tile_matmul_l0()(Before)
     printed = ir.python_print(after)
     assert printed.count("pl.tile.store(") >= 4
-    assert "pl.TileView(valid_shape=[" in printed
-    assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT32, pl\.Mem\.Acc, pl\.TileView\(valid_shape=\[\d+, 16\]\)\]",
-        printed,
-    ), printed
-    assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT8, pl\.Mem\.Right, "
-        r"pl\.TileView\(valid_shape=\[\d+, 16\], compact=pl\.CompactMode\.normal\)\]",
-        printed,
-    ), printed
+    rectangles = []
+    for store in _collect_store_calls(after):
+        offsets = store.args[1]
+        tile_type = store.args[0].type
+        assert isinstance(offsets, ir.MakeTuple)
+        assert isinstance(tile_type, ir.TileType)
+        extents = tile_type.shape
+        if tile_type.tile_view is not None and tile_type.tile_view.valid_shape:
+            extents = tile_type.tile_view.valid_shape
+        assert len(offsets.elements) == len(extents) == 2
+        dimensions = []
+        for value in [*offsets.elements, *extents]:
+            assert isinstance(value, ir.ConstInt)
+            dimensions.append(int(value.value))
+        row, col, height, width = dimensions
+        assert height > 0 and width > 0
+        assert row + height <= 512 and col + width <= 272, printed
+        rectangles.append((row, col, height, width))
+    for row in range(512):
+        spans = sorted(
+            (col, col + width) for top, col, height, width in rectangles if top <= row < top + height
+        )
+        cursor = 0
+        for start, end in spans:
+            assert start == cursor, f"gap or overlap at row {row}: {spans}"
+            cursor = end
+        assert cursor == 272, f"incomplete row {row}: {spans}"
 
 
 def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
@@ -931,8 +1231,8 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
                 [64, 2048],
                 pl.INT8,
                 pl.Mem.Mat,
-                pl.TileView(valid_shape=[16, 2048]),
-            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[16, 2048], target_memory=pl.Mem.Mat)
+                pl.TileView(valid_shape=[13, 2048]),
+            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[13, 2048], target_memory=pl.Mem.Mat)
             rhs_mat: pl.Tile[[2048, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
                 rhs, [0, 0], [2048, 128], target_memory=pl.Mem.Mat
             )
@@ -940,7 +1240,7 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
                 [64, 128],
                 pl.INT32,
                 pl.Mem.Acc,
-                pl.TileView(valid_shape=[16, 128], compact=pl.CompactMode.normal),
+                pl.TileView(valid_shape=[13, 128], compact=pl.CompactMode.normal),
             ] = pl.tile.matmul(lhs_mat, rhs_mat)
             out = pl.tile.store(product, [0, 0], out)
             return out
@@ -948,10 +1248,10 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
     after = passes.auto_tile_matmul_l0()(Before)
     printed = ir.python_print(after)
 
-    assert re.search(r"pl\.tile\.create\(\s*\[64, 128\][^)]*compact=True", printed, re.S), (
+    assert re.search(r"pl\.tile\.create\(\s*\[16, 128\][^)]*compact=True", printed, re.S), (
         f"the synthesized accumulator seed must declare compact=True:\n{printed}"
     )
-    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[16,[^)]*)\)", printed, re.S)
+    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[13,[^)]*)\)", printed, re.S)
     assert acc_views, printed
     for view in acc_views:
         assert "compact=pl.CompactMode.normal" in view, (

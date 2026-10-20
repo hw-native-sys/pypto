@@ -747,6 +747,9 @@ struct MatmulTiling {
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;
+  /// Work bounds shared by selection and M/N emission. M/N retain the original
+  /// physical boxes for input contracts and Mat-scratch allocation.
+  int64_t grid_m = 0, grid_n = 0;
   /// Logical output extents. Ordinarily identical to M/N; a box-padded
   /// boundary matmul keeps the larger physical M/N in the operands/result.
   ExprPtr output_valid_m = nullptr;
@@ -844,7 +847,7 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr) {
+    const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1188,6 +1191,31 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     return std::nullopt;
   }
 
+  // A supported output placement may omit complete padding-only boxes, but
+  // selection and emission must use the same work rectangle. Otherwise a
+  // physical N=416 / valid N=17 source produces stores at offset 256 with
+  // extent zero. Unknown or empty valid extents retain the existing policy;
+  // a partial last fractal remains real work with its original valid shape.
+  // Do not apply this to caller-owned accumulators or unsupported consumers:
+  // their K-only result must retain the original physical type. Vec-left M/N
+  // placement remains outside this pass's current local-grid contract.
+  // A Mat bias without a reconstructible load snapshot has the same full-N
+  // requirement for this optimization: narrowing it would replace a legal
+  // K-only rewrite with an unsupported bias-window fold. Keep its old grid.
+  const bool can_bound_bias = !is_bias || bias_load || bias_tile->GetMemorySpace() == MemorySpace::Bias;
+  if (restrict_output_grid && lhs_tile->GetMemorySpace() == MemorySpace::Mat && can_bound_bias) {
+    auto work_extent = [&](int64_t physical, const ExprPtr& valid, int alignment) {
+      const auto extent = As<ConstInt>(valid);
+      if (!extent || extent->value_ <= 0) return physical;
+      return std::min(physical, AlignStaticExtent(extent->value_, alignment, assign->span_));
+    };
+    cfg.M = static_cast<int>(work_extent(M, output_valid_shape[0], cfg.align_m));
+    // A resident Bias tile cannot be windowed. Respect its full-N minimum,
+    // without expanding a physical source that is below the chooser minimum.
+    cfg.N = static_cast<int>(std::min<int64_t>(
+        N, std::max<int64_t>(cfg.min_n, work_extent(N, output_valid_shape[1], cfg.align_n))));
+  }
+
   utils::L0TileResult res;
   try {
     res = utils::ChooseL0Tile(cfg);
@@ -1253,6 +1281,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   t.m = res.m;
   t.n = res.n;
   t.k = res.k;
+  t.grid_m = cfg.M;
+  t.grid_n = cfg.N;
   t.output_valid_m = output_valid_shape[0];
   t.output_valid_n = output_valid_shape[1];
   t.stationarity = res.stationarity;
@@ -2195,9 +2225,9 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
   const std::string base = t.assign->var_->name_hint_;
   // A tile never exceeds the problem dims (you cannot tile M into blocks larger
   // than M); the chooser guarantees this, so the interior always has >= 1 block.
-  INTERNAL_CHECK_SPAN(t.m <= t.M && t.n <= t.N, sp)
-      << "Internal error: full-K tile must not exceed the problem dims; got M=" << t.M << " m=" << t.m
-      << " N=" << t.N << " n=" << t.n;
+  INTERNAL_CHECK_SPAN(t.m <= t.grid_m && t.n <= t.grid_n, sp)
+      << "Internal error: full-K tile must not exceed the work grid; got M=" << t.grid_m << " m=" << t.m
+      << " N=" << t.grid_n << " n=" << t.n;
 
   // Loop order + buffering. When the chooser picked an operand-stationary point
   // (k == K), the stationary operand is the OUTER (held) panel and is SINGLE-
@@ -2216,8 +2246,8 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
 
   // Interior = the region tiled by FULL m x n blocks; the L-shaped partial
   // boundary beyond it is peeled into straight-line tiles below.
-  const int64_t full_m = (t.M / t.m) * t.m;
-  const int64_t full_n = (t.N / t.n) * t.n;
+  const int64_t full_m = (t.grid_m / t.m) * t.m;
+  const int64_t full_n = (t.grid_n / t.n) * t.n;
 
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
@@ -2304,16 +2334,17 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
   }
 
   // --- Tail: straight-line partial tiles for the L-shaped boundary ---
-  // Bottom strip [full_m, M) x [0, N) (covers the corner), then right strip
-  // [0, full_m) x [full_n, N).  Either is empty when its dim divides evenly.
+  // Bottom strip [full_m, grid_m) x [0, grid_n) (covers the corner), then
+  // right strip [0, full_m) x [full_n, grid_n). Whole storage-padding blocks
+  // are absent from this rectangle, not emitted as zero-valid tail tiles.
   // step 0 is used by the interior placement; the tail continues from step 1.
   int tail_step = 1;
-  for (int64_t ni = 0; full_m < t.M && ni < t.N; ni += t.n) {
-    chain = EmitFullKTile(stmts, t, placer, chain, full_m, ni, t.M - full_m, std::min<int64_t>(t.n, t.N - ni),
-                          base, tail_step++);
+  for (int64_t ni = 0; full_m < t.grid_m && ni < t.grid_n; ni += t.n) {
+    chain = EmitFullKTile(stmts, t, placer, chain, full_m, ni, t.grid_m - full_m,
+                          std::min<int64_t>(t.n, t.grid_n - ni), base, tail_step++);
   }
-  for (int64_t mi = 0; full_n < t.N && mi < full_m; mi += t.m) {
-    chain = EmitFullKTile(stmts, t, placer, chain, mi, full_n, t.m, t.N - full_n, base, tail_step++);
+  for (int64_t mi = 0; full_n < t.grid_n && mi < full_m; mi += t.m) {
+    chain = EmitFullKTile(stmts, t, placer, chain, mi, full_n, t.m, t.grid_n - full_n, base, tail_step++);
   }
   return {std::move(stmts), chain};
 }
@@ -2327,18 +2358,18 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
 std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, SubtilePlacer& placer) {
   const Span sp = t.assign->span_;
   const std::string base = t.assign->var_->name_hint_;
-  const int64_t num_m = (t.M + t.m - 1) / t.m;
-  const int64_t num_n = (t.N + t.n - 1) / t.n;
+  const int64_t num_m = (t.grid_m + t.m - 1) / t.m;
+  const int64_t num_n = (t.grid_n + t.n - 1) / t.n;
 
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
   int step = 0;
   for (int64_t nj = 0; nj < num_n; ++nj) {
     const int64_t ni = nj * t.n;
-    const int64_t n_eff = std::min<int64_t>(t.n, t.N - ni);
+    const int64_t n_eff = std::min<int64_t>(t.n, t.grid_n - ni);
     for (int64_t mj = 0; mj < num_m; ++mj) {
       const int64_t mi = mj * t.m;
-      const int64_t m_eff = std::min<int64_t>(t.m, t.M - mi);
+      const int64_t m_eff = std::min<int64_t>(t.m, t.grid_m - mi);
       const std::string tbase = base + "_t" + std::to_string(step);
 
       auto inner = BuildKLoopRewrite(MakeKLoop(t, MakeIndex(mi, sp), MakeIndex(ni, sp), m_eff, n_eff, tbase));
@@ -2459,6 +2490,83 @@ bool CastFoldableToFixpipeMat(const CallPtr& cast, const TileTypePtr& src_ty, Da
   return !GetSaturationMode(cast).has_value();
 }
 
+/// Scope-local consumer facts shared by selection and rewriting. Classify
+/// before choosing a smaller work rectangle: a returned tile or caller-owned
+/// accumulator cannot silently acquire a different physical result type.
+struct MatmulOutputConsumer {
+  int result_uses;
+  int operand_uses;
+  DataType scratch_dtype;
+  const Var* remap_target;
+  const Var* extra_remap = nullptr;
+  const AssignStmt* store_stmt = nullptr;
+  bool supports_output_grid = false;
+};
+
+std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmtPtr& assign,
+                                                                const SiblingIndex& index,
+                                                                const Stmt* next_effect) {
+  const auto call = As<Call>(assign->value_);
+  const auto type = As<TileType>(assign->var_->GetType());
+  if (!call || !type ||
+      (!IsOp(call, "tile.matmul") && !IsOp(call, "tile.matmul_bias") && !IsOp(call, "tile.matmul_acc"))) {
+    return std::nullopt;
+  }
+  const auto count = [](const std::unordered_map<const Var*, int>& uses, const Var* var) {
+    const auto found = uses.find(var);
+    return found == uses.end() ? 0 : found->second;
+  };
+  const Var* result = assign->var_.get();
+  MatmulOutputConsumer plan{count(index.use_counts, result), count(index.matmul_operand_uses, result),
+                            type->dtype_, result};
+  if (auto store = index.store_of.find(result); store != index.store_of.end()) {
+    plan.store_stmt = store->second;
+  }
+  // Preserve the existing FIXPIPE cast-fold contract while making its consumer
+  // information available before selection. This does not admit new consumers
+  // or move the cast; it replaces the same later classification at emission.
+  if (auto cast = index.cast_of.find(result); cast != index.cast_of.end()) {
+    const Var* cb = cast->second->var_.get();
+    const auto cb_type = As<TileType>(cb->GetType());
+    const auto cast_call = As<Call>(cast->second->value_);
+    const int uses = count(index.use_counts, cb);
+    const int operands = count(index.matmul_operand_uses, cb);
+    if (cb_type && CastFoldableToFixpipeMat(cast_call, type, cb_type->dtype_) && plan.result_uses == 1 &&
+        uses >= 1 && uses == operands) {
+      plan.scratch_dtype = cb_type->dtype_;
+      plan.remap_target = cb;
+      plan.extra_remap = result;
+      plan.result_uses = uses;
+      plan.operand_uses = operands;
+    }
+  }
+  if (IsOp(call, "tile.matmul_acc")) return plan;
+
+  if (plan.store_stmt && plan.result_uses == 1) {
+    const auto store = As<Call>(plan.store_stmt->value_);
+    const auto offsets = store ? As<MakeTuple>(store->args_[1]) : nullptr;
+    // Reconstructed bias loads may not move across an effect to the store.
+    // A resident Bias operand needs no reload and retains its full-N minimum.
+    const auto bias = IsOp(call, "tile.matmul_bias") && call->args_.size() == 3
+                          ? As<TileType>(call->args_[2]->GetType())
+                          : nullptr;
+    const bool bias_snapshot_safe = !IsOp(call, "tile.matmul_bias") || plan.store_stmt == next_effect ||
+                                    (bias && bias->GetMemorySpace() == MemorySpace::Bias);
+    plan.supports_output_grid =
+        offsets && offsets->elements_.size() == 2 && AsVarLike(store->args_[2]) && bias_snapshot_safe;
+  }
+  if (plan.result_uses >= 1 && plan.operand_uses == plan.result_uses &&
+      backend::BackendConfig::IsConfigured()) {
+    const auto* ctx = PassContext::Current();
+    const auto* handler = ctx ? ctx->GetBackendHandler() : backend::GetBackend()->GetHandler();
+    const bool low_precision = plan.scratch_dtype == DataType::BF16 || plan.scratch_dtype == DataType::FP16;
+    if (handler && (!handler->RequiresLowPrecisionMatScratch() || low_precision)) {
+      plan.supports_output_grid = true;
+    }
+  }
+  return plan;
+}
+
 /// Try to fold a Mat-resident plain ``tile.matmul`` whose [M, N] output exceeds
 /// L0c into a Mat-scratch grid when the result is consumed *entirely* at
 /// matmul-operand positions (a chained matmul reads it on-chip).  Each sub-tile is
@@ -2537,7 +2645,18 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // upside is smaller here, but the mechanism is the same.)
   const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
-  return std::make_pair(std::move(stmts), scratch);
+  const auto valid_m = As<ConstInt>(t.output_valid_m);
+  const auto valid_n = As<ConstInt>(t.output_valid_n);
+  if (valid_m && valid_n && valid_m->value_ == t.M && valid_n->value_ == t.N) {
+    return std::make_pair(std::move(stmts), scratch);
+  }
+  // The allocation keeps its physical box, but the grid wrote only the valid
+  // rectangle. A chained matmul must not read unwritten padding as K values.
+  auto view = OpRegistry::GetInstance().Create("tile.set_validshape",
+                                               {scratch, t.output_valid_m, t.output_valid_n}, sp);
+  auto valid_scratch = std::make_shared<Var>(base + "_valid", view->GetType(), sp);
+  stmts.push_back(std::make_shared<AssignStmt>(valid_scratch, view, sp));
+  return std::make_pair(std::move(stmts), valid_scratch);
 }
 
 /// Static physical footprint of a tile, rounded exactly as the active memory
@@ -3210,8 +3329,12 @@ class AutoTileMutator : public IRMutator {
       // visitation happens after rewrite-rejection so nested matmuls inside
       // ForStmt bodies still get rewritten by the recursive visit.
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
+        const Stmt* next_effect =
+            next_non_load[i] < op->stmts_.size() ? op->stmts_[next_non_load[i]].get() : nullptr;
+        const auto consumer = AnalyzeMatmulOutputConsumer(assign, sibling_index, next_effect);
         if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs)) {
+                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                        consumer && consumer->supports_output_grid)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only.  k < K here (k == K with
             // m == M, n == N needs no matmul tiling and was skipped by
@@ -3231,46 +3354,13 @@ class AutoTileMutator : public IRMutator {
           // via the raw (un-substituted) SiblingIndex: the matmul's result is
           // freshly defined here, so its use count / store site are never
           // affected by the running remap.
-          const Var* result = assign->var_.get();
-          auto uc_it = sibling_index.use_counts.find(result);
-          int result_uses = uc_it == sibling_index.use_counts.end() ? 0 : uc_it->second;
-          auto mo_it = sibling_index.matmul_operand_uses.find(result);
-          int operand_uses = mo_it == sibling_index.matmul_operand_uses.end() ? 0 : mo_it->second;
-          // Mat-scratch dtype + remap target. Default: the matmul result itself at
-          // its own dtype. Chained-matmul-with-downcast — `c -> tile.cast(c,
-          // bf16/f16) -> matmul` — fuses the cast (the cube FIXPIPE writeback,
-          // pto.tinsert) into the scratch: the scratch holds the bf16/f16
-          // intermediate, the per-sub-tile assemble downcasts Acc f32 -> Mat bf16,
-          // and the cast result is remapped to the scratch so the consumer matmul
-          // reads it on-chip (the cast op then goes dead).
-          auto result_tile_ty = As<TileType>(result->GetType());
-          DataType scratch_dtype = result_tile_ty->dtype_;
-          const Var* remap_target = result;
-          const Var* extra_remap = nullptr;
-          if (auto cast_it = sibling_index.cast_of.find(result); cast_it != sibling_index.cast_of.end()) {
-            const Var* cb = cast_it->second->var_.get();
-            auto cb_ty = As<TileType>(cb->GetType());
-            auto cast_call = As<Call>(cast_it->second->value_);
-            // Fold the downcast into the FIXPIPE Acc->Mat writeback only when FIXPIPE
-            // can reproduce it: f32 (the matmul Acc) -> bf16/f16, round-to-nearest.
-            // Otherwise keep the standalone Vector cast (e.g. an int accumulator, or a
-            // directional/truncating round mode FIXPIPE has no `rmode` for).
-            if (cb_ty && CastFoldableToFixpipeMat(cast_call, result_tile_ty, cb_ty->dtype_)) {
-              auto cb_uc = sibling_index.use_counts.find(cb);
-              auto cb_mo = sibling_index.matmul_operand_uses.find(cb);
-              const int cb_uses = cb_uc == sibling_index.use_counts.end() ? 0 : cb_uc->second;
-              const int cb_mm = cb_mo == sibling_index.matmul_operand_uses.end() ? 0 : cb_mo->second;
-              // `c`'s sole use is the cast, whose result is consumed entirely as
-              // matmul operands — fold the matmul+cast into a low-precision scratch.
-              if (result_uses == 1 && cb_uses >= 1 && cb_uses == cb_mm) {
-                scratch_dtype = cb_ty->dtype_;
-                remap_target = cb;     // consumer matmul reads the scratch
-                extra_remap = result;  // c -> scratch too; the cast op goes dead
-                result_uses = cb_uses;
-                operand_uses = cb_mm;
-              }
-            }
-          }
+          INTERNAL_CHECK_SPAN(consumer, assign->span_)
+              << "Internal error: analyzed matmul is missing its output consumer facts";
+          const int result_uses = consumer->result_uses;
+          const int operand_uses = consumer->operand_uses;
+          const auto scratch_dtype = consumer->scratch_dtype;
+          const Var* remap_target = consumer->remap_target;
+          const Var* extra_remap = consumer->extra_remap;
           // Mat-scratch: result consumed entirely on-chip at matmul-operand
           // positions — assemble the sub-tiles into an L1/Mat scratch and remap the
           // matmul result (or its downcast) to it.  Emitted at the matmul site
@@ -3292,7 +3382,8 @@ class AutoTileMutator : public IRMutator {
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
             os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
-                                      /*output_box_alignment=*/std::nullopt, &direct_defs);
+                                      /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                      consumer->supports_output_grid);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
           if (auto ms = TryFoldMatScratch(*fold_tiling, result_uses, operand_uses, scratch_dtype, hints)) {
@@ -3312,9 +3403,7 @@ class AutoTileMutator : public IRMutator {
             changed = true;
             continue;
           }
-          auto store_it = sibling_index.store_of.find(result);
-          const AssignStmt* store_stmt =
-              store_it == sibling_index.store_of.end() ? nullptr : store_it->second;
+          const AssignStmt* store_stmt = consumer->store_stmt;
           const bool reconstructs_bias = tiling->bias_load_def && tiling->n != tiling->N;
           const bool bias_snapshot_reaches_store =
               !reconstructs_bias || !store_stmt ||
