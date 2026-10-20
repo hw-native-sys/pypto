@@ -802,6 +802,55 @@ class TestInlineTileArgumentContracts:
 
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 
+    @pytest.mark.parametrize("affine", [False, True], ids=["plain", "affine"])
+    def test_returned_tile_arguments_keep_independent_generic_dimensions(self, affine):
+        """First, second, and tuple returns must retain their own actual shapes through later ops."""
+        rows = pl.dynamic("TILE_CONTRACT_RETURNED_GENERIC_ROWS")
+        extent = 2 * rows if affine else rows
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def select_first(
+                self, first: pl.Tile[[extent, 64], pl.FP32], second: pl.Tile[[extent, 64], pl.FP32]
+            ):
+                return first
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def select_second(
+                self, first: pl.Tile[[extent, 64], pl.FP32], second: pl.Tile[[extent, 64], pl.FP32]
+            ):
+                return second
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def select_pair(
+                self, first: pl.Tile[[extent, 64], pl.FP32], second: pl.Tile[[extent, 64], pl.FP32]
+            ):
+                return first, second
+
+            @pl.function
+            def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+                selected_first = self.select_first(first, second)
+                selected_second = self.select_second(first, second)
+                left, right = self.select_pair(first, second)
+                first_sum = pl.add(selected_first, left)
+                second_sum = pl.add(selected_second, right)
+                return first_sum, second_sum
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+                selected_first = first
+                selected_second = second
+                left = first
+                right = second
+                first_sum = pl.add(selected_first, left)
+                second_sum = pl.add(selected_second, right)
+                return first_sum, second_sum
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
     def test_unspecified_formal_memory_space_accepts_vec(self):
         """An omitted formal space leaves the actual Tile's resolved space intact."""
 

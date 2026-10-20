@@ -344,3 +344,60 @@ def tensor_types_differ_only_by_valid_shape(lhs: ir.Type | None, rhs: ir.Type | 
         return ir.TensorType(tensor_type.shape, tensor_type.dtype, tensor_type.memref, view)
 
     return types_match(without_valid_shape(lhs), without_valid_shape(rhs))
+
+
+class InlineReturnProvenanceCollector(ir.IRVisitor):
+    """Check that a trailing inline return has no competing return or rebound formal."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.return_count = 0
+        self.assigned_ids: set[int] = set()
+
+    def visit_return_stmt(self, op: ir.ReturnStmt) -> None:
+        self.return_count += 1
+        super().visit_return_stmt(op)
+
+    def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+        self.assigned_ids.add(op.var.unique_id)
+        super().visit_assign_stmt(op)
+
+
+def returned_tile_types(actual: ir.Type, fallback: ir.Type) -> ir.Type | None:
+    """Recover only returned Tile metadata; other result kinds retain native deduction."""
+    if isinstance(actual, ir.TileType) and isinstance(fallback, ir.TileType):
+        return actual
+    if isinstance(actual, ir.TupleType) and isinstance(fallback, ir.TupleType):
+        if len(actual.types) != len(fallback.types):
+            return None
+        projected = [returned_tile_types(a, f) for a, f in zip(actual.types, fallback.types)]
+        if any(t is not None for t in projected):
+            return ir.TupleType([p if p is not None else f for p, f in zip(projected, fallback.types)])
+    return None
+
+
+def inline_argument_return_type(
+    value: ir.Expr,
+    fallback: ir.Type,
+    argument_types: dict[int, ir.Type],
+    assigned_ids: frozenset[int],
+) -> ir.Type | None:
+    """Trace direct formal/tuple returns by Var identity, without guessing computed results."""
+    if isinstance(value, ir.Var):
+        actual = argument_types.get(value.unique_id)
+        if actual is not None and value.unique_id not in assigned_ids:
+            return returned_tile_types(actual, fallback)
+    elif isinstance(value, ir.MakeTuple) and isinstance(fallback, ir.TupleType):
+        if len(value.elements) != len(fallback.types):
+            return None
+        projected = [
+            inline_argument_return_type(v, f, argument_types, assigned_ids)
+            for v, f in zip(value.elements, fallback.types)
+        ]
+        if any(t is not None for t in projected):
+            return ir.TupleType([p if p is not None else f for p, f in zip(projected, fallback.types)])
+    elif isinstance(value, ir.TupleGetItemExpr):
+        container = inline_argument_return_type(value.tuple, value.tuple.type, argument_types, assigned_ids)
+        if isinstance(container, ir.TupleType) and 0 <= value.index < len(container.types):
+            return returned_tile_types(container.types[value.index], fallback)
+    return None

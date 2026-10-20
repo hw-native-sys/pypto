@@ -4266,6 +4266,7 @@ def deduce_call_return_type(
     callee_params: Sequence[Var],
     args: Sequence[Expr],
     return_types: Sequence[Type],
+    is_inline: bool = False,
 ) -> list[Type]:
     """Deduce return types for a cross-function call.
 
@@ -4276,6 +4277,8 @@ def deduce_call_return_type(
         callee_params: Callee function parameter variables
         args: Actual call argument expressions
         return_types: Callee's declared return types
+        is_inline: Keep conflicting generic Tile physical extents provisional
+            until inline expansion recovers each actual result type
 
     Returns:
         Substituted return types (unchanged if no dynamic vars found)

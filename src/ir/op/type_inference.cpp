@@ -39,6 +39,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1556,6 +1557,7 @@ struct CallTypeBindingConstraint {
   ExprPtr existing;
   ExprPtr candidate;
   std::string context;
+  bool tile_physical = false;
 };
 
 struct CallAffineExpr {
@@ -1781,8 +1783,12 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   auto value_tile = As<TileType>(value);
   if (!pattern_tile || !value_tile) return;
   CheckCallPackedFp4Format(pattern_tile->dtype_, value_tile->dtype_, context);
+  const size_t physical_constraints_begin = constraints.size();
   CollectCallExprVectorBindings(pattern_tile->shape_, value_tile->shape_, context + " physical shape",
                                 var_map, constraints, true);
+  for (size_t i = physical_constraints_begin; i < constraints.size(); ++i) {
+    constraints[i].tile_physical = true;
+  }
   // An omitted valid shape imposes no view contract on the actual Tile.
   // Reusing the formal's physical extents here would bind the same symbol
   // to both the allocation size and a legitimately smaller valid extent.
@@ -1832,6 +1838,25 @@ void CollectCallTypeBindings(const std::vector<VarPtr>& callee_params, const std
   }
 }
 
+// Tile physical placeholders specialize independently at inline call sites.
+// A symbol also used by tensor metadata, explicit Tile view metadata, or an
+// actual scalar parameter still carries a shared contract and remains strict.
+void CollectStrictInlineTypeVars(const TypePtr& type, var_collectors::VarDefUseCollector& collector) {
+  if (auto tuple = As<TupleType>(type)) {
+    for (const auto& element : tuple->types_) CollectStrictInlineTypeVars(element, collector);
+    return;
+  }
+  if (auto tile = As<TileType>(type)) {
+    if (tile->tile_view_) {
+      for (const auto& dim : tile->tile_view_->valid_shape) collector.VisitExpr(dim);
+      for (const auto& stride : tile->tile_view_->stride) collector.VisitExpr(stride);
+      if (tile->tile_view_->start_offset) collector.VisitExpr(tile->tile_view_->start_offset);
+    }
+    return;
+  }
+  var_collectors::VisitTypeExprFields(collector, type);
+}
+
 }  // namespace
 
 std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector<VarPtr>& callee_params,
@@ -1862,7 +1887,7 @@ std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector
 
 std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_params,
                                           const std::vector<ExprPtr>& args,
-                                          const std::vector<TypePtr>& return_types) {
+                                          const std::vector<TypePtr>& return_types, bool is_inline) {
   TypeVarMap var_map;
   std::vector<CallTypeBindingConstraint> constraints;
   CollectCallTypeBindings(callee_params, args, var_map, constraints);
@@ -1870,10 +1895,20 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
   // not let an E2M1 buffer reach an E1M2 body (or vice versa) without a cast.
   if (return_types.empty() || var_map.empty()) return return_types;
 
+  var_collectors::VarDefUseCollector strict_vars;
+  if (is_inline) {
+    for (const auto& param : callee_params) {
+      if (!param) continue;
+      if (As<ScalarType>(param->GetType())) strict_vars.VisitExpr(param);
+      CollectStrictInlineTypeVars(param->GetType(), strict_vars);
+    }
+  }
+
   // Validate repeated bindings only after all arguments have contributed.
   // A constraint may mention another callee placeholder that is bound by a
   // later argument (for example STAGED = NR * 64, then NR = world_size()).
   for (const auto& constraint : constraints) {
+    if (is_inline && constraint.tile_physical && !strict_vars.var_uses.count(constraint.var.get())) continue;
     if (structural_equal(constraint.existing, constraint.candidate)) continue;
     auto existing = transform_utils::Substitute(constraint.existing, var_map);
     auto candidate = transform_utils::Substitute(constraint.candidate, var_map);
@@ -1882,6 +1917,22 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
         << "Dynamic type variable '" << constraint.var->name_hint_ << "' has conflicting bindings "
         << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
         << constraint.context << "; cross-function calls do not emit a runtime shape guard";
+  }
+
+  // Do not choose the first Tile argument's extent for another operand. Leave
+  // only conflicting generic Tile symbols unresolved; InlineFunctions retypes
+  // the result from its actual returned expression after splicing the body.
+  if (is_inline) {
+    const auto inline_bindings = DeduceCallTypeBindings(callee_params, args);
+    for (const auto& constraint : constraints) {
+      if (!constraint.tile_physical || strict_vars.var_uses.count(constraint.var.get())) continue;
+      const auto found = inline_bindings.find(constraint.var.get());
+      if (found == inline_bindings.end()) {
+        var_map.erase(constraint.var.get());
+      } else {
+        var_map[constraint.var.get()] = found->second;
+      }
+    }
   }
 
   std::vector<TypePtr> result;

@@ -1077,11 +1077,14 @@ std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector
  * @param callee_params  Callee function parameter variables
  * @param args           Actual call argument expressions
  * @param return_types   Callee's declared return types
+ * @param is_inline      Whether the call will be expanded before lowering.
+ *                       Conflicting generic Tile physical dimensions stay
+ *                       provisional until expansion recovers each actual type.
  * @return Substituted return types (unchanged if no dynamic vars found)
  */
 std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_params,
                                           const std::vector<ExprPtr>& args,
-                                          const std::vector<TypePtr>& return_types);
+                                          const std::vector<TypePtr>& return_types, bool is_inline = false);
 
 /**
  * @brief Parse and validate the optional ``drop_dims`` operand of a slice op.

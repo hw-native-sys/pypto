@@ -4017,6 +4017,46 @@ class TestInlineTileAnnotations:
         with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
             entry.compile(config=config)
 
+    def test_rebound_parameterized_factory_contract_invalidates_cached_artifact(self):
+        """A constexpr axis must not hide a changed annotation-only factory axis."""
+        ROWS = 99
+
+        def factory(cols):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(64)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 128], pl.FP32], dst: pl.Out[pl.Tensor[[8, 128], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile, 8)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 128], pl.FP32], dst: pl.Out[pl.Tensor[[8, 128], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        static_hash = entry._get_static_source_hash()
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        compiled = entry.compile(config=config)
+        assert entry.compile(config=config) is compiled
+
+        keep_tile = factory(128)
+        assert entry._get_static_source_hash() == static_hash
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
+            entry.compile(config=config)
+
     def test_eager_generic_tile_with_dynamic_tensor_anchor_compiles(self, tmp_path):
         """A Tensor anchor declares M while the helper's physical M binds to eight."""
         M = pl.dynamic("M")
@@ -4131,6 +4171,99 @@ class TestInlineTileAnnotations:
         assert entry._get_source_hash() != source_hash
         assert entry._persistent_source_digest() != persistent_digest
         assert entry.compile(config=config) is not first
+
+    @pytest.mark.parametrize("rebound", ["shape", "view", "constexpr-view"])
+    def test_postponed_tile_constants_compile_and_invalidate_cache(self, rebound):
+        """Prebuilt annotation constants survive emission and enter both cache keys."""
+        SHAPE = [pl.dynamic("FIRST_ROWS"), 64]
+        VIEW = pl.TileView(valid_shape=[1, 64], stride=[64, 1])
+        ROWS = 99
+        if rebound == "constexpr-view":
+
+            def keep_tile(
+                tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec, VIEW], ROWS: pl.constexpr
+            ) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec, VIEW]"
+        else:
+
+            def keep_tile(tile: pl.Tile[SHAPE, pl.FP32, pl.Mem.Vec, VIEW], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Tile[SHAPE, pl.FP32, pl.Mem.Vec, VIEW]"
+
+        raw = keep_tile
+        postponed = types.FunctionType(
+            raw.__code__, {**raw.__globals__, "SHAPE": SHAPE, "VIEW": VIEW}, raw.__name__
+        )
+        postponed.__annotations__ = {"tile": annotation, "ROWS": "pl.constexpr", "return": "pl.Tile"}
+        keep_tile = jit.inline(auto_scope=False)(postponed)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile, 8)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        first = entry.compile(config=config)
+        assert entry.compile(config=config) is first
+
+        if rebound == "shape":
+            postponed.__globals__["SHAPE"] = [pl.dynamic("SECOND_ROWS"), 64]
+        else:
+            postponed.__globals__["VIEW"] = pl.TileView(valid_shape=[2, 64], stride=[64, 1])
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        assert entry.compile(config=config) is not first
+
+    def test_postponed_complete_tile_alias_invalidates_cached_artifact(self):
+        """A named Tile contract must enter hashes even without a subscript AST."""
+        CONTRACT = pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec]
+
+        # JIT accepts evaluated Tile values as annotation aliases; static
+        # Python typing only accepts type aliases in this position.
+        def keep_tile(tile: CONTRACT) -> pl.Tile:  # pyright: ignore[reportInvalidTypeForm]
+            return tile
+
+        raw = keep_tile
+        postponed = types.FunctionType(raw.__code__, {**raw.__globals__, "CONTRACT": CONTRACT}, raw.__name__)
+        postponed.__annotations__ = {"tile": "CONTRACT", "return": "pl.Tile"}
+        keep_tile = jit.inline(auto_scope=False)(postponed)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        first = entry.compile(config=config)
+        assert entry.compile(config=config) is first
+
+        postponed.__globals__["CONTRACT"] = pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec]
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        # A stale artifact would skip validation of the new 16-row contract.
+        with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
+            entry.compile(config=config)
 
     @pytest.mark.parametrize(
         "shape, dtype, space, mismatch",
@@ -4299,15 +4432,21 @@ class TestInlineTileAnnotations:
         )
 
     def test_inline_tile_shape_uses_each_constexpr_binding(self, tmp_path):
-        """Two calls to one helper resolve its Tile annotation independently."""
+        """Two calls retain an erased factory column and bind their own row extent."""
         # This ambient value makes Python's eager annotation legal. The JIT
         # must fold each call's ROWS first, rather than capture this value or
         # reuse the first helper specialization at the second call site.
         ROWS = 99
 
-        @jit.inline(auto_scope=False)
-        def keep_tile(t: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
-            return t
+        def factory(cols):
+            @jit.inline(auto_scope=False)
+            def keep_tile(t: pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
+                return t
+
+            return keep_tile
+
+        keep_tile = factory(64)
+        assert not keep_tile._func.__code__.co_freevars
 
         @jit.incore
         def copy_incore(src: pl.Tensor[[24, 64], pl.FP32], dst: pl.Out[pl.Tensor[[24, 64], pl.FP32]]):

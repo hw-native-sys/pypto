@@ -2275,12 +2275,13 @@ class TestInlineTileParamAnnotations:
         ctx.py_globals = {"pl": pl}
 
         source = specialize("_TestClass", [ctx])
-
-        assert f"tile: pl.Tile[[8, 64], pl.{dtype}, pl.MemorySpace.Vec]" in source
         program = pl.parse(source)
         assert isinstance(program, ir.Program)
         func = program.get_function("keep_tile")
         assert func is not None
+        # Canonical enum spelling may change; the parsed Tile contract must
+        # preserve its physical axes, dtype and explicit memory space.
+        assert len(func.params) == 1
         tile_type = func.params[0].type
         assert isinstance(tile_type, ir.TileType)
         for dim, extent in zip(tile_type.shape, [8, 64], strict=True):
@@ -2384,12 +2385,13 @@ class TestInlineTileParamAnnotations:
         ctx.constexpr_values = {"ROWS": "4", "DTYPE": "pl.BF16", "SPACE": "pl.Mem.Vec"}
 
         source = specialize("_TestClass", [ctx])
-        assert "tile: pl.Tile[[4 * 2, 64], pl.BF16, pl.Mem.Vec]" in source
         program = pl.parse(source)
         assert isinstance(program, ir.Program)
         func = program.get_function("keep_tile")
         assert func is not None
         assert len(func.params) == 1
+        # Annotation evaluation folds 4 * 2; verify the resulting contract
+        # rather than requiring the original arithmetic spelling.
         ir.assert_structural_equal(
             func.params[0].type,
             ir.TileType([8, 64], DataType.BF16, memory_space=ir.MemorySpace.Vec),
@@ -2544,6 +2546,42 @@ class TestInlineTileParamAnnotations:
         assert func is not None
         assert "TILE_VALID_ROWS" in ir.python_print_type(func.params[0].type)
 
+    def test_source_tile_aggregate_and_metadata_constants_are_canonical(self):
+        """Evaluated generic shapes and metadata cannot remain undefined aliases."""
+        dimension = pl.dynamic("TILE_ROWS")
+        allocation = pl.MemRef("tile_buffer", 64, 4096)
+        view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(tile: pl.Tile[SHAPE, pl.BF16, ALLOCATION, pl.Mem.Vec, VIEW]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl, "SHAPE": [dimension, 64], "ALLOCATION": allocation, "VIEW": view}
+
+        source = specialize("_TestClass", [ctx])
+        assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
+        assert "SHAPE" not in source and "ALLOCATION" not in source and "VIEW" not in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        ir.assert_structural_equal(
+            helper.params[0].type,
+            ir.TileType(
+                [dimension.unwrap(), ir.ConstInt(64, DataType.INDEX, ir.Span.unknown())],
+                DataType.BF16,
+                memref=allocation,
+                tile_view=view,
+                memory_space=ir.MemorySpace.Vec,
+            ),
+            enable_auto_mapping=True,
+        )
+
     @pytest.mark.parametrize("ambient", [False, True])
     def test_scalar_tile_dimension_stays_in_function_scope(self, ambient):
         """A runtime Scalar dimension is a formal, not a frozen or module-level symbol."""
@@ -2591,7 +2629,7 @@ class TestInlineTileParamAnnotations:
             auto_scope=False,
             constexpr_values={"ROWS": str(rows)},
         )
-        assert "tile" not in ctx.eager_tile_annotations
+        assert "ROWS" in ctx.eager_tile_annotations["tile"]
         program = pl.parse(specialize("_TestClass", [ctx]))
         assert isinstance(program, ir.Program)
         func = program.get_function("keep_tile")
@@ -2600,6 +2638,113 @@ class TestInlineTileParamAnnotations:
             func.params[0].type,
             ir.TileType([rows, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
         )
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    @pytest.mark.parametrize("valid_rows", [3, 8])
+    def test_eager_factory_constants_coexist_with_constexpr_axes(self, rows, valid_rows):
+        """An erased factory column and metadata survive a per-call row binding."""
+        ROWS = 8
+
+        def factory(cols):
+            dtype = pl.BF16
+            allocation = pl.MemRef("tile_buffer", 64, 2048)
+            # A full ambient view must retain eight valid rows when the
+            # per-call physical shape later grows to sixteen.
+            view = pl.TileView(valid_shape=[valid_rows, cols], stride=[cols, 1], start_offset=0)
+
+            def keep_tile(
+                tile: pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view], ROWS: pl.constexpr
+            ):
+                return tile
+
+            return keep_tile
+
+        helper = factory(64)
+        assert not helper.__code__.co_freevars
+        ctx = build_specialize_context(
+            helper,
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"ROWS": str(rows)},
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        original = helper.__annotations__["tile"]
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType(
+                [rows, 64],
+                DataType.BF16,
+                memref=original.memref,
+                tile_view=original.tile_view,
+                memory_space=original.memory_space,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    @pytest.mark.parametrize("metadata_name_collision", [False, True])
+    def test_eager_mixed_axis_rejects_unrecoverable_factory_operand(self, metadata_name_collision):
+        """The eager sum cannot reveal a lost operand after ROWS is rebound."""
+        ROWS = 99
+
+        def factory(padding):
+            # An unrelated metadata DynVar with the erased operand's name
+            # cannot stand in for that numeric factory value.
+            valid_rows = pl.dynamic("padding") if metadata_name_collision else 3
+            view = pl.TileView(valid_shape=[valid_rows, 64])
+
+            def keep_tile(tile: pl.Tile[[ROWS + padding, 64], pl.FP32, view], ROWS: pl.constexpr):
+                return tile
+
+            return keep_tile
+
+        helper = factory(3)
+        assert not helper.__code__.co_freevars
+        with pytest.raises(ValueError, match="Cannot recover.*padding.*ROWS \\+ padding"):
+            build_specialize_context(
+                helper,
+                "keep_tile",
+                "inline",
+                None,
+                {},
+                {},
+                [],
+                auto_scope=False,
+                constexpr_values={"ROWS": "8"},
+            )
+
+    def test_eager_factory_axis_keeps_runtime_scalar_in_local_scope(self):
+        """Replacing an ambient generic axis must not declare its obsolete symbol."""
+        ROWS = pl.dynamic("AMBIENT_ROWS")
+
+        def factory(cols):
+            def keep_tile(ROWS: pl.Scalar[pl.INDEX], tile: pl.Tile[[ROWS, cols], pl.FP32]):
+                return tile
+
+            return keep_tile
+
+        helper = factory(64)
+        assert not helper.__code__.co_freevars
+        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        source = specialize("_TestClass", [ctx])
+        assert "AMBIENT_ROWS" not in source
+        assert 'ROWS = pl.dynamic("ROWS")' not in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        tile_type = func.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert ir.structural_equal(tile_type.shape[0], func.params[0])
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert tile_type.shape[1].value == 64
 
     @pytest.mark.parametrize("rows", [4, 8])
     @pytest.mark.parametrize("shadowed", [False, True])
