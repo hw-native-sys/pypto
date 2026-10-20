@@ -14,12 +14,33 @@
 #
 # shellcheck shell=bash
 
+# Imports and diagnostic Git probes must not leave root-owned state in sources.
+export PYTHONDONTWRITEBYTECODE=1 GIT_OPTIONAL_LOCKS=0
+
 export PYPTO_HOME="${PYPTO_HOME:-/opt/pypto}"
 
 # Where the bind-mounted checkouts live. Overridable so a host that mounts
 # somewhere else needs no rebuild.
 export PYPTO_SRC="${PYPTO_SRC:-/workspace/pypto}"
 export PYPTO_LIB_SRC="${PYPTO_LIB_SRC:-/workspace/pypto-lib}"
+
+# The launcher selects a platform explicitly. Direct image runs derive it from
+# the CANN tag retained by the Dockerfile; custom environments can set it too.
+export PYPTO_PLATFORM="${PYPTO_PLATFORM:-}"
+if [ -z "$PYPTO_PLATFORM" ]; then
+    case "${PYPTO_CANN_TAG:-}" in
+        *-a2-*|*-a3-*) export PYPTO_PLATFORM=a2a3 ;;
+        *-950-*) export PYPTO_PLATFORM=a5 ;;
+    esac
+fi
+
+_pypto_model_command() {
+    if [ -n "${PYPTO_PLATFORM:-}" ]; then
+        printf '    python $PYPTO_LIB_SRC/models/qwen3_14b/decode_fwd.py -p %s -d ${PYPTO_DEVICE:-0}\n' "$PYPTO_PLATFORM"
+    else
+        echo '    Set PYPTO_PLATFORM=a2a3 or a5 for model commands.'
+    fi
+}
 
 # --- CANN -----------------------------------------------------------------
 # First, because set_env.sh prepends its own dirs to PATH / LD_LIBRARY_PATH /
@@ -37,9 +58,9 @@ source "$PYPTO_HOME/venv/bin/activate"
 
 # --- ptoas ----------------------------------------------------------------
 export PTOAS_ROOT="${PTOAS_ROOT:-$PYPTO_HOME/ptoas}"
-# CANN prepends its online-build assembler on every activation. Prepend ours
-# again even when it already appears later in PATH.
-export PATH="$PTOAS_ROOT/bin:$PATH"
+# Keep Python and package installation in PyPTO's venv. PTOAS also has a Python
+# executable, so put its bin directory after that venv but before CANN's tools.
+export PATH="$PYPTO_HOME/venv/bin:$PTOAS_ROOT/bin:$PATH"
 
 # PYTHONPATH is searched before either interpreter's site-packages, so selecting
 # the pinned executable alone still lets it import CANN's bundled ptoas. Keep
@@ -96,18 +117,35 @@ done
 unset _pypto_path _pypto_pp _pypto_ifs
 
 export PATH="$PYPTO_HOME/bin:$PATH"
+# CANN and virtualenv activation both prepend paths. Keep the first occurrence,
+# including the empty component (current directory), without shell glob expansion.
+_pypto_deduplicate_path() {
+    local name="$1" value rest="${!1}" result="" separator="" done=false
+    local -A seen=()
+    while ! $done; do
+        if [[ "$rest" = *:* ]]; then value="${rest%%:*}"; rest="${rest#*:}"
+        else value="$rest"; done=true; fi
+        if [ -z "${seen["x$value"]:-}" ]; then
+            result+="$separator$value"; separator=:
+            seen["x$value"]=1
+        fi
+    done
+    printf -v "$name" '%s' "$result"
+    export "$name"
+}
+_pypto_deduplicate_path PATH
+_pypto_deduplicate_path PYTHONPATH
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then _pypto_deduplicate_path LD_LIBRARY_PATH; fi
+unset -f _pypto_deduplicate_path
 
 if [ -n "${PS1:-}" ] && [ -z "${PYPTO_MOTD_SHOWN:-}" ]; then
     export PYPTO_MOTD_SHOWN=1
-    # The `dist` image arrives already built, so telling its user to build first
-    # would send them off to repeat work that is done. Only that image writes
-    # the manifest, so its absence means this is the bring-your-own-source one.
+    echo "PyPTO dev environment — pypto-doctor (check the current checkout) / pypto-build (build or refresh it)"
+    echo "After the checks pass, run a model:"
+    _pypto_model_command
+    # This describes image provenance. A bind mount can hide the image's built
+    # checkout, so the manifest cannot establish readiness of the current tree.
     if [ -f "$PYPTO_HOME/dist-manifest" ]; then
-        echo "PyPTO — already built. Run a model:"
-        echo "    python \$PYPTO_LIB_SRC/models/qwen3_14b/decode_fwd.py -p a2a3 -d \${PYPTO_DEVICE:-0}"
-        echo "Update source and PTOAS with pypto-update.sh; keep edits with --no-pull."
-        echo "pypto-doctor checks the environment; $PYPTO_HOME/dist-manifest records what shipped."
-    else
-        echo "PyPTO dev image — pypto-doctor (check the environment) / pypto-build (build pypto + simpler)"
+        echo "Image build revisions: $PYPTO_HOME/dist-manifest; mounted sources may differ."
     fi
 fi

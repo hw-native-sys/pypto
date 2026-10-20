@@ -142,7 +142,12 @@ warn  npu-smi: npu get board type failed. ret is -9005 — expected under --runt
 
 The driver's `version.info` is readable on the host, not in the container, and `npu-smi`
 fails because it enumerates every board while only the cards you exposed are present.
-`device access: aclrtSetDevice(0) ok` is the check that settles whether the card works.
+`device access: aclrtSetDevice(0) ok` confirms device access; it does not establish
+driver compatibility for AICPU initialization. A missing CANN interpreter or an ACL probe
+that cannot execute is a blocking doctor failure. When `version.info` is readable,
+doctor enforces the runtime's supported pairs: CANN `9.0.0` with driver `26.0.rc1`,
+or CANN `9.1.T500` with driver `25.6.rc1.b108`. Unknown pairs fail validation.
+`ASCEND_DRIVER_ROOT` overrides the default driver directory `/usr/local/Ascend/driver`.
 
 Then run a kernel on the card:
 
@@ -177,8 +182,9 @@ that.
 | Ascend Docker Runtime | `ascend` listed | `docker info --format '{{json .Runtimes}}'` |
 | Free disk | ≥ 30 GB for image layers, containers, and build cache | `df -h /var/lib/docker` |
 
-In `version.info`, `Version=` is the driver and `compatible_version=` is the range of CANN
-versions it accepts. Those two lines settle every version argument.
+In `version.info`, `Version=` is the public driver version. `compatible_version=` lists
+internal release identifiers such as `V100R001C10`, not public CANN version numbers.
+Check the supported public driver/CANN pair in `runtime/docs/install.md`.
 
 Install what is missing, in this order — each step depends on the one before it:
 
@@ -347,6 +353,13 @@ container needs `/workspace/pypto` and `/workspace/pypto-lib` to exist directly.
 mount hides the image's own `/workspace`, so the source you mounted is the only source
 there is, and it is almost certainly not the one `simpler` was built from. Run
 `pypto-build` before anything else.
+The startup message always directs you to check the current checkout; an image's
+`dist-manifest` records what shipped and does not certify a bind-mounted tree as built.
+
+Model suggestions use `PYPTO_PLATFORM`: the launcher sets `a2a3` for `run a3` and
+`a5` for `run a5`; direct image runs derive it from the image's CANN tag. In a custom
+environment, set `PYPTO_PLATFORM=a2a3` or `PYPTO_PLATFORM=a5` explicitly. An unknown
+tag produces setup guidance instead of guessing a model target.
 
 ### Updating the source and rebuilding
 
@@ -366,6 +379,13 @@ pinned submodules, installs the PTOAS release in `toolchain/versions.env` if nec
 rebuilds PyPTO and simpler, and runs `pypto-doctor`. It never switches branches or resets
 commits. A detached checkout, divergent branch, or local changes require you to resolve
 that state yourself or use `--no-pull`.
+After pulling (or immediately with `--no-pull`), the updater uses the helpers from
+`$PYPTO_SRC/.github/docker`, including when launched from `/opt/pypto/bin`. The selected
+checkout must contain those helpers; missing helpers fail instead of using stale image copies.
+Every update also refreshes the installed helpers and toolchain inputs atomically,
+including without `--reinstall-deps`. Reload an existing shell with
+`source "$PYPTO_HOME/bin/pypto-activate.sh"`, or re-enter it, to use the new activation.
+`pypto-setup.sh --helpers-only` performs just this helper refresh without installing dependencies.
 
 For edits in a bind-mounted checkout, preserve the source and rebuild:
 
@@ -393,22 +413,47 @@ source "$PYPTO_SRC/.github/docker/pypto-activate.sh"
 The installer reads the checkout's version and architecture-specific SHA256, verifies
 the release wheel before changing the installation, and installs into
 `${PTOAS_ROOT:-/opt/pypto/ptoas}`. It accepts `--force` to reinstall the same version.
+Both dedicated environments must contain a working CPython 3.10 interpreter,
+`pyvenv.cfg`, and `bin/activate`; an incompatible or incomplete PTOAS prefix is
+recreated after the downloaded wheel passes checksum verification. Activation keeps
+PyPTO's venv first on PATH while exposing the pinned PTOAS ahead of CANN's assembler;
+runtime packages are installed explicitly into `$PYPTO_HOME/venv`.
 In an older image, source the checkout's activation helper in each new shell before
 using PTOAS; selecting its executable alone does not prevent CANN's Python package from
 shadowing the pinned wheel. The installer isolates its own version probes automatically.
 The environment must already contain uv and CPython 3.10, as the published image does.
 Run `pypto-setup.sh` from a complete checkout to provision a different CANN container;
 it installs the same helper sources and uses `build-constraints.txt` for build tools.
+It verifies that its dedicated `$PYPTO_HOME/venv` uses CPython 3.10. Incompatible or
+incomplete environments are recreated before dependencies are installed; an existing
+complete CPython 3.10 environment is preserved.
+Setup copies a discovered uv executable into `$PYPTO_HOME/bin`, so checkout-owner
+builds can use it even when the original executable is under root's private home.
+To pin uv, pass `--uv-version TAG` or set `UV_VERSION=TAG`; a concrete release tag
+always downloads that release, even if uv is already installed. The command-line
+option takes precedence over the environment variable. With the default `latest`
+setting, setup reuses an existing uv or downloads the latest release if none exists.
 
 `pypto-build` uses native CMake, installs the simpler matching the checkout, and follows
-its PTO-ISA pin. It deliberately avoids `pip install -e .`: a scikit-build-configured
+its PTO-ISA pin. It rebuilds and reinstalls the runtime wheel on every invocation,
+including after uncommitted source edits; native build and ccache reuse remain enabled.
+It deliberately avoids `pip install -e .`: a scikit-build-configured
 `build/` can place the extension outside the source import path. Build parallelism comes
 from `.claude/skills/testing/load-env.sh`, with two jobs on unclassified machines.
+An explicit job request can lower that cap but cannot raise it.
 Existing native builds keep their CMake generator; fresh builds use Ninja. Caches from
-a different absolute path are refreshed automatically when mounted into the container.
+a different path, environment or toolchain are discarded together with their objects,
+including host caches mounted at the same path. The helper records build state after
+each successful build; unchanged builds remain incremental, while unrecorded builds
+or artifacts modified outside the helper are rebuilt. Container hostnames, path-list
+ordering, ownership and filesystem change times are excluded from that record, so
+recreating an equivalent container preserves incremental builds.
 `pypto-doctor` checks the installed simpler build revision against the mounted `runtime/`.
 It warns when `runtime/` has uncommitted changes, because a matching revision cannot
-prove that the installed binding includes those edits.
+prove that the installed binding includes those edits. A known revision mismatch fails
+even with `PYPTO_SKIP_RUNTIME_PIN_CHECK=1`, as does a binding that predates revision
+stamping. An empty build stamp or unavailable checkout revision is reported as
+unverified, never as a verified match.
 
 ### Building the development image
 
@@ -426,6 +471,11 @@ docker buildx build --load --target dist \
 
 The default `main` refs stay on tracking branches so `pypto-update.sh` can pull updates.
 Tag and commit refs produce detached checkouts; use `--no-pull` for those pinned builds.
+The selected PyPTO ref must contain the dev-container helpers, `toolchain/versions.env`
+and `build-constraints.txt`. The `dist` stage runs that checkout's setup and build
+helpers, refreshes dependencies from its pins and constraints, and installs its helpers
+for subsequent sessions. It does not fall back to the Docker context's helper copies
+when a selected ref lacks them.
 
 For an AMD64 image, build on an x86_64 host with a CANN base tag supporting
 `linux/amd64`; confirm that support before building. Publish to a separate architecture
@@ -436,51 +486,60 @@ build only.
 Use `.github/docker/pypto-dev.sh build a3` for a local environment image and
 `.github/docker/pypto-dev.sh run a3 0` to create or re-enter a container. The launcher
 supports CANN tag, image, cache-volume, and proxy overrides; see its source for details.
+Proxy values are forwarded from the environment without printing credentials in command
+traces or passing them as command arguments. Re-entry retains the container's existing
+environment. The launcher checks the checkout paths, image (including a rebuilt tag),
+cache volume, and device configuration before reusing a container. A mismatch, or an older
+container without configuration metadata, stops with recreation instructions; preserve
+container-only changes before explicitly removing it.
 With Ascend Docker Runtime, the selected physical card is logical device `0` inside the
 container, so the launcher exports `PYPTO_DEVICE=0`. Privileged access keeps the physical
-card index. `pypto-doctor` probes that same selected device. Linked worktree mounts also
-expose the common Git metadata at its original path so Git remains usable inside the container.
+card index. `pypto-doctor` probes that same selected device. For linked worktrees, the
+launcher preserves the original paths of both the checkout and common Git metadata.
+It sets `PYPTO_SRC`/`PYPTO_LIB_SRC` accordingly and starts in `PYPTO_SRC`; this keeps
+relative submodule gitdir paths and worktree back-references valid without rewriting
+host metadata. Regular checkouts still use `/workspace/pypto` and `/workspace/pypto-lib`.
+The launcher supplies scoped Git `safe.directory` entries for the mounted checkouts and
+their initialized submodules, including nested ones, so container root can access
+host-owned trees. Adding initialized submodules changes the container configuration
+and requires recreation.
+Git updates run as each checkout's numeric UID/GID. Native compilation and runtime
+wheel creation run as the PyPTO checkout owner, so new sources, Git metadata and build
+outputs remain writable on the host. Rootful containers require `setpriv` from
+util-linux; no matching account in `/etc/passwd` is needed. Source-writing commands use
+a separate HOME at `$PYPTO_HOME/users/<uid>` and ccache directory at
+`$PYPTO_HOME/cache/ccache/<uid>`. Configure private-repository Git authentication for
+that HOME or supply an SSH agent; root's credentials are not copied. Installation of
+the completed wheel retains the caller's privileges and leaves the existing Python
+environment's ownership intact. Existing host files and linked-worktree metadata are
+never recursively chowned. Shell/device diagnostics keep their original privileges;
+checkout diagnostics run as the source owner. Activation disables Python bytecode
+writes and optional Git index refreshes during read-only checks.
+When the primary PyPTO checkout has `.claude/skills/testing/testing.env`, the launcher
+mounts that file read-only at its original path too, preserving the machine's job limits.
 
 ### Without Ascend Docker Runtime
 
-If you cannot install the runtime — no root, no permission to restart Docker, maintenance
-window not open — pass the device nodes and driver in yourself:
+When no Ascend runtime is registered, the launcher's default `auto` mode selects
+`privileged`. This requires permission to run privileged Docker containers and exposes
+all host devices and cards. The launcher prints this behavior before creating or
+re-entering the container. Choose it explicitly when that access is acceptable:
 
 ```bash
-docker run --rm -it \
-  --device /dev/davinci1 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  --shm-size=16g \
-  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-  -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-  "$PYPTO_IMAGE"
+PYPTO_DEVICE_ACCESS=privileged .github/docker/pypto-dev.sh run a3 1
 ```
 
-`davinci1` is the card you want; the other three nodes are driver management nodes and
-must be passed together with it. The `driver` mount supplies the driver libraries. The
-`dcmi`, `npu-smi`, and `ascend_install.info` mounts only decide whether `npu-smi` works
-inside the container and can be dropped.
+The launcher mounts the host driver tree and management tools, and sets
+`PYPTO_DEVICE=1` to select physical card 1 as the default compute device. This setting
+does not restrict which other cards or host devices the container can access.
+For A5, use `run a5` on an appropriate host; the launcher also supplies its URMA devices.
 
-**Card numbers are not remapped here.** The container still sees `/dev/davinci1`, but ACL
-enumerates only that one card, so PyPTO still takes `-d 0`; passing `davinci2` and
-`davinci3` gives `-d 0,1`. To select by physical number when several are visible, use
-CANN's own variable, whose logical ids start at 0 in the order listed:
-
-```bash
--e ASCEND_RT_VISIBLE_DEVICES=2,3
-```
-
-This path is verified on `driver 26.0.rc1` with this image: `pypto-doctor` passes every
-check, and both the single-card and two-card runs pass. It needs no `--privileged`, and
-`--privileged` is not a substitute — that hands the container every card on the machine.
-Reach for it only as a last resort, if the above still reports `507899`.
-
-`--runtime=ascend` remains the recommended path: it injects driver and device nodes,
-renumbers cards, and exposes only the ones you named.
+Passing only four device nodes and driver mounts is not a portable substitute for
+this fallback: device enumeration can fail with `drvGetDevNum`/`507899`, including on
+driver `26.0.rc1`. The guide therefore makes no claim that this restricted form works
+with that driver. Use the registered `--runtime=ascend` path when device isolation is
+required; it injects the driver and exposes only the selected cards. If privileged
+containers are not permitted, arrange that runtime with the host administrator.
 
 ## Edge Cases
 
@@ -490,7 +549,7 @@ renumbers cards, and exposes only the ones you named.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| `unknown or invalid runtime name: ascend` | Ascend Docker Runtime missing, unregistered, or Docker not restarted after install | `sudo systemctl daemon-reload && sudo systemctl restart docker`, then check `docker info --format '{{json .Runtimes}}'`; or use the [`--device` fallback](#without-ascend-docker-runtime) |
+| `unknown or invalid runtime name: ascend` | Ascend Docker Runtime missing, unregistered, or Docker not restarted after install | `sudo systemctl daemon-reload && sudo systemctl restart docker`, then check `docker info --format '{{json .Runtimes}}'`; or use the [privileged fallback](#without-ascend-docker-runtime) |
 | `exec format error` | ARM64 image on an x86_64 host | Run it on an `aarch64` host — there is no workaround |
 | `aclrtSetDevice` returns `507899` or `Resource_Busy` | The same physical card is held by another container or process | Find it with `npu-smi info` and `docker ps`, stop it or pick another card. The ACL context may be in a sticky error state afterwards — recreate the container before retesting |
 | `simpler_init failed with code 507018` | Almost always a driver / CANN mismatch | [Triaging `507018`](#triaging-507018) |
@@ -530,8 +589,9 @@ container:
 cat /usr/local/Ascend/driver/version.info
 ```
 
-`Version=` must be `26.0.rc1`, and `compatible_version=` must include the image's CANN
-9.0.0. Anything else is an unsupported environment (the runtime lists what it supports in
+For the A3 image's CANN 9.0.0, `Version=` must be `26.0.rc1`.
+`compatible_version=` uses internal identifiers, so do not search it for `9.0.0`.
+Other public version pairs are unsupported for this image (the runtime lists what it supports in
 `runtime/docs/install.md`); upgrade the driver and firmware to the matching pair before
 retesting.
 

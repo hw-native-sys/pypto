@@ -12,6 +12,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/pypto-venv.sh"
 PYPTO_HOME="${PYPTO_HOME:-/opt/pypto}"
 PYPTO_SRC="${PYPTO_SRC:-$(cd "$here/../.." && pwd)}"
 PTOAS_ROOT="${PTOAS_ROOT:-$PYPTO_HOME/ptoas}"
@@ -52,7 +53,8 @@ sha="$(sed -n "s/^${sha_key}=//p" "$toolchain_env")"
 # it with the v-prefixed pin; comparing raw strings reinstalls on every update.
 # The standalone installer also runs in older images without our activation.
 # Ignore inherited CANN/PyPTO import paths so both probes inspect this venv's wheel.
-if ! $force && output="$(PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version 2>/dev/null)" &&
+if ! $force && pypto_venv_is_compatible "$PTOAS_ROOT" &&
+    output="$(PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version 2>/dev/null)" &&
     [[ "$output" =~ ptoas[[:space:]]+(version[[:space:]]+)?v?([0-9]+(\.[0-9]+)+) ]] &&
     [ "${BASH_REMATCH[2]}" = "${version#v}" ]; then
     echo "PTOAS $version already installed at $PTOAS_ROOT"
@@ -60,8 +62,9 @@ if ! $force && output="$(PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version 2>/dev/nu
 fi
 
 python="${PYPTO_PYTHON:-$PYPTO_HOME/venv/bin/python}"
-py_version="$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-[ "$py_version" = 3.10 ] || { echo "PTOAS wheels require CPython 3.10, got $py_version" >&2; exit 1; }
+pypto_python_is_310 "$python" || {
+    echo "PTOAS wheels require CPython 3.10 at $python" >&2; exit 1;
+}
 command -v uv >/dev/null || { echo "uv is required; run pypto-setup.sh first" >&2; exit 1; }
 
 download_dir="$(mktemp -d)"
@@ -71,8 +74,7 @@ curl --fail --location --retry 3 --retry-all-errors \
     "https://github.com/hw-native-sys/PTOAS/releases/download/${version}/${wheel}" \
     -o "$download_dir/$wheel"
 printf '%s  %s\n' "$sha" "$download_dir/$wheel" | sha256sum -c -
-if [ ! -x "$PTOAS_ROOT/bin/python" ]; then
-    uv venv --python "$python" "$PTOAS_ROOT"
-fi
+# Verify the download before replacing an incompatible/incomplete environment.
+pypto_ensure_venv "$PTOAS_ROOT" "$python"
 uv pip install --python "$PTOAS_ROOT/bin/python" --force-reinstall "$download_dir/$wheel"
 PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version

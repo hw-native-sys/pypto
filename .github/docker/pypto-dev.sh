@@ -69,6 +69,7 @@ cmd="$1"; chip="$2"; shift 2
 case "$chip" in
     a3)
         cann_chip=a3
+        platform=a2a3
         extra_devices=()
         # Verified end to end on this combination: on-device build plus a
         # pypto-lib decode model, against host driver 26.0.rc1.
@@ -79,6 +80,7 @@ case "$chip" in
         # Ascend950. On aarch64 these images also carry URMA for RoCE, whose two
         # extra character devices have to be passed in as well.
         cann_chip=950
+        platform=a5
         extra_devices=(--device /dev/ummu --device /dev/uburma)
         # runtime/docs/install.md names 9.1.T500 for A5. Unverified here — no
         # Ascend950 card was available — including whether the CANN registry
@@ -98,9 +100,8 @@ build)
     # caller's proxy rather than making every developer remember to.
     proxy_args=()
     for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
-        [ -n "${!v:-}" ] && proxy_args+=(--build-arg "$v=${!v}")
+        [ -n "${!v:-}" ] && proxy_args+=(--build-arg "$v")
     done
-    set -x
     docker buildx build \
         --file "$here/pypto_dev.Dockerfile" \
         --target "$TARGET" \
@@ -115,22 +116,62 @@ run)
     device_id="${1:-0}"
     src="${PYPTO_SRC_HOST:-$repo_root}"
     lib="${PYPTO_LIB_SRC_HOST:-$(dirname "$repo_root")/pypto-lib}"
+    src="$(cd "$src" && pwd -P)"
+    if [ -d "$lib" ]; then lib="$(cd "$lib" && pwd -P)"; fi
+    container_src=/workspace/pypto
+    container_lib=/workspace/pypto-lib
     # Linked worktrees store an absolute gitdir outside their source directory.
-    # Keep that metadata reachable at its original path after mounting the source
-    # at /workspace/pypto, so update/build can still resolve the checkout and pin.
+    # Keep both source and metadata at their original paths: submodule gitdir
+    # files may be relative, while core.worktree points back from the metadata.
     git_mount=()
     for checkout in "$src" "$lib"; do
         if [ -f "$checkout/.git" ]; then
             git_common="$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir)"
             git_mount+=(-v "$git_common:$git_common")
+            # load-env.sh reads the ignored profile beside the primary .git,
+            # outside the linked source mount. Preserve that cap, even when
+            # --jobs requests more workers, without exposing the primary tree.
+            if [ "$checkout" = "$src" ]; then
+                container_src="$src"
+                profile="$(dirname "$git_common")/.claude/skills/testing/testing.env"
+                if [ -f "$profile" ]; then
+                    git_mount+=(--mount "type=bind,src=$profile,dst=$profile,readonly")
+                fi
+            else
+                container_lib="$lib"
+            fi
         fi
     done
     lib_mount=()
     if [ -d "$lib" ]; then
-        lib_mount=(-v "$lib:/workspace/pypto-lib")
+        lib_mount=(-v "$lib:$container_lib")
     else
         echo "note: no pypto-lib checkout at $lib — set PYPTO_LIB_SRC_HOST to mount one" >&2
     fi
+    # Root in the container does not own host checkouts. Supply protected Git
+    # configuration for exactly the mounted roots and initialized submodules,
+    # including nested ones. Do not change the host's global Git configuration.
+    git_env=()
+    safe_count=0
+    for checkout in "$src" "$lib"; do
+        [ -d "$checkout" ] || continue
+        destination="$container_src"
+        if [ "$checkout" = "$lib" ]; then destination="$container_lib"; fi
+        safe_paths=("$destination")
+        if [ -e "$checkout/.git" ]; then
+            # foreach visits initialized submodules only; any subsequently
+            # initialized modules will be owned by the container's own user.
+            submodules="$(git -C "$checkout" submodule foreach --quiet --recursive 'printf "%s\n" "$displaypath"')"
+            while IFS= read -r submodule; do
+                [ -n "$submodule" ] && safe_paths+=("$destination/$submodule")
+            done <<< "$submodules"
+        fi
+        for safe_path in "${safe_paths[@]}"; do
+            git_env+=(-e "GIT_CONFIG_KEY_$safe_count=safe.directory" -e "GIT_CONFIG_VALUE_$safe_count=$safe_path")
+            safe_count=$((safe_count + 1))
+        done
+    done
+    git_env+=(-e "GIT_CONFIG_COUNT=$safe_count")
     # A *named* volume, not a bind mount, and not --rm:
     #  - Docker pre-populates a fresh named volume from the image, so anything
     #    the image put under /opt/pypto/cache survives the mount rather than
@@ -139,7 +180,6 @@ run)
     #    tree, where it would show up as untracked files and be shared with a
     #    host-side build that has a different toolchain.
     cache_volume="${PYPTO_CACHE_VOLUME:-pypto-dev-cache}"
-    docker volume create "$cache_volume" >/dev/null
 
     access="$PYPTO_DEVICE_ACCESS"
     if [ "$access" = auto ]; then
@@ -165,6 +205,7 @@ run)
         ;;
     privileged)
         container_device="$device_id"
+        echo 'Privileged fallback exposes every host device/card; the selected card is only the default compute device.' >&2
         # No runtime: name the devices, mount the driver tree *whole* (with only
         # lib64 + version.info npu-smi cannot reach the board at all, -9005),
         # and take the privilege hit. This hands over every card on the host.
@@ -190,29 +231,54 @@ run)
     # pypto-build clones the pinned pto-isa over HTTPS from inside it.
     proxy_env=()
     for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
-        [ -n "${!v:-}" ] && proxy_env+=(-e "$v=${!v}")
+        # Docker reads the value from its environment; keep credentials out of
+        # command arguments and shell traces.
+        [ -n "${!v:-}" ] && proxy_env+=(-e "$v")
     done
 
     container="pypto-dev-$chip-$device_id"
+    # Include effective mounts and device settings, but never proxy credentials.
+    # The version marker makes future changes to this contract explicit.
+    config="$(printf '%s\0' pypto-dev-v3 "$src" "$container_src" "$container_lib" "$IMAGE:$chip" "$cache_volume" \
+        "$container_device" "$platform" "${device_args[@]}" "${git_mount[@]}" "${lib_mount[@]}" "${git_env[@]}" | sha256sum)"
+    config="${config%% *}"
     # Re-enter rather than recreate: `uv pip install ./runtime` writes simpler
     # into the container's own venv, and a --rm container would throw that away
     # after every session, making each `docker run` recompile it.
-    if docker container inspect "$container" >/dev/null 2>&1; then
+    if existing="$(docker container inspect "$container" \
+        --format '{{index .Config.Labels "org.pypto.dev.config"}} {{.Image}}' 2>/dev/null)"; then
+        read -r existing_config existing_image <<< "$existing"
+        image_id="$(docker image inspect "$IMAGE:$chip" --format '{{.Id}}')" || {
+            echo "cannot verify the image for $container; restore $IMAGE:$chip before re-entering" >&2
+            exit 1
+        }
+        if [ "$existing_config" != "$config" ] || [ "$existing_image" != "$image_id" ]; then
+            echo "$container uses a different checkout, image, cache or device configuration, or predates configuration tracking." >&2
+            echo "Preserve any container-only changes, then remove it explicitly with: docker rm $container" >&2
+            echo "Run this launcher again to create the requested environment." >&2
+            exit 1
+        fi
         echo "re-entering $container (docker rm -f $container to start over)"
         exec docker start -ai "$container"
     fi
 
-    set -x
+    docker volume create "$cache_volume" >/dev/null
     docker run -it \
         --name "$container" \
+        --label "org.pypto.dev.config=$config" \
         --shm-size=16g \
         "${device_args[@]}" \
-        -v "$src:/workspace/pypto" \
+        -v "$src:$container_src" \
         "${git_mount[@]}" \
         "${lib_mount[@]}" \
         -v "$cache_volume:/opt/pypto/cache" \
         "${proxy_env[@]}" \
+        "${git_env[@]}" \
+        -e "PYPTO_SRC=$container_src" \
+        -e "PYPTO_LIB_SRC=$container_lib" \
         -e "PYPTO_DEVICE=$container_device" \
+        -e "PYPTO_PLATFORM=$platform" \
+        --workdir "$container_src" \
         "$IMAGE:$chip"
     ;;
 *)
