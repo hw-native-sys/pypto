@@ -11,8 +11,9 @@
 
 A latency-hiding cache hint: [`async_prefetch`][pypto.language.prefetch.async_prefetch] starts an SDMA-backed
 pull of a global-memory region into L2 while unrelated compute proceeds, and
-[`wait`][pypto.language.prefetch.wait] blocks until it lands. The prefetch changes no tensor values, so a
-kernel is numerically identical with or without it — only performance differs.
+[`wait`][pypto.language.prefetch.wait] checks completion with a bounded deadline.
+The prefetch changes no tensor values, so a kernel is numerically identical
+with or without it — only performance differs.
 
 Typical usage::
 
@@ -22,11 +23,19 @@ Typical usage::
     ...                                            # unrelated compute overlaps
     pl.prefetch.wait(evt, session)                 # x is now resident in L2
 
-The runtime owns and injects the SDMA scratch workspace. One-shot execution
-enables SDMA automatically from generated artifact metadata; an explicitly
-reused worker must be created with ``ChipWorker(enable_sdma=True)``. The current
-runtime-provisioned path is covered on onboard a2a3. A runtime without an SDMA
-provider fails during worker initialization; there is no fallback or no-op path.
+The runtime owns and injects the SDMA workspace. In program mode, one-shot
+execution enables SDMA from artifact metadata; an explicitly reused worker needs
+``ChipWorker(enable_sdma=True)``. In kernel mode, call
+``pypto.torch.init(runtime="tensormap_and_ringbuffer", enable_sdma=True)``
+(or ``runtime="host_build_graph"``) before the first kernel invocation. Compile
+and prepare the kernel before ACLGraph capture, then reuse its context on replay.
+SDMA cannot be enabled by a kernel invocation after initialization.
+
+On supported a2a3 runtimes, each resident AIV worker receives a distinct SDMA
+channel. Codegen reserves 256 bytes of UB per context for its entire function
+lifetime, including waits, so prefetch cannot overwrite live compute tiles.
+A runtime without an SDMA provider fails during initialization; there is no
+fallback or no-op path.
 """
 
 from typing import Any
@@ -108,7 +117,10 @@ def wait(event: AsyncEvent, session_handle: AsyncSession) -> Scalar:
             [`session`][pypto.language.prefetch.session].
 
     Returns:
-        A ``BOOL`` [`Scalar`][pypto.language.Scalar] done flag.
+        A ``BOOL`` [`Scalar`][pypto.language.Scalar] done flag. Device prefetch
+        probes completion about once per microsecond and returns ``False``
+        after a 20 ms event deadline. Timeout does not cancel the transfer
+        or permit the source/context storage to be reused while it is in flight.
     """
     return Scalar(expr=_ir_prefetch.wait(_unwrap(event), _unwrap(session_handle)))
 

@@ -598,9 +598,9 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 ## PrefetchOp: Asynchronous GM→L2 Prefetch
 
 A latency-hiding cache hint. `async_prefetch` starts an SDMA-backed pull of a
-global-memory region into L2 while unrelated compute proceeds; `wait` blocks
-until it lands. The prefetch changes no tensor values — a kernel is numerically
-identical with or without it, so only performance differs.
+global-memory region into L2 while unrelated compute proceeds; `wait` checks
+completion with a bounded deadline. The prefetch changes no tensor values — a
+kernel is numerically identical with or without it, so only performance differs.
 
 Unlike most PTO intrinsics, `TPREFETCH_ASYNC` carries no implicit wait-event
 synchronization, so completion is explicit via an event/session pair.
@@ -609,10 +609,14 @@ synchronization, so completion is explicit via an event/session pair.
 
 | DSL | Operands | Result | PTOAS op |
 | --- | -------- | ------ | -------- |
-| `pl.prefetch.make_context()` | None | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
+| `pl.prefetch.make_context()` | None | `PrefetchAsyncContextType` | `func.call @pypto_make_prefetch_context` |
 | `pl.prefetch.async_prefetch(src, ctx)` | GM Tensor, context | `AsyncEventType` | `pto.tprefetch_async` |
 | `pl.prefetch.session(ctx)` | context | `AsyncSessionType` | `pto.get_prefetch_async_session` |
-| `pl.prefetch.wait(evt, session)` | event, session | `BOOL` scalar | `pto.comm.wait_async_event` |
+| `pl.prefetch.wait(evt, session)` | event, session | `BOOL` scalar | `func.call @pypto_wait_prefetch` |
+
+The prefetch wait adapter uses the public `AsyncEvent::Test()` with approximately
+1 microsecond between incomplete probes and a 20 ms event deadline. A timeout
+returns false without cancelling the transfer. PTO-ISA itself is unchanged.
 
 The three result types are opaque singleton markers (no shape, no buffer), in
 the same family as `CommCtxType`. The SDMA workspace is not a program operand:

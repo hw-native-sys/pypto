@@ -144,6 +144,11 @@ class _ProcessKernelState:
         if (abi.platform, abi.runtime) != (config.platform, config.runtime):
             raise ValueError("Kernel artifact platform/runtime does not match the Worker configuration")
         worker = self.bound_worker(config)
+        if artifact.requires_sdma and not config.enable_sdma:
+            raise ValueError(
+                "Kernel artifact requires SDMA, but the Worker was initialized with enable_sdma=False; "
+                "start a new process and call pypto.torch.init(enable_sdma=True) before kernel execution"
+            )
         identity = artifact.identity()
         with self._condition:
             self._require_ready()

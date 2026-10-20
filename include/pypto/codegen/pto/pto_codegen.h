@@ -536,6 +536,13 @@ class PTOCodegen : public CodegenBase {
    * argument. Returns empty when the function does not use prefetch.
    */
   [[nodiscard]] std::string GetSdmaWorkspaceArgSSA() const { return fs_.sdma_workspace_arg_ssa; }
+  /// Compiler-reserved UB address for this context, live for the entire function.
+  [[nodiscard]] std::string GetPrefetchScratchSSA(const ir::CallPtr& op) const {
+    auto it = fs_.prefetch_scratch_ssas.find(op.get());
+    INTERNAL_CHECK_SPAN(it != fs_.prefetch_scratch_ssas.end(), op->span_)
+        << "Prefetch context has no reserved scratch buffer";
+    return it->second;
+  }
 
   /**
    * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
@@ -1036,6 +1043,7 @@ class PTOCodegen : public CodegenBase {
     /// SSA name of the synthetic runtime-owned SDMA workspace pointer param.
     /// Empty when the current function does not use prefetch.make_context.
     std::string sdma_workspace_arg_ssa;
+    std::map<const ir::Call*, std::string> prefetch_scratch_ssas;
 
     /// Raw runtime dispatch-args pointer used by deferred completion adapters.
     std::string deferred_completion_raw_args_ssa;
@@ -1115,6 +1123,7 @@ class PTOCodegen : public CodegenBase {
       ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();
+      prefetch_scratch_ssas.clear();
       deferred_completion_raw_args_ssa.clear();
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();
@@ -1136,6 +1145,7 @@ class PTOCodegen : public CodegenBase {
 
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
+  bool needs_prefetch_adapter_ = false;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 

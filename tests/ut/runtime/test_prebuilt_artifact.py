@@ -1455,6 +1455,33 @@ def identity_artifact(monkeypatch, tmp_path):
     return value, counts
 
 
+@pytest.mark.parametrize("runtime_config", [{}, {"enable_sdma": False}, {"enable_sdma": True}])
+@pytest.mark.parametrize("source", ["artifact_runtime", "prebuilt"])
+def test_kernel_artifact_exposes_loaded_sdma_requirement(
+    identity_artifact, monkeypatch, source, runtime_config
+):
+    from pypto.runtime import _prebuilt  # noqa: PLC0415
+
+    value, _ = identity_artifact
+    loads = []
+
+    def load(*args, **kwargs):
+        loads.append(source)
+        return {".": (b"complete binary", value.kernel_abi.runtime, runtime_config)}
+
+    if source == "artifact_runtime":
+        value._artifact_runtime = SimpleNamespace(load=load)
+    else:
+        value._artifact_runtime = None
+        monkeypatch.setattr(_prebuilt, "prepare_prebuilt", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_prebuilt, "load_prebuilt", load)
+    assert value._loaded is None
+    assert value.requires_sdma is runtime_config.get("enable_sdma", False)
+    assert value.requires_sdma is runtime_config.get("enable_sdma", False)
+    assert value.chip_callable == b"complete binary"
+    assert loads == [source]
+
+
 def test_kernel_identity_is_shared_by_concurrent_eager_and_loaded_lookups(identity_artifact):
     """Concurrent warmup and capture lookups must serialize the descriptor once."""
     value, counts = identity_artifact

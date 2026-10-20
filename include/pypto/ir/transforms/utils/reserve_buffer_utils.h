@@ -32,6 +32,10 @@
 namespace pypto {
 namespace ir {
 
+// PTO-ISA SDMA contexts use a 256-byte Vec scratch tile. The generated
+// adapter statically checks this against the installed PTO-ISA headers.
+inline constexpr uint64_t kPrefetchScratchBytes = 256;
+
 /// Shared `system.reserve_buffer` resolution — the SINGLE source of truth for both AllocateMemoryAddr
 /// (which needs each reserve op's resolved base AND the per-space reserved end for address emission) and
 /// MemoryReuse (which needs the per-space reserved end as `SpaceFootprint`'s `reserved_start`). Because
@@ -66,8 +70,10 @@ struct ReserveBufferInfo {
 class ReserveBufferCollector : public IRVisitor {
  public:
   [[nodiscard]] const std::vector<ReserveBufferInfo>& GetReserveBuffers() const { return reserve_buffers_; }
+  [[nodiscard]] const std::vector<const Call*>& GetPrefetchContexts() const { return prefetch_contexts_; }
 
   void VisitExpr_(const CallPtr& op) override {
+    if (IsOp(op, "prefetch.make_context")) prefetch_contexts_.push_back(op.get());
     if (IsOp(op, "system.reserve_buffer")) {
       const int size = op->GetKwarg<int>("size", -1);
       const int base = op->GetKwarg<int>("base", -1);
@@ -80,10 +86,12 @@ class ReserveBufferCollector : public IRVisitor {
 
  private:
   std::vector<ReserveBufferInfo> reserve_buffers_;
+  std::vector<const Call*> prefetch_contexts_;
 };
 
 struct ReserveBufferResolution {
   ReserveBufferBaseMap resolved_bases;
+  ReserveBufferBaseMap prefetch_scratch_bases;
   ReservedEndBySpace reserved_end_by_space;
 };
 
@@ -96,7 +104,7 @@ inline ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func
 
   ReserveBufferCollector collector;
   collector.VisitStmt(func->body_);
-  if (collector.GetReserveBuffers().empty()) return resolution;
+  if (collector.GetReserveBuffers().empty() && collector.GetPrefetchContexts().empty()) return resolution;
 
   const MemorySpace reserve_space = GetReserveBufferMemorySpace(func);
 
@@ -145,6 +153,14 @@ inline ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func
     reserved_end = std::max(reserved_end, buffer_end);
   }
 
+  // A context's hidden SDMA scratch remains live through submission and wait.
+  // Reserve it for the whole function, after explicit pipe/user reservations.
+  // This same floor is charged by MemoryReuse and AllocateMemoryAddr.
+  for (const Call* context : collector.GetPrefetchContexts()) {
+    auto& base = resolution.reserved_end_by_space[MemorySpace::Vec];
+    resolution.prefetch_scratch_bases[context] = static_cast<int64_t>(base);
+    base = policy.AlignAddress(base + kPrefetchScratchBytes, MemorySpace::Vec);
+  }
   return resolution;
 }
 

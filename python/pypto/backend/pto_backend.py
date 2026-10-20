@@ -269,6 +269,56 @@ using namespace pto;
 
 """
 
+_PREFETCH_ADAPTER = """\
+#include "common/platform_config.h"
+
+// Scratch is reserved by both memory planners for the entire function.
+// Build the session explicitly so PTO-ISA never falls back to UB address zero
+// or to the launch block index (which aliases the two AIV lanes in a MIX).
+extern "C" inline __aicore__ pto::PrefetchAsyncContext pypto_make_prefetch_context(
+    __gm__ int8_t* workspace, int32_t channel, int32_t scratch_address)
+{
+    pto::PrefetchAsyncContext ctx(reinterpret_cast<__gm__ uint8_t*>(workspace));
+#if !defined(__CPU_SIM) && !defined(__PTO_AUTO__)
+    static_assert(pto::comm::sdma::UB_ALIGN_SIZE == 256,
+                  "Update the compiler prefetch scratch reservation");
+    pto::TASSIGN(ctx.scratchTile, scratch_address);
+    if (channel < 0 || !pto::comm::sdma::BuildSdmaSession(
+            ctx.scratchTile, ctx.workspace, ctx.session, 0U,
+            {64ULL * 1024ULL * 1024ULL, 0, 1}, static_cast<uint32_t>(channel))) {
+        trap();
+    }
+#endif
+    return ctx;
+}
+
+// Use the public nonblocking probe so pacing stays local to PyPTO prefetch.
+extern "C" inline __aicore__ bool pypto_wait_prefetch(
+    pto::comm::AsyncEvent event, pto::comm::AsyncSession session)
+{
+#if !defined(__CPU_SIM) && !defined(__PTO_AUTO__)
+    if (!session.valid) {
+        return event.Test(session);
+    }
+    constexpr uint64_t interval = PLATFORM_PROF_SYS_CNT_FREQ / 1000000ULL;
+    constexpr uint64_t timeout = PLATFORM_PROF_SYS_CNT_FREQ / 50ULL;
+    const uint64_t start = get_sys_cnt();
+    while (!event.Test(session)) {
+        const uint64_t poll_end = get_sys_cnt();
+        if (poll_end - start >= timeout) {
+            return false;
+        }
+        while (get_sys_cnt() - poll_end < interval) {
+        }
+    }
+    return true;
+#else
+    return event.Wait(session);
+#endif
+}
+
+"""
+
 _DEFERRED_COMPLETION_ADAPTER = """\
 // --- Deferred completion adapter ---
 // ABI precondition: supported Simpler dispatchers provide kernel_entry with a
@@ -1061,6 +1111,7 @@ def _generate_kernel_wrapper(
             "    __gm__ int8_t* __pypto_sdma_workspace = "
             "reinterpret_cast<__gm__ int8_t*>("
             "get_dma_workspace(args, DMA_WORKSPACE_SDMA));\n\n"
+            "    int32_t __pypto_sdma_channel = get_sdma_channel_id(args);\n\n"
         )
 
     # PTOCodegen appends raw dispatch args for deferred completion after
@@ -1072,6 +1123,7 @@ def _generate_kernel_wrapper(
         call_args_list.append("args")
     if func_uses_sdma:
         call_args_list.append("__pypto_sdma_workspace")
+        call_args_list.append("__pypto_sdma_channel")
     if func_uses_spmd:
         call_args_list = call_args_list + ["__pypto_spmd_block_idx", "__pypto_spmd_block_num"]
     if wrapper_uses_subblock:
@@ -1098,7 +1150,8 @@ def _generate_kernel_wrapper(
 
     deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
     return (
-        f"{header}\n{deferred_completion_adapter}{fifo_lane_arg_bridge}"
+        f"{header}\n{_PREFETCH_ADAPTER if func_uses_sdma else ''}"
+        f"{deferred_completion_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
     )
 

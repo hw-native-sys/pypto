@@ -558,7 +558,7 @@ class CrossCoreExample:
 ## PrefetchOp：GM→L2 异步预取
 
 一种隐藏访存延迟 (latency hiding) 的缓存提示。`async_prefetch` 通过 SDMA 异步地把一段
-全局内存 (GM) 拉入 L2 缓存，期间可以并行执行不相关的计算；`wait` 阻塞直到预取完成。
+全局内存 (GM) 拉入 L2 缓存，期间可以并行执行不相关的计算；`wait` 在有限期限内等待预取完成。
 预取不改变任何张量的值——同一个 kernel 加不加预取在数值上完全一致，只影响性能。
 
 与大多数 PTO intrinsic 不同，`TPREFETCH_ASYNC` 不携带隐式的 wait-event 同步，
@@ -568,10 +568,14 @@ class CrossCoreExample:
 
 | DSL | 操作数 | 结果 | PTOAS op |
 | --- | ------ | ---- | -------- |
-| `pl.prefetch.make_context()` | 无 | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
+| `pl.prefetch.make_context()` | 无 | `PrefetchAsyncContextType` | `func.call @pypto_make_prefetch_context` |
 | `pl.prefetch.async_prefetch(src, ctx)` | GM Tensor、context | `AsyncEventType` | `pto.tprefetch_async` |
 | `pl.prefetch.session(ctx)` | context | `AsyncSessionType` | `pto.get_prefetch_async_session` |
-| `pl.prefetch.wait(evt, session)` | event、session | `BOOL` 标量 | `pto.comm.wait_async_event` |
+| `pl.prefetch.wait(evt, session)` | event、session | `BOOL` 标量 | `func.call @pypto_wait_prefetch` |
+
+预取等待适配层通过公开的 `AsyncEvent::Test()` 查询完成状态；未完成时约间隔
+1 微秒再查询，每个事件等待最多 20 毫秒。超时返回 false，不会取消传输。
+无需修改 PTO-ISA 本身。
 
 这三个结果类型都是不透明的单例标记类型 (opaque singleton marker，无 shape、无 buffer)，
 与 `CommCtxType` 属于同一族。SDMA workspace 不是程序操作数：runtime 持有它，

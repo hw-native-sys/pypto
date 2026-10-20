@@ -10,6 +10,8 @@
 """PTO codegen tests for the ``prefetch.*`` async GM->L2 prefetch op family."""
 
 import re
+import shutil
+import subprocess
 
 import pypto.language as pl
 import pytest
@@ -81,19 +83,26 @@ class OrderedSyntheticArgsProgram:
 class TestPrefetchPTOCodegen:
     """Each prefetch op lowers to its PTOAS counterpart with the right operand types."""
 
+    def test_context_reserves_scratch_and_uses_runtime_channel(self):
+        mlir = _generate_mlir(PrefetchProgram)
+        assert "pto.reserve_buffer" in mlir
+        assert "size = 256" in mlir
+        assert "%__pypto_sdma_channel: i32" in mlir
+        assert "func.call @pypto_make_prefetch_context" in mlir
+
     def test_make_context_lowers_from_hidden_i8_pointer(self):
-        """A synthetic INT8 pointer feeds ``pto.make_prefetch_async_context``."""
+        """The adapter receives workspace, worker channel, and reserved scratch."""
         mlir = _generate_mlir(PrefetchProgram)
         assert re.search(r"func\.func @main\([^)]*!pto\.ptr<i8>[^)]*\)", mlir), mlir
         assert re.search(
-            r"pto\.make_prefetch_async_context\(%\w+ : !pto\.ptr<i8>\)",
+            r"func.call @pypto_make_prefetch_context\(%\w+, %__pypto_sdma_channel, %\w+\)",
             mlir,
         ), mlir
 
     def test_hidden_sdma_pointer_is_first_parameter_without_user_args(self):
         """A hidden-only signature starts directly with ``%arg0``, not a comma."""
         mlir = _generate_mlir(ZeroParamPrefetchProgram)
-        assert "func.func @main(%arg0: !pto.ptr<i8>)" in mlir, mlir
+        assert "func.func @main(%arg0: !pto.ptr<i8>, %__pypto_sdma_channel: i32)" in mlir, mlir
 
     def test_synthetic_argument_order_matches_wrapper(self):
         """Dynamic dims precede SDMA, which precedes SPMD in both call layers."""
@@ -110,7 +119,7 @@ class TestPrefetchPTOCodegen:
         assert re.search(
             r"func\.func @ordered\("
             r"%arg0: !pto\.ptr<f32>, %arg1: !pto\.ptr<f32>, %arg2: !pto\.ptr<f32>, "
-            r"%arg3: index, %arg4: !pto\.ptr<i8>, "
+            r"%arg3: index, %arg4: !pto\.ptr<i8>, %__pypto_sdma_channel: i32, "
             r"%__pypto_spmd_block_idx: i32, %__pypto_spmd_block_num: i32\)",
             signature_line,
         ), signature_line
@@ -121,7 +130,8 @@ class TestPrefetchPTOCodegen:
         call_line = next(line.strip() for line in wrapper.splitlines() if line.strip().startswith("ordered("))
         assert re.search(
             r"ordered\(prefetch_src\w*, x\w*, out\w*, ROWS, "
-            r"__pypto_sdma_workspace, __pypto_spmd_block_idx, __pypto_spmd_block_num\);",
+            r"__pypto_sdma_workspace, __pypto_sdma_channel, "
+            r"__pypto_spmd_block_idx, __pypto_spmd_block_num\);",
             call_line,
         ), call_line
 
@@ -144,11 +154,11 @@ class TestPrefetchPTOCodegen:
             mlir,
         ), mlir
 
-    def test_wait_lowers_to_comm_wait_async_event(self):
+    def test_wait_lowers_to_paced_prefetch_adapter(self):
         """``wait`` pairs the event and session and yields an ``i1``."""
         mlir = _generate_mlir(PrefetchProgram)
         assert re.search(
-            r"= pto\.comm\.wait_async_event\(%\w+, %\w+ : "
+            r"= func\.call @pypto_wait_prefetch\(%\w+, %\w+\) : \("
             r"!pto\.async_event, !pto\.async_session\) -> i1",
             mlir,
         ), mlir
@@ -170,7 +180,7 @@ class TestPrefetchPTOCodegen:
                 operands = re.findall(r"%\w+", stripped.split(" = ", 1)[1])
             else:
                 lhs = None
-            if "pto.tprefetch_async" in stripped or "pto.comm.wait_async_event" in stripped:
+            if "pto.tprefetch_async" in stripped or "func.call @pypto_wait_prefetch" in stripped:
                 for operand in operands:
                     assert operand in defined, f"{operand} used before definition in: {stripped}"
             if lhs is not None:
@@ -217,10 +227,10 @@ class TestPrefetchCoreAffinity:
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(MixedPrefetchProgram)
 
         lowered_prefetch_ops = (
-            "pto.make_prefetch_async_context",
+            "func.call @pypto_make_prefetch_context",
             "pto.tprefetch_async",
             "pto.get_prefetch_async_session",
-            "pto.comm.wait_async_event",
+            "func.call @pypto_wait_prefetch",
         )
         per_core: dict[str, int] = {}
         for func in optimized.functions.values():
@@ -308,6 +318,150 @@ class TestPrefetchBackendArtifact:
         assert "get_dma_workspace" not in wrapper
         assert '#include "intrinsic.h"' not in wrapper
         assert '"enable_sdma"' not in result["kernel_config.py"]
+
+
+@pl.program
+class LiveTilePrefetchProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[[1, 1024], pl.FP32], out: pl.Tensor[[1, 1024], pl.FP32]):
+        value = pl.load(x, [0, 0], [1, 1024])
+        ctx = pl.prefetch.make_context()
+        event = pl.prefetch.async_prefetch(x, ctx)
+        pl.prefetch.wait(event, pl.prefetch.session(ctx))
+        return pl.store(pl.add(value, 1.0), [0, 0], out)
+
+
+@pl.program
+class ReservedMultiContextProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[[1, 1024], pl.FP32], out: pl.Tensor[[1, 1024], pl.FP32]):
+        pipe_buf = pl.reserve_buffer(name="user_scratch", size=4096, base=1024)
+        pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
+        value = pl.load(x, [0, 0], [1, 1024])
+        ctx1 = pl.prefetch.make_context()
+        ctx2 = pl.prefetch.make_context()
+        event1 = pl.prefetch.async_prefetch(x, ctx1)
+        pl.prefetch.wait(event1, pl.prefetch.session(ctx1))
+        event2 = pl.prefetch.async_prefetch(x, ctx2)
+        pl.prefetch.wait(event2, pl.prefetch.session(ctx2))
+        return pl.store(pl.add(value, 1.0), [0, 0], out)
+
+
+@pytest.mark.parametrize(
+    "program,scratch_bases,tile_floor",
+    [(LiveTilePrefetchProgram, [0], 256), (ReservedMultiContextProgram, [5120, 5376], 5632)],
+)
+def test_prefetch_scratch_never_aliases_live_tiles_or_user_reservations(program, scratch_bases, tile_floor):
+    mlir = _generate_mlir(program)
+    reservations = [
+        line for line in mlir.splitlines() if "pto.reserve_buffer" in line and "size = 256" in line
+    ]
+    matches = [re.search(r"base = (\d+)", line) for line in reservations]
+    assert all(match is not None for match in matches)
+    assert [int(match.group(1)) for match in matches if match is not None] == scratch_bases
+    constants = {name: int(value) for name, value in re.findall(r"(%\w+) = arith.constant (\d+) : i64", mlir)}
+    addresses = re.findall(r"pto.alloc_tile addr = (%\w+)[^\n]*loc=vec", mlir)
+    assert addresses
+    assert all(constants[address] >= tile_floor for address in addresses), mlir
+    assert mlir.index("pto.tload") < mlir.index("func.call @pypto_make_prefetch_context")
+    assert mlir.index("func.call @pypto_wait_prefetch") < mlir.index("pto.tadds")
+
+
+def test_ptoas_planner_reserves_prefetch_scratch(tmp_path):
+    from pypto import passes  # noqa: PLC0415
+    from pypto.backend._ptoas_locate import find_ptoas_binary  # noqa: PLC0415
+    from pypto.backend.pto_backend import _compile_pto_module  # noqa: PLC0415
+
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(LiveTilePrefetchProgram)
+        mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+    assert "size = 256, location = #pto.address_space<vec>, auto = true" in mlir
+    cpp = _compile_pto_module(mlir, "live_prefetch", str(tmp_path), passes.MemoryPlanner.PTOAS)
+    constants = {}
+    for name, value in re.findall(r"(?:u?int(?:32|64)_t) (\w+) = (?:\(\w+\) )*(\w+);", cpp):
+        if value.isdecimal():
+            constants[name] = int(value)
+        elif value in constants:
+            constants[name] = constants[value]
+    addresses = [constants[value] for value in re.findall(r"TASSIGN\([^,]+, (\w+)\)", cpp)]
+    assert addresses, cpp
+    scratch_match = re.search(r"= pypto_make_prefetch_context\(\w+, \w+, (\w+)\)", cpp)
+    assert scratch_match is not None, cpp
+    scratch_arg = scratch_match.group(1)
+    scratch_base = constants[scratch_arg]
+    # PTOAS may put the reservation after ordinary tiles, unlike PyPTO's floor.
+    assert all(base + 4096 <= scratch_base or base >= scratch_base + 256 for base in addresses), cpp
+
+
+def test_prefetch_wait_adapter_paces_probes_and_bounds_failure(tmp_path):
+    """Exercise the emitted wait with a deterministic clock and completion probe."""
+    compiler = shutil.which("g++")
+    if compiler is None:
+        pytest.skip("C++ compiler is unavailable")
+    adapter = pto_backend._PREFETCH_ADAPTER
+    wait = adapter[adapter.index('extern "C" inline __aicore__ bool pypto_wait_prefetch') :]
+    source = tmp_path / "wait_contract.cpp"
+    source.write_text(
+        r"""
+#include <cassert>
+#include <cstdint>
+#define __aicore__
+constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 50000000;
+uint64_t clock_ticks = 0;
+unsigned probe_count = 0;
+uint64_t get_sys_cnt() { return clock_ticks++; }
+namespace pto::comm {
+struct AsyncSession {
+    bool valid = true;
+    mutable unsigned probes = 0;
+    mutable uint64_t last_probe = 0;
+};
+struct AsyncEvent {
+    unsigned ready_after;
+    bool Test(const AsyncSession& session) const {
+        if (!session.valid) return false;
+        if (session.probes != 0) assert(clock_ticks - session.last_probe >= 50);
+        session.last_probe = clock_ticks;
+        ++session.probes;
+        ++probe_count;
+        return ready_after != 0 && session.probes >= ready_after;
+    }
+    bool Wait(const AsyncSession&) const { assert(false); return false; }
+};
+}
+"""
+        + wait
+        + r"""
+int main() {
+    pto::comm::AsyncSession ready;
+    assert(pypto_wait_prefetch({1}, ready));
+    assert(probe_count == 1 && clock_ticks < 50);
+    clock_ticks = 0;
+    probe_count = 0;
+    pto::comm::AsyncSession delayed;
+    assert(pypto_wait_prefetch({3}, delayed));
+    assert(probe_count == 3 && clock_ticks >= 100);
+    clock_ticks = 0;
+    probe_count = 0;
+    pto::comm::AsyncSession absent;
+    assert(!pypto_wait_prefetch({0}, absent));
+    assert(clock_ticks >= 1000000 && clock_ticks < 1000100);
+    assert(probe_count < 20001);
+    clock_ticks = 0;
+    pto::comm::AsyncSession invalid;
+    invalid.valid = false;
+    assert(!pypto_wait_prefetch({1}, invalid));
+    assert(clock_ticks == 0);
+}
+"""
+    )
+    binary = tmp_path / "wait_contract"
+    subprocess.run([compiler, "-std=c++17", "-O2", str(source), "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True, timeout=10)
 
 
 if __name__ == "__main__":

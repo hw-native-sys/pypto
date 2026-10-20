@@ -51,6 +51,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -687,6 +688,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
+  needs_prefetch_adapter_ = false;
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
@@ -708,6 +710,17 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   }
 
   EmitDeferredCompletionAdapterDeclaration();
+  if (needs_prefetch_adapter_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != "pypto_make_prefetch_context" && func->name_ != "pypto_wait_prefetch",
+                 func->span_)
+          << "Function name is reserved for the prefetch runtime adapter";
+    }
+    stream_ << "  func.func private @pypto_make_prefetch_context"
+            << "(!pto.ptr<i8>, i32, i32) -> !pto.prefetch_async_context\n";
+    stream_ << "  func.func private @pypto_wait_prefetch"
+            << "(!pto.async_event, !pto.async_session) -> i1\n";
+  }
 
   stream_ << "}\n";
   return stream_.str();
@@ -930,6 +943,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   const bool uses_subblock_param = collector.UsesSubblockOp();
   fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
   if (uses_sdma_workspace) {
+    fs_.used_ssa_names.insert("__pypto_sdma_channel");
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
   }
   if (uses_deferred_completion) {
@@ -1105,7 +1119,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   if (uses_sdma_workspace) {
     if (!first_param) stream_ << ", ";
     fs_.sdma_workspace_arg_ssa = "%arg" + std::to_string(next_arg_idx++);
-    stream_ << fs_.sdma_workspace_arg_ssa << ": !pto.ptr<i8>";
+    stream_ << fs_.sdma_workspace_arg_ssa << ": !pto.ptr<i8>, %__pypto_sdma_channel: i32";
+    needs_prefetch_adapter_ = true;
   }
 
   // Append SPMD identity params after the dynamic-dim and SDMA workspace args,
@@ -1209,6 +1224,23 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
+
+  if (uses_sdma_workspace) {
+    auto policy = backend_->CreateMemoryAllocatorPolicy();
+    const auto reserved = ir::ResolveReserveBufferBases(func, *policy);
+    ir::ReserveBufferCollector contexts;
+    contexts.VisitStmt(func->body_);
+    for (const auto* context : contexts.GetPrefetchContexts()) {
+      const auto scratch = NewNamedTemp("__pypto_prefetch_scratch");
+      fs_.prefetch_scratch_ssas[context] = scratch;
+      std::string placement =
+          emit_tile_addr_ ? "false, base = " + std::to_string(reserved.prefetch_scratch_bases.at(context))
+                          : "true";
+      Emit(scratch + " = pto.reserve_buffer {name = \"" + scratch.substr(1) +
+           "\", size = " + std::to_string(ir::kPrefetchScratchBytes) +
+           ", location = #pto.address_space<vec>, auto = " + placement + "} -> i32");
+    }
+  }
 
   if (func->body_) {
     VisitStmt(func->body_);

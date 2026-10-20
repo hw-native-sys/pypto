@@ -75,7 +75,7 @@ def test_init_binds_current_device_and_initializes_once(setup, framework, runtim
         ("runtime", ValueError, "supports"),
         ("device", ValueError, r"torch\.npu\.set_device\(1\)"),
         ("threads", ValueError, "AICPU"),
-        ("framework", RuntimeError, "verified for torch_npu 2.6.0.post2"),
+        ("framework", RuntimeError, r"Automatic kernel shutdown is verified for .*got 2\.7\.0;"),
         ("native", ValueError, "requires Simpler"),
         ("capture", RuntimeError, "outside graph capture"),
     ],
@@ -104,6 +104,28 @@ def test_invalid_init_leaves_process_unclaimed_and_retryable(setup, framework, c
     init()
     assert state.require_config().device_id == 0
     state.close()
+
+
+@pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
+@pytest.mark.parametrize("enable_sdma", [False, True])
+def test_init_sdma_is_immutable(setup, framework, runtime, enable_sdma):
+    state, _, calls, _ = setup
+    init(runtime=runtime, enable_sdma=enable_sdma)
+    assert state.require_config().enable_sdma is enable_sdma
+    init(runtime=runtime, enable_sdma=enable_sdma)
+    with pytest.raises(ValueError, match="configuration conflict"):
+        init(runtime=runtime, enable_sdma=not enable_sdma)
+    assert len(calls.inits) == 1
+    state.close()
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_invalid_sdma_configuration_does_not_claim_process(setup, framework, value):
+    state, _, calls, _ = setup
+    with pytest.raises(TypeError, match="enable_sdma must be bool"):
+        init(enable_sdma=value)
+    assert not calls.workers and _execution_mode._gate.mode is None
+    assert state.state is KernelState.UNINITIALIZED
 
 
 def test_concurrent_init_shares_one_worker(setup, framework):
