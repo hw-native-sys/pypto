@@ -1164,7 +1164,7 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     "runtime",
     [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH],
 )
-def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime, pass_verification_instruments):
+def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime):
     """All chip sub-builds in one distributed program must name the same runtime.
 
     The builtin collectives are materialized from templates rather than by the
@@ -1192,13 +1192,11 @@ def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime, pass_v
             pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return 0
 
-    # Lowering and codegen share one runtime ABI, including the suite's checks.
-    with passes.PassContext(pass_verification_instruments, runtime=runtime):
-        program = passes.materialize_comm_domain_scopes()(Prog)
-        program = passes.lower_host_tensor_collectives()(program)
-        program = passes.materialize_dist_tensor_ctx()(program)
-        program = _finalize_chip_program_for_generate(program)
-        files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    program = _finalize_chip_program_for_generate(program)
+    files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
 
     configs = {
         path: text
@@ -1216,7 +1214,7 @@ def test_every_next_level_reports_the_selected_runtime(tmp_path, runtime, pass_v
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
-def test_backend_950_materializes_allreduce_with_core_num_launch(tmp_path, ascend_backend):
+def test_backend_950_materializes_allreduce_with_block_num_launch(tmp_path, ascend_backend):
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -1242,7 +1240,7 @@ def test_backend_950_materializes_allreduce_with_core_num_launch(tmp_path, ascen
 
     base = "next_levels/builtin.tensor.allreduce__sum__fp32"
     entry_cpp = files[f"{base}/orchestration/builtin_tensor_allreduce__sum__fp32.cpp"]
-    assert "params.launch_spec.set_core_num(core_num)" in entry_cpp
+    assert "params.launch_spec.set_block_num(core_num)" in entry_cpp
 
 
 def test_host_allreduce_ring_builtin_codegen_uses_ring_next_level_callable_key():

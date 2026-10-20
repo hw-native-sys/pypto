@@ -82,11 +82,8 @@ Graph 代码还会包含 `host_build_graph/host/graph_boundary_match.h`。
 内建入口模板通过 `current_orch_context()` 访问 HBG 上下文（Context），
 通过 `current_runtime()` 访问 TensorMap/RingBuffer 上下文。
 
-启动数量也遵循所选运行时 ABI：HBG 在两种架构上都使用 `set_block_num()`，
-而 A5 TensorMap/RingBuffer 使用 `set_core_num()`。后端处理器从
-`PassContext.runtime` 读取这个选择。Python 后端在没有活动上下文时，
-为代码生成建立临时上下文；已有上下文的运行时一致时，直接复用该上下文。
-运行时冲突会在代码生成前报错；降级（Lowering）和代码生成必须使用相同的 ABI。
+两种运行时在 A2/A3 和 A5 上都使用 `launch_spec.set_block_num()` 设置每个任务的
+逻辑 block 数量。该方法不依赖 `PassContext.runtime`。
 
 ### 阶段 2–3：入口点
 

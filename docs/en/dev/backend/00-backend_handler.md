@@ -52,7 +52,7 @@ to global state.
 | Method | Purpose | Ascend910 | Ascend950 |
 | ------ | ------- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
-| `GetLaunchSpecCoreCountMethod()` | runtime API name on `launch_spec` | `"set_block_num"` | `"set_block_num"` (HBG); `"set_core_num"` (TensorMap/RingBuffer) |
+| `GetLaunchSpecCoreCountMethod()` | runtime API name for the logical block count on `launch_spec` | `"set_block_num"` | `"set_block_num"` |
 | `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA selects a distinct algorithm from the `precisionType` attribute that `high_precision=True` emits; when false, both PTO emitters (Tile op callbacks and Buffer IR) warn that the request is dropped | `false` | `true` |
@@ -66,11 +66,6 @@ to global state.
 | `SplitsCubeToVectorTransportInHardware()` | a split Cube-to-Vector push hands each AIV lane half of the transported extent, so that extent is the lane partition | `false` | `true` |
 | `GetL0cMAlignment(dtype)` | physical M-row alignment shared by L0C tiling, dbC capacity, and allocation | 32 for INT32; otherwise 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
-
-The launch-count setter follows the active `PassContext.runtime`.
-HostBuildGraph (HBG) uses `set_block_num()` on both backends; TensorMap/RingBuffer
-uses the architecture-specific setters shown above. Without an active context,
-the handler assumes TensorMap/RingBuffer.
 
 ## Select operator rules
 

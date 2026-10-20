@@ -82,12 +82,8 @@ Graph code also includes `host_build_graph/host/graph_boundary_match.h`.
 Builtin entry templates access the HBG context through `current_orch_context()`
 and the TensorMap/RingBuffer context through `current_runtime()`.
 
-Launch counts also follow the selected runtime ABI: HBG uses `set_block_num()`
-on both architectures, while A5 TensorMap/RingBuffer uses `set_core_num()`.
-The backend handler reads this choice from `PassContext.runtime`. The Python
-backend creates a temporary codegen context when no context is active, and
-reuses an existing context when its runtime matches. A conflicting runtime is
-rejected before code generation; lowering and codegen must target the same ABI.
+Both runtimes use `launch_spec.set_block_num()` on A2/A3 and A5 to set the
+per-task logical block count. This setter is independent of `PassContext.runtime`.
 
 ### Phase 2–3: Entry Points
 

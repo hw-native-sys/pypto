@@ -15,14 +15,14 @@ can read it. These tests pin the whole path: the context round-trip, the
 precedence ``ir.compile()`` applies, and the value that lands in the generated
 ``kernel_config.py``.
 
-``tests/ut/conftest.py`` supplies an ambient ``PassContext``. Most tests select
-the runtime through a matching context; ``TestCompileWithoutPassContext``
-disables that fixture to cover the explicit ``ir.compile(runtime=...)`` path.
+Note that ``tests/ut/conftest.py`` wraps every unit test in a ``PassContext``,
+so ``ir.compile(runtime=...)`` is always a conflict here — selecting the runtime
+by wrapping the call in a context is the path these tests exercise, and the one
+users take in practice.
 """
 
 import pypto.language as pl
 import pytest
-from pypto.backend import pto_backend
 from pypto.ir.compile import compile as ir_compile
 from pypto.pypto_core import passes
 
@@ -90,23 +90,6 @@ def test_compile_rejects_runtime_when_a_context_is_active(tmp_path):
             )
 
 
-@pytest.mark.parametrize(
-    ("runtime", "context_runtime"),
-    [(DEFAULT_RUNTIME, GRAPH_EXECUTION_RUNTIME), (GRAPH_EXECUTION_RUNTIME, DEFAULT_RUNTIME)],
-)
-def test_generate_rejects_conflicting_runtime_before_codegen(tmp_path, runtime, context_runtime):
-    """Codegen must not silently switch away from the caller's runtime ABI."""
-    output_dir = tmp_path / "conflict"
-    with passes.PassContext([], runtime=context_runtime):
-        context = passes.PassContext.current()
-        with pytest.raises(
-            RuntimeError, match=r"generate\(\) runtime .* conflicts with .*PassContext runtime"
-        ):
-            pto_backend.generate(VectorAdd, str(output_dir), skip_ptoas=True, runtime=runtime)
-        assert passes.PassContext.current() is context
-    assert not output_dir.exists()
-
-
 # ---------------------------------------------------------------------------
 # The value that lands in the artifact
 # ---------------------------------------------------------------------------
@@ -154,54 +137,6 @@ def test_context_runtime_reaches_kernel_config(tmp_path, runtime, stub_ptoas):
 def test_compile_without_explicit_runtime_defaults_to_tensormap(tmp_path, stub_ptoas):
     config = _compile_and_read_config(tmp_path / "default")
     assert f'"runtime": "{passes.runtime_kind_to_name(DEFAULT_RUNTIME)}"' in config
-
-
-class TestCompileWithoutPassContext:
-    """Exercise the public runtime argument without the unit suite's ambient context."""
-
-    @pytest.fixture(autouse=True)
-    def pass_verification_context(self):
-        """Let compile() establish its own pass and codegen contexts."""
-        yield
-
-    @pytest.mark.parametrize(
-        ("runtime", "method"),
-        [(DEFAULT_RUNTIME, "set_core_num"), (GRAPH_EXECUTION_RUNTIME, "set_block_num")],
-    )
-    def test_explicit_runtime_reaches_a5_orchestration(self, tmp_path, stub_ptoas, runtime, method):
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.AIV)
-            def kernel(
-                self, x: pl.Tensor[[1, 128], pl.FP32], out: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
-                tile = pl.load(x, [0, 0], [1, 128])
-                out = pl.store(tile, [0, 0], out)
-                return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self, x: pl.Tensor[[1, 128], pl.FP32], out: pl.Out[pl.Tensor[[1, 128], pl.FP32]]
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
-                with pl.manual_scope():
-                    out, _ = pl.spmd_submit(self.kernel, x, out, core_num=4)
-                return out
-
-        # compile() exits its pass context before codegen. A5 launch specs must
-        # still use the selected runtime, and no context may leak to the caller.
-        assert passes.PassContext.current() is None
-        ir_compile(
-            Prog,
-            runtime=runtime,
-            skip_ptoas=False,
-            platform="a5",
-            output_dir=str(tmp_path),
-            dump_passes=False,
-        )
-        assert passes.PassContext.current() is None
-        config = (tmp_path / "kernel_config.py").read_text()
-        assert f'"runtime": "{passes.runtime_kind_to_name(runtime)}"' in config
-        assert f"launch_spec.{method}(" in (tmp_path / "orchestration" / "main.cpp").read_text()
 
 
 if __name__ == "__main__":

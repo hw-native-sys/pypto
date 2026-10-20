@@ -73,7 +73,7 @@ class TestBackendHandlerValues:
         handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
 
         assert handler.get_pto_target_arch() == "a5"
-        assert handler.get_launch_spec_core_count_method() == "set_core_num"
+        assert handler.get_launch_spec_core_count_method() == "set_block_num"
         assert handler.get_default_sim_platform() == "a5sim"
         assert handler.get_extra_ptoas_flags() == ["--pto-arch", "a5"]
 
@@ -92,7 +92,8 @@ class TestBackendHandlerValues:
         h950 = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
 
         assert h910.get_pto_target_arch() != h950.get_pto_target_arch()
-        assert h910.get_launch_spec_core_count_method() != h950.get_launch_spec_core_count_method()
+        # Simpler exposes the same logical-block API on both architectures.
+        assert h910.get_launch_spec_core_count_method() == h950.get_launch_spec_core_count_method()
         assert h910.get_default_sim_platform() != h950.get_default_sim_platform()
 
 

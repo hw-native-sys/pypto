@@ -1325,14 +1325,14 @@ def test_spmd_submit_core_num_variable_emits_var_reference():
 
 
 @pytest.mark.parametrize(
-    ("runtime", "method"),
+    "runtime",
     [
-        (passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, "set_core_num"),
-        (passes.RuntimeKind.HOST_BUILD_GRAPH, "set_block_num"),
+        passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+        passes.RuntimeKind.HOST_BUILD_GRAPH,
     ],
 )
-def test_spmd_submit_950_backend_selects_runtime_launch_method(tmp_path, runtime, method):
-    """A5 HBG uses the shared block-count API; A5 TMR uses core counts."""
+def test_spmd_submit_950_backend_uses_block_count_api(tmp_path, runtime):
+    """Both A5 runtimes must compile with Simpler's unified block-count API."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
 
@@ -1362,14 +1362,13 @@ def test_spmd_submit_950_backend_selects_runtime_launch_method(tmp_path, runtime
     main_cpp = tmp_path / "main.cpp"
     main_cpp.write_text(code)
     _assert_orchestration_compiles(main_cpp, runtime_name=passes.runtime_kind_to_name(runtime), arch="a5")
-    assert f"params_t0.launch_spec.{method}(4);" in code, code
+    assert "params_t0.launch_spec.set_block_num(4);" in code, code
 
-    # The Python backend must retain a matching caller context across codegen.
+    # Lower with the requested runtime, then exercise Python codegen after that
+    # context has ended: selecting the setter no longer needs a codegen context.
     with passes.PassContext([], runtime=runtime):
-        context = passes.PassContext.current()
         program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
-        files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
-        assert passes.PassContext.current() is context
+    files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
     main_cpp.write_text(files["orchestration/main.cpp"])
     _assert_orchestration_compiles(main_cpp, runtime_name=passes.runtime_kind_to_name(runtime), arch="a5")
 

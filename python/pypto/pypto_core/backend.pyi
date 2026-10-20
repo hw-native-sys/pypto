@@ -108,12 +108,7 @@ class BackendHandler:
 
     def get_pto_target_arch(self) -> str: ...
     def get_launch_spec_core_count_method(self) -> str:
-        """Return the launch-count setter for the active PassContext runtime.
-
-        HostBuildGraph uses ``set_block_num`` on both backends. TensorMap/RingBuffer
-        uses ``set_block_num`` on Ascend910 and ``set_core_num`` on Ascend950.
-        Without an active PassContext, TensorMap/RingBuffer is assumed.
-        """
+        """Return ``set_block_num`` for both supported backends and runtimes."""
 
     def get_default_sim_platform(self) -> str: ...
     def get_extra_ptoas_flags(self) -> list[str]: ...

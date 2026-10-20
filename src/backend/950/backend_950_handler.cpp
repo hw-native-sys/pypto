@@ -12,14 +12,12 @@
 #include "pypto/backend/950/backend_950_handler.h"
 
 #include <initializer_list>
-#include <string>
 
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -30,16 +28,6 @@ Ascend950Handler::Ascend950Handler() : BackendHandler(Backend950::Instance()) {}
 const Ascend950Handler& Ascend950Handler::Instance() {
   static const Ascend950Handler instance;
   return instance;
-}
-
-std::string Ascend950Handler::GetLaunchSpecCoreCountMethod() const {
-  // HBG shares its block-count LaunchSpec across architectures. Only A5 TMR
-  // uses core counts; select the ABI per compilation rather than per chip.
-  const auto* context = ir::PassContext::Current();
-  if (context && context->GetRuntime() == ir::RuntimeKind::HostBuildGraph) {
-    return "set_block_num";
-  }
-  return "set_core_num";
 }
 
 ir::TileView Ascend950Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_ms,

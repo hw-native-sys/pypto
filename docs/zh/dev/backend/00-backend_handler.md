@@ -49,7 +49,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | 方法 | 用途 | Ascend910 | Ascend950 |
 | ---- | ---- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
-| `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置核数的运行时 API 名 | `"set_block_num"` | `"set_block_num"`（HBG）；`"set_core_num"`（TensorMap/RingBuffer） |
+| `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置逻辑 block 数量的运行时 API 名 | `"set_block_num"` | `"set_block_num"` |
 | `GetDefaultSimPlatform()` | 默认仿真平台名 | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA 是否会根据 `high_precision=True` 生成的 `precisionType` 属性选择不同算法；为 false 时两个 PTO 发射路径（Tile 算子回调与 Buffer IR）都会告警该请求被丢弃 | `false` | `true` |
@@ -63,10 +63,6 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | `SplitsCubeToVectorTransportInHardware()` | 切分的 Cube-to-Vector push 是否由硬件把传输的 extent 各分一半给两个 AIV lane（此时该 extent 即 lane 划分） | `false` | `true` |
 | `GetL0cMAlignment(dtype)` | L0C 切分、dbC 容量与分配共同使用的物理 M 行对齐 | INT32 为 32；其余为 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | 跨核传输边界处的 tile 视图 | Mat/Left/Right 转 NZ；Vec 保持原样 | Mat/Left/Right 转 NZ（a5 硬件要求边界为 fractal）；Vec 保持原样 |
-
-启动数量设置方法由当前上下文（Context）的 `PassContext.runtime` 决定。
-HostBuildGraph（HBG）在两种后端上都使用 `set_block_num()`；TensorMap/RingBuffer
-使用上表所示的各架构对应方法。没有激活的上下文时，处理器默认采用 TensorMap/RingBuffer。
 
 ## 内存容量来源
 
