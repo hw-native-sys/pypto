@@ -36,16 +36,13 @@ jobs:
   #    deliberately ungated here for the same reason it is ungated behind the
   #    lint gate — gating it would protect no scarce capacity.
   #
-  # This cannot weaken the merge rule. The skipped jobs are required status
-  # checks (repo ruleset "default"); each is a non-matrix job, so skipping it
-  # still creates a check run under its exact required context name with a
-  # `skipped` conclusion, which required status checks count as satisfied. (This
-  # is why the gate uses a job-level `if:` and not a workflow-level `paths`
-  # filter: the filter creates no check run at all, leaving every required
-  # context "expected" and the PR unmergeable.) `unit-tests` is the exception the
-  # note above covers. Nothing becomes un-runnable either: pushing a single
-  # non-documentation file to the PR flips the classification and the full
-  # pipeline runs on the next event.
+  # Required PTOAS-suite contexts come from the lightweight *-result jobs below.
+  # They always run on hosted runners, including when the expensive backend
+  # matrices are skipped before expansion. They accept success or an intentional
+  # skip and propagate either backend's failure, so documentation-only changes
+  # never queue an NPU merely to produce a required status name. unit-tests keeps
+  # its own always-expanded matrix and step-level gate as documented on that job.
+  # No test scope is lost: changing code makes the backend matrices run normally.
   #
   # Deliberately conservative — `docs_only` is true only for a `pull_request`
   # whose every changed path (both sides of a rename) matches the allowlist in the
@@ -842,7 +839,7 @@ jobs:
       run: echo "Every changed path is documentation — no build, no tests."
 
   docs-examples:
-    name: docs-examples${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: docs-examples (${{ matrix.ptoas_backend }})
     # The user manual's runnable code blocks, on the path examples-tests cannot
     # cover. That job is skipped for a documentation-only change -- which is
     # exactly when the blocks themselves are being edited -- so without this the
@@ -917,7 +914,7 @@ jobs:
           retention-days: 7
 
   examples-tests:
-    name: examples-tests${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: examples-tests (${{ matrix.ptoas_backend }})
     # The distributed examples ladder — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
     # material cannot silently rot.
@@ -1120,7 +1117,7 @@ jobs:
             --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
-    name: system-tests${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: system-tests (${{ matrix.ptoas_backend }})
     # Batched shard A (mechanism A): the HEAVY device_batch directories — all of
     # tests/st EXCEPT runtime/ops + runtime/cross_core. The batched `Test system
     # tests` step used to run ~7-15 min and dominated the whole job, so it is
@@ -1294,7 +1291,7 @@ jobs:
           checkout-path: st-checkout
 
   system-tests-direct:
-    name: system-tests-direct${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: system-tests-direct (${{ matrix.ptoas_backend }})
     # The complement of `system-tests`, sized to balance it:
     #   1. Batched shard B (mechanism A): device_batch on the LIGHT dirs — only
     #      runtime/ops + runtime/cross_core. These have many tests but cheap
@@ -1563,7 +1560,7 @@ jobs:
           checkout-path: st-direct-checkout
 
   dist-system-tests:
-    name: dist-system-tests${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: dist-system-tests (${{ matrix.ptoas_backend }})
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
     # paths from set_env.sh). In docker the chip child silent-crashes in
     # comm_init.
@@ -1820,7 +1817,7 @@ jobs:
           checkout-path: backend-parity-checkout
 
   pypto-lib-compile:
-    name: pypto-lib-compile (${{ matrix.platform }}, ${{ matrix.runner }}, ${{ matrix.needs-cann }})${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: pypto-lib-compile (${{ matrix.platform }}, ${{ matrix.runner }}, ${{ matrix.needs-cann }}, ${{ matrix.ptoas_backend }})
     # Compile all formal library entrypoints without executing device code.
     # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
     needs: [changes, toolchain, pre-commit, clang-tidy]
@@ -1929,7 +1926,7 @@ jobs:
           retention-days: 7
 
   pypto-lib-model:
-    name: pypto-lib-model${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: pypto-lib-model (${{ matrix.ptoas_backend }})
     # No container: each model run borrows an NPU from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python
     # models/...` invocation, which compiles + runs in one process, is wrapped).
@@ -2152,7 +2149,7 @@ jobs:
           checkout-path: lib-checkout
 
   serving-guard:
-    name: serving-guard${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: serving-guard (${{ matrix.ptoas_backend }})
     # Does a toolchain bump break generation in pypto-serving?
     #
     # `pypto-lib-model` proves the models still compile and run; it does not
@@ -2435,7 +2432,7 @@ jobs:
           checkout-path: serving-checkout
 
   onboard-tests-a5:
-    name: onboard-tests-a5${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: onboard-tests-a5 (${{ matrix.ptoas_backend }})
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
     # npu-a5 card. Two steps share one checkout / install:
@@ -2629,7 +2626,7 @@ jobs:
           checkout-path: a5-checkout
 
   system-tests-a5sim:
-    name: system-tests-a5sim${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
+    name: system-tests-a5sim (${{ matrix.ptoas_backend }})
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
     # alongside it.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
@@ -2799,3 +2796,70 @@ jobs:
           name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
           path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
           retention-days: 7
+
+  # Required status contexts must also exist when docs-only/conditional gates
+  # skip the expensive matrix before GitHub expands it. These tiny hosted jobs
+  # preserve the original names and propagate any backend failure.
+  system-tests-result:
+    name: system-tests
+    needs: [system-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Propagate backend matrix result
+        env:
+          MATRIX_RESULT: ${{ needs.system-tests.result }}
+        run: |
+          case "$MATRIX_RESULT" in
+            success|skipped) exit 0 ;;
+            *) echo "Backend matrix finished with $MATRIX_RESULT"; exit 1 ;;
+          esac
+
+  dist-system-tests-result:
+    name: dist-system-tests
+    needs: [dist-system-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Propagate backend matrix result
+        env:
+          MATRIX_RESULT: ${{ needs.dist-system-tests.result }}
+        run: |
+          case "$MATRIX_RESULT" in
+            success|skipped) exit 0 ;;
+            *) echo "Backend matrix finished with $MATRIX_RESULT"; exit 1 ;;
+          esac
+
+  pypto-lib-model-result:
+    name: pypto-lib-model
+    needs: [pypto-lib-model]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Propagate backend matrix result
+        env:
+          MATRIX_RESULT: ${{ needs.pypto-lib-model.result }}
+        run: |
+          case "$MATRIX_RESULT" in
+            success|skipped) exit 0 ;;
+            *) echo "Backend matrix finished with $MATRIX_RESULT"; exit 1 ;;
+          esac
+
+  system-tests-a5sim-result:
+    name: system-tests-a5sim
+    needs: [system-tests-a5sim]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Propagate backend matrix result
+        env:
+          MATRIX_RESULT: ${{ needs.system-tests-a5sim.result }}
+        run: |
+          case "$MATRIX_RESULT" in
+            success|skipped) exit 0 ;;
+            *) echo "Backend matrix finished with $MATRIX_RESULT"; exit 1 ;;
+          esac

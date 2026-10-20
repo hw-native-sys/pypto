@@ -947,9 +947,12 @@ failures in the report rather than skips.
 CI expands the existing system-test shards, distributed tests, A5 onboard tests,
 simulator tests, examples/documented snippets, library compilation, model tests,
 and conditional serving tests over `emitc` and `vpto`. The original test commands,
-parameters, platform filters, assertions, and goldens are retained. The EmitC
-variant preserves the original required check name; the VPTO variant adds
-`(vpto)`. A failure in one test step does not suppress later test steps.
+parameters, platform filters, assertions, and goldens are retained. Backend
+checks explicitly name `emitc` or `vpto`. Lightweight hosted result gates preserve
+the original required check names, even when a documentation-only or conditional
+gate skips a matrix before expansion; a failure in either backend fails its gate.
+The skipped matrices allocate no NPU runner. A failure in one test step does not
+suppress later test steps.
 Unit tests and `--codegen-only` tests that never invoke PTOAS do not constitute
 VPTO execution and are not counted as backend comparisons.
 
