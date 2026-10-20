@@ -1505,6 +1505,154 @@ class Expected:
             assert isinstance(result_type, ir.TensorType) and isinstance(input_type, ir.TensorType)
             assert result_type.memref is memref and input_type.memref is memref
 
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("tensor_first", [True, False], ids=["tensor-first", "scalar-first"])
+    @pytest.mark.parametrize("fold_initializer", [True, False], ids=["alias-init", "unchanged-init"])
+    def test_loop_header_storage_rebinding_is_order_independent(
+        self, loop_kind: str, tensor_first: bool, fold_initializer: bool
+    ):
+        """All carry definitions must exist before rebinding any carry's storage type."""
+        span = ir.Span.unknown()
+        index_type = ir.ScalarType(DataType.INDEX)
+
+        def const(value: int) -> ir.ConstInt:
+            return ir.ConstInt(value, DataType.INDEX, span)
+
+        source_type = ir.TensorType([1, 8], DataType.FP32)
+        source = ir.Var("source", source_type, span)
+        sink = ir.Var("sink", ir.TensorType([8, 8], DataType.FP32), span)
+        initial = ir.Var("initial", index_type, span)
+        seed = ir.Var("seed", index_type, span)
+        scalar = ir.IterArg("scalar", index_type, seed if fold_initializer else const(0), span)
+        storage = ir.MemRef(
+            ir.Var("mem", ir.PtrType(), span),
+            ir.Mul(scalar, const(32), DataType.INDEX, span),
+            32,
+            span,
+            slots=2,
+            slot=scalar,
+        )
+        carried_type = ir.TensorType([1, 8], DataType.FP32, storage)
+        tensor = ir.IterArg("tensor", carried_type, source, span)
+        alias = ir.Var("alias", carried_type, span)
+        next_scalar = ir.Var("next_scalar", index_type, span)
+        tensor_result = ir.Var("tensor_result", source_type, span)
+        scalar_result = ir.Var("scalar_result", index_type, span)
+
+        def ordered(tensor_value: ir.Expr, scalar_value: ir.Expr) -> list[ir.Expr]:
+            return [tensor_value, scalar_value] if tensor_first else [scalar_value, tensor_value]
+
+        def write(destination: ir.Var, row: ir.Expr, column: int) -> ir.Call:
+            return ir.create_op_call(
+                "tensor.write",
+                [
+                    destination,
+                    ir.MakeTuple([row, const(column)], span),
+                    ir.ConstFloat(1.0, DataType.FP32, span),
+                ],
+                span,
+            )
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(alias, tensor, span),
+                ir.EvalStmt(write(tensor, const(0), 0), span),
+                ir.EvalStmt(write(alias, const(0), 1), span),
+                ir.AssignStmt(next_scalar, ir.Add(scalar, const(1), DataType.INDEX, span), span),
+                ir.YieldStmt(ordered(tensor, next_scalar), span),
+            ],
+            span,
+        )
+        arguments = [tensor, scalar] if tensor_first else [scalar, tensor]
+        results = [tensor_result, scalar_result] if tensor_first else [scalar_result, tensor_result]
+        if loop_kind == "for":
+            before_loop = ir.ForStmt(
+                ir.Var("iteration", index_type, span),
+                const(0),
+                const(2),
+                const(1),
+                arguments,
+                body,
+                results,
+                span,
+            )
+        else:
+            before_loop = ir.WhileStmt(
+                ir.Lt(scalar, const(2), DataType.BOOL, span), arguments, body, results, span
+            )
+        function = ir.Function(
+            "main",
+            [source, sink],
+            [],
+            ir.SeqStmts(
+                [
+                    ir.AssignStmt(initial, const(0), span),
+                    ir.AssignStmt(seed, initial, span),
+                    before_loop,
+                    ir.EvalStmt(write(tensor_result, const(0), 0), span),
+                    ir.EvalStmt(write(sink, scalar_result, 0), span),
+                ],
+                span,
+            ),
+            span,
+        )
+        before = ir.Program([function], "imported_loop_header", span)
+        # Imported allocated metadata may refer to a later header binder. The DSL
+        # infers carries' types from their outer initializers, so it cannot print/parse
+        # this header type. Keep pass verification and check the complete IR below.
+        instruments: list[passes.PassInstrument] = [
+            passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with passes.PassContext(instruments):
+            after = passes.simplify()(before)
+        after_function = after.get_function("main")
+        assert after_function is not None
+        loop = next(
+            stmt
+            for stmt in ir.flatten_to_stmts(after_function.body)
+            if isinstance(stmt, (ir.ForStmt, ir.WhileStmt))
+        )
+        tensor_index, scalar_index = (0, 1) if tensor_first else (1, 0)
+        new_tensor, new_scalar = loop.iter_args[tensor_index], loop.iter_args[scalar_index]
+        assert isinstance(new_scalar.initValue, ir.ConstInt) and new_scalar.initValue.value == 0
+        assert new_scalar.same_as(scalar) != fold_initializer
+        assert new_tensor.same_as(tensor) != fold_initializer
+        tensor_type = new_tensor.type
+        assert isinstance(tensor_type, ir.TensorType) and tensor_type.memref is not None
+        memref = tensor_type.memref
+        assert memref.is_pinned_ is False and memref.slot_count_ == 2
+        assert isinstance(memref.byte_offset_, ir.Mul), "the address must remain iteration-dependent"
+        assert memref.byte_offset_.left.same_as(new_scalar), "storage names a discarded scalar carry"
+        assert memref.slot_index_ is not None and memref.slot_index_.same_as(new_scalar)
+        assert (memref is storage) != fold_initializer
+
+        statements = ir.flatten_to_stmts(loop.body)
+        alias_assignment = next(stmt for stmt in statements if isinstance(stmt, ir.AssignStmt))
+        assert alias_assignment.value.same_as(new_tensor)
+        alias_type = alias_assignment.var.type
+        assert isinstance(alias_type, ir.TensorType) and alias_type.memref is memref
+        writes = [stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt)]
+        assert len(writes) == 2
+        for write_call, destination in zip(writes, [new_tensor, alias_assignment.var], strict=True):
+            assert isinstance(write_call, ir.Call) and write_call.args[0].same_as(destination)
+            write_type = write_call.type
+            assert isinstance(write_type, ir.TensorType) and write_type.memref is memref
+        update = next(
+            stmt for stmt in statements if isinstance(stmt, ir.AssignStmt) and stmt is not alias_assignment
+        )
+        assert isinstance(update.value, ir.Add) and update.value.left.same_as(new_scalar)
+        yielded = next(stmt for stmt in statements if isinstance(stmt, ir.YieldStmt))
+        assert yielded.value[tensor_index].same_as(new_tensor)
+        assert yielded.value[scalar_index].same_as(update.var)
+        if isinstance(loop, ir.WhileStmt):
+            assert isinstance(loop.condition, ir.Lt) and loop.condition.left.same_as(new_scalar)
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
     def test_if_result_storage_tracks_a_rebuilt_nested_loop_carry(self):
         """A retained branch result must share its yielded views' rebound storage."""
 

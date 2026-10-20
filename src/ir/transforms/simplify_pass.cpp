@@ -420,11 +420,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_stop = SimplifyExpr(op->stop_);
     auto new_step = SimplifyExpr(op->step_);
 
-    // Rebuild iter_args before visiting the body so body references pick up
-    // the remapped IterArg identity.
+    // Seed the whole header before rebuilding its types: storage metadata on
+    // an earlier tensor carry may reference a later scalar carry.
     bool iter_args_changed = false;
-    auto new_iter_args = RebuildVec(
-        op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
+    auto new_iter_args = RebuildIterArgs(op->iter_args_, &iter_args_changed);
 
     auto start_ci = As<ConstInt>(new_start);
     auto stop_ci = As<ConstInt>(new_stop);
@@ -547,7 +546,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // (Fold A on a nested IfStmt or Fold B on a nested single-trip ForStmt)
     // record remaps from outer Vars to body-internal values; leaking those to
     // siblings of this ForStmt or to the parent scope produces dangling
-    // references. The MaybeRebuildIterArg additions made above stay in
+    // references. The RebuildIterArgs additions made above stay in
     // baseline_remap (they're valid in body and after).
     auto baseline_remap = var_remap_;
 
@@ -704,8 +703,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // the header kept the stale IterArg while all uses pointed at an
     // undefined clone (UseAfterDef).
     bool iter_args_changed = false;
-    auto new_iter_args = RebuildVec(
-        op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
+    auto new_iter_args = RebuildIterArgs(op->iter_args_, &iter_args_changed);
 
     auto new_condition = SimplifyExpr(op->condition_);
 
@@ -714,7 +712,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // an IfStmt, Fold B on a single-trip ForStmt) records `outer_var -> body-local
     // value`. Leaking that past the loop rewrites post-loop uses of a leak-mode
     // body var into a value from one iteration's interior -- silently wrong, since
-    // the var is still in scope so no verifier flags it. The MaybeRebuildIterArg
+    // the var is still in scope so no verifier flags it. The RebuildIterArgs
     // additions above are captured in the baseline (they stay valid after the loop).
     auto baseline_remap = var_remap_;
     auto new_body = VisitScopedBody(op->body_);
@@ -1097,14 +1095,58 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return new_var;
   }
 
-  IterArgPtr MaybeRebuildIterArg(const IterArgPtr& ia) {
-    if (!ia) return ia;
-    auto new_type = SimplifyType(ia->GetType());
-    auto new_init = SimplifyExpr(ia->initValue_);
-    if (new_type.get() == ia->GetType().get() && new_init.get() == ia->initValue_.get()) return ia;
-    auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
-    var_remap_[ia.get()] = new_ia;
-    return new_ia;
+  std::vector<IterArgPtr> RebuildIterArgs(const std::vector<IterArgPtr>& iter_args, bool* changed) {
+    // Seeds belong to the enclosing scope, not the loop's carry scope. Fold
+    // all of them before installing this header's binder remaps.
+    std::vector<ExprPtr> new_inits;
+    new_inits.reserve(iter_args.size());
+    for (const auto& ia : iter_args) {
+      auto new_init = SimplifyExpr(ia->initValue_);
+      if (new_init != ia->initValue_) *changed = true;
+      new_inits.push_back(std::move(new_init));
+    }
+
+    // A discovery pass preserves every original identity for a no-op header.
+    // Once anything changes, clone the entire group: changing one binder can
+    // require another carry's type to change, independently of header order.
+    if (!*changed) {
+      for (const auto& ia : iter_args) {
+        if (SimplifyType(ia->GetType()) != ia->GetType()) {
+          *changed = true;
+          break;
+        }
+      }
+    }
+    if (!*changed) return iter_args;
+
+    // Only these unpublished construction shells are mutable. A real IterArg
+    // constructor gives each binder a fresh unique identity; MutableCopy is
+    // unsuitable for identity-bearing nodes. Rewrite visitors treat mapped
+    // carries as leaves; all types are finalized before visiting the body.
+    class HeaderIterArg final : public IterArg {
+     public:
+      using IterArg::IterArg;
+      void FinalizeType(TypePtr type) { type_ = std::move(type); }
+    };
+    std::vector<std::shared_ptr<HeaderIterArg>> fresh;
+    std::vector<IterArgPtr> result;
+    fresh.reserve(iter_args.size());
+    result.reserve(iter_args.size());
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      const auto& ia = iter_args[i];
+      auto new_ia =
+          std::make_shared<HeaderIterArg>(ia->name_hint_, ia->GetType(), std::move(new_inits[i]), ia->span_);
+      var_remap_[ia.get()] = new_ia;
+      fresh.push_back(new_ia);
+      result.push_back(std::move(new_ia));
+    }
+    // Every old -> fresh entry must exist before the first final type visit.
+    // In particular, allocated byte offsets and retained slot indices must
+    // refer to the declared fresh scalar even when its carry follows theirs.
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      fresh[i]->FinalizeType(SimplifyType(iter_args[i]->GetType()));
+    }
+    return result;
   }
 
   VarPtr LookupVarRemap(const Var* key) {

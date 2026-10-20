@@ -15,7 +15,7 @@
 - **SSA 后**（在 `ConvertToSSA` 之后、`FlattenCallExpr` 之前）：将闭包捕获的常量（如 `CHUNK_K: Scalar[INDEX] = 512`）传播进 shape 表达式与类型，使后续的 tile lowering Pass 看到的是字面量而不是变量。
 - **tile pipeline 末尾**（在 `MaterializeDistTensorCtx` 之后）：清理由内存空间推断、layout 解析等晚期 lowering 暴露出来的可折叠表达式。
 
-[InitMemRef](34-init_memref.md) 还会在入口处以**仅常量模式（constant-only mode）**调用共享的内部辅助函数，随后再规范化语句结构、构建地址。该模式将可证明的常量传播到表达式与类型元数据中，并删除死标量赋值，同时保留控制流、phi 和循环携带结构；它跳过恒等 `tensor.view` 折叠、非常量代数重写和死 yield 槽位裁剪。这样，即使直接调用 `InitMemRef`，也能折叠此前 lowering Pass 引入的常量，无需额外的流水线 Pass 或新的前置条件。独立的 `Simplify` Pass 仍执行下文介绍的完整行为。
+[InitMemRef](35-init_memref.md) 还会在入口处以**仅常量模式（constant-only mode）**调用共享的内部辅助函数，随后再规范化语句结构、构建地址。该模式将可证明的常量传播到表达式与类型元数据中，并删除死标量赋值，同时保留控制流、phi 和循环携带结构；它跳过恒等 `tensor.view` 折叠、非常量代数重写和死 yield 槽位裁剪。这样，即使直接调用 `InitMemRef`，也能折叠此前 lowering Pass 引入的常量，无需额外的流水线 Pass 或新的前置条件。独立的 `Simplify` Pass 仍执行下文介绍的完整行为。
 
 **需要 (Requires)**：无。
 
@@ -69,9 +69,9 @@ program_simplified = simplify_pass(program)
    - `BinaryExpr` / `UnaryExpr`：先访问子节点，再折叠重建后的节点。
    - `CallPtr`：刷新结果 `type_`，让 shape 参数被折叠后的 Call 与重新解析得到的 Call 在结构上相等。
    - `AssignStmt`：对不在 `multi_assigned_` 中的标量 LHS `Var`，把化简后的 RHS 注册到分析器。无论位于函数体顶层还是嵌套区域内，`ConstInt`/`ConstFloat`/`ConstBool` RHS 都会被完整绑定（字面量代入下游使用点）。符号 RHS 只贡献一个 `ConstIntBound`，使恒死的分支守卫得以折叠而不会内联该标量。每个绑定都会被记录，以便所在区域的访问器在退出时解绑。这不会把循环携带值绑定为其初值，也不会假定不同分支的结果相同。
-   - `ForStmt`：在访问循环体前重建 `iter_args_`，使体内的引用对应到新的标识；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
+   - `ForStmt`：先在外层作用域化简每个 carry 的初值。只要循环头的值或类型发生变化，就先创建并登记整组 carry，再重建类型，使已分配的偏移或槽位下标能够引用后声明的标量 carry；完全不变的循环头保留原对象身份。随后使用完整映射访问循环体；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
    - `IfStmt`：进入 `Analyzer::GetConstraintContext(cond)` 处理 then 分支，进入 `Not(cond)` 处理 else 分支；每个分支内绑定的标量会在该分支结束后解绑，以免泄漏到另一分支或越过 `IfStmt`。保留分支时，在共同的基线映射下重建 `return_vars_`，使结果类型跟随外层变量的重建，同时不引入分支内部的定义。可由分析器证明的条件也会被折叠 —— 见下文「控制流折叠」。
-   - `WhileStmt`：除没有循环边界外与 `ForStmt` 相同 —— 在访问条件与循环体前重建 `iter_args_`，在访问循环体前后快照并恢复 `var_remap_`，随后重建 `return_vars_`，并采用同样的区域化标量解绑方式。以循环头为准写入重映射表，确保类型或初值变化后，条件与循环体中的每处引用仍指向声明的节点。
+   - `WhileStmt`：除没有循环边界外与 `ForStmt` 相同 —— 在访问条件与循环体前复用同样的两阶段 carry 整组重建，在访问循环体前后快照并恢复 `var_remap_`，随后重建 `return_vars_`，并采用同样的区域化标量解绑方式。先建立完整的循环头映射，使条件、循环体与存储元数据中的引用始终指向声明的节点，不依赖 carry 的排列顺序。
    - `SpmdScopeStmt`：以同样的区域化标量解绑方式访问其语句体，并额外折叠 `core_num_`（如 `MAX // TILE` 这样的闭包算术，可能需要 SSA 之后再化简一次）。
 3. **类型重建**：`SimplifyType` 递归地处理 `TensorType`、`TileType`、`TupleType`，对嵌入的表达式（shape、stride、valid_shape、start_offset、view 字段）调用 `SimplifyExpr`。`RemapPinnedMemRefExprs` 还会在 pinned 声明式分配的槽位下标转换为字节偏移之前化简该下标。非 pinned MemRef 在内部变量未被重映射时保留指针身份；若循环 carry 等变量被重建，其 base、字节偏移和保留的槽位下标会同步重绑，不经过分析器常量折叠，并通过共享缓存确保变量与 Call 类型使用同一个新 MemRef。仅在地址元数据中使用的标量定义仍会在 DCE 中保持存活。类型无变化时保留原对象，使往返一致性检查仍然便宜。
 4. **标量 DCE + 死 yield 槽位裁剪**：mutator 完成后，`dce::EliminateDeadScalarAssignments` 在展平的函数体上运行，删除所有「全部使用都被折掉了」的标量 `AssignStmt`。该 DCE 是保守的：永远不会删除 Call 支撑的赋值，因为 IR 目前还没有纯度标注，`Call` 可能存在可观察的副作用。两次标量 DCE 之间由 `dce::EliminateDeadYieldSlots` 裁掉没有任何读者的 yield 槽位——`IfStmt` 中无人使用的 phi `return_vars_[i]`，以及 `ForStmt` / `WhileStmt` 中 `iter_args_[i]`（循环体内读）与 `return_vars_[i]`（循环后读）都未被使用的循环携带槽位——同时删除对应的 `YieldStmt` 槽位。跨两个 scope 复用同一个 Python 局部变量恰好会产生这种死携带：SSA 用前一个 scope 的值给第二个循环做初值，循环体每一轮都覆盖它，两端都没有人读。若保留下来，它会让前一个 scope 的值变成 live-out；对设备 scope 而言，这会迫使外提出的 kernel 返回一个 `Scalar`——参见 [08-outline_incore_scopes.md](09-outline_incore_scopes.md)。
