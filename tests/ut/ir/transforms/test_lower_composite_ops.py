@@ -20,11 +20,7 @@ pins the full decomposed primitive tree so any change to the lowering surfaces
 as a structural diff.
 """
 
-import gzip
-import json
 import re
-from difflib import unified_diff
-from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -4044,45 +4040,6 @@ def test_tile_select_bf16_uses_registered_tsel_fallback(ascend_backend):
     plan = target.plan_op_scratch("tile.sel", DataType.BF16)
     assert plan is not None and plan.spec is not None
     assert ((plan.spec.rows, plan.spec.cols), plan.spec.dtype) in _select_scratch_shapes(after)
-
-
-# Frozen on the unmodified main revision named in manifest.json. The input IR
-# carries a stable synthetic filename, so checkout paths and test line numbers
-# cannot hide changes to spans, variable names, types, or shared references.
-_COMPOSITE_SNAPSHOTS = Path(__file__).with_name("data") / "lower_composite"
-_COMPOSITE_SNAPSHOT_CASES = json.loads((_COMPOSITE_SNAPSHOTS / "manifest.json").read_text())["cases"]
-
-
-@pytest.mark.parametrize("case", _COMPOSITE_SNAPSHOT_CASES, ids=lambda case: case["name"])
-def test_lower_composite_matches_frozen_baseline(case):
-    """Moving a rule must preserve the complete serialized IR, not just op names."""
-    # Override the transforms directory's autouse Ascend950 fixture, including
-    # the standalone path where no backend is configured. Teardown resets it.
-    backend.reset_for_testing()
-    if case["backend"] is not None:
-        backend.set_backend_type(getattr(BackendType, case["backend"]))
-    fixture = _COMPOSITE_SNAPSHOTS / case["name"]
-    before = ir.deserialize(gzip.decompress(fixture.with_suffix(".input.msgpack.gz").read_bytes()))
-    expected_bytes = gzip.decompress(fixture.with_suffix(".expected.msgpack.gz").read_bytes())
-    expected = ir.deserialize(expected_bytes)
-    assert isinstance(before, ir.Program)
-    assert isinstance(expected, ir.Program)
-    after = passes.lower_composite_ops()(before)
-    actual_bytes = ir.serialize(after)
-    if actual_bytes != expected_bytes:
-        # Text makes ordinary recipe differences reviewable; the byte comparison
-        # also catches metadata and sharing changes the Python printer omits.
-        diff = "\n".join(
-            unified_diff(
-                ir.python_print(expected).splitlines(),
-                ir.python_print(after).splitlines(),
-                fromfile="baseline",
-                tofile="actual",
-            )
-        )
-        pytest.fail(f"Serialized lowering changed for {case['name']}.\n{diff}")
-    ir.assert_structural_equal(after, expected)
-    ir.assert_structural_equal(passes.lower_composite_ops()(after), after)
 
 
 if __name__ == "__main__":

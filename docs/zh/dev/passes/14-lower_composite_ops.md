@@ -395,19 +395,6 @@ mutator 重写 `VisitStmt_(const AssignStmtPtr&)` 而不是 `VisitCall`，原因
 
 `tile.cast` 模式 `RINT`（cos）、`ROUND`（sin）、`FLOOR`（sign）、`None`（int↔float）来自 tile 算子注册表的枚举（`src/ir/op/tile_ops/unary.cpp`）。模式选择对正确性至关重要：sin 中 `k` 用 `ROUND` 保持以零为中心对称，使 Horner 多项式看到的 `t` 分布均匀；cos 中 `k` 用 `RINT` 与 `+0.5` 偏移配合，确保偶数 `k` 对应 `π/2` 的偶数倍。
 
-## 重构回归测试 (Refactoring Regression Tests)
-
-结构测试文件中的 `test_lower_composite_matches_frozen_baseline` 从
-`tests/ut/ir/transforms/data/lower_composite/` 读取固定的输入与期望 IR。
-`manifest.json` 记录每个场景的基线提交和后端。Gzip 文件保存 `ir.serialize` 字节，
-包含 source span、类型和共享引用；测试检查字节一致性、结构相等及幂等性。
-输入使用稳定的合成源文件名。24 个场景覆盖所有分发表入口、连续 collective 调用、
-三角函数链、MX tuple 别名，以及两种后端和未配置后端的 select。
-
-若有意改变行为，应先审查 IR 差异和新行为，再更新受影响的期望 fixture。
-对于结构重构，应在未修改的基线上生成期望输出，在独立进程中复验，
-并在整个重构期间保持固定。不能从失败的待测实现刷新基线来让测试通过。
-
 ## 相关 (Related)
 
 - **Issue**：[#1289 — Add FP32-only `tile.sin` / `tile.cos` and a lowering pass](https://github.com/hw-native-sys/pypto/issues/1289)。

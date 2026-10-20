@@ -343,23 +343,6 @@ Each intermediate result is bound to a fresh `Var` named via `auto_name::BuildNa
 
 The cast modes `RINT` (cos), `ROUND` (sin), `FLOOR` (sign), and `None` (int↔float) come from the tile-op registry's enum (`src/ir/op/tile_ops/unary.cpp`). Choosing the correct mode is load-bearing: `ROUND` for sin's `k` keeps `k` symmetric around zero so the Horner polynomial sees evenly distributed `t`; `RINT` for cos's `k` matches the `+0.5` shift and ensures even `k` corresponds to even multiples of `π/2`.
 
-## Refactoring Regression Tests
-
-`test_lower_composite_matches_frozen_baseline` in the structural test file loads
-fixed input/expected IR from `tests/ut/ir/transforms/data/lower_composite/`.
-`manifest.json` records the baseline commit and backend for each case. The gzip
-files contain `ir.serialize` bytes, including source spans, types, and shared
-references; the test compares bytes, structural equality, and idempotency.
-Inputs use stable synthetic source filenames. The 24 cases cover every dispatch
-entry, consecutive collective calls, trig chains, MX tuple aliases, and select
-with both backends and without a configured backend.
-
-For an intentional behavior change, inspect the IR difference and update only
-the affected expected fixture after reviewing the new behavior. For a structural
-refactor, generate expected output on the unmodified baseline, verify it in a
-separate process, and keep it fixed throughout the refactor. Never refresh a
-baseline from a failing candidate just to make its tests pass.
-
 ## Related
 
 - **Issue**: [#1289 — Add FP32-only `tile.sin` / `tile.cos` and a lowering pass](https://github.com/hw-native-sys/pypto/issues/1289).
