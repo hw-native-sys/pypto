@@ -30,6 +30,7 @@
 #include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_registry.h"
+#include "pypto/backend/common/op_rules.h"
 #include "pypto/ir/memory_allocator_policy.h"
 
 // clang-format off

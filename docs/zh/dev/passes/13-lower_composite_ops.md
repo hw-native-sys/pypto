@@ -93,13 +93,13 @@ mutator 把本 Pass 产出的 `MakeTuple`（及其 SSA alias）记入私有 `com
 | tile | 标量 | `tile.create`(TSELS scratch) + `tile.sels(mask, T, tmp, F)` | 正好是 TSELS 的形态 `dst = mask ? src : scalar`，一条指令 |
 | 标量 | tile | `tile.full(T)` + `tile.create`(TSEL scratch) + `tile.sel(mask, full, F, tmp)` | TSELS 没有"标量在真值侧"的形式，只能物化标量后走 TSEL |
 
-有两种情况会把 tile/标量那一行也推到最后这条路径上，因为目标架构没有对应的 TSELS 形式：**A2/A3 的 8 位整数**（`BackendHandler::SupportsTselsDataType`，与 `pto.tsels` 发射器检查的是同一个谓词，因此 pass 与发射器不会走偏），以及 dtype 无法与源配对的标量。在 pass 里判掉这一点，才能保证程序可编译 —— 发射 `tile.sels` 只会在很晚的发射器 dtype 检查处失败。
+tile/标量路径通过 `Backend::PlanOpScratch("tile.sels", request)` 查询源 dtype 和物理列数对应的规则。只有计划为 `Required`、源为列数静态的二维 tile、且标量 dtype 能与源配对时，才使用 TSELS；否则物化标量并尝试 TSEL。两个目标的 TSELS 都不支持 BF16，但 TSEL 支持；A2/A3 的两种形式都不支持 8 位整数，因此 Pass 会报告不支持该 select，而不是生成非法的回退。注册的 scratch planner 与 TSELS validator 共用 `pto_ops_select.cpp` 中的 dtype 谓词。
 
 `tile.full` 是 tile 流水线唯一能降级的标量广播：`tile.expands` 没有 PTO 发射器，`pl.expands` 自身就过不了 codegen。这就把标量分支限制为**字面量**、把结果限制为**静态** extent；两者都由 `DeduceTileSelectType` 校验，因此诊断落在用户的调用点上，而不是以 `tile.full` 报错的形式从本 Pass 内部冒出来。
 
 `tile.full` 还会把结果标成全部有效，而 `tile.sel` 从它的 `lhs` 读取结果的 valid 范围，所以被物化的分支会把尾部收窄的 select 重新放宽。规则会用另一分支的 view 给新建的调用重新定型 —— 只覆盖 view，这样改写后的调用仍能通过 print → parse 往返。
 
-**scratch 形状由后端拥有。** 由 `BackendHandler::GetTselScratchSpec` / `GetTselsScratchSpec` 提供：A2/A3 的 TSEL 用 `UINT32 [1, 16]`，TSELS 则按一整行完整物理源、以源 dtype 计算（`src_dtype [1, N]`）；A5 两者都用 `UINT8 [1, 32]`。与 `tile.tquant_mx` 规则一样，scratch 的 `tile.create` 显式标注 `MemorySpace::Vec`，因为本 Pass 在 `InferTileMemorySpace` 之前运行。
+**scratch 几何由后端管理。** 注册的 `Backend::PlanOpScratch` 规则通过 `PassContext::GetBackend()` 提供需求：A2/A3 的 TSEL 使用 `UINT32 [1, 16]`，TSELS 使用源 dtype 的完整物理源行（`src_dtype [1, N]`）；A5 两者均使用 `UINT8 [1, 32]`。未配置后端的独立降级仍使用历史 A5 几何，且不限制 dtype。这些计划描述编译器创建的 scratch；显式 `tile.sel` / `tile.sels` 的 scratch 操作数仍由调用方管理。与 `tile.tquant_mx` 规则一样，scratch 的 `tile.create` 显式标记 `MemorySpace::Vec`，因为本 Pass 在 `InferTileMemorySpace` 之前运行。
 
 **ND 操作数走 TSEL 路径。** `DeduceTileSelsType` 写死要求 rank 2 —— 它的掩码覆盖算术直接索引 `valid_shape[0]` 和 `[1]` —— 而本 Pass 跑在 `FlattenTileNdTo2D` **之前**（slot 13 vs 14），所以 ND 到这里还是 ND。规则因此把 TSELS 用 rank 2 门控住，让 ND 落到 `tile.full` + `tile.sel`（两者都不限制 rank），再由 `FlattenTileNdTo2D` 和其余算子一起折叠。不因 rank 拒绝任何输入。
 

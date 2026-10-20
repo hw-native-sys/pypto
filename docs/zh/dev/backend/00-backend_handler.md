@@ -134,7 +134,7 @@ from pypto import DataType, backend
 
 target = backend.get_backend_instance(backend.BackendType.Ascend910)
 plan = target.plan_op_scratch("tile.sels", DataType.FP16, source_cols=128)
-# Required：FP16 [1, 128]，一整行物理源数据。
+# Required: FP16 [1, 128], one physical source row.
 ```
 
 `Required` 携带以元素为单位的只读 `TileScratchSpec`；`NotRequired` 明确表示无需

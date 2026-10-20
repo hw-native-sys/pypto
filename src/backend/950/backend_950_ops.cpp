@@ -33,6 +33,7 @@
  */
 
 #include "pypto/backend/950/backend_950.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/pto_ops_common.h"
 
 namespace pypto {

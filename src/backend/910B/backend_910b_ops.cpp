@@ -20,6 +20,7 @@
  */
 
 #include "pypto/backend/910B/backend_910b.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/pto_ops_common.h"
 
 namespace pypto {

@@ -16,11 +16,16 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/pto_ops_common.h"
+#include "pypto/codegen/codegen_base.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
 namespace pypto::backend {
@@ -42,14 +47,16 @@ OpScratchPlan PlanSelectScratch(SelectTarget target, SelectForm form, const OpSc
   if (request.source_dtype && !SupportsSelect(target, form, *request.source_dtype)) {
     return {OpScratchStatus::Unsupported, std::nullopt, "Select source dtype is not supported"};
   }
-  if (form == SelectForm::Scalar && !request.source_dtype) {
+  if (form == SelectForm::Tile) {
+    const auto spec = target == SelectTarget::A5 ? TileScratchSpec{DataType::UINT8, 1, 32}
+                                                 : TileScratchSpec{DataType::UINT32, 1, 16};
+    return {OpScratchStatus::Required, spec, ""};
+  }
+  if (!request.source_dtype) {
     return {OpScratchStatus::Unknown, std::nullopt, "TSELS source dtype is required"};
   }
   if (target == SelectTarget::A5) {
     return {OpScratchStatus::Required, TileScratchSpec{DataType::UINT8, 1, 32}, ""};
-  }
-  if (form == SelectForm::Tile) {
-    return {OpScratchStatus::Required, TileScratchSpec{DataType::UINT32, 1, 16}, ""};
   }
   if (!request.source_cols) {
     return {OpScratchStatus::Unknown, std::nullopt, "A2/A3 TSELS requires physical source columns"};
@@ -74,15 +81,20 @@ void ValidateSels(SelectTarget target, const ir::CallPtr& op, const ir::TypePtr&
 
   const std::vector<std::pair<std::string_view, ir::TileTypePtr>> operands = {
       {"mask", mask}, {"src", src}, {"tmp", tmp}, {"dst", dst}};
+  // Extract each region immediately after checking its optional MemRef. Later
+  // alias checks operate only on these validated regions.
+  std::vector<ir::MemRefPtr> regions;
+  regions.reserve(operands.size());
   for (const auto& [name, type] : operands) {
     INTERNAL_CHECK_SPAN(type->memref_.has_value(), op->span_)
         << "Internal error: tile.sels " << name << " must carry a MemRef before PTO codegen";
+    regions.push_back(*type->memref_);
   }
-  CHECK_SPAN(!ir::MemRef::MayAlias(*mask->memref_, *dst->memref_), op->span_)
+  CHECK_SPAN(!ir::MemRef::MayAlias(regions[0], regions[3]), op->span_)
       << "tile.sels requires mask and dst to use non-overlapping memory regions";
   if (target == SelectTarget::A2A3) {
     for (const size_t other : {size_t{0}, size_t{1}}) {
-      CHECK_SPAN(!ir::MemRef::MayAlias(*tmp->memref_, *operands[other].second->memref_), op->span_)
+      CHECK_SPAN(!ir::MemRef::MayAlias(regions[2], regions[other]), op->span_)
           << "tile.sels on A2/A3 requires tmp not to overlap mask or src, but tmp overlaps "
           << operands[other].first;
     }
