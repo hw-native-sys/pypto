@@ -409,9 +409,11 @@ class TestMakeCacheKey:
         assert len(set(keys)) == len(keys), f"planner must split the cache key, got {keys}"
 
     def test_dbc_double_buffer_flag_splits_legacy_pypto_key(self):
-        """The legacy-PyPTO dbC=2 opt-in changes AutoTileMatmulL0/MemoryReuse output,
-        so a kernel compiled with it off must not reuse that artifact when later
-        called with it on."""
+        """Preserve the historical PYPTO key split for the compatibility flag.
+
+        Automatic dbC is disabled regardless of this value; distinct keys
+        preserve the legacy cache contract, not different AutoTile output.
+        """
         key_off = self._make_key(
             param_names=["a"],
             tensor_shapes={"a": (8, 8)},
@@ -426,11 +428,11 @@ class TestMakeCacheKey:
             memory_planner=MemoryPlanner.PYPTO,
             enable_pypto_l0c_double_buffer=True,
         )
-        assert key_off != key_on, "dbC=2 opt-in must split the cache key"
+        assert key_off != key_on, "legacy PYPTO flag values must retain distinct compatibility keys"
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
-    def test_dbc_double_buffer_flag_does_not_split_automatic_planner_key(self, planner):
-        """DSA_RP and PTOAS enable dbC automatically, so the legacy-PyPTO flag is inert."""
+    def test_dbc_double_buffer_flag_does_not_split_non_pypto_key(self, planner):
+        """Non-PYPTO keys omit the PYPTO-only legacy flag; automatic dbC stays disabled."""
         kwargs: dict[str, Any] = {
             "param_names": ["a"],
             "tensor_shapes": {"a": (8, 8)},
@@ -504,15 +506,17 @@ def test_buffer_ir_cache_option_follows_active_context():
 
 
 class TestResolveEnablePyptoL0cDoubleBuffer:
-    """The legacy-PyPTO dbC=2 opt-in must match what ``ir.compile()`` inherits."""
+    """Preserve the legacy compatibility state inherited by ``ir.compile()``."""
 
     def test_defaults_to_off(self):
         assert _resolve_enable_pypto_l0c_double_buffer() is False
 
     def test_reads_the_active_pass_context(self):
-        """The flag is set by wrapping the call in a PassContext, which never
-        reaches RunConfig; keying only on RunConfig would let a flag-on call
-        reuse the flag-off artifact."""
+        """A PassContext-only value must survive even without a RunConfig field.
+
+        This preserves the historical PYPTO cache-key distinction, although
+        neither value enables automatic dbC.
+        """
         with passes.PassContext([], enable_pypto_l0c_double_buffer=True):
             assert _resolve_enable_pypto_l0c_double_buffer() is True
         assert _resolve_enable_pypto_l0c_double_buffer() is False

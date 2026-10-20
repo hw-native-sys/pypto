@@ -373,12 +373,11 @@ class PassManager:
         ctx = passes.PassContext.current()
         # The construction-time planner fixes the pass list: DSA_RP drops
         # MemoryReuse, while PTOAS drops MemoryReuse + AllocateMemoryAddr.
-        # Planner-gated pass behaviour
-        # (AutoTileMatmulL0's dbC=2) reads the planner again at execution time, so
-        # run_passes re-asserts the run-time planner still matches this one — otherwise a
-        # PassManager built outside PTOAS but run inside a PTOAS context would keep
-        # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
-        # into one shrunk single-buffer tile (see _check_planner_consistency).
+        # Storage planning and lowering read the planner at execution time, so
+        # run_passes requires it to match the planner that selected this recipe.
+        # Otherwise, the pass list could retain legacy planning passes while
+        # execution requests a different allocation route. Automatic dbC is
+        # disabled for every planner and is not the reason for this guard.
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         skipped_mem_planning_passes: tuple[str, ...]
@@ -426,9 +425,8 @@ class PassManager:
         """Reject memory-planner or Buffer IR mode changes after construction.
 
         The pass list is fixed at construction: DSA_RP drops ``MemoryReuse`` and
-        PTOAS also drops ``AllocateMemoryAddr``. Planner-gated pass behaviour,
-        including ``AutoTileMatmulL0``'s dbC=2 selection, reads
-        ``GetMemoryPlanner()`` at execution time. Constructing under one planner
+        PTOAS also drops ``AllocateMemoryAddr``. Storage planning and lowering
+        read ``GetMemoryPlanner()`` at execution time. Constructing under one planner
         and running under another would therefore combine the wrong pass list
         with the chosen lowering. ``compile()`` builds and runs under one
         context, so this guard only catches direct PassManager misuse. The Buffer
@@ -572,11 +570,10 @@ class PassManager:
         # so callers' diagnostic intent isn't reset.
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner AND the legacy-PYPTO dbC=2 opt-in: a nested
-        # PassContext otherwise resets them to the binding defaults, which silently
-        # disables planner-gated pass behaviour (AutoTileMatmulL0's dbC=2 tile
-        # selection reads GetMemoryPlanner() + GetEnablePyptoL0cDoubleBuffer()
-        # *during* pass execution) whenever the pipeline dumps IR.
+        # Preserve the caller's planner and legacy compatibility flag in the
+        # nested dump context. The planner must match the fixed pass list, and
+        # dumping IR must not reset caller-visible context state. The flag no
+        # longer enables automatic dbC, but remains stored and forwarded.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
@@ -627,9 +624,9 @@ class PassManager:
         ctx = passes.PassContext.current()
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner, the legacy-PYPTO dbC=2 opt-in and the
-        # runtime ABI (see run_passes) so profiling doesn't silently reset them and
-        # disable planner- or runtime-gated behaviour.
+        # Preserve the planner, runtime ABI, and stored legacy compatibility
+        # flag just as the dump path does. Profiling must not change planning
+        # or reset context state; the flag no longer enables automatic dbC.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
