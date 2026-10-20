@@ -178,6 +178,11 @@ explicit view operations, and `tile.set_validshape` retain their own binding
 semantics. This handling does not add support for arbitrary dtype or layout
 conversions; the existing operation and PTO view restrictions still apply.
 
+Under PTOAS planning, codegen rejects a new destination `pto.treshape` if either
+the selected storage or the result uses packed `FP4E2M1X2`. Use `PYPTO` or
+`DSA_RP` addressed memory planning for these shared aliases. A destination whose
+physical configuration already matches remains usable without an additional view.
+
 ### Reshape and the valid region
 
 A reshape is a zero-copy view, so it cannot invent data: `tensor.reshape` and

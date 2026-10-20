@@ -162,6 +162,10 @@ PyPTO 与 DSA-RP 规划器会落实该约束；如果显式 MemRef 绑定或手�
 语义。此处理不增加任意 dtype 或 layout 转换的支持；既有算子及 PTO 视图的限制
 仍然适用。
 
+在 PTOAS 内存规划下，如果选中的存储或结果使用打包类型 `FP4E2M1X2`，codegen
+会拒绝新建目标 `pto.treshape`。这类共享别名应使用 `PYPTO` 或 `DSA_RP`
+显式地址内存规划。物理配置已经匹配的目标仍可直接使用，无需额外视图。
+
 ### reshape 与有效区域（valid region）
 
 reshape 是零拷贝视图，无法凭空产生数据：`tensor.reshape` 与 `tile.reshape` 共用

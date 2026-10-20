@@ -21,10 +21,15 @@ from pypto.backend.pto_backend import _run_ptoas
 from pypto.pypto_core import codegen
 
 
-def _generate(program: ir.Program) -> str:
+def _generate(
+    program: ir.Program,
+    *,
+    backend_type=BackendType.Ascend910,
+    emit_tile_addr: bool = False,
+) -> str:
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910)
-    return codegen.PTOCodegen().generate(program, emit_tile_addr=False)
+    set_backend_type(backend_type)
+    return codegen.PTOCodegen().generate(program, emit_tile_addr=emit_tile_addr)
 
 
 def _line(mlir: str, text: str) -> str:
@@ -210,6 +215,93 @@ def test_matching_output_type_does_not_create_a_view(operation):
     _assert_operand_declarations(_line(mlir, f"pto.t{operation} ins("), _definitions(mlir))
     assert "pto.treshape" not in mlir, mlir
     assert mlir.count("= pto.alloc_tile") == 2, mlir
+
+
+def _packed_fp4_destination_program(root_dtype, result_dtype) -> ir.Program:
+    """Load into a shared byte window whose existing descriptor may differ."""
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, pl.INDEX, span)
+    address = ir.ConstInt(0, pl.INT64, span)
+    shape = (16, 32)
+    storage = ir.MemRef(ir.MemorySpace.Vec, address, 512, 0)
+    root_type = ir.TileType(shape, root_dtype, storage, None, ir.MemorySpace.Vec)
+    result_type = ir.TileType(shape, result_dtype, storage, None, ir.MemorySpace.Vec)
+    root = ir.Var("root", root_type, span)
+    destination = ir.Var("destination", result_type, span)
+    source = ir.Var("source", ir.TensorType(shape, result_dtype), span)
+    output = ir.Var("output", source.type, span)
+    stored = ir.Var("stored", output.type, span)
+    offsets = ir.MakeTuple([zero, zero], span)
+    shapes = ir.MakeTuple([ir.ConstInt(dim, pl.INDEX, span) for dim in shape], span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(root, ir.Call(ir.Op("tile.create"), [], root_type, span), span),
+            ir.AssignStmt(
+                destination,
+                ir.Call(ir.Op("tile.load"), [source, offsets, shapes], result_type, span),
+                span,
+            ),
+            ir.AssignStmt(
+                stored,
+                ir.Call(ir.Op("tile.store"), [destination, offsets, output], output.type, span),
+                span,
+            ),
+            ir.ReturnStmt([stored], span),
+        ],
+        span,
+    )
+    function = ir.Function(
+        "kernel",
+        [(source, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+        [output.type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    return ir.Program([function], "PackedFp4SharedDestination", span)
+
+
+@pytest.mark.parametrize(
+    ("root_dtype", "result_dtype"),
+    [(pl.UINT8, pl.FP4E2M1X2), (pl.FP4E2M1X2, pl.UINT8)],
+    ids=["byte-to-packed", "packed-to-byte"],
+)
+def test_shared_destination_rejects_packed_fp4_treshape(root_dtype, result_dtype):
+    # Equal carrier sizes do not make packed-FP4 treshape legal in PTOAS.
+    program = _packed_fp4_destination_program(root_dtype, result_dtype)
+    with pytest.raises(ValueError, match="FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory"):
+        _generate(program, backend_type=BackendType.Ascend950)
+
+
+def test_matching_packed_fp4_destination_does_not_create_a_view():
+    program = _packed_fp4_destination_program(pl.FP4E2M1X2, pl.FP4E2M1X2)
+    mlir = _generate(program, backend_type=BackendType.Ascend950)
+    assert "pto.treshape" not in mlir, mlir
+    assert mlir.count("= pto.alloc_tile") == 1, mlir
+    targets, annotations = _operands(_line(mlir, "pto.tload"), "outs")
+    assert targets == ["%root"], mlir
+    assert "dtype=!pto.f4E2M1x2" in annotations[0], mlir
+    assert _operands(_line(mlir, "pto.tstore"), "ins") == (targets, annotations), mlir
+
+
+@pytest.mark.parametrize(
+    ("root_dtype", "result_dtype"),
+    [(pl.UINT8, pl.FP4E2M1X2), (pl.FP4E2M1X2, pl.UINT8)],
+    ids=["byte-to-packed", "packed-to-byte"],
+)
+def test_addressed_packed_fp4_destination_keeps_its_own_allocation(root_dtype, result_dtype):
+    # PYPTO and DSA_RP provide an address, so each dtype gets an alloc at that
+    # same address instead of a treshape of the other dtype's descriptor.
+    program = _packed_fp4_destination_program(root_dtype, result_dtype)
+    mlir = _generate(program, backend_type=BackendType.Ascend950, emit_tile_addr=True)
+    assert "pto.treshape" not in mlir, mlir
+    allocations = [line for line in mlir.splitlines() if "= pto.alloc_tile" in line]
+    assert len(allocations) == 2, mlir
+    assert all("addr = %c0_i64" in line for line in allocations), mlir
+    targets, annotations = _operands(_line(mlir, "pto.tload"), "outs")
+    assert targets == ["%destination"], mlir
+    assert _definitions(mlir)[targets[0]] == annotations[0], mlir
+    assert _operands(_line(mlir, "pto.tstore"), "ins") == (targets, annotations), mlir
 
 
 @pytest.mark.parametrize("operation", ["add", "exp"])

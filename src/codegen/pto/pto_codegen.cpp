@@ -2204,6 +2204,12 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
     return output;
   }
 
+  // Packed FP4 can reuse an identical descriptor, but PTOAS cannot treshape
+  // to or from the packed dtype. Address-backed aliases returned above.
+  CHECK_SPAN(!actual->second->dtype_.IsPackedFp4() && !tile_type->dtype_.IsPackedFp4(), var->span_)
+      << op_name << ": FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory; "
+      << "PTOAS does not support packed-FP4 tile treshape";
+
   // Mirror the storage constraints of PTOAS treshape. FP4 Vec descriptors use
   // an eight-bit packed carrier after ExtractTileTypeInfo halves one axis.
   auto carrier_bits = [](const std::shared_ptr<const ir::TileType>& type) {
