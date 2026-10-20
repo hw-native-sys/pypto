@@ -10,10 +10,17 @@
 
 # Fast-forward source, align PTOAS with the checkout, and rebuild the environment.
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYPTO_HOME="${PYPTO_HOME:-/opt/pypto}"
 export PYPTO_SRC="${PYPTO_SRC:-/workspace/pypto}"
 export PYPTO_LIB_SRC="${PYPTO_LIB_SRC:-/workspace/pypto-lib}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/pypto-owner.sh"
+# Even read-only Git commands can refresh the index. Run all Git access with
+# the corresponding repository's owner; the two checkouts may have different IDs.
+checkout_git() {
+    local checkout="$1"; shift
+    pypto_as_checkout_owner "$checkout" git -C "$checkout" "$@"
+}
 pull=true
 reinstall=false
 doctor=true
@@ -83,28 +90,28 @@ if $pull; then
     status_args=(--porcelain)
     if $remote_submodules; then status_args+=(--ignore-submodules=all); fi
     for repo in "${repos[@]}"; do
-        git -C "$repo" rev-parse --is-inside-work-tree >/dev/null
-        current_branch="$(git -C "$repo" symbolic-ref --quiet --short HEAD)" || {
+        checkout_git "$repo" rev-parse --is-inside-work-tree >/dev/null
+        current_branch="$(checkout_git "$repo" symbolic-ref --quiet --short HEAD)" || {
             echo "$repo has detached HEAD; select a branch or use --no-pull" >&2; exit 1;
         }
         if [ -n "$branch" ] && [ "$branch" != "$current_branch" ]; then
             echo "$repo is on $current_branch, expected $branch; select the branch explicitly" >&2
             exit 1
         fi
-        repo_status="$(git -C "$repo" status "${status_args[@]}")" || exit 1
+        repo_status="$(checkout_git "$repo" status "${status_args[@]}")" || exit 1
         [ -z "$repo_status" ] || {
             echo "$repo has local changes; commit/stash them or use --no-pull" >&2; exit 1;
         }
         if $remote_submodules; then
             # An explicitly staged gitlink is a user edit, not the unstaged drift
             # produced by --remote. Keep it protected even when status hides links.
-            git -C "$repo" diff --cached --quiet --ignore-submodules=none || {
+            checkout_git "$repo" diff --cached --quiet --ignore-submodules=none || {
                 echo "$repo has local changes; commit/stash them or use --no-pull" >&2; exit 1;
             }
             # Remote tracking deliberately moves submodule HEADs off their gitlinks.
             # Ignore only that expected drift: check every populated submodule for
             # tracked/untracked edits separately, including nested submodules.
-            git -C "$repo" submodule foreach --quiet --recursive '
+            checkout_git "$repo" submodule foreach --quiet --recursive '
                 git diff --cached --quiet --ignore-submodules=none || {
                     echo "submodule $displaypath has local changes; commit/stash them or use --no-pull" >&2
                     exit 1
@@ -116,18 +123,27 @@ if $pull; then
                 }
             ' || exit 1
         fi
-        git -C "$repo" rev-parse --verify '@{upstream}' >/dev/null || {
+        checkout_git "$repo" rev-parse --verify '@{upstream}' >/dev/null || {
             echo "$repo needs a tracking branch or --no-pull" >&2; exit 1;
         }
     done
     for repo in "${repos[@]}"; do
-        git -C "$repo" pull --ff-only
+        checkout_git "$repo" pull --ff-only
     done
     submodule_args=(--init --recursive)
     if $remote_submodules; then submodule_args+=(--remote); fi
-    git -C "$PYPTO_SRC" submodule update "${submodule_args[@]}"
+    checkout_git "$PYPTO_SRC" submodule update "${submodule_args[@]}"
 fi
 
+# Installed launchers can outlive the image's helper copies. Once the source is
+# current, use its helpers together so build, activation and pin handling agree.
+here="$PYPTO_SRC/.github/docker"
+for helper in pypto-build pypto-install-ptoas.sh pypto-setup.sh pypto-doctor; do
+    [ -x "$here/$helper" ] || {
+        echo "Missing checkout helper $here/$helper; select a checkout containing the container scripts" >&2
+        exit 1
+    }
+done
 if $reinstall; then
     "$here/pypto-setup.sh" "${setup_args[@]}"
 else

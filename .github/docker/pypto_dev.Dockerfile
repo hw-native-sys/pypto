@@ -48,6 +48,7 @@ ARG CANN_REPO=quay.io/ascend/cann
 ARG CANN_TAG=9.0.0-a3-ubuntu22.04-py3.11-devel
 
 FROM ${CANN_REPO}:${CANN_TAG} AS deps
+ARG CANN_TAG
 
 # Pinned to what the CI fleet carries. Left to resolve `torch>=2.0.0` itself,
 # pip picks an aarch64 wheel that drags in the whole CUDA stack (torch 427 MB +
@@ -59,6 +60,7 @@ ARG TORCH_VERSION=2.10.0
 ARG UV_VERSION=latest
 
 ENV PYPTO_HOME=/opt/pypto \
+    PYPTO_CANN_TAG=${CANN_TAG} \
     UV_PYTHON_INSTALL_DIR=/opt/pypto/python \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -92,7 +94,7 @@ RUN set -eu; \
 # Keep dependencies, PTOAS installation, and helper sources identical to the
 # in-container setup path. These remain reachable when /workspace is mounted.
 COPY toolchain/versions.env build-constraints.txt ${PYPTO_HOME}/toolchain/
-COPY .github/docker/pypto-activate.sh .github/docker/pypto-build .github/docker/pypto-doctor \
+COPY .github/docker/pypto-owner.sh .github/docker/pypto-activate.sh .github/docker/pypto-build .github/docker/pypto-doctor \
      .github/docker/pypto-update.sh .github/docker/pypto-setup.sh \
      .github/docker/pypto-install-ptoas.sh ${PYPTO_HOME}/bin/
 RUN chmod 0755 "$PYPTO_HOME/bin/pypto-build" "$PYPTO_HOME/bin/pypto-doctor" \
@@ -212,10 +214,21 @@ RUN set -eu; \
     git clone "$PYPTO_LIB_REPO" /workspace/pypto-lib; \
     git -C /workspace/pypto-lib checkout "$PYPTO_LIB_REF" --
 
-# Builds pypto, then simpler, and clones the pinned pto-isa into the source
-# tree's runtime/build/pto-isa.
-RUN PYPTO_SRC=/workspace/pypto pypto-install-ptoas.sh \
- && PYPTO_BUILD_JOBS="$DIST_BUILD_JOBS" pypto-build
+# The selected ref owns its setup inputs and helpers. Refresh the environment
+# before building so a context/ref mismatch cannot silently use stale logic.
+# Do not activate the context's BASH_ENV while bootstrapping the selected setup.
+RUN set -eu; \
+    export PYPTO_SRC=/workspace/pypto; \
+    helpers="$PYPTO_SRC/.github/docker"; \
+    for required in .github/docker/pypto-setup.sh .github/docker/pypto-build \
+        .github/docker/pypto-activate.sh toolchain/versions.env build-constraints.txt; do \
+        test -r "$PYPTO_SRC/$required" || { \
+            echo "Selected PYPTO_REF lacks $required; choose a ref with the dev-container helpers" >&2; \
+            exit 1; \
+        }; \
+    done; \
+    BASH_ENV= "$helpers/pypto-setup.sh"; \
+    BASH_ENV="$helpers/pypto-activate.sh" PYPTO_BUILD_JOBS="$DIST_BUILD_JOBS" "$helpers/pypto-build"
 
 # A wheel install resolves PTO-ISA below simpler_setup/_assets, but the runtime
 # package intentionally installs only build/lib and the pin — not the managed

@@ -34,6 +34,8 @@ for arg in "$@"; do
 done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYPTO_HOME="${PYPTO_HOME:-/opt/pypto}" PYPTO_SRC="${PYPTO_SRC:-/workspace/pypto}"
+source "$here/pypto-owner.sh"
 source "$here/pypto-activate.sh"
 
 if [ ! -f "$PYPTO_SRC/CMakeLists.txt" ]; then
@@ -42,17 +44,44 @@ if [ ! -f "$PYPTO_SRC/CMakeLists.txt" ]; then
     echo "  Or point PYPTO_SRC at where it is mounted." >&2
     exit 1
 fi
+# Only source-writing work drops privileges. Keep the image's Python environment
+# owned by its original user: chowning it would copy large image layers and alter
+# the ownership of bundled Git caches. Build a wheel as the source owner, then
+# install that completed artifact with the caller's original privileges.
+source_uid="$(stat -c %u "$PYPTO_SRC")"
+if [ "$(id -u)" = 0 ] && [ "$source_uid" != 0 ]; then
+    source_gid="$(stat -c %g "$PYPTO_SRC")"
+    wheel_dir="$(mktemp -d)"
+    trap 'rm -rf "$wheel_dir"' EXIT
+    install -d -o "$source_uid" -g "$source_gid" "$wheel_dir" \
+        "$PYPTO_HOME/cache/ccache/$source_uid"
+    pypto_as_checkout_owner "$PYPTO_SRC" env PYPTO_RUNTIME_WHEEL_DIR="$wheel_dir" \
+        bash "$here/pypto-build" "$@"
+    if ! $pypto_only; then
+        wheels=("$wheel_dir"/*.whl)
+        [ "${#wheels[@]}" = 1 ] && [ -f "${wheels[0]}" ] || {
+            echo 'pypto-build: expected exactly one completed runtime wheel' >&2; exit 1;
+        }
+        uv pip install --python "$(command -v python)" --no-cache \
+            --reinstall-package simpler "${wheels[0]}"
+        python -c 'import simpler.task_interface; print("simpler ok")'
+    fi
+    exit 0
+fi
 cd "$PYPTO_SRC"
 
-# The loader may replace an environment request with a machine profile. Keep
-# a smaller explicit request while never exceeding that profile's limit.
+# Load the machine cap independently of the caller's request, including the
+# conservative default when the checkout has no machine profile.
 requested_jobs="${PYPTO_BUILD_JOBS:-}"
-source .claude/skills/testing/load-env.sh
-jobs="$PYPTO_BUILD_JOBS"
 if [ -n "$requested_jobs" ]; then
     [[ "$requested_jobs" =~ ^[1-9][0-9]*$ ]] || {
         echo 'PYPTO_BUILD_JOBS must be a positive integer' >&2; exit 2;
     }
+fi
+unset PYPTO_BUILD_JOBS
+source .claude/skills/testing/load-env.sh
+jobs="$PYPTO_BUILD_JOBS"
+if [ -n "$requested_jobs" ]; then
     if [ "$requested_jobs" -lt "$jobs" ]; then jobs="$requested_jobs"; fi
 fi
 export PYPTO_BUILD_JOBS="$jobs" CMAKE_BUILD_PARALLEL_LEVEL="$jobs" MAX_JOBS="$jobs"
@@ -74,7 +103,7 @@ export MAKEFLAGS="-j$jobs"
 # Nothing depends on this: without ccache, ninja's incremental build in the
 # mounted build/ dir still makes repeat builds cheap.
 # ---------------------------------------------------------------------------
-cache_root="${PYPTO_HOME}/cache/ccache"
+cache_root="${PYPTO_HOME}/cache/ccache/$(id -u)"
 pin="$(cat runtime/pto_isa.pin 2>/dev/null || echo unpinned)"
 export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-20G}"
 mkdir -p "$cache_root/pypto" "$cache_root/simpler-$pin" 2>/dev/null || true
@@ -89,27 +118,57 @@ fi
 
 echo "==> building pypto ($jobs jobs, $CXX)"
 export CCACHE_DIR="$cache_root/pypto"
-# Keep native generators, including Makefiles. A host cache also records absolute
-# paths that change under a container bind mount; refresh just CMake's cache/state
-# in that case, preserving the generator and other files in the build directory.
-configure_args=()
+# Cache paths alone cannot identify a host build: linked worktrees keep their
+# original paths in the container. Record the environment and actual cached
+# compiler binaries after a successful build. Record file metadata too, so a
+# subsequent host build cannot silently replace objects while leaving the cache
+# unchanged. Hostnames, PATH ordering, ownership and ctime are deliberately
+# excluded: they change across equivalent containers/image layers. Reset objects
+# as well as CMake state on a mismatch.
+build_fingerprint() {
+    {
+        printf '%s\0' pypto-build-v2 "$(pwd -P)" \
+            "$CC" "$CXX" "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+            "${CFLAGS:-}" "${CXXFLAGS:-}" "${CPPFLAGS:-}" "${LDFLAGS:-}" \
+            "${CMAKE_TOOLCHAIN_FILE:-}" "${CMAKE_C_COMPILER_LAUNCHER:-}" \
+            "${CMAKE_CXX_COMPILER_LAUNCHER:-}"
+        sha256sum build/CMakeCache.txt /etc/os-release || return 1
+        local language compiler
+        for language in C CXX; do
+            compiler="$(sed -n "s/^CMAKE_${language}_COMPILER:[^=]*=//p" build/CMakeCache.txt)"
+            if [ -n "$compiler" ]; then sha256sum "$compiler" || return 1; fi
+        done
+        find build -type f ! -name .pypto-build-fingerprint -printf '%p %s %T@\0' | sort -z || return 1
+        if [ -d python/pypto ]; then
+            find python/pypto -maxdepth 1 -name 'pypto_core*.so' -printf '%p %s %T@\0' | sort -z || return 1
+        fi
+        if [ -n "${CMAKE_TOOLCHAIN_FILE:-}" ]; then
+            sha256sum "$CMAKE_TOOLCHAIN_FILE" || return 1
+        fi
+        cmake --version
+    } | sha256sum
+}
+
+generator=Ninja
 if [ -f build/CMakeCache.txt ]; then
+    generator="$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' build/CMakeCache.txt)"
+    generator="${generator:-Ninja}"
     cached_source="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' build/CMakeCache.txt)"
     cached_build="$(sed -n 's/^CMAKE_CACHEFILE_DIR:INTERNAL=//p' build/CMakeCache.txt)"
     source_dir="$(pwd -P)"
-    if [ "$cached_source" != "$source_dir" ] || [ "$cached_build" != "$source_dir/build" ]; then
-        echo "==> build/ was configured at another path; refreshing CMake state"
-        configure_args=(--fresh)
-        generator="$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' build/CMakeCache.txt)"
-        if [ -n "$generator" ]; then configure_args+=(-G "$generator"); fi
+    if [ "$cached_source" != "$source_dir" ] || [ "$cached_build" != "$source_dir/build" ] \
+        || [ ! -f build/.pypto-build-fingerprint ] \
+        || ! fingerprint="$(build_fingerprint)" \
+        || [ "$(cat build/.pypto-build-fingerprint)" != "$fingerprint" ]; then
+        echo "==> build/ has an unknown or changed toolchain/build state; rebuilding"
+        rm -rf build
     fi
-else
-    configure_args=(-G Ninja)
 fi
-cmake -B build "${configure_args[@]}" \
+cmake -B build -G "$generator" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
     -Dnanobind_DIR="$(python -c 'import nanobind; print(nanobind.cmake_dir())')"
 cmake --build build --parallel "$jobs"
+build_fingerprint > build/.pypto-build-fingerprint
 
 python -c 'import pypto.language as pl; print(f"pypto ok — {len(pl.__all__)} exports")'
 
@@ -127,9 +186,18 @@ if ! $pypto_only; then
     # The first run also clones the pinned pto-isa into runtime/build/pto-isa
     # (HTTPS, GitHub with a GitCode fallback); it is reused untouched afterwards.
     export CCACHE_DIR="$cache_root/simpler-$pin"
-    uv pip install --python "$(command -v python)" --no-build-isolation ./runtime
-    python -c 'import simpler.task_interface; print("simpler ok")'
+    # Source edits and submodule advances need not change pyproject.toml, which
+    # uv uses to invalidate directory wheels. Always rebuild/reinstall simpler;
+    # its native CMake build and ccache still provide incremental compilation.
+    if [ -n "${PYPTO_RUNTIME_WHEEL_DIR:-}" ]; then
+        uv build --wheel --python "$(command -v python)" --no-build-isolation \
+            --no-cache --out-dir "$PYPTO_RUNTIME_WHEEL_DIR" ./runtime
+    else
+        uv pip install --python "$(command -v python)" --no-build-isolation \
+            --no-cache --reinstall-package simpler ./runtime
+        python -c 'import simpler.task_interface; print("simpler ok")'
+    fi
 fi
 
 echo "==> done. Next: pypto-doctor, or run a model:"
-echo "    python \$PYPTO_LIB_SRC/models/qwen3_14b/decode_fwd.py -p a2a3 -d \${PYPTO_DEVICE:-0}"
+_pypto_model_command

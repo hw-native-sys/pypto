@@ -19,6 +19,7 @@ if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
 fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/pypto-activate.sh"
+source "$here/pypto-owner.sh"
 
 fail=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
@@ -68,6 +69,7 @@ else
 fi
 
 echo "CANN and driver"
+cann=""
 # ASCEND_HOME_PATH, not ASCEND_TOOLKIT_HOME: simpler_setup/toolchain.py resolves
 # every compiler below from ASCEND_HOME_PATH, so checking anything else can pass
 # here and still fail at the first assemble.
@@ -90,12 +92,22 @@ for tool in "${ASCEND_HOME_PATH:-/missing-cann}/bin/ccec" \
     fi
 done
 # Ascend-Docker-Runtime injects the driver as include/ + lib64/ only, without
-# version.info, so its absence says nothing about whether the driver works —
-# the ACL probe further down is what settles that. Only a missing lib64 is fatal.
-if [ -r /usr/local/Ascend/driver/version.info ]; then
-    ok "host driver $(sed -n 's/^Version=//p' /usr/local/Ascend/driver/version.info | head -1)"
-elif [ -d /usr/local/Ascend/driver/lib64 ]; then
-    warn "driver libs present but version.info is not exposed (normal under --runtime=ascend)"
+# version.info. In that mode compatibility still needs a host-side check; the
+# ACL probe establishes access, not whether AICPU initialization will work.
+driver_root="${ASCEND_DRIVER_ROOT:-/usr/local/Ascend/driver}"
+if [ -r "$driver_root/version.info" ]; then
+    driver="$(sed -n 's/^Version=//p' "$driver_root/version.info" | head -1)"
+    # Supported pairs from runtime/docs/install.md. compatible_version contains
+    # internal V100R... identifiers, not public CANN release numbers.
+    case "$cann:$driver" in
+        9.0.0:26.0.rc1|9.1.T500:25.6.rc1.b108)
+            ok "host driver $driver matches supported CANN $cann" ;;
+        9.0.0:*) bad "host driver ${driver:-unknown} is unsupported for CANN $cann; expected 26.0.rc1" ;;
+        9.1.T500:*) bad "host driver ${driver:-unknown} is unsupported for CANN $cann; expected 25.6.rc1.b108" ;;
+        *) bad "cannot verify host driver ${driver:-unknown} for CANN ${cann:-unknown}; see runtime/docs/install.md for supported pairs" ;;
+    esac
+elif [ -d "$driver_root/lib64" ]; then
+    warn "driver libs present but version.info is not exposed (normal under --runtime=ascend); verify the supported CANN/driver pair on the host"
 else
     bad "no host driver in this container — pass the card in with --runtime=ascend, or mount /usr/local/Ascend/driver"
 fi
@@ -128,7 +140,7 @@ fi
 device_id="${PYPTO_DEVICE:-0}"
 cann_py="$(ls -d /usr/local/python3.*/bin/python3 2>/dev/null | head -1)"
 if [ -z "$cann_py" ]; then
-    warn "no CANN interpreter found under /usr/local/python3.* — cannot probe device access"
+    bad "no CANN interpreter found under /usr/local/python3.* — cannot probe device access"
 elif acl_out="$(PYTHONPATH="${ASCEND_HOME_PATH:-/missing-cann}/python/site-packages" "$cann_py" -c '
 import sys
 import acl
@@ -148,14 +160,14 @@ print("%d %d %d" % (init, dev, total // 1024 // 1024))
         echo "        Ascend-Docker-Runtime registered on the host), or --privileged."
     fi
 else
-    warn "could not run the ACL device probe — treat device access as unverified"
+    bad "could not run the ACL device probe — repair the CANN interpreter/acl installation before using this environment"
 fi
 
 echo "checkout"
 if [ -f "$PYPTO_SRC/CMakeLists.txt" ]; then
-    ok "pypto at $PYPTO_SRC ($(git -C "$PYPTO_SRC" rev-parse --short HEAD 2>/dev/null || echo 'not a git repo'))"
+    ok "pypto at $PYPTO_SRC ($(pypto_as_checkout_owner "$PYPTO_SRC" git -C "$PYPTO_SRC" rev-parse --short HEAD 2>/dev/null || echo 'not a git repo'))"
     if [ -f "$PYPTO_SRC/runtime/pyproject.toml" ]; then
-        ok "runtime submodule at $(git -C "$PYPTO_SRC" rev-parse --short HEAD:runtime 2>/dev/null || echo '?')"
+        ok "runtime submodule at $(pypto_as_checkout_owner "$PYPTO_SRC" git -C "$PYPTO_SRC" rev-parse --short HEAD:runtime 2>/dev/null || echo '?')"
     else
         bad "runtime/ is empty — git submodule update --init --recursive"
     fi
@@ -167,7 +179,7 @@ if [ -d "$PYPTO_LIB_SRC" ]; then ok "pypto-lib at $PYPTO_LIB_SRC"; else
 fi
 
 echo "build products"
-if pypto_file="$(python -c 'import pypto; print(pypto.__file__)' 2>/dev/null)"; then
+if pypto_file="$(pypto_as_checkout_owner "$PYPTO_SRC" python -c 'import pypto; print(pypto.__file__)' 2>/dev/null)"; then
     ok "import pypto -> $pypto_file"
     case "$pypto_file" in
         "$PYPTO_SRC"/*) ;;
@@ -188,22 +200,39 @@ else
 fi
 # A site-packages install has no adjacent Git checkout for simpler's own guard.
 # Compare its build stamp against the mounted runtime before importing the binding.
-if err="$(python -c '
+if err="$(pypto_as_checkout_owner "$PYPTO_SRC" python -c '
 import sys
-from pypto.runtime.runtime_pin import check_runtime_pin, runtime_tree_is_dirty
-status = check_runtime_pin()
+from pypto.runtime.runtime_pin import runtime_pin_status, runtime_tree_is_dirty
+# A diagnostic must inspect the verdict even when the import guard is bypassed.
+status = runtime_pin_status()
+if status.expected is not None and status.stamp_missing:
+    print("installed binding predates revision stamping")
+    sys.exit(1)
+if status.comparable and not status.matches:
+    print(f"installed {status.installed}, runtime/ HEAD {status.expected}")
+    sys.exit(1)
 import simpler.task_interface
+if not status.comparable:
+    installed = status.installed or "<unknown>"
+    expected = status.expected or "<unknown>"
+    print(f"installed {installed}, runtime/ HEAD {expected}")
+    sys.exit(4)
 # Matching Git revisions cannot establish whether uncommitted ABI edits were built.
 sys.exit(3 if runtime_tree_is_dirty(status) else 0)
 ' 2>&1)"; then
     ok "simpler binding matches its source tree"
-elif [ "$?" -eq 3 ]; then
-    warn "runtime/ has uncommitted changes; the matching build stamp cannot prove the binding is current — rerun pypto-build"
-elif printf '%s' "$err" | grep -q 'ModuleNotFoundError'; then
-    warn "simpler not installed yet — run pypto-build"
 else
-    bad "simpler binding rejected: $(printf '%s\n' "$err" | tail -1)"
-    echo "        the compiled _task_interface was built from a different runtime/ commit — rerun pypto-build"
+    result=$?
+    if [ "$result" -eq 3 ]; then
+        warn "runtime/ has uncommitted changes; the matching build stamp cannot prove the binding is current — rerun pypto-build"
+    elif [ "$result" -eq 4 ]; then
+        warn "simpler binding revision is unverified: $err — restore runtime/ Git metadata and rerun pypto-build"
+    elif printf '%s' "$err" | grep -q 'ModuleNotFoundError'; then
+        warn "simpler not installed yet — run pypto-build"
+    else
+        bad "simpler binding rejected: $(printf '%s\n' "$err" | tail -1)"
+        echo "        verify the compiled _task_interface against runtime/ — rerun pypto-build"
+    fi
 fi
 
 echo

@@ -52,7 +52,10 @@ if [ ! -f "$constraints" ]; then constraints="$PYPTO_HOME/toolchain/build-constr
     exit 1
 }
 export PATH="$PYPTO_HOME/bin:$PATH"
-if ! command -v uv >/dev/null 2>&1; then
+install -d "$PYPTO_HOME/bin"
+uv_path="$(type -P uv || true)"
+# A concrete release tag takes precedence over any executable already on PATH.
+if [ -z "$uv_path" ] || [ "$uv_version" != latest ]; then
     case "$(uname -m)" in
         aarch64|x86_64) asset="uv-$(uname -m)-unknown-linux-gnu" ;;
         *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
@@ -66,16 +69,33 @@ if ! command -v uv >/dev/null 2>&1; then
     trap 'rm -rf "$download_dir"' EXIT
     curl --fail --location --retry 3 --retry-all-errors "$url" -o "$download_dir/uv.tar.gz"
     tar -xzf "$download_dir/uv.tar.gz" -C "$download_dir"
-    install -d "$PYPTO_HOME/bin"
-    install -m 0755 "$download_dir/$asset/uv" "$PYPTO_HOME/bin/uv"
+    uv_path="$download_dir/$asset/uv"
 fi
+# Root may discover uv below a private HOME. Always install a regular shared
+# executable, without overwriting the target of a pre-existing shared symlink.
+uv_path="$(readlink -f "$uv_path")"
+if [ -L "$PYPTO_HOME/bin/uv" ]; then rm "$PYPTO_HOME/bin/uv"; fi
+if [ ! "$uv_path" -ef "$PYPTO_HOME/bin/uv" ]; then
+    install -m 0755 "$uv_path" "$PYPTO_HOME/bin/uv"
+fi
+chmod 0755 "$PYPTO_HOME/bin/uv"
+hash -r
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PYPTO_HOME/python}"
 export PIP_USER=0
 uv python install 3.10
-if [ ! -x "$PYPTO_HOME/venv/bin/python" ]; then
-    uv venv --python 3.10 "$PYPTO_HOME/venv"
-fi
 python="$PYPTO_HOME/venv/bin/python"
+version_query='import sys; print(".".join(map(str, sys.version_info[:2])) if sys.implementation.name == "cpython" else "unsupported")'
+venv_version="$("$python" -I -S -c "$version_query" 2>/dev/null || true)"
+if [ "$venv_version" != 3.10 ]; then
+    # This prefix is setup's dedicated environment. Recreate incompatible or
+    # incomplete venvs before installing any dependencies, without following a
+    # symlink to an external environment.
+    rm -rf -- "$PYPTO_HOME/venv"
+    uv venv --python cpython@3.10 "$PYPTO_HOME/venv"
+    [ "$("$python" -I -S -c "$version_query")" = 3.10 ] || {
+        echo "Setup requires CPython 3.10 at $python" >&2; exit 1;
+    }
+fi
 uv pip install --python "$python" "torch==$torch_version" --index-url "$torch_index"
 uv pip install --python "$python" --constraint "$constraints" \
     'scikit-build-core>=0.10.0' 'nanobind>=2.0.0,<3' 'ninja>=1.11.0' 'cmake>=3.15' \
@@ -91,9 +111,11 @@ for helper in pypto-build pypto-doctor pypto-update.sh pypto-setup.sh pypto-inst
         install -m 0755 "$here/$helper" "$PYPTO_HOME/bin/$helper"
     fi
 done
-if [ ! "$here/pypto-activate.sh" -ef "$PYPTO_HOME/bin/pypto-activate.sh" ]; then
-    install -m 0644 "$here/pypto-activate.sh" "$PYPTO_HOME/bin/pypto-activate.sh"
-fi
+for helper in pypto-activate.sh pypto-owner.sh; do
+    if [ ! "$here/$helper" -ef "$PYPTO_HOME/bin/$helper" ]; then
+        install -m 0644 "$here/$helper" "$PYPTO_HOME/bin/$helper"
+    fi
+done
 if [ ! "$toolchain_env" -ef "$PYPTO_HOME/toolchain/versions.env" ]; then
     install -m 0644 "$toolchain_env" "$PYPTO_HOME/toolchain/versions.env"
 fi
