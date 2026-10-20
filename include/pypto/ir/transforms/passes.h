@@ -652,31 +652,17 @@ Pass LegalizeTileCast();
  * ``tile.matmul_acc`` calls with caller-owned accumulators remain deferred with
  * ``PH-AT-006``.
  *
- * Full-K M/N grids may use output-, A-, or B-stationary loop orders.  L0C
- * double-buffering is enabled automatically under DSA_RP and PTOAS and is an
- * opt-in under the legacy PYPTO planner.  Under PYPTO, chained Mat-scratch
- * producers remain output-stationary to avoid the allocator offset-packing
- * limitation tracked by issue #1908; some dbC-enabled layouts can still exceed
- * operand capacity there.
+ * Full-K M/N grids may use output-, A-, or B-stationary loop orders.  Automatic
+ * L0C double-buffering is excluded before candidate enumeration under every
+ * planner, regardless of the stored legacy opt-in flag.  Under PYPTO, chained
+ * Mat-scratch producers remain output-stationary to avoid the allocator offset-packing
+ * limitation tracked by issue #1908.
  * DSA_RP and PTOAS retain operand-stationary choices because their lifetime-aware
  * placement can subdivide the released operand range.
  *
- * The pass also recognizes a user-authored, static pipeline (stage >= 2, trip
- * count divisible by the stage count) containing exactly one already-L0
- * ``tile.matmul``.  Its selected moving operand must be produced by a direct
- * per-iteration Mat-to-L0 transfer, while the other operand is loop-invariant.
- * Its Acc result must have one canonical loop-carried drain: direct-to-GM
- * ``tile.store`` needs at least four iterations; Acc-to-Mat ``tile.assemble``
- * needs at least eight iterations and an aligned Acc tile occupying at least
- * one quarter of L0C.  When the
- * conservative whole-function Acc footprint (including the physical stage
- * multiplicity of other pipelined Acc producers) plus one slot per profitable
- * loop fits in L0C, it enables the existing two-accumulator drain-overlap
- * schedule automatically under the PyPTO memory planner.  Deeper operand
- * pipelines are scheduled in depth-two compute/drain chunks and still rotate
- * only two L0C slots.  Explicit loop policies, nested control flow, multiple
- * cube matmuls or Acc values, non-canonical drain/yield chains, additional
- * stores, and insufficient L0C capacity stay unchanged.
+ * Existing already-L0 pipelines are not automatically marked for accumulator
+ * double buffering.  Explicit ``pipeline_double_buffer_c`` attributes remain
+ * caller-owned scheduling decisions and are preserved for downstream lowering.
  *
  * Eligible calls require static 2D operands with B in Mat and A in Mat or Vec.
  * ``tile.matmul_bias`` is supported when both matrix operands are Mat and its
