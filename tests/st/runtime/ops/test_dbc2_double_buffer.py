@@ -114,36 +114,32 @@ class _DbcDirectStore(PTOTestCase):
     def get_program(self) -> Any:
         M, K, N = self.M, self.K, self.N
 
-        @pl.program
-        class DbcDirectStoreProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> pl.Tensor[[M, N], pl.FP32]:
-                lm: pl.Tile[[M, K], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                    a, [0, 0], [M, K], target_memory=pl.Mem.Mat
-                )
-                rm: pl.Tile[[K, N], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                    b, [0, 0], [K, N], target_memory=pl.Mem.Mat
-                )
-                c: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lm, rm)
-                out = pl.store(c, [0, 0], out)
-                return out
+        @pl.jit.incore
+        def kernel(
+            a: pl.Tensor[[M, K], pl.FP32],
+            b: pl.Tensor[[K, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            lm: pl.Tile[[M, K], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                a, [0, 0], [M, K], target_memory=pl.Mem.Mat
+            )
+            rm: pl.Tile[[K, N], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                b, [0, 0], [K, N], target_memory=pl.Mem.Mat
+            )
+            c: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lm, rm)
+            out = pl.store(c, [0, 0], out)
+            return out
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32],
-                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> pl.Tensor[[M, N], pl.FP32]:
-                out = self.kernel(a, b, out)
-                return out
+        @pl.jit
+        def orchestrator(
+            a: pl.Tensor[[M, K], pl.FP32],
+            b: pl.Tensor[[K, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            out = kernel(a, b, out)
+            return out
 
-        return DbcDirectStoreProgram
+        return orchestrator.specialize()
 
     def compute_expected(self, tensors, params=None):
         tensors["out"][:] = torch.matmul(tensors["a"], tensors["b"])
@@ -205,34 +201,30 @@ class _DbcMatScratch(PTOTestCase):
     def get_program(self) -> Any:
         M, K, N, P = self.M, self.K, self.N, self.P
 
-        @pl.program
-        class DbcMatScratchProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                a: pl.Tensor[[M, K], pl.BF16],
-                b: pl.Tensor[[K, N], pl.BF16],
-                e: pl.Tensor[[N, P], pl.BF16],
-                out: pl.Out[pl.Tensor[[M, P], pl.FP32]],
-            ) -> pl.Tensor[[M, P], pl.FP32]:
-                c = pl.matmul(a, b, out_dtype=pl.FP32)  # [M, N] f32 > L0c -> Mat scratch
-                cb = pl.cast(c, pl.BF16, mode="rint")  # rint: FIXPIPE narrows tie-even (foldable)
-                d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the scratch on-chip
-                out = pl.assemble(out, d, [0, 0])
-                return out
+        @pl.jit.incore
+        def kernel(
+            a: pl.Tensor[[M, K], pl.BF16],
+            b: pl.Tensor[[K, N], pl.BF16],
+            e: pl.Tensor[[N, P], pl.BF16],
+            out: pl.Out[pl.Tensor[[M, P], pl.FP32]],
+        ) -> pl.Tensor[[M, P], pl.FP32]:
+            c = pl.matmul(a, b, out_dtype=pl.FP32)  # [M, N] f32 > L0c -> Mat scratch
+            cb = pl.cast(c, pl.BF16, mode="rint")  # rint: FIXPIPE narrows tie-even (foldable)
+            d = pl.matmul(cb, e, out_dtype=pl.FP32)  # consumes the scratch on-chip
+            out = pl.assemble(out, d, [0, 0])
+            return out
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                a: pl.Tensor[[M, K], pl.BF16],
-                b: pl.Tensor[[K, N], pl.BF16],
-                e: pl.Tensor[[N, P], pl.BF16],
-                out: pl.Out[pl.Tensor[[M, P], pl.FP32]],
-            ) -> pl.Tensor[[M, P], pl.FP32]:
-                out = self.kernel(a, b, e, out)
-                return out
+        @pl.jit
+        def orchestrator(
+            a: pl.Tensor[[M, K], pl.BF16],
+            b: pl.Tensor[[K, N], pl.BF16],
+            e: pl.Tensor[[N, P], pl.BF16],
+            out: pl.Out[pl.Tensor[[M, P], pl.FP32]],
+        ) -> pl.Tensor[[M, P], pl.FP32]:
+            out = kernel(a, b, e, out)
+            return out
 
-        return DbcMatScratchProgram
+        return orchestrator.specialize()
 
     def compute_expected(self, tensors, params=None):
         a = tensors["a"].float()
