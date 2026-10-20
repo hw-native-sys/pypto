@@ -5238,8 +5238,9 @@ class Before:
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
 
-    @pytest.mark.parametrize("first_loop", ["for", "while"])
-    def test_unused_forwarded_accumulator_allows_retarget(self, first_loop):
+    @pytest.mark.parametrize("first_loop", ["for", "while", "alias", "view"])
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    def test_unused_forwarded_accumulator_allows_retarget(self, first_loop, buffer_ir):
         """Forwarding an unused Acc carry must not require an unsupported Acc copy."""
         forwarding = (
             "            for _first, (carry,) in pl.range(2, init_values=(seed,)):\n"
@@ -5249,6 +5250,11 @@ class Before:
             "                pl.cond(step < 2)\n"
             "                _unused, _steps = pl.yield_(carry, step + 1)\n"
         )
+        carry_seed = "seed"
+        if first_loop in {"alias", "view"}:
+            value = "seed" if first_loop == "alias" else "pl.tile.reshape(seed, [16, 64])"
+            forwarding = f"            alias = {value}\n"
+            carry_seed = "alias"
         before = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -5262,17 +5268,59 @@ class Before:
         seed = pl.tile.matmul(sa, sb)
         for (wave,) in pl.while_(init_values=(0,)):
             pl.cond(wave < 2)
-{forwarding}            for _second, (_carry,) in pl.range(2, init_values=(seed,)):
+{forwarding}            for _second, (_carry,) in pl.range(2, init_values=({carry_seed},)):
                 replacement = pl.tile.matmul(sa, sb)
                 result = pl.yield_(replacement)
             _used = pl.tile.store(result, [0, 0], out)
             _wave_out = pl.yield_(wave + 1)
         return out
 """)
-        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        with passes.PassContext([], enable_buffer_ir=buffer_ir):
+            after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
         refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
         assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
         _assert_carry_yield_lands_in_its_buffer(after)
+
+    @pytest.mark.parametrize("bounds", ["0", "1", "2", "2, 1, -1"])
+    @pytest.mark.parametrize("observe_result", [False, True])
+    def test_forwarding_yield_requires_reachable_consumer(self, bounds, observe_result):
+        """Only a reachable result/backedge can observe the other external seed."""
+        observation = (
+            "            snapshot = pl.tile.move(first_result, target_memory=pl.Mem.Vec)\n"
+            "            _first_used = pl.tile.store(snapshot, [0, 0], out)\n"
+            if observe_result
+            else ""
+        )
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, pool: pl.Tensor[[32, 32], pl.FP16],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP16]]) -> pl.Tensor[[16, 32], pl.FP16]:
+        seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        initial = pl.tile.load(pool, [16, 0], [16, 32], target_memory=pl.Mem.Mat)
+        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < 2)
+            for _first, (carry,) in pl.range({bounds}, init_values=(initial,)):
+                vector = pl.tile.move(carry, target_memory=pl.Mem.Vec)
+                _used = pl.tile.store(vector, [0, 0], out)
+                first_result = pl.yield_(seed)
+{observation}            for _second, (_unused,) in pl.range(2, init_values=(seed,)):
+                replacement = pl.tile.load(pool, [16, 0], [16, 32], target_memory=pl.Mem.Mat)
+                result = pl.yield_(replacement)
+            final_vector = pl.tile.move(result, target_memory=pl.Mem.Vec)
+            _final_used = pl.tile.store(final_vector, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        with passes.PassContext([], enable_buffer_ir=False):
+            after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        observed = bounds == "2" or (observe_result and bounds != "0")
+        if observed:
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+        else:
+            assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
 
     def test_nested_carry_chain_preserves_intermediate_version(self):
         """An inner carry restarts from the outer carry on every intervening While entry."""
@@ -5352,7 +5400,8 @@ class Before:
 
     @pytest.mark.parametrize("read_carry", [False, True], ids=["unused_binding", "observed_carry"])
     @pytest.mark.parametrize("seed_scope", ["outside", "inside"])
-    def test_nested_for_carry_observes_initializer_version(self, read_carry, seed_scope):
+    @pytest.mark.parametrize("alias_kind", ["identity", "view"])
+    def test_nested_for_carry_observes_initializer_version(self, read_carry, seed_scope, alias_kind):
         """An observed carry needs the original seed on every enclosing While entry."""
         seed = "        seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Vec)\n"
         outside = seed if seed_scope == "outside" else ""
@@ -5362,6 +5411,7 @@ class Before:
             if read_carry
             else "pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Vec)"
         )
+        alias = "seed" if alias_kind == "identity" else "pl.tile.reshape(seed, [16, 32])"
         before = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -5370,7 +5420,8 @@ class Before:
                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
 {outside}        for (wave,) in pl.while_(init_values=(0,)):
             pl.cond(wave < waves)
-{inside}            for _i, (carry,) in pl.range(2, init_values=(seed,)):
+{inside}            alias = {alias}
+            for _i, (carry,) in pl.range(2, init_values=(alias,)):
                 replacement = {producer}
                 result = pl.yield_(replacement)
             _used = pl.tile.store(result, [0, 0], out)
@@ -5598,6 +5649,9 @@ class TestWhileAccumulatorAliasSafety:
                 sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
                 initial = pl.tile.matmul(sa, sb)
                 for _i, (carry,) in pl.range(2, init_values=(initial,)):
+                    # An unused forwarding loop must not keep the old Acc seed live.
+                    for _unused_i, (unused_carry,) in pl.range(2, init_values=(initial,)):
+                        _unused_result = pl.yield_(unused_carry)
                     if cond < 1:
                         fresh = pl.tile.matmul(sa, sb)
                         merged = pl.yield_(fresh)

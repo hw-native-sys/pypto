@@ -70,11 +70,18 @@ its own fresh MemRef. This pass closes that gap:
    prove at least one iteration exclude this zero-trip observation; unknown
    bounds remain conservative. Result observations participate in the same
    worklist, including results used to initialize another observed loop carry.
-   Bare-variable yields are forwarding bindings, not payload reads. Only when a
-   branch/loop result or a later iteration actually consumes the value does the
-   worklist activate the corresponding yield observations. This also preserves
+   Bare SSA assignments, zero-copy view sources, and bare-variable yields are
+   forwarding bindings, not payload reads. Both alias and physical recurrence
+   indexes and Buffer IR loop-input isolation share the activated payload
+   observations; ordinary access indexes still
+   retain all forwarding uses. Only when an alias, branch/loop result, or later
+   iteration actually consumes the value does the worklist activate its source
+   observations. Constant For bounds disable body-result edges for zero trips
+   and backedge edges for at most one trip; unknown bounds remain conservative. This also preserves
    consumed forwarding results of nonempty loops, without making unused Acc
    carries falsely block retargeting and require an unsupported Acc-to-Acc copy.
+   Buffer IR also avoids private loop-input storage when the complete body only
+   yields every carry unchanged: this binding cannot overwrite its initializer.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.

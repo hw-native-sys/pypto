@@ -316,6 +316,36 @@ class DefMapVisitor : public IRVisitor {
       defs[op->var_] = d;
       writes[op.get()].insert(op->var_);
     }
+    // Renames and zero-copy views bind storage without reading its payload.
+    // Keep shape/offset operands as ordinary reads; defer only the source.
+    if (As<TileType>(op->var_->GetType())) {
+      if (auto source = AsVarLike(op->value_)) {
+        binding_reads[op->var_].emplace_back(op.get(), source);
+        reading_initializer_ = true;
+        VisitExpr(op->value_);
+        reading_initializer_ = false;
+        return;
+      }
+      if (auto call = As<Call>(op->value_);
+          call && call->op_ && op_predicates::IsBufferAliasingViewOp(call->op_->name_) &&
+          OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
+              ExecutionMemoryAccessEvidence::NoAccess &&
+          !call->args_.empty()) {
+        if (auto source = AsVarLike(call->args_[0])) {
+          binding_reads[op->var_].emplace_back(op.get(), source);
+          reading_initializer_ = true;
+          VisitExpr(call->args_[0]);
+          reading_initializer_ = false;
+          for (size_t i = 1; i < call->args_.size(); ++i) VisitExpr(call->args_[i]);
+          // Debug/dependency attributes can independently consume payloads.
+          for (const auto& [key, value] : call->attrs_) {
+            (void)key;
+            ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+          }
+          return;
+        }
+      }
+    }
     if (op->value_) VisitExpr(op->value_);
   }
 
@@ -397,7 +427,12 @@ class DefMapVisitor : public IRVisitor {
       if (auto branch = As<IfStmt>(owner)) {
         bind(branch);
       } else if (auto loop = As<ForStmt>(owner)) {
-        bind_loop(loop);
+        // A zero-trip loop cannot return a body yield, and a one-trip loop
+        // cannot consume it on a backedge. Unknown bounds retain both edges.
+        if (ForMayExecute(loop, false)) bind(loop);
+        if (ForMayExecute(loop, true) && i < loop->iter_args_.size()) {
+          binding_reads[loop->iter_args_[i]].emplace_back(op.get(), source);
+        }
       } else if (auto loop = As<WhileStmt>(owner)) {
         bind_loop(loop);
       }
@@ -417,6 +452,17 @@ class DefMapVisitor : public IRVisitor {
   }
 
  private:
+  static bool ForMayExecute(const ForStmtPtr& loop, bool after_first) {
+    const auto start = As<ConstInt>(loop->start_);
+    const auto stop = As<ConstInt>(loop->stop_);
+    const auto step = As<ConstInt>(loop->step_);
+    if (!start || !stop || !step || step->value_ == 0) return true;
+    // Widen before addition so extreme signed bounds/steps cannot overflow.
+    const __int128 current =
+        static_cast<__int128>(start->value_) + (after_first ? static_cast<__int128>(step->value_) : 0);
+    return step->value_ > 0 ? current < stop->value_ : current > stop->value_;
+  }
+
   template <typename LoopPtr>
   void VisitLoopInitializers(const LoopPtr& loop) {
     for (const auto& argument : loop->iter_args_) {
@@ -462,6 +508,69 @@ class DefMapVisitor : public IRVisitor {
   std::vector<StmtPtr> binding_stack_;
   size_t next_order_ = 0;
 };
+
+// Share payload demand with both legacy coalescing and Buffer IR loop-input
+// isolation. Forwarding bindings must not become reads in either storage path.
+std::map<const Stmt*, std::set<VarPtr>> BuildPayloadObservations(
+    const std::map<VarPtr, VarDef>& defs, const std::map<const Stmt*, std::set<VarPtr>>& observation_reads,
+    const DefMapVisitor::BindingReads& binding_reads) {
+  auto effective_observations = observation_reads;
+  std::set<VarPtr> observed_loop_values;
+  std::vector<VarPtr> pending_loop_values;
+  auto observe_loop_value = [&](const VarPtr& var) {
+    const auto def = defs.find(var);
+    if (def != defs.end() &&
+        (def->second.kind == VarDef::kIterArg || def->second.kind == VarDef::kForReturn ||
+         def->second.kind == VarDef::kWhileReturn || def->second.kind == VarDef::kIfReturn ||
+         binding_reads.count(var) != 0) &&
+        observed_loop_values.insert(var).second) {
+      pending_loop_values.push_back(var);
+    }
+  };
+  for (const auto& [stmt, vars] : observation_reads) {
+    (void)stmt;
+    for (const auto& var : vars) observe_loop_value(var);
+  }
+  while (!pending_loop_values.empty()) {
+    const auto value = pending_loop_values.back();
+    pending_loop_values.pop_back();
+    // Activate forwarding edges only on demand; an unused yield is not a
+    // physical read. Each binding and edge is processed at most once.
+    if (auto bindings = binding_reads.find(value); bindings != binding_reads.end()) {
+      for (const auto& [stmt, source] : bindings->second) {
+        effective_observations[stmt].insert(source);
+        observe_loop_value(source);
+      }
+    }
+    const auto& def = defs.at(value);
+    IterArgPtr argument = def.iter_arg;
+    if (def.kind == VarDef::kForReturn) {
+      auto loop = As<ForStmt>(def.control_stmt);
+      if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
+      auto start = As<ConstInt>(loop->start_);
+      auto stop = As<ConstInt>(loop->stop_);
+      auto step = As<ConstInt>(loop->step_);
+      // Compare bounds directly: computing stop-start or a trip count could
+      // overflow. Unknown bounds conservatively retain the zero-trip path.
+      if (start && stop && step &&
+          ((step->value_ > 0 && start->value_ < stop->value_) ||
+           (step->value_ < 0 && start->value_ > stop->value_))) {
+        continue;
+      }
+      argument = loop->iter_args_[def.return_idx];
+    } else if (def.kind == VarDef::kWhileReturn) {
+      auto loop = As<WhileStmt>(def.control_stmt);
+      if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
+      argument = loop->iter_args_[def.return_idx];
+    }
+    if (!argument) continue;
+    if (auto initial = AsVarLike(argument->initValue_)) {
+      effective_observations[def.definition_stmt.get()].insert(initial);
+      observe_loop_value(initial);
+    }
+  }
+  return effective_observations;
+}
 
 /// A second lexical numbering with every IfStmt's arms visited in reverse.
 /// In structured control flow, statement A can execute before statement B iff
@@ -672,6 +781,10 @@ class LoopInputIsolation : public IRVisitor {
 
   void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
     names_.Collect(body, parameters);
+    DefMapVisitor demand;
+    demand.Run(body);
+    payload_observations_ =
+        BuildPayloadObservations(demand.defs, demand.observation_reads, demand.binding_reads);
     ReverseBranchOrderVisitor reverse;
     reverse.Run(body);
     reverse_order_ = std::move(reverse.stmt_order);
@@ -722,6 +835,8 @@ class LoopInputIsolation : public IRVisitor {
 
  protected:
   void VisitStmt(const StmtPtr& statement) override {
+    const auto* saved_statement = current_statement_;
+    current_statement_ = statement.get();
     auto saved = current_;
     const auto saved_reverse = current_reverse_;
     current_reverse_ = reverse_order_.at(statement.get()) + 1;
@@ -730,6 +845,7 @@ class LoopInputIsolation : public IRVisitor {
     IRVisitor::VisitStmt(statement);
     current_ = saved;
     current_reverse_ = saved_reverse;
+    current_statement_ = saved_statement;
   }
   void VisitStmt_(const AssignStmtPtr& statement) override {
     auto source = AsVarLike(statement->value_);
@@ -742,6 +858,9 @@ class LoopInputIsolation : public IRVisitor {
       // logical version, including a view created inside a loop from old input.
       auto origin = definitions_.find(source.get());
       definitions_[statement->var_.get()] = origin == definitions_.end() ? 0 : origin->second;
+      // Visit the expression through the demand filter: non-source operands
+      // and reference attributes can be real observations even for a view.
+      VisitExpr(statement->value_);
       return;
     }
     definitions_[statement->var_.get()] = current_;
@@ -762,6 +881,8 @@ class LoopInputIsolation : public IRVisitor {
   void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
   void VisitExpr_(const IterArgPtr& value) override { VisitVarLike_(value); }
   void VisitVarLike_(const VarPtr& value) override {
+    const auto observation = payload_observations_.find(current_statement_);
+    if (observation == payload_observations_.end() || observation->second.count(value) == 0) return;
     if (GetTileTypeWithMemRef(value->GetType())) {
       reads_.emplace_back(current_, value);
       read_reverse_[current_] = current_reverse_;
@@ -777,6 +898,9 @@ class LoopInputIsolation : public IRVisitor {
   }
 
  private:
+  const Stmt* current_statement_ = nullptr;
+  std::map<const Stmt*, std::set<VarPtr>> payload_observations_;
+
   template <typename LoopPtr>
   void VisitLoop(const LoopPtr& loop) {
     loops_.push_back(loop);
@@ -799,6 +923,20 @@ class LoopInputIsolation : public IRVisitor {
 
   template <typename LoopPtr>
   void PlanLoop(const LoopPtr& loop) {
+    auto body = loop->body_;
+    if (auto sequence = As<SeqStmts>(body); sequence && sequence->stmts_.size() == 1) {
+      body = sequence->stmts_[0];
+    }
+    if (auto yield = As<YieldStmt>(body); yield && yield->value_.size() == loop->iter_args_.size()) {
+      bool unchanged = true;
+      for (size_t i = 0; i < yield->value_.size(); ++i) {
+        unchanged = unchanged && AsVarLike(yield->value_[i]) == loop->iter_args_[i];
+      }
+      // A body containing only identity forwarding cannot overwrite any input,
+      // even when another handle observes that input after this loop. Such a
+      // binding needs no private buffer (and no unsupported Acc-to-Acc copy).
+      if (unchanged) return;
+    }
     const auto position = positions_.at(loop.get());
     std::set<size_t> isolate;
     std::map<const Var*, std::vector<std::pair<int64_t, size_t>>> windows;
@@ -1041,8 +1179,8 @@ class TopDownRetargeter {
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
     BuildAccessIndexes(def_v.reads, def_v.writes);
-    BuildRecurringReadIndexes(def_v.reads, def_v.condition_reads, def_v.observation_reads,
-                              def_v.binding_reads, def_v.loops);
+    BuildRecurringReadIndexes(def_v.condition_reads, def_v.observation_reads, def_v.binding_reads,
+                              def_v.loops);
     if (!index_branch_storage) return;
 
     // Count distinct storage handles once, including incoming handles with no
@@ -1322,8 +1460,7 @@ class TopDownRetargeter {
   /// active loop stack for the outermost loop entered after each handle's
   /// definition. Each loop is pushed/popped once; event indexing and queries
   /// remain O(N log N), with no per-phi subtree or ancestor scans.
-  void BuildRecurringReadIndexes(const std::map<const Stmt*, std::set<VarPtr>>& reads,
-                                 const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
+  void BuildRecurringReadIndexes(const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
                                  const std::map<const Stmt*, std::set<VarPtr>>& observation_reads,
                                  const DefMapVisitor::BindingReads& binding_reads,
                                  const std::vector<StmtPtr>& loops) {
@@ -1337,63 +1474,10 @@ class TopDownRetargeter {
     // A consumed loop result also observes the initializer on a zero-trip
     // path. Definitely nonempty For results need no such entry observation.
     // Unused bindings remain non-observing; this worklist stays O(N log N).
-    auto effective_observations = observation_reads;
-    std::set<VarPtr> observed_loop_values;
-    std::vector<VarPtr> pending_loop_values;
-    auto observe_loop_value = [&](const VarPtr& var) {
-      const auto def = defs_.find(var);
-      if (def != defs_.end() &&
-          (def->second.kind == VarDef::kIterArg || def->second.kind == VarDef::kForReturn ||
-           def->second.kind == VarDef::kWhileReturn || def->second.kind == VarDef::kIfReturn) &&
-          observed_loop_values.insert(var).second) {
-        pending_loop_values.push_back(var);
-      }
-    };
-    for (const auto& [stmt, vars] : observation_reads) {
-      (void)stmt;
-      for (const auto& var : vars) observe_loop_value(var);
-    }
-    while (!pending_loop_values.empty()) {
-      const auto value = pending_loop_values.back();
-      pending_loop_values.pop_back();
-      // Activate forwarding edges only on demand; an unused yield is not a
-      // physical read. Each binding and edge is processed at most once.
-      if (auto bindings = binding_reads.find(value); bindings != binding_reads.end()) {
-        for (const auto& [stmt, source] : bindings->second) {
-          effective_observations[stmt].insert(source);
-          observe_loop_value(source);
-        }
-      }
-      const auto& def = defs_.at(value);
-      IterArgPtr argument = def.iter_arg;
-      if (def.kind == VarDef::kForReturn) {
-        auto loop = As<ForStmt>(def.control_stmt);
-        if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
-        auto start = As<ConstInt>(loop->start_);
-        auto stop = As<ConstInt>(loop->stop_);
-        auto step = As<ConstInt>(loop->step_);
-        // Compare bounds directly: computing stop-start or a trip count could
-        // overflow. Unknown bounds conservatively retain the zero-trip path.
-        if (start && stop && step &&
-            ((step->value_ > 0 && start->value_ < stop->value_) ||
-             (step->value_ < 0 && start->value_ > stop->value_))) {
-          continue;
-        }
-        argument = loop->iter_args_[def.return_idx];
-      } else if (def.kind == VarDef::kWhileReturn) {
-        auto loop = As<WhileStmt>(def.control_stmt);
-        if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
-        argument = loop->iter_args_[def.return_idx];
-      }
-      if (!argument) continue;
-      if (auto initial = AsVarLike(argument->initValue_)) {
-        effective_observations[def.definition_stmt.get()].insert(initial);
-        observe_loop_value(initial);
-      }
-    }
+    auto effective_observations = BuildPayloadObservations(defs_, observation_reads, binding_reads);
     std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;
-    ordered_reads.reserve(reads.size());
-    for (const auto& [stmt, vars] : reads) {
+    ordered_reads.reserve(effective_observations.size());
+    for (const auto& [stmt, vars] : effective_observations) {
       ordered_reads.emplace_back(stmt_order_.at(stmt), &vars);
     }
     std::sort(ordered_reads.begin(), ordered_reads.end(),
@@ -1403,10 +1487,6 @@ class TopDownRetargeter {
     std::vector<std::pair<size_t, size_t>> loop_stack;
     std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
     std::map<size_t, std::vector<std::pair<size_t, size_t>>> physical_events;
-    std::map<size_t, const std::set<VarPtr>*> observations_by_position;
-    for (const auto& [stmt, vars] : effective_observations) {
-      observations_by_position.emplace(stmt_order_.at(stmt), &vars);
-    }
     auto record_physical = [&](const VarPtr& var, const std::pair<size_t, size_t>& interval) {
       // Semantic aliases may still carry stale physical metadata before the
       // first normalization. Protect their canonical allocation as well.
@@ -1438,12 +1518,9 @@ class TopDownRetargeter {
                       [](size_t definition, const auto& interval) { return definition < interval.first; });
         if (recurring != loop_stack.end()) {
           recurring_events[ResolveAliasRoot(var).get()].push_back(*recurring);
-          // Naming storage as a carry initializer does not by itself observe
-          // its payload. Preserve the safe reload-only Mat carry retarget.
-          const auto observations = observations_by_position.find(position);
-          if (observations != observations_by_position.end() && observations->second->count(var) != 0) {
-            record_physical(var, *recurring);
-          }
+          // Alias and physical recurrence must share payload demand. Unused
+          // forwarding bindings belong only to the ordinary access indexes.
+          record_physical(var, *recurring);
         }
       }
     }
