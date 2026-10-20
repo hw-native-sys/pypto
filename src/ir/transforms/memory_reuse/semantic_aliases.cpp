@@ -273,6 +273,8 @@ class DefMapVisitor : public IRVisitor {
   std::map<const Stmt*, std::set<VarPtr>> writes;
   std::map<const Stmt*, std::set<VarPtr>> condition_reads;
   std::map<const Stmt*, std::set<VarPtr>> observation_reads;
+  using BindingReads = std::map<VarPtr, std::vector<std::pair<const Stmt*, VarPtr>>>;
+  BindingReads binding_reads;
   std::vector<StmtPtr> loops;  // ForStmt/WhileStmt in lexical preorder
   StmtPtr root;
 
@@ -331,8 +333,10 @@ class DefMapVisitor : public IRVisitor {
       d.order = stmt_order.at(op.get());
       defs[rv] = d;
     }
+    binding_stack_.push_back(op);
     VisitStmt(op->then_body_);
     if (op->else_body_.has_value()) VisitStmt(op->else_body_.value());
+    binding_stack_.pop_back();
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
@@ -345,7 +349,9 @@ class DefMapVisitor : public IRVisitor {
 
     RegisterLoopBindings(op, VarDef::kForReturn, op);
     for_stack_.push_back(op);
+    binding_stack_.push_back(op);
     VisitStmt(op->body_);
+    binding_stack_.pop_back();
     for_stack_.pop_back();
   }
 
@@ -362,7 +368,40 @@ class DefMapVisitor : public IRVisitor {
     reading_condition_ = true;
     VisitExpr(loop->condition_);
     reading_condition_ = false;
+    binding_stack_.push_back(loop);
     VisitStmt(loop->body_);
+    binding_stack_.pop_back();
+  }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      auto source = AsVarLike(op->value_[i]);
+      // Forwarding a handle only observes its payload when the bound result
+      // or next iteration's carry is consumed. Computed yields still read it.
+      reading_initializer_ = source != nullptr && !binding_stack_.empty();
+      VisitExpr(op->value_[i]);
+      reading_initializer_ = false;
+      if (!source || binding_stack_.empty()) continue;
+      auto bind = [&](const auto& owner) {
+        if (i < owner->return_vars_.size()) {
+          binding_reads[owner->return_vars_[i]].emplace_back(op.get(), source);
+        }
+      };
+      auto bind_loop = [&](const auto& loop) {
+        bind(loop);
+        if (i < loop->iter_args_.size()) {
+          binding_reads[loop->iter_args_[i]].emplace_back(op.get(), source);
+        }
+      };
+      const auto& owner = binding_stack_.back();
+      if (auto branch = As<IfStmt>(owner)) {
+        bind(branch);
+      } else if (auto loop = As<ForStmt>(owner)) {
+        bind_loop(loop);
+      } else if (auto loop = As<WhileStmt>(owner)) {
+        bind_loop(loop);
+      }
+    }
   }
 
   void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
@@ -420,6 +459,7 @@ class DefMapVisitor : public IRVisitor {
   bool reading_condition_ = false;
   bool reading_initializer_ = false;
   std::vector<ForStmtPtr> for_stack_;
+  std::vector<StmtPtr> binding_stack_;
   size_t next_order_ = 0;
 };
 
@@ -1001,7 +1041,8 @@ class TopDownRetargeter {
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
     BuildAccessIndexes(def_v.reads, def_v.writes);
-    BuildRecurringReadIndexes(def_v.reads, def_v.condition_reads, def_v.observation_reads, def_v.loops);
+    BuildRecurringReadIndexes(def_v.reads, def_v.condition_reads, def_v.observation_reads,
+                              def_v.binding_reads, def_v.loops);
     if (!index_branch_storage) return;
 
     // Count distinct storage handles once, including incoming handles with no
@@ -1284,6 +1325,7 @@ class TopDownRetargeter {
   void BuildRecurringReadIndexes(const std::map<const Stmt*, std::set<VarPtr>>& reads,
                                  const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
                                  const std::map<const Stmt*, std::set<VarPtr>>& observation_reads,
+                                 const DefMapVisitor::BindingReads& binding_reads,
                                  const std::vector<StmtPtr>& loops) {
     recurring_alias_read_index_.clear();
     recurring_physical_read_index_.clear();
@@ -1302,7 +1344,7 @@ class TopDownRetargeter {
       const auto def = defs_.find(var);
       if (def != defs_.end() &&
           (def->second.kind == VarDef::kIterArg || def->second.kind == VarDef::kForReturn ||
-           def->second.kind == VarDef::kWhileReturn) &&
+           def->second.kind == VarDef::kWhileReturn || def->second.kind == VarDef::kIfReturn) &&
           observed_loop_values.insert(var).second) {
         pending_loop_values.push_back(var);
       }
@@ -1314,6 +1356,14 @@ class TopDownRetargeter {
     while (!pending_loop_values.empty()) {
       const auto value = pending_loop_values.back();
       pending_loop_values.pop_back();
+      // Activate forwarding edges only on demand; an unused yield is not a
+      // physical read. Each binding and edge is processed at most once.
+      if (auto bindings = binding_reads.find(value); bindings != binding_reads.end()) {
+        for (const auto& [stmt, source] : bindings->second) {
+          effective_observations[stmt].insert(source);
+          observe_loop_value(source);
+        }
+      }
       const auto& def = defs_.at(value);
       IterArgPtr argument = def.iter_arg;
       if (def.kind == VarDef::kForReturn) {

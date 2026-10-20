@@ -5184,7 +5184,8 @@ class TestWhileNestedAliasTraversal:
         ["runtime_for", "zero_for", "positive_for", "descending_for", "runtime_while", "zero_while"],
     )
     @pytest.mark.parametrize("observe_result", [False, True], ids=["unused_result", "observed_result"])
-    def test_zero_trip_result_observes_initializer(self, first_loop, observe_result):
+    @pytest.mark.parametrize("forward_carry", [False, True], ids=["reload_yield", "forward_yield"])
+    def test_zero_trip_result_observes_initializer(self, first_loop, observe_result, forward_carry):
         """A zero-trip result can observe an old seed without ever reading its carry."""
         if first_loop.endswith("for"):
             bounds = {
@@ -5208,6 +5209,8 @@ class TestWhileNestedAliasTraversal:
             if observe_result
             else ""
         )
+        if forward_carry:
+            first_yield = first_yield.replace("first_reload", "_carry")
         before = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -5230,10 +5233,46 @@ class Before:
         after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
         refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
         can_skip = first_loop not in {"positive_for", "descending_for"}
-        if observe_result and can_skip:
+        if observe_result and (can_skip or forward_carry):
             assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+
+    @pytest.mark.parametrize("first_loop", ["for", "while"])
+    def test_unused_forwarded_accumulator_allows_retarget(self, first_loop):
+        """Forwarding an unused Acc carry must not require an unsupported Acc copy."""
+        forwarding = (
+            "            for _first, (carry,) in pl.range(2, init_values=(seed,)):\n"
+            "                _unused = pl.yield_(carry)\n"
+            if first_loop == "for"
+            else "            for carry, step in pl.while_(init_values=(seed, 0)):\n"
+            "                pl.cond(step < 2)\n"
+            "                _unused, _steps = pl.yield_(carry, step + 1)\n"
+        )
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[16, 64], pl.BF16], rhs: pl.Tensor[[64, 64], pl.BF16],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+        seed = pl.tile.matmul(sa, sb)
+        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < 2)
+{forwarding}            for _second, (_carry,) in pl.range(2, init_values=(seed,)):
+                replacement = pl.tile.matmul(sa, sb)
+                result = pl.yield_(replacement)
+            _used = pl.tile.store(result, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+        _assert_carry_yield_lands_in_its_buffer(after)
 
     def test_nested_carry_chain_preserves_intermediate_version(self):
         """An inner carry restarts from the outer carry on every intervening While entry."""

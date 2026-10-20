@@ -57,7 +57,10 @@ program = passes.materialize_semantic_aliases()(program)
    消费可能零次迭代的 For/While 结果时，即使循环体不读取 carry，也会在入口观测
    initializer。常量 For 边界若证明至少执行一次，则排除零次迭代观测；未知边界
    保守处理。结果观测沿同一工作队列传播，也覆盖结果用作其他被读取 carry 的
-   initializer 的情况。
+   initializer 的情况。仅 yield 变量属于转发绑定，不是数据读取；只有分支/循环
+   结果或后续迭代实际消费该值时，工作队列才激活相应的 yield 观测。因此，非空循环
+   转发且被消费的结果仍受保护，而未使用的 Acc carry 不会错误阻止重定向，进而
+   要求不受支持的 Acc-to-Acc 复制。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部

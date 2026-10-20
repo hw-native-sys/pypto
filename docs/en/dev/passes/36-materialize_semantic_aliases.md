@@ -70,6 +70,11 @@ its own fresh MemRef. This pass closes that gap:
    prove at least one iteration exclude this zero-trip observation; unknown
    bounds remain conservative. Result observations participate in the same
    worklist, including results used to initialize another observed loop carry.
+   Bare-variable yields are forwarding bindings, not payload reads. Only when a
+   branch/loop result or a later iteration actually consumes the value does the
+   worklist activate the corresponding yield observations. This also preserves
+   consumed forwarding results of nonempty loops, without making unused Acc
+   carries falsely block retargeting and require an unsupported Acc-to-Acc copy.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.
