@@ -1479,6 +1479,133 @@ class TestInlineTileArgumentContracts:
             == []
         )
 
+    @pytest.mark.parametrize(
+        "mismatch", ["shape", "dtype", "memory_space", "rank", "tile_kind", "tuple_kind", "tuple_arity"]
+    )
+    def test_nested_tuple_tile_physical_contract(self, mismatch):
+        """Discarding a tuple argument must not erase a nested Tile's declared contract."""
+        span = ir.Span("tuple_tile_contract.py", 29, 3)
+        scalar_type = ir.ScalarType(pl.INDEX)
+        formal_tile = ir.TileType([8, 64], pl.FP32, memory_space=ir.MemorySpace.Vec)
+        formal_type = ir.TupleType([scalar_type, ir.TupleType([formal_tile])])
+        shape = [16, 64] if mismatch == "shape" else [8, 64, 1] if mismatch == "rank" else [8, 64]
+        dtype = pl.BF16 if mismatch == "dtype" else pl.FP32
+        space = ir.MemorySpace.Acc if mismatch == "memory_space" else ir.MemorySpace.Vec
+        actual_tile = (
+            ir.TensorType(shape, dtype)
+            if mismatch == "tile_kind"
+            else ir.TileType(shape, dtype, memory_space=space)
+        )
+        actual_type = (
+            actual_tile
+            if mismatch == "tuple_kind"
+            else ir.TupleType([scalar_type, ir.TupleType([] if mismatch == "tuple_arity" else [actual_tile])])
+        )
+        pair, source = ir.Var("pair", formal_type, span), ir.Var("source", actual_type, span)
+        helper = ir.Function("consume", [pair], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline)
+        call = ir.Call(ir.GlobalVar("consume"), [source], ir.UnknownType(), span)
+        body = ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span)
+        before = ir.Program(
+            [helper, ir.Function("main", [source], [actual_type], body, span)], "Before", span
+        )
+        detail = {
+            "shape": "physical shape dimension",
+            "dtype": "dtype",
+            "memory_space": "memory space",
+            "rank": "physical rank",
+            "tile_kind": "expected Tile",
+            "tuple_kind": "expected tuple",
+            "tuple_arity": "tuple arity",
+        }[mismatch]
+        with pytest.raises(
+            ValueError, match=f"Inline call to 'consume' parameter 'pair': .*{detail}"
+        ) as error:
+            passes.inline_functions()(before)
+        assert "tuple_tile_contract.py:29:3" in str(error.value)
+
+    def test_nested_tuple_tiles_keep_independent_generic_dimensions(self):
+        """Each generic Tile uses its own physical extents and preserves its caller-owned view."""
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+        formal_tile = ir.TileType([rows, 64], pl.FP32)
+        formal_type = ir.TupleType([formal_tile, ir.TupleType([formal_tile])])
+        actual_type = ir.TupleType(
+            [
+                ir.TileType(
+                    [8, 64],
+                    pl.FP32,
+                    memory_space=ir.MemorySpace.Vec,
+                    tile_view=ir.TileView(valid_shape=[3, 64]),
+                ),
+                ir.TupleType([ir.TileType([16, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[5, 64]))]),
+            ]
+        )
+        pair, source = ir.Var("pair", formal_type, span), ir.Var("source", actual_type, span)
+        helper = ir.Function("consume", [pair], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline)
+        call = ir.Call(ir.GlobalVar("consume"), [source], ir.UnknownType(), span)
+        before = ir.Program(
+            [
+                helper,
+                ir.Function(
+                    "main",
+                    [source],
+                    [actual_type],
+                    ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span),
+                    span,
+                ),
+            ],
+            "Before",
+            span,
+        )
+        expected = ir.Program(
+            [ir.Function("main", [source], [actual_type], ir.ReturnStmt([source], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
+    @pytest.mark.parametrize("scalar_first", [False, True], ids=["scalar_last", "scalar_first"])
+    @pytest.mark.parametrize("scalar_value", [8, 16], ids=["matching", "conflicting"])
+    def test_nested_tuple_tile_shape_uses_actual_scalar(self, scalar_first, scalar_value):
+        """Scalar values remain authoritative for physical dimensions inside tuple parameters."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        formal_type = ir.TupleType([ir.TupleType([ir.TileType([scalar, 64], pl.FP32)])])
+        actual_type = ir.TupleType(
+            [ir.TupleType([ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[3, 64]))])]
+        )
+        pair, source = ir.Var("pair", formal_type, span), ir.Var("source", actual_type, span)
+        params, args = [pair, scalar], [source, ir.ConstInt(scalar_value, pl.INDEX, span)]
+        if scalar_first:
+            params.reverse()
+            args.reverse()
+        helper = ir.Function("consume", params, [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline)
+        call = ir.Call(ir.GlobalVar("consume"), args, ir.UnknownType(), span)
+        before = ir.Program(
+            [
+                helper,
+                ir.Function(
+                    "main",
+                    [source],
+                    [actual_type],
+                    ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span),
+                    span,
+                ),
+            ],
+            "Before",
+            span,
+        )
+        if scalar_value != 8:
+            with pytest.raises(ValueError, match="parameter 'pair': .*physical shape dimension"):
+                passes.inline_functions()(before)
+            return
+        expected = ir.Program(
+            [ir.Function("main", [source], [actual_type], ir.ReturnStmt([source], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
     @pytest.mark.parametrize("scalar_value", [4, 8], ids=["matching", "conflicting"])
     def test_void_tuple_tile_scalar_view_contract(self, scalar_value):
         """Tuple-contained Tiles must reach the same void-call contract validation."""

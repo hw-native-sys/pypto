@@ -730,62 +730,81 @@ bool ContainsTileType(const TypePtr& type) {
   return false;
 }
 
+void ValidateInlineTileType(const TypePtr& expected_type, const TypePtr& actual_type,
+                            const std::unordered_map<const Var*, ExprPtr>& scalar_args,
+                            const std::string& context, const Span& span) {
+  if (auto expected_tuple = As<TupleType>(expected_type)) {
+    auto actual_tuple = As<TupleType>(actual_type);
+    CHECK_SPAN(actual_tuple, span) << context << "expected tuple argument, got "
+                                   << (actual_type ? actual_type->TypeName() : "an untyped value");
+    CHECK_SPAN(expected_tuple->types_.size() == actual_tuple->types_.size(), span)
+        << context << "tuple arity mismatch: expected " << expected_tuple->types_.size() << ", got "
+        << actual_tuple->types_.size();
+    for (size_t i = 0; i < expected_tuple->types_.size(); ++i) {
+      ValidateInlineTileType(expected_tuple->types_[i], actual_tuple->types_[i], scalar_args,
+                             context + "tuple element[" + std::to_string(i) + "]: ", span);
+    }
+    return;
+  }
+  auto expected = As<TileType>(expected_type);
+  if (!expected) return;
+  auto actual = As<TileType>(actual_type);
+  CHECK_SPAN(actual, span) << context << "expected Tile argument, got "
+                           << (actual_type ? actual_type->TypeName() : "an untyped value");
+  CHECK_SPAN(expected->dtype_ == actual->dtype_, span)
+      << context << "dtype mismatch: expected " << expected->dtype_.ToString() << ", got "
+      << actual->dtype_.ToString();
+  CHECK_SPAN(expected->shape_.size() == actual->shape_.size(), span)
+      << context << "physical rank mismatch: expected " << expected->shape_.size() << ", got "
+      << actual->shape_.size();
+  const auto expected_space = expected->GetMemorySpace();
+  const auto actual_space = actual->GetMemorySpace();
+  if (expected_space && actual_space) {
+    CHECK_SPAN(*expected_space == *actual_space, span)
+        << context << "memory space mismatch: expected " << MemorySpaceToString(*expected_space) << ", got "
+        << MemorySpaceToString(*actual_space);
+  }
+
+  // Bind generic dimensions per Tile from physical extents only. The general
+  // call-type deduction also binds valid extents, which can legitimately be
+  // smaller and must not constrain this check. Scalar shape parameters still
+  // use their actual values, and repeated dimensions within one Tile agree.
+  // Reuse structural expression binding (e.g. 2*M -> 2*N), but strip views
+  // from these analysis-only descriptors so valid extents never bind M.
+  auto physical_param = std::make_shared<Var>(
+      "inline_tile", std::make_shared<TileType>(expected->shape_, expected->dtype_), span);
+  auto physical_arg =
+      std::make_shared<Var>("inline_tile", std::make_shared<TileType>(actual->shape_, actual->dtype_), span);
+  auto physical_dims = DeduceCallTypeBindings({physical_param}, {physical_arg});
+  var_collectors::VarDefUseCollector shape_vars;
+  for (const auto& dim : expected->shape_) shape_vars.VisitExpr(dim);
+  for (const auto* var : shape_vars.var_uses_ordered) {
+    if (scalar_args.count(var)) physical_dims.erase(var);
+  }
+  for (size_t axis = 0; axis < expected->shape_.size(); ++axis) {
+    auto dim = transform_utils::Substitute(expected->shape_[axis], scalar_args);
+    dim = transform_utils::Substitute(dim, physical_dims);
+    CHECK_SPAN(DimensionsEqual(dim, actual->shape_[axis]), span)
+        << context << "physical shape dimension[" << axis << "] mismatch: expected " << PythonPrint(dim)
+        << ", got " << PythonPrint(actual->shape_[axis]);
+  }
+}
+
 void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr>& args, const Span& span) {
   std::unordered_map<const Var*, ExprPtr> scalar_args;
-  bool has_tile_arg = false;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
-    has_tile_arg |= ContainsTileType(callee->params_[i]->GetType());
     if (As<ScalarType>(callee->params_[i]->GetType())) {
       scalar_args.emplace(callee->params_[i].get(), args[i]);
     }
   }
+  bool has_tile_arg = false;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
     const auto& param = callee->params_[i];
-    auto expected = As<TileType>(param->GetType());
-    if (!expected) continue;
+    if (!ContainsTileType(param->GetType())) continue;
+    has_tile_arg = true;
     const std::string context =
         "Inline call to '" + callee->name_ + "' parameter '" + param->name_hint_ + "': ";
-    const auto actual_type = args[i]->GetType();
-    auto actual = As<TileType>(actual_type);
-    CHECK_SPAN(actual, span) << context << "expected Tile argument, got "
-                             << (actual_type ? actual_type->TypeName() : "an untyped value");
-    CHECK_SPAN(expected->dtype_ == actual->dtype_, span)
-        << context << "dtype mismatch: expected " << expected->dtype_.ToString() << ", got "
-        << actual->dtype_.ToString();
-    CHECK_SPAN(expected->shape_.size() == actual->shape_.size(), span)
-        << context << "physical rank mismatch: expected " << expected->shape_.size() << ", got "
-        << actual->shape_.size();
-    const auto expected_space = expected->GetMemorySpace();
-    const auto actual_space = actual->GetMemorySpace();
-    if (expected_space && actual_space) {
-      CHECK_SPAN(*expected_space == *actual_space, span)
-          << context << "memory space mismatch: expected " << MemorySpaceToString(*expected_space) << ", got "
-          << MemorySpaceToString(*actual_space);
-    }
-
-    // Bind generic dimensions per Tile from physical extents only. The general
-    // call-type deduction also binds valid extents, which can legitimately be
-    // smaller and must not constrain this check. Scalar shape parameters still
-    // use their actual values, and repeated dimensions within one Tile agree.
-    // Reuse structural expression binding (e.g. 2*M -> 2*N), but strip views
-    // from these analysis-only descriptors so valid extents never bind M.
-    auto physical_param = std::make_shared<Var>(
-        param->name_hint_, std::make_shared<TileType>(expected->shape_, expected->dtype_), param->span_);
-    auto physical_arg = std::make_shared<Var>(
-        param->name_hint_, std::make_shared<TileType>(actual->shape_, actual->dtype_), args[i]->span_);
-    auto physical_dims = DeduceCallTypeBindings({physical_param}, {physical_arg});
-    var_collectors::VarDefUseCollector shape_vars;
-    for (const auto& dim : expected->shape_) shape_vars.VisitExpr(dim);
-    for (const auto* var : shape_vars.var_uses_ordered) {
-      if (scalar_args.count(var)) physical_dims.erase(var);
-    }
-    for (size_t axis = 0; axis < expected->shape_.size(); ++axis) {
-      auto dim = transform_utils::Substitute(expected->shape_[axis], scalar_args);
-      dim = transform_utils::Substitute(dim, physical_dims);
-      CHECK_SPAN(DimensionsEqual(dim, actual->shape_[axis]), span)
-          << context << "physical shape dimension[" << axis << "] mismatch: expected " << PythonPrint(dim)
-          << ", got " << PythonPrint(actual->shape_[axis]);
-    }
+    ValidateInlineTileType(param->GetType(), args[i]->GetType(), scalar_args, context, span);
   }
   // Empty return types request shared Tile-contract validation, including void
   // helpers that the parser never needs to run return-type deduction for.

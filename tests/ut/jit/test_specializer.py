@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.backend import BackendType
 from pypto.jit.specializer import (
     DynDim,
     SpecializeContext,
@@ -37,8 +38,10 @@ from pypto.jit.specializer import (
     _unwrap_direction_annotation,
     build_specialize_context,
     specialize,
+    tile_annotation_fingerprints,
 )
 from pypto.pypto_core import DataType, ir
+from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2261,6 +2264,154 @@ class TestArrayParamAnnotation:
 
 class TestInlineTileParamAnnotations:
     """Explicit Tile parameters must survive JIT signature specialization."""
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "pl",
+            "pld",
+            "class",
+            "for",
+            "__debug__",
+            "\uff50\uff4c",
+            "\U0001d699\U0001d695",
+            "\uff50\uff4c\uff44",
+            "\uff43\uff4c\uff41\uff53\uff53",
+            "\uff2d",
+            "\U0001d474",
+        ],
+    )
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_unsafe_dynamic_labels_rejected_before_source_emission(self, label, postponed):
+        """Canonical Tile symbols cannot overwrite DSL imports or invalidate Python syntax."""
+        dimension = pl.dynamic(label)
+
+        def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
+            return tile
+
+        helper = keep_tile
+        if postponed:
+            helper = types.FunctionType(
+                keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
+            )
+            helper.__annotations__ = {"tile": "pl.Tile[[dimension, 64], pl.FP32]"}
+        with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+            ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+            specialize("_TestClass", [ctx])
+
+    @pytest.mark.parametrize("label", ["class", "for", "__debug__"])
+    @pytest.mark.parametrize("metadata", [False, True], ids=["shape", "metadata"])
+    def test_parameterized_annotation_fingerprint_rejects_keyword_label(self, label, metadata):
+        """Cache rendering diagnoses an invalid free label before parsing canonical source."""
+        dimension = pl.dynamic(label)
+
+        def keep_tile(tile, ROWS):
+            return tile
+
+        helper = types.FunctionType(
+            keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
+        )
+        component = (
+            "[[ROWS, 64], pl.FP32, pl.TileView(valid_shape=[dimension, 64])]"
+            if metadata
+            else "[[ROWS, dimension], pl.FP32]"
+        )
+        helper.__annotations__ = {"tile": f"pl.Tile{component}", "ROWS": "pl.constexpr"}
+        with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+            tile_annotation_fingerprints(helper)
+
+    @pytest.mark.parametrize(
+        "label",
+        ["match", "case", "type", "_pypto_tile_param_0", "__name__", "__builtins__", "\u884c", "\u03b1"],
+    )
+    def test_safe_dynamic_labels_still_parse(self, label):
+        """Soft keywords and internal-looking user symbols remain legal declarations."""
+        dimension = pl.dynamic(label)
+
+        def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
+            return tile
+
+        ctx = build_specialize_context(keep_tile, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        source = specialize("_TestClass", [ctx])
+        assert f'{label} = pl.dynamic("{label}")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        tile_type = helper.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert isinstance(tile_type.shape[0], ir.Var)
+        assert tile_type.shape[0].name_hint == label
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "pl",
+            "pld",
+            "class",
+            "__debug__",
+            "\uff50\uff4c",
+            "\uff43\uff4c\uff41\uff53\uff53",
+            "match",
+            "\u884c",
+        ],
+    )
+    def test_dynamic_label_validation_through_jit_compile(self, label):
+        """The public compile path rejects unsafe labels and compiles a legal soft keyword."""
+        dimension = pl.dynamic(label)
+
+        def compile_entry():
+            @pl.jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
+                return tile
+
+            @pl.jit.incore
+            def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+                tile = pl.load(src, [0, 0], [8, 64])
+                kept = keep_tile(tile)
+                return pl.store(kept, [0, 0], dst)
+
+            @pl.jit
+            def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+                return copy_incore(src, dst)
+
+            return entry.compile(
+                config=RunConfig(
+                    backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+                )
+            )
+
+        if label not in {"match", "\u884c"}:
+            with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+                compile_entry()
+            return
+        assert compile_entry() is not None
+
+    @pytest.mark.parametrize("label", ["not-valid", "bad label"])
+    def test_invalid_native_annotation_symbol_has_clear_diagnostic(self, label):
+        """Prebuilt IR metadata cannot bypass the generated-identifier validation."""
+        dimension = pl.Scalar(expr=ir.Var(label, ir.ScalarType(pl.INDEX), ir.Span.unknown()))
+
+        def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.TileView(valid_shape=[dimension, 64])]):
+            return tile
+
+        with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+            build_specialize_context(keep_tile, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+
+    @pytest.mark.parametrize("literal", ["pl", "__debug__"])
+    def test_tensor_alias_with_reserved_literal_keeps_its_safe_binding(self, literal):
+        """A safe emitted Tensor alias is distinct from the DynVar's internal literal."""
+        ctx = _make_ctx(
+            "entry",
+            "def entry(src: pl.Tensor):\n    return src",
+            param_names=["src"],
+            tensor_meta={"src": TensorMeta((DynDim("ROWS", literal, 8), 64), DataType.FP32)},
+            auto_scope=False,
+        )
+        source = specialize("_TestClass", [ctx])
+        assert f'ROWS = pl.dynamic("{literal}")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
 
     @pytest.mark.parametrize("postponed", [False, True])
     @pytest.mark.parametrize("symbol_name", ["tile", "anchor"])

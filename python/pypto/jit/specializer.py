@@ -40,8 +40,10 @@ import enum
 import functools
 import importlib
 import inspect
+import keyword
 import textwrap
 import types
+import unicodedata
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1695,10 +1697,34 @@ def _annotation_symbol_index() -> dict[int, str]:
     return paths
 
 
+def _validate_dynamic_symbol_name(name: str, *, declaration: bool = False) -> None:
+    """Reject names that cannot safely appear in generated annotation source."""
+    if not name.isidentifier() or keyword.iskeyword(name) or name == "__debug__":
+        raise ValueError(
+            f"JIT dynamic symbol '{name}' must be an assignable Python identifier, not a keyword; "
+            "choose a different pl.dynamic() label"
+        )
+    normalized = unicodedata.normalize("NFKC", name)
+    if name != normalized:
+        raise ValueError(
+            f"JIT dynamic symbol '{name}' changes to '{normalized}' when Python parses identifiers; "
+            "choose a different pl.dynamic() label with stable Unicode normalization"
+        )
+    if declaration and name in {"pl", "pld"}:
+        raise ValueError(
+            f"JIT dynamic symbol '{name}' is reserved for generated DSL imports; "
+            "choose a different dynamic symbol name"
+        )
+
+
 def _tile_annotation_source(annotation: _LangTile) -> str | None:
     """Render an evaluated Tile through the IR printer, retaining its full metadata."""
     if annotation.shape is None or annotation.dtype is None:
         return None
+    # Validate before the native printer's output reaches ast.parse, including
+    # eager snapshots and cache fingerprints. Local Scalar symbols are not
+    # declarations, so import-name conflicts are checked only at emission.
+    _tile_annotation_dynvars(annotation)
     shape: list[_ir.Expr] = []
     for extent in cast("Sequence[Any]", annotation.shape):
         if isinstance(extent, _LangScalar):
@@ -1730,6 +1756,7 @@ def _render_annotation_value(value: Any) -> ast.expr | None:
     """
     if isinstance(value, _LangDynVar):
         # The Python alias need not match the DynVar's emitted name.
+        _validate_dynamic_symbol_name(value.name, declaration=True)
         return ast.Name(id=value.name, ctx=ast.Load())
     if isinstance(value, (list, tuple)):
         elements = [_render_annotation_value(element) for element in cast("Sequence[Any]", value)]
@@ -1829,6 +1856,7 @@ def _tile_annotation_dynvars(
     class Collector(_ir.IRVisitor):
         def visit_var(self, op: _ir.Var) -> None:
             if isinstance(op.type, _ir.ScalarType):
+                _validate_dynamic_symbol_name(op.name_hint)
                 if (
                     scalar_variable_ids is not None
                     and op.name_hint in scalar_variable_ids
@@ -2718,6 +2746,7 @@ class Specializer:
         for ctx in self._contexts:
             for dv_name, dv_literal in ctx.dynvar_literals().items():
                 if dv_name not in dv_seen:
+                    _validate_dynamic_symbol_name(dv_name, declaration=True)
                     dv_seen.add(dv_name)
                     lines.append(f'{dv_name} = pl.dynamic("{dv_literal}")')
         if dv_seen:

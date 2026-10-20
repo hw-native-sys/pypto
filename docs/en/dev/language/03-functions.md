@@ -159,6 +159,10 @@ substitution, including valid extents, strides, and offsets. This includes indir
 dependencies through shared dimensions such as `rows = 2*n`. An omitted actual
 valid shape uses its physical shape, and an omitted offset is zero. A
 Scalar-dependent stride contract requires explicit actual stride metadata.
+The same physical and view checks apply recursively to Tiles in tuple parameters.
+Dynamic dimension names emitted from Tile annotations must use assignable Python
+identifiers in normalized spelling, must not be Python keywords, and must not
+shadow the DSL aliases `pl` or `pld`.
 Inlining substitutes the caller's Tile without
 copying it, preserving its valid shape. Tile parameters remain limited to
 inline helpers and are not added to device dispatch interfaces.
