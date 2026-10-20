@@ -2262,6 +2262,212 @@ class TestArrayParamAnnotation:
 class TestInlineTileParamAnnotations:
     """Explicit Tile parameters must survive JIT signature specialization."""
 
+    @pytest.mark.parametrize("postponed", [False, True])
+    @pytest.mark.parametrize("symbol_name", ["tile", "anchor"])
+    def test_generic_tile_symbol_can_match_nonscalar_parameter(self, postponed, symbol_name):
+        """Shape globals remain needed even when an earlier parameter has the same name."""
+        ROWS = pl.dynamic(symbol_name)
+
+        def keep_tile(
+            anchor: pl.Tensor[[8, 64], pl.FP32],
+            tile: pl.Tile[[ROWS, 64], pl.FP32],
+            other: pl.Tile[[ROWS, 64], pl.FP32],
+        ):
+            return tile
+
+        helper = keep_tile
+        if postponed:
+            helper = types.FunctionType(
+                keep_tile.__code__, {**keep_tile.__globals__, "ROWS": ROWS}, keep_tile.__name__
+            )
+            helper.__annotations__ = {
+                "anchor": "pl.Tensor[[8, 64], pl.FP32]",
+                "tile": "pl.Tile[[ROWS, 64], pl.FP32]",
+                "other": "pl.Tile[[ROWS, 64], pl.FP32]",
+            }
+        ctx = build_specialize_context(
+            helper,
+            "keep_tile",
+            "inline",
+            None,
+            {"anchor": TensorMeta((8, 64), DataType.FP32)},
+            {},
+            [],
+            auto_scope=False,
+        )
+        source = specialize("_TestClass", [ctx])
+        assert f'{symbol_name} = pl.dynamic("{symbol_name}")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        for param in func.params[1:]:
+            tile_type = param.type
+            assert isinstance(tile_type, ir.TileType)
+            assert isinstance(tile_type.shape[0], ir.Var)
+            assert isinstance(tile_type.shape[0].type, ir.ScalarType)
+            assert tile_type.shape[0].name_hint == symbol_name
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_scalar_dimension_matching_parameter_stays_local(self, postponed):
+        """A real Scalar supplies the dimension and must not be shadowed by a new global."""
+        tile = pl.dynamic("tile")
+
+        def keep_tile(tile: pl.Scalar[pl.INDEX], value: pl.Tile[[tile, 64], pl.FP32]):
+            return value
+
+        helper = keep_tile
+        if postponed:
+            helper = types.FunctionType(
+                keep_tile.__code__, {**keep_tile.__globals__, "tile": tile}, keep_tile.__name__
+            )
+            helper.__annotations__ = {
+                "tile": "pl.Scalar[pl.INDEX]",
+                "value": "pl.Tile[[tile, 64], pl.FP32]",
+            }
+        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        source = specialize("_TestClass", [ctx])
+        assert 'tile = pl.dynamic("tile")' not in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        tile_type = func.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert ir.structural_equal(tile_type.shape[0], func.params[0])
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    @pytest.mark.parametrize("mixed_axes", [False, True])
+    def test_free_dynvar_name_is_not_a_constexpr_reference(self, rows, mixed_axes):
+        """Canonical free-symbol spelling must not turn into a helper parameter use."""
+        M = pl.dynamic("ROWS")
+        ROWS = 99
+        if mixed_axes:
+
+            def keep_tile(tile: pl.Tile[[M, ROWS], pl.FP32], ROWS: pl.constexpr):
+                return tile
+
+        else:
+
+            def keep_tile(tile: pl.Tile[[M, 64], pl.FP32], ROWS: pl.constexpr):
+                return tile
+
+        ctx = build_specialize_context(
+            keep_tile,
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"ROWS": str(rows)},
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        tile_type = func.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert isinstance(tile_type.shape[0], ir.Var)
+        assert tile_type.shape[0].name_hint == "ROWS"
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert tile_type.shape[1].value == (rows if mixed_axes else 64)
+
+    def test_parameter_marker_avoids_folded_free_symbol_names(self):
+        """A free alias may use the marker prefix even when eager math folds it away."""
+        M = pl.dynamic("_pypto_tile_param_0")
+        ROWS = 0
+
+        def keep_tile(tile: pl.Tile[[ROWS * M, 64], pl.FP32], ROWS: pl.constexpr):
+            return tile
+
+        # This hygiene case requires a source-evaluable free operand. A
+        # factory-only operand erased inside a product is diagnosed separately.
+        helper = types.FunctionType(keep_tile.__code__, {**keep_tile.__globals__, "M": M}, keep_tile.__name__)
+        helper.__annotations__ = keep_tile.__annotations__
+        ctx = build_specialize_context(
+            helper,
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"ROWS": "8"},
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        span = ir.Span.unknown()
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType(
+                [ir.ConstInt(8, DataType.INDEX, span) * M.unwrap(), ir.ConstInt(64, DataType.INDEX, span)],
+                DataType.FP32,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_distinct_free_symbol_matching_scalar_name_is_diagnosed(self, postponed):
+        """Separate free and local dimensions cannot silently share one emitted name."""
+        M = pl.dynamic("tile")
+        tile = 99
+
+        def keep_tile(tile: pl.Scalar[pl.INDEX], value: pl.Tile[[M, tile], pl.FP32]):
+            return value
+
+        helper = keep_tile
+        if postponed:
+            helper = types.FunctionType(
+                keep_tile.__code__, {**keep_tile.__globals__, "M": M}, keep_tile.__name__
+            )
+            helper.__annotations__ = {
+                "tile": "pl.Scalar[pl.INDEX]",
+                "value": "pl.Tile[[M, tile], pl.FP32]",
+            }
+        with pytest.raises(ValueError, match="Free dynamic symbol 'tile'.*Scalar parameter"):
+            ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+            specialize("_TestClass", [ctx])
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_scalar_metadata_override_keeps_true_local_binding(self, postponed):
+        """A raw ambient view is replaced before checking the genuine Scalar dimension."""
+        count = pl.dynamic("count")
+
+        def keep_tile(
+            count: pl.Scalar[pl.INDEX],
+            tile: pl.Tile[
+                [8, 64], pl.FP32, pl.TileView(valid_shape=[count, 64], start_offset=count.unwrap())
+            ],
+        ):
+            return tile
+
+        helper = keep_tile
+        if postponed:
+            helper = types.FunctionType(keep_tile.__code__, dict(keep_tile.__globals__), keep_tile.__name__)
+            helper.__annotations__ = {
+                "count": "pl.Scalar[pl.INDEX]",
+                "tile": "pl.Tile[[8, 64], pl.FP32, "
+                "pl.TileView(valid_shape=[count, 64], start_offset=count.unwrap())]",
+            }
+        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        source = specialize("_TestClass", [ctx])
+        assert 'count = pl.dynamic("count")' not in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        tile_type = func.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert ir.structural_equal(tile_type.tile_view.valid_shape[0], func.params[0])
+        assert tile_type.tile_view.start_offset is not None
+        assert ir.structural_equal(tile_type.tile_view.start_offset, func.params[0])
+
     def test_direction_wrapper_unwrap_uses_object_identity(self):
         source = "Direction[pl.Tile[[8, 64], pl.FP32]]"
         for wrapper in (pl.Out, pl.InOut):
@@ -2641,7 +2847,6 @@ class TestInlineTileParamAnnotations:
             auto_scope=False,
             constexpr_values={"ROWS": str(rows)},
         )
-        assert "ROWS" in ctx.eager_tile_annotations["tile"]
         program = pl.parse(specialize("_TestClass", [ctx]))
         assert isinstance(program, ir.Program)
         func = program.get_function("keep_tile")
@@ -2789,7 +2994,8 @@ class TestInlineTileParamAnnotations:
             enable_auto_mapping=True,
         )
 
-    def test_metadata_override_declares_rebound_dynvar_alias(self):
+    @pytest.mark.parametrize("symbol_name", ["NEW_VALID_COLS", "tile"])
+    def test_metadata_override_declares_rebound_dynvar_alias(self, symbol_name):
         """The active override can contain symbols absent from the original eager value."""
         VALID = 3
         dimension = pl.dynamic("OLD_VALID_COLS")
@@ -2803,7 +3009,7 @@ class TestInlineTileParamAnnotations:
             keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
         )
         raw.__annotations__ = keep_tile.__annotations__
-        raw.__globals__["dimension"] = pl.dynamic("NEW_VALID_COLS")
+        raw.__globals__["dimension"] = pl.dynamic(symbol_name)
         ctx = build_specialize_context(
             raw,
             "keep_tile",
@@ -2816,7 +3022,7 @@ class TestInlineTileParamAnnotations:
             constexpr_values={"VALID": "4"},
         )
         source = specialize("_TestClass", [ctx])
-        assert 'NEW_VALID_COLS = pl.dynamic("NEW_VALID_COLS")' in source
+        assert f'{symbol_name} = pl.dynamic("{symbol_name}")' in source
         program = pl.parse(source)
         assert isinstance(program, ir.Program)
         func = program.get_function("keep_tile")
@@ -2827,7 +3033,7 @@ class TestInlineTileParamAnnotations:
         assert isinstance(tile_type.tile_view.valid_shape[0], ir.ConstInt)
         assert tile_type.tile_view.valid_shape[0].value == 4
         assert isinstance(tile_type.tile_view.valid_shape[1], ir.Var)
-        assert tile_type.tile_view.valid_shape[1].name_hint == "NEW_VALID_COLS"
+        assert tile_type.tile_view.valid_shape[1].name_hint == symbol_name
 
     def test_metadata_override_rejects_kind_change(self):
         """A different kind cannot leave the original eager metadata silently attached."""

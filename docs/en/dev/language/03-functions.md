@@ -138,6 +138,11 @@ another constexpr parameter or capture it in the helper body.
 Dynamic symbols referenced
 only by Tile parameter types receive their own module-level `pl.dynamic()`
 declarations, even when no Tensor parameter uses them.
+This also applies when the emitted symbol name matches a Tile or Tensor
+parameter name; actual Scalar dimension parameters remain local.
+If a free dynamic symbol and a distinct Scalar parameter share a label,
+specialization reports the ambiguity; give the free symbol a unique
+`pl.dynamic()` label.
 
 Before substituting arguments, `InlineFunctions` checks Tile dtype, physical
 rank and shape, and conflicting explicitly resolved memory spaces. Generic
@@ -145,6 +150,8 @@ physical dimensions bind to the actual Tile's physical extents, including
 integer affine bindings such as `2*M` to `16` (`M=8`); valid extents
 do not constrain that check. Separate Tile arguments can bind their generic
 physical dimensions independently, including when the helper returns its Tile parameters.
+Dimensions shared with Tensor types, explicit Tile views, or Scalar parameters
+retain their shared constraints, including in helpers with no return value.
 Inlining substitutes the caller's Tile without
 copying it, preserving its valid shape. Tile parameters remain limited to
 inline helpers and are not added to device dispatch interfaces.

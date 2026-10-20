@@ -3939,6 +3939,88 @@ class TestInlineFuncIntegration:
 class TestInlineTileAnnotations:
     """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
 
+    @pytest.mark.parametrize("physical_rows, constexpr_rows", [(8, 16), (16, 8)])
+    @pytest.mark.parametrize("mixed_axes", [False, True])
+    def test_free_dynvar_is_independent_of_same_named_constexpr(
+        self, physical_rows, constexpr_rows, mixed_axes
+    ):
+        """A canonical DynVar label must not make a generic extent use an unrelated constexpr."""
+        M = pl.dynamic("ROWS")
+        ROWS = 99
+        if mixed_axes:
+
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[M, ROWS], pl.FP32], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            cols = constexpr_rows
+        else:
+
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[M, 64], pl.FP32], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            cols = 64
+
+        @jit.incore
+        def copy_incore(
+            src: pl.Tensor[[physical_rows, cols], pl.FP32],
+            dst: pl.Out[pl.Tensor[[physical_rows, cols], pl.FP32]],
+        ):
+            tile = pl.load(src, [0, 0], [physical_rows, cols])
+            kept = keep_tile(tile, constexpr_rows)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(
+            src: pl.Tensor[[physical_rows, cols], pl.FP32],
+            dst: pl.Out[pl.Tensor[[physical_rows, cols], pl.FP32]],
+        ):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    @pytest.mark.parametrize("symbol_name", ["tile", "anchor"])
+    def test_generic_tile_symbol_matching_nonscalar_parameter_compiles(self, postponed, symbol_name):
+        """A module-level shape symbol can share a name with a Tile or Tensor formal."""
+        ROWS = pl.dynamic(symbol_name)
+
+        def keep_tile(anchor: pl.Tensor[[8, 64], pl.FP32], tile: pl.Tile[[ROWS, 64], pl.FP32]) -> pl.Tile:
+            return tile
+
+        raw = keep_tile
+        if postponed:
+            raw = types.FunctionType(raw.__code__, {**raw.__globals__, "ROWS": ROWS}, raw.__name__)
+            raw.__annotations__ = {
+                "anchor": "pl.Tensor[[8, 64], pl.FP32]",
+                "tile": "pl.Tile[[ROWS, 64], pl.FP32]",
+                "return": "pl.Tile",
+            }
+        keep_tile = jit.inline(auto_scope=False)(raw)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64])
+            kept = keep_tile(src, tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+
     @pytest.mark.parametrize("changed", ["factory-shape", "memory-space"])
     def test_eager_factory_shape_with_constexpr_space_compiles_and_invalidates_cache(self, changed):
         """SPACE specialization retains erased rows and rechecks changed contracts."""

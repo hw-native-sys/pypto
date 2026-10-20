@@ -722,6 +722,7 @@ class NestedInlineCallHoister : public IRMutator {
 // Tile contract must be checked before replacing a formal with its actual.
 void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr>& args, const Span& span) {
   std::unordered_map<const Var*, ExprPtr> scalar_args;
+  bool has_tile_arg = false;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
     if (As<ScalarType>(callee->params_[i]->GetType())) {
       scalar_args.emplace(callee->params_[i].get(), args[i]);
@@ -731,6 +732,7 @@ void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr
     const auto& param = callee->params_[i];
     auto expected = As<TileType>(param->GetType());
     if (!expected) continue;
+    has_tile_arg = true;
     const std::string context =
         "Inline call to '" + callee->name_ + "' parameter '" + param->name_hint_ + "': ";
     const auto actual_type = args[i]->GetType();
@@ -775,6 +777,9 @@ void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr
           << ", got " << PythonPrint(actual->shape_[axis]);
     }
   }
+  // Empty return types request shared Tile-contract validation, including void
+  // helpers that the parser never needs to run return-type deduction for.
+  if (has_tile_arg) DeduceCallReturnType(callee->params_, args, {}, /*is_inline=*/true);
 }
 
 class InlineCallsMutator : public IRMutator {

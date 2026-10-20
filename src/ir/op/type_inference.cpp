@@ -22,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1857,6 +1858,14 @@ void CollectStrictInlineTypeVars(const TypePtr& type, var_collectors::VarDefUseC
   var_collectors::VisitTypeExprFields(collector, type);
 }
 
+void CollectInlineTileTypeVars(const TypePtr& type, var_collectors::VarDefUseCollector& collector) {
+  if (auto tuple = As<TupleType>(type)) {
+    for (const auto& element : tuple->types_) CollectInlineTileTypeVars(element, collector);
+  } else if (As<TileType>(type)) {
+    var_collectors::VisitTypeExprFields(collector, type);
+  }
+}
+
 }  // namespace
 
 std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector<VarPtr>& callee_params,
@@ -1888,12 +1897,15 @@ std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector
 std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_params,
                                           const std::vector<ExprPtr>& args,
                                           const std::vector<TypePtr>& return_types, bool is_inline) {
+  // An inline call without results requests validation of its shared Tile
+  // contracts. Keep legacy Tensor-only void helpers' per-operand dimensions.
+  const bool validate_inline_tiles = is_inline && return_types.empty();
   TypeVarMap var_map;
   std::vector<CallTypeBindingConstraint> constraints;
   CollectCallTypeBindings(callee_params, args, var_map, constraints);
   // Void callees still consume their arguments: equal carrier geometry must
   // not let an E2M1 buffer reach an E1M2 body (or vice versa) without a cast.
-  if (return_types.empty() || var_map.empty()) return return_types;
+  if ((return_types.empty() && !validate_inline_tiles) || var_map.empty()) return return_types;
 
   var_collectors::VarDefUseCollector strict_vars;
   if (is_inline) {
@@ -1904,10 +1916,48 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
     }
   }
 
+  std::unordered_set<const Var*> relevant_vars;
+  if (validate_inline_tiles) {
+    var_collectors::VarDefUseCollector tile_vars;
+    for (const auto& param : callee_params) {
+      if (param) CollectInlineTileTypeVars(param->GetType(), tile_vars);
+    }
+    std::vector<const Var*> pending;
+    for (const auto* var : tile_vars.var_uses_ordered) {
+      if (strict_vars.var_uses.count(var) && relevant_vars.insert(var).second) pending.push_back(var);
+    }
+    // Retain every argument for transitive proofs: M = 2*N must also check
+    // repeated bindings of N. Unrelated Tensor dimensions remain independent.
+    std::unordered_map<const Var*, std::vector<const CallTypeBindingConstraint*>> dependencies;
+    for (const auto& constraint : constraints) dependencies[constraint.var.get()].push_back(&constraint);
+    auto add_dependencies = [&](const ExprPtr& expr) {
+      var_collectors::VarDefUseCollector uses;
+      uses.VisitExpr(expr);
+      for (const auto* var : uses.var_uses_ordered) {
+        if (relevant_vars.insert(var).second) pending.push_back(var);
+      }
+    };
+    // Dependencies append to this worklist, so process its growing tail.
+    size_t next = 0;
+    while (next < pending.size()) {
+      const auto* var = pending[next++];
+      if (const auto binding = var_map.find(var); binding != var_map.end()) {
+        add_dependencies(binding->second);
+      }
+      if (const auto found = dependencies.find(var); found != dependencies.end()) {
+        for (const auto* constraint : found->second) {
+          add_dependencies(constraint->existing);
+          add_dependencies(constraint->candidate);
+        }
+      }
+    }
+  }
+
   // Validate repeated bindings only after all arguments have contributed.
   // A constraint may mention another callee placeholder that is bound by a
   // later argument (for example STAGED = NR * 64, then NR = world_size()).
   for (const auto& constraint : constraints) {
+    if (validate_inline_tiles && !relevant_vars.count(constraint.var.get())) continue;
     if (is_inline && constraint.tile_physical && !strict_vars.var_uses.count(constraint.var.get())) continue;
     if (structural_equal(constraint.existing, constraint.candidate)) continue;
     auto existing = transform_utils::Substitute(constraint.existing, var_map);
@@ -1918,6 +1968,7 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
         << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
         << constraint.context << "; cross-function calls do not emit a runtime shape guard";
   }
+  if (return_types.empty()) return return_types;
 
   // Do not choose the first Tile argument's extent for another operand. Leave
   // only conflicting generic Tile symbols unresolved; InlineFunctions retypes

@@ -802,6 +802,227 @@ class TestInlineTileArgumentContracts:
 
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 
+    @pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested"])
+    @pytest.mark.parametrize("tensor_rows", [8, 16], ids=["matching", "conflicting"])
+    def test_void_shared_tile_tensor_dimension_is_checked(self, nested, tensor_rows):
+        """A void call must retain shared Tensor constraints through generic wrappers."""
+        rows = pl.dynamic("VOID_SHARED_TILE_TENSOR_ROWS")
+        wrapper_tile_rows = pl.dynamic("VOID_WRAPPER_TILE_ROWS")
+        wrapper_tensor_rows = pl.dynamic("VOID_WRAPPER_TENSOR_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def consume(self, tile: pl.Tile[[rows, 64], pl.FP32], tensor: pl.Tensor[[rows, 64], pl.FP32]):
+                _tile_alias = tile
+                _tensor_alias = tensor
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def forward(
+                self,
+                tile: pl.Tile[[wrapper_tile_rows, 64], pl.FP32],
+                tensor: pl.Tensor[[wrapper_tensor_rows, 64], pl.FP32],
+            ):
+                self.consume(tile, tensor)
+
+            @pl.function
+            def main(self, tile: pl.Tile[[8, 64], pl.FP32], tensor: pl.Tensor[[tensor_rows, 64], pl.FP32]):
+                self.forward(tile, tensor)
+
+        if not nested:
+            span = ir.Span.unknown()
+            main = Before.get_function("main")
+            assert main is not None
+            call = ir.Call(ir.GlobalVar("consume"), main.params, ir.UnknownType(), span)
+            main = ir.Function("main", main.params, [], ir.EvalStmt(call, span), span)
+            consume = Before.get_function("consume")
+            forward = Before.get_function("forward")
+            assert consume is not None and forward is not None
+            Before = ir.Program([consume, forward, main], "Before", span)
+
+        if tensor_rows != 8:
+            with pytest.raises(ValueError, match="Dynamic type variable.*conflicting bindings"):
+                passes.inline_functions()(Before)
+            return
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, tile: pl.Tile[[8, 64], pl.FP32], tensor: pl.Tensor[[tensor_rows, 64], pl.FP32]):
+                _tile_alias = tile
+                _tensor_alias = tensor
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    def test_unrelated_tile_keeps_void_tensor_placeholders_independent(self):
+        """Adding a fixed Tile must not tighten legacy logical/padded Tensor helpers."""
+        rows = pl.dynamic("VOID_UNRELATED_TENSOR_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def consume(
+                self,
+                tile: pl.Tile[[8, 64], pl.FP32],
+                logical: pl.Tensor[[rows, 64], pl.FP32],
+                padded: pl.Tensor[[rows, 64], pl.FP32],
+            ):
+                _tile_alias = tile
+                _logical_alias = logical
+                _padded_alias = padded
+
+            @pl.function
+            def main(
+                self,
+                tile: pl.Tile[[8, 64], pl.FP32],
+                logical: pl.Tensor[[8, 64], pl.FP32],
+                padded: pl.Tensor[[16, 64], pl.FP32],
+            ):
+                self.consume(tile, logical, padded)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                tile: pl.Tile[[8, 64], pl.FP32],
+                logical: pl.Tensor[[8, 64], pl.FP32],
+                padded: pl.Tensor[[16, 64], pl.FP32],
+            ):
+                _tile_alias = tile
+                _logical_alias = logical
+                _padded_alias = padded
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    @pytest.mark.parametrize("tensor_rows", [8, 16], ids=["matching", "conflicting"])
+    def test_void_shared_scalar_tile_tensor_dimension_is_checked(self, tensor_rows):
+        """An explicit scalar dimension remains shared with a void helper's Tensor."""
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+        tile = ir.Var("tile", ir.TileType([rows, 64], pl.FP32), span)
+        tensor = ir.Var("tensor", ir.TensorType([rows, 64], pl.FP32), span)
+        source = ir.Var("source", ir.TileType([8, 64], pl.FP32), span)
+        storage = ir.Var("storage", ir.TensorType([tensor_rows, 64], pl.FP32), span)
+        helper = ir.Function(
+            "consume", [rows, tile, tensor], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline
+        )
+        args = [ir.ConstInt(8, pl.INDEX, span), source, storage]
+        call = ir.Call(ir.GlobalVar("consume"), args, ir.UnknownType(), span)
+        body = ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span)
+        main = ir.Function("main", [source, storage], [source.type], body, span)
+        before = ir.Program([helper, main], "Before", span)
+
+        if tensor_rows != 8:
+            with pytest.raises(ValueError, match="Dynamic type variable.*conflicting bindings"):
+                ir.deduce_call_return_type(helper.params, args, [], is_inline=True)
+            with pytest.raises(ValueError, match="Dynamic type variable.*conflicting bindings"):
+                passes.inline_functions()(before)
+            return
+
+        assert ir.deduce_call_return_type(helper.params, args, [], is_inline=True) == []
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, source: pl.Tile[[8, 64], pl.FP32], storage: pl.Tensor[[tensor_rows, 64], pl.FP32]
+            ) -> pl.Tile[[8, 64], pl.FP32]:
+                return source
+
+        ir.assert_structural_equal(passes.inline_functions()(before), Expected)
+
+    @pytest.mark.parametrize("last_rows", [8, 9], ids=["matching", "conflicting"])
+    def test_void_shared_tile_constraint_checks_transitive_tensor_bindings(self, last_rows):
+        """Every binding feeding the shared Tile dimension must agree, including dependencies."""
+        rows = pl.dynamic("VOID_TRANSITIVE_TILE_ROWS")
+        dependent = pl.dynamic("VOID_TRANSITIVE_DEPENDENT_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def consume(
+                self,
+                tile: pl.Tile[[rows, 64], pl.FP32],
+                tensor: pl.Tensor[[rows, 64], pl.FP32],
+                first: pl.Tensor[[dependent, 64], pl.FP32],
+                second: pl.Tensor[[dependent, 64], pl.FP32],
+            ):
+                _tile_alias = tile
+                _tensor_alias = tensor
+
+            @pl.function
+            def main(
+                self,
+                tile: pl.Tile[[16, 64], pl.FP32],
+                tensor: pl.Tensor[[2 * dependent, 64], pl.FP32],
+                first: pl.Tensor[[8, 64], pl.FP32],
+                second: pl.Tensor[[last_rows, 64], pl.FP32],
+            ):
+                self.consume(tile, tensor, first, second)
+
+        if last_rows != 8:
+            with pytest.raises(ValueError, match="Dynamic type variable.*conflicting bindings"):
+                passes.inline_functions()(Before)
+            return
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                tile: pl.Tile[[16, 64], pl.FP32],
+                tensor: pl.Tensor[[2 * dependent, 64], pl.FP32],
+                first: pl.Tensor[[8, 64], pl.FP32],
+                second: pl.Tensor[[last_rows, 64], pl.FP32],
+            ):
+                _tile_alias = tile
+                _tensor_alias = tensor
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    @pytest.mark.parametrize("valid_rows", [8, 4], ids=["matching", "conflicting"])
+    def test_void_explicit_view_keeps_shared_dimension_strict(self, valid_rows):
+        """An explicit valid extent still constrains the same physical placeholder."""
+        rows = pl.dynamic("VOID_SHARED_TILE_VIEW_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def consume(
+                self,
+                tile: pl.Tile[[rows, 64], pl.FP32],
+                viewed: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[rows, 64])],
+            ):
+                _tile_alias = tile
+                _viewed_alias = viewed
+
+            @pl.function
+            def main(
+                self,
+                tile: pl.Tile[[8, 64], pl.FP32],
+                viewed: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[valid_rows, 64])],
+            ):
+                self.consume(tile, viewed)
+
+        if valid_rows != 8:
+            with pytest.raises(ValueError, match="Dynamic type variable.*conflicting bindings"):
+                passes.inline_functions()(Before)
+            return
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                tile: pl.Tile[[8, 64], pl.FP32],
+                viewed: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[valid_rows, 64])],
+            ):
+                _tile_alias = tile
+                _viewed_alias = viewed
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
     @pytest.mark.parametrize("affine", [False, True], ids=["plain", "affine"])
     def test_returned_tile_arguments_keep_independent_generic_dimensions(self, affine):
         """First, second, and tuple returns must retain their own actual shapes through later ops."""
