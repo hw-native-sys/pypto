@@ -95,6 +95,27 @@ class DynDim:
 ShapeDim = int | DynDim
 
 
+@dataclass(frozen=True)
+class _TileMetadataOverride:
+    """One original metadata expression, its cache spelling and proven eager kind."""
+
+    kind: str
+    source: str
+    canonical_source: str
+
+
+@dataclass
+class _EagerTileAnnotations:
+    """Request-local annotation templates shared by specialization and cache hashing."""
+
+    sources: dict[str, str] = field(default_factory=dict[str, str])
+    dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    fingerprints: dict[str, str] = field(default_factory=dict[str, str])
+    overrides: dict[str, tuple[_TileMetadataOverride, ...]] = field(
+        default_factory=dict[str, tuple[_TileMetadataOverride, ...]]
+    )
+
+
 @dataclass
 class TensorMeta:
     """Runtime metadata for a single tensor parameter.
@@ -170,6 +191,9 @@ class SpecializeContext:
         annotation_dynvars: Scalar symbols used by Tile annotation shapes or
             metadata. These need generated declarations independently of any
             Tensor parameter's dynamic-dimension bindings.
+        eager_tile_metadata_overrides: Parameter-dependent trailing metadata
+            expressions, evaluated after call bindings and applied by their
+            proven original metadata kind rather than source position.
         orig_file: Path to the user's real source file (``inspect.getsourcefile``),
             or ``None`` when the function has no on-disk source (REPL / exec).
             Used to map generated diagnostics back to the user's ``.py`` (#1612).
@@ -232,10 +256,13 @@ class SpecializeContext:
     # reaches the same function, which ``dep_func_names`` already covers.
     dep_call_variants: dict[tuple[str, int], str] = field(default_factory=dict[tuple[str, int], str])
     # Appended for positional compatibility. These sources share the request's
-    # annotation snapshot with the cache key; parameter-dependent annotations
-    # are excluded so call-site bindings and local scalar dimensions take precedence.
+    # annotation snapshot with the cache key; parameter-dependent components
+    # remain expressions so call bindings and local dimensions take precedence.
     eager_tile_annotations: Mapping[str, str] = field(default_factory=dict[str, str])
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    eager_tile_metadata_overrides: Mapping[str, tuple[_TileMetadataOverride, ...]] = field(
+        default_factory=dict[str, tuple[_TileMetadataOverride, ...]]
+    )
 
     @property
     def source_def_name(self) -> str:
@@ -1726,12 +1753,30 @@ def _render_annotation_value(value: Any) -> ast.expr | None:
         assert source is not None
         node = ast.parse(source, mode="eval").body
         assert isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Tuple)
-        if len(node.slice.elts) == 2:
-            # An entirely implicit empty view has no printed trailing slot.
-            return ast.parse("pl.TileView()", mode="eval").body
         # A holder has exactly one metadata object. MemRef precedes the
         # required memory-space enum; TileView is its only trailing argument.
-        return node.slice.elts[2]
+        rendered = (
+            node.slice.elts[2] if len(node.slice.elts) > 2 else ast.parse("pl.TileView()", mode="eval").body
+        )
+        if isinstance(value, _ir.TileView):
+            assert isinstance(rendered, ast.Call)
+            # The destination's memory space may change at a call. A layout
+            # omitted relative to this neutral holder would then be inferred
+            # differently (for example row_major Vec versus col_major Mat).
+            fields = {
+                "blayout": f"pl.TileLayout.{value.blayout.name}",
+                "slayout": f"pl.TileLayout.{value.slayout.name}",
+                "fractal": str(value.fractal),
+                "pad": f"pl.PadValue.{value.pad.name}",
+                "compact": f"pl.CompactMode.{value.compact.name}",
+            }
+            existing = {keyword.arg for keyword in rendered.keywords}
+            rendered.keywords.extend(
+                ast.keyword(arg=name, value=ast.parse(source, mode="eval").body)
+                for name, source in fields.items()
+                if name not in existing
+            )
+        return rendered
     if isinstance(value, (_LangScalar, _ir.Expr)):
         source = _tile_annotation_source(
             _LangTile(cast("Sequence[Any]", [value]), DataType.FP32, _annotation_only=True)
@@ -1776,13 +1821,91 @@ def _tile_annotation_dynvars(annotation: _LangTile) -> dict[str, str]:
     return declarations
 
 
+def _tile_metadata_kind(value: Any) -> str | None:
+    """Identify trailing Tile components by semantic type, independent of order."""
+    for kind, cls in (("MemRef", _ir.MemRef), ("MemorySpace", _ir.MemorySpace), ("TileView", _ir.TileView)):
+        if isinstance(value, cls):
+            return kind
+    return None
+
+
+def _tile_metadata_expression_kind(node: ast.expr, namespace: Mapping[str, Any]) -> str | None:
+    """Identify an existing value or constructor without requiring its operands."""
+    kind = _tile_metadata_kind(_eval_annotation(ast.unparse(node), namespace))
+    if kind is not None:
+        return kind
+    root = node
+    while isinstance(root, ast.Subscript):
+        root = root.value
+    if isinstance(root, ast.Call):
+        constructor = _eval_annotation(ast.unparse(root.func), namespace)
+        language = importlib.import_module("pypto.language")
+        for kind, cls in (("MemRef", _ir.MemRef), ("TileView", _ir.TileView)):
+            if constructor is cls or constructor is getattr(language, kind):
+                return kind
+    return None
+
+
+def _eager_metadata_override_kinds(
+    extras: list[ast.expr], annotation: _LangTile, namespace: Mapping[str, Any], param_names: set[str]
+) -> dict[int, str]:
+    """Prove originating kinds before deferred metadata can replace an eager slot.
+
+    Eager Tile objects retain one value of each kind but lose source order.
+    Resolve independent values/constructors first, then use a unique remaining
+    kind. Multiple erased aliases cannot be associated safely by position.
+    """
+    present = {
+        kind
+        for value in (annotation.memref, annotation.memory_space, annotation.tile_view)
+        if (kind := _tile_metadata_kind(value)) is not None
+    }
+    # Tile[...] records validated original order before factory aliases are
+    # lost. Constructor-created/mutated objects can lack a usable record;
+    # validate it against the current fields before using the fallback proof.
+    recorded = cast("tuple[str, ...] | None", getattr(annotation, "_annotation_extra_kinds", None))
+    if recorded is not None and len(recorded) == len(extras) == len(present) and set(recorded) == present:
+        kinds: dict[int, str | None] = dict(enumerate(recorded))
+    else:
+        kinds = {
+            index: _tile_metadata_expression_kind(extra, namespace) for index, extra in enumerate(extras)
+        }
+    remaining = present - {kind for kind in kinds.values() if kind is not None}
+    unknown = [index for index, kind in kinds.items() if kind is None]
+    if len(unknown) == len(remaining) == 1:
+        kinds[unknown[0]] = remaining.pop()
+    result: dict[int, str] = {}
+    for index, extra in enumerate(extras):
+        if not any(isinstance(node, ast.Name) and node.id in param_names for node in ast.walk(extra)):
+            continue
+        kind = kinds[index]
+        if kind is None:
+            raise ValueError(
+                f"Cannot determine original metadata kind of parameter-dependent Tile component "
+                f"{ast.unparse(extra)!r}; make independent metadata constructors explicit"
+            )
+        result[index] = kind
+    return result
+
+
+def _unwrap_direction_annotation(node: ast.expr, namespace: Mapping[str, Any]) -> ast.expr:
+    """Unwrap the DSL's identity direction markers, including imported aliases."""
+    language = importlib.import_module("pypto.language")
+    while isinstance(node, ast.Subscript):
+        wrapper = _eval_annotation(ast.unparse(node.value), namespace)
+        if wrapper is not language.Out and wrapper is not language.InOut:
+            break
+        node = node.slice
+    return node
+
+
 def _parameterized_eager_tile_source(
     original: ast.expr,
     eager_source: str,
     annotation: _LangTile,
     namespace: Mapping[str, Any],
     param_names: set[str],
-) -> str | None:
+) -> tuple[str, tuple[_TileMetadataOverride, ...]] | None:
     """Keep eager components while restoring shape/dtype expressions owned by a call.
 
     Python retains ``Tile[[ROWS, factory_cols], dtype]`` as one evaluated
@@ -1795,13 +1918,11 @@ def _parameterized_eager_tile_source(
     def depends_on_parameter(node: ast.expr) -> bool:
         return any(isinstance(part, ast.Name) and part.id in param_names for part in ast.walk(node))
 
+    original = _unwrap_direction_annotation(original, namespace)
     if not isinstance(original, ast.Subscript) or not isinstance(original.slice, ast.Tuple):
         return None
     original_parts = original.slice.elts
-    if len(original_parts) < 2 or any(depends_on_parameter(part) for part in original_parts[2:]):
-        # Trailing arguments may appear in any order and the printer sorts
-        # them by kind. Keep the existing source path rather than associate a
-        # parameter-dependent MemRef/TileView with the wrong eager component.
+    if len(original_parts) < 2:
         return None
     merged = ast.parse(eager_source, mode="eval").body
     assert isinstance(merged, ast.Subscript) and isinstance(merged.slice, ast.Tuple)
@@ -1853,11 +1974,19 @@ def _parameterized_eager_tile_source(
         merged_parts[0] = parameter_component(original_shape)
     if depends_on_parameter(original_parts[1]):
         merged_parts[1] = parameter_component(original_parts[1])
-    return ast.unparse(merged)
+    overrides: list[_TileMetadataOverride] = []
+    extras = original_parts[2:]
+    if any(depends_on_parameter(extra) for extra in extras):
+        for index, kind in _eager_metadata_override_kinds(extras, annotation, namespace, param_names).items():
+            extra = extras[index]
+            overrides.append(
+                _TileMetadataOverride(kind, ast.unparse(extra), ast.unparse(parameter_component(extra)))
+            )
+    return ast.unparse(merged), tuple(overrides)
 
 
 @cache_in_snapshot
-def _eager_tile_annotation_data(func: Any) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+def _eager_tile_annotation_data(func: Any) -> _EagerTileAnnotations:
     """Snapshot eager Tile contracts without freezing helper constexpr references.
 
     Only the evaluated annotation retains factory locals used exclusively in
@@ -1869,40 +1998,47 @@ def _eager_tile_annotation_data(func: Any) -> tuple[dict[str, str], dict[str, st
     """
     annotations = inspect.get_annotations(func, eval_str=False)
     if not any(isinstance(annotation, _LangTile) for annotation in annotations.values()):
-        return {}, {}, {}
+        return _EagerTileAnnotations()
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
     definition = _find_func_def(tree, func.__name__)
     assert definition is not None, f"specialize: no def named {func.__name__!r} in its own source"
     param_names = {arg.arg for arg in definition.args.args}
-    sources: dict[str, str] = {}
-    declarations: dict[str, str] = {}
-    fingerprints: dict[str, str] = {}
+    data = _EagerTileAnnotations()
     namespace = {name: value for name, value in func_name_lookup(func).items() if name not in param_names}
     for arg in definition.args.args:
         annotation = annotations.get(arg.arg)
         if not isinstance(annotation, _LangTile) or arg.annotation is None:
             continue
         source = _tile_annotation_source(annotation)
+        overrides: tuple[_TileMetadataOverride, ...] = ()
         if source is not None and any(
             isinstance(node, ast.Name) and node.id in param_names for node in ast.walk(arg.annotation)
         ):
-            source = _parameterized_eager_tile_source(
+            merged = _parameterized_eager_tile_source(
                 arg.annotation, source, annotation, namespace, param_names
             )
-            if source is None:
-                fingerprints[arg.arg] = ast.unparse(_fold_const_names(arg.annotation, namespace))
+            if merged is None:
+                source = None
+                data.fingerprints[arg.arg] = ast.unparse(_fold_const_names(arg.annotation, namespace))
+            else:
+                source, overrides = merged
         if source is not None:
-            sources[arg.arg] = source
-            fingerprints[arg.arg] = source
+            data.sources[arg.arg] = source
+            data.overrides[arg.arg] = overrides
+            # Both the factory-derived base and deferred expressions affect
+            # generated types. Constexpr values remain request-key-owned.
+            data.fingerprints[arg.arg] = repr(
+                (source, tuple((override.kind, override.canonical_source) for override in overrides))
+            )
             used_names = {node.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Name)}
-            declarations.update(
+            data.dynvars.update(
                 {
                     name: literal
                     for name, literal in _tile_annotation_dynvars(annotation).items()
                     if name in used_names and name not in param_names
                 }
             )
-    return sources, declarations, fingerprints
+    return data
 
 
 @cache_in_snapshot
@@ -1913,7 +2049,7 @@ def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
     names still change generated source, so they need annotation-only cache
     records in both the memory and persistent keys.
     """
-    fingerprints = dict(_eager_tile_annotation_data(func)[2])
+    fingerprints = dict(_eager_tile_annotation_data(func).fingerprints)
     namespace = dict(func_name_lookup(func))
     ann_globals: dict[str, Any] = {
         "pl": importlib.import_module("pypto.language"),
@@ -1938,6 +2074,7 @@ def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
             if source is not None:
                 fingerprints[name] = source
                 continue
+        node = _unwrap_direction_annotation(node, render_globals)
         if not isinstance(node, ast.Subscript):
             continue
         if _eval_annotation(ast.unparse(node.value), ann_globals) is _LangTile:
@@ -1946,6 +2083,58 @@ def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
             # layered onto this function hash.
             fingerprints[name] = ast.unparse(_fold_const_names(node, render_globals))
     return fingerprints
+
+
+def _specialize_eager_tile_annotation(
+    ctx: SpecializeContext, param_name: str, ann_globals: Mapping[str, Any]
+) -> str:
+    """Apply per-call metadata values without losing the factory-derived base."""
+    node = _fold_const_names(
+        ast.parse(ctx.eager_tile_annotations[param_name], mode="eval").body, {}, ctx.constexpr_values
+    )
+    assert isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Tuple)
+    canonical_globals: dict[str, Any] = {
+        "pl": importlib.import_module("pypto.language"),
+        "__builtins__": {},
+    }
+    for override in ctx.eager_tile_metadata_overrides.get(param_name, ()):
+        # Original spellings must evaluate in the original namespace: a
+        # Python DynVar alias can differ from its emitted canonical name.
+        value = _eval_annotation(override.source, ann_globals)
+        kind = _tile_metadata_kind(value)
+        if kind != override.kind:
+            raise ValueError(
+                f"@pl.jit.inline helper '{ctx.source_def_name}' Tile parameter '{param_name}': "
+                f"metadata component {override.source!r} must retain its original "
+                f"{override.kind} kind, got {type(value).__name__}"
+            )
+        rendered = _render_annotation_value(value)
+        assert rendered is not None
+        # The printer orders fields by kind, not by original source position.
+        # Replace the proven originating kind instead of adding a duplicate.
+        node.slice.elts[2:] = [
+            extra
+            for extra in node.slice.elts[2:]
+            if _tile_metadata_expression_kind(extra, canonical_globals) != kind
+        ]
+        node.slice.elts.append(rendered)
+        holder = _LangTile(
+            [],
+            DataType.FP32,
+            memref=value if kind == "MemRef" else None,
+            tile_view=value if kind == "TileView" else None,
+            _annotation_only=True,
+        )
+        # An evaluated override can select a different free DynVar from the
+        # eager branch. Declare its actual symbols, keeping Scalar formals local.
+        ctx.annotation_dynvars.update(
+            {
+                name: literal
+                for name, literal in _tile_annotation_dynvars(holder).items()
+                if name not in ctx.param_names
+            }
+        )
+    return ast.unparse(node)
 
 
 def _infer_return_type(
@@ -2578,10 +2767,7 @@ class Specializer:
             # Parameter-dependent axes remain source expressions in this
             # snapshot; resolve this call's constexpr variant only now.
             if is_inline and arg.arg in ctx.eager_tile_annotations:
-                annotation = ast.parse(ctx.eager_tile_annotations[arg.arg], mode="eval").body
-                extra_param_anns[arg.arg] = ast.unparse(
-                    _fold_const_names(annotation, {}, ctx.constexpr_values)
-                )
+                extra_param_anns[arg.arg] = _specialize_eager_tile_annotation(ctx, arg.arg, ann_globals)
                 continue
             ann_obj = _eval_annotation(ast.unparse(arg.annotation), ann_globals)
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
@@ -2994,9 +3180,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
     param_names = [p for p in inspect.signature(func).parameters if p != "self"]
-    eager_sources, eager_dynvars, _ = (
-        _eager_tile_annotation_data(func) if func_type == "inline" else ({}, {}, {})
-    )
+    eager_data = _eager_tile_annotation_data(func) if func_type == "inline" else _EagerTileAnnotations()
 
     return SpecializeContext(
         func_name=func_name,
@@ -3013,8 +3197,9 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         dep_call_variants=dep_call_variants or {},
         auto_scope=auto_scope,
         py_globals=func_name_lookup(func),
-        eager_tile_annotations=eager_sources,
-        annotation_dynvars=dict(eager_dynvars),
+        eager_tile_annotations=eager_data.sources,
+        annotation_dynvars=dict(eager_data.dynvars),
+        eager_tile_metadata_overrides=eager_data.overrides,
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

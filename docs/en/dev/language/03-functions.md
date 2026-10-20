@@ -128,7 +128,11 @@ For an eager Tile annotation whose factory-local constants are absent from the
 function closure, specialization can retain the already evaluated annotation.
 Independent shape axes and dtype survive even when other axes depend on helper
 parameters; those dependent components are substituted per call. The merged
-contract also contributes to the cache identity. If one dependent expression
+contract also contributes to the cache identity. Constexpr memory space
+parameters are substituted while independent shapes evaluated in the factory
+remain intact. Metadata replacements must retain their original kind; ambiguous
+replacements produce a diagnostic.
+If one dependent expression
 mixes a helper parameter with an unavailable factory local, pass that local as
 another constexpr parameter or capture it in the helper body.
 Dynamic symbols referenced

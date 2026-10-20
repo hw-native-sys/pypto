@@ -12,6 +12,7 @@
 import ast
 import math
 import textwrap
+import types
 import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ from pypto.jit.specializer import (
     _infer_return_type,
     _layout_str,
     _render_free_value,
+    _unwrap_direction_annotation,
     build_specialize_context,
     specialize,
 )
@@ -2260,6 +2262,16 @@ class TestArrayParamAnnotation:
 class TestInlineTileParamAnnotations:
     """Explicit Tile parameters must survive JIT signature specialization."""
 
+    def test_direction_wrapper_unwrap_uses_object_identity(self):
+        source = "Direction[pl.Tile[[8, 64], pl.FP32]]"
+        for wrapper in (pl.Out, pl.InOut):
+            node = _unwrap_direction_annotation(ast.parse(source, mode="eval").body, {"Direction": wrapper})
+            assert ast.unparse(node) == "pl.Tile[[8, 64], pl.FP32]"
+        # An unrelated object named InOut has no DSL passthrough contract.
+        source = "InOut[pl.Tile[[8, 64], pl.FP32]]"
+        node = _unwrap_direction_annotation(ast.parse(source, mode="eval").body, {"InOut": object()})
+        assert ast.unparse(node) == source
+
     @pytest.mark.parametrize("dtype", ["FP32", "BF16"])
     def test_explicit_tile_annotation_preserved(self, dtype):
         ctx = _make_ctx(
@@ -2641,7 +2653,8 @@ class TestInlineTileParamAnnotations:
 
     @pytest.mark.parametrize("rows", [8, 16])
     @pytest.mark.parametrize("valid_rows", [3, 8])
-    def test_eager_factory_constants_coexist_with_constexpr_axes(self, rows, valid_rows):
+    @pytest.mark.parametrize("direction", ["bare", "Out", "InOut"])
+    def test_eager_factory_constants_coexist_with_constexpr_axes(self, rows, valid_rows, direction):
         """An erased factory column and metadata survive a per-call row binding."""
         ROWS = 8
 
@@ -2652,10 +2665,28 @@ class TestInlineTileParamAnnotations:
             # per-call physical shape later grows to sixteen.
             view = pl.TileView(valid_shape=[valid_rows, cols], stride=[cols, 1], start_offset=0)
 
-            def keep_tile(
-                tile: pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view], ROWS: pl.constexpr
-            ):
-                return tile
+            if direction == "Out":
+
+                def keep_tile(
+                    tile: pl.Out[pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view]],
+                    ROWS: pl.constexpr,
+                ):
+                    return tile
+
+            elif direction == "InOut":
+
+                def keep_tile(
+                    tile: pl.InOut[pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view]],
+                    ROWS: pl.constexpr,
+                ):
+                    return tile
+
+            else:
+
+                def keep_tile(
+                    tile: pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view], ROWS: pl.constexpr
+                ):
+                    return tile
 
             return keep_tile
 
@@ -2688,6 +2719,144 @@ class TestInlineTileParamAnnotations:
             ),
             enable_auto_mapping=True,
         )
+
+    @pytest.mark.parametrize("space", [pl.Mem.Vec, pl.Mem.Mat])
+    @pytest.mark.parametrize("position", ["first", "last"])
+    def test_eager_factory_shape_keeps_constexpr_memory_space(self, space, position):
+        """Metadata source order cannot lose an erased factory shape or duplicate SPACE."""
+        SPACE = pl.Mem.Vec
+
+        def factory(rows):
+            allocation = pl.MemRef("buffer", 0, 4096)
+            view = pl.TileView(valid_shape=[3, 64])
+            if position == "first":
+
+                def keep_tile(
+                    tile: pl.Tile[
+                        [rows, 64],
+                        pl.FP32,
+                        SPACE,
+                        allocation,
+                        view,
+                    ],
+                    SPACE: pl.constexpr,
+                ):
+                    return tile
+
+            else:
+
+                def keep_tile(
+                    tile: pl.Tile[
+                        [rows, 64],
+                        pl.FP32,
+                        view,
+                        allocation,
+                        SPACE,
+                    ],
+                    SPACE: pl.constexpr,
+                ):
+                    return tile
+
+            return keep_tile
+
+        helper = factory(8)
+        assert not helper.__code__.co_freevars
+        ctx = build_specialize_context(
+            helper,
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"SPACE": f"pl.Mem.{space.name}"},
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        original = helper.__annotations__["tile"]
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType(
+                [8, 64],
+                DataType.FP32,
+                memref=original.memref,
+                tile_view=original.tile_view,
+                memory_space=space,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    def test_metadata_override_declares_rebound_dynvar_alias(self):
+        """The active override can contain symbols absent from the original eager value."""
+        VALID = 3
+        dimension = pl.dynamic("OLD_VALID_COLS")
+
+        def keep_tile(
+            tile: pl.Tile[[8, 64], pl.FP32, pl.TileView(valid_shape=[VALID, dimension])], VALID: pl.constexpr
+        ):
+            return tile
+
+        raw = types.FunctionType(
+            keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
+        )
+        raw.__annotations__ = keep_tile.__annotations__
+        raw.__globals__["dimension"] = pl.dynamic("NEW_VALID_COLS")
+        ctx = build_specialize_context(
+            raw,
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"VALID": "4"},
+        )
+        source = specialize("_TestClass", [ctx])
+        assert 'NEW_VALID_COLS = pl.dynamic("NEW_VALID_COLS")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        tile_type = func.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert isinstance(tile_type.tile_view.valid_shape[0], ir.ConstInt)
+        assert tile_type.tile_view.valid_shape[0].value == 4
+        assert isinstance(tile_type.tile_view.valid_shape[1], ir.Var)
+        assert tile_type.tile_view.valid_shape[1].name_hint == "NEW_VALID_COLS"
+
+    def test_metadata_override_rejects_kind_change(self):
+        """A different kind cannot leave the original eager metadata silently attached."""
+        USE_VIEW = False
+
+        def factory(rows):
+            def keep_tile(
+                tile: pl.Tile[
+                    [rows, 64], pl.FP32, pl.TileView(valid_shape=[3, 64]) if USE_VIEW else pl.Mem.Vec
+                ],
+                USE_VIEW: pl.constexpr,
+            ):
+                return tile
+
+            return keep_tile
+
+        ctx = build_specialize_context(
+            factory(8),
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"USE_VIEW": "True"},
+        )
+        with pytest.raises(ValueError, match="must retain its original MemorySpace kind, got TileView"):
+            specialize("_TestClass", [ctx])
 
     @pytest.mark.parametrize("metadata_name_collision", [False, True])
     def test_eager_mixed_axis_rejects_unrecoverable_factory_operand(self, metadata_name_collision):

@@ -62,6 +62,7 @@ from pypto.language.parser.diagnostics.exceptions import (
     ParserTypeError,
     UnsupportedFeatureError,
 )
+from pypto.language.typing.direction import InOut as TileDirection
 from pypto.pypto_core import DataType, InternalError, ir, passes
 from pypto.runtime.runner import ExecutionMode, RunConfig
 
@@ -3938,6 +3939,103 @@ class TestInlineFuncIntegration:
 class TestInlineTileAnnotations:
     """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
 
+    @pytest.mark.parametrize("changed", ["factory-shape", "memory-space"])
+    def test_eager_factory_shape_with_constexpr_space_compiles_and_invalidates_cache(self, changed):
+        """SPACE specialization retains erased rows and rechecks changed contracts."""
+        SPACE = pl.Mem.Vec
+
+        def factory(rows):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[rows, 64], pl.FP32, SPACE], SPACE: pl.constexpr) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(8)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile, SPACE)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        first = entry.compile(config=config)
+        assert entry.compile(config=config) is first
+        if changed == "factory-shape":
+            keep_tile = factory(16)
+            conflict = "physical shape dimension"
+        else:
+            # Intentionally rebind the annotation constant to test cache invalidation.
+            SPACE = pl.Mem.Mat  # pyright: ignore[reportConstantRedefinition]
+            conflict = "memory space"
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        with pytest.raises(ValueError, match=f"Inline call to 'keep_tile'.*{conflict}"):
+            entry.compile(config=config)
+
+    @pytest.mark.parametrize("direction", ["Out", "InOut", "alias"])
+    def test_postponed_wrapped_tile_metadata_invalidates_cache(self, direction):
+        """Direction markers normalize to Tile while ROWS and VIEW keep cache ownership."""
+        VIEW = pl.TileView(valid_shape=[3, 64])
+        ROWS = 99
+        if direction == "Out":
+
+            def keep_tile(tile: pl.Out[pl.Tile[[ROWS, 64], pl.FP32, VIEW]], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Out[pl.Tile[[ROWS, 64], pl.FP32, VIEW]]"
+        elif direction == "InOut":
+
+            def keep_tile(tile: pl.InOut[pl.Tile[[ROWS, 64], pl.FP32, VIEW]], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            annotation = "pl.InOut[pl.Tile[[ROWS, 64], pl.FP32, VIEW]]"
+        else:
+
+            def keep_tile(
+                tile: TileDirection[pl.Tile[[ROWS, 64], pl.FP32, VIEW]], ROWS: pl.constexpr
+            ) -> pl.Tile:
+                return tile
+
+            annotation = "TileDirection[pl.Tile[[ROWS, 64], pl.FP32, VIEW]]"
+
+        raw = keep_tile
+        postponed = types.FunctionType(raw.__code__, {**raw.__globals__, "VIEW": VIEW}, raw.__name__)
+        postponed.__annotations__ = {"tile": annotation, "ROWS": "pl.constexpr", "return": "pl.Tile"}
+        keep_tile = jit.inline(auto_scope=False)(postponed)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile, 8)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        first = entry.compile(config=config)
+        assert entry.compile(config=config) is first
+        postponed.__globals__["VIEW"] = pl.TileView(valid_shape=[4, 64])
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        assert entry.compile(config=config) is not first
+
     @pytest.mark.parametrize("rows", [8, 16])
     def test_eager_factory_local_tile_annotation_compiles(self, rows, tmp_path):
         """Annotation-only factory values have no Python closure cell to re-read."""
@@ -4431,7 +4529,8 @@ class TestInlineTileAnnotations:
             tile_op_pattern, sources[1], re.MULTILINE
         )
 
-    def test_inline_tile_shape_uses_each_constexpr_binding(self, tmp_path):
+    @pytest.mark.parametrize("direction", ["bare", "Out", "InOut"])
+    def test_inline_tile_shape_uses_each_constexpr_binding(self, tmp_path, direction):
         """Two calls retain an erased factory column and bind their own row extent."""
         # This ambient value makes Python's eager annotation legal. The JIT
         # must fold each call's ROWS first, rather than capture this value or
@@ -4439,9 +4538,27 @@ class TestInlineTileAnnotations:
         ROWS = 99
 
         def factory(cols):
-            @jit.inline(auto_scope=False)
-            def keep_tile(t: pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
-                return t
+            if direction == "Out":
+
+                @jit.inline(auto_scope=False)
+                def keep_tile(
+                    t: pl.Out[pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec]], ROWS: pl.constexpr
+                ) -> pl.Tile:
+                    return t
+
+            elif direction == "InOut":
+
+                @jit.inline(auto_scope=False)
+                def keep_tile(
+                    t: pl.InOut[pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec]], ROWS: pl.constexpr
+                ) -> pl.Tile:
+                    return t
+
+            else:
+
+                @jit.inline(auto_scope=False)
+                def keep_tile(t: pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
+                    return t
 
             return keep_tile
 
