@@ -13,8 +13,8 @@ PTO codegen 直接接收分配句柄和目标操作数。
 最终结构、SSA、类型和调用验证仍覆盖整个程序。选中后出现编译、验证或执行错误
 直接报告，不捕获错误后重新编译 Tile。
 
-默认支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的静态二维稠密 Vec 和普通 cube kernel。
-物理行须按 32 字节对齐；valid 可以是物理 shape 内的静态部分矩形。
+默认支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的静态物理形状二维稠密 Vec 和普通 cube kernel。
+物理行须按 32 字节对齐；valid 可以是物理 shape 内的静态部分矩形或已支持的运行时矩形。
 逐元素运算的 Tile 输入与目标必须具有一致的物理 shape 和 valid 范围；仅 valid 相同不足以入选。
 
 | 算子 | 元素类型 |
@@ -37,12 +37,16 @@ For 要求 INDEX 归纳变量和可证明为正的常量步长。动态/负步�
 Tile carry 的复制在 lowering 前规划；标量 yield 同时赋值，Torch 调试也保留交换语义。
 block/subblock 查询使用已有 Buffer 配方。
 
-静态 Vec slice（包括嵌套 slice）保持父视图的行距。reshape 和 reinterpret 保持物理字节数不变，
+具有静态或运行时偏移的 Vec slice（包括嵌套 slice）保持父视图的行距。reshape 和 reinterpret 保持物理字节数不变，
 要求源行距稠密，单行源也须满足此要求。Vec assemble 要求目标不是窗口，且源与目标行距相同。发生源/目标重叠时，
 在规划前显式复制完整的带类型父视图，再重建源窗口；精确原位写入或已证明不相交的静态字节范围不需要快照。
 不相交证明使用继承的行距，并包含行间空隙，与验证器的保守存储范围一致。
 它通过共享分配的起点和字节偏移识别连续 assemble 的结果，保留重叠源快照所需的逻辑父视图。
-算术目标不能复用正在读取的窗口所属存储组。
+算术目标不能复用正在读取的窗口所属存储组。符号累计偏移在各 slice 定义点绑定一次，
+重建快照时复用；静态子窗口不能让动态父窗口的存储范围重新变得精确。
+动态边界仍是调用者前置条件。向量基址须按 32 字节对齐，例如 FP32 的列偏移
+`block * 8` 可以保持对齐。无法证明对齐的 slice 由更早的规范化 pass 物化，
+仍不属于默认 Buffer 视图配方。
 
 静态稠密 Vec reshape 支持同一已规划分配的多个视图。
 静态非负 MemRef 偏移必须按 32 字节对齐。lowering 验证分配容量及窗口边界；
@@ -57,7 +61,7 @@ INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或�
 转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
-reduction、运行时 offset/valid shape、窗口区域 carry、非连续 relabel、行距不兼容或目标为窗口的
+reduction、运行时 offset 的 relabel、窗口区域 carry、非连续 relabel、行距不兼容或目标为窗口的
 assemble、槽位、helper ABI 和跨核资源在正常流水线保持 Tile。同一符号分配需要多个不同形状或
 类型的窗口父视图时也保持 Tile；对已 relabel 的窗口再 slice 同样尚未开放。已有生产配方可通过显式底层 pass 流水线开发和测试，
 配方存在本身不代表默认支持。
@@ -70,6 +74,29 @@ False:       两种 kernel                 => Tile
 
 用 `PassContext([], enable_buffer_ir=False)` 选择旧路径。JIT 缓存包含 bool 与 Buffer
 语义版本；嵌套 dump/profiling 上下文、预编译 worker 和调试重编译保持有效开关值。
+
+## 运行时 valid 的默认选择
+
+默认支持直线区域中的 Vec load/store、allocation-backed `set_validshape` 和上表中
+形状相同的逐元素配方。算术输入与结果的 valid 表达式须结构相等；两个 descriptor
+维度都是 `-1` 不代表实际运行时值相等。前向 SSA 分析拒绝 setter 之后再次使用旧
+元数据版本，包括普通别名及从该版本切出的窗口；当前版本可以有多个消费者。
+带动态 valid 状态的用户控制流、窗口 setter、动态 valid 的 relabel/assemble、嵌套
+动态 valid 窗口继续 Tile。已有静态控制流支持不变。
+
+可变 allocation 使用双轴动态 descriptor，窗口保留逐轴静态/动态 descriptor。
+PYPTO 仅允许动态 allocation 与兼容的、覆盖完整容量的 typed root 合并。
+独立 allocation 的生命周期结束后，仍可复用其物理地址。
+
+有效长度允许零：allocation metadata 仍更新，但 load/store/算术仅在两轴 valid
+均为正时执行。动态 valid 的 subview 在受 guard 保护的消费点物化，因此空路径
+不会构造空 native subview。常量空操作在创建 Buffer 调用前消除。view 不逃逸出
+分支，也不产生 Buffer-valued phi。扩大 valid 不初始化数据；非零动态长度仍须
+满足物理窗口边界，读取区域须已初始化。
+
+`tests/st/runtime/ops/test_buffer_views.py::test_default_dynamic_buffer_windows`
+通过公开默认 JIT 入口覆盖三种 planner，在同一编译产物内改变偏移与空/部分/完整
+有效区，检查未写区 sentinel 及实际执行的 Buffer/native 产物。
 
 ## 位置与 API
 

@@ -714,7 +714,7 @@ def test_conflicting_typed_window_parents_stay_tile(planner):
 
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("dynamic", ["offset", "valid"])
-def test_dynamic_window_forms_remain_tile(planner, dynamic):
+def test_dynamic_window_forms_select_buffer(planner, dynamic):
     offset = "rows" if dynamic == "offset" else "0"
     valid = ", valid_shape=[rows, 32]" if dynamic == "valid" else ""
     program = pl.parse_program(f"""
@@ -726,6 +726,226 @@ class DynamicWindow:
         whole = pl.load(x, [0, 0], [64, 64])
         window = pl.tile.slice(whole, [16, 32], [{offset}, 0]{valid})
         return pl.store(window, [0, 0], out)
+""")
+    assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Buffer
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["nested", "assemble", "nested_assemble"])
+def test_default_runtime_offsets_preserve_source_and_overlap(tmp_path, planner, kind):
+    body = {
+        "nested": """outer = pl.tile.slice(whole, [32, 48], [row, 0])
+        window = pl.tile.slice(outer, [16, 32], [8, col * 8])
+        value = pl.add(window, window)
+        out = pl.store(whole, [0, 0], out)
+        out = pl.store(value, [0, 0], out)""",
+        "assemble": """window = pl.tile.slice(whole, [16, 64], [row, 0])
+        value = pl.tile.assemble(whole, window, [col, 0])
+        out = pl.store(value, [0, 0], out)""",
+        "nested_assemble": """outer = pl.tile.slice(whole, [32, 64], [row, 0])
+        window = pl.tile.slice(outer, [16, 64], [8, 0])
+        value = pl.tile.assemble(whole, window, [col, 0])
+        out = pl.store(value, [0, 0], out)""",
+    }[kind]
+    program = pl.parse_program(f"""
+@pl.program
+class RuntimeOffsets:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], row: pl.Scalar[pl.INDEX],
+               col: pl.Scalar[pl.INDEX], out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]
+               ) -> pl.Tensor[[64, 64], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        {body}
+        return out
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    ir.assert_structural_equal(lowered, ir.deserialize(ir.serialize(lowered)))
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    # Reuse one compiled body with changing offsets; a frozen first offset
+    # or wrong nested pitch must change both the data and untouched sentinel.
+    samples = [(0, 0), (1, 1), (16, 2), (32, 0)]
+    for row, col in samples:
+        out = torch.full_like(x, -777)
+        namespace["kernel"](x, row, col, out)
+        if kind == "nested":
+            expected = x.clone()
+            expected[:16, :32] = 2 * x[row + 8 : row + 24, col * 8 : col * 8 + 32]
+        else:
+            expected = x.clone()
+            start = row + (8 if kind == "nested_assemble" else 0)
+            expected[col : col + 16] = x[start : start + 16].clone()
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    assert _kernel(_lower(program, planner, False)).ir_stage == ir.FunctionIRStage.Functional
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "runtime_offsets.pto"
+        source.write_text(codegen.PTOCodegen().generate(lowered, emit_source_loc=False))
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(
+            str(source), str(tmp_path / "runtime_offsets.cpp"), ["--pto-arch=a2", f"--pto-level={level}"]
+        )
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "load",
+        "setter",
+        "mixed",
+        "zero",
+        "mixed_zero",
+        "chain",
+        "two_axes",
+        "different_capacity",
+        "static_setter_capacity",
+    ],
+)
+def test_default_runtime_valid_empty_and_nonempty_paths(tmp_path, planner, kind):
+    valid = (
+        "[rows, cols]"
+        if kind == "two_axes"
+        else "[16, 0]"
+        if kind in ("zero", "mixed_zero")
+        else "[16, cols]"
+    )
+    body = f"loaded = pl.load(x, [0, 0], [16, 32], valid_shape={valid})"
+    operation = "pl.add(loaded, loaded)"
+    if kind == "setter":
+        body = """whole = pl.load(x, [0, 0], [16, 32])
+        loaded = pl.tile.set_validshape(whole, 16, cols)"""
+    elif kind in ("mixed", "mixed_zero"):
+        body = f"""whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 32], [0, 0], valid_shape={valid})
+        {body}"""
+        operation = "pl.add(window, loaded)"
+    elif kind == "chain":
+        body = """whole = pl.load(x, [0, 0], [16, 32])
+        narrowed = pl.tile.set_validshape(whole, 16, cols)
+        out = pl.store(narrowed, [32, 0], out)
+        loaded = pl.tile.set_validshape(narrowed, 16, 32)"""
+    elif kind in ("different_capacity", "static_setter_capacity"):
+        # The larger allocation dies before the runtime-valid load. PYPTO must
+        # not turn the smaller dynamic allocation into an interior byte view.
+        body = f"""whole = pl.load(x, [0, 0], [64, 64])
+        out = pl.store(whole, [0, 0], out)
+        {body}"""
+        if kind == "static_setter_capacity":
+            body = """whole = pl.load(x, [0, 0], [64, 64])
+        out = pl.store(whole, [0, 0], out)
+        full = pl.load(x, [0, 0], [16, 32])
+        loaded = pl.tile.set_validshape(full, 16, 7)"""
+    program = pl.parse_program(f"""
+@pl.program
+class RuntimeValid:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], rows: pl.Scalar[pl.INDEX],
+               cols: pl.Scalar[pl.INDEX], out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]
+               ) -> pl.Tensor[[64, 64], pl.FP32]:
+        {body}
+        computed = {operation}
+        return pl.store(computed, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    ir.assert_structural_equal(lowered, ir.deserialize(ir.serialize(lowered)))
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    for rows, cols in [(0, 0), (0, 32), (16, 0), (1, 1), (16, 32), (7, 13), (0, 0)]:
+        out = torch.full_like(x, -777)
+        namespace["kernel"](x, rows, cols, out)
+        expected = (
+            x.clone()
+            if kind in ("different_capacity", "static_setter_capacity")
+            else torch.full_like(x, -777)
+        )
+        vr = rows if kind == "two_axes" else 16
+        vc = 32 if kind == "chain" else 0 if kind in ("zero", "mixed_zero") else cols
+        if kind == "static_setter_capacity":
+            vc = 7
+        expected[:vr, :vc] = 2 * x[:vr, :vc]
+        if kind == "chain":
+            expected[32:48, :cols] = x[:16, :cols]
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "runtime_valid.pto"
+        text = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+        source.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(
+            str(source), str(tmp_path / "runtime_valid.cpp"), ["--pto-arch=a2", f"--pto-level={level}"]
+        )
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("alias", ["direct", "alias", "window"])
+def test_runtime_valid_old_metadata_aliases_remain_tile(planner, alias):
+    saved = {
+        "direct": "",
+        "alias": "old = loaded",
+        "window": "old = pl.tile.slice(loaded, [16, 32], [0, 0])",
+    }[alias]
+    old = "loaded" if alias == "direct" else "old"
+    program = pl.parse_program(f"""
+@pl.program
+class OldValid:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[16, 32], pl.FP32], cols: pl.Scalar[pl.INDEX],
+               out: pl.InOut[pl.Tensor[[32, 32], pl.FP32]]) -> pl.Tensor[[32, 32], pl.FP32]:
+        loaded = pl.load(x, [0, 0], [16, 32])
+        {saved}
+        narrowed = pl.tile.set_validshape(loaded, 16, cols)
+        small = pl.add(narrowed, narrowed)
+        out = pl.store(small, [0, 0], out)
+        full = pl.add({old}, {old})
+        return pl.store(full, [16, 0], out)
+""")
+    assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "kind", ["unaligned_offset", "window_setter", "nested_valid", "different_valid", "if", "for", "while"]
+)
+def test_dynamic_unsupported_forms_remain_tile(planner, kind):
+    body = {
+        "unaligned_offset": "value = pl.tile.slice(whole, [16, 32], [0, cols])",
+        "window_setter": """window = pl.tile.slice(whole, [16, 32], [0, 0])
+        value = pl.tile.set_validshape(window, 16, cols)""",
+        "nested_valid": """window = pl.tile.slice(whole, [32, 64], [0, 0], valid_shape=[32, cols])
+        value = pl.tile.slice(window, [16, 32], [0, 0], valid_shape=[16, cols])""",
+        "if": """loaded = pl.load(x, [0, 0], [16, 32], valid_shape=[16, cols])
+        if other > 0:
+            value = pl.add(loaded, loaded)
+        else:
+            value = pl.sub(loaded, loaded)""",
+        "for": """loaded = pl.load(x, [0, 0], [16, 32], valid_shape=[16, cols])
+        for index in pl.range(2):
+            loaded = pl.add(loaded, loaded)
+        value = loaded""",
+        "while": """loaded = pl.load(x, [0, 0], [16, 32], valid_shape=[16, cols])
+        count = other
+        while count > 0:
+            loaded = pl.add(loaded, loaded)
+            count = count - 1
+        value = loaded""",
+        "different_valid": """left = pl.load(x, [0, 0], [16, 32], valid_shape=[16, cols])
+        right = pl.load(x, [0, 0], [16, 32], valid_shape=[16, other])
+        value = pl.add(left, right)""",
+    }[kind]
+    program = pl.parse_program(f"""
+@pl.program
+class UnsupportedDynamic:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], cols: pl.Scalar[pl.INDEX],
+               other: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+               ) -> pl.Tensor[[16, 32], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        {body}
+        return pl.store(value, [0, 0], out)
 """)
     assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
 

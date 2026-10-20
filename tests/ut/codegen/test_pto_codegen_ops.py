@@ -3506,7 +3506,10 @@ class TestSetValidShapeCodegen:
                 )
                 return pl.store(narrowed, [0, 0], dst)
 
-        mlir = self._generate_mlir(Prog)
+        # This regression exercises the legacy Tile emitter's source-name
+        # aliasing; default Buffer SSA/metadata is covered by selector tests.
+        with passes.PassContext([], enable_buffer_ir=False):
+            mlir = self._generate_mlir(Prog)
         set_validshape_line = next(
             strip_loc(line) for line in mlir.splitlines() if "pto.set_validshape" in line
         )

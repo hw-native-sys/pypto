@@ -15,7 +15,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, ir
+from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -182,15 +182,17 @@ def test_add_kernel_dynamic_shape_pto_codegen():
     assert "shape = [%c0_index" not in mlir_code
 
 
-def test_add_kernel_valid_shape_pto_codegen():
+@pytest.mark.parametrize("enabled", [True, False])
+def test_add_kernel_valid_shape_pto_codegen(enabled):
     """Test PTO codegen handles load with valid_shape: tile allocated from shapes, M/N as index scalars."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelValidShape.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_valid_shape", ir.Span.unknown())
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    optimized = pm.run_passes(program)
+    with passes.PassContext([], enable_buffer_ir=enabled):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program)
 
     gen = codegen.PTOCodegen()
     mlir_code = gen.generate(optimized)
@@ -212,13 +214,17 @@ def test_add_kernel_valid_shape_pto_codegen():
     # alloc_tile has dynamic type (v_row=?, v_col=?) with dynamic operands
     assert "v_row=?" in mlir_code
     assert "v_col=?" in mlir_code
-    # alloc_tile valid_row/valid_col use the dynamic valid_shape operands
-    # (%arg3, %arg4), matching the partition_view sizes above.
-    assert "valid_row = %arg3" in mlir_code
-    assert "valid_col = %arg4" in mlir_code
-    # No set_validshape: alloc_tile carries the valid_row/valid_col operands
-    # and partition_view already reflects the same valid region.
-    assert "pto.set_validshape" not in mlir_code
+    if enabled:
+        updates = [line for line in mlir_code.splitlines() if "pto.set_validshape" in line]
+        assert updates and all("%arg3, %arg4" in line for line in updates)
+    else:
+        # The legacy allocation initializes directly from the runtime operands.
+        assert "valid_row = %arg3" in mlir_code
+        assert "valid_col = %arg4" in mlir_code
+    # Default Buffer updates metadata at definitions and skips empty data ops.
+    # Off retains the legacy allocation-only initialization.
+    assert ("pto.set_validshape" in mlir_code) == enabled
+    assert ("scf.if" in mlir_code) == enabled
 
 
 def test_add_kernel_valid_shape_expr_pto_codegen():

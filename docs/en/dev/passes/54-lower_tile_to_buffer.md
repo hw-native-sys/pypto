@@ -17,9 +17,9 @@ results and dependencies. Final structural, SSA, type and call checks cover the
 whole program. A selected kernel's compilation, verification or execution error
 propagates; there is no catch-and-recompile fallback.
 
-The default a2/a3 rollout accepts static rank-2 dense Vec and ordinary cube kernels
+The default a2/a3 rollout accepts statically sized rank-2 dense Vec and ordinary cube kernels
 with PYPTO, DSA_RP and PTOAS planners. Physical rows must be 32-byte aligned;
-valid extents may be static partial rectangles within the physical shape.
+valid extents may be static partial rectangles or supported runtime rectangles within the physical shape.
 Elementwise Tile operands and their destination must have matching physical shapes
 and valid extents; matching valid extents alone do not qualify.
 
@@ -47,7 +47,7 @@ helper calls remain outside the default contract. Tile carry copies are planned
 before lowering; scalar yields assign simultaneously, including swaps in Torch
 numerical debugging. Block and subblock queries use their existing Buffer recipes.
 
-Static Vec slices, including nested slices, keep their parent's row pitch.
+Vec slices with static or runtime offsets, including nested slices, keep their parent's row pitch.
 Reshape and reinterpret preserve equal physical bytes and require dense source
 row pitch, including single-row sources. Vec assemble requires a non-window target and matching source/target
 row pitches. An overlapping source is preserved by an explicit copy of its
@@ -57,7 +57,13 @@ The disjointness proof uses inherited row pitch and includes gaps between rows,
 matching the verifier's conservative storage ranges. It compares shared allocation
 origins and byte offsets across chained assemble results, without changing the
 logical parent used for an overlapping-source snapshot. Arithmetic destinations cannot
-reuse the storage family of a window they read.
+reuse the storage family of a window they read. Symbolic cumulative offsets are
+bound once at each slice definition and reused when rebuilding a snapshot;
+a static child never makes its dynamic parent's storage range precise.
+Runtime bounds remain caller preconditions. Vector base addresses must be
+32-byte aligned: for FP32, a column offset such as `block * 8` preserves
+alignment. Unproven alignment is materialized by the earlier slice
+canonicalization pass and remains outside this default Buffer view recipe.
 
 Static dense Vec reshape supports repeated views of one planned allocation. Static nonnegative MemRef offsets must be
 32-byte aligned. Lowering verifies allocation capacity and window bounds; a
@@ -75,7 +81,7 @@ including transpose relabels and product views. Only complete untouched Acc
 boxes have defined preservation outside a partially valid product.
 
 A5 retains Tile IR until its default rollout has clean runtime acceptance.
-Reductions, runtime offsets/valid shapes, window region carries, strided relabels,
+Reductions, runtime-offset relabels, window region carries, strided relabels,
 assemble with incompatible pitches or window targets, slots, helper ABIs and
 cross-core resources remain Tile in the normal pipeline. A symbolic allocation
 requiring several differently shaped or typed window parents also remains Tile,
@@ -92,6 +98,36 @@ False:          both kernels                => Tile
 Use `PassContext([], enable_buffer_ir=False)` for the legacy path. JIT keys
 include the bool and a Buffer semantics version; nested dump/profiling contexts,
 precompile workers and debug recompilation preserve the effective value.
+
+## Runtime-valid default selection
+
+Runtime valid shapes are enabled for straight-line Vec load/store, allocation-backed
+`set_validshape`, and matching-shape elementwise recipes from the table above.
+Valid expressions must match structurally across arithmetic operands and result;
+two `-1` descriptor dimensions alone do not prove matching runtime values.
+A forward SSA analysis rejects uses of old metadata versions after a setter,
+including ordinary aliases and windows cut from that version. A current version
+may have several consumers. User control flow with dynamic valid state, window
+setters, dynamic-valid relabels/assemble, and nested dynamic-valid windows retain
+Tile IR. Static control-flow support is unchanged.
+
+Allocations use two dynamic descriptor dimensions when metadata can change;
+windows retain their per-axis static/dynamic descriptors. PYPTO only merges a
+dynamic allocation with compatible full-capacity typed roots. Independent
+allocations may still reuse physical addresses after their lifetimes end.
+
+An extent may be zero: allocation metadata is updated, but load/store/arithmetic
+execute only when both valid extents are positive. Dynamic-valid subviews are
+materialized at their guarded consumers, so the empty path never constructs an
+empty native subview. Constant-empty operations are removed before constructing
+Buffer calls. Views never escape the guard, and no Buffer-valued phi is introduced.
+This does not initialize data when valid extents grow. Nonzero runtime extents
+must still fit the physical window, and reads must refer to initialized data.
+
+`tests/st/runtime/ops/test_buffer_views.py::test_default_dynamic_buffer_windows`
+uses the public default JIT path across three planners, changing offsets and
+empty/partial/full valid rectangles within one compiled artifact. It checks
+untouched sentinels and the Buffer/native artifacts used for execution.
 
 ## Placement and API
 

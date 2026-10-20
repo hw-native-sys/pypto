@@ -56,6 +56,7 @@
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -225,6 +226,7 @@ class SnapshotAssembleSources : public IRMutator {
 
   StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
     const auto call = As<Call>(assign->value_);
+    if (call && IsOp(call, "tile.slice")) return IndexWindowOffsets(assign, call);
     if (!call || !IsOp(call, "tile.assemble")) return assign;
     const auto target = GetTileTypeWithMemRef(call->args_[0]->GetType());
     const auto source = AsVarLike(call->args_[1]);
@@ -241,8 +243,8 @@ class SnapshotAssembleSources : public IRMutator {
     const auto view = views_.Get(source);
     if (HasDisjointWindows(call, source_type, view)) return assign;
     const auto copied_source = view.window ? view.root : source;
-    CHECK_SPAN(copied_source && (!view.window || view.offsets), call->span_)
-        << "Buffer IR overlapping assemble requires a static window of a typed allocation";
+    CHECK_SPAN(copied_source && (!view.window || view.slice), call->span_)
+        << "Buffer IR overlapping assemble requires a window of a typed allocation";
     const auto copied_type = GetTileTypeWithMemRef(copied_source->GetType());
     const auto size = utils::StaticPhysicalAllocationBytes(copied_type, MemorySpace::Vec, nullptr);
     CHECK_SPAN(size, call->span_) << "Buffer IR assemble snapshots require a static source allocation";
@@ -254,10 +256,7 @@ class SnapshotAssembleSources : public IRMutator {
         names_.Fresh("assemble_source_"));
     std::vector<StmtPtr> statements{copy};
     if (view.window) {
-      std::vector<ExprPtr> offsets;
-      for (const auto offset : *view.offsets) {
-        offsets.push_back(std::make_shared<ConstInt>(offset, DataType::INDEX, call->span_));
-      }
+      const auto offsets = RootOffsets(view, call->span_);
       const auto valid = tile_view_semantics::GetEffectiveTileView(*source_type).valid_shape;
       auto window_call = OpRegistry::GetInstance().Create(
           "tile.slice",
@@ -266,12 +265,15 @@ class SnapshotAssembleSources : public IRMutator {
            std::make_shared<MakeTuple>(valid, call->span_)},
           {}, call->span_);
       const auto old_memory = GetDefinedMemRef(source_type);
-      const auto old_origin = As<ConstInt>(GetDefinedMemRef(copied_type)->byte_offset_);
-      const auto old_offset = As<ConstInt>(old_memory->byte_offset_);
-      CHECK_SPAN(old_origin && old_offset, call->span_)
-          << "Buffer IR static assemble snapshot requires constant relative storage offsets";
-      auto window_memory = std::make_shared<MemRef>(base, old_offset->value_ - old_origin->value_,
-                                                    old_memory->size_, call->span_);
+      // Rebase element coordinates onto the new allocation, never carry an
+      // addressed parent's absolute byte origin into its snapshot.
+      INTERNAL_CHECK_SPAN(view.row_bytes, call->span_) << "Internal error: missing window pitch";
+      const auto pitch = std::make_shared<ConstInt>(*view.row_bytes, DataType::INDEX, call->span_);
+      const auto element =
+          std::make_shared<ConstInt>(source_type->dtype_.GetBit() / 8, DataType::INDEX, call->span_);
+      const auto relative =
+          AddByteOffsets(MulByteOffsets(offsets[0], pitch), MulByteOffsets(offsets[1], element));
+      auto window_memory = std::make_shared<MemRef>(base, relative, old_memory->size_, call->span_);
       auto window = std::make_shared<Var>(names_.Fresh("assemble_window_"),
                                           CloneTypeWithMemRef(source_type, window_memory), call->span_);
       statements.push_back(std::make_shared<AssignStmt>(window, window_call, call->span_));
@@ -286,6 +288,44 @@ class SnapshotAssembleSources : public IRMutator {
   }
 
  private:
+  std::vector<ExprPtr> RootOffsets(const BufferViewAnalysis::View& view, const Span& span) const {
+    if (view.offsets) {
+      return {std::make_shared<ConstInt>((*view.offsets)[0], DataType::INDEX, span),
+              std::make_shared<ConstInt>((*view.offsets)[1], DataType::INDEX, span)};
+    }
+    const auto found = root_offsets_.find(view.slice.get());
+    INTERNAL_CHECK_SPAN(found != root_offsets_.end(), span)
+        << "Internal error: runtime window offsets must dominate their snapshot";
+    return found->second;
+  }
+
+  StmtPtr IndexWindowOffsets(const AssignStmtPtr& assign, const CallPtr& call) {
+    const auto view = views_.Get(assign->var_);
+    if (view.offsets || !view.root) return assign;
+    const auto parent = RootOffsets(views_.Get(call->args_[0]), call->span_);
+    const auto offsets = As<MakeTuple>(call->args_[2]);
+    INTERNAL_CHECK_SPAN(offsets && offsets->elements_.size() == 2, call->span_)
+        << "Internal error: rank-2 slice offsets required";
+    std::vector<StmtPtr> statements;
+    std::vector<ExprPtr> cumulative;
+    for (size_t axis = 0; axis < 2; ++axis) {
+      auto offset = offsets->elements_[axis];
+      if (GetScalarDtype(offset) != DataType::INDEX) offset = MakeCast(offset, DataType::INDEX);
+      auto sum = AddByteOffsets(parent[axis], offset);
+      if (!As<ConstInt>(sum) && !AsVarLike(sum)) {
+        // Bind once at the slice's lexical definition. Descendants refer to
+        // this SSA scalar instead of repeatedly expanding their ancestor tree.
+        auto var = std::make_shared<Var>(names_.Fresh("window_offset_"), sum->GetType(), call->span_);
+        statements.push_back(std::make_shared<AssignStmt>(var, sum, call->span_));
+        sum = var;
+      }
+      cumulative.push_back(sum);
+    }
+    root_offsets_.emplace(call.get(), std::move(cumulative));
+    statements.push_back(assign);
+    return std::make_shared<SeqStmts>(statements, assign->span_);
+  }
+
   bool HasDisjointWindows(const CallPtr& call, const TileTypePtr& source_type,
                           const BufferViewAnalysis::View& source) const {
     const auto target = views_.Get(call->args_[0]);
@@ -329,6 +369,7 @@ class SnapshotAssembleSources : public IRMutator {
 
   BufferViewAnalysis views_;
   StorageNameSupply names_;
+  std::unordered_map<const Call*, std::vector<ExprPtr>> root_offsets_;
 };
 
 /// Describes where a TileType Var is defined.
@@ -3478,6 +3519,7 @@ struct PackedBuffer {
   std::vector<PackedMember> members;
   uint64_t capacity = 0;
   bool pinned = false;
+  BufferRootCompatibility::Root buffer_root;
 };
 
 ReuseMap IdentifyReuseOpportunities(
@@ -3490,6 +3532,12 @@ ReuseMap IdentifyReuseOpportunities(
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
     const FunctionPtr& func, std::vector<Diagnostic>* out_hints) {
   ReuseMap reuse_map;
+  std::vector<BufferRootCompatibility::Root> buffer_roots(lifetimes.size());
+  const auto* buffer_context = PassContext::Current();
+  if (buffer_context && buffer_context->GetEnableBufferIR()) {
+    BufferRootCompatibility compatibility(func->body_);
+    for (size_t i = 0; i < lifetimes.size(); ++i) buffer_roots[i] = compatibility.Get(lifetimes[i].variable);
+  }
 
   // A declared allocation (`pl.Tile[..., pl.MemRef("name"), ...]`) has exactly the membership
   // the kernel author wrote. The packer neither adds tiles to it nor moves its
@@ -3891,13 +3939,18 @@ ReuseMap IdentifyReuseOpportunities(
       std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
         if (is_pinned[idx]) {
-          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, lifetimes[idx].size, true});
+          buffers.push_back(
+              PackedBuffer{{PackedMember{idx, 0}}, lifetimes[idx].size, true, buffer_roots[idx]});
           continue;
         }
         const auto& cand = lifetimes[idx];
         bool placed = false;
         for (PackedBuffer& buffer : buffers) {
           if (buffer.pinned || cand.size > buffer.capacity) continue;
+          // A disjoint subrange is still the same symbolic byte root. Dynamic
+          // metadata requires a compatible full-capacity typed allocation even
+          // when the original lifetimes do not overlap.
+          if (!BufferRootCompatibility::Compatible(buffer_roots[idx], buffer.buffer_root)) continue;
 
           std::optional<uint64_t> chosen_offset;
           if (!allow_subranges || !whole_root_subrange_eligible[idx] ||
@@ -3942,11 +3995,12 @@ ReuseMap IdentifyReuseOpportunities(
                                         return lhs.byte_offset < rhs.byte_offset;
                                       });
           buffer.members.insert(pos, placement);
+          buffer.buffer_root = BufferRootCompatibility::Merge(buffer.buffer_root, buffer_roots[idx]);
           placed = true;
           break;
         }
         if (!placed) {
-          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, cand.size, false});
+          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, cand.size, false, buffer_roots[idx]});
         }
       }
       return buffers;

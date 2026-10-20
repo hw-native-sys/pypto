@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -116,13 +117,15 @@ class BufferKernelSupport : public IRVisitor {
         supported &= view.valid_shape.size() == tile->shape_.size();
         for (size_t i = 0; supported && i < view.valid_shape.size(); ++i) {
           const auto valid = As<ConstInt>(view.valid_shape[i]);
-          supported &= valid && valid->value_ > 0 && valid->value_ <= As<ConstInt>(tile->shape_[i])->value_;
+          const auto scalar = As<ScalarType>(view.valid_shape[i]->GetType());
+          supported &= valid ? valid->value_ >= 0 && valid->value_ <= As<ConstInt>(tile->shape_[i])->value_
+                             : space == MemorySpace::Vec && scalar &&
+                                   (scalar->dtype_ == DataType::INDEX || scalar->dtype_.IsSignedInt());
+          if (space != MemorySpace::Vec) supported &= valid && valid->value_ > 0;
         }
       }
       if (const auto memory = tile->memref_.value_or(nullptr)) {
-        const auto offset = As<ConstInt>(memory->byte_offset_);
-        supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_ && offset &&
-                     offset->value_ >= 0 && offset->value_ % 32 == 0;
+        supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_;
       }
     } else if (auto tensor = As<TensorType>(type)) {
       supported &= StaticShape(tensor->shape_) &&
@@ -148,6 +151,18 @@ class BufferKernelSupport : public IRVisitor {
       return;
     }
     CheckType(expr->GetType());
+    if (const auto var = AsVarLike(expr)) {
+      if (const auto tile = As<TileType>(var->GetType())) {
+        if (const auto memory = tile->memref_.value_or(nullptr)) {
+          const auto offset = As<ConstInt>(memory->byte_offset_);
+          const auto view = views_.Get(var);
+          // Only a slice with a known typed parent can carry a symbolic
+          // member offset. Allocation origins themselves remain static.
+          supported &= offset ? offset->value_ >= 0 && offset->value_ % 32 == 0
+                              : view.window && view.root && view.row_bytes.has_value();
+        }
+      }
+    }
     IRVisitor::VisitExpr(expr);
   }
 
@@ -305,6 +320,9 @@ class BufferKernelSupport : public IRVisitor {
                    GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
                    !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+    } else if (IsOp(call, "tile.set_validshape")) {
+      supported &= call->args_.size() == 3 && call->kwargs_.empty() && !views_.IsWindow(call->args_[0]) &&
+                   As<TileType>(call->GetType())->GetMemorySpace() == MemorySpace::Vec;
     } else if (IsOp(call, "tile.slice") || IsOp(call, "tile.assemble")) {
       CheckWindowCall(call);
     } else if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) {
@@ -313,7 +331,8 @@ class BufferKernelSupport : public IRVisitor {
       const auto source_bytes = TileBytes(source);
       supported &= source && destination && source->GetMemorySpace() == MemorySpace::Vec &&
                    destination->GetMemorySpace() == MemorySpace::Vec && source_bytes &&
-                   source_bytes == TileBytes(destination) && views_.HasDenseRowPitch(call->args_[0]);
+                   source_bytes == TileBytes(destination) && views_.HasDenseRowPitch(call->args_[0]) &&
+                   (!views_.IsWindow(call->args_[0]) || views_.Get(call->args_[0]).offsets.has_value());
       if (IsOp(call, "tile.reshape")) {
         supported &= call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
                      source->dtype_ == destination->dtype_;
@@ -357,9 +376,13 @@ class BufferKernelSupport : public IRVisitor {
     }
     for (size_t i = 0; i < 2; ++i) {
       const auto offset = As<ConstInt>(offsets->elements_[i]);
-      supported &=
-          offset && offset->value_ >= 0 &&
-          offset->value_ <= As<ConstInt>(parent->shape_[i])->value_ - As<ConstInt>(window->shape_[i])->value_;
+      const auto scalar = As<ScalarType>(offsets->elements_[i]->GetType());
+      const auto limit = As<ConstInt>(parent->shape_[i])->value_ - As<ConstInt>(window->shape_[i])->value_;
+      // Dynamic bounds remain the slice/assemble caller's precondition. They
+      // never establish a precise range for alias analysis.
+      supported &= limit >= 0 && scalar &&
+                   (scalar->dtype_ == DataType::INDEX || scalar->dtype_.IsSignedInt()) &&
+                   (!offset || (offset->value_ >= 0 && offset->value_ <= limit));
     }
     if (slice) {
       supported &= call->kwargs_.empty() && call->args_.size() <= 5;
@@ -377,7 +400,7 @@ class BufferKernelSupport : public IRVisitor {
       // a destination with a different pitch needs a separate transfer recipe.
       const auto source_view = views_.Get(call->args_[1]);
       supported &= source_view.row_bytes && source_view.row_bytes == views_.Get(call->args_[0]).row_bytes &&
-                   (!source_view.window || (source_view.root && source_view.offsets));
+                   (!source_view.window || (source_view.root && source_view.slice));
     }
     if (!views_.IsWindow(call->args_[0])) {
       const auto memory = parent->memref_.value_or(nullptr);
@@ -591,6 +614,7 @@ FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper
     support.CheckType(type);
   }
   support.VisitStmt(function->body_);
+  if (support.supported) support.supported = BufferValidAnalysis(function->body_).supported();
   auto selected = std::make_shared<Function>(*function);
   selected->attrs_.emplace_back(kAttrBufferIrSelected, support.supported &&
                                                            (support.has_load || support.has_fill) &&

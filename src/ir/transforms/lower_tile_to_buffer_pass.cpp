@@ -49,7 +49,9 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -561,7 +563,8 @@ class StorageIndex : public IRVisitor {
 
 class TileToBufferMutator : public IRMutator {
  public:
-  explicit TileToBufferMutator(const StorageIndex& storage) : storage_(storage) {}
+  explicit TileToBufferMutator(const StorageIndex& storage, bool guarded_valid)
+      : storage_(storage), guarded_valid_(guarded_valid) {}
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& var) override {
@@ -595,10 +598,17 @@ class TileToBufferMutator : public IRMutator {
 
   StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
     if (auto call = As<Call>(assign->value_)) {
-      return WithValidState(call, assign->var_, LowerCall(call, assign->var_));
+      return LowerDefinition(call, assign->var_);
     }
     if (As<TileType>(assign->var_->GetType())) {
       auto source = AsVarLike(assign->value_);
+      if (source) {
+        const auto deferred = deferred_windows_.find(As<TileType>(source->GetType()).get());
+        if (deferred != deferred_windows_.end()) {
+          deferred_windows_[As<TileType>(assign->var_->GetType()).get()] = deferred->second;
+          return Empty(assign->span_);
+        }
+      }
       INTERNAL_CHECK_SPAN(source && Handle(source) == Handle(assign->var_), assign->span_)
           << "Internal error: Tile storage legalization left an implicit alias transfer";
       return Empty(assign->span_);
@@ -614,7 +624,7 @@ class TileToBufferMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& eval) override {
-    if (auto call = As<Call>(eval->expr_)) return LowerCall(call, nullptr);
+    if (auto call = As<Call>(eval->expr_)) return LowerDefinition(call, nullptr);
     return IRMutator::VisitStmt_(eval);
   }
 
@@ -746,9 +756,19 @@ class TileToBufferMutator : public IRMutator {
 
   static StmtPtr Empty(const Span& span) { return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span); }
 
-  VarPtr Handle(const ExprPtr& value) const {
+  VarPtr Handle(const ExprPtr& value) {
     auto tile = As<TileType>(value->GetType());
     INTERNAL_CHECK_SPAN(tile, value->span_) << "Internal error: Buffer conversion expected a Tile operand";
+    if (auto deferred = deferred_windows_.find(tile.get()); deferred != deferred_windows_.end()) {
+      auto found = use_windows_.find(tile.get());
+      if (found != use_windows_.end()) return found->second;
+      const auto& [call, result] = deferred->second;
+      auto handle =
+          DefineWindow(result->name_hint_, Handle(call->args_[0]), Offsets(call->args_[2]),
+                       WindowDescriptor(tile, call->span_), Valid(result), use_definitions_, call->span_);
+      use_windows_.emplace(tile.get(), handle);
+      return handle;
+    }
     if (auto window = window_handles_.find(tile.get()); window != window_handles_.end()) {
       return window->second;
     }
@@ -773,6 +793,49 @@ class TileToBufferMutator : public IRMutator {
       }
     }
     return std::make_shared<MakeTuple>(std::move(extents), tile->span_);
+  }
+
+  StmtPtr LowerDefinition(const CallPtr& call, const VarPtr& result) {
+    if (!guarded_valid_) return WithValidState(call, result, LowerCall(call, result));
+    if (result && IsOp(call, "tile.slice") && NeedsRuntimeBufferValid(result->GetType())) {
+      // Remember immutable scalar operands, not a branch-local Buffer handle.
+      // Empty windows are never constructed, even speculatively before a guard.
+      deferred_windows_[As<TileType>(result->GetType()).get()] = {call, result};
+      return Empty(call->span_);
+    }
+    const bool store = IsOp(call, "tile.store");
+    const bool data_operation =
+        store || IsOp(call, "tile.load") || backend::FindLogicalBufferElementwiseRecipe(call->op_->name_);
+    ExprPtr value = store ? call->args_[0] : ExprPtr(result);
+    if (!data_operation || !value || !NeedsRuntimeBufferValid(value->GetType())) {
+      return WithValidState(call, result, LowerCall(call, result));
+    }
+    const auto valid = Valid(value);
+    ExprPtr condition;
+    bool empty = false;
+    for (const auto& extent : valid->elements_) {
+      if (auto constant = As<ConstInt>(extent)) {
+        empty |= constant->value_ == 0;
+      } else {
+        auto positive = MakeGt(extent, std::make_shared<ConstInt>(0, GetScalarDtype(extent), call->span_));
+        condition = condition ? MakeAnd(condition, positive, call->span_) : positive;
+      }
+    }
+    if (store && result) tensor_aliases_[result.get()] = VisitExpr(call->args_[2]);
+    if (empty) return WithValidState(call, result, Empty(call->span_));
+    use_windows_.clear();
+    use_definitions_.clear();
+    auto body = LowerCall(call, result);
+    if (!use_definitions_.empty()) {
+      use_definitions_.push_back(body);
+      body = std::make_shared<SeqStmts>(use_definitions_, call->span_);
+    }
+    if (condition) {
+      body = std::make_shared<IfStmt>(condition, body, std::nullopt, std::vector<VarPtr>{}, call->span_);
+    }
+    // Destination state must also be established on the empty path. The
+    // selector proves that setting it cannot invalidate a live input version.
+    return WithValidState(call, result, body);
   }
 
   // A definition of a dynamic handle first states the valid extents it
@@ -1135,6 +1198,10 @@ class TileToBufferMutator : public IRMutator {
   }
 
   const StorageIndex& storage_;
+  bool guarded_valid_;
+  std::unordered_map<const TileType*, std::pair<CallPtr, VarPtr>> deferred_windows_;
+  std::unordered_map<const TileType*, VarPtr> use_windows_;
+  std::vector<StmtPtr> use_definitions_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;
   YieldContext* yield_context_ = nullptr;
@@ -1171,11 +1238,12 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
     storage.Finalize();
-    TileToBufferMutator mutator(storage);
+    TileToBufferMutator mutator(storage, function->GetAttr<bool>(kAttrBufferIrSelected, false));
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
     lowered->ir_stage_ = FunctionIRStage::Buffer;
-    functions.push_back(std::move(lowered));
+    // Guard bodies are newly constructed and are not revisited by the mutator.
+    functions.push_back(NormalizeStmtStructure(lowered));
   }
   auto result = std::make_shared<Program>(functions, program->name_, program->span_);
   verifiers.VerifyOrThrow({IRProperty::BufferIR}, result);

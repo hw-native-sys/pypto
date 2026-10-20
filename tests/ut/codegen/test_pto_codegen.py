@@ -26,7 +26,7 @@ import subprocess
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, arith, backend, codegen, ir
+from pypto import DataType, arith, backend, codegen, ir, passes
 from pypto.backend import BackendType, pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import (
@@ -759,7 +759,8 @@ def test_pto_codegen_fillpad_inplace():
     assert "pto.tfillpad " in mlir_code, "Expected pto.tfillpad in MLIR output"
 
 
-def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
+@pytest.mark.parametrize("enabled", [True, False])
+def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body(enabled):
     """Dynamic valid_shape scalars defined in-body should still reach alloc_tile."""
 
     @pl.program
@@ -782,7 +783,8 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
             result: pl.Tensor[[1, 120], pl.FP32] = pl.tile.store(tile, [0, 0], output)
             return result
 
-    mlir_code = _generate_default_mlir(DynamicValidShapeScalarProgram)
+    with passes.PassContext([], enable_buffer_ir=enabled):
+        mlir_code = _generate_default_mlir(DynamicValidShapeScalarProgram)
     alloc_lines = _get_alloc_tile_lines(mlir_code)
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
@@ -797,12 +799,14 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
     )
     assert "valid_col" in alloc_line, f"Expected valid_col operand in alloc: {alloc_line}"
     assert "%c-1" not in mlir_code
-    # alloc_tile already carries the runtime valid_col, so no separate
-    # pto.set_validshape is emitted.
-    assert "pto.set_validshape" not in mlir_code
+    # Buffer defines metadata at the logical load and guards the empty path;
+    # the legacy Tile path initializes metadata entirely through alloc_tile.
+    assert ("pto.set_validshape" in mlir_code) == enabled
+    assert ("scf.if" in mlir_code) == enabled
 
 
-def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
+@pytest.mark.parametrize("enabled", [True, False])
+def test_pto_codegen_dynamic_valid_shape_row_defined_in_body(enabled):
     """Dynamic valid_shape rows defined in-body should still reach alloc_tile."""
 
     @pl.program
@@ -825,7 +829,8 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
             result: pl.Tensor[[120, 16], pl.FP32] = pl.tile.store(tile, [0, 0], output)
             return result
 
-    mlir_code = _generate_default_mlir(DynamicValidShapeRowProgram)
+    with passes.PassContext([], enable_buffer_ir=enabled):
+        mlir_code = _generate_default_mlir(DynamicValidShapeRowProgram)
     alloc_lines = _get_alloc_tile_lines(mlir_code)
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
@@ -839,9 +844,8 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
     assert "valid_col = %c16_index" in alloc_line, (
         f"Expected valid_col = %c16_index operand in alloc: {alloc_line}"
     )
-    # alloc_tile already carries the runtime valid_row, so no separate
-    # pto.set_validshape is emitted.
-    assert "pto.set_validshape" not in mlir_code
+    assert ("pto.set_validshape" in mlir_code) == enabled
+    assert ("scf.if" in mlir_code) == enabled
 
 
 def test_pto_codegen_tile_load_lowering():
