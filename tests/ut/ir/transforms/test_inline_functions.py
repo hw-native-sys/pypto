@@ -1026,6 +1026,79 @@ class TestInlineTileArgumentContracts:
             return
         assert ir.deduce_call_return_type(params, args, [], is_inline=True) == []
 
+    @pytest.mark.parametrize("metadata", ["valid_shape", "stride", "start_offset"])
+    @pytest.mark.parametrize("returns_tile", [False, True], ids=["void", "returning"])
+    @pytest.mark.parametrize("matching", [False, True], ids=["conflicting", "matching"])
+    @pytest.mark.parametrize("constant_first", [False, True], ids=["symbolic_binding", "constant_binding"])
+    def test_transitive_scalar_tile_view_expression(self, metadata, returns_tile, matching, constant_first):
+        """Shared dimension bindings retain Scalar provenance even when a constant won first."""
+        span = ir.Span("indirect_scalar_view.py", 51, 2)
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+        declared = ir.Sub(rows, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+        observed = 5 if matching else 4
+        if metadata == "valid_shape":
+            formal_view = ir.TileView(valid_shape=[declared, 64])
+            actual_view = ir.TileView(valid_shape=[observed, 64])
+        elif metadata == "stride":
+            formal_view = ir.TileView(stride=[declared, 1])
+            actual_view = ir.TileView(stride=[observed, 1])
+        else:
+            formal_view = ir.TileView(start_offset=declared)
+            actual_view = ir.TileView(start_offset=observed)
+        formal_type = ir.TileType([8, 64], pl.FP32, tile_view=formal_view)
+        actual_type = ir.TileType([8, 64], pl.FP32, tile_view=actual_view)
+        tile = ir.Var("tile", formal_type, span)
+        source = ir.Var("source", actual_type, span)
+        extent = ir.Var("extent", ir.TensorType([rows, 64], pl.FP32), span)
+        twice_scalar = ir.Mul(ir.ConstInt(2, pl.INDEX, span), scalar, pl.INDEX, span)
+        tensor = ir.Var("tensor", ir.TensorType([twice_scalar, 64], pl.FP32), span)
+        params = [tile]
+        args: list[ir.Expr] = [source]
+        if constant_first:
+            fixed = ir.Var("fixed", ir.TensorType([rows, 64], pl.FP32), span)
+            actual_fixed = ir.Var("actual_fixed", ir.TensorType([6, 64], pl.FP32), span)
+            params.append(fixed)
+            args.append(actual_fixed)
+        params.extend([extent, scalar])
+        args.extend([tensor, ir.ConstInt(3, pl.INDEX, span)])
+        returns = [formal_type] if returns_tile else []
+        if matching:
+            ir.deduce_call_return_type(params, args, returns, is_inline=True)
+        else:
+            with pytest.raises(
+                ValueError, match=rf"Scalar-dependent Tile {metadata}.*expected 5.*got 4"
+            ) as error:
+                ir.deduce_call_return_type(params, args, returns, is_inline=True)
+            assert "indirect_scalar_view.py:51:2" in str(error.value)
+        # Legacy non-inline inference does not interpret Scalar argument values.
+        if not constant_first:
+            ir.deduce_call_return_type(params, args, [formal_type])
+
+    @pytest.mark.parametrize("matching", [False, True], ids=["conflicting", "matching"])
+    def test_scalar_view_provenance_created_during_refinement(self, matching):
+        """A deferred view binding can make another complete expression Scalar-dependent."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+        one, three = ir.ConstInt(1, pl.INDEX, span), ir.ConstInt(3, pl.INDEX, span)
+        twice_scalar = ir.Mul(ir.ConstInt(2, pl.INDEX, span), scalar, pl.INDEX, span)
+        formal_view = ir.TileView(
+            valid_shape=[ir.Sub(rows, one, pl.INDEX, span), 64],
+            stride=[ir.Add(scalar, rows, pl.INDEX, span), 1],
+        )
+        actual_view = ir.TileView(
+            valid_shape=[5 if matching else 4, 64],
+            stride=[ir.Add(three, twice_scalar, pl.INDEX, span), 1],
+        )
+        tile = ir.Var("tile", ir.TileType([8, 64], pl.FP32, tile_view=formal_view), span)
+        source = ir.Var("source", ir.TileType([8, 64], pl.FP32, tile_view=actual_view), span)
+        if matching:
+            assert ir.deduce_call_return_type([tile, scalar], [source, three], [], is_inline=True) == []
+        else:
+            with pytest.raises(ValueError, match="Scalar-dependent Tile valid_shape.*expected 5.*got 4"):
+                ir.deduce_call_return_type([tile, scalar], [source, three], [], is_inline=True)
+
     def test_inline_scalar_identity_cannot_be_rebound_by_tile_view(self):
         """A caller-owned scalar identity cannot silently become an unrelated valid extent."""
         span = ir.Span.unknown()

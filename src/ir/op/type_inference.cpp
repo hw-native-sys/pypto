@@ -1892,6 +1892,61 @@ TypeVarMap CollectCallScalarArgs(const std::vector<VarPtr>& callee_params, const
   return scalar_args;
 }
 
+// Track Scalar provenance independently of the winning numeric binding. A
+// competing observation can retain rows = 2*n after rows was already bound to
+// a constant, and deferred metadata inference can introduce further edges.
+TypeVarMap CollectCallScalarProvenance(const std::vector<VarPtr>& callee_params,
+                                       const TypeVarMap& scalar_args, const TypeVarMap& var_map,
+                                       const std::vector<CallTypeBindingConstraint>& constraints) {
+  TypeVarMap sources;
+  if (scalar_args.empty()) return sources;
+  std::unordered_map<const Var*, std::vector<const Var*>> dependents;
+  auto add_dependencies = [&](const Var* target, const ExprPtr& expr) {
+    var_collectors::VarDefUseCollector uses;
+    uses.VisitExpr(expr);
+    for (const auto* dependency : uses.var_uses_ordered) dependents[dependency].push_back(target);
+  };
+  // Map keys are parameter/type variables. Visit them in AST order rather than
+  // iterating the pointer-keyed map, so source-span selection is deterministic.
+  var_collectors::VarDefUseCollector type_vars;
+  for (const auto& param : callee_params) {
+    if (!param) continue;
+    type_vars.VisitExpr(param);
+    var_collectors::VisitTypeExprFields(type_vars, param->GetType());
+  }
+  for (const auto* var : type_vars.var_uses_ordered) {
+    if (const auto binding = var_map.find(var); binding != var_map.end()) {
+      add_dependencies(var, binding->second);
+    }
+  }
+  for (const auto& constraint : constraints) {
+    add_dependencies(constraint.var.get(), constraint.existing);
+    add_dependencies(constraint.var.get(), constraint.candidate);
+  }
+  std::vector<const Var*> pending;
+  pending.reserve(type_vars.var_uses_ordered.size());
+  for (const auto& param : callee_params) {
+    if (!param) continue;
+    if (const auto scalar = scalar_args.find(param.get()); scalar != scalar_args.end()) {
+      if (sources.emplace(param.get(), scalar->second).second) pending.push_back(param.get());
+    }
+  }
+  // Each reachable variable is queued once, including cycles and identity
+  // observations. Only formal Scalar parameters seed provenance; arbitrary
+  // variables appearing in their actual expressions do not become contracts.
+  size_t next = 0;
+  while (next < pending.size()) {
+    const auto* var = pending[next++];
+    const auto found = dependents.find(var);
+    if (found == dependents.end()) continue;
+    const auto source = sources.at(var);
+    for (const auto* dependent : found->second) {
+      if (sources.emplace(dependent, source).second) pending.push_back(dependent);
+    }
+  }
+  return sources;
+}
+
 struct ScalarTileViewExpr {
   ExprPtr declared;
   ExprPtr observed;
@@ -2183,7 +2238,13 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
         << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
         << constraint.context << "; cross-function calls do not emit a runtime shape guard";
   }
-  if (is_inline) ValidateScalarTileViewExprs(scalar_views, scalar_args, var_map);
+  if (is_inline) {
+    // Select complete fields after refinement, including fields that depend on
+    // Scalars through shared dimensions rather than mentioning them directly.
+    const auto scalar_sources = CollectCallScalarProvenance(callee_params, scalar_args, var_map, constraints);
+    const auto dependent_views = CollectScalarTileViewExprs(callee_params, args, scalar_sources);
+    ValidateScalarTileViewExprs(dependent_views, scalar_args, var_map);
+  }
   if (return_types.empty()) return return_types;
 
   // Do not choose the first Tile argument's extent for another operand. Leave

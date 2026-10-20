@@ -155,7 +155,8 @@ retain their shared constraints, including in helpers with no return value.
 Actual Scalar values also constrain view-only dimensions: `n=8` cannot match
 an actual valid extent of `3` when the declared valid extent is `n`.
 Scalar-dependent view expressions such as `n - 1` are compared after argument
-substitution, including valid extents, strides, and offsets. An omitted actual
+substitution, including valid extents, strides, and offsets. This includes indirect
+dependencies through shared dimensions such as `rows = 2*n`. An omitted actual
 valid shape uses its physical shape, and an omitted offset is zero. A
 Scalar-dependent stride contract requires explicit actual stride metadata.
 Inlining substitutes the caller's Tile without
