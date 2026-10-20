@@ -5179,6 +5179,62 @@ class SharedSuffix:
 class TestWhileNestedAliasTraversal:
     """Scalar while wrappers must preserve nested alias rules and their safety checks."""
 
+    @pytest.mark.parametrize(
+        "first_loop",
+        ["runtime_for", "zero_for", "positive_for", "descending_for", "runtime_while", "zero_while"],
+    )
+    @pytest.mark.parametrize("observe_result", [False, True], ids=["unused_result", "observed_result"])
+    def test_zero_trip_result_observes_initializer(self, first_loop, observe_result):
+        """A zero-trip result can observe an old seed without ever reading its carry."""
+        if first_loop.endswith("for"):
+            bounds = {
+                "runtime_for": "trips",
+                "zero_for": "0",
+                "positive_for": "2",
+                "descending_for": "2, 0, -1",
+            }[first_loop]
+            header = f"            for _first, (_carry,) in pl.range({bounds}, init_values=(seed,)):\n"
+            first_yield = "                first_result = pl.yield_(first_reload)\n"
+        else:
+            bound = "trips" if first_loop == "runtime_while" else "0"
+            header = (
+                "            for _carry, step in pl.while_(init_values=(seed, 0)):\n"
+                f"                pl.cond(step < {bound})\n"
+            )
+            first_yield = "                first_result, _steps = pl.yield_(first_reload, step + 1)\n"
+        observation = (
+            "            snapshot = pl.tile.move(first_result, target_memory=pl.Mem.Vec)\n"
+            "            _observed = pl.tile.store(snapshot, [0, 0], observed)\n"
+            if observe_result
+            else ""
+        )
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, pool: pl.Tensor[[32, 32], pl.FP16], trips: pl.Scalar[pl.INDEX],
+               observed: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP16]]) -> pl.Tensor[[16, 32], pl.FP16]:
+        seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < 2)
+{header}                first_reload = pl.tile.load(pool, [16, 0], [16, 32], target_memory=pl.Mem.Mat)
+{first_yield}{observation}            for _second, (_unused,) in pl.range(2, init_values=(seed,)):
+                replacement = pl.tile.load(pool, [16, 0], [16, 32], target_memory=pl.Mem.Mat)
+                result = pl.yield_(replacement)
+            vector = pl.tile.move(result, target_memory=pl.Mem.Vec)
+            _used = pl.tile.store(vector, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        can_skip = first_loop not in {"positive_for", "descending_for"}
+        if observe_result and can_skip:
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+        else:
+            assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+
     def test_nested_carry_chain_preserves_intermediate_version(self):
         """An inner carry restarts from the outer carry on every intervening While entry."""
 

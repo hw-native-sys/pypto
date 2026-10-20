@@ -1291,28 +1291,54 @@ class TopDownRetargeter {
     // binding from an outer loop consumes the initializer again. Attribute an
     // observed carry's entry read to that binding header, not to every use in
     // its body. Propagate observed bindings once along initializer chains so
-    // intermediate carry versions survive intervening loops as well. Unused
-    // bindings remain non-observing; this worklist stays O(N log N).
+    // intermediate carry versions survive intervening loops as well.
+    // A consumed loop result also observes the initializer on a zero-trip
+    // path. Definitely nonempty For results need no such entry observation.
+    // Unused bindings remain non-observing; this worklist stays O(N log N).
     auto effective_observations = observation_reads;
-    std::set<VarPtr> observed_carries;
-    std::vector<VarPtr> pending_carries;
-    auto observe_carry = [&](const VarPtr& var) {
+    std::set<VarPtr> observed_loop_values;
+    std::vector<VarPtr> pending_loop_values;
+    auto observe_loop_value = [&](const VarPtr& var) {
       const auto def = defs_.find(var);
-      if (def != defs_.end() && def->second.kind == VarDef::kIterArg && observed_carries.insert(var).second) {
-        pending_carries.push_back(var);
+      if (def != defs_.end() &&
+          (def->second.kind == VarDef::kIterArg || def->second.kind == VarDef::kForReturn ||
+           def->second.kind == VarDef::kWhileReturn) &&
+          observed_loop_values.insert(var).second) {
+        pending_loop_values.push_back(var);
       }
     };
     for (const auto& [stmt, vars] : observation_reads) {
       (void)stmt;
-      for (const auto& var : vars) observe_carry(var);
+      for (const auto& var : vars) observe_loop_value(var);
     }
-    while (!pending_carries.empty()) {
-      const auto carry = pending_carries.back();
-      pending_carries.pop_back();
-      const auto& def = defs_.at(carry);
-      if (auto initial = AsVarLike(def.iter_arg->initValue_)) {
+    while (!pending_loop_values.empty()) {
+      const auto value = pending_loop_values.back();
+      pending_loop_values.pop_back();
+      const auto& def = defs_.at(value);
+      IterArgPtr argument = def.iter_arg;
+      if (def.kind == VarDef::kForReturn) {
+        auto loop = As<ForStmt>(def.control_stmt);
+        if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
+        auto start = As<ConstInt>(loop->start_);
+        auto stop = As<ConstInt>(loop->stop_);
+        auto step = As<ConstInt>(loop->step_);
+        // Compare bounds directly: computing stop-start or a trip count could
+        // overflow. Unknown bounds conservatively retain the zero-trip path.
+        if (start && stop && step &&
+            ((step->value_ > 0 && start->value_ < stop->value_) ||
+             (step->value_ < 0 && start->value_ > stop->value_))) {
+          continue;
+        }
+        argument = loop->iter_args_[def.return_idx];
+      } else if (def.kind == VarDef::kWhileReturn) {
+        auto loop = As<WhileStmt>(def.control_stmt);
+        if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
+        argument = loop->iter_args_[def.return_idx];
+      }
+      if (!argument) continue;
+      if (auto initial = AsVarLike(argument->initValue_)) {
         effective_observations[def.definition_stmt.get()].insert(initial);
-        observe_carry(initial);
+        observe_loop_value(initial);
       }
     }
     std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;

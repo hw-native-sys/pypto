@@ -65,6 +65,11 @@ its own fresh MemRef. This pass closes that gap:
    the original seed. Header reads exclude their own loop from recurrence, while
    enclosing loops still protect repeated initialization. This distinction also
    preserves accumulator-phi coalescing through metadata-view yields.
+   Consuming a possibly zero-trip For/While result also observes its initializer
+   at entry, even when the body never reads the carry. Constant For bounds that
+   prove at least one iteration exclude this zero-trip observation; unknown
+   bounds remain conservative. Result observations participate in the same
+   worklist, including results used to initialize another observed loop carry.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.

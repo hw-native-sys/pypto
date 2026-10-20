@@ -54,6 +54,10 @@ program = passes.materialize_semantic_aliases()(program)
    循环体读取仍保留 carry 当前的定义：自身回边推进该值，并非重读原始 seed。
    header 读取不属于自身循环的重复读取，但外层循环仍会保护重复初始化所需的值。
    这也保证经过元数据 view yield 的 accumulator phi 仍能安全合并。
+   消费可能零次迭代的 For/While 结果时，即使循环体不读取 carry，也会在入口观测
+   initializer。常量 For 边界若证明至少执行一次，则排除零次迭代观测；未知边界
+   保守处理。结果观测沿同一工作队列传播，也覆盖结果用作其他被读取 carry 的
+   initializer 的情况。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
