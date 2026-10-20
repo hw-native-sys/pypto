@@ -229,7 +229,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/lower_composite/lower_composite_broadcast.cpp
     src/ir/transforms/lower_composite/lower_composite_builder.cpp
     src/ir/transforms/lower_composite/lower_composite_common.cpp
+    src/ir/transforms/lower_composite/lower_composite_math.cpp
+    src/ir/transforms/lower_composite/lower_composite_mx.cpp
     src/ir/transforms/lower_composite/lower_composite_reduce_scatter.cpp
+    src/ir/transforms/lower_composite/lower_composite_rules.cpp
+    src/ir/transforms/lower_composite/lower_composite_select.cpp
     src/ir/transforms/lower_composite_ops_pass.cpp
     src/ir/transforms/materialize_tensor_strides_pass.cpp
     src/ir/transforms/ir_property.cpp

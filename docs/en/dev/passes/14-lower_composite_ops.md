@@ -28,47 +28,57 @@ The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/
 
 ## Architecture
 
-The pass is a thin dispatcher plus one translation unit per collective, under
-`src/ir/transforms/lower_composite/`:
+The pass keeps statement rewriting separate from its lowering recipes. All
+rules live under `src/ir/transforms/lower_composite/`; the existing pass entry
+point owns traversal, result binding, and tuple alias tracking.
 
 ```text
 src/ir/transforms/lower_composite/
-  lower_composite_builder.{h,cpp}
-    CommSetup               — per-collective comm-domain/signal setup bundle
-    LoweringBuilder         — per-call scratchpad (Bind + primitive tile-op builders:
-                              tile.muls, tile.adds, tile.add, tile.sub, tile.mul,
-                              tile.maximum, tile.minimum, tile.cast
-                              + structured control-flow: EmitFor / EmitForReduce
-                              / EmitIf / EmitIfExpr + NotEq scalar guard)
-    MakeNegation            — file-local scalar/tile negation helper used by builder rules
-  lower_composite_common.{h,cpp}
-    shared collective helpers — chunk geometry, mesh signal-shape validation,
-                              shape collapsing, allreduce target view, and the
-                              self-clearing credit-barrier protocol comment
-  lower_composite_rules.h
-    CompositeLoweringFn     — (call, visited_args, builder) -> result expr
-    LowerTensor<Op>Rule     — one declaration per collective
+  lower_composite_builder.{h,cpp}   — per-call statement builder and control flow
+  lower_composite_common.{h,cpp}    — shared collective geometry and validation
+  lower_composite_rules.h          — CompositeLoweringFn and internal rule declarations
+  lower_composite_rules.cpp        — op-name -> rule dispatch table (kRules)
+  lower_composite_math.cpp         — sin/cos and their shared polynomial recipe
+  lower_composite_select.cpp       — select, scalar materialization and scratch binding
+  lower_composite_mx.cpp           — tquant_mx and its workspace/view construction
   lower_composite_{allreduce,allgather,reduce_scatter,broadcast,barrier,
                    all_to_all,all_to_all_v}.cpp
-                            — one translation unit per collective
+                                  — one translation unit per collective
 
 src/ir/transforms/lower_composite_ops_pass.cpp
-  LowerSinRule / LowerCosRule / LowerTileTQuantMxRule / LowerTileSelectRule
-                            — elementwise, MX and select rules, file-local (they
-                              share no code with the collectives)
-  LookupCompositeRule       — file-local op-name → rule dispatch table (kRules)
-  LowerCompositeOpsMutator  — walks the function, looks up a rule per Call
+  LowerCompositeOpsMutator         — statement rewriting and tuple/variable remapping
+  TransformLowerCompositeOps       — per-function context and managed-collective deferral
+  LowerCompositeOps                — pass factory
 ```
 
-Adding a new single-result composite op. A `tile.*` rule stays in
-`lower_composite_ops_pass.cpp`; a `pld.tensor.*` collective gets its own
-translation unit under `lower_composite/`, a declaration in
-`lower_composite_rules.h`, and a row in `CMakeLists.txt`:
+`CompositeLoweringFn` receives the original `CallPtr`, already visited operands,
+and a `LoweringBuilder&`, and returns the final result expression. Rules must use
+the visited operands so variable remapping is preserved. The builder accumulates
+intermediate statements and provides primitive tile operations and structured
+control flow (`EmitFor`, `EmitForReduce`, `EmitIf`, `EmitIfExpr`). Its temporary
+counter is borrowed from the function's mutator and shared by nested builders;
+barrier generations remain local to each top-level collective call.
 
-1. Write a `Lower<Op>Rule(call, args, builder)` function. It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`, `call->op_->name_` as needed), the visited arg expressions (var-remap already applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` per intermediate temp. For rules that need control flow, use `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr` — each takes a body callback that receives a nested builder sharing the same temp counter, so emitted temps stay uniquely named regardless of nesting depth. `LowerTensorAllReduceRule` is the canonical example of a control-flow-bearing rule (ready barrier plus chunked remote_load+accumulate / barrier / store for mesh; `LowerTensorRingAllReduceRule` adds a chunked RS+AG ring schedule dispatched via a `mode` kwarg).
-2. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside `LookupCompositeRule`.
+To add a composite op:
 
-Multi-result rules return `MakeTuple`; the mutator maps both the original result and ordinary SSA aliases of that tuple, so direct projections and alias-chain projections expose the same destinations. Every collective already has its own translation unit under `src/ir/transforms/lower_composite/`; the dispatch table stays in the pass file.
+1. Define `Lower<Op>Rule(call, args, builder)` in the appropriate module under
+   `lower_composite/`. Keep recipe-specific helpers and constants file-local.
+   Declare the entry point in `lower_composite_rules.h`; add any new `.cpp` to
+   `CMakeLists.txt`.
+2. Add a `{"<op>", &Lower<Op>Rule}` entry to `kRules` in
+   `lower_composite_rules.cpp`. This immutable function-local table uses explicit
+   function references, with no static self-registration or initialization-order
+   dependency. An unlisted call follows the existing `IRMutator` path.
+3. For a new managed collective, also update the shared
+   `op_predicates::IsManagedTensorCollective` classification. The mutator defers
+   these calls in orchestration functions to the HOST/CHIP collective passes;
+   the rule table does not maintain another classification list.
+
+Multi-result rules return `MakeTuple`. The mutator retains result and alias-chain
+tracking so projections expose the same destinations. Rules emit primitive ops
+outside the table, preserving idempotency. `AssignStmt`, `EvalStmt`, and direct
+`ReturnStmt` calls retain their existing rewrite behavior. Moving a rule changes
+neither its backend queries nor the pass order and properties.
 
 ## Algorithm (`tile.tquant_mx` rule)
 
@@ -108,7 +118,7 @@ The tile/scalar path queries `Backend::PlanOpScratch("tile.sels", request)` with
 
 ## Algorithm (sin / cos rule)
 
-`LowerSinCos` in `src/ir/transforms/lower_composite_ops_pass.cpp` is parameterised on `is_cos`. The mutator overrides `VisitStmt_(const AssignStmtPtr&)` (rather than `VisitCall`) because each trig op expands to ~33 statements and each statement needs a fresh temp `Var`. Working at the statement level lets the rule append directly to the surrounding sequence via the builder.
+`LowerSinCos` in `src/ir/transforms/lower_composite/lower_composite_math.cpp` is parameterised on `is_cos`. The mutator overrides `VisitStmt_(const AssignStmtPtr&)` (rather than `VisitCall`) because each trig op expands to ~33 statements and each statement needs a fresh temp `Var`. Working at the statement level lets the rule append directly to the surrounding sequence via the builder.
 
 ### Range Reduction (Cody-Waite, 4-part π split)
 
@@ -202,7 +212,7 @@ The same polynomial is used for both sin and cos: the cos path differs only in t
 
 ## Constants
 
-All constants are FP32 literals (the `k*` literals near the top of `src/ir/transforms/lower_composite_ops_pass.cpp`, matching the framework reference at `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h`):
+All constants are FP32 literals (the `k*` literals near the top of `src/ir/transforms/lower_composite/lower_composite_math.cpp`, matching the framework reference at `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h`):
 
 | Symbol | C++ literal | Role |
 | ------ | ----------- | ---- |
@@ -332,6 +342,23 @@ The mutator overrides `VisitStmt_(const AssignStmtPtr&)` rather than `VisitCall`
 Each intermediate result is bound to a fresh `Var` named via `auto_name::BuildName` with the user's target name as the base. The mutator's `temp_counter_` is shared (by reference, through each `LoweringBuilder`) across all trig ops in a function so distinct ops do not collide on temp names.
 
 The cast modes `RINT` (cos), `ROUND` (sin), `FLOOR` (sign), and `None` (int↔float) come from the tile-op registry's enum (`src/ir/op/tile_ops/unary.cpp`). Choosing the correct mode is load-bearing: `ROUND` for sin's `k` keeps `k` symmetric around zero so the Horner polynomial sees evenly distributed `t`; `RINT` for cos's `k` matches the `+0.5` shift and ensures even `k` corresponds to even multiples of `π/2`.
+
+## Refactoring Regression Tests
+
+`test_lower_composite_matches_frozen_baseline` in the structural test file loads
+fixed input/expected IR from `tests/ut/ir/transforms/data/lower_composite/`.
+`manifest.json` records the baseline commit and backend for each case. The gzip
+files contain `ir.serialize` bytes, including source spans, types, and shared
+references; the test compares bytes, structural equality, and idempotency.
+Inputs use stable synthetic source filenames. The 24 cases cover every dispatch
+entry, consecutive collective calls, trig chains, MX tuple aliases, and select
+with both backends and without a configured backend.
+
+For an intentional behavior change, inspect the IR difference and update only
+the affected expected fixture after reviewing the new behavior. For a structural
+refactor, generate expected output on the unmodified baseline, verify it in a
+separate process, and keep it fixed throughout the refactor. Never refresh a
+baseline from a failing candidate just to make its tests pass.
 
 ## Related
 

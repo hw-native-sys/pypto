@@ -1,0 +1,102 @@
+{
+  "baseline": "30e9cba95b67bff717b2e51006ceb50ea98dcf70",
+  "format": "gzip-compressed ir.serialize; stable input source spans; unmodified output bytes",
+  "cases": [
+    {
+      "name": "allreduce_mesh",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "allreduce_ring",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "allgather",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "reduce_scatter",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "broadcast",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "barrier_twice",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "all_to_all_twice",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "all_to_all_v",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "select_Ascend910_mask-tile-tile",
+      "backend": "Ascend910"
+    },
+    {
+      "name": "select_Ascend910_mask-tile-scalar",
+      "backend": "Ascend910"
+    },
+    {
+      "name": "select_Ascend910_mask-scalar-tile",
+      "backend": "Ascend910"
+    },
+    {
+      "name": "select_Ascend950_mask-tile-tile",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "select_Ascend950_mask-tile-scalar",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "select_Ascend950_mask-scalar-tile",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "select_unset_mask-tile-tile",
+      "backend": null
+    },
+    {
+      "name": "select_unset_mask-tile-scalar",
+      "backend": null
+    },
+    {
+      "name": "select_unset_mask-scalar-tile",
+      "backend": null
+    },
+    {
+      "name": "select_bf16",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "select_nd",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "sin",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "cos",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "trig_chain",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "mx_axis0",
+      "backend": "Ascend950"
+    },
+    {
+      "name": "mx_axis1",
+      "backend": "Ascend950"
+    }
+  ]
+}

@@ -28,46 +28,50 @@ host-orchestrator 中的 `pld.tensor.allreduce` 调用会跳过本 Pass：`Synth
 
 ## 架构 (Architecture)
 
-本 Pass 由一个精简的分发器加上每个集合通信算子各自的翻译单元 (translation unit) 组成，
-位于 `src/ir/transforms/lower_composite/`：
+本 Pass 将语句改写与降级规则分开。所有规则位于
+`src/ir/transforms/lower_composite/`；原有 pass 入口负责遍历、结果绑定和 tuple 别名追踪。
 
 ```text
 src/ir/transforms/lower_composite/
-  lower_composite_builder.{h,cpp}
-    CommSetup               — 每次集合通信调用的 comm-domain/signal 配置组合
-    LoweringBuilder         — 单次调用的暂存区 (Bind + 基本 tile 算子构造器：
-                              tile.muls、tile.adds、tile.add、tile.sub、tile.mul、
-                              tile.maximum、tile.minimum、tile.cast
-                              + 结构化控制流：EmitFor / EmitForReduce
-                              / EmitIf / EmitIfExpr + NotEq 标量比较)
-    MakeNegation            — builder 规则使用的文件内标量/tile 取负辅助函数
-  lower_composite_common.{h,cpp}
-    共享的集合通信辅助函数     — 分块几何 (chunk geometry)、mesh signal 形状校验、
-                              形状折叠、allreduce 目标视图 (target view)，以及
-                              自清零信用屏障 (self-clearing credit barrier) 协议注释
-  lower_composite_rules.h
-    CompositeLoweringFn     — (call, visited_args, builder) -> 结果表达式
-    LowerTensor<Op>Rule     — 每个集合通信算子一条声明
+  lower_composite_builder.{h,cpp}   — per-call statement builder and control flow
+  lower_composite_common.{h,cpp}    — shared collective geometry and validation
+  lower_composite_rules.h          — CompositeLoweringFn and internal rule declarations
+  lower_composite_rules.cpp        — op-name -> rule dispatch table (kRules)
+  lower_composite_math.cpp         — sin/cos and their shared polynomial recipe
+  lower_composite_select.cpp       — select, scalar materialization and scratch binding
+  lower_composite_mx.cpp           — tquant_mx and its workspace/view construction
   lower_composite_{allreduce,allgather,reduce_scatter,broadcast,barrier,
                    all_to_all,all_to_all_v}.cpp
-                            — 每个集合通信算子各自一个翻译单元
+                                  — one translation unit per collective
 
 src/ir/transforms/lower_composite_ops_pass.cpp
-  LowerSinRule / LowerCosRule / LowerTileTQuantMxRule / LowerTileSelectRule
-                            — 逐元素 (elementwise)、MX 与 select 规则，文件内私有
-                              （与集合通信算子不共享任何代码）
-  LookupCompositeRule       — 文件内的「算子名 → 规则」分发表 (kRules)
-  LowerCompositeOpsMutator  — 遍历函数，对每个 Call 查表
+  LowerCompositeOpsMutator         — statement rewriting and tuple/variable remapping
+  TransformLowerCompositeOps       — per-function context and managed-collective deferral
+  LowerCompositeOps                — pass factory
 ```
 
-新增一个单结果组合算子的步骤。`tile.*` 规则仍留在 `lower_composite_ops_pass.cpp` 内；
-`pld.tensor.*` 集合通信算子则需要在 `lower_composite/` 下新建自己的翻译单元、
-在 `lower_composite_rules.h` 中声明，并在 `CMakeLists.txt` 中登记：
+`CompositeLoweringFn` 接收原始 `CallPtr`、已访问的操作数以及 `LoweringBuilder&`，
+返回最终结果表达式。规则必须使用已访问的操作数，以保留变量重映射。
+Builder 累积中间语句，提供基本 tile 操作和结构化控制流
+（`EmitFor`、`EmitForReduce`、`EmitIf`、`EmitIfExpr`）。临时变量计数器借自函数的 mutator，
+并由嵌套 builder 共享；屏障代次仍局限于每次顶层 collective 调用。
 
-1. 写一个 `Lower<Op>Rule(call, args, builder)` 函数。它接收原始 `CallPtr`（按需用 `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用 var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。需要控制流的规则可以用 `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调里收到的嵌套 builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。`LowerTensorAllReduceRule` 是含控制流规则的范例（mesh 使用 ready 屏障，加分块 remote_load+accumulate / 屏障 / store；`LowerTensorRingAllReduceRule` 则通过 `mode` kwarg 分发，增加分块 RS+AG ring 调度）。
-2. 在 `LookupCompositeRule` 的 `kRules` 里加一条 `{"<op>", &Lower<Op>Rule}`。
+新增组合算子 (composite op) 的步骤：
 
-多结果规则返回 `MakeTuple`；mutator 会同时映射原始结果及该 tuple 的普通 SSA alias，因此直接投影和 alias 链投影都会暴露同一组 destination。每个集合通信算子都已在 `src/ir/transforms/lower_composite/` 下拥有各自的翻译单元；分发表仍留在 pass 文件内。
+1. 在 `lower_composite/` 的相应模块定义 `Lower<Op>Rule(call, args, builder)`。
+   规则专用的辅助函数和常量保持文件内私有。在 `lower_composite_rules.h` 声明入口；
+   新增 `.cpp` 时同时加入 `CMakeLists.txt`。
+2. 在 `lower_composite_rules.cpp` 的 `kRules` 中添加
+   `{"<op>", &Lower<Op>Rule}`。函数内的只读表显式引用规则函数，
+   不使用静态自注册，也不依赖初始化顺序。未列入表的调用继续走原有 `IRMutator` 路径。
+3. 新增 managed collective 时，同步更新共享的
+   `op_predicates::IsManagedTensorCollective` 分类。Mutator 将 orchestration 函数中的
+   这些调用留给 HOST/CHIP collective pass；规则表不再维护另一份分类名单。
+
+多结果规则返回 `MakeTuple`。Mutator 保留结果和别名链追踪，使投影指向同一组 destination。
+规则产生的基本算子不在分发表中，因此 Pass 保持幂等。
+`AssignStmt`、`EvalStmt` 和直接位于 `ReturnStmt` 的调用保持原有改写行为。
+移动规则不改变其后端查询、Pass 顺序或属性。
 
 ## 算法（`tile.tquant_mx` 规则）
 
@@ -107,7 +111,7 @@ tile/标量路径通过 `Backend::PlanOpScratch("tile.sels", request)` 查询源
 
 ## 算法 (Algorithm，sin / cos 规则)
 
-`src/ir/transforms/lower_composite_ops_pass.cpp` 中的 `LowerSinCos` 由 `is_cos` 参数化。mutator 重写的是 `VisitStmt_(const AssignStmtPtr&)`，而不是 `VisitCall`，因为每个三角算子要展开成 ~33 条语句，每条都需要新临时 `Var`。在语句级 (statement level) 工作让规则可以通过 builder 直接把语句追加到外围序列里。
+`src/ir/transforms/lower_composite/lower_composite_math.cpp` 中的 `LowerSinCos` 由 `is_cos` 参数化。mutator 重写的是 `VisitStmt_(const AssignStmtPtr&)`，而不是 `VisitCall`，因为每个三角算子要展开成 ~33 条语句，每条都需要新临时 `Var`。在语句级 (statement level) 工作让规则可以通过 builder 直接把语句追加到外围序列里。
 
 ### 区间归约 (Range Reduction，4 段 π Cody-Waite)
 
@@ -201,7 +205,7 @@ sin 与 cos 共用同一组多项式系数：cos 路径只在区间归约阶段�
 
 ## 常量 (Constants)
 
-所有常量均为 FP32 字面量（即 `src/ir/transforms/lower_composite_ops_pass.cpp` 顶部附近的 `k*` 字面量，与 `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h` 上游参考实现一致）：
+所有常量均为 FP32 字面量（即 `src/ir/transforms/lower_composite/lower_composite_math.cpp` 顶部附近的 `k*` 字面量，与 `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h` 上游参考实现一致）：
 
 | Symbol | C++ literal | Role |
 | ------ | ----------- | ---- |
@@ -390,6 +394,19 @@ mutator 重写 `VisitStmt_(const AssignStmtPtr&)` 而不是 `VisitCall`，原因
 每个中间结果都绑定到一个用 `auto_name::BuildName` 生成的临时 `Var`，base 名取用户给的目标名。mutator 的 `temp_counter_` 通过每个 `LoweringBuilder` 按引用共享，确保函数内多个三角调用之间临时名不会冲突。
 
 `tile.cast` 模式 `RINT`（cos）、`ROUND`（sin）、`FLOOR`（sign）、`None`（int↔float）来自 tile 算子注册表的枚举（`src/ir/op/tile_ops/unary.cpp`）。模式选择对正确性至关重要：sin 中 `k` 用 `ROUND` 保持以零为中心对称，使 Horner 多项式看到的 `t` 分布均匀；cos 中 `k` 用 `RINT` 与 `+0.5` 偏移配合，确保偶数 `k` 对应 `π/2` 的偶数倍。
+
+## 重构回归测试 (Refactoring Regression Tests)
+
+结构测试文件中的 `test_lower_composite_matches_frozen_baseline` 从
+`tests/ut/ir/transforms/data/lower_composite/` 读取固定的输入与期望 IR。
+`manifest.json` 记录每个场景的基线提交和后端。Gzip 文件保存 `ir.serialize` 字节，
+包含 source span、类型和共享引用；测试检查字节一致性、结构相等及幂等性。
+输入使用稳定的合成源文件名。24 个场景覆盖所有分发表入口、连续 collective 调用、
+三角函数链、MX tuple 别名，以及两种后端和未配置后端的 select。
+
+若有意改变行为，应先审查 IR 差异和新行为，再更新受影响的期望 fixture。
+对于结构重构，应在未修改的基线上生成期望输出，在独立进程中复验，
+并在整个重构期间保持固定。不能从失败的待测实现刷新基线来让测试通过。
 
 ## 相关 (Related)
 
