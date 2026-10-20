@@ -162,7 +162,7 @@ def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, 
     selector.parent.mkdir(parents=True)
     selector.write_text(
         "import sys\nassert sys.argv[1:] == ['--all', '--platform', 'a5']\n"
-        "print('models/case.py models/glm5_3_flash/weights.py')\n"
+        "print('models/case.py models/glm5_3_flash/weights.py models/glm5_3_flash/prefill_ref.py')\n"
     )
     body = f"from golden import run\nrun({kernel!r}, [])"
     if kernel == "truncated":

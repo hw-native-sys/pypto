@@ -29,9 +29,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-# The library selector also includes this CPU-only checkpoint round-trip test.
-# It defines no PyPTO kernel and cannot contribute compilation coverage.
-NON_KERNEL_ENTRIES = {"models/glm5_3_flash/weights.py"}
+# The library selector also includes these CPU-only reference and checkpoint tests.
+# They define no PyPTO kernels and cannot contribute compilation coverage.
+NON_KERNEL_ENTRIES = {
+    "models/glm5_3_flash/prefill_ref.py",
+    "models/glm5_3_flash/weights.py",
+}
 
 
 def select_entries(lib: Path, platform: str) -> list[str]:
