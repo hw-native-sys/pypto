@@ -120,6 +120,8 @@ Tile 注解、没有进入函数闭包，专门化可以保留原函数已经求
 不同 Tile 实参可以独立绑定各自的泛型物理维度，helper 返回 Tile 形参时也遵循这一规则。
 与 Tensor 类型、显式 Tile 视图或 Scalar 形参共用的维度仍需满足共享约束，没有返回值的 helper 也会检查。
 Scalar 实参值也约束只出现在视图中的维度：声明有效尺寸为 `n` 时，`n=8` 不能匹配实际有效尺寸 `3`。
+`n - 1` 等依赖 Scalar 的复合视图表达式也会在代入实参后比较，覆盖有效尺寸、stride 和 offset。
+实参省略有效形状时使用物理形状，省略 offset 时使用零；依赖 Scalar 的 stride 约定需要实参具有显式 stride 元数据。
 内联（inlining）直接代入调用方的 Tile，无需复制，并保留其有效形状
 （valid shape）。Tile 参数仅用于内联 helper，不会扩展到设备派发接口。
 

@@ -1046,6 +1046,403 @@ class TestInlineTileArgumentContracts:
         with pytest.raises(ValueError, match="callee_params size.*must match args size"):
             ir.deduce_call_return_type([scalar], [], [], is_inline=True)
 
+    @pytest.mark.parametrize("metadata", ["valid_shape", "stride", "start_offset"])
+    @pytest.mark.parametrize("expression", ["subtract", "double", "product"])
+    @pytest.mark.parametrize("returns_tile", [False, True], ids=["void", "returning"])
+    @pytest.mark.parametrize("matching", [False, True], ids=["conflicting", "matching"])
+    def test_composite_scalar_tile_view_contract(self, metadata, expression, returns_tile, matching):
+        """Whole view expressions must agree after substituting all actual scalar values."""
+        span = ir.Span("composite_scalar_view.py", 45, 1)
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        factor = ir.Var("a", ir.ScalarType(pl.INDEX), span)
+        if expression == "subtract":
+            formal_extent = ir.Sub(scalar, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+            scalar_value, expected_value = 8, 7
+        else:
+            coefficient = factor if expression == "product" else ir.ConstInt(2, pl.INDEX, span)
+            formal_extent = ir.Mul(coefficient, scalar, pl.INDEX, span)
+            scalar_value, expected_value = 3, 6
+        actual_extent = expected_value if matching else 3
+        if metadata == "valid_shape":
+            formal_view = ir.TileView(valid_shape=[formal_extent, 64])
+            actual_view = ir.TileView(valid_shape=[actual_extent, 64])
+        elif metadata == "stride":
+            formal_view = ir.TileView(stride=[formal_extent, 1])
+            actual_view = ir.TileView(stride=[actual_extent, 1])
+        else:
+            formal_view = ir.TileView(start_offset=formal_extent)
+            actual_view = ir.TileView(start_offset=actual_extent)
+        formal_type = ir.TileType([8, 64], pl.FP32, tile_view=formal_view)
+        actual_type = ir.TileType([8, 64], pl.FP32, tile_view=actual_view)
+        tile = ir.Var("tile", formal_type, span)
+        source = ir.Var("source", actual_type, span)
+        params = [tile, scalar, factor]
+        args = [source, ir.ConstInt(scalar_value, pl.INDEX, span), ir.ConstInt(2, pl.INDEX, span)]
+        returns = [formal_type] if returns_tile else []
+        helper = ir.Function(
+            "consume",
+            params,
+            returns,
+            ir.ReturnStmt([tile] if returns_tile else [], span),
+            span,
+            ir.FunctionType.Inline,
+        )
+        call = ir.Call(ir.GlobalVar("consume"), args, actual_type if returns_tile else ir.UnknownType(), span)
+        body = (
+            ir.ReturnStmt([call], span)
+            if returns_tile
+            else ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span)
+        )
+        before = ir.Program(
+            [helper, ir.Function("main", [source], [actual_type], body, span)], "Before", span
+        )
+        if not matching:
+            message = rf"Scalar-dependent Tile {metadata}.*expected {expected_value}.*got 3"
+            with pytest.raises(ValueError, match=message) as error:
+                ir.deduce_call_return_type(params, args, returns, is_inline=True)
+            assert "composite_scalar_view.py:45:1" in str(error.value)
+            with pytest.raises(ValueError, match=message):
+                passes.inline_functions()(before)
+            legacy = ir.deduce_call_return_type(params, args, [formal_type])
+            ir.assert_structural_equal(legacy[0], formal_type)
+            return
+        ir.deduce_call_return_type(params, args, returns, is_inline=True)
+        expected = ir.Program(
+            [ir.Function("main", [source], [actual_type], ir.ReturnStmt([source], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "caller_expr",
+            "identity",
+            "swapped_add",
+            "swapped_product",
+            "different_ast",
+            "unknown",
+            "known_unknown",
+        ],
+    )
+    def test_symbolic_scalar_tile_view_expression(self, case):
+        """Equivalent caller expressions pass; unrelated runtime dimensions require a guard."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        other = ir.Var("a", ir.ScalarType(pl.INDEX), span)
+        left = ir.Var("left", ir.ScalarType(pl.INDEX), span)
+        right = ir.Var("right", ir.ScalarType(pl.INDEX), span)
+        one = ir.ConstInt(1, pl.INDEX, span)
+        scalar_actual = left
+        if case in ("swapped_add", "swapped_product", "different_ast"):
+            operation = ir.Mul if case == "swapped_product" else ir.Add
+            formal = operation(scalar, other, pl.INDEX, span)
+            actual = operation(right, left, pl.INDEX, span)
+            if case == "different_ast":
+                scalar_actual = ir.Add(left, one, pl.INDEX, span)
+                actual = ir.Add(left, ir.Add(right, one, pl.INDEX, span), pl.INDEX, span)
+        else:
+            formal = ir.Sub(scalar, one, pl.INDEX, span)
+            actual = right if case in ("unknown", "known_unknown") else left
+            if case == "known_unknown":
+                scalar_actual = ir.ConstInt(8, pl.INDEX, span)
+            if case == "identity":
+                scalar_actual = scalar
+                actual = ir.Sub(scalar, one, pl.INDEX, span)
+            elif case == "caller_expr":
+                scalar_actual = ir.Add(left, one, pl.INDEX, span)
+        tile = ir.Var(
+            "tile", ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[formal, 64])), span
+        )
+        source = ir.Var(
+            "source", ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[actual, 64])), span
+        )
+        params, args = [tile, scalar, other], [source, scalar_actual, right]
+        if case in ("unknown", "known_unknown"):
+            with pytest.raises(ValueError, match="Scalar-dependent Tile valid_shape.*not provably equal"):
+                ir.deduce_call_return_type(params, args, [], is_inline=True)
+            return
+        assert ir.deduce_call_return_type(params, args, [], is_inline=True) == []
+
+    @pytest.mark.parametrize("missing", ["valid_shape", "stride", "tile_kind"])
+    def test_scalar_view_contract_rejects_missing_actual_field(self, missing):
+        """A missing axis or a non-Tile value cannot establish an explicit scalar contract."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        extent = ir.Sub(scalar, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+        if missing == "stride":
+            formal_view, actual_view = ir.TileView(stride=[64, extent]), ir.TileView(stride=[3])
+        else:
+            formal_view, actual_view = ir.TileView(valid_shape=[8, extent]), ir.TileView(valid_shape=[3])
+        tile = ir.Var("tile", ir.TileType([8, 64], pl.FP32, tile_view=formal_view), span)
+        actual_type = (
+            ir.TensorType([8, 64], pl.FP32)
+            if missing == "tile_kind"
+            else ir.TileType([8, 64], pl.FP32, tile_view=actual_view)
+        )
+        source = ir.Var("source", actual_type, span)
+        message = "Scalar-dependent Tile.*got " + (
+            "a non-Tile argument" if missing == "tile_kind" else "unspecified"
+        )
+        with pytest.raises(ValueError, match=message):
+            ir.deduce_call_return_type(
+                [tile, scalar], [source, ir.ConstInt(8, pl.INDEX, span)], [], is_inline=True
+            )
+
+    def test_scalar_view_equivalence_preserves_free_dimension_binding(self):
+        """A reordered scalar product must not overwrite a free dimension supplied by another Tile."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+        left = ir.Var("left", ir.ScalarType(pl.INDEX), span)
+        right = ir.Var("right", ir.ScalarType(pl.INDEX), span)
+        formal_product = ir.Mul(scalar, rows, pl.INDEX, span)
+        actual_product = ir.Mul(right, left, pl.INDEX, span)
+        tile = ir.Var(
+            "tile",
+            ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[formal_product, 64])),
+            span,
+        )
+        physical = ir.Var("physical", ir.TileType([rows, 64], pl.FP32), span)
+        source = ir.Var(
+            "source",
+            ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[actual_product, 64])),
+            span,
+        )
+        actual_physical = ir.Var("actual_physical", ir.TileType([right, 64], pl.FP32), span)
+        scalar_type = ir.ScalarType(pl.INDEX)
+        helper = ir.Function(
+            "dimension",
+            [tile, scalar, physical],
+            [scalar_type],
+            ir.ReturnStmt([rows], span),
+            span,
+            ir.FunctionType.Inline,
+        )
+        call = ir.Call(ir.GlobalVar("dimension"), [source, left, actual_physical], scalar_type, span)
+        caller_params = [left, source, actual_physical]
+        before = ir.Program(
+            [helper, ir.Function("main", caller_params, [scalar_type], ir.ReturnStmt([call], span), span)],
+            "Before",
+            span,
+        )
+        expected = ir.Program(
+            [ir.Function("main", caller_params, [scalar_type], ir.ReturnStmt([right], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
+    @pytest.mark.parametrize("bound_value", [3, 4], ids=["matching", "conflicting"])
+    def test_scalar_view_anchor_uses_later_tensor_binding(self, bound_value):
+        """A later Tensor can establish the Scalar anchor needed to infer a free view dimension."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        anchor = ir.Var("K", ir.ScalarType(pl.INDEX), span)
+        caller_rows = ir.Var("P", ir.ScalarType(pl.INDEX), span)
+        declared = ir.Add(scalar, rows, pl.INDEX, span)
+        observed = ir.Add(anchor, caller_rows, pl.INDEX, span)
+        tile = ir.Var(
+            "tile", ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[declared, 64])), span
+        )
+        source = ir.Var(
+            "source", ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[observed, 64])), span
+        )
+        tensor = ir.Var("tensor", ir.TensorType([anchor, 64], pl.FP32), span)
+        storage = ir.Var("storage", ir.TensorType([bound_value, 64], pl.FP32), span)
+        params, args = [tile, scalar, tensor], [source, ir.ConstInt(3, pl.INDEX, span), storage]
+        scalar_type = ir.ScalarType(pl.INDEX)
+        helper = ir.Function(
+            "dimension", params, [scalar_type], ir.ReturnStmt([rows], span), span, ir.FunctionType.Inline
+        )
+        call = ir.Call(ir.GlobalVar("dimension"), args, scalar_type, span)
+        before = ir.Program(
+            [
+                helper,
+                ir.Function("main", [source, storage], [scalar_type], ir.ReturnStmt([call], span), span),
+            ],
+            "Before",
+            span,
+        )
+        if bound_value != 3:
+            with pytest.raises(ValueError, match="Scalar-dependent Tile valid_shape.*not provably equal"):
+                passes.inline_functions()(before)
+            return
+        assert ir.deduce_call_return_type(params, args, [], is_inline=True) == []
+        expected = ir.Program(
+            [ir.Function("main", [source, storage], [scalar_type], ir.ReturnStmt([caller_rows], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
+    def test_scalar_view_bindings_wake_dependent_fields(self):
+        """A deferred field can unlock an earlier field through a Scalar argument expression."""
+        span = ir.Span.unknown()
+        n, m, rows, anchor, caller_rows, offset, base = [
+            ir.Var(name, ir.ScalarType(pl.INDEX), span) for name in ("n", "m", "M", "K", "P", "L", "T")
+        ]
+        three = ir.ConstInt(3, pl.INDEX, span)
+        one = ir.ConstInt(1, pl.INDEX, span)
+        first = ir.Var(
+            "first",
+            ir.TileType(
+                [8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[ir.Add(n, rows, pl.INDEX, span), 64])
+            ),
+            span,
+        )
+        second = ir.Var(
+            "second",
+            ir.TileType(
+                [8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[ir.Add(m, anchor, pl.INDEX, span), 64])
+            ),
+            span,
+        )
+        actual_first = ir.Var(
+            "actual_first",
+            ir.TileType(
+                [8, 64],
+                pl.FP32,
+                tile_view=ir.TileView(valid_shape=[ir.Add(anchor, caller_rows, pl.INDEX, span), 64]),
+            ),
+            span,
+        )
+        actual_second = ir.Var(
+            "actual_second",
+            ir.TileType(
+                [8, 64],
+                pl.FP32,
+                tile_view=ir.TileView(valid_shape=[ir.Add(offset, three, pl.INDEX, span), 64]),
+            ),
+            span,
+        )
+        base_tensor = ir.Var("base_tensor", ir.TensorType([base, 64], pl.FP32), span)
+        offset_tensor = ir.Var("offset_tensor", ir.TensorType([offset, 64], pl.FP32), span)
+        actual_base = ir.Var("actual_base", ir.TensorType([3, 64], pl.FP32), span)
+        actual_offset = ir.Var("actual_offset", ir.TensorType([4, 64], pl.FP32), span)
+        params = [first, second, n, m, base_tensor, offset_tensor]
+        args = [
+            actual_first,
+            actual_second,
+            three,
+            ir.Add(base, one, pl.INDEX, span),
+            actual_base,
+            actual_offset,
+        ]
+        inferred = ir.deduce_call_return_type(
+            params, args, [ir.TileType([rows, 64], pl.FP32)], is_inline=True
+        )
+        ir.assert_structural_equal(inferred[0], ir.TileType([caller_rows, 64], pl.FP32))
+
+    def test_zero_scalar_view_does_not_constrain_an_independent_factor(self):
+        """A whole expression already equal to zero must not infer a conflicting free factor."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        caller_rows = ir.Var("P", ir.ScalarType(pl.INDEX), span)
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        declared = ir.Mul(scalar, rows, pl.INDEX, span)
+        observed = ir.Mul(zero, caller_rows, pl.INDEX, span)
+        tile = ir.Var(
+            "tile", ir.TileType([rows, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[declared, 64])), span
+        )
+        source = ir.Var(
+            "source", ir.TileType([16, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[observed, 64])), span
+        )
+        assert ir.deduce_call_return_type([tile, scalar], [source, zero], [], is_inline=True) == []
+
+    @pytest.mark.parametrize(
+        "metadata,scalar_value,matching",
+        [
+            ("valid_shape", 9, True),
+            ("valid_shape", 8, False),
+            ("start_offset", 1, True),
+            ("start_offset", 2, False),
+            ("stride", 65, False),
+        ],
+    )
+    def test_scalar_view_contract_uses_actual_default_metadata(self, metadata, scalar_value, matching):
+        """Full valid shape and zero offset have defaults; missing strides remain unspecified."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        extent = ir.Sub(scalar, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+        if metadata == "valid_shape":
+            view = ir.TileView(valid_shape=[extent, 64])
+        elif metadata == "stride":
+            view = ir.TileView(stride=[extent, 1])
+        else:
+            view = ir.TileView(start_offset=extent)
+        tile = ir.Var("tile", ir.TileType([8, 64], pl.FP32, tile_view=view), span)
+        source = ir.Var("source", ir.TileType([8, 64], pl.FP32), span)
+        params, args = [tile, scalar], [source, ir.ConstInt(scalar_value, pl.INDEX, span)]
+        if not matching:
+            message = rf"Scalar-dependent Tile {metadata}.*got " + (
+                "unspecified" if metadata == "stride" else ""
+            )
+            with pytest.raises(ValueError, match=message):
+                ir.deduce_call_return_type(params, args, [], is_inline=True)
+            return
+        assert ir.deduce_call_return_type(params, args, [], is_inline=True) == []
+
+    @pytest.mark.parametrize("metadata", ["valid_shape", "stride", "start_offset"])
+    def test_scalar_view_check_preserves_constant_metadata_policy(self, metadata):
+        """An unrelated Scalar must not make fixed metadata an inline equality contract."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("unused", ir.ScalarType(pl.INDEX), span)
+        if metadata == "valid_shape":
+            formal_view, actual_view = ir.TileView(valid_shape=[7, 64]), ir.TileView(valid_shape=[3, 64])
+        elif metadata == "stride":
+            formal_view, actual_view = ir.TileView(stride=[7, 1]), ir.TileView(stride=[3, 1])
+        else:
+            formal_view, actual_view = ir.TileView(start_offset=7), ir.TileView(start_offset=3)
+        tile = ir.Var("tile", ir.TileType([8, 64], pl.FP32, tile_view=formal_view), span)
+        source = ir.Var("source", ir.TileType([8, 64], pl.FP32, tile_view=actual_view), span)
+        assert (
+            ir.deduce_call_return_type(
+                [tile, scalar], [source, ir.ConstInt(8, pl.INDEX, span)], [], is_inline=True
+            )
+            == []
+        )
+
+    @pytest.mark.parametrize("scalar_value", [4, 8], ids=["matching", "conflicting"])
+    def test_void_tuple_tile_scalar_view_contract(self, scalar_value):
+        """Tuple-contained Tiles must reach the same void-call contract validation."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        extent = ir.Sub(scalar, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+        formal_type = ir.TupleType(
+            [ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[extent, 64]))]
+        )
+        actual_type = ir.TupleType(
+            [ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[3, 64]))]
+        )
+        pair, source = ir.Var("pair", formal_type, span), ir.Var("source", actual_type, span)
+        helper = ir.Function(
+            "consume", [pair, scalar], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline
+        )
+        call = ir.Call(
+            ir.GlobalVar("consume"),
+            [source, ir.ConstInt(scalar_value, pl.INDEX, span)],
+            ir.UnknownType(),
+            span,
+        )
+        body = ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span)
+        before = ir.Program(
+            [helper, ir.Function("main", [source], [actual_type], body, span)], "Before", span
+        )
+        if scalar_value != 4:
+            with pytest.raises(ValueError, match="Scalar-dependent Tile valid_shape.*expected 7.*got 3"):
+                passes.inline_functions()(before)
+            return
+        expected = ir.Program(
+            [ir.Function("main", [source], [actual_type], ir.ReturnStmt([source], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
     @pytest.mark.parametrize("last_rows", [8, 9], ids=["matching", "conflicting"])
     def test_void_shared_tile_constraint_checks_transitive_tensor_bindings(self, last_rows):
         """Every binding feeding the shared Tile dimension must agree, including dependencies."""

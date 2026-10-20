@@ -36,6 +36,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -1662,9 +1663,35 @@ bool BindConstantCallAffineExpr(const ExprPtr& pattern, const ExprPtr& value, co
   return true;
 }
 
-bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value) {
+ExprPtr ResolveCallExpr(const ExprPtr& expr, const TypeVarMap& scalar_args, const TypeVarMap& var_map) {
+  return transform_utils::Substitute(transform_utils::Substitute(expr, scalar_args), var_map);
+}
+
+bool ReferencesCallScalar(const ExprPtr& expr, const TypeVarMap& scalar_args) {
+  var_collectors::VarDefUseCollector uses;
+  uses.VisitExpr(expr);
+  for (const auto* var : uses.var_uses_ordered) {
+    if (scalar_args.count(var)) return true;
+  }
+  return false;
+}
+
+bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value,
+                                 const TypeVarMap* scalar_args = nullptr,
+                                 const TypeVarMap* var_map = nullptr) {
   if (!pattern || !value) return false;
-  if (As<Var>(pattern)) return true;
+  if (auto var = As<Var>(pattern)) {
+    if (scalar_args) {
+      const auto actual = scalar_args->find(var.get());
+      if (actual != scalar_args->end()) {
+        auto anchor = var_map ? ResolveCallExpr(actual->second, *scalar_args, *var_map) : actual->second;
+        auto observed = var_map ? ResolveCallExpr(value, *scalar_args, *var_map) : value;
+        return structural_equal(anchor, observed) ||
+               ProveValidExtentEqual(anchor, observed) == ProofResult::kTrue;
+      }
+    }
+    return true;
+  }
   if (structural_equal(pattern, value) || ProveValidExtentEqual(pattern, value) == ProofResult::kTrue) {
     return true;
   }
@@ -1673,20 +1700,28 @@ bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value) {
   auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
   auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
   if (pattern_binary && value_binary) {
-    return CanDecomposeCallExprPattern(pattern_binary->left_, value_binary->left_) &&
-           CanDecomposeCallExprPattern(pattern_binary->right_, value_binary->right_);
+    return CanDecomposeCallExprPattern(pattern_binary->left_, value_binary->left_, scalar_args, var_map) &&
+           CanDecomposeCallExprPattern(pattern_binary->right_, value_binary->right_, scalar_args, var_map);
   }
 
   auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
   auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
   return pattern_unary && value_unary &&
-         CanDecomposeCallExprPattern(pattern_unary->operand_, value_unary->operand_);
+         CanDecomposeCallExprPattern(pattern_unary->operand_, value_unary->operand_, scalar_args, var_map);
 }
 
 void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
                              TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
-                             bool allow_affine = false) {
+                             bool allow_affine = false, const TypeVarMap* scalar_args = nullptr) {
   if (!pattern || !value) return;
+  if (scalar_args && ReferencesCallScalar(pattern, *scalar_args)) {
+    auto expected = ResolveCallExpr(pattern, *scalar_args, var_map);
+    auto observed = ResolveCallExpr(value, *scalar_args, var_map);
+    if (structural_equal(expected, observed) ||
+        ProveValidExtentEqual(expected, observed) == ProofResult::kTrue) {
+      return;
+    }
+  }
   if (auto var = As<Var>(pattern)) {
     BindCallTypeVar(var, value, context, var_map, constraints);
     return;
@@ -1705,32 +1740,34 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   // recording any bindings so a mismatch in a non-variable operand cannot
   // leave behind a partial, incorrect binding. A direct binding discovered
   // elsewhere still substitutes through differently-shaped return metadata.
-  if (!CanDecomposeCallExprPattern(pattern, value)) return;
+  // A bound Scalar is an anchor, not a positional wildcard. Equivalent
+  // reordered expressions are checked as a whole after all bindings exist.
+  if (!CanDecomposeCallExprPattern(pattern, value, scalar_args, &var_map)) return;
   auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
   auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
   if (pattern_binary && value_binary) {
     CollectCallExprBindings(pattern_binary->left_, value_binary->left_, context + " left operand", var_map,
-                            constraints, allow_affine);
+                            constraints, allow_affine, scalar_args);
     CollectCallExprBindings(pattern_binary->right_, value_binary->right_, context + " right operand", var_map,
-                            constraints, allow_affine);
+                            constraints, allow_affine, scalar_args);
     return;
   }
   auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
   auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
   if (pattern_unary && value_unary) {
     CollectCallExprBindings(pattern_unary->operand_, value_unary->operand_, context + " operand", var_map,
-                            constraints, allow_affine);
+                            constraints, allow_affine, scalar_args);
   }
 }
 
 void CollectCallExprVectorBindings(const std::vector<ExprPtr>& patterns, const std::vector<ExprPtr>& values,
                                    const std::string& context, TypeVarMap& var_map,
                                    std::vector<CallTypeBindingConstraint>& constraints,
-                                   bool allow_affine = false) {
+                                   bool allow_affine = false, const TypeVarMap* scalar_args = nullptr) {
   const size_t count = std::min(patterns.size(), values.size());
   for (size_t i = 0; i < count; ++i) {
     CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map,
-                            constraints, allow_affine);
+                            constraints, allow_affine, scalar_args);
   }
 }
 
@@ -1750,7 +1787,8 @@ void CheckCallPackedFp4Format(DataType expected, DataType actual, const std::str
 }
 
 void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const std::string& context,
-                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
+                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
+                             const TypeVarMap* scalar_args = nullptr) {
   if (!pattern || !value) return;
 
   if (auto pattern_tuple = As<TupleType>(pattern)) {
@@ -1759,7 +1797,8 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
     const size_t count = std::min(pattern_tuple->types_.size(), value_tuple->types_.size());
     for (size_t i = 0; i < count; ++i) {
       CollectCallTypeBindings(pattern_tuple->types_[i], value_tuple->types_[i],
-                              context + " tuple element[" + std::to_string(i) + "]", var_map, constraints);
+                              context + " tuple element[" + std::to_string(i) + "]", var_map, constraints,
+                              scalar_args);
     }
     return;
   }
@@ -1796,13 +1835,13 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   if (pattern_tile->tile_view_ && !pattern_tile->tile_view_->valid_shape.empty()) {
     CollectCallExprVectorBindings(pattern_tile->tile_view_->valid_shape,
                                   GetEffectiveTileValidShape(*value_tile), context + " valid shape", var_map,
-                                  constraints);
+                                  constraints, false, scalar_args);
   }
   if (pattern_tile->tile_view_ && value_tile->tile_view_) {
     CollectCallExprVectorBindings(pattern_tile->tile_view_->stride, value_tile->tile_view_->stride,
-                                  context + " tile stride", var_map, constraints);
+                                  context + " tile stride", var_map, constraints, false, scalar_args);
     CollectCallExprBindings(pattern_tile->tile_view_->start_offset, value_tile->tile_view_->start_offset,
-                            context + " tile start_offset", var_map, constraints);
+                            context + " tile start_offset", var_map, constraints, false, scalar_args);
   }
 }
 
@@ -1827,7 +1866,8 @@ TypePtr SubstituteCallReturnType(const TypePtr& type, const TypeVarMap& var_map)
 }
 
 void CollectCallTypeBindings(const std::vector<VarPtr>& callee_params, const std::vector<ExprPtr>& args,
-                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
+                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
+                             const TypeVarMap* scalar_args = nullptr) {
   CHECK(callee_params.size() == args.size())
       << "DeduceCallTypeBindings: callee_params size (" << callee_params.size() << ") must match args size ("
       << args.size() << ")";
@@ -1835,7 +1875,168 @@ void CollectCallTypeBindings(const std::vector<VarPtr>& callee_params, const std
   for (size_t i = 0; i < callee_params.size(); ++i) {
     if (!callee_params[i] || !args[i]) continue;
     CollectCallTypeBindings(callee_params[i]->GetType(), args[i]->GetType(), "argument " + std::to_string(i),
-                            var_map, constraints);
+                            var_map, constraints, scalar_args);
+  }
+}
+
+TypeVarMap CollectCallScalarArgs(const std::vector<VarPtr>& callee_params, const std::vector<ExprPtr>& args) {
+  CHECK(callee_params.size() == args.size())
+      << "DeduceCallTypeBindings: callee_params size (" << callee_params.size() << ") must match args size ("
+      << args.size() << ")";
+  TypeVarMap scalar_args;
+  for (size_t i = 0; i < callee_params.size(); ++i) {
+    if (callee_params[i] && args[i] && As<ScalarType>(callee_params[i]->GetType())) {
+      scalar_args.emplace(callee_params[i].get(), args[i]);
+    }
+  }
+  return scalar_args;
+}
+
+struct ScalarTileViewExpr {
+  ExprPtr declared;
+  ExprPtr observed;
+  Span span;
+  std::string context;
+  std::string field;
+  bool actual_tile;
+};
+
+// Collect complete expressions once. Structural inference cannot by itself
+// validate arbitrary Scalar-dependent metadata or missing actual fields.
+void CollectScalarTileViewExprs(const TypePtr& pattern, const TypePtr& value, const TypeVarMap& scalar_args,
+                                const std::string& context, std::vector<ScalarTileViewExpr>& exprs) {
+  if (auto tuple = As<TupleType>(pattern)) {
+    auto actual = As<TupleType>(value);
+    for (size_t i = 0; i < tuple->types_.size(); ++i) {
+      CollectScalarTileViewExprs(tuple->types_[i],
+                                 actual && i < actual->types_.size() ? actual->types_[i] : nullptr,
+                                 scalar_args, context + " tuple element[" + std::to_string(i) + "]", exprs);
+    }
+    return;
+  }
+  auto tile = As<TileType>(pattern);
+  if (!tile || !tile->tile_view_) return;
+  auto actual = As<TileType>(value);
+  std::optional<TileView> actual_view;
+  if (actual) {
+    actual_view = tile_view_semantics::NormalizeImplicitTileView(
+        actual->tile_view_, actual->shape_, actual->GetMemorySpace(), /*fill_start_offset=*/true);
+  }
+  auto collect = [&](const ExprPtr& declared, const ExprPtr& observed, const std::string& field) {
+    if (!declared) return;
+    var_collectors::VarDefUseCollector uses;
+    uses.VisitExpr(declared);
+    for (const auto* var : uses.var_uses_ordered) {
+      if (const auto arg = scalar_args.find(var); arg != scalar_args.end()) {
+        exprs.push_back({declared, observed, arg->second->span_, context, field, actual != nullptr});
+        return;
+      }
+    }
+  };
+  for (size_t i = 0; i < tile->tile_view_->valid_shape.size(); ++i) {
+    collect(tile->tile_view_->valid_shape[i],
+            actual_view && i < actual_view->valid_shape.size() ? actual_view->valid_shape[i] : nullptr,
+            "valid_shape[" + std::to_string(i) + "]");
+  }
+  for (size_t i = 0; i < tile->tile_view_->stride.size(); ++i) {
+    // An absent stride stays unspecified: packed strides depend on tile layout.
+    collect(tile->tile_view_->stride[i],
+            actual_view && i < actual_view->stride.size() ? actual_view->stride[i] : nullptr,
+            "stride[" + std::to_string(i) + "]");
+  }
+  collect(tile->tile_view_->start_offset, actual_view ? actual_view->start_offset : nullptr, "start_offset");
+}
+
+std::vector<ScalarTileViewExpr> CollectScalarTileViewExprs(const std::vector<VarPtr>& callee_params,
+                                                           const std::vector<ExprPtr>& args,
+                                                           const TypeVarMap& scalar_args) {
+  std::vector<ScalarTileViewExpr> exprs;
+  if (scalar_args.empty()) return exprs;
+  for (size_t i = 0; i < callee_params.size(); ++i) {
+    if (callee_params[i] && args[i]) {
+      CollectScalarTileViewExprs(callee_params[i]->GetType(), args[i]->GetType(), scalar_args,
+                                 "argument " + std::to_string(i), exprs);
+    }
+  }
+  return exprs;
+}
+
+void RefineScalarTileViewBindings(const std::vector<ScalarTileViewExpr>& exprs, const TypeVarMap& scalar_args,
+                                  TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
+  std::vector<size_t> pending;
+  std::vector<bool> queued(exprs.size(), true);
+  std::vector<bool> done(exprs.size(), false);
+  std::vector<std::unordered_set<const Var*>> subscribed(exprs.size());
+  std::unordered_map<const Var*, std::vector<size_t>> dependents;
+  pending.reserve(exprs.size());
+  for (size_t i = 0; i < exprs.size(); ++i) pending.push_back(i);
+  // Failed anchors subscribe to unresolved dependencies. New bindings wake
+  // only those fields, rather than rescanning all metadata to a fixed point.
+  size_t next = 0;
+  while (next < pending.size()) {
+    const size_t index = pending[next++];
+    queued[index] = false;
+    if (done[index]) continue;
+    const auto& expr = exprs[index];
+    auto expected = ResolveCallExpr(expr.declared, scalar_args, var_map);
+    auto observed = expr.observed ? ResolveCallExpr(expr.observed, scalar_args, var_map) : nullptr;
+    if (!observed || structural_equal(expected, observed) ||
+        ProveValidExtentEqual(expected, observed) == ProofResult::kTrue) {
+      done[index] = true;
+      continue;
+    }
+    var_collectors::VarDefUseCollector declared_vars;
+    declared_vars.VisitExpr(expr.declared);
+    std::vector<const Var*> missing;
+    for (const auto* var : declared_vars.var_uses_ordered) {
+      if (!scalar_args.count(var) && !var_map.count(var)) missing.push_back(var);
+    }
+    if (missing.empty()) {
+      done[index] = true;
+      continue;
+    }
+    if (CanDecomposeCallExprPattern(expr.declared, expr.observed, &scalar_args, &var_map)) {
+      CollectCallExprBindings(expr.declared, expr.observed, expr.context + " " + expr.field, var_map,
+                              constraints, false, &scalar_args);
+      done[index] = true;
+      for (const auto* var : missing) {
+        if (!var_map.count(var)) continue;
+        const auto found = dependents.find(var);
+        if (found == dependents.end()) continue;
+        for (const auto dependent : found->second) {
+          if (!done[dependent] && !queued[dependent]) {
+            pending.push_back(dependent);
+            queued[dependent] = true;
+          }
+        }
+      }
+      continue;
+    }
+    var_collectors::VarDefUseCollector dependencies;
+    dependencies.VisitExpr(expected);
+    dependencies.VisitExpr(observed);
+    for (const auto* var : dependencies.var_uses_ordered) {
+      if (!var_map.count(var) && subscribed[index].insert(var).second) {
+        dependents[var].push_back(index);
+      }
+    }
+  }
+}
+
+void ValidateScalarTileViewExprs(const std::vector<ScalarTileViewExpr>& exprs, const TypeVarMap& scalar_args,
+                                 const TypeVarMap& var_map) {
+  for (const auto& expr : exprs) {
+    auto expected = GeneralAnalyzer().Simplify(ResolveCallExpr(expr.declared, scalar_args, var_map));
+    auto observed = expr.observed
+                        ? GeneralAnalyzer().Simplify(ResolveCallExpr(expr.observed, scalar_args, var_map))
+                        : nullptr;
+    const bool equal = observed && (structural_equal(expected, observed) ||
+                                    ProveValidExtentEqual(expected, observed) == ProofResult::kTrue);
+    CHECK_SPAN(equal, expr.span)
+        << expr.context << ": Scalar-dependent Tile " << expr.field << " mismatch: expected "
+        << PythonPrint(expected) << ", got "
+        << (observed ? PythonPrint(observed) : (expr.actual_tile ? "unspecified" : "a non-Tile argument"))
+        << "; expressions are not provably equal and inline calls do not emit a runtime shape guard";
   }
 }
 
@@ -1872,7 +2073,10 @@ std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector
                                                                const std::vector<ExprPtr>& args) {
   TypeVarMap var_map;
   std::vector<CallTypeBindingConstraint> constraints;
-  CollectCallTypeBindings(callee_params, args, var_map, constraints);
+  const auto scalar_args = CollectCallScalarArgs(callee_params, args);
+  CollectCallTypeBindings(callee_params, args, var_map, constraints, &scalar_args);
+  const auto scalar_views = CollectScalarTileViewExprs(callee_params, args, scalar_args);
+  RefineScalarTileViewBindings(scalar_views, scalar_args, var_map, constraints);
   // An identity observation denotes a dimension already owned by the caller.
   // Keep it even when another argument has a padded physical extent.
   for (const auto& constraint : constraints) {
@@ -1902,23 +2106,21 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
   const bool validate_inline_tiles = is_inline && return_types.empty();
   TypeVarMap var_map;
   std::vector<CallTypeBindingConstraint> constraints;
+  TypeVarMap scalar_args;
   if (is_inline) {
-    CHECK(callee_params.size() == args.size())
-        << "DeduceCallReturnType: callee_params size (" << callee_params.size() << ") must match args size ("
-        << args.size() << ")";
     // Scalar values are authoritative even when their only type occurrence is
     // in a Tile view. Seed every argument first so parameter order cannot let
     // metadata replace an actual value, including a caller-owned identity.
-    for (size_t i = 0; i < callee_params.size(); ++i) {
-      if (callee_params[i] && args[i] && As<ScalarType>(callee_params[i]->GetType())) {
-        var_map.emplace(callee_params[i].get(), args[i]);
-      }
-    }
+    scalar_args = CollectCallScalarArgs(callee_params, args);
+    var_map = scalar_args;
   }
-  CollectCallTypeBindings(callee_params, args, var_map, constraints);
+  CollectCallTypeBindings(callee_params, args, var_map, constraints, is_inline ? &scalar_args : nullptr);
   // Void callees still consume their arguments: equal carrier geometry must
   // not let an E2M1 buffer reach an E1M2 body (or vice versa) without a cast.
-  if ((return_types.empty() && !validate_inline_tiles) || var_map.empty()) return return_types;
+  if (return_types.empty() && !validate_inline_tiles) return return_types;
+  const auto scalar_views = CollectScalarTileViewExprs(callee_params, args, scalar_args);
+  if (is_inline) RefineScalarTileViewBindings(scalar_views, scalar_args, var_map, constraints);
+  if (var_map.empty()) return return_types;
 
   var_collectors::VarDefUseCollector strict_vars;
   if (is_inline) {
@@ -1981,6 +2183,7 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
         << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
         << constraint.context << "; cross-function calls do not emit a runtime shape guard";
   }
+  if (is_inline) ValidateScalarTileViewExprs(scalar_views, scalar_args, var_map);
   if (return_types.empty()) return return_types;
 
   // Do not choose the first Tile argument's extent for another operand. Leave
