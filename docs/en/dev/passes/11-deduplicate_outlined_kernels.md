@@ -34,11 +34,28 @@ Thus `[N]` and `[M]` kernels remain separate even when alpha-equivalent; kernels
 sharing the same symbols can still merge. Keeping the original call result type
 alone does not protect downstream output allocation.
 Binding verification and closure inspection include types, shapes, views and attrs.
-Free captures, unknown types, explicit storage/communication resources, external or
+Free captures, unresolved value types, explicit storage/communication resources, external or
 builtin kernels, runtime bindings and unsupported helper graphs are skipped.
 Ordinary memory effects are allowed: all executions and actual arguments remain.
 An unsupported payload that prevents complete reference indexing conservatively
 preserves the Program. Debug logs identify unsupported projection diagnostics.
+
+Two narrowly checked exceptions admit additional kernels:
+
+- Legacy statement-only calls may carry `UnknownType` only as a direct
+  `EvalStmt` result. The allowlist is `pld.tensor.put`, `pld.tile.remote_store`,
+  `pld.tensor.remote_store`, `pld.system.notify`, `pld.system.wait`,
+  `pld.system.defer_wait`, `system.set_ffts`, `system.sync_set` and
+  `system.sync_wait`. Unknown values in signatures, operands, returns or metadata
+  remain ineligible.
+- Prefetch contexts, events and sessions must be produced and consumed locally
+  by the corresponding `prefetch` operations. A wait must use the event's
+  originating context. Handles cannot escape through signatures, metadata,
+  aliases or arbitrary consumers. Each invocation still creates its own context.
+
+Admission checks every incoming expression edge, including shared DAG nodes,
+and nested type payloads. These exceptions do not relax structural equality or
+the signature-symbol identity check.
 
 ## Rewriting and complexity
 

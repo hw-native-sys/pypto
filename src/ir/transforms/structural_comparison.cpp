@@ -470,6 +470,9 @@ class Projection {
     // code and in metadata: the latter reference cannot be rewritten. Equality
     // and binding verification retain their original two-cache behavior.
     const size_t context = inspection_ && !collecting_ && !IsBodyContext() ? 2 : 0;
+    if (inspection_ && !collecting_) {
+      inspection_->node_uses.push_back({node, inspection_parent_, IsBodyContext()});
+    }
     auto& cache = node_cache_[context + (definition ? 1 : 0)];
     auto cached = cache.find(node.get());
     if (cached != cache.end()) {
@@ -482,6 +485,12 @@ class Projection {
     if (depth_ >= 512) Unsupported("DepthLimitExceeded");
     if (!active_.insert(node.get()).second) Unsupported("CyclicStructure");
     ++depth_;
+    const auto saved_inspection_parent = inspection_parent_;
+    const bool saved_inspection_body = inspection_parent_in_body_;
+    if (inspection_ && !collecting_) {
+      inspection_parent_ = node;
+      inspection_parent_in_body_ = IsBodyContext();
+    }
     Id result;
     if (variable) {
       result = Variable(variable, definition);
@@ -490,6 +499,8 @@ class Projection {
     } else {
       result = DispatchNode(node);
     }
+    inspection_parent_ = saved_inspection_parent;
+    inspection_parent_in_body_ = saved_inspection_body;
     if (use_id != kForever) use_postorder_.push_back(use_id);
     use_parent_ = saved_parent;
     --depth_;
@@ -542,6 +553,11 @@ class Projection {
 
   Id Type(const TypePtr& type) {
     if (!type) return 0;
+    if (inspection_ && !collecting_) {
+      auto owner = As<Expr>(inspection_parent_);
+      if (path_.empty() || path_.back() != "type" || !owner || owner->GetType() != type) owner = nullptr;
+      inspection_->type_uses.push_back({type, owner, inspection_parent_in_body_});
+    }
     const size_t saved_parent = use_parent_;
     size_t use_id = checking_visibility_ ? BeginUses(type.get(), false, nullptr) : kForever;
     auto cached = type_cache_.find(type.get());
@@ -707,6 +723,8 @@ class Projection {
   }
 
   structural_comparison_detail::Inspection* inspection_ = nullptr;
+  IRNodePtr inspection_parent_;
+  bool inspection_parent_in_body_ = false;
   Arena& arena_;
   bool map_free_;
   bool verify_bindings_ = false;

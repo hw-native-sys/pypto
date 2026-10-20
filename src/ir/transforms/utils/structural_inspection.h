@@ -23,6 +23,20 @@
 
 namespace pypto::ir::structural_comparison_detail {
 
+struct NodeUse {
+  IRNodePtr node;
+  IRNodePtr parent;
+  bool in_body;
+};
+
+struct TypeUse {
+  TypePtr type;
+  // Non-null only for an expression's direct type, not a nested type or a
+  // function return declaration. This distinguishes values from type payloads.
+  ExprPtr expression;
+  bool in_body;
+};
+
 // Private inspection of the exact comparison projection. Consumers apply their
 // own eligibility policy; comparison itself continues to allow free captures.
 struct Inspection {
@@ -32,6 +46,10 @@ struct Inspection {
   std::vector<VarPtr> free_variables;
   // The flag identifies body callees handled by the standard IR mutator.
   std::vector<std::pair<OpPtr, bool>> operators;
+  // Record incoming edges before memoization: one shared Call can be discarded
+  // by EvalStmt and also escape through a return, argument, or metadata field.
+  std::vector<NodeUse> node_uses;
+  std::vector<TypeUse> type_uses;
 };
 Inspection Inspect(const FunctionPtr& function);
 

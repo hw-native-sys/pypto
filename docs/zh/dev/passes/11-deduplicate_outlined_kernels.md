@@ -28,10 +28,25 @@ x2 = self.step(x1)
 不会将其中符号映射到每个调用的符号空间。因此 `[N]` 和 `[M]` kernel 即使
 alpha 等价也不合并；共享相同符号的 kernel 仍可合并。仅保留原调用的返回类型
 不足以保证后续输出分配正确。
-绑定验证与闭合性检查覆盖 type、shape、view 和 attrs。自由捕获、unknown type、
+绑定验证与闭合性检查覆盖 type、shape、view 和 attrs。自由捕获、未确定的值类型、
 显式存储或通信资源、external/builtin kernel、runtime binding、未支持的 helper 图
 保守跳过。普通内存副作用允许存在，因为每次执行及实参都保留。若未知 payload
 使完整引用索引无法建立，则保留整个 Program；debug 日志记录投影诊断。
+
+以下两类例外经过严格检查后可以参与去重：
+
+- 旧版无返回值调用仅在直接作为 `EvalStmt` 结果时允许携带 `UnknownType`。
+  白名单为 `pld.tensor.put`、`pld.tile.remote_store`、`pld.tensor.remote_store`、
+  `pld.system.notify`、`pld.system.wait`、`pld.system.defer_wait`、
+  `system.set_ffts`、`system.sync_set` 和 `system.sync_wait`。
+  签名、实参、返回值或 metadata 中的 unknown 值仍不准入。
+- Prefetch context、event 和 session 必须在函数内部由对应的 `prefetch`
+  操作产生和使用；wait 必须使用 event 原始 context 的 session。
+  句柄不能通过签名、metadata、别名或任意消费者逃逸。
+  每次调用仍独立创建 context。
+
+准入检查覆盖表达式的每条入边（包括共享 DAG 节点）以及嵌套类型。
+这些例外不放宽结构等价或签名符号身份检查。
 
 ## 重写与复杂度
 

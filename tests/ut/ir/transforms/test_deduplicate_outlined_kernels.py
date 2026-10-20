@@ -14,10 +14,108 @@ import pytest
 from pypto import DataType as D
 from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
-from pypto.ir.op import tensor
+from pypto.ir.op import prefetch_ops, system_ops, tensor
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 S = ir.Span.unknown()
+
+
+@pytest.mark.parametrize("escape", [None, "return", "argument", "metadata", "signature", "nested_type"])
+def test_legacy_statement_results_are_admitted_only_when_discarded(escape):
+    typ = ir.TensorType([256], D.INT64)
+    functions = []
+    for name in ["a", "b"]:
+        x = var("workspace", typ)
+        call = system_ops.set_ffts(x)
+        stmts: list[ir.Stmt] = [ir.EvalStmt(call, S)]
+        attrs = None
+        returns: list[ir.Type] = []
+        # Reuse the exact Call object in both positions to exercise DAG edges,
+        # rather than relying on a second node being visited independently.
+        if escape == "return":
+            stmts.append(ir.ReturnStmt([call], S))
+        elif escape == "argument":
+            stmts.append(ir.EvalStmt(ir.Call(ir.get_op("system.set_ffts"), [call], call.type, S), S))
+        elif escape == "metadata":
+            attrs = {"retained_statement": call}
+        elif escape == "signature":
+            returns = [ir.UnknownType()]
+        elif escape == "nested_type":
+            returns = [ir.TupleType([ir.UnknownType()])]
+        functions.append(
+            ir.Function(
+                name, [x], returns, ir.SeqStmts(stmts, S), S, type=ir.FunctionType.InCore, attrs=attrs
+            )
+        )
+    source = program([*functions, caller(["a", "b"], typ)])
+    result = run(source)
+    assert names(result) == ({"a", "main"} if escape is None else {"a", "b", "main"})
+    assert len(calls(result)) == 2
+
+
+def test_unknown_value_result_is_not_assumed_to_be_a_statement():
+    typ = ir.TensorType([16], D.FP32)
+    functions = []
+    for name in ["a", "b"]:
+        x = var("x", typ)
+        # A registered op with an unresolved value type is still not a known
+        # statement-only operation, even when its result is discarded.
+        call = ir.Call(ir.get_op("tensor.add"), [x, x], ir.UnknownType(), S)
+        functions.append(ir.Function(name, [x], [], ir.EvalStmt(call, S), S, type=ir.FunctionType.InCore))
+    source = program([*functions, caller(["a", "b"], typ)])
+    assert names(run(source)) == {"a", "b", "main"}
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["discard", "wait", "return_context", "return_event", "metadata", "alias", "parameter", "cross_context"],
+)
+def test_prefetch_handles_must_stay_local_to_each_kernel_invocation(mode):
+    typ = ir.TensorType([64], D.FP32)
+    functions = []
+    for name in ["a", "b"]:
+        x = var("x", typ)
+        make_context = prefetch_ops.make_context()
+        ctx = var("ctx", make_context.type)
+        stmts: list[ir.Stmt] = []
+        params = [x]
+        attrs = None
+        returns: list[ir.Type] = []
+        if mode == "parameter":
+            params.append(ctx)
+        else:
+            stmts.append(ir.AssignStmt(ctx, make_context, S))
+        event_call = prefetch_ops.async_prefetch(x, ctx)
+        event = var("event", event_call.type)
+        if mode == "discard":
+            stmts.append(ir.EvalStmt(event_call, S))
+        else:
+            stmts.append(ir.AssignStmt(event, event_call, S))
+            session_context = ctx
+            if mode == "cross_context":
+                session_context = var("other_ctx", make_context.type)
+                stmts.append(ir.AssignStmt(session_context, prefetch_ops.make_context(), S))
+            session_call = prefetch_ops.session(session_context)
+            session = var("session", session_call.type)
+            stmts.append(ir.AssignStmt(session, session_call, S))
+            stmts.append(ir.EvalStmt(prefetch_ops.wait(event, session), S))
+        if mode in ("return_context", "return_event"):
+            escaped = ctx if mode == "return_context" else event
+            returns = [escaped.type]
+            stmts.append(ir.ReturnStmt([escaped], S))
+        elif mode == "metadata":
+            attrs = {"escaped_context": ctx}
+        elif mode == "alias":
+            stmts.append(ir.AssignStmt(var("alias", ctx.type), ctx, S))
+        functions.append(
+            ir.Function(
+                name, params, returns, ir.SeqStmts(stmts, S), S, type=ir.FunctionType.InCore, attrs=attrs
+            )
+        )
+    source = program([*functions, caller(["a", "b"], typ)])
+    result = run(source)
+    assert names(result) == ({"a", "main"} if mode in ("discard", "wait") else {"a", "b", "main"})
+    assert len(calls(result)) == 2
 
 
 def var(name, typ=None):

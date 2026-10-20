@@ -156,16 +156,119 @@ struct FunctionInfo {
   bool eligible = true;
 };
 
+bool IsLegacyStatementCall(const CallPtr& call) {
+  if (!call || !As<Op>(call->op_)) return false;
+  // These registered operations intentionally return UnknownType for "no SSA
+  // result". Sharing their definition preserves every execution and operand;
+  // none uses the enclosing function's identity as a resource. Do not infer
+  // this contract from UnknownType, an op-name prefix, or registration alone.
+  return IsOp(call, "pld.tensor.put") || IsOp(call, "pld.tile.remote_store") ||
+         IsOp(call, "pld.tensor.remote_store") || IsOp(call, "pld.system.notify") ||
+         IsOp(call, "pld.system.wait") || IsOp(call, "pld.system.defer_wait") ||
+         IsOp(call, "system.set_ffts") || IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait");
+}
+
+bool IsPrefetchHandle(const TypePtr& type) {
+  return As<PrefetchAsyncContextType>(type) || As<AsyncEventType>(type) || As<AsyncSessionType>(type);
+}
+
+bool IsPrefetchProducer(const CallPtr& call) {
+  if (!call || !As<Op>(call->op_)) return false;
+  return (IsOp(call, "prefetch.make_context") && call->args_.empty() &&
+          As<PrefetchAsyncContextType>(call->GetType())) ||
+         (IsOp(call, "prefetch.async_prefetch") && call->args_.size() == 2 &&
+          As<AsyncEventType>(call->GetType())) ||
+         (IsOp(call, "prefetch.session") && call->args_.size() == 1 && As<AsyncSessionType>(call->GetType()));
+}
+
+bool AdmitSpecialTypes(const Inspection& inspection) {
+  // Inspect all type edges, including signatures and nested type payloads.
+  // An allowed statement result must not conceal an unresolved SSA type, and
+  // handles may not enter/leave the kernel through its signature or metadata.
+  for (const auto& use : inspection.type_uses) {
+    if (!As<UnknownType>(use.type) && !IsPrefetchHandle(use.type)) continue;
+    if (!use.expression || !use.in_body) return false;
+    if (As<UnknownType>(use.type) && !IsLegacyStatementCall(As<Call>(use.expression))) return false;
+  }
+
+  std::unordered_map<const Var*, CallPtr> definitions;
+  for (const auto& node : inspection.nodes) {
+    auto assign = As<AssignStmt>(node);
+    if (!assign || !IsPrefetchHandle(assign->var_->GetType())) continue;
+    auto call = As<Call>(assign->value_);
+    if (!IsPrefetchProducer(call) || assign->var_->GetType()->GetKind() != call->GetType()->GetKind()) {
+      return false;
+    }
+    definitions.emplace(assign->var_.get(), call);
+  }
+  auto producer = [&](const ExprPtr& expr) -> CallPtr {
+    // Only direct local SSA definitions qualify; loop-carried IterArgs and
+    // forwarded aliases have no ownership proof in this admission contract.
+    auto var = As<Var>(expr);
+    if (!var) return nullptr;
+    auto found = definitions.find(var.get());
+    return found == definitions.end() ? nullptr : found->second;
+  };
+  auto context = [&](const ExprPtr& expr) {
+    auto call = producer(expr);
+    return call && IsOp(call, "prefetch.make_context");
+  };
+  auto consumer = [&](const CallPtr& call) {
+    if (!call || !As<Op>(call->op_)) return false;
+    if (IsOp(call, "prefetch.async_prefetch")) {
+      return IsPrefetchProducer(call) && AsTensorTypeLike(call->args_[0]->GetType()) &&
+             context(call->args_[1]);
+    }
+    if (IsOp(call, "prefetch.session")) {
+      return IsPrefetchProducer(call) && context(call->args_[0]);
+    }
+    if (!IsOp(call, "prefetch.wait") || call->args_.size() != 2) return false;
+    auto event = producer(call->args_[0]);
+    auto session = producer(call->args_[1]);
+    // A wait must pair the event with the session of its originating context.
+    return event && session && IsOp(event, "prefetch.async_prefetch") && IsOp(session, "prefetch.session") &&
+           event->args_[1] == session->args_[0];
+  };
+
+  // Incoming edges, not just unique nodes, determine whether a value escapes.
+  // This rejects even a DAG node shared by a valid use and an invalid use.
+  for (const auto& use : inspection.node_uses) {
+    auto expr = As<Expr>(use.node);
+    if (!expr) continue;
+    auto type = expr->GetType();
+    if (!As<UnknownType>(type) && !IsPrefetchHandle(type)) continue;
+    if (!use.in_body) return false;
+    auto eval = As<EvalStmt>(use.parent);
+    if (As<UnknownType>(type)) {
+      if (!eval || eval->expr_ != expr || !IsLegacyStatementCall(As<Call>(expr))) return false;
+      continue;
+    }
+    auto assign = As<AssignStmt>(use.parent);
+    if (auto var = As<Var>(expr)) {
+      if (!producer(var)) return false;
+      if (assign && assign->var_ == var) continue;
+      if (!consumer(As<Call>(use.parent))) return false;
+    } else {
+      auto call = As<Call>(expr);
+      if (!IsPrefetchProducer(call)) return false;
+      if (!IsOp(call, "prefetch.make_context") && !consumer(call)) return false;
+      if (eval && eval->expr_ == expr) continue;
+      if (!assign || assign->value_ != expr || producer(assign->var_) != call) return false;
+    }
+  }
+  return true;
+}
+
 FunctionInfo InspectFunction(const FunctionPtr& function) {
   FunctionInfo info{function, structural_comparison_detail::Inspect(function), {}, {}, true};
   info.eligible = info.inspection.free_variables.empty() && !function->requires_runtime_binding_ &&
-                  !function->HasAttr(kAttrExternalSource) && !function->HasAttr(kAttrBuiltinTemplateDir);
+                  !function->HasAttr(kAttrExternalSource) && !function->HasAttr(kAttrBuiltinTemplateDir) &&
+                  AdmitSpecialTypes(info.inspection);
   for (const auto& type : info.inspection.types) {
-    // Explicit storage/communication/async identities are outside the early
-    // functional-kernel contract. Ordinary tensor loads/stores remain eligible.
-    if (As<UnknownType>(type) || As<MemRefType>(type) || As<WindowBufferType>(type) ||
-        As<CommCtxType>(type) || As<PtrType>(type) || As<BufferType>(type) || As<MultiBufferType>(type) ||
-        As<PrefetchAsyncContextType>(type) || As<AsyncEventType>(type) || As<AsyncSessionType>(type)) {
+    // Explicit storage and communication handles remain outside the contract.
+    // Local prefetch handles and legacy statement results were checked by use.
+    if (As<MemRefType>(type) || As<WindowBufferType>(type) || As<CommCtxType>(type) || As<PtrType>(type) ||
+        As<BufferType>(type) || As<MultiBufferType>(type)) {
       info.eligible = false;
     }
   }
