@@ -139,7 +139,7 @@ class SingleCGrid:
             }
             for stmt in loop.body.stmts:
                 if isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
-                    if stmt.expr.op.name == "buffer.matmul":
+                    if stmt.expr.op.name == ir.get_op("buffer.matmul").name:
                         destination = stmt.expr.args[-1]
                         assert isinstance(destination, ir.Var)
                         assert destination.name_hint in local_accumulators
