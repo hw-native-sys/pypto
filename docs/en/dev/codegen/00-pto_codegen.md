@@ -186,7 +186,7 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
-| `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc` (`src0 + src1 + carry`) |
@@ -199,8 +199,8 @@ print(pto_code)
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`; scalar is same-width signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
-**`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered
-through `pto.subview`, which is a pure view alias of the source tile (no
+**`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and the
+fallback `tile.assemble` path use `pto.subview`, a pure alias of the source tile (no
 data movement, no extra `pto.alloc_tile`).  `pto.subview` requires the
 result `tile_buf` to share `dtype`, `memory_space`, `blayout`, `slayout`,
 `fractal`, `pad`, and `compact` with the source — `DeduceTileSliceType` propagates
@@ -216,9 +216,19 @@ satisfies the constraints by construction.  Backend codegen also runs a
 
 For `tile.assemble`, the leading `pto.tmov target → dst` is only emitted
 when buffer reuse did not collapse `target` and the destination buffer; in
-that case it preserves any data outside the insertion window.  The
-trailing `pto.tmov src → dst_view` is the actual data write into the
-sub-window carved out by `pto.subview`.
+that case it preserves any data outside the insertion window. ND (`row_major`,
+`none_box`) Vec-to-Vec copies of FP32, FP16, and BF16 use
+`pto.tinsert` with the original destination and explicit offsets. This preserves
+the destination row pitch and copies only the source's valid region, leaving
+the rest of the target intact. A `subview + tmov` is insufficient for column
+insertion on A2/A3: PTOAS resolves the view to its parent's physical dimensions,
+then rejects the unequal source/destination shapes (#2717). Other copies retain
+the `pto.subview + pto.tmov` path. A2/A3 PTOAS rejects INT16/INT32 TINSERT,
+and the pinned ISA rejects INT8/UINT8 TINSERT with dynamic valid columns;
+existing whole-tile integer TMOV copies are preserved.
+On A2/A3, the insertion column offset must be 32-byte aligned (8 FP32 or
+16 FP16/BF16 elements). Codegen diagnoses a constant offset violating this
+restriction; callers must preserve it for dynamic offsets too.
 
 **FIXPIPE epilogue on the Acc writeback.**  A *converting* `Acc → Mat` assemble
 and every `Acc → GM` store are the cube's fix-pipe draining L0C, which can
@@ -233,7 +243,7 @@ in `tests/st/runtime/ops/test_fixpipe_epilogue.py` measures it on a2a3.
 The scale also *selects* the lowering — an `INT32` accumulator reaches an `FP16`
 Mat tile only because it carries one (`DEQF16`) — so one predicate,
 `ir::CubeMatWritebackUsesFixpipe`, decides it for the emitter and
-`FixpipeEpilogueValid` alike; a same-dtype assemble converts nothing, stays a
+`FixpipeEpilogueValid` alike; a same-dtype Acc-to-Mat assemble converts nothing, stays a
 plain `pto.tmov`, and carries no epilogue. `pto.tinsert` and `pto.tstore` spell
 the packed scale operand differently, neither form guessable from the other —
 both pinned with their provenance at the emission sites. See

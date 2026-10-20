@@ -67,12 +67,12 @@ using pto_ops_detail::MakePartitionTensorViewType;
 using pto_ops_detail::mask_patterns;
 using pto_ops_detail::MaterializeSubviewOperandIfNeeded;
 
-// Helper function for tile.assemble → pto.subview + pto.tmov
+// Helper function for tile.assemble → pto.tinsert or pto.subview + pto.tmov.
 // Writes source tile into target tile at a given row/col offset.  Lowering:
 //   1. (optional) pto.tmov target → dst when buffer reuse did not merge them
 //      (preserves any data outside the insertion window).
-//   2. %dst_view = pto.subview %dst[row, col] sizes [src.rows, src.cols] : ... -> ...
-//   3. pto.tmov ins(%src) outs(%dst_view)
+//   2. pto.tinsert for supported ND Vec copies and FIXPIPE Acc->Mat writebacks;
+//      otherwise pto.subview + pto.tmov into the destination window.
 // Arguments: args[0] = target (destination base), args[1] = source, args[2] = offset MakeTuple
 static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -248,7 +248,35 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   // payload: an INT32 accumulator draining into an FP16 Mat scratch is a
   // `pto.tinsert` precisely because it carries a scale. `fixpipe_insert` is
   // computed above, before the early returns that would drop an epilogue.
-  if (fixpipe_insert) {
+  //
+  // A Vec subview retains its base tile's physical row pitch. PTOAS restores
+  // that physical shape before verifying TMOV, so a [16,128] source cannot be
+  // moved into a window of a [16,512] destination even though the printed view
+  // types agree (#2717). TINSERT carries both pitches and the insertion offset
+  // explicitly and copies only the source's valid region. The existing target
+  // preservation copy above still protects the rest of a non-reused destination.
+  //
+  // Keep this path within the common A2/A3 + A5 PTOAS contract (verified on
+  // 0.65 and 0.68). A2/A3 TINSERT rejects i16/i32; the pinned ISA also rejects
+  // i8/u8 tiles with dynamic ValidCol (-1) at its two-byte alignment assertion.
+  // Keep integer copies on their existing path rather than regressing working
+  // whole-tile TMOVs.
+  const auto source_view = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type);
+  const auto dtype = source_tile_type->dtype_;
+  const bool vec_insert = source_tile_type->memory_space_ == ir::MemorySpace::Vec &&
+                          result_tile_type->memory_space_ == ir::MemorySpace::Vec &&
+                          source_view.blayout == ir::TileLayout::row_major &&
+                          source_view.slayout == ir::TileLayout::none_box &&
+                          (dtype == DataType::FP32 || dtype == DataType::FP16 || dtype == DataType::BF16);
+  if (vec_insert && codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3") {
+    // The A2/A3 ISA checks this at runtime. Reject a known-invalid offset here
+    // instead of turning an assembler failure into a device-side assertion.
+    // Dynamic offsets retain the same alignment precondition.
+    CHECK_SPAN(!off_col_c || off_col_c->value_ % (32 / dtype.GetByte()) == 0, op->span_)
+        << "tile.assemble: A2/A3 ND Vec insertion requires a 32-byte-aligned column offset (a multiple of "
+        << 32 / dtype.GetByte() << " elements for " << dtype.ToString() << ")";
+  }
+  if (fixpipe_insert || vec_insert) {
     std::ostringstream tins;
     tins << "pto.tinsert ins(" << src << ", " << row_off << ", " << col_off;
     if (!src_type.empty()) tins << " : " << src_type << ", index, index";

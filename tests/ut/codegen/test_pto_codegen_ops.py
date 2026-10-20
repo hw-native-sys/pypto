@@ -23,7 +23,8 @@ import pypto.language as pl
 import pytest
 from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 # ============================================================================
@@ -2962,14 +2963,7 @@ class TestTileSliceCodegen:
 
 
 class TestTileAssembleCodegen:
-    """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).
-
-    tile.assemble lowers to:
-      1. (optional) pto.tmov target → dst when buffer reuse did not merge them.
-      2. %dst_view = pto.subview %dst[row, col] sizes [...] : ... -> ...
-      3. pto.tmov ins(%src) outs(%dst_view)
-    The historical pto.tinsert copy op is no longer emitted.
-    """
+    """Tests for destination preservation and target-specific tile insertion."""
 
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
@@ -2985,7 +2979,7 @@ class TestTileAssembleCodegen:
         return codegen_instance.generate(single)
 
     def test_tile_assemble_codegen(self):
-        """tile.assemble lowers to pto.subview + pto.tmov, never pto.tinsert."""
+        """ND Vec insertion keeps the destination pitch through pto.tinsert."""
 
         @pl.program
         class Prog:
@@ -3002,26 +2996,87 @@ class TestTileAssembleCodegen:
                 return pl.store(result, [0, 0], out)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.tinsert" not in mlir, f"tile.assemble no longer emits pto.tinsert, got:\n{mlir}"
-        # Exactly one pto.subview should carve out the destination window.
-        subview_lines = [line.strip() for line in mlir.splitlines() if "pto.subview" in line]
-        assert len(subview_lines) == 1, (
-            f"Expected one pto.subview for tile.assemble, got {len(subview_lines)}:\n"
-            + "\n".join(subview_lines)
-        )
-        sv = subview_lines[0]
-        assert "sizes [16, 64]" in sv, f"subview sizes must equal source shape: {sv}"
-        assert "valid [" in sv, f"subview must carry explicit valid operands: {sv}"
-        valid_clause = sv.split("valid [", 1)[1].split("]", 1)[0]
-        assert "%" in valid_clause, f"subview valid operands must be SSA/index values, got: {sv}"
-        assert "v_row=16" in sv and "v_col=64" in sv, (
-            f"subview result type must preserve the source tile valid_shape: {sv}"
-        )
-        # The actual data write is a pto.tmov from src into the subview SSA.
-        view_ssa = sv.split(" = ", 1)[0].strip()
-        assert any("pto.tmov" in line and f"outs({view_ssa}" in line for line in mlir.splitlines()), (
-            f"tile.assemble should pto.tmov into the subview SSA {view_ssa!r}, got:\n{mlir}"
-        )
+        insert_lines = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(insert_lines) == 1, mlir
+        source, destination = insert_lines[0].split("outs(")
+        assert "rows=16, cols=64" in source
+        assert "rows=16, cols=128" in destination
+        assert "pto.subview" not in mlir
+
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("dtype", [pl.FP32, pl.FP16, pl.BF16])
+    @pytest.mark.parametrize(
+        ("rows", "cols", "row_offset", "col_offset", "valid_rows", "valid_cols"),
+        [
+            (16, 512, 0, 128, 16, 128),
+            (16, 512, 0, 0, 16, 128),
+            (32, 512, 16, 128, 8, 96),
+            (16, 128, 0, 0, 16, 128),
+            (16, 512, 0, 1, 16, 128),
+        ],
+        ids=["columns", "zero_offset", "narrow_valid", "whole_tile", "unaligned_offset"],
+    )
+    def test_vec_assemble_ptoas(
+        self, tmp_path, backend_type, dtype, rows, cols, row_offset, col_offset, valid_rows, valid_cols
+    ):
+        """Issue #2717: a destination window must retain its parent's row pitch."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 128], dtype],
+                initial: pl.Tensor[[rows, cols], dtype],
+                out: pl.Out[pl.Tensor[[rows, cols], dtype]],
+            ) -> pl.Tensor[[rows, cols], dtype]:
+                source = pl.load(x, [0, 0], [16, 128], valid_shape=[valid_rows, valid_cols])
+                target = pl.load(initial, [0, 0], [rows, cols])
+                result = pl.assemble(target, source, [row_offset, col_offset])
+                return pl.store(result, [0, 0], out)
+
+        backend.set_backend_type(backend_type)
+        # Exercise the tile emitter even when a whole-tile copy is eligible for
+        # Buffer IR; runtime tests separately cover the default pipeline.
+        with passes.PassContext([], enable_buffer_ir=False):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+        if backend_type == BackendType.Ascend910B and col_offset == 1:
+            # A5 supports unaligned insertion; A2/A3 would assert on device.
+            with pytest.raises(ValueError, match="32-byte-aligned column offset"):
+                codegen.PTOCodegen().generate(optimized)
+            return
+        mlir = codegen.PTOCodegen().generate(optimized)
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        # Checking only the logical subview types missed the failure: PTOAS
+        # restores the destination's physical dimensions before verifying TMOV.
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TINSERT(" in cpp
+
+    @pytest.mark.parametrize("dtype", [pl.INT8, pl.UINT8, pl.INT16, pl.INT32])
+    def test_integer_whole_tile_assemble_retains_tmov(self, tmp_path, dtype):
+        """Integer TMOVs must not inherit the narrower TINSERT type contract."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 128], dtype],
+                initial: pl.Tensor[[16, 128], dtype],
+                out: pl.Out[pl.Tensor[[16, 128], dtype]],
+            ) -> pl.Tensor[[16, 128], dtype]:
+                source = pl.load(x, [0, 0], [16, 128])
+                target = pl.load(initial, [0, 0], [16, 128])
+                result = pl.assemble(target, source, [0, 0])
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tinsert" not in mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TMOV(" in cpp
 
     def _generate_mlir_all_incore(self, program_cls) -> str:
         """Like ``_generate_mlir`` but concatenates PTOCodegen output for every

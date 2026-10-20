@@ -174,7 +174,7 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
-| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc`（`src0 + src1 + carry`） |
@@ -187,7 +187,7 @@ print(pto_code)
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`；scalar 使用同位宽 signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
-**`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
+**`tile.slice` / `tile.assemble` 下沉细节。** `tile.slice` 和 `tile.assemble` 的回退路径通过 `pto.subview`
 下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。
 `pto.subview` 要求结果 `tile_buf` 与源 `tile_buf` 在 `dtype`、`memory_space`、
 `blayout`、`slayout`、`fractal`、`pad` 和 `compact` 上完全一致，因此
@@ -201,9 +201,16 @@ print(pto_code)
   需要 zero/min/max 填充，请在切出来的子 tile 上再调用 `tile.fillpad`。
 
 对 `tile.assemble`，前置的 `pto.tmov target → dst` 仅在缓冲复用未把
-`target` 与目标缓冲合并时才会发出，用于保留写入窗口外的数据；末尾的
-`pto.tmov src → dst_view` 才是真正写入由 `pto.subview` 切出的子窗口的数据
-搬运。
+`target` 与目标缓冲合并时才会发出，用于保留写入窗口外的数据。ND（`row_major`、
+`none_box`）布局下的 FP32、FP16 和 BF16 Vec-to-Vec 复制使用
+`pto.tinsert`，直接传入原目标和显式偏移，保留目标行跨度，只复制源的有效区域，
+其余目标元素保持不变。A2/A3 上的列插入不能使用 `subview + tmov`：PTOAS 会把
+视图解析为父 tile 的物理维度，随后因源和目标形状不一致而拒绝编译（#2717）。
+其他复制继续使用 `pto.subview + pto.tmov`。A2/A3 PTOAS 不接受 INT16/INT32 TINSERT，
+固定版本的 ISA 也不接受有效列数为动态值的 INT8/UINT8 TINSERT；
+因此保留整数类型原有的整块 TMOV 复制。
+A2/A3 的插入列偏移必须满足 32 字节对齐（8 个 FP32 或 16 个 FP16/BF16 元素）。
+代码生成会拒绝违反该限制的常量偏移；动态偏移也必须由调用方保证满足此条件。
 
 **Acc 写回上的 FIXPIPE epilogue。** **发生类型转换的** `Acc → Mat` assemble，
 以及**任何** `Acc → GM` store，都是 cube 的 fix-pipe 在排空 L0C——它可以在写出的
@@ -218,7 +225,7 @@ print(pto_code)
 scale 还**决定**走哪条下沉路径，而不只是搭个便车——`INT32` 累加器之所以能
 抵达 `FP16` 的 Mat tile，正是因为它带了 scale（`DEQF16`）——因此由同一个判据
 `ir::CubeMatWritebackUsesFixpipe` 同时供 emitter 与 `FixpipeEpilogueValid` 使用；
-同 dtype 的 assemble 不发生转换，仍是普通的 `pto.tmov`，**带不了任何 epilogue**。
+同 dtype 的 Acc-to-Mat assemble 不发生转换，仍是普通的 `pto.tmov`，**带不了任何 epilogue**。
 `pto.tinsert` 与 `pto.tstore` 对打包后的 scale 操作数拼写不同，两种形式都无法从
 对方推出——二者连同其出处都逐字钉在各自的发射点上。寄存器编码见
 `codegen::EncodeFixpipePreQuant`，各后端的 dtype 表见 `99-verifier.md`。
