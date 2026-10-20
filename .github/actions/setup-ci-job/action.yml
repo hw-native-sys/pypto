@@ -1044,6 +1044,14 @@ runs:
         fi
 
 
+    - name: Install PTOAS backend audit for every test process
+      if: ${{ env.PYPTO_PTOAS_TEST_BACKEND != '' && inputs.install-toolchain == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      run: |
+        source activate.sh
+        python tests/ci/ptoas_test_backend.py install
+
     - name: Show ccache stats (after)
       shell: bash
       run: ccache -s || true

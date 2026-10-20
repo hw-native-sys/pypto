@@ -903,8 +903,8 @@ The PTO backend wraps each ptoas-generated InCore function for runtime dispatch.
 `tests/ci/compare_ptoas_backends.py` audits the pinned PTOAS `emitc` and `vpto`
 backends on elementwise arithmetic, reduction, loop-carried accumulation,
 partial valid shapes, and FP16-to-FP32 matmul. Each case runs with both PyPTO
-and PTOAS memory planning. The script selects the backend only inside the audit;
-normal PyPTO compilation continues to use the PTOAS default.
+and PTOAS memory planning. This small corpus remains a focused reproducer; the existing CI suites also run
+with both backends as described below. Production compilation keeps the PTOAS default.
 
 ```bash
 python tests/ci/compare_ptoas_backends.py --platform a2a3 --output build/backend-parity
@@ -941,3 +941,44 @@ establish equivalence for every operator, model, or performance workload.
 The `ptoas-backend-parity` CI jobs run the audit on A2/A3 and A5 devices and
 upload the evidence even when a backend fails. Unsupported VPTO lowerings remain
 failures in the report rather than skips.
+
+### Existing test suites under both backends
+
+CI expands the existing system-test shards, distributed tests, A5 onboard tests,
+simulator tests, examples/documented snippets, library compilation, model tests,
+and conditional serving tests over `emitc` and `vpto`. The original test commands,
+parameters, platform filters, assertions, and goldens are retained. The EmitC
+variant preserves the original required check name; the VPTO variant adds
+`(vpto)`. A failure in one test step does not suppress later test steps.
+Unit tests and `--codegen-only` tests that never invoke PTOAS do not constitute
+VPTO execution and are not counted as backend comparisons.
+
+`tests/ci/ptoas_test_backend.py` installs an experimental bootstrap into the CI
+job's interpreter after package installation. The installer sets
+`PYPTO_PTOAS_AUDIT_READY=1` for subsequent CI steps, keeping the bootstrap
+inactive during builds. `PYPTO_PTOAS_TEST_BACKEND=emitc|vpto` selects the backend and
+`PYPTO_PTOAS_AUDIT_DIR` selects the evidence directory. Fresh Python processes,
+pytest workers, and task-submit children load the same bootstrap. Backend- and
+job-specific cache epochs prevent an EmitC artifact from satisfying a VPTO test.
+This bootstrap is restricted to test environments and adds no production API.
+
+The VPTO variant invokes native PTOAS first. A failed native compilation remains
+a test failure, with no EmitC fallback. Successful native objects use the same
+ABI adapter as the focused reproducer. At every actual kernel build, both the
+EmitC implementation and the VPTO adapter are compiled at the same source path;
+the selected binary is returned to the existing runtime and golden checks.
+The test's original generated wrapper is not modified. Full ELF, runtime `.text`,
+compiler commands, and comparison fields are saved per module/kernel. External
+handwritten kernels are recorded separately because they do not invoke PTOAS.
+
+CPU simulator execution cannot consume a native AICore VPTO object. The VPTO
+simulator variant records this as an explicit failure instead of executing
+EmitC and claiming a VPTO pass. Native code generation on CPU-only runners also
+requires the CANN device compiler; missing tools remain visible failures.
+
+Each suite uploads `ptoas-suite-*` artifacts even on failure. Their `summary.json`
+rejects empty backend coverage and separates actual collected pytest node IDs and test outcomes from PTOAS attempts,
+kernel builds, external kernels, and binary comparisons. Per-attempt records
+retain errors and distinguish native lowering from reference/adapter failures.
+The small five-case `ptoas-backend-parity` jobs remain additional diagnostics;
+they are not the scope of the full-suite VPTO coverage.

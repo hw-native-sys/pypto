@@ -842,6 +842,7 @@ jobs:
       run: echo "Every changed path is documentation — no build, no tests."
 
   docs-examples:
+    name: docs-examples${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # The user manual's runnable code blocks, on the path examples-tests cannot
     # cover. That job is skipped for a documentation-only change -- which is
     # exactly when the blocks themselves are being edited -- so without this the
@@ -853,11 +854,17 @@ jobs:
     if: needs.changes.outputs.docs_changed == 'true'
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
         working-directory: docs-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/docs-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/docs-checkout/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/docs-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
@@ -877,6 +884,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: docs-checkout
@@ -885,13 +893,31 @@ jobs:
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Run the user manual's runnable code blocks
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         run: |
           source activate.sh
           set -e
           python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity \
             -p a2a3sim --jobs 16
 
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
+
   examples-tests:
+    name: examples-tests${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # The distributed examples ladder — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
     # material cannot silently rot.
@@ -933,11 +959,17 @@ jobs:
     # it can queue behind the aarch64 box. Remove the arch label once the
     # contamination is fixed -- #2525 removed every other one deliberately,
     # and this should not become permanent.
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, arm64, cpu]
     defaults:
       run:
         working-directory: examples-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/examples-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/examples-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -968,6 +1000,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: examples-checkout
@@ -984,6 +1017,7 @@ jobs:
       # The matrix itself moved into tests/docs/run_examples.py, where a
       # developer can reproduce one leg without reading YAML.
       - name: Run every example on the simulator
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         run: |
           source activate.sh
           set -e
@@ -993,11 +1027,28 @@ jobs:
       # rots silently -- a kernel can compile, run, write nothing, and still read
       # correctly on the page -- so the manual itself is executed here.
       - name: Run the user manual's runnable code blocks
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         run: |
           source activate.sh
           set -e
           python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity \
             -p a2a3sim --jobs "$EXAMPLE_JOBS"
+
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
@@ -1069,6 +1120,7 @@ jobs:
             --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
+    name: system-tests${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # Batched shard A (mechanism A): the HEAVY device_batch directories — all of
     # tests/st EXCEPT runtime/ops + runtime/cross_core. The batched `Test system
     # tests` step used to run ~7-15 min and dominated the whole job, so it is
@@ -1123,11 +1175,17 @@ jobs:
     # health one: over the 120 ci.yml runs before it was lifted both jobs went
     # red on BOTH halves at indistinguishable rates (aarch64 4 red / 55, x86_64
     # 9 red / 87), failing the same batched step.
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: st-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/st-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/st-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -1157,6 +1215,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: st-checkout
@@ -1169,6 +1228,7 @@ jobs:
           toolchain: bundle
 
       - name: Test system tests (batched shard A — heavy dirs, all but ops/cross_core)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         timeout-minutes: 30
         # Mechanism A: compile + golden run card-free in the precompile pool;
         # each case's device run borrows an NPU via `task-submit --device auto`
@@ -1211,6 +1271,22 @@ jobs:
             --execute-via-task-submit --execute-batch-size=64 \
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID"
 
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
+
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
@@ -1218,6 +1294,7 @@ jobs:
           checkout-path: st-checkout
 
   system-tests-direct:
+    name: system-tests-direct${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # The complement of `system-tests`, sized to balance it:
     #   1. Batched shard B (mechanism A): device_batch on the LIGHT dirs — only
     #      runtime/ops + runtime/cross_core. These have many tests but cheap
@@ -1259,11 +1336,17 @@ jobs:
     # health one: over the 120 ci.yml runs before it was lifted both jobs went
     # red on BOTH halves at indistinguishable rates (aarch64 4 red / 55, x86_64
     # 9 red / 87), failing the same batched step.
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: st-direct-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/st-direct-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/st-direct-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -1293,6 +1376,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: st-direct-checkout
@@ -1302,6 +1386,7 @@ jobs:
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Test system tests (batched shard B — ops + cross_core, cheap compiles)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         timeout-minutes: 30
         # Mechanism A, complement of system-tests' heavy shard: device_batch on
         # ONLY runtime/ops + runtime/cross_core (the cheap-compile dirs, ~80s
@@ -1321,6 +1406,7 @@ jobs:
             --task-queue-timeout=1800 --task-max-time=600 --task-submit-device="$DEVICE_ID"
 
       - name: Test direct-device (mechanism B — one card, in-process)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         timeout-minutes: 30
         # ALL `-m 'not device_batch and not multi_card'` tests across tests/st (both shards' dirs):
         # direct @pl.jit kernel calls / config=test_config (and no-fixture device
@@ -1353,6 +1439,7 @@ jobs:
               --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test persistent cache across processes (isolated pytest invocation)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # The parent must never have initialized the card: earlier direct tests
         # retain process-level device state even after Worker.close(), so spawned
         # consumers cannot map registers (halMemCtl EACCES). A per-test fork does
@@ -1366,6 +1453,7 @@ jobs:
               -v --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test paged-attention codegen (numeric compare, in device env)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # tests/st/codegen runs device-free in the CPU codegen-tests job, but this
         # one file's numeric golden compare is unstable on a CPU torch/BLAS build,
         # so it runs here in the device job's environment. Own step (in-process
@@ -1378,6 +1466,7 @@ jobs:
               -v --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test multi-orch L2 (isolated pytest invocation)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # Mechanism B: a single forked pytest wrapped whole in task-submit (no
         # precompile pipeline here). A ``Worker(level=2)`` session leaves runtime
         # state that poisons the next ``Worker(level=3)`` init in the same
@@ -1389,6 +1478,7 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/distributed/test_l2_multi_orch.py -v --device=\$TASK_DEVICE"
 
       - name: Test swimlane output
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # --precompile-workers is what gives these tests an artifact directory at
         # all: they read the record through `case_run.dfx(...)`, which resolves
         # inside the case's own work_dir, and conftest returns early -- no pool,
@@ -1403,6 +1493,7 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py -v --device=\$TASK_DEVICE --platform=a2a3 --enable-chip-swimlane --precompile-workers=8"
 
       - name: Test scheduling swimlane assertions
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # The 35 swimlane assertions under runtime/scheduling had never run: they
         # gate on `--enable-chip-swimlane`, which CI passed only to
         # test_perf_swimlane.py, so every one of them skipped in the batched
@@ -1429,6 +1520,7 @@ jobs:
               --precompile-workers=8 --strict-case-discovery"
 
       - name: Test Graph record-and-replay (one process per test)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # --forked because a ChipWorker binds one (platform, device_id, runtime):
         # the host_build_graph cases and the default-runtime A/B twin in this file
         # cannot share a process.
@@ -1438,6 +1530,7 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_graph_execution.py -v --device=\$TASK_DEVICE --platform=a2a3 --forked"
 
       - name: Test dump-args output
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # No pool and --forked, unlike the swimlane steps: this file's cases stay
         # fixture-driven (see TestSubmitDumpsManifest's inline_case marker), and
         # --forked is what keeps TestDumpTagManifest's module fixture in a
@@ -1447,6 +1540,22 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
             --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest tests/st/runtime/framework_and_models/test_dump_tag.py -v --device=\$TASK_DEVICE --platform=a2a3 --dump-args --forked"
 
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
+
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
@@ -1454,6 +1563,7 @@ jobs:
           checkout-path: st-direct-checkout
 
   dist-system-tests:
+    name: dist-system-tests${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
     # paths from set_env.sh). In docker the chip child silent-crashes in
     # comm_init.
@@ -1512,11 +1622,17 @@ jobs:
     # So if the wedging returns, the thing to fix is the host again, not an arch
     # label -- the aarch64 box is being decommissioned and will not be there to
     # move to.
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: dist-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/dist-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -1546,6 +1662,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: dist-checkout
@@ -1556,6 +1673,7 @@ jobs:
           unset-ring: 'true'
 
       - name: Test distributed system tests
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # The step clock includes both task-submit queueing and the device run.
         # Keep enough headroom for a typical ~10-minute suite after waiting for
         # a two-card slot; --max-time below still caps device execution at 30m,
@@ -1595,6 +1713,7 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v -n 6 --device-group-size 2 --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Test multi-card cases outside tests/st/distributed
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # Multi-card used to be selected by directory, so a test needing two
         # cards anywhere else was collected by a single-card step and skipped
         # itself from the body. `@pytest.mark.multi_card(n)` makes the
@@ -1606,6 +1725,22 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest \
               tests/st -v -m multi_card --ignore=tests/st/distributed \
               --device=\$TASK_DEVICE --platform=a2a3"
+
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -1685,6 +1820,7 @@ jobs:
           checkout-path: backend-parity-checkout
 
   pypto-lib-compile:
+    name: pypto-lib-compile (${{ matrix.platform }}, ${{ matrix.runner }}, ${{ matrix.needs-cann }})${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # Compile all formal library entrypoints without executing device code.
     # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
     needs: [changes, toolchain, pre-commit, clang-tidy]
@@ -1700,13 +1836,25 @@ jobs:
           - platform: a2a3
             runner: npu
             needs-cann: 'true'
+            ptoas_backend: emitc
+          - platform: a2a3
+            runner: npu
+            needs-cann: 'true'
+            ptoas_backend: vpto
           - platform: a5
             runner: cpu
             needs-cann: 'false'
+            ptoas_backend: emitc
+          - platform: a5
+            runner: cpu
+            needs-cann: 'false'
+            ptoas_backend: vpto
     defaults:
       run:
         working-directory: lib-compile-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/lib-compile-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/lib-compile-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -1728,6 +1876,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: lib-compile-checkout
@@ -1742,6 +1891,7 @@ jobs:
           git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git build/pypto-lib
 
       - name: Compile every formal library entry
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           LIB_PLATFORM: ${{ matrix.platform }}
         run: |
@@ -1762,7 +1912,24 @@ jobs:
             lib-compile-checkout/build/lib-compile-results/**/compilations.json
           retention-days: 7
 
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.platform }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
+
   pypto-lib-model:
+    name: pypto-lib-model${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # No container: each model run borrows an NPU from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python
     # models/...` invocation, which compiles + runs in one process, is wrapped).
@@ -1799,11 +1966,17 @@ jobs:
     # single-card jobs. If multi-card runs start wedging cards again, split the
     # moe step into its own job rather than reaching for an arch label -- nine
     # single-card steps should not pay for one multi-card one.
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, npu]
     defaults:
       run:
         working-directory: lib-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/lib-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/lib-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -1833,6 +2006,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: lib-checkout
@@ -1865,6 +2039,7 @@ jobs:
       # this job clones pypto-lib main, so its requirements move without any
       # change on this side.
       - name: Run pypto-lib Qwen3-14B decode example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1878,6 +2053,7 @@ jobs:
       # loop-carried var. Regressions in cross-function dynamic-shape typing
       # surface here (and only here) before they reach pypto-serving.
       - name: Run pypto-lib Qwen3-14B prefill example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1891,6 +2067,7 @@ jobs:
       # is sampled daily with multiple runs averaged to keep the signal stable.
 
       - name: Run pypto-lib DeepSeek-V4-Flash decode_swa example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1899,6 +2076,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_swa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash decode_hca example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1907,6 +2085,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash decode_csa example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1915,6 +2094,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_csa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash prefill_csa example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1923,6 +2103,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_csa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash prefill_hca example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1931,6 +2112,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash prefill_swa example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1939,12 +2121,29 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_swa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash decode_moe example
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_moe.py -p a2a3 -d \$TASK_DEVICE --ep 2"
+
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -1953,6 +2152,7 @@ jobs:
           checkout-path: lib-checkout
 
   serving-guard:
+    name: serving-guard${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # Does a toolchain bump break generation in pypto-serving?
     #
     # `pypto-lib-model` proves the models still compile and run; it does not
@@ -1983,6 +2183,10 @@ jobs:
     # `npu-xp` selects the runners provisioned for this guard: they carry the
     # Qwen3 weights the steps below read from the runner config, which the rest
     # of the npu pool does not stage.
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, npu-xp]
     # Matches pypto-serving's own job, which carries these guards over a
     # from-source pypto build. Its comment records that 90 left no headroom once
@@ -1995,6 +2199,8 @@ jobs:
       run:
         working-directory: serving-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/serving-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/serving-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -2016,6 +2222,7 @@ jobs:
           persist-credentials: false
 
       - name: Resolve runner card and model dir
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # Checked before the setup on purpose, mirroring serving's own job: this
         # reads nothing but the runner's own env, while behind it lie a
         # checkout, a toolchain install and a from-source pypto build. A host
@@ -2067,6 +2274,7 @@ jobs:
         # pypto's own setup, not serving's: this builds the pull request under
         # test. `pip-cache-name` is distinct so this job never shares a pip dir
         # with `pypto-lib-model` or the system-test jobs.
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: serving-checkout
@@ -2103,6 +2311,7 @@ jobs:
           }
 
       - name: Install pypto-serving and its dependencies
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # pypto's `setup-ci-job` installs what pypto needs; serving carries its
         # own runtime stack (msgspec for the engine<->worker IPC, transformers
         # for the tokenizer, fastapi/uvicorn for the HTTP surface, and
@@ -2172,6 +2381,7 @@ jobs:
       # it passes upstream.
       #
       - name: Run pypto-serving Qwen3 accuracy guard
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-serving
         run: |
@@ -2180,6 +2390,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && DEVICE_ID=\$TASK_DEVICE PYTHONPATH=$PYTHONPATH PYPTO_QWEN3_MODEL_DIR=$PYPTO_QWEN3_MODEL_DIR python -m pytest tests/test_qwen3_accuracy.py -q -s"
 
       - name: Run pypto-serving Qwen3 serving guard
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-serving
         run: |
@@ -2188,6 +2399,7 @@ jobs:
             --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && DEVICE_ID=\$TASK_DEVICE PYTHONPATH=$PYTHONPATH PYPTO_QWEN3_MODEL_DIR=$PYPTO_QWEN3_MODEL_DIR python -m pytest tests/test_qwen3_serving.py -q -s"
 
       - name: Run pypto-serving DeepSeek V4 MTP HTTP matrix
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # Multi-card, so it borrows its own eight rather than using this
         # runner's single card, and --ignore-whitelist because the pool the
         # whitelist exposes is smaller than that. A second server startup can
@@ -2200,6 +2412,22 @@ jobs:
             --timeout 3600 --max-time 4800 \
             --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_MODEL_DIR=$PYPTO_DSV4_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_v4_accuracy.py -q -s"
 
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
+
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
@@ -2207,6 +2435,7 @@ jobs:
           checkout-path: serving-checkout
 
   onboard-tests-a5:
+    name: onboard-tests-a5${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
     # npu-a5 card. Two steps share one checkout / install:
@@ -2290,11 +2519,17 @@ jobs:
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: [self-hosted, linux, npu-a5]
     defaults:
       run:
         working-directory: a5-checkout
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/a5-checkout/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/a5-checkout/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
@@ -2323,6 +2558,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup CI job
+        id: backend_setup
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: a5-checkout
@@ -2335,6 +2571,7 @@ jobs:
           toolchain: bundle
 
       - name: mixed-kernel-tests-a5
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         timeout-minutes: 60
         # Mechanism B: one task-submit card session wrapping a single pytest run
         # (no precompile pipeline), executed in-process on the borrowed card. The
@@ -2353,6 +2590,7 @@ jobs:
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         timeout-minutes: 60
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
@@ -2368,6 +2606,22 @@ jobs:
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          if [ -f activate.sh ]; then
+            source activate.sh
+            python tests/ci/ptoas_test_backend.py summary
+          fi
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7
+
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
@@ -2375,6 +2629,7 @@ jobs:
           checkout-path: a5-checkout
 
   system-tests-a5sim:
+    name: system-tests-a5sim${{ matrix.ptoas_backend == 'vpto' && ' (vpto)' || '' }}
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
     # alongside it.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
@@ -2392,8 +2647,14 @@ jobs:
       && needs.pre-commit.result == 'success'
       && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
       && needs.toolchain.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        ptoas_backend: [emitc, vpto]
     runs-on: ubuntu-latest
     env:
+      PYPTO_PTOAS_TEST_BACKEND: ${{ matrix.ptoas_backend }}
+      PYPTO_PTOAS_AUDIT_DIR: ${{ github.workspace }}/build/ptoas-backend-audit
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
@@ -2477,13 +2738,6 @@ jobs:
           "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
           "$PTOAS_ROOT/bin/ptoas" --version
 
-      - name: Test PTOAS compilation regressions
-        # Reuse the pinned compiler above. Missing or incompatible PTOAS must
-        # fail this step instead of skipping the native compilation assertions.
-        run: >-
-          python -m pytest tests/ut/codegen/
-          --require-ptoas -m ptoas_compile -v
-
       - name: Install simpler
         run: |
           whl="$(ls wheelhouse/simpler-*.whl 2>/dev/null | head -1)"
@@ -2497,7 +2751,20 @@ jobs:
           fi
           python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
+      - name: Install PTOAS backend audit for all test processes
+        id: backend_setup
+        run: python tests/ci/ptoas_test_backend.py install
+
+      - name: Test PTOAS compilation regressions
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
+        # Reuse the pinned compiler above. Missing or incompatible PTOAS must
+        # fail this step instead of skipping the native compilation assertions.
+        run: >-
+          python -m pytest tests/ut/codegen/
+          --require-ptoas -m ptoas_compile -v
+
       - name: Test fillpad_inplace numerical correctness with PTOAS
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # The default ST planner is PYPTO. Select PTOAS explicitly to exercise
         # shared views and compare both valid and padded rows with the golden.
         run: >-
@@ -2505,6 +2772,7 @@ jobs:
           --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
 
       - name: Test A5 system tests (simulator)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         # TestMscatter is deselected: the a5 simulator compiles incore kernels
         # against the runtime's bundled pto-isa, which still clones from the
         # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
@@ -2512,7 +2780,22 @@ jobs:
         run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_gather.py tests/st/runtime/ops/test_gatherb.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_prelu.py tests/st/runtime/ops/test_random.py tests/st/runtime/ops/test_sels.py tests/st/runtime/ops/test_tri.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked -k "not TestMscatter"
 
       - name: Test A5 cross-core system tests (simulator)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim
 
       - name: Test A2A3 cross-core system tests (simulator)
+        if: ${{ !cancelled() && steps.backend_setup.outcome == 'success' }}
         run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim
+
+      - name: Summarize actual PTOAS attempts and pytest outcomes
+        if: always()
+        run: |
+          python tests/ci/ptoas_test_backend.py summary
+
+      - name: Upload full-suite PTOAS sources, binaries, and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-suite-${{ github.job }}-${{ matrix.ptoas_backend }}
+          path: ${{ env.PYPTO_PTOAS_AUDIT_DIR }}
+          retention-days: 7

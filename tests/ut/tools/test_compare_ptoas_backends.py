@@ -9,9 +9,13 @@
 
 """Regression coverage for backend binary comparison and missing evidence."""
 
+import importlib
 import importlib.util
+import json
 import struct
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +113,126 @@ def test_adapter_rejects_missing_or_ambiguous_native_entry(symbols):
 def test_adapter_rejects_no_reference_signature():
     with pytest.raises(RuntimeError, match="No VPTO functions"):
         audit.adapter_declarations("", "kernel.vector")
+
+
+@pytest.fixture
+def suite_backend(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "ci"))
+    suite = importlib.import_module("ptoas_test_backend")
+    pto_backend = importlib.import_module("pypto.backend.pto_backend")
+
+    monkeypatch.setattr(suite, "_state", {"installed": False, "record_tests": True})
+    monkeypatch.setenv("PYPTO_PTOAS_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("PYPTO_PTOAS_TEST_BACKEND", "vpto")
+    calls = SimpleNamespace(ptoas=[], links=[], sources=[], fail_vpto=False)
+
+    def run_ptoas(source, output, flags):
+        selected = next(f for f in flags if f.startswith("--pto-backend="))
+        calls.ptoas.append(selected)
+        if calls.fail_vpto and selected == "--pto-backend=vpto":
+            raise RuntimeError("unsupported VPTO operation")
+        if selected == "--pto-backend=vpto":
+            Path(output).write_bytes(b"native fat object")
+        else:
+            Path(output).write_text("AICORE void kernel(__gm__ float* value) { reference_implementation(); }")
+
+    class Compiler:
+        def __init__(self, platform="a2a3"):
+            self.platform = platform
+            self.sdk = SimpleNamespace(ccec=SimpleNamespace(cxx_path="compiler/bin/bisheng"))
+
+        def _run(self, command, output, label):
+            calls.links.append(command)
+            native = any(str(arg).endswith("vpto.device.o") for arg in command)
+            return _elf(text=b"vpto code" if native else b"emitc code")
+
+        def compile_incore(self, source_path, *args, **kwargs):
+            calls.sources.append(Path(source_path).read_text())
+            return self._run(["link", "wrapper.o"], Path("unused.elf"), "Incore-link")
+
+    def tool(command):
+        if "llvm-objcopy" in command[0]:
+            Path(command[1].split("=", 2)[2]).write_bytes(b"native object")
+        return "kernel.vector\n"
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", run_ptoas)
+    monkeypatch.setitem(
+        sys.modules, "pypto.runtime.kernel_compiler", SimpleNamespace(KernelCompiler=Compiler)
+    )
+    monkeypatch.setitem(
+        sys.modules, "pypto.runtime.pto_isa", SimpleNamespace(ensure_pto_isa_root=lambda: "test-isa")
+    )
+    monkeypatch.setattr(suite, "_run_tool", tool)
+    return SimpleNamespace(module=suite, compiler=Compiler, backend=pto_backend, calls=calls)
+
+
+def _suite_wrapper(tmp_path, suite):
+    source, output = tmp_path / "kernel.pto", tmp_path / "kernel.cpp"
+    source.write_text("module {}")
+    suite.backend._run_ptoas(str(source), str(output), ["--pto-arch=a3", "--pto-level=level2"])
+    wrapper = tmp_path / "wrapper.cpp"
+    wrapper.write_text(
+        "// preserved header\n// --- ptoas-generated code ---\n"
+        + output.read_text()
+        + "\n// --- Kernel entry point ---\nvoid kernel_entry() {}\n"
+    )
+    return wrapper
+
+
+@pytest.mark.parametrize("backend", ["emitc", "vpto"])
+def test_existing_suite_executes_selected_backend_and_preserves_binary_evidence(
+    suite_backend, monkeypatch, tmp_path, backend
+):
+    monkeypatch.setenv("PYPTO_PTOAS_TEST_BACKEND", backend)
+    suite_backend.module.install()
+    wrapper = _suite_wrapper(tmp_path, suite_backend)
+    original = wrapper.read_bytes()
+    binary = suite_backend.compiler().compile_incore(str(wrapper))
+    assert binary == _elf(text=b"vpto code" if backend == "vpto" else b"emitc code")
+    assert wrapper.read_bytes() == original
+    assert f"--pto-backend={backend}" in suite_backend.calls.ptoas
+    records = list((tmp_path / "audit").glob("module-*/kernel-*/result.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert record["passed"]
+    if backend == "vpto":
+        assert not record["comparison"]["runtime_text_equal"]
+        assert "reference_implementation" not in suite_backend.calls.sources[-1]
+        assert 'extern "C" AICORE void kernel' in suite_backend.calls.sources[-1]
+        assert suite_backend.calls.links[-1][-1].endswith("vpto.device.o")
+
+
+def test_existing_suite_does_not_fallback_when_vpto_fails(suite_backend, tmp_path):
+    suite_backend.calls.fail_vpto = True
+    suite_backend.module.install()
+    with pytest.raises(RuntimeError, match="unsupported VPTO"):
+        _suite_wrapper(tmp_path, suite_backend)
+    assert suite_backend.calls.ptoas == ["--pto-backend=vpto"]
+    record = json.loads(next((tmp_path / "audit").glob("module-*/ptoas.json")).read_text())
+    assert not record["passed"] and record["stage"] == "vpto"
+    assert suite_backend.calls.links == []
+
+
+def test_native_vpto_is_not_misreported_as_simulator_execution(suite_backend, tmp_path):
+    suite_backend.module.install()
+    wrapper = _suite_wrapper(tmp_path, suite_backend)
+    with pytest.raises(RuntimeError, match="CPU simulator cannot execute"):
+        suite_backend.compiler("a5sim").compile_incore(str(wrapper))
+    assert suite_backend.calls.links == []
+
+
+def test_bootstrap_stays_inactive_while_ci_dependencies_are_built(suite_backend, monkeypatch):
+    monkeypatch.delenv("PYPTO_PTOAS_AUDIT_READY", raising=False)
+    suite_backend.module.bootstrap()
+    assert not suite_backend.module._state["installed"]
+    assert suite_backend.calls.ptoas == []
+
+
+def test_suite_backend_keeps_planner_and_target_flags(suite_backend):
+    flags = ["--pto-level=level2", "--pto-arch", "a3", "--pto-backend=emitc"]
+    selected = suite_backend.module.backend_flags(flags, "vpto")
+    assert selected == ["--pto-level=level2", "--pto-arch", "a3", "--pto-backend=vpto"]
+    assert flags[-1] == "--pto-backend=emitc"
 
 
 if __name__ == "__main__":
