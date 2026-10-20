@@ -199,8 +199,8 @@ class StorageIndex : public IRVisitor {
   std::unordered_map<const Var*, BufferStorage> roots;
   std::unordered_map<const TileType*, VarPtr> handles;
   std::unordered_map<const Call*, VarPtr> write_views;
-  // Tiles that are use-site windows of another handle (slices and their
-  // relabels). Their storage is the source's; lowering defines them in place.
+  // Tiles that are use-site windows of another handle (slices, relabels and
+  // aliases). Their storage is the source's; lowering defines them in place.
   std::unordered_set<const TileType*> windows;
 
  protected:
@@ -212,7 +212,7 @@ class StorageIndex : public IRVisitor {
     if (auto call = As<Call>(assign->value_); call && IsOp(call, "tile.matmul_acc")) {
       IndexProductView(call, assign->var_);
     }
-    if (auto call = As<Call>(assign->value_); call && IsWindowDefinition(call)) {
+    if (IsWindowDefinition(assign->value_)) {
       if (auto tile = As<TileType>(assign->var_->GetType())) windows.insert(tile.get());
     }
     if (auto call = As<Call>(assign->value_);
@@ -223,13 +223,17 @@ class StorageIndex : public IRVisitor {
     IRVisitor::VisitStmt_(assign);
   }
 
-  // A slice is a window at its (possibly runtime) offset; a relabel of a
-  // window is still a window. Allocation-backed relabels stay storage members.
-  bool IsWindowDefinition(const CallPtr& call) const {
-    if (IsOp(call, "tile.slice")) return true;
-    if (!IsOp(call, "tile.reshape") && !IsOp(call, "tile.reinterpret_view")) return false;
-    auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
-    return source && windows.count(source.get());
+  // A slice is a window at its (possibly runtime) offset; its relabels and
+  // aliases remain windows. Allocation-backed definitions stay storage members.
+  bool IsWindowDefinition(const ExprPtr& value) const {
+    auto source = AsVarLike(value);
+    if (auto call = As<Call>(value)) {
+      if (IsOp(call, "tile.slice")) return true;
+      if (!IsOp(call, "tile.reshape") && !IsOp(call, "tile.reinterpret_view")) return false;
+      source = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
+    }
+    auto tile = source ? As<TileType>(source->GetType()) : nullptr;
+    return tile && windows.count(tile.get());
   }
 
   // tile.matmul_acc may accumulate into a wider valid rectangle than its
@@ -606,6 +610,11 @@ class TileToBufferMutator : public IRMutator {
         const auto deferred = deferred_windows_.find(As<TileType>(source->GetType()).get());
         if (deferred != deferred_windows_.end()) {
           deferred_windows_[As<TileType>(assign->var_->GetType()).get()] = deferred->second;
+          return Empty(assign->span_);
+        }
+        const auto window = window_handles_.find(As<TileType>(source->GetType()).get());
+        if (window != window_handles_.end()) {
+          window_handles_[As<TileType>(assign->var_->GetType()).get()] = window->second;
           return Empty(assign->span_);
         }
       }

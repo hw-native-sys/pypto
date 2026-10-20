@@ -731,6 +731,49 @@ class DynamicWindow:
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dynamic", ["static", "offset", "valid", "both"])
+def test_default_window_aliases_preserve_storage(tmp_path, planner, dynamic):
+    offsets = "[row, col * 8]" if dynamic in ("offset", "both") else "[0, 0]"
+    valid = ", valid_shape=[16, cols]" if dynamic in ("valid", "both") else ""
+    program = pl.parse_program(f"""
+@pl.program
+class WindowAliases:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], row: pl.Scalar[pl.INDEX],
+               col: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX],
+               out: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 32], {offsets}{valid})
+        alias = window
+        chained = alias
+        value = pl.add(alias, chained)
+        out = pl.store(whole, [0, 0], out)
+        return pl.store(value, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    ir.assert_structural_equal(lowered, ir.deserialize(ir.serialize(lowered)))
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    for row, col, cols in [(0, 0, 0), (1, 1, 1), (32, 2, 32), (8, 1, 0)]:
+        out = torch.full_like(x, -777)
+        namespace["kernel"](x, row, col, cols, out)
+        start_row, start_col = (row, col * 8) if dynamic in ("offset", "both") else (0, 0)
+        width = cols if dynamic in ("valid", "both") else 32
+        expected = x.clone()
+        expected[:16, :width] = 2 * x[start_row : start_row + 16, start_col : start_col + width]
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "window_aliases.pto"
+        source.write_text(codegen.PTOCodegen().generate(lowered, emit_source_loc=False))
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(
+            str(source), str(tmp_path / "window_aliases.cpp"), ["--pto-arch=a2", f"--pto-level={level}"]
+        )
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("kind", ["nested", "assemble", "nested_assemble"])
 def test_default_runtime_offsets_preserve_source_and_overlap(tmp_path, planner, kind):
     body = {
