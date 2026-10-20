@@ -10,6 +10,7 @@
 | [函数与程序结构](03-functions.md) | 函数类型、参数方向、跨模块复用、打印 IR |
 | [集成手写 C++ Kernel](04-external-kernels.md) | 从 PyPTO 程序中调用已有的手写 C++ InCore kernel |
 | [GM 缓存访问策略](05-cache-policy.md) | `pl.set_cache_policy` / `pl.load(cache=...)` —— 声明式 GM 缓存策略、它的一致性契约，以及它如何抵达 codegen |
+| [VF IR 实施设计](21-vf-ir-pr-design.md) | 五个 PR 的规划、基础设施边界、RegScope 分阶段验证与 hardware loop 证据 |
 
 ## 另请参阅
 
