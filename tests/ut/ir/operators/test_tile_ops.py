@@ -4013,6 +4013,79 @@ class TestTileReinterpretViewIR:
         assert isinstance(call.type, ir.TileType)
         assert self._shape_values(call.type) == [32]
 
+    def test_fp8_byte_alias_after_fp4_decode(self):
+        # FP4 decode introduces explicit dense strides that the subsequent FP8
+        # cast retains. They must not prevent a zero-copy byte alias (#3073).
+        packed = tile.reinterpret_view(self._var([128, 64], DataType.UINT8), DataType.FP4E2M1X2)
+        decoded = tile.cast(packed, DataType.BF16)
+        fp8 = tile.cast(decoded, DataType.FP8E4M3FN, mode="rint")
+        assert isinstance(fp8.type, ir.TileType)
+        assert _shape_ints(fp8.type.get_effective_tile_view().stride) == [128, 1]
+
+        call = tile.reinterpret_view(fp8, DataType.INT8)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT8
+        assert self._shape_values(call.type) == [128, 128]
+        assert _valid_of(call.type) == [128, 128]
+        assert not call.type.get_effective_tile_view().stride
+
+    @pytest.mark.parametrize(
+        ("layout", "stride", "expected_shape"),
+        [
+            (ir.TileLayout.row_major, [16, 1], [8, 32]),
+            (ir.TileLayout.col_major, [1, 8], [16, 16]),
+        ],
+    )
+    def test_canonical_explicit_stride_uses_layout_contiguous_axis(self, layout, stride, expected_shape):
+        view = ir.TileView(stride=stride, start_offset=0, blayout=layout)
+
+        call = tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TileType)
+        assert self._shape_values(call.type) == expected_shape
+        result_view = call.type.get_effective_tile_view()
+        assert result_view.blayout == layout
+        assert not result_view.stride
+        assert result_view.start_offset is None
+
+    @pytest.mark.parametrize("stride", [[32, 1], [16, 2], [1, 8], [16], [12, 1]])
+    def test_rejects_noncanonical_explicit_stride(self, stride):
+        # Packedness follows the physical [8, 16] allocation, including when
+        # only [4, 12] is valid; a valid-region pitch of 12 is not sufficient.
+        view = ir.TileView(stride=stride, valid_shape=[4, 12])
+
+        with pytest.raises(ValueError, match="canonical strides"):
+            tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+    def test_rejects_unproven_symbolic_stride(self):
+        pitch = ir.Var("pitch", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+        view = ir.TileView(stride=[pitch, 1])
+
+        with pytest.raises(ValueError, match="canonical strides"):
+            tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_canonical_explicit_stride_still_rejects_start_offset(self, dynamic):
+        offset = ir.Var("offset", ir.ScalarType(DataType.INDEX), ir.Span.unknown()) if dynamic else 1
+        view = ir.TileView(stride=[16, 1], start_offset=offset)
+
+        with pytest.raises(ValueError, match="start_offset"):
+            tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+    def test_boxed_mx_scale_byte_alias_rejects_explicit_stride(self):
+        # ND strides do not describe the physical MX-scale box, even when
+        # both layout fields agree and the dtype alias itself is supported.
+        view = ir.TileView(
+            stride=[64, 1],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=32,
+        )
+
+        with pytest.raises(ValueError, match="canonical strides"):
+            tile.reinterpret_view(self._var([16, 64], DataType.UINT8, view), DataType.FP8E8M0)
+
     @pytest.mark.parametrize(
         ("source_dtype", "target_dtype"),
         [
@@ -4191,13 +4264,20 @@ class TestTileReinterpretViewIR:
         with pytest.raises(ValueError, match=r"dimension 1 .*not divisible by 2"):
             tile.reinterpret_view(self._var([8, 15], DataType.INT16), DataType.FP32)
 
-    def test_partial_valid_shape_scales_with_auto_shape(self):
-        view = ir.TileView(valid_shape=[4, 12])
+    @pytest.mark.parametrize("stride", [[], [16, 1]])
+    def test_partial_valid_shape_scales_with_auto_shape(self, stride):
+        view = ir.TileView(valid_shape=[4, 12], stride=stride)
         call = tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
 
         assert isinstance(call.type, ir.TileType)
         result_view = call.type.get_effective_tile_view()
         assert [dim.value for dim in result_view.valid_shape if isinstance(dim, ir.ConstInt)] == [4, 24]
+
+    def test_canonical_explicit_stride_preserves_partial_reshape_restriction(self):
+        view = ir.TileView(valid_shape=[4, 12], stride=[16, 1])
+
+        with pytest.raises(ValueError, match="cannot preserve a partial valid_shape"):
+            tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16, shape=[4, 64])
 
     @pytest.mark.parametrize(
         ("source_pad", "expected_pad"),

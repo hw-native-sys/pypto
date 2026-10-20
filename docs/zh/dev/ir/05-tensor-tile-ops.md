@@ -57,6 +57,11 @@ window 的操作数不在这条规则范围内，因为它们当前的下降或�
 
 `pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图。通用路径支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32；MX 下降额外只允许 INT8↔FP8E4M3FN 和 UINT8↔FP8E8M0 两对等字节 alias；packed FP4 额外只允许 FP4E2M1X2↔UINT8/INT8。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
 
+Flat tile 可以携带显式步长（stride），但必须与完整物理 shape 的规范 row/col-major
+步长完全一致。这包括 FP4 解码后得到的 FP8 cast 结果，无需先执行展平 reshape
+即可建立 INT8 字节 alias。非规范步长、非零或动态 tile 起始偏移（start offset），
+以及 boxed MX-scale tile 的显式步长仍不支持。
+
 Ascend950 上的 FP4E2M1X2 ↔ UINT8/INT8 alias 保持 carrier shape 和字节数不变。
 InCore tensor 和 tile 均下降为连续、带地址的二维 row-major Vec 存储，要求静态
 UB offset，使用 PYPTO 或 DSA_RP 内存规划器。PTOAS 规划器和编排层 tensor alias

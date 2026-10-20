@@ -36,6 +36,7 @@
 #include "pypto/ir/reinterpret_view_semantics.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -381,9 +382,19 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
       << kOpName << " requires row_major or col_major blayout";
   CHECK_SPAN(source_view.blayout != TileLayout::col_major || tile_type->shape_.size() >= 2, args[0]->span_)
       << kOpName << " requires rank >= 2 for col_major layout";
+  if (!source_view.stride.empty()) {
+    // FP4 decoding can leave explicit dense strides on a fresh cast result.
+    // They describe the same packed storage as implicit strides, but only for
+    // flat tiles and the full physical shape, not a smaller valid region.
+    const auto layout = source_view.blayout == TileLayout::col_major ? TensorLayout::DN : TensorLayout::ND;
+    const auto expected_stride =
+        tensor_view_semantics::BuildLogicalStridesFromLayout(tile_type->shape_, layout);
+    CHECK_SPAN(source_view.slayout == TileLayout::none_box &&
+                   tile_view_semantics::ShapeExprListsEquivalent(source_view.stride, expected_stride),
+               args[0]->span_)
+        << kOpName << " only supports packed flat tiles with canonical strides for their layout";
+  }
   if (tile_type->tile_view_.has_value()) {
-    CHECK_SPAN(tile_type->tile_view_->stride.empty(), args[0]->span_)
-        << kOpName << " only supports packed tiles without explicit strides";
     if (auto offset = As<ConstInt>(tile_type->tile_view_->start_offset)) {
       CHECK_SPAN(offset->value_ == 0, args[0]->span_)
           << kOpName << " only supports tiles with zero start_offset, got " << offset->value_;

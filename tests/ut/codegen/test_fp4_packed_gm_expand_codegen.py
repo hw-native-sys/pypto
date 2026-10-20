@@ -104,6 +104,59 @@ def test_uint8_ub_fp4_alias_is_consumed_by_native_cast_and_store(planner):
     assert len(addresses) == 2 and addresses[0] == addresses[1], aliases
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_fp4_decode_fp8_byte_alias_is_consumed(planner, transpose):
+    @pl.program
+    class DecodeToFp8Bytes:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            packed: pl.Tensor[[128, 64], pl.UINT8],
+            output: pl.Out[pl.Tensor[[128, 128], pl.INT8]],
+        ) -> pl.Tensor[[128, 128], pl.INT8]:
+            payload = pl.load(packed, [0, 0], [128, 64])
+            fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+            decoded = pl.cast(fp4, pl.BF16)
+            fp8 = pl.cast(decoded, pl.FP8E4M3FN, mode="rint")
+            byte_view = pl.reinterpret_view(fp8, pl.INT8)
+            if transpose:
+                result = pl.transpose(byte_view, 0, 1)
+            else:
+                result = byte_view
+            return pl.store(result, [0, 0], output)
+
+    mlir = _emit_incore_mlir(DecodeToFp8Bytes, planner)
+    casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+    # Ascend950 legalizes BF16 -> FP8 through FP32; the final byte alias
+    # must remain zero-copy after that existing conversion sequence.
+    assert len(casts) == 3, mlir
+    assert "dtype=!pto.f4E2M1x2, rows=128, cols=64" in casts[0], casts[0]
+    assert "dtype=bf16, rows=128, cols=128" in casts[0], casts[0]
+    assert "dtype=bf16, rows=128, cols=128" in casts[1], casts[1]
+    assert "dtype=f32, rows=128, cols=128" in casts[1], casts[1]
+    assert "dtype=f32, rows=128, cols=128" in casts[2], casts[2]
+    assert "dtype=f8E4M3FN, rows=128, cols=128" in casts[2], casts[2]
+    assert "rmode = #pto<round_mode RINT>" in casts[1], casts[1]
+    assert "rmode = #pto<round_mode RINT>" in casts[2], casts[2]
+    assert mlir.count("pto.tload ") == mlir.count("pto.tstore ") == 1, mlir
+    assert mlir.count("pto.ttrans ") == int(transpose), mlir
+    assert "pto.treshape" not in mlir, mlir
+
+    consumer_op = "pto.ttrans " if transpose else "pto.tstore "
+    consumer = next(line for line in mlir.splitlines() if consumer_op in line)
+    source = re.search(r"ins\((%[\w.$-]+)", consumer)
+    assert source is not None, consumer
+    allocations = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    fp8_alloc = next(line for line in allocations if "dtype=f8E4M3FN" in line)
+    byte_alloc = next(line for line in allocations if line.strip().startswith(f"{source.group(1)} = "))
+    assert "dtype=i8, rows=128, cols=128" in byte_alloc, byte_alloc
+    addresses = [
+        match.group(1) for line in (fp8_alloc, byte_alloc) if (match := re.search(r"addr = ([^, ]+)", line))
+    ]
+    assert len(addresses) == 2 and addresses[0] == addresses[1], (fp8_alloc, byte_alloc)
+
+
 def test_uint8_ub_fp4_alias_rejects_ptoas_memory_planner():
     with pytest.raises(ValueError, match="FP4E2M1X2 tile aliases require PYPTO or DSA_RP"):
         _emit_incore_mlir(_uint8_ub_fp4_decode_program(), passes.MemoryPlanner.PTOAS)

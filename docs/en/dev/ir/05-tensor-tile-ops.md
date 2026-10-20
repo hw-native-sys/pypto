@@ -65,6 +65,12 @@ combination contracts require separate handling.
 
 `pl.reinterpret_view(data, dtype, *, shape=None)` dispatches to the equivalent `pl.tensor` or `pl.tile` operator and returns the same kind. It is a zero-copy view over exactly the same bytes. General reinterpretation supports signed/unsigned 8/16/32/64-bit integers, FP16, BF16, and FP32; MX lowering additionally permits only the byte-identical INT8↔FP8E4M3FN and UINT8↔FP8E8M0 pairs; packed FP4 additionally permits only FP4E2M1X2↔UINT8/INT8. With no `shape`, ND/row-major scales the last axis and DN/col-major scales the penultimate axis by the source/target byte-width ratio. An explicit shape must be byte-equivalent and fully static unless it is provably identical to the auto-inferred shape; a partial `valid_shape` only permits that auto-equivalent shape. Zero/null padding metadata is preserved, while dtype-dependent max/min padding is cleared. The initial executable path supports packed ND in-core tensors and packed flat (`none_box`) row/col-major tiles; DN tensor inference is available but Tensor-to-Tile lowering rejects it, and orchestration tensors are unsupported.
 
+Flat tiles may carry explicit strides when they exactly match the canonical
+row/col-major strides of the full physical shape. This includes FP8 cast results
+after FP4 decoding; no flattening reshape is needed before an INT8 byte alias.
+Noncanonical strides, nonzero or dynamic tile start offsets, and explicit
+strides on boxed MX-scale tiles remain unsupported.
+
 FP4E2M1X2 ↔ UINT8/INT8 aliases on Ascend950 preserve carrier shape and byte
 size. InCore tensors and tiles lower to dense address-backed 2D row-major Vec
 storage with static UB offsets, using PYPTO or DSA_RP memory planning.
