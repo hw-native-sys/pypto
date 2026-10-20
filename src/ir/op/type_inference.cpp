@@ -1560,6 +1560,7 @@ struct CallTypeBindingConstraint {
   ExprPtr candidate;
   std::string context;
   bool tile_physical = false;
+  ExprPtr scalar_source = nullptr;  // Original expression before known Scalar values were substituted.
 };
 
 struct CallAffineExpr {
@@ -1639,7 +1640,8 @@ void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string&
 }
 
 bool BindConstantCallAffineExpr(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
-                                TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
+                                TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
+                                const ExprPtr& scalar_source = nullptr) {
   auto constant = As<ConstInt>(value);
   if (!constant) constant = As<ConstInt>(GeneralAnalyzer().Simplify(value));
   if (!constant || !arith::detail::ConstIntFitsDtype(constant->value_, constant->dtype())) return false;
@@ -1658,9 +1660,30 @@ bool BindConstantCallAffineExpr(const ExprPtr& pattern, const ExprPtr& value, co
   const int64_t candidate = numerator / affine->scale;
   const DataType dtype = GetScalarDtype(affine->var);
   if (!arith::detail::ConstIntFitsDtype(candidate, dtype)) return false;
-  BindCallTypeVar(affine->var, std::make_shared<ConstInt>(candidate, dtype, value->span_), context, var_map,
-                  constraints);
+  auto bound_value = std::make_shared<ConstInt>(candidate, dtype, value->span_);
+  BindCallTypeVar(affine->var, bound_value, context, var_map, constraints);
+  if (scalar_source) {
+    // Preserve provenance after constant folding without introducing an
+    // unevaluated competing value into numeric conflict checks.
+    constraints.push_back({affine->var, bound_value, bound_value, context, false, scalar_source});
+  }
   return true;
+}
+
+ExprPtr SubstituteKnownCallScalars(const ExprPtr& expr, const TypeVarMap& scalar_args) {
+  TypeVarMap constants;
+  var_collectors::VarDefUseCollector uses;
+  uses.VisitExpr(expr);
+  for (const auto* var : uses.var_uses_ordered) {
+    if (const auto actual = scalar_args.find(var); actual != scalar_args.end()) {
+      if (auto constant = As<ConstInt>(GeneralAnalyzer().Simplify(actual->second))) {
+        constants.emplace(var, constant);
+      }
+    }
+  }
+  // Unknown caller dimensions remain Scalar anchors, not new free variables
+  // for the affine solver to infer from a concrete physical extent.
+  return transform_utils::Substitute(expr, constants);
 }
 
 ExprPtr ResolveCallExpr(const ExprPtr& expr, const TypeVarMap& scalar_args, const TypeVarMap& var_map) {
@@ -1733,7 +1756,13 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   // Infer affine bindings from physical extents only. A formal's implicit
   // valid shape repeats its physical shape, while an actual's valid extent
   // can be smaller and must not solve the same physical symbol again.
-  if (allow_affine && BindConstantCallAffineExpr(pattern, value, context, var_map, constraints)) return;
+  if (allow_affine) {
+    auto affine_pattern = scalar_args ? SubstituteKnownCallScalars(pattern, *scalar_args) : pattern;
+    auto scalar_source = affine_pattern.get() != pattern.get() ? pattern : nullptr;
+    if (BindConstantCallAffineExpr(affine_pattern, value, context, var_map, constraints, scalar_source)) {
+      return;
+    }
+  }
 
   // Composite parameter metadata can bind variables when the actual metadata
   // has a compatible expression structure. Check the whole pattern before
@@ -1825,7 +1854,7 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   CheckCallPackedFp4Format(pattern_tile->dtype_, value_tile->dtype_, context);
   const size_t physical_constraints_begin = constraints.size();
   CollectCallExprVectorBindings(pattern_tile->shape_, value_tile->shape_, context + " physical shape",
-                                var_map, constraints, true);
+                                var_map, constraints, true, scalar_args);
   for (size_t i = physical_constraints_begin; i < constraints.size(); ++i) {
     constraints[i].tile_physical = true;
   }
@@ -1922,6 +1951,7 @@ TypeVarMap CollectCallScalarProvenance(const std::vector<VarPtr>& callee_params,
   for (const auto& constraint : constraints) {
     add_dependencies(constraint.var.get(), constraint.existing);
     add_dependencies(constraint.var.get(), constraint.candidate);
+    if (constraint.scalar_source) add_dependencies(constraint.var.get(), constraint.scalar_source);
   }
   std::vector<const Var*> pending;
   pending.reserve(type_vars.var_uses_ordered.size());
@@ -2218,6 +2248,7 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
         for (const auto* constraint : found->second) {
           add_dependencies(constraint->existing);
           add_dependencies(constraint->candidate);
+          if (constraint->scalar_source) add_dependencies(constraint->scalar_source);
         }
       }
     }

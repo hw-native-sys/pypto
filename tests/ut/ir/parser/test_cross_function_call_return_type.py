@@ -857,5 +857,97 @@ def test_rebound_inline_parameter_does_not_claim_the_incoming_tile_view():
     assert valid_rows.value == 16
 
 
+@pytest.mark.parametrize("extent", ["ROWS", "2 * ROWS"], ids=["plain", "affine"])
+@pytest.mark.parametrize("returned", ["first", "second", "chain", "tuple"])
+def test_inline_immutable_alias_return_keeps_actual_tile_type(extent, returned):
+    """An alias of an independently specialized Tile retains the chosen caller operand's type."""
+    bodies = {
+        "first": "alias = first\n        return alias",
+        "second": "alias = second\n        return alias",
+        "chain": "alias = second\n        another = alias\n        result = another\n        return result",
+        "tuple": "left = first\n        right = second\n        return left, right",
+    }
+    target = "first" if returned == "first" else "second"
+    call = "_left, selected" if returned == "tuple" else "selected"
+    program = pl.parse_program(f"""
+ROWS = pl.dynamic("IMMUTABLE_ALIAS_ROWS")
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def choose(self, first: pl.Tile[[{extent}, 64], pl.FP32], second: pl.Tile[[{extent}, 64], pl.FP32]):
+        {bodies[returned]}
+
+    @pl.function
+    def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+        {call} = self.choose(first, second)
+        return pl.add(selected, {target})
+""")
+    (deduced,) = _user_call_types(program, "choose")
+    if returned == "tuple":
+        assert isinstance(deduced, ir.TupleType)
+        deduced = deduced.types[1]
+    assert isinstance(deduced, ir.TileType)
+    rows = deduced.shape[0]
+    assert isinstance(rows, ir.ConstInt)
+    assert rows.value == (16 if returned == "first" else 32)
+
+
+def test_inline_alias_of_tuple_projection_keeps_actual_tile_type():
+    """A transparent tuple alias and projection remain tied to the original argument."""
+    program = pl.parse_program("""
+ROWS = pl.dynamic("TUPLE_ALIAS_ROWS")
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def choose(self, pair: pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]]):
+        alias = pair
+        selected = alias[1]
+        result = selected
+        return result
+
+    @pl.function
+    def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+        selected = self.choose((first, second))
+        return pl.add(selected, second)
+""")
+    (deduced,) = _user_call_types(program, "choose")
+    assert isinstance(deduced, ir.TileType)
+    rows = deduced.shape[0]
+    assert isinstance(rows, ir.ConstInt)
+    assert rows.value == 32
+
+
+@pytest.mark.parametrize("mutation", ["alias", "formal", "conditional", "computed"])
+def test_inline_alias_recovery_keeps_mutation_and_computation_guards(mutation):
+    """Rebound, conditional, and computed results must keep native provisional metadata."""
+    bodies = {
+        "alias": "alias = second\n        alias = first\n        return alias",
+        "formal": "alias = second\n        second = first\n        return alias",
+        "conditional": (
+            "alias = second\n        if condition > 0:\n            alias = first\n        return alias"
+        ),
+        "computed": "alias = pl.add(first, second)\n        return alias",
+    }
+    program = pl.parse_program(f"""
+ROWS = pl.dynamic("GUARDED_ALIAS_ROWS")
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def choose(self, first: pl.Tile[[ROWS, 64], pl.FP32], second: pl.Tile[[ROWS, 64], pl.FP32],
+               condition: pl.Scalar[pl.INDEX]):
+        {bodies[mutation]}
+
+    @pl.function
+    def main(self, first: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[4, 64])],
+             second: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[3, 64])]):
+        return self.choose(first, second, 1)
+""")
+    (deduced,) = _user_call_types(program, "choose")
+    assert isinstance(deduced, ir.TileType)
+    rows = deduced.get_effective_tile_view().valid_shape[0]
+    assert isinstance(rows, ir.ConstInt)
+    assert rows.value == 16
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

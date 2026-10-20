@@ -148,8 +148,11 @@ Before substituting arguments, `InlineFunctions` checks Tile dtype, physical
 rank and shape, and conflicting explicitly resolved memory spaces. Generic
 physical dimensions bind to the actual Tile's physical extents, including
 integer affine bindings such as `2*M` to `16` (`M=8`); valid extents
-do not constrain that check. Separate Tile arguments can bind their generic
+do not constrain that check. Known Scalar values are substituted first:
+`n=8` and `n+M=16` infer `M=8`. Separate Tile arguments can bind their generic
 physical dimensions independently, including when the helper returns its Tile parameters.
+Returned-parameter types also follow simple immutable aliases such as
+`tmp = second; return tmp`.
 Dimensions shared with Tensor types, explicit Tile views, or Scalar parameters
 retain their shared constraints, including in helpers with no return value.
 Actual Scalar values also constrain view-only dimensions: `n=8` cannot match

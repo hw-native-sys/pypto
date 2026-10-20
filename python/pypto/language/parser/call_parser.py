@@ -31,6 +31,7 @@ from .type_semantics import (
     InlineReturnProvenanceCollector,
     derive_return_types_from_body,
     inline_argument_return_type,
+    inline_immutable_aliases,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +66,7 @@ class CallParser:
         # hazard from a collected-and-reallocated Function.
         self.derived_return_types_cache: dict[ir.Function, list[ir.Type]] = {}
         self.inline_return_provenance_cache: dict[
-            ir.Function, tuple[tuple[ir.Expr, ...], frozenset[int]]
+            ir.Function, tuple[tuple[ir.Expr, ...], frozenset[int], dict[int, ir.Expr]]
         ] = {}
 
     def parse_submit_assignment(self, target: ast.Tuple, call: ast.Call, *, is_spmd: bool = False) -> None:
@@ -576,8 +577,9 @@ class CallParser:
         Different inline operands may specialize one generic symbol differently.
         An unresolved callee symbol cannot survive in a caller's temporary type,
         so recover proven parameter returns from the corresponding actual type.
-        A single trailing return and an unmodified formal are required; computed
-        values and competing return paths retain native inference.
+        A single trailing return and an unmodified formal (possibly reached
+        through immutable aliases) are required; computed values and competing
+        return paths retain native inference.
         """
         if func.func_type != ir.FunctionType.Inline or len(args) != len(func.params):
             return return_types
@@ -593,14 +595,15 @@ class CallParser:
                 if collector.return_count == 1 and isinstance(trailing, ir.ReturnStmt)
                 else ()
             )
-            cached = (values, frozenset(collector.assigned_ids))
+            aliases = inline_immutable_aliases(func, collector) if values else {}
+            cached = (values, frozenset(collector.assigned_ids), aliases)
             self.inline_return_provenance_cache[func] = cached
-        values, assigned_ids = cached
+        values, assigned_ids, aliases = cached
         if len(values) != len(return_types):
             return return_types
         argument_types = {p.unique_id: a.type for p, a in zip(func.params, args)}
         return [
-            inline_argument_return_type(v, t, argument_types, assigned_ids) or t
+            inline_argument_return_type(v, t, argument_types, assigned_ids, aliases) or t
             for v, t in zip(values, return_types)
         ]
 

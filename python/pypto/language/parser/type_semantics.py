@@ -353,6 +353,7 @@ class InlineReturnProvenanceCollector(ir.IRVisitor):
         super().__init__()
         self.return_count = 0
         self.assigned_ids: set[int] = set()
+        self.assignment_counts: dict[int, int] = {}
 
     def visit_return_stmt(self, op: ir.ReturnStmt) -> None:
         self.return_count += 1
@@ -360,7 +361,49 @@ class InlineReturnProvenanceCollector(ir.IRVisitor):
 
     def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
         self.assigned_ids.add(op.var.unique_id)
+        self.assignment_counts[op.var.unique_id] = self.assignment_counts.get(op.var.unique_id, 0) + 1
         super().visit_assign_stmt(op)
+
+
+def inline_alias_origin(value: ir.Expr, origins: dict[int, ir.Expr]) -> ir.Expr | None:
+    """Resolve transparent aliases to an earlier formal or tuple projection."""
+    if isinstance(value, ir.Var):
+        return origins.get(value.unique_id)
+    if isinstance(value, ir.TupleGetItemExpr):
+        container = inline_alias_origin(value.tuple, origins)
+        if (
+            container is not None
+            and isinstance(container.type, ir.TupleType)
+            and 0 <= value.index < len(container.type.types)
+        ):
+            return ir.TupleGetItemExpr(container, value.index, value.span)
+    return None
+
+
+def inline_immutable_aliases(
+    func: ir.Function, collector: InlineReturnProvenanceCollector
+) -> dict[int, ir.Expr]:
+    """Cache single-definition, top-level aliases without tracing computed values.
+
+    Definition order compresses a Var chain as it is read, so long chains are
+    resolved once per callee. Only already-proven origins qualify; forward
+    references, cycles, nested assignments, and rebound formals stay unresolved.
+    """
+    parameter_ids = {param.unique_id for param in func.params}
+    origins: dict[int, ir.Expr] = {
+        param.unique_id: param for param in func.params if param.unique_id not in collector.assigned_ids
+    }
+    statements = func.body.stmts if isinstance(func.body, ir.SeqStmts) else (func.body,)
+    for stmt in statements:
+        if not isinstance(stmt, ir.AssignStmt):
+            continue
+        target = stmt.var.unique_id
+        if target in parameter_ids or collector.assignment_counts[target] != 1:
+            continue
+        origin = inline_alias_origin(stmt.value, origins)
+        if origin is not None:
+            origins[target] = origin
+    return {identity: origin for identity, origin in origins.items() if identity not in parameter_ids}
 
 
 def returned_tile_types(actual: ir.Type, fallback: ir.Type) -> ir.Type | None:
@@ -381,23 +424,29 @@ def inline_argument_return_type(
     fallback: ir.Type,
     argument_types: dict[int, ir.Type],
     assigned_ids: frozenset[int],
+    aliases: dict[int, ir.Expr],
 ) -> ir.Type | None:
-    """Trace direct formal/tuple returns by Var identity, without guessing computed results."""
+    """Trace formal/immutable-alias returns by identity, without guessing computed results."""
     if isinstance(value, ir.Var):
         actual = argument_types.get(value.unique_id)
         if actual is not None and value.unique_id not in assigned_ids:
             return returned_tile_types(actual, fallback)
+        origin = aliases.get(value.unique_id)
+        if origin is not None:
+            return inline_argument_return_type(origin, fallback, argument_types, assigned_ids, aliases)
     elif isinstance(value, ir.MakeTuple) and isinstance(fallback, ir.TupleType):
         if len(value.elements) != len(fallback.types):
             return None
         projected = [
-            inline_argument_return_type(v, f, argument_types, assigned_ids)
+            inline_argument_return_type(v, f, argument_types, assigned_ids, aliases)
             for v, f in zip(value.elements, fallback.types)
         ]
         if any(t is not None for t in projected):
             return ir.TupleType([p if p is not None else f for p, f in zip(projected, fallback.types)])
     elif isinstance(value, ir.TupleGetItemExpr):
-        container = inline_argument_return_type(value.tuple, value.tuple.type, argument_types, assigned_ids)
+        container = inline_argument_return_type(
+            value.tuple, value.tuple.type, argument_types, assigned_ids, aliases
+        )
         if isinstance(container, ir.TupleType) and 0 <= value.index < len(container.types):
             return returned_tile_types(container.types[value.index], fallback)
     return None

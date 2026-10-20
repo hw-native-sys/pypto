@@ -22,6 +22,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -30,6 +31,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -771,13 +773,26 @@ void ValidateInlineTileType(const TypePtr& expected_type, const TypePtr& actual_
   // use their actual values, and repeated dimensions within one Tile agree.
   // Reuse structural expression binding (e.g. 2*M -> 2*N), but strip views
   // from these analysis-only descriptors so valid extents never bind M.
+  var_collectors::VarDefUseCollector shape_vars;
+  for (const auto& dim : expected->shape_) shape_vars.VisitExpr(dim);
+  std::unordered_map<const Var*, ExprPtr> constant_scalar_args;
+  for (const auto* var : shape_vars.var_uses_ordered) {
+    if (const auto scalar = scalar_args.find(var); scalar != scalar_args.end()) {
+      if (auto constant = As<ConstInt>(arith::Analyzer().Simplify(scalar->second))) {
+        constant_scalar_args.emplace(var, constant);
+      }
+    }
+  }
+  std::vector<ExprPtr> physical_shape;
+  physical_shape.reserve(expected->shape_.size());
+  for (const auto& dim : expected->shape_) {
+    physical_shape.push_back(transform_utils::Substitute(dim, constant_scalar_args));
+  }
   auto physical_param = std::make_shared<Var>(
-      "inline_tile", std::make_shared<TileType>(expected->shape_, expected->dtype_), span);
+      "inline_tile", std::make_shared<TileType>(physical_shape, expected->dtype_), span);
   auto physical_arg =
       std::make_shared<Var>("inline_tile", std::make_shared<TileType>(actual->shape_, actual->dtype_), span);
   auto physical_dims = DeduceCallTypeBindings({physical_param}, {physical_arg});
-  var_collectors::VarDefUseCollector shape_vars;
-  for (const auto& dim : expected->shape_) shape_vars.VisitExpr(dim);
   for (const auto* var : shape_vars.var_uses_ordered) {
     if (scalar_args.count(var)) physical_dims.erase(var);
   }

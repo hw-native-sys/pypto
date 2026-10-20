@@ -1945,6 +1945,154 @@ class TestInlineTileArgumentContracts:
 
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 
+    @pytest.mark.parametrize("operation", ["add", "subtract", "multiply"])
+    @pytest.mark.parametrize("scalar_first", [False, True], ids=["scalar_last", "scalar_first"])
+    def test_actual_scalar_is_substituted_before_generic_extent_inference(self, operation, scalar_first):
+        """Known Scalar values leave one free dimension for return inference and clone seeding."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        scalar_value = 24 if operation == "subtract" else 2 if operation == "multiply" else 8
+        operator = {"add": ir.Add, "subtract": ir.Sub, "multiply": ir.Mul}[operation]
+        extent = operator(scalar, rows, pl.INDEX, span)
+        formal_type: ir.Type = ir.TileType([extent, 64], pl.FP32)
+        actual_type: ir.Type = ir.TileType([16, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[3, 64]))
+        if operation == "multiply":
+            formal_type, actual_type = ir.TupleType([formal_type]), ir.TupleType([actual_type])
+        formal = ir.Var("tile", formal_type, span)
+        source = ir.Var("source", actual_type, span)
+        params, args = [formal, scalar], [source, ir.ConstInt(scalar_value, pl.INDEX, span)]
+        if scalar_first:
+            params.reverse()
+            args.reverse()
+        result_type = ir.ScalarType(pl.INDEX)
+        helper = ir.Function(
+            "dimension", params, [result_type], ir.ReturnStmt([rows], span), span, ir.FunctionType.Inline
+        )
+        call = ir.Call(ir.GlobalVar("dimension"), args, result_type, span)
+        before = ir.Program(
+            [helper, ir.Function("main", [source], [result_type], ir.ReturnStmt([call], span), span)],
+            "Before",
+            span,
+        )
+        expected = ir.Program(
+            [
+                ir.Function(
+                    "main",
+                    [source],
+                    [result_type],
+                    ir.ReturnStmt([ir.ConstInt(8, pl.INDEX, span)], span),
+                    span,
+                )
+            ],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+        # The shared parser deduction must recover the same free extent.
+        (deduced,) = ir.deduce_call_return_type(
+            params, args, [ir.TileType([rows, 64], pl.FP32)], is_inline=True
+        )
+        ir.assert_structural_equal(deduced, ir.TileType([8, 64], pl.FP32))
+
+    @pytest.mark.parametrize("columns", [8, 9], ids=["consistent", "conflicting"])
+    def test_scalar_specialized_affine_binding_agrees_across_axes(self, columns):
+        """Scalar substitution cannot make repeated physical dimensions independent."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        formal = ir.Var("tile", ir.TileType([ir.Add(scalar, rows, pl.INDEX, span), rows], pl.FP32), span)
+        source = ir.Var("source", ir.TileType([16, columns], pl.FP32), span)
+        helper = ir.Function(
+            "consume", [scalar, formal], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline
+        )
+        call = ir.Call(
+            ir.GlobalVar("consume"), [ir.ConstInt(8, pl.INDEX, span), source], ir.UnknownType(), span
+        )
+        before = ir.Program(
+            [helper, ir.Function("main", [source], [], ir.EvalStmt(call, span), span)], "Before", span
+        )
+        if columns != 8:
+            with pytest.raises(ValueError, match="parameter 'tile': .*physical shape dimension"):
+                passes.inline_functions()(before)
+            return
+        expected = ir.Program(
+            [ir.Function("main", [source], [], ir.SeqStmts([], span), span)], "Expected", span
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
+    @pytest.mark.parametrize("valid_rows", [7, 4], ids=["matching", "conflicting"])
+    def test_scalar_specialized_generic_extent_keeps_view_provenance(self, valid_rows):
+        """Solving M from n+M must retain its Scalar origin for explicit view checks."""
+        span = ir.Span("scalar_affine_view.py", 19, 2)
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        extent = ir.Add(scalar, rows, pl.INDEX, span)
+        valid = ir.Sub(rows, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+        formal = ir.Var(
+            "tile", ir.TileType([extent, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[valid, 64])), span
+        )
+        source = ir.Var(
+            "source",
+            ir.TileType([16, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[valid_rows, 64])),
+            span,
+        )
+        args = [source, ir.ConstInt(8, pl.INDEX, span)]
+        if valid_rows != 7:
+            with pytest.raises(
+                ValueError, match="Scalar-dependent Tile valid_shape.*expected 7.*got 4"
+            ) as error:
+                ir.deduce_call_return_type([formal, scalar], args, [], is_inline=True)
+            assert "scalar_affine_view.py:19:2" in str(error.value)
+            return
+        assert ir.deduce_call_return_type([formal, scalar], args, [], is_inline=True) == []
+
+    def test_affine_inference_does_not_solve_an_unknown_scalar_actual(self):
+        """A caller-owned runtime dimension cannot become a free affine variable after substitution."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        extent = ir.Add(scalar, rows, pl.INDEX, span)
+        formal = ir.Var("tile", ir.TileType([extent, 64], pl.FP32), span)
+        source = ir.Var("source", ir.TileType([16, 64], pl.FP32), span)
+        returned_type = ir.TileType([rows, 64], pl.FP32)
+        (deduced,) = ir.deduce_call_return_type(
+            [formal, scalar], [source, rows], [returned_type], is_inline=True
+        )
+        ir.assert_structural_equal(deduced, returned_type)
+        helper = ir.Function(
+            "consume", [formal, scalar], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline
+        )
+        call = ir.Call(ir.GlobalVar("consume"), [source, rows], ir.UnknownType(), span)
+        before = ir.Program(
+            [helper, ir.Function("main", [source, rows], [], ir.EvalStmt(call, span), span)], "Before", span
+        )
+        with pytest.raises(ValueError, match="parameter 'tile': .*physical shape dimension"):
+            passes.inline_functions()(before)
+
+    def test_scalar_specialized_tiles_keep_independent_free_dimensions(self):
+        """A known Scalar does not merge the remaining generic extents of separate Tile arguments."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+        formal_type = ir.TileType([ir.Add(scalar, rows, pl.INDEX, span), 64], pl.FP32)
+        first, second = ir.Var("first", formal_type, span), ir.Var("second", formal_type, span)
+        left = ir.Var("left", ir.TileType([16, 64], pl.FP32), span)
+        right = ir.Var("right", ir.TileType([24, 64], pl.FP32), span)
+        helper = ir.Function(
+            "consume", [first, second, scalar], [], ir.ReturnStmt([], span), span, ir.FunctionType.Inline
+        )
+        call = ir.Call(
+            ir.GlobalVar("consume"), [left, right, ir.ConstInt(8, pl.INDEX, span)], ir.UnknownType(), span
+        )
+        before = ir.Program(
+            [helper, ir.Function("main", [left, right], [], ir.EvalStmt(call, span), span)], "Before", span
+        )
+        expected = ir.Program(
+            [ir.Function("main", [left, right], [], ir.SeqStmts([], span), span)], "Expected", span
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
     @pytest.mark.parametrize("valid_rows", [17, 4], ids=["fully_valid", "partially_valid"])
     def test_affine_binding_specializes_inline_local_type(self, valid_rows):
         """Cloned locals use the physical binding even when the argument is only partially valid."""

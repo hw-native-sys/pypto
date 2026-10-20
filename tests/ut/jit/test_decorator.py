@@ -3939,6 +3939,37 @@ class TestInlineFuncIntegration:
 class TestInlineTileAnnotations:
     """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
 
+    @pytest.mark.parametrize("affine", [False, True])
+    def test_immutable_tile_alias_return_compiles(self, affine):
+        """A returned local alias can be consumed before inline expansion resolves generic dimensions."""
+        rows = pl.dynamic("JIT_IMMUTABLE_ALIAS_ROWS")
+        extent = 2 * rows if affine else rows
+
+        @jit.inline(auto_scope=False)
+        def choose_second(first: pl.Tile[[extent, 64], pl.FP32], second: pl.Tile[[extent, 64], pl.FP32]):
+            alias = second
+            result = alias
+            return result
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [16, 64])
+            second = pl.load(src, [0, 0], [32, 64])
+            selected = choose_second(first, second)
+            result = pl.add(selected, second)
+            return pl.store(result, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+
     @pytest.mark.parametrize("physical_rows, constexpr_rows", [(8, 16), (16, 8)])
     @pytest.mark.parametrize("mixed_axes", [False, True])
     def test_free_dynvar_is_independent_of_same_named_constexpr(
