@@ -369,9 +369,9 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # window_size is the sum of aligned physical slot sizes. Each spec keeps
     # its exact logical size in count and exposes only its physical size via
     # nbytes.
-    # Single slot → `window_size=((((64 * 4) + 31) // 32) * 32),`. The inner
+    # Single slot → `window_size=((((64 * 4) + 63) // 64) * 64),`. The inner
     # parentheses come from the Mul expression.
-    aligned_size = r"\(\(\(\(64 \* 4\) \+ 31\) // 32\) \* 32\)"
+    aligned_size = r"\(\(\(\(64 \* 4\) \+ 63\) // 64\) \* 64\)"
     assert re.search(rf"window_size=\({aligned_size}\),", code), code
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count=\(64 \* 4\), nbytes={aligned_size}\),',
@@ -408,8 +408,8 @@ def test_comm_buffer_specs_align_each_physical_allocation():
     code = _lower(Prog)
     data_logical = r"\(17 \* 2\)"
     signal_logical = r"\(2 \* 4\)"
-    data_alloc = rf"\(\(\({data_logical} \+ 31\) // 32\) \* 32\)"
-    signal_alloc = rf"\(\(\({signal_logical} \+ 31\) // 32\) \* 32\)"
+    data_alloc = rf"\(\(\({data_logical} \+ 63\) // 64\) \* 64\)"
+    signal_alloc = rf"\(\(\({signal_logical} \+ 63\) // 64\) \* 64\)"
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count={data_logical}, nbytes={data_alloc}\),',
         code,
@@ -422,6 +422,52 @@ def test_comm_buffer_specs_align_each_physical_allocation():
         code,
     ), code
     assert re.search(rf"window_size=\({data_alloc}\) \+ \({signal_alloc}\),", code), code
+
+
+def test_comm_buffer_specs_isolate_signal_and_counts_cache_lines():
+    """Scalar count writeback must not overwrite a peer's signal credits.
+
+    The L2 all_to_all_v P=2, B=4 layout places a 32-byte signal before
+    8-byte counts and recv slots. Rounding each to 32 bytes shares a 64-byte
+    cache line between signal and counts, so a counts DCCI can lose credits.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[2, 4], pl.INT32],
+            counts: pld.DistributedTensor[[2, 1], pl.INT32],
+            recv: pld.DistributedTensor[[2, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            stage_buf = pld.alloc_window_buffer(2048)
+            data_buf = pld.alloc_window_buffer(2048)
+            signal_buf = pld.alloc_window_buffer(32)
+            counts_buf = pld.alloc_window_buffer(8)
+            recv_buf = pld.alloc_window_buffer(8)
+            stage = pld.window(stage_buf, [8, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [2, 4], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [2, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [2, 1], dtype=pl.INT32)
+            self.chip_orch(stage, data, signal, counts, recv, device=0)
+            return 0
+
+    code = _lower(Prog)
+    for name, logical_bytes in (("signal_buf", 32), ("counts_buf", 8), ("recv_buf", 8)):
+        # Each small slot gets one complete cache line; count still exposes
+        # the original logical bytes rather than the padded allocation.
+        alloc_bytes = f"((({logical_bytes} + 63) // 64) * 64)"
+        assert (
+            f'CommBufferSpec(name="{name}", dtype="opaque", count={logical_bytes}, nbytes={alloc_bytes}),'
+        ) in code, code
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +547,8 @@ def test_world_size_lowers_to_kwarg_in_expression_context():
     # `world_size * 4` expression in place of a constant nbytes literal.
     assert re.search(r"window_size=\(.*\bworld_size\b.*\),", code), code
     assert re.search(r"CommBufferSpec\(.*\bworld_size\b.*\),", code), code
+    # Runtime-sized slots need the same cache-line isolation as static ones.
+    assert re.search(r"nbytes=\(\(\(.*\bworld_size\b.* \+ 63\) // 64\) \* 64\)", code), code
     # The legacy ``len(contexts)`` form must not survive.
     assert "len(contexts)" not in code, code
 

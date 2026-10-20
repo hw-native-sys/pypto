@@ -40,9 +40,11 @@ inline constexpr std::size_t kWindowsOutOffset = offsetof(::CommContext, windows
 inline constexpr std::size_t kWindowSlotStride = sizeof(std::uint64_t);
 inline constexpr std::size_t kCommCtxSize = sizeof(::CommContext);
 // Simpler carves communication buffers sequentially from one device window.
-// Keep every buffer start MTE/CCU-safe, and leave enough physical tail room
-// for an FP16 remote TLOAD rounded to the 32-byte transfer granularity.
-inline constexpr std::size_t kCommBufferAlignmentBytes = 32;
+// Isolate independent buffers on a2a3's 64-byte AICore D-cache lines: scalar
+// stores followed by DCCI write back the whole line and can otherwise erase
+// peer signal credits in a neighbouring slot. This also satisfies the 32-byte
+// MTE/CCU alignment and leaves tail room for rounded FP16 remote TLOADs.
+inline constexpr std::size_t kCommBufferAlignmentBytes = 64;
 
 static_assert(kRankIdOffset == 16, "CommContext.rankId offset drift");
 static_assert(kRankNumOffset == 20, "CommContext.rankNum offset drift");

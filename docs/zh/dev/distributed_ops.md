@@ -696,6 +696,10 @@ peer 算术；而*远程*操作数
 [`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
+分布式 codegen 将每个槽位的物理分配向上取整到 64 字节，并对补齐后的大小求和作为通信域窗口大小。
+`CommBufferSpec.count` 和 `DistributedTensor` 的 shape 保留逻辑范围。这使独立槽位位于不同的 A2/A3 数据缓存行：
+标量写入后的 DCCI 会写回整条 64 字节缓存行，不应覆盖相邻 signal 槽位的 credit。
+该补齐同时满足 32 字节远端传输的对齐和尾部空间要求。
 随后 [`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 

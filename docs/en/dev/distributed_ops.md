@@ -818,6 +818,12 @@ Comm domains and their slot allocations are materialised by the
 [`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
+Distributed codegen rounds each slot's physical allocation up to 64 bytes and
+sums these padded sizes for the domain window. `CommBufferSpec.count` and
+`DistributedTensor` shapes retain their logical extents. This keeps independent
+slots on separate A2/A3 D-cache lines: a scalar store followed by DCCI writes
+back a whole 64-byte line and must not overwrite an adjacent signal slot's
+credits. The padding also covers 32-byte remote-transfer alignment and tails.
 Host-level tensor collectives are then lowered by
 [`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
