@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +97,20 @@ def entry_args(path: Path, platform: str) -> list[str]:
     return args
 
 
-def compile_entry(lib: Path, entry: str, platform: str, receipt: Path) -> None:
+def read_receipt(receipt: Path) -> list[dict[str, Any]]:
+    """Reject absent or malformed compilation records without aborting the matrix."""
+    try:
+        results = json.loads(receipt.read_text()) if receipt.exists() else []
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(results, list) or any(
+        not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results
+    ):
+        return []
+    return results
+
+
+def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: list[str] | None = None) -> None:
     """Force every golden.run call through its real compile-only pipeline."""
     sys.path[:0] = [str(lib), str((lib / entry).parent)]
     golden: Any = importlib.import_module("golden")
@@ -109,6 +123,54 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path) -> None:
     ir_module: Any = importlib.import_module("pypto.ir")
     original_compile = compile_module.compile
     in_golden = False
+    original_popen = subprocess.Popen
+    popen_signature = inspect.signature(original_popen)
+    child_ids = count()
+    children: list[tuple[Path, subprocess.Popen[Any]]] = []
+    entry_path = (lib / entry).resolve()
+
+    class CompileOnlyPopen(subprocess.Popen):
+        def __init__(self, args: Any, *popenargs: Any, **kwargs: Any) -> None:
+            command = args
+            child_receipt = None
+            if (
+                isinstance(command, (list, tuple))
+                and len(command) >= 2
+                and Path(os.fsdecode(command[0])).resolve() == Path(sys.executable).resolve()
+            ):
+                options = popen_signature.bind(args, *popenargs, **kwargs).arguments
+                script = Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[1])
+                if (
+                    not options.get("shell")
+                    and not options.get("executable")
+                    and script.resolve() == entry_path
+                ):
+                    # Self-dispatching entries need the same audit in each fresh interpreter.
+                    child_receipt = receipt.with_name(f"{receipt.stem}.{next(child_ids)}.json")
+                    child_receipt.unlink(missing_ok=True)
+                    command = [
+                        command[0],
+                        str(Path(__file__).resolve()),
+                        "--lib",
+                        str(lib),
+                        "--platform",
+                        platform,
+                        "--entry",
+                        entry,
+                        "--receipt",
+                        str(child_receipt),
+                        "--entry-args",
+                        json.dumps([os.fsdecode(arg) for arg in command[2:]]),
+                    ]
+            try:
+                super().__init__(command, *popenargs, **kwargs)
+            except OSError as error:
+                if child_receipt is not None:
+                    results.append({"passed": False, "error": f"Child process failed to start: {error}"})
+                raise
+            self.args = args
+            if child_receipt is not None:
+                children.append((child_receipt, self))
 
     def full_compile(*args: Any, **kwargs: Any) -> Any:
         # JIT otherwise silently emits only MLIR when PTOAS is unavailable.
@@ -142,10 +204,24 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path) -> None:
     golden.run = runner.run = compile_only
     runner._prepare_inputs = reject_execution
     compile_module.compile = ir_module.compile = full_compile
-    sys.argv = entry_args(lib / entry, platform)
+    subprocess.Popen = CompileOnlyPopen
+    sys.argv = [str(entry_path), *argv] if argv is not None else entry_args(entry_path, platform)
     try:
-        runpy.run_path(str(lib / entry), run_name="__main__")
+        runpy.run_path(str(entry_path), run_name="__main__")
     finally:
+        subprocess.Popen = original_popen
+        for child_receipt, child in children:
+            child_results = read_receipt(child_receipt)
+            child_code = child.poll()
+            if not child_results or child_code != 0:
+                child_results.append(
+                    {
+                        "passed": False,
+                        "error": "Child process failed or produced no compilation receipts: "
+                        f"{child_receipt.name}, exit_code={child_code}",
+                    }
+                )
+            results.extend(child_results)
         receipt.write_text(json.dumps(results, indent=2) + "\n")
 
 
@@ -182,14 +258,7 @@ def run_case(lib: Path, entry: str, platform: str, output: Path, timeout: int) -
                 os.killpg(proc.pid, signal.SIGKILL)
                 code = proc.wait()
                 log.write(f"\nTimed out after {timeout}s\n")
-    try:
-        results = json.loads(receipt.read_text()) if receipt.exists() else []
-    except (json.JSONDecodeError, OSError):
-        results = []
-    if not isinstance(results, list) or any(
-        not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results
-    ):
-        results = []
+    results = read_receipt(receipt)
     passed = code == 0 and bool(results) and all(result["passed"] for result in results)
     return {
         "entry": entry,
@@ -221,12 +290,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=positive_int, default=1200)
     parser.add_argument("--entry", help=argparse.SUPPRESS)
     parser.add_argument("--receipt", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--entry-args", type=json.loads, help=argparse.SUPPRESS)
     args = parser.parse_args()
     lib = args.lib.resolve()
     if args.entry:
         if args.receipt is None:
             parser.error("--entry requires --receipt")
-        compile_entry(lib, args.entry, args.platform, args.receipt)
+        compile_entry(lib, args.entry, args.platform, args.receipt, args.entry_args)
         return 0
 
     output = args.output.resolve()

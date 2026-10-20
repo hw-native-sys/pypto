@@ -134,6 +134,13 @@ Repeat with `--platform a5`. Each entry has a 1200-second timeout (override with
 `--timeout`). Compilation failures, process failures, timeouts, and zero recorded
 compilations fail the job. Malformed or unreadable receipts fail their entry
 without aborting the remaining entries or losing the matrix summary.
+When an entry dispatches cases by launching its own script with the current
+Python interpreter, each child runs through the same compile-only adapter.
+Child arguments, environment, working directory, and process isolation are
+preserved, and the parent combines their compilation records. A child failure
+or missing, empty, or malformed child receipt fails the entry even if the
+parent exits successfully. This interception applies to the current entry
+script launched by the same Python interpreter.
 CI uploads per-entry logs, results, and a manifest
 containing the tested library revision and selected entries.
 

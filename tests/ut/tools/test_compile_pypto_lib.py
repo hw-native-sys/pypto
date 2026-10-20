@@ -80,6 +80,139 @@ def test_compile_receipts_gate_success(library, tmp_path, body, passed, count):
     assert len(result["compilations"]) == count
 
 
+@pytest.mark.parametrize(
+    ("cases", "passed", "count"),
+    [
+        (["ok", "ok"], True, 2),
+        (["ok", "bad"], False, 2),
+        (["empty"], False, 1),
+        (["caught"], False, 1),
+        (["invalid"], False, 1),
+        (["exit"], False, 1),
+        (["partial_exit"], False, 2),
+        (["nested"], True, 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "launch",
+    [
+        "subprocess.run(command, check=False)",
+        "subprocess.check_call(command)",
+        "subprocess.Popen(command).wait()",
+    ],
+)
+def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, passed, count, launch):
+    # Formal entries can isolate cases in fresh interpreters to own runtime lifetimes.
+    (library / "models/case.py").write_text(
+        "import argparse, json, subprocess, sys\n"
+        "from golden import run\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "parser.add_argument('-d', default='0,1')\n"
+        "parser.add_argument('--case', default='all')\n"
+        "parser.add_argument('--compile-only', action='store_true')\n"
+        "args = parser.parse_args()\n"
+        "if args.case in ('all', 'nested'):\n"
+        f"    cases = {cases!r} if args.case == 'all' else ['ok']\n"
+        "    for case in cases:\n"
+        "        command = [sys.executable, __file__, '-p', args.p, '-d', '0',\n"
+        "                   '--case', case, '--compile-only']\n"
+        f"        {launch}\n"
+        "else:\n"
+        "    assert args.d == '0' and args.compile_only\n"
+        "    if args.case == 'exit':\n"
+        "        raise SystemExit(3)\n"
+        "    if args.case == 'caught':\n"
+        "        try:\n"
+        "            run('raise', [], compile_only=args.compile_only)\n"
+        "        except ValueError:\n"
+        "            pass\n"
+        "    elif args.case != 'empty':\n"
+        "        run(args.case, [], compile_only=args.compile_only)\n"
+        "        if args.case == 'invalid':\n"
+        "            json.dumps = lambda *args, **kwargs: '['\n"
+        "        if args.case == 'partial_exit':\n"
+        "            raise SystemExit(3)\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    assert result["passed"] is passed
+    assert len(result["compilations"]) == count
+
+
+def test_python_subprocess_preserves_other_commands(library, tmp_path):
+    (library / "models/helper.py").write_text("raise SystemExit(0)\n")
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "from golden import run\n"
+        "subprocess.run([sys.executable, '-c', 'raise SystemExit(0)'], check=True)\n"
+        "subprocess.run([sys.executable, str(Path(__file__).with_name('helper.py'))], check=True)\n"
+        "subprocess.run([b'true'], check=True)\n"
+        "run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
+def test_python_subprocess_preserves_popen_options(library, tmp_path):
+    (library / "models/case.py").write_text(
+        "import os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "from golden import run\n"
+        "if '--case' not in sys.argv:\n"
+        "    command = [sys.executable, 'case.py', '--case', 'child', '-d', '0']\n"
+        "    with subprocess.Popen(args=command, cwd=Path(__file__).parent,\n"
+        "                          env=os.environ | {'AUDIT_CHILD': 'preserved'},\n"
+        "                          stdout=subprocess.PIPE, text=True) as child:\n"
+        "        output, _ = child.communicate()\n"
+        "        assert child.returncode == 0 and output.strip() == 'child-output'\n"
+        "        assert child.args == command\n"
+        "else:\n"
+        "    assert sys.argv[1:] == ['--case', 'child', '-d', '0']\n"
+        "    assert Path.cwd() == Path(__file__).parent\n"
+        "    assert os.environ['AUDIT_CHILD'] == 'preserved'\n"
+        "    run('ok', [])\n"
+        "    print('child-output')\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
+def test_empty_child_receipt_cannot_reuse_previous_success(library, tmp_path, monkeypatch):
+    (library / "models/case.py").write_text(
+        "import os, subprocess, sys\n"
+        "from golden import run\n"
+        "if '--child' not in sys.argv:\n"
+        "    subprocess.run([sys.executable, __file__, '--child'], check=True)\n"
+        "elif os.environ.get('AUDIT_EMPTY_CHILD') != '1':\n"
+        "    run('ok', [])\n"
+    )
+    output = tmp_path / "out"
+    assert audit.run_case(library, "models/case.py", "a5", output, 10)["passed"]
+    monkeypatch.setenv("AUDIT_EMPTY_CHILD", "1")
+    result = audit.run_case(library, "models/case.py", "a5", output, 10)
+    assert not result["passed"]
+    assert len(result["compilations"]) == 1
+
+
+def test_caught_child_start_failure_cannot_pass(library, tmp_path):
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "from golden import run\n"
+        "try:\n"
+        "    subprocess.run([sys.executable, __file__], cwd=Path(__file__).parent / 'missing')\n"
+        "except OSError:\n"
+        "    pass\n"
+        "run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert not result["passed"]
+    assert len(result["compilations"]) == 2
+
+
 def test_timeout_cannot_reuse_previous_receipt(library, tmp_path):
     script = library / "models/case.py"
     output = tmp_path / "out"
