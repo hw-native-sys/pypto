@@ -124,10 +124,16 @@ same-named module or closure constant. Different bindings produce separate
 helper specializations. DSL aliases such as `p.Tile` or a directly imported
 `Tile` are rendered as canonical `pl` paths, preserving `TileView` and `MemRef`
 metadata. An unrelated user variable named `pl` does not affect this rendering.
+For an eager Tile annotation whose factory-local constants are absent from the
+function closure, specialization can retain the already evaluated annotation;
+that contract also contributes to the cache identity. Dynamic symbols referenced
+only by Tile parameter types receive their own module-level `pl.dynamic()`
+declarations, even when no Tensor parameter uses them.
 
 Before substituting arguments, `InlineFunctions` checks Tile dtype, physical
 rank and shape, and conflicting explicitly resolved memory spaces. Generic
-physical dimensions bind to the actual Tile's physical extents; valid extents
+physical dimensions bind to the actual Tile's physical extents, including
+integer affine bindings such as `2*M` to `16` (`M=8`); valid extents
 do not constrain that check. Inlining substitutes the caller's Tile without
 copying it, preserving its valid shape. Tile parameters remain limited to
 inline helpers and are not added to device dispatch interfaces.

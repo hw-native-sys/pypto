@@ -705,5 +705,56 @@ def test_tensor_dim_is_not_folded_in_an_inline_callee():
     _assert_roundtrips(Prog)
 
 
+@pytest.mark.parametrize(
+    "expression, extent", [("signed_shift", 21), ("same_symbol", 16), ("constant_actual", 16)]
+)
+def test_call_return_type_solves_single_variable_integer_affine_extents(expression, extent):
+    """Infer a concrete return extent through signed offsets or repeated uses of one symbol."""
+    span = ir.Span.unknown()
+    rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+    if expression == "signed_shift":
+        scaled = ir.Mul(ir.ConstInt(2, pl.INDEX, span), rows, pl.INDEX, span)
+        pattern = ir.Sub(ir.ConstInt(5, pl.INDEX, span), ir.Neg(scaled, pl.INDEX, span), pl.INDEX, span)
+    else:
+        pattern = ir.Add(rows, rows, pl.INDEX, span)
+    param = ir.Var("tile", ir.TileType([pattern, 64], pl.FP32), span)
+    actual_extent = (
+        ir.Add(ir.ConstInt(8, pl.INDEX, span), ir.ConstInt(8, pl.INDEX, span), pl.INDEX, span)
+        if expression == "constant_actual"
+        else extent
+    )
+    actual = ir.Var("actual", ir.TileType([actual_extent, 64], pl.FP32), span)
+    return_type = ir.TileType([rows, 64], pl.FP32)
+
+    (deduced,) = ir.deduce_call_return_type([param], [actual], [return_type])
+
+    assert isinstance(deduced, ir.TileType)
+    assert isinstance(deduced.shape[0], ir.ConstInt)
+    assert deduced.shape[0].value == 8
+
+
+@pytest.mark.parametrize("expression", ["multiple_symbols", "nonlinear", "narrow_overflow"])
+def test_call_return_type_does_not_invent_unsafe_affine_bindings(expression):
+    """Ambiguous, nonlinear, and out-of-range solutions leave the return symbol unbound."""
+    span = ir.Span.unknown()
+    dtype = pl.INT8 if expression == "narrow_overflow" else pl.INDEX
+    rows = ir.Var("rows", ir.ScalarType(dtype), span)
+    if expression == "multiple_symbols":
+        other = ir.Var("other", ir.ScalarType(dtype), span)
+        pattern = ir.Add(rows, other, dtype, span)
+    elif expression == "nonlinear":
+        pattern = ir.Mul(rows, rows, dtype, span)
+    else:
+        pattern = ir.Mul(ir.ConstInt(2, dtype, span), rows, dtype, span)
+    extent = 256 if expression == "narrow_overflow" else 16
+    param = ir.Var("tile", ir.TileType([pattern, 64], pl.FP32), span)
+    actual = ir.Var("actual", ir.TileType([extent, 64], pl.FP32), span)
+    return_type = ir.TileType([rows, 64], pl.FP32)
+
+    (deduced,) = ir.deduce_call_return_type([param], [actual], [return_type])
+
+    ir.assert_structural_equal(deduced, return_type)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

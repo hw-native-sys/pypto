@@ -33,6 +33,7 @@ from pypto.jit.specializer import (
     _infer_return_type,
     _layout_str,
     _render_free_value,
+    build_specialize_context,
     specialize,
 )
 from pypto.pypto_core import DataType, ir
@@ -2392,6 +2393,212 @@ class TestInlineTileParamAnnotations:
         ir.assert_structural_equal(
             func.params[0].type,
             ir.TileType([8, 64], DataType.BF16, memory_space=ir.MemorySpace.Vec),
+        )
+
+    @pytest.mark.parametrize("shadowed", [False, True])
+    def test_eager_factory_annotation_keeps_original_local_value(self, monkeypatch, shadowed):
+        """An annotation-only local cannot be recovered from globals or closure cells."""
+
+        def factory(tile_rows):
+            def keep_tile(tile: pl.Tile[[tile_rows, 64], pl.FP32, pl.Mem.Vec]):
+                return tile
+
+            return keep_tile
+
+        helper = factory(8)
+        assert "tile_rows" not in helper.__code__.co_freevars
+        if shadowed:
+            # A same-named module global must not replace the local value that
+            # Python already used when it evaluated the eager annotation.
+            monkeypatch.setitem(helper.__globals__, "tile_rows", 99)
+        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([8, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
+        )
+
+    def test_eager_factory_annotation_retains_all_metadata(self):
+        """Factory-only aliases and metadata objects survive canonical fallback rendering."""
+
+        def factory():
+            rows = 8
+            dtype = pl.BF16
+            allocation = pl.MemRef("tile_buffer", 64, 2048)
+            view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
+
+            def keep_tile(tile: pl.Tile[[rows, 64], dtype, allocation, pl.Mem.Vec, view]):
+                return tile
+
+            return keep_tile
+
+        helper = factory()
+        assert not helper.__code__.co_freevars
+        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        original = helper.__annotations__["tile"]
+        expected = ir.TileType(
+            original.shape,
+            original.dtype,
+            memref=original.memref,
+            tile_view=original.tile_view,
+            memory_space=original.memory_space,
+        )
+        ir.assert_structural_equal(func.params[0].type, expected, enable_auto_mapping=True)
+
+    def test_eager_generic_tile_normalizes_static_axes(self):
+        """An evaluated [M, 64] mixes a DynVar and an int before IR normalization."""
+        M = pl.dynamic("M")
+
+        def keep_tile(tile: pl.Tile[[M, 64], pl.FP32, pl.Mem.Vec]):
+            return tile
+
+        def entry(src: pl.Tensor[[M, 64], pl.FP32]):
+            return src
+
+        helper_ctx = build_specialize_context(
+            keep_tile, "keep_tile", "inline", None, {}, {}, [], auto_scope=False
+        )
+        entry_ctx = build_specialize_context(
+            entry,
+            "entry",
+            "orchestration",
+            None,
+            {"src": TensorMeta((DynDim("M", "M", 8), 64), DataType.FP32)},
+            {},
+            [],
+        )
+        source = specialize("_TestClass", [helper_ctx, entry_ctx])
+        assert 'M = pl.dynamic("M")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        tile_type = helper.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert isinstance(tile_type.shape[0], ir.Var)
+        assert tile_type.shape[0].name_hint == "M"
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert tile_type.shape[1].value == 64
+
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            "pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec]",
+            "pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec, "
+            "pl.TileView(valid_shape=[ROWS, 64], stride=[ROWS * 64, 1], start_offset=0)]",
+        ],
+        ids=["physical-shape", "tile-view"],
+    )
+    def test_source_tile_only_dynvars_use_canonical_names(self, annotation):
+        """Tile-only symbols need declarations and may use a different Python alias."""
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: {annotation}):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl, "ROWS": pl.dynamic("TILE_ROWS")}
+
+        source = specialize("_TestClass", [ctx])
+        assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        tile_type = helper.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert "TILE_ROWS" in ir.python_print_type(tile_type)
+
+    def test_eager_factory_tile_view_declares_its_symbols(self):
+        """Dynamic eager metadata retains its factory-only symbol and canonical name."""
+
+        def factory():
+            rows = pl.dynamic("TILE_VALID_ROWS")
+            view = pl.TileView(valid_shape=[rows, 64], stride=[rows * 64, 1], start_offset=rows.unwrap())
+
+            def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec, view]):
+                return tile
+
+            return keep_tile
+
+        helper = factory()
+        assert not helper.__code__.co_freevars
+        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        source = specialize("_TestClass", [ctx])
+        assert 'TILE_VALID_ROWS = pl.dynamic("TILE_VALID_ROWS")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        assert "TILE_VALID_ROWS" in ir.python_print_type(func.params[0].type)
+
+    @pytest.mark.parametrize("ambient", [False, True])
+    def test_scalar_tile_dimension_stays_in_function_scope(self, ambient):
+        """A runtime Scalar dimension is a formal, not a frozen or module-level symbol."""
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(ROWS: pl.Scalar[pl.INDEX], tile: pl.Tile[[ROWS, 64], pl.FP32]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["ROWS", "tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+        if ambient:
+            ctx.py_globals["ROWS"] = 8
+
+        source = specialize("_TestClass", [ctx])
+        assert 'ROWS = pl.dynamic("ROWS")' not in source
+        assert "tile: pl.Tile[[ROWS, 64], pl.FP32]" in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        tile_type = helper.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert ir.structural_equal(tile_type.shape[0], helper.params[0])
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    def test_eager_annotation_does_not_freeze_helper_constexpr(self, rows):
+        """Eager evaluation happens before calls and cannot select a constexpr variant."""
+        ROWS = 99
+
+        def keep_tile(tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr):
+            return tile
+
+        ctx = build_specialize_context(
+            keep_tile,
+            "keep_tile",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"ROWS": str(rows)},
+        )
+        assert "tile" not in ctx.eager_tile_annotations
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([rows, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
         )
 
     @pytest.mark.parametrize("rows", [4, 8])

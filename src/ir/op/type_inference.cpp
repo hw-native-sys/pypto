@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -28,6 +30,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -1555,6 +1558,66 @@ struct CallTypeBindingConstraint {
   std::string context;
 };
 
+struct CallAffineExpr {
+  VarPtr var;
+  int64_t scale;
+  int64_t offset;
+};
+
+// Recognize a single-variable integer affine expression without evaluating
+// unsupported operators or overflowing coefficient arithmetic. Distinct free
+// variables and nonlinear expressions do not determine a unique binding.
+std::optional<CallAffineExpr> ParseCallAffineExpr(const ExprPtr& expr) {
+  if (auto constant = As<ConstInt>(expr)) {
+    if (!arith::detail::ConstIntFitsDtype(constant->value_, constant->dtype())) return std::nullopt;
+    return CallAffineExpr{nullptr, 0, constant->value_};
+  }
+  if (auto var = As<Var>(expr)) {
+    auto type = As<ScalarType>(var->GetType());
+    if (!type || (!type->dtype_.IsInt() && type->dtype_ != DataType::INDEX)) return std::nullopt;
+    return CallAffineExpr{var, 1, 0};
+  }
+  if (auto neg = As<Neg>(expr)) {
+    auto operand = ParseCallAffineExpr(neg->operand_);
+    if (!operand || arith::NegWouldOverflow(operand->scale) || arith::NegWouldOverflow(operand->offset)) {
+      return std::nullopt;
+    }
+    return CallAffineExpr{operand->var, -operand->scale, -operand->offset};
+  }
+  auto binary = std::dynamic_pointer_cast<const BinaryExpr>(expr);
+  if (!binary || (!As<Add>(expr) && !As<Sub>(expr) && !As<Mul>(expr))) return std::nullopt;
+  auto lhs = ParseCallAffineExpr(binary->left_);
+  auto rhs = ParseCallAffineExpr(binary->right_);
+  if (!lhs || !rhs || (lhs->var && rhs->var && lhs->var.get() != rhs->var.get())) return std::nullopt;
+
+  VarPtr var = lhs->var ? lhs->var : rhs->var;
+  int64_t scale = 0;
+  int64_t offset = 0;
+  if (As<Add>(expr)) {
+    if (arith::AddWouldOverflow(lhs->scale, rhs->scale) ||
+        arith::AddWouldOverflow(lhs->offset, rhs->offset)) {
+      return std::nullopt;
+    }
+    scale = lhs->scale + rhs->scale;
+    offset = lhs->offset + rhs->offset;
+  } else if (As<Sub>(expr)) {
+    if (arith::SubWouldOverflow(lhs->scale, rhs->scale) ||
+        arith::SubWouldOverflow(lhs->offset, rhs->offset)) {
+      return std::nullopt;
+    }
+    scale = lhs->scale - rhs->scale;
+    offset = lhs->offset - rhs->offset;
+  } else {
+    if ((lhs->var && rhs->var) || arith::MulWouldOverflow(lhs->offset, rhs->offset)) return std::nullopt;
+    const int64_t coefficient = lhs->var ? lhs->scale : rhs->scale;
+    const int64_t factor = lhs->var ? rhs->offset : lhs->offset;
+    if (arith::MulWouldOverflow(coefficient, factor)) return std::nullopt;
+    scale = coefficient * factor;
+    offset = lhs->offset * rhs->offset;
+  }
+  return CallAffineExpr{scale == 0 ? nullptr : var, scale, offset};
+}
+
 void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string& context, TypeVarMap& var_map,
                      std::vector<CallTypeBindingConstraint>& constraints) {
   // A callee placeholder can also appear verbatim in the caller's annotation.
@@ -1569,6 +1632,31 @@ void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string&
   if (inserted) return;
 
   constraints.push_back({var, it->second, value, context});
+}
+
+bool BindConstantCallAffineExpr(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
+                                TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
+  auto constant = As<ConstInt>(value);
+  if (!constant) constant = As<ConstInt>(GeneralAnalyzer().Simplify(value));
+  if (!constant || !arith::detail::ConstIntFitsDtype(constant->value_, constant->dtype())) return false;
+  auto affine = ParseCallAffineExpr(pattern);
+  if (!affine || !affine->var || affine->scale == 0 ||
+      arith::SubWouldOverflow(constant->value_, affine->offset)) {
+    return false;
+  }
+  const int64_t numerator = constant->value_ - affine->offset;
+  // Exact integer inversion only: truncating 15 / 2 would invent M = 7.
+  // Guard the signed division overflow before either remainder or division.
+  if ((numerator == std::numeric_limits<int64_t>::min() && affine->scale == -1) ||
+      numerator % affine->scale != 0) {
+    return false;
+  }
+  const int64_t candidate = numerator / affine->scale;
+  const DataType dtype = GetScalarDtype(affine->var);
+  if (!arith::detail::ConstIntFitsDtype(candidate, dtype)) return false;
+  BindCallTypeVar(affine->var, std::make_shared<ConstInt>(candidate, dtype, value->span_), context, var_map,
+                  constraints);
+  return true;
 }
 
 bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value) {
@@ -1593,12 +1681,21 @@ bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value) {
 }
 
 void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
-                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
+                             TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
+                             bool allow_affine = false) {
   if (!pattern || !value) return;
   if (auto var = As<Var>(pattern)) {
     BindCallTypeVar(var, value, context, var_map, constraints);
     return;
   }
+
+  // A static actual has no expression tree to decompose: infer M = 8 from
+  // 2*M = 16 first. Feed the existing constraint collector so repeated axes,
+  // parser return types, and inline-local metadata all share the same binding.
+  // Infer affine bindings from physical extents only. A formal's implicit
+  // valid shape repeats its physical shape, while an actual's valid extent
+  // can be smaller and must not solve the same physical symbol again.
+  if (allow_affine && BindConstantCallAffineExpr(pattern, value, context, var_map, constraints)) return;
 
   // Composite parameter metadata can bind variables when the actual metadata
   // has a compatible expression structure. Check the whole pattern before
@@ -1610,26 +1707,27 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
   if (pattern_binary && value_binary) {
     CollectCallExprBindings(pattern_binary->left_, value_binary->left_, context + " left operand", var_map,
-                            constraints);
+                            constraints, allow_affine);
     CollectCallExprBindings(pattern_binary->right_, value_binary->right_, context + " right operand", var_map,
-                            constraints);
+                            constraints, allow_affine);
     return;
   }
   auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
   auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
   if (pattern_unary && value_unary) {
     CollectCallExprBindings(pattern_unary->operand_, value_unary->operand_, context + " operand", var_map,
-                            constraints);
+                            constraints, allow_affine);
   }
 }
 
 void CollectCallExprVectorBindings(const std::vector<ExprPtr>& patterns, const std::vector<ExprPtr>& values,
                                    const std::string& context, TypeVarMap& var_map,
-                                   std::vector<CallTypeBindingConstraint>& constraints) {
+                                   std::vector<CallTypeBindingConstraint>& constraints,
+                                   bool allow_affine = false) {
   const size_t count = std::min(patterns.size(), values.size());
   for (size_t i = 0; i < count; ++i) {
     CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map,
-                            constraints);
+                            constraints, allow_affine);
   }
 }
 
@@ -1668,7 +1766,7 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
     if (!value_tensor) return;
     CheckCallPackedFp4Format(pattern_tensor->dtype_, value_tensor->dtype_, context);
     CollectCallExprVectorBindings(pattern_tensor->shape_, value_tensor->shape_, context + " physical shape",
-                                  var_map, constraints);
+                                  var_map, constraints, true);
     CollectCallExprVectorBindings(GetEffectiveTensorValidShape(*pattern_tensor),
                                   GetEffectiveTensorValidShape(*value_tensor), context + " valid shape",
                                   var_map, constraints);
@@ -1684,10 +1782,15 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   if (!pattern_tile || !value_tile) return;
   CheckCallPackedFp4Format(pattern_tile->dtype_, value_tile->dtype_, context);
   CollectCallExprVectorBindings(pattern_tile->shape_, value_tile->shape_, context + " physical shape",
-                                var_map, constraints);
-  CollectCallExprVectorBindings(GetEffectiveTileValidShape(*pattern_tile),
-                                GetEffectiveTileValidShape(*value_tile), context + " valid shape", var_map,
-                                constraints);
+                                var_map, constraints, true);
+  // An omitted valid shape imposes no view contract on the actual Tile.
+  // Reusing the formal's physical extents here would bind the same symbol
+  // to both the allocation size and a legitimately smaller valid extent.
+  if (pattern_tile->tile_view_ && !pattern_tile->tile_view_->valid_shape.empty()) {
+    CollectCallExprVectorBindings(pattern_tile->tile_view_->valid_shape,
+                                  GetEffectiveTileValidShape(*value_tile), context + " valid shape", var_map,
+                                  constraints);
+  }
   if (pattern_tile->tile_view_ && value_tile->tile_view_) {
     CollectCallExprVectorBindings(pattern_tile->tile_view_->stride, value_tile->tile_view_->stride,
                                   context + " tile stride", var_map, constraints);

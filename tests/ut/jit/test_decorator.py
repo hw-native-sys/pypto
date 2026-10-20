@@ -14,6 +14,7 @@ import importlib
 import inspect
 import re
 import textwrap
+import types
 import warnings
 from copy import deepcopy
 from pathlib import Path
@@ -3936,6 +3937,200 @@ class TestInlineFuncIntegration:
 
 class TestInlineTileAnnotations:
     """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    def test_eager_factory_local_tile_annotation_compiles(self, rows, tmp_path):
+        """Annotation-only factory values have no Python closure cell to re-read."""
+
+        def factory(tile_rows):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[tile_rows, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(rows)
+        assert "tile_rows" not in keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[rows, 64], pl.FP32], dst: pl.Out[pl.Tensor[[rows, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [rows, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[rows, 64], pl.FP32], dst: pl.Out[pl.Tensor[[rows, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910,
+                execution_mode=ExecutionMode.SIM,
+                codegen_only=True,
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+        pto_files = list(tmp_path.rglob("*.pto"))
+        assert pto_files
+        source = "\n".join(path.read_text() for path in pto_files)
+        assert f"rows={rows}, cols=64" in source
+        assert source.count("pto.tload ") == source.count("pto.tstore ") == 1
+
+    def test_rebound_eager_factory_contract_invalidates_cached_artifact(self):
+        """Same-source helper instances may retain different annotation-only values."""
+
+        def factory(tile_rows):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[tile_rows, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(8)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        static_hash = entry._get_static_source_hash()
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        compiled = entry.compile(config=config)
+        assert entry.compile(config=config) is compiled
+
+        keep_tile = factory(16)
+        assert entry._get_static_source_hash() == static_hash
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        # Reusing the first artifact would silently bypass the new 16-row
+        # physical contract and never diagnose the caller's 8-row Tile.
+        with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
+            entry.compile(config=config)
+
+    def test_eager_generic_tile_with_dynamic_tensor_anchor_compiles(self, tmp_path):
+        """A Tensor anchor declares M while the helper's physical M binds to eight."""
+        M = pl.dynamic("M")
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(tile: pl.Tile[[M, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return tile
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            valid_rows = pl.min(pl.tensor.dim(src, 0), 8)
+            tile = pl.load(src, [0, 0], [8, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910,
+                execution_mode=ExecutionMode.SIM,
+                codegen_only=True,
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+        pto_files = list(tmp_path.rglob("*.pto"))
+        assert pto_files
+        source = "\n".join(path.read_text() for path in pto_files)
+        assert "rows=8, cols=64" in source
+        assert "v_row=?" in source
+        assert source.count("pto.tload ") == source.count("pto.tstore ") == 1
+
+    @pytest.mark.parametrize("symbol_name", ["M", "TILE_ROWS"])
+    def test_tile_only_generic_dim_compiles(self, symbol_name, tmp_path):
+        """A generic Tile formal declares its symbol even when every Tensor is static."""
+        ROWS = pl.dynamic(symbol_name)
+
+        def factory(dimension):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(ROWS)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910,
+                execution_mode=ExecutionMode.SIM,
+                codegen_only=True,
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+        pto_files = list(tmp_path.rglob("*.pto"))
+        assert pto_files
+        source = "\n".join(path.read_text() for path in pto_files)
+        assert "rows=8, cols=64" in source
+        assert source.count("pto.tload ") == source.count("pto.tstore ") == 1
+
+    def test_postponed_tile_dynvar_rebinding_invalidates_cache(self):
+        """Postponed Tile aliases affect emitted types even without eager snapshots."""
+        ROWS = pl.dynamic("FIRST_ROWS")
+
+        def keep_tile(tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return tile
+
+        # Preserve the source AST while giving it the string annotations that
+        # a module using postponed annotations would store at definition time.
+        raw = keep_tile
+        postponed = types.FunctionType(raw.__code__, {**raw.__globals__, "ROWS": ROWS}, raw.__name__)
+        postponed.__annotations__ = {
+            "tile": "pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec]",
+            "return": "pl.Tile",
+        }
+        keep_tile = jit.inline(auto_scope=False)(postponed)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        first = entry.compile(config=config)
+        assert entry.compile(config=config) is first
+
+        postponed.__globals__["ROWS"] = pl.dynamic("SECOND_ROWS")
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        assert entry.compile(config=config) is not first
 
     @pytest.mark.parametrize(
         "shape, dtype, space, mismatch",

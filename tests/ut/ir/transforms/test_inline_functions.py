@@ -858,16 +858,16 @@ class TestInlineTileArgumentContracts:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.Inline)
-            def consume(self, tile: pl.Tile[[physical_rows, 64], pl.FP32, pl.Mem.Vec]):
-                _alias = tile
+            def keep_tile(self, tile: pl.Tile[[physical_rows, 64], pl.FP32, pl.Mem.Vec]):
+                return tile
 
             @pl.function
             def main(
                 self,
                 source: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[valid_rows, 64])],
             ):
-                self.consume(source)
-                return source
+                result = self.keep_tile(source)
+                return result
 
         @pl.program
         class Expected:
@@ -876,8 +876,8 @@ class TestInlineTileArgumentContracts:
                 self,
                 source: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[valid_rows, 64])],
             ):
-                _alias = source
-                return source
+                result = source
+                return result
 
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 
@@ -937,6 +937,169 @@ class TestInlineTileArgumentContracts:
             def main(self, source: pl.Tile[[8, 64], pl.FP32]):
                 _alias = source
                 return source
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    def test_affine_generic_dimension_binds_to_concrete_identity_argument(self):
+        """The reported 2*M -> 16 identity call also specializes the parser's return type."""
+        rows = pl.dynamic("TILE_CONTRACT_STATIC_AFFINE_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def keep_tile(self, tile: pl.Tile[[2 * rows, 64], pl.FP32]):
+                return tile
+
+            @pl.function
+            def main(self, source: pl.Tile[[16, 64], pl.FP32]):
+                result = self.keep_tile(source)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tile[[16, 64], pl.FP32]):
+                result = source
+                return result
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    @pytest.mark.parametrize("valid_rows", [17, 4], ids=["fully_valid", "partially_valid"])
+    def test_affine_binding_specializes_inline_local_type(self, valid_rows):
+        """Cloned locals use the physical binding even when the argument is only partially valid."""
+        rows = pl.dynamic("TILE_CONTRACT_AFFINE_LOCAL_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def make_tile(self, tile: pl.Tile[[2 * rows + 1, 64], pl.FP32]):
+                scratch: pl.Tile[[rows, 64], pl.FP32] = pl.tile.tpop_from_aiv()
+                return scratch
+
+            @pl.function
+            def main(self, source: pl.Tile[[17, 64], pl.FP32, pl.TileView(valid_shape=[valid_rows, 64])]):
+                result = self.make_tile(source)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tile[[17, 64], pl.FP32, pl.TileView(valid_shape=[valid_rows, 64])]):
+                scratch: pl.Tile[[8, 64], pl.FP32] = pl.tile.tpop_from_aiv()
+                result = scratch
+                return result
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    @pytest.mark.parametrize(
+        "valid_rows", [3, 4, "composite"], ids=["odd_static", "even_static", "composite_dynamic"]
+    )
+    def test_affine_concrete_physical_binding_ignores_partial_valid_shape(self, valid_rows):
+        """An identity return preserves validity without rebinding the physical symbol M = 8."""
+        rows = pl.dynamic("TILE_CONTRACT_AFFINE_PARTIAL_ROWS")
+        valid_factor = 2 if isinstance(valid_rows, str) else 1
+        if isinstance(valid_rows, str):
+            # A matching 2*N tree must not bind M from an undeclared valid shape.
+            valid_rows = pl.dynamic("TILE_CONTRACT_AFFINE_VALID_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def keep_tile(self, tile: pl.Tile[[2 * rows, 64], pl.FP32]):
+                return tile
+
+            @pl.function
+            def main(
+                self,
+                source: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[valid_factor * valid_rows, 64])],
+            ):
+                result = self.keep_tile(source)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                source: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[valid_factor * valid_rows, 64])],
+            ):
+                result = source
+                return result
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    def test_explicit_tile_valid_shape_still_binds_returned_local_type(self):
+        """An explicitly declared valid symbol still specializes metadata independently of physical shape."""
+        valid_rows = pl.dynamic("TILE_CONTRACT_EXPLICIT_VALID_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def receive(self, tile: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[valid_rows, 64])]):
+                received: pl.Tile[[valid_rows, 64], pl.FP32] = pl.tile.tpop_from_aiv()
+                return received
+
+            @pl.function
+            def main(self, source: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[4, 64])]):
+                result = self.receive(source)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[4, 64])]):
+                received: pl.Tile[[4, 64], pl.FP32] = pl.tile.tpop_from_aiv()
+                result = received
+                return result
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    def test_affine_generic_dimension_requires_integral_binding(self):
+        """2*M = 15 has no integer solution and must not truncate to M = 7."""
+        rows = pl.dynamic("TILE_CONTRACT_AFFINE_ODD_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def consume(self, tile: pl.Tile[[2 * rows, 64], pl.FP32]):
+                _alias = tile
+
+            @pl.function
+            def main(self, source: pl.Tile[[15, 64], pl.FP32]):
+                self.consume(source)
+
+        with pytest.raises(
+            ValueError, match="Inline call to 'consume' parameter 'tile': .*physical shape dimension"
+        ):
+            passes.inline_functions()(Before)
+
+    @pytest.mark.parametrize("columns", [32, 36], ids=["consistent", "conflicting"])
+    def test_affine_binding_is_consistent_across_tile_axes(self, columns):
+        """The axes 2*M and 4*M must describe one M even when both actual axes are static."""
+        rows = pl.dynamic("TILE_CONTRACT_AFFINE_SHARED_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def consume(self, tile: pl.Tile[[2 * rows, 4 * rows], pl.FP32]):
+                _alias = tile
+
+            @pl.function
+            def main(self, source: pl.Tile[[16, columns], pl.FP32]):
+                self.consume(source)
+
+        if columns != 32:
+            with pytest.raises(
+                ValueError, match="Inline call to 'consume' parameter 'tile': .*physical shape dimension"
+            ):
+                passes.inline_functions()(Before)
+            return
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tile[[16, columns], pl.FP32]):
+                _alias = source
 
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 

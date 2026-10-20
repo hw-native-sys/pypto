@@ -762,7 +762,11 @@ void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr
     auto physical_arg = std::make_shared<Var>(
         param->name_hint_, std::make_shared<TileType>(actual->shape_, actual->dtype_), args[i]->span_);
     auto physical_dims = DeduceCallTypeBindings({physical_param}, {physical_arg});
-    for (const auto& [scalar, value] : scalar_args) physical_dims.erase(scalar);
+    var_collectors::VarDefUseCollector shape_vars;
+    for (const auto& dim : expected->shape_) shape_vars.VisitExpr(dim);
+    for (const auto* var : shape_vars.var_uses_ordered) {
+      if (scalar_args.count(var)) physical_dims.erase(var);
+    }
     for (size_t axis = 0; axis < expected->shape_.size(); ++axis) {
       auto dim = transform_utils::Substitute(expected->shape_[axis], scalar_args);
       dim = transform_utils::Substitute(dim, physical_dims);

@@ -50,11 +50,14 @@ from typing import Any, cast
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
 from pypto.language.typing.array import Array as _LangArray
+from pypto.language.typing.dynamic import DynVar as _LangDynVar
+from pypto.language.typing.scalar import Scalar as _LangScalar
 from pypto.language.typing.tile import Tile as _LangTile
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import TensorLayout
 
-from ._source import _UNBOUND, function_namespace
+from ._source import _UNBOUND, cache_in_snapshot, function_namespace
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -160,6 +163,13 @@ class SpecializeContext:
             bindings. During JIT compilation this is the same namespace used
             for cache-key construction and annotation resolution. The specializer
             inlines referenced int/float/bool constants at their use sites.
+        eager_tile_annotations: Canonical source for eager inline Tile annotations
+            independent of helper parameters. Python has already
+            evaluated these; annotation-only factory locals need not have a
+            closure cell and cannot be recovered by re-evaluating the source.
+        annotation_dynvars: Scalar symbols used by Tile annotation shapes or
+            metadata. These need generated declarations independently of any
+            Tensor parameter's dynamic-dimension bindings.
         orig_file: Path to the user's real source file (``inspect.getsourcefile``),
             or ``None`` when the function has no on-disk source (REPL / exec).
             Used to map generated diagnostics back to the user's ``.py`` (#1612).
@@ -221,6 +231,11 @@ class SpecializeContext:
     # longer identifies the callee. Empty when every call site of a name
     # reaches the same function, which ``dep_func_names`` already covers.
     dep_call_variants: dict[tuple[str, int], str] = field(default_factory=dict[tuple[str, int], str])
+    # Appended for positional compatibility. These sources share the request's
+    # annotation snapshot with the cache key; parameter-dependent annotations
+    # are excluded so call-site bindings and local scalar dimensions take precedence.
+    eager_tile_annotations: Mapping[str, str] = field(default_factory=dict[str, str])
+    annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
 
     @property
     def source_def_name(self) -> str:
@@ -250,7 +265,7 @@ class SpecializeContext:
         singleton-cached; the constraint is on user source, not on the
         runtime object identity.)
         """
-        out: dict[str, str] = {}
+        out: dict[str, str] = dict(self.annotation_dynvars)
         for meta in self.tensor_meta.values():
             for d in meta.shape:
                 if isinstance(d, DynDim):
@@ -1618,6 +1633,11 @@ def _fold_const_names(
         def visit_Name(self, node: ast.Name) -> ast.expr:
             if constexpr_values and node.id in constexpr_values:
                 return ast.copy_location(ast.parse(constexpr_values[node.id], mode="eval").body, node)
+            value = py_globals.get(node.id, _UNBOUND)
+            if isinstance(value, _LangDynVar):
+                # The Python alias need not match the DynVar's emitted name:
+                # ROWS = pl.dynamic("TILE_ROWS") declares TILE_ROWS, not ROWS.
+                return ast.copy_location(ast.Name(id=value.name, ctx=ast.Load()), node)
             folded = _fold_free_name(node.id, py_globals, node)
             if folded is not None:
                 return folded
@@ -1643,6 +1663,129 @@ def _annotation_symbol_index() -> dict[int, str]:
         for name in sorted(namespace.__all__):
             paths.setdefault(id(getattr(namespace, name)), f"{prefix}.{name}")
     return paths
+
+
+def _tile_annotation_source(annotation: _LangTile) -> str | None:
+    """Render an evaluated Tile through the IR printer, retaining its full metadata."""
+    if annotation.shape is None or annotation.dtype is None:
+        return None
+    shape: list[_ir.Expr] = []
+    for extent in cast("Sequence[Any]", annotation.shape):
+        if isinstance(extent, _LangScalar):
+            extent = extent.unwrap()
+        # Native shaped-type constructors accept all-int or all-Expr shapes,
+        # so a generic [M, 64] annotation must normalize its static axes too.
+        if isinstance(extent, int):
+            extent = _ir.ConstInt(extent, DataType.INDEX, _ir.Span.unknown())
+        if not isinstance(extent, _ir.Expr):
+            return None
+        shape.append(extent)
+    tile_type = _ir.TileType(
+        shape,
+        annotation.dtype,
+        memref=annotation.memref,
+        tile_view=annotation.tile_view,
+        memory_space=annotation.memory_space,
+    )
+    return _ir.python_print_type(tile_type, format=False)
+
+
+def _tile_annotation_dynvars(annotation: _LangTile) -> dict[str, str]:
+    """Collect scalar symbols from Tile shapes and views, excluding allocation bases."""
+    declarations: dict[str, str] = {}
+
+    class Collector(_ir.IRVisitor):
+        def visit_var(self, op: _ir.Var) -> None:
+            if isinstance(op.type, _ir.ScalarType):
+                declarations[op.name_hint] = op.name_hint
+            super().visit_var(op)
+
+    collector = Collector()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, _LangScalar):
+            value = value.unwrap()
+        if isinstance(value, _ir.Expr):
+            collector.visit_expr(value)
+
+    for extent in annotation.shape or ():
+        collect(extent)
+    if annotation.tile_view is not None:
+        for extent in (*annotation.tile_view.valid_shape, *annotation.tile_view.stride):
+            collect(extent)
+        collect(annotation.tile_view.start_offset)
+    if annotation.memref is not None:
+        collect(annotation.memref.byte_offset_)
+        collect(annotation.memref.slot_index_)
+    return declarations
+
+
+@cache_in_snapshot
+def _eager_tile_annotation_data(func: Any) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Snapshot eager Tile contracts without freezing helper constexpr references.
+
+    Only the evaluated annotation retains factory locals used exclusively in
+    annotations: Python does not put those names in the function's closure.
+    Keep canonical source in the same request snapshot used by cache hashing.
+    An annotation mentioning any helper parameter must instead follow the
+    source AST path: constexpr bindings and runtime scalar dimensions belong
+    to the call, not to an ambient value used during eager evaluation.
+    """
+    annotations = inspect.get_annotations(func, eval_str=False)
+    if not any(isinstance(annotation, _LangTile) for annotation in annotations.values()):
+        return {}, {}, {}
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    definition = _find_func_def(tree, func.__name__)
+    assert definition is not None, f"specialize: no def named {func.__name__!r} in its own source"
+    param_names = {arg.arg for arg in definition.args.args}
+    sources: dict[str, str] = {}
+    declarations: dict[str, str] = {}
+    fingerprints: dict[str, str] = {}
+    namespace = {name: value for name, value in func_name_lookup(func).items() if name not in param_names}
+    for arg in definition.args.args:
+        annotation = annotations.get(arg.arg)
+        if not isinstance(annotation, _LangTile) or arg.annotation is None:
+            continue
+        if any(isinstance(node, ast.Name) and node.id in param_names for node in ast.walk(arg.annotation)):
+            fingerprints[arg.arg] = ast.unparse(_fold_const_names(arg.annotation, namespace))
+            continue
+        source = _tile_annotation_source(annotation)
+        if source is not None:
+            sources[arg.arg] = source
+            fingerprints[arg.arg] = source
+            declarations.update(_tile_annotation_dynvars(annotation))
+    return sources, declarations, fingerprints
+
+
+@cache_in_snapshot
+def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
+    """Hash the canonical annotation spelling, including postponed DynVar aliases.
+
+    Generic annotation aliases have no body-value rendering. Their canonical
+    names still change generated source, so they need annotation-only cache
+    records in both the memory and persistent keys.
+    """
+    fingerprints = dict(_eager_tile_annotation_data(func)[2])
+    namespace = dict(func_name_lookup(func))
+    ann_globals: dict[str, Any] = {
+        "pl": importlib.import_module("pypto.language"),
+        **namespace,
+        "__builtins__": {},
+    }
+    param_names = set(inspect.signature(func).parameters)
+    render_globals = {name: value for name, value in namespace.items() if name not in param_names}
+    for name, annotation in inspect.get_annotations(func, eval_str=False).items():
+        if name == "return" or not isinstance(annotation, str):
+            continue
+        try:
+            node = ast.parse(annotation, mode="eval").body
+        except SyntaxError:
+            continue
+        if not isinstance(node, ast.Subscript):
+            continue
+        if _eval_annotation(ast.unparse(node.value), ann_globals) is _LangTile:
+            fingerprints[name] = ast.unparse(_fold_const_names(node, render_globals))
+    return fingerprints
 
 
 def _infer_return_type(
@@ -1939,6 +2082,24 @@ def _scalar_dtype_source(dtype_text: str, ann_globals: Mapping[str, Any]) -> str
     value = _eval_annotation(dtype_text, ann_globals)
     rendered = constant_source(value) if isinstance(value, DataType) else None
     return dtype_text if rendered is None else rendered
+
+
+def _bind_scalar_annotation_names(
+    scalar_dtypes: Mapping[str, str],
+    ann_globals: dict[str, Any],
+    canonical_globals: Mapping[str, Any],
+    is_inline: bool,
+) -> None:
+    """Use symbolic local bindings when earlier Scalar parameters size later Tiles."""
+    if not is_inline:
+        return
+    # A same-named ambient constant must not select the Tile's physical size.
+    # These bindings classify the type; the emitted AST keeps the local name.
+    for name, dtype_source in scalar_dtypes.items():
+        dtype = _eval_annotation(dtype_source, canonical_globals)
+        if isinstance(dtype, DataType):
+            var = _ir.Var(name, _ir.ScalarType(dtype), _ir.Span.unknown())
+            ann_globals[name] = _LangScalar(expr=var)
 
 
 def _extract_bare_dtype(node: ast.expr) -> str | None:
@@ -2242,11 +2403,18 @@ class Specializer:
         scalar_dtype_strs = {
             name: _scalar_dtype_source(text, ann_globals) for name, text in scalar_dtype_strs.items()
         }
+        _bind_scalar_annotation_names(scalar_dtype_strs, ann_globals, canonical_globals, is_inline)
         extra_param_anns: dict[str, str] = {}
         for arg in func_def.args.args:
             if arg.arg == "self" or arg.annotation is None:
                 continue
             if arg.arg in tensor_params or arg.arg in scalar_dtype_strs:
+                continue
+            # Eager annotations preserve their defining factory's values even
+            # after it returns (or when a module global has the same name).
+            # The snapshot excludes annotations depending on helper parameters.
+            if is_inline and arg.arg in ctx.eager_tile_annotations:
+                extra_param_anns[arg.arg] = ctx.eager_tile_annotations[arg.arg]
                 continue
             ann_obj = _eval_annotation(ast.unparse(arg.annotation), ann_globals)
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
@@ -2254,8 +2422,20 @@ class Specializer:
             elif is_inline and isinstance(ann_obj, _LangTile):
                 # Keep the declared type; inlining substitutes the caller's
                 # actual Tile, including its valid shape, without a Tile copy.
-                annotation = _fold_const_names(arg.annotation, ctx.py_globals, ctx.constexpr_values)
+                # Runtime scalar shape parameters remain local names; a
+                # same-named module global must not become their fixed value.
+                annotation_globals = {
+                    name: value for name, value in ctx.py_globals.items() if name not in all_param_names
+                }
+                annotation = _fold_const_names(arg.annotation, annotation_globals, ctx.constexpr_values)
                 extra_param_anns[arg.arg] = ast.unparse(annotation)
+                ctx.annotation_dynvars.update(
+                    {
+                        name: literal
+                        for name, literal in _tile_annotation_dynvars(ann_obj).items()
+                        if name not in all_param_names
+                    }
+                )
 
         params = self._build_params(
             all_param_names,
@@ -2648,6 +2828,9 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
     param_names = [p for p in inspect.signature(func).parameters if p != "self"]
+    eager_sources, eager_dynvars, _ = (
+        _eager_tile_annotation_data(func) if func_type == "inline" else ({}, {}, {})
+    )
 
     return SpecializeContext(
         func_name=func_name,
@@ -2664,6 +2847,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         dep_call_variants=dep_call_variants or {},
         auto_scope=auto_scope,
         py_globals=func_name_lookup(func),
+        eager_tile_annotations=eager_sources,
+        annotation_dynvars=dict(eager_dynvars),
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,
