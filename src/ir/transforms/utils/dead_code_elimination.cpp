@@ -303,6 +303,10 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
         auto copy = MutableCopy(cluster);
         copy->body_ = new_body;
         new_scope = copy;
+      } else if (auto reg = std::dynamic_pointer_cast<const RegScopeStmt>(stmt)) {
+        auto copy = MutableCopy(reg);
+        copy->body_ = new_body;
+        new_scope = copy;
       } else if (auto hierarchy = std::dynamic_pointer_cast<const HierarchyScopeStmt>(stmt)) {
         auto copy = MutableCopy(hierarchy);
         copy->body_ = new_body;
@@ -545,6 +549,11 @@ StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt,
   }
   if (auto cluster = std::dynamic_pointer_cast<const ClusterScopeStmt>(scope_stmt)) {
     auto copy = MutableCopy(cluster);
+    copy->body_ = new_body;
+    return copy;
+  }
+  if (auto reg = std::dynamic_pointer_cast<const RegScopeStmt>(scope_stmt)) {
+    auto copy = MutableCopy(reg);
     copy->body_ = new_body;
     return copy;
   }

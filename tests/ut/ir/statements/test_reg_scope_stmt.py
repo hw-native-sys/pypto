@@ -95,6 +95,41 @@ def test_flatten_call_expr_keeps_nested_calls_inside_reg_scope():
     ir.assert_structural_equal(second.var, result)
 
 
+@pytest.mark.parametrize("dead_body", ["assignment", "yield_slot"])
+def test_simplify_preserves_reg_scope_when_eliminating_dead_values(dead_body):
+    span = ir.Span("reg_scope.py", 2, 1, 4, 8)
+    scalar = ir.ScalarType(DataType.INT32)
+    condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+    value = ir.ConstInt(1, DataType.INT32, span)
+    unused = ir.Var("unused", scalar, span)
+    if dead_body == "assignment":
+        body = ir.AssignStmt(unused, value, span)
+    else:
+        body = ir.IfStmt(
+            condition,
+            ir.YieldStmt([value], span),
+            ir.YieldStmt([value], span),
+            [unused],
+            span,
+        )
+    scope = ir.RegScopeStmt("vf", body, span, ["keep"], {"tag": "local"})
+    program = ir.Program([ir.Function("main", [condition], [], scope, span)], "test", span)
+    with passes.PassContext([]):
+        after = passes.simplify()(program)
+    result = next(iter(after.functions.values())).body
+    assert isinstance(result, ir.RegScopeStmt)
+    assert result.name_hint == "vf"
+    assert result.attrs == {"tag": "local"}
+    assert list(result.leading_comments) == ["keep"]
+    assert result.span.filename == span.filename
+    if dead_body == "assignment":
+        assert isinstance(result.body, ir.SeqStmts)
+        assert not result.body.stmts
+    else:
+        assert isinstance(result.body, ir.IfStmt)
+        assert not result.body.return_vars
+
+
 def test_reg_scope_text_printing_does_not_erase_boundary():
     with pytest.raises(ValueError, match="RegScopeStmt.*not supported"):
         python_print(_scope(), format=False)
