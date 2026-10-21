@@ -135,10 +135,6 @@ enum class ObjectKind {
   // Op kinds
   Op,
   GlobalVar,
-<<<<<<< HEAD
-=======
-
->>>>>>> 3c97e9e0 ([FEAT]: Create RegType releated IR nodes for adapting pypto framework on A5.)
 };
 
 /**
