@@ -2319,6 +2319,76 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Checkout the same simpler revision for a standalone control
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          repository: hw-native-sys/simpler
+          ref: d8f997fabd1b6988b69a94feef61ab669dda0eea
+          path: simpler-control
+          persist-credentials: false
+
+      - name: Build standalone simpler using its A5 CI command
+        if: always()
+        working-directory: simpler-control
+        run: |
+          # Match simpler's setup-venv action on this same runner. Do not source
+          # PyPTO's activate.sh or change simpler's warning policy.
+          source /usr/local/Ascend/cann/set_env.sh
+          printf 'standalone runner=%s arch=%s\n' "$RUNNER_NAME" "$RUNNER_ARCH"
+          printf 'CANN_ROOT=%s ASCEND_HOME_PATH=%s\n' "$CANN_ROOT" "$ASCEND_HOME_PATH"
+          readlink -f /usr/local/Ascend/cann
+          readlink -f "$CANN_ROOT"
+          readlink -f "$ASCEND_HOME_PATH"
+          "$ASCEND_HOME_PATH/tools/hcc/bin/aarch64-target-linux-gnu-g++" --version
+          printf 'SIMPLER_DISABLE_WARNINGS_AS_ERRORS=%s\n' \
+            "${SIMPLER_DISABLE_WARNINGS_AS_ERRORS-<unset>}"
+          unset CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
+          unset PIP_CONSTRAINT PIP_BUILD_CONSTRAINT
+          python3 -m venv --system-site-packages .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core 'nanobind<3' 'cmake>=3.20'
+          python -m pip install --no-build-isolation \
+            --config-settings=build.targets=build_package_a5 '.[test]'
+
+      - name: Capture standalone simpler AICPU configuration
+        if: always()
+        working-directory: simpler-control
+        run: |
+          git rev-parse HEAD
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for cache in sorted(Path("build/cache/a5/onboard").glob("*/aicpu/CMakeCache.txt")):
+              print(f"=== standalone {cache} ===", flush=True)
+              for line in cache.read_text().splitlines():
+                  if line.startswith(("WERROR:", "CMAKE_CXX_COMPILER:", "CMAKE_CXX_FLAGS:")):
+                      print(line, flush=True)
+              for identity in sorted((cache.parent / "CMakeFiles").glob("*/CMakeCXXCompiler.cmake")):
+                  for line in identity.read_text().splitlines():
+                      if line.startswith(("set(CMAKE_CXX_COMPILER_ID ", "set(CMAKE_CXX_COMPILER_VERSION ")):
+                          print(line, flush=True)
+              commands = cache.parent / "compile_commands.json"
+              if commands.is_file():
+                  for command in json.loads(commands.read_text()):
+                      if Path(command["file"]).name == "runtime_init.cpp":
+                          print(json.dumps(command, indent=2), flush=True)
+          PY
+
+      - name: Preserve standalone simpler build configuration
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-simpler-a5-build-configuration
+          path: |
+            simpler-control/build/cache/a5/onboard/*/aicpu/CMakeCache.txt
+            simpler-control/build/cache/a5/onboard/*/aicpu/compile_commands.json
+            simpler-control/build/cache/a5/onboard/*/aicpu/CMakeFiles/*/CMakeCXXCompiler.cmake
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: mixed-kernel-tests-a5
         if: false # Compile-only reproduction; do not acquire an NPU card.
         timeout-minutes: 60
