@@ -82,8 +82,9 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// overlaps tile i+1's MAD. Under ``memory_planner=PTOAS``, InitMemRef keeps the
 /// co-live buffers distinct and ptoas places them. Under the PyPTO planner,
 /// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
-/// preserves the pair. Automatic dbC selection and existing-pipeline recognition
-/// in ``AutoTileMatmulL0`` are disabled. This attribute remains available for
+/// preserves the pair. Automatic dbC selection is disabled for PyPTO/DSA-RP;
+/// PTOAS retains it. Existing-pipeline recognition stays disabled for every
+/// planner. This attribute remains available for
 /// explicit scheduling intent and is preserved by AutoTile. Its downstream
 /// lowering is unchanged; the separate slots alone do not establish profitable
 /// compute/drain overlap. Consumed (stripped) by

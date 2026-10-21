@@ -376,8 +376,8 @@ class PassManager:
         # Storage planning and lowering read the planner at execution time, so
         # run_passes requires it to match the planner that selected this recipe.
         # Otherwise, the pass list could retain legacy planning passes while
-        # execution requests a different allocation route. Automatic dbC is
-        # disabled for every planner and is not the reason for this guard.
+        # execution requests a different allocation route. AutoTile also uses
+        # the active planner to retain automatic dbC only for PTOAS.
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         skipped_mem_planning_passes: tuple[str, ...]

@@ -2584,11 +2584,11 @@ class TestAutoTileMatmulL0MNTiling:
             (128, 384, 64, 64),
         ],
     )
-    def test_system_k_split_shapes_emit_k_only_loop(self, planner, M, K, N, tile_k):
+    def test_system_shapes_emit_expected_reduction_route(self, planner, M, K, N, tile_k):
         """Structural contract for the FP32 system-test matrix.
 
-        Automatic dbC is disabled, so every planner retains the single-C
-        K-only schedules for these shapes.
+        In-tree planners retain single-C K-only schedules. PTOAS also retains
+        its historical full-K A-stationary dbC choice for 64x256x256.
         """
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
@@ -2615,6 +2615,14 @@ class TestAutoTileMatmulL0MNTiling:
         with passes.PassContext([], memory_planner=planner):
             After = passes.auto_tile_matmul_l0()(Before)
         printed = ir.python_print(After)
+        if planner == passes.MemoryPlanner.PTOAS and (M, K, N) == (64, 256, 256):
+            assert '"pipeline_double_buffer_c": True' in printed
+            assert "pl.range(0, 64, 64," in printed
+            assert "pl.pipeline(0, 256, 32," in printed
+            assert "[64, 256]" in printed
+            assert "pl.tile.matmul_acc(" not in printed
+            _assert_ssa_valid(After, "ptoas_full_k_stationary")
+            return
         assert "pipeline_double_buffer_c" not in printed
         assert printed.count("pl.pipeline(") == 1
         assert "pl.range(" not in printed
@@ -2637,13 +2645,13 @@ class TestAutoTileMatmulL0MNTiling:
             ),
             (
                 passes.MemoryPlanner.PTOAS,
-                256,
-                128,
-                544,
-                256,
-                "pl.range(0, 256, 256,",
-                "pl.pipeline(0, 512, 128,",
-                False,
+                48,
+                352,
+                96,
+                48,
+                "pl.range(0, 48, 48,",
+                "pl.pipeline(0, 96, 32,",
+                True,
             ),
         ],
     )
@@ -2706,13 +2714,13 @@ class TestAutoTileMatmulL0MNTiling:
             ),
             (
                 passes.MemoryPlanner.PTOAS,
-                192,
                 64,
-                512,
-                512,
-                "pl.range(0, 512, 512,",
-                "pl.pipeline(0, 192, 64,",
-                False,
+                80,
+                256,
+                256,
+                "pl.range(0, 256, 256,",
+                "pl.pipeline(0, 64, 32,",
+                True,
             ),
         ],
     )
@@ -2778,8 +2786,8 @@ class TestAutoTileMatmulL0MNTiling:
             (384, 256),
         ],
     )
-    def test_system_shapes_emit_best_single_c_tile(self, planner, pypto_dbc, M, N):
-        """Former dbC geometries must use a fresh single-C choice at full capacity."""
+    def test_system_shapes_emit_planner_selected_tile(self, planner, pypto_dbc, M, N):
+        """PTOAS retains dbC; the in-tree planners search the full single-C budget."""
         K = 64
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
@@ -2816,12 +2824,12 @@ class TestAutoTileMatmulL0MNTiling:
         cfg.l0a_bytes = cfg.l0b_bytes = 65536
         cfg.l0c_bytes = 131072
         cfg.allow_a_stationary = cfg.allow_b_stationary = True
-        cfg.allow_double_buffer_c = False
+        cfg.allow_double_buffer_c = planner == passes.MemoryPlanner.PTOAS
         cfg.allow_k_boundary = True
         choice = passes.l0_tile_chooser.choose_l0_tile(cfg)
         assert f"[{choice.m}, {choice.k}], target_memory=pl.Mem.Left" in printed
         assert f"[{choice.k}, {choice.n}], target_memory=pl.Mem.Right" in printed
-        assert "pipeline_double_buffer_c" not in printed
+        assert ("pipeline_double_buffer_c" in printed) == choice.double_buffer_c
         assert "pipeline_membership" not in printed
         assert "slots=2" not in printed
         _assert_ssa_valid(After, f"test_system_single_c_{planner}_{M}_{N}")
@@ -4097,12 +4105,10 @@ class TestAutoTileMatmulL0OperandKAlignment:
         ir.assert_structural_equal(after, Before)
 
 
-@pytest.mark.parametrize(
-    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
-)
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 @pytest.mark.parametrize("legacy_opt_in", [False, True])
 @pytest.mark.parametrize("shape", [(128, 512, 384), (64, 288, 384), (64, 256, 80)])
-def test_automatic_dbc_disabled_for_all_planners(planner, legacy_opt_in, shape):
+def test_automatic_dbc_disabled_for_in_tree_planners(planner, legacy_opt_in, shape):
     """The legacy opt-in must not shrink a single-C tile to the dbC capacity."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
@@ -4134,6 +4140,37 @@ def test_automatic_dbc_disabled_for_all_planners(planner, legacy_opt_in, shape):
     assert "slots=2" not in text
     assert "pl.tile.matmul" in text
     _assert_ssa_valid(after, "automatic_dbc_disabled")
+
+
+@pytest.mark.parametrize("legacy_opt_in", [False, True])
+def test_ptoas_retains_automatic_dbc_independently_of_legacy_flag(legacy_opt_in):
+    """Keep the historical full-K dbC choice only for the native planner."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[160, 64], pl.FP32],
+            rhs: pl.Tensor[[64, 160], pl.FP32],
+            out: pl.Out[pl.Tensor[[160, 160], pl.FP32]],
+        ) -> pl.Tensor[[160, 160], pl.FP32]:
+            a = pl.tile.load(lhs, [0, 0], [160, 64], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [64, 160], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(a, b)
+            out = pl.tile.store(c, [0, 0], out)
+            return out
+
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.PTOAS, enable_pypto_l0c_double_buffer=legacy_opt_in
+    ):
+        after = passes.auto_tile_matmul_l0()(Before)
+    text = ir.python_print(after)
+    assert '"pipeline_double_buffer_c": True' in text
+    assert '"pipeline_overlap_stores": False' in text
+    _assert_ssa_valid(after, "ptoas_automatic_dbc")
 
 
 @pytest.mark.parametrize(

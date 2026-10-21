@@ -295,8 +295,9 @@ class PassContext {
    *        DsaRP replaces MemoryReuse with in-tree capacity-constrained DSA-RP.
    *        PtoAS skips PyPTO address allocation so ptoas PlanMemory owns it.
    * @param enable_pypto_l0c_double_buffer Legacy compatibility flag (default:
-   *        false). Automatic dbC is disabled for every planner regardless of
-   *        this flag. Explicit buffering declarations are preserved.
+   *        false). This flag does not enable automatic dbC for PyPTO or DsaRP;
+   *        PtoAS retains its existing automatic selection independently of it.
+   *        Explicit buffering declarations are preserved.
    * @param runtime Which Simpler runtime ABI to target (default:
    *        TensorMapAndRingBuffer). Passes that must legalize IR for a specific
    *        runtime switch on this rather than inspecting codegen options.
@@ -368,7 +369,7 @@ class PassContext {
   [[nodiscard]] MemoryPlanner GetMemoryPlanner() const;
 
   /**
-   * @brief Return the stored legacy flag; automatic dbC remains disabled.
+   * @brief Return the legacy flag; it does not override the planner's dbC policy.
    */
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 

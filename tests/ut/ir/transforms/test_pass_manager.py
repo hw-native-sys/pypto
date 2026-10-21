@@ -253,7 +253,7 @@ class TestPassManagerPlannerGate:
     DSA_RP omits ``MemoryReuse``; PTOAS also omits ``AllocateMemoryAddr``. The
     run-time context must match the planner that chose those passes, rather
     than combine one planner's recipe with another planner's storage lowering.
-    This guard is independent of the disabled automatic dbC policy.
+    The planner also controls whether AutoTile may enumerate automatic dbC.
     """
 
     @staticmethod

@@ -1,8 +1,9 @@
 # AutoTileMatmulL0 Pass
 
-所有 planner 均禁用自动 L0C 双缓冲，包括旧版
-`enable_pypto_l0c_double_buffer=True` 开关。AutoTile 使用完整 L0C 容量
-选择最佳 single-C tile。显式缓冲属性保持不变，其 lowering 不受此策略影响。
+PYPTO 与 DSA_RP 禁用自动 L0C 双缓冲，包括旧版
+`enable_pypto_l0c_double_buffer=True` 开关。这两个 planner 使用完整 L0C 容量
+选择最佳 single-C tile。为保持 native allocator 兼容性，PTOAS 保留原有的
+自动 dbC 选择，且不受旧版开关影响。显式缓冲属性及其 lowering 保持不变。
 
 针对静态 2D `tile.matmul`、`tile.matmul_acc` 与 `tile.matmul_bias` 进行 L0 切分：从当前 backend 的 L0 容量中挑选 L0 tile 形状 `(m, n, k)`，并把调用改写成一个 2 阶段流水化的 K-loop，每个迭代用 `tile.extract` 从 Mat 抽取 Left/Right 操作数。容量检查采用累加器在 L0C 中的物理占用，而不只是逻辑形状。该物理占用超过 L0c 时，本 pass 会对新的普通或带 bias 的 matmul，或前端规范的 split-K create/pipeline/store 链做 M/N 切分。
 
@@ -78,7 +79,7 @@ program_tiled = l0_tile_pass(program)
 
    **放置策略（direct-store vs Mat-scratch）。** 两种网格都把每个 `[m, n]` Acc 子块交给一个 `SubtilePlacer`。**`DirectGmPlacer`** 把它 store 到 DDR 输出（上文的 `tile.store`）。**`MatScratchPlacer`** 则把整个 `[M, N]` 结果保留在片上的 L1/**Mat** scratch 中——用 `tile.create(target_memory=Mat)` 创建一次（其隐式 NZ TileView `col_major/row_major` 即矩阵乘操作数布局），随后每个子块通过 `tile.assemble(scratch, sub, [mi, ni])` 就地组装。链式路径使用的 bf16/f16 低精度 scratch 会把该 Acc→Mat 回写 lower 成 FIXPIPE `pto.tinsert`；受支持的同 dtype 整窗 assemble 则使用 `pto.subview` + `pto.tmov`。当 matmul 结果的**所有**使用都是矩阵乘操作数读取、**且** `[M, N]` scratch 能放进 backend handler 的 Mat 容量（`GetCapacityBytes(MemorySpace::Mat)`）时，本 pass 才选择 Mat-scratch——这是一个保守的必要条件 gate，把超大的链式 matmul 留在延后的 `PH-AT-006` 路径上，而不是产生一个不可能的片上分配（同时考虑共存 Mat 张量的完整 packed-peak 检查为后续工作）。选中后把结果 `Var` 重映射到 scratch，使消费者在片上读取它。`tile.assemble` 的 `set_output_memory_inherit_input()` 让整条链共享同一个 Mat base，因此组装是就地的（不产生不受支持的 Mat→Mat 保留拷贝）。split-K（展开、常量偏移）与 full-K（流水化、循环变量偏移）网格都可驱动任一 placer。
 
-   > **旧版 PYPTO planner 的限制 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而流水化消费者需要多块较小缓冲。旧版 PYPTO planner 的 `AllocateMemoryAddr` 只是把复用类顺序堆叠、从不细分已释放区域（例如，一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者 slot 会浪费 32 KB，另一块 slot 溢出 → L0 超限），因此本 pass 仅在该 planner 下强制 Mat-scratch 生产者使用 **output-stationary**。`DSA_RP` 与 `PTOAS` 保留 chooser 选出的 operand-stationary 调度，但这不保证 native allocator 能处理任意缓冲大小序列；已知 A2/A3 PTOAS 链式 matmul 限制与本策略分开处理。为旧版 allocator 增加等价的按生命周期细分能力仍由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
+   > **旧版 PYPTO planner 的限制 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而流水化消费者需要多块较小缓冲。旧版 PYPTO planner 的 `AllocateMemoryAddr` 只是把复用类顺序堆叠、从不细分已释放区域（例如，一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者 slot 会浪费 32 KB，另一块 slot 溢出 → L0 超限），因此本 pass 仅在该 planner 下强制 Mat-scratch 生产者使用 **output-stationary**。`DSA_RP` 与 `PTOAS` 保留 chooser 选出的 operand-stationary 调度，PTOAS 还保留原有 dbC 候选枚举，以避免强制此链使用 single-C 时暴露的 A2/A3 Left 内存打包回归。为旧版 allocator 增加等价的按生命周期细分能力仍由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
 7. **改写所在 `SeqStmts`** —— 把原 matmul 的 `Var`（K 切分）或消费 store 的结果（M/N 切分）用法改成新的 `return_var`。替换作用域只限当前 `SeqStmts`，不会泄漏到兄弟区域。
 
 8. **保留已有 L0 流水线**——分析前即禁用自动累加器缓冲识别。显式 `pipeline_double_buffer_c` 属性保持不变。
@@ -106,10 +107,22 @@ program_tiled = l0_tile_pass(program)
 （`k == K`），由 `BuildFullKPipelined` 的 `ForKind::Sequential` 外层循环实现；
 若外层流水化，则需要两倍的满 L0 预算。
 
-**自动 dbC 选择已禁用。** `AutoTileMatmulL0` 在调用 `ChooseL0Tile`
-之前设置 `allow_double_buffer_c=false`，与 planner 及保存的旧版开关值无关。
-已有 L0 流水线的自动识别也已禁用。这不是在半容量下选定 tile 后删除缓冲，
-而是让 chooser 搜索真正的 single-C 设计空间。
+**按 planner 区分的自动 dbC 策略。** 对 PYPTO 与 DSA_RP，
+`AutoTileMatmulL0` 在调用 `ChooseL0Tile` 前设置
+`allow_double_buffer_c=false`，不受保存的旧版开关影响。这两个 planner
+搜索真正的 single-C 设计空间，而不是在半容量下选定 tile 后删除缓冲。
+PTOAS 保留 `allow_double_buffer_c=true`：强制原有链式 matmul 使用
+single-C 会暴露 native Left 内存打包限制。保留原有候选枚举可避免这项编译
+回归，但不修复 allocator，也不证明 dbC 有性能收益。
+所有 planner 仍禁用已有 L0 流水线的自动识别。
+
+在保留此策略后，原有 BF16 `(256x256 @ 256x256) @ 256x64` 链仍会暴露
+**PTOAS A5 已有的限制**：一个 64 KiB Left 生产者缓冲结束使用后，消费者
+需要两个同时存活的 32 KiB 缓冲，但 native 整块复用请求 96 KiB，而不会
+细分已结束生命周期的生产者存储。策略修改前的 base 也会为相同的发射程序
+报告失败。native Tile/Buffer 测试将这一确切溢出标为严格的预期失败；
+系统测试仅排除 PTOAS 的 A5/A5 模拟器组合，A2/A3 PTOAS 覆盖恢复。
+本策略不修复 PTOAS 分配器，也不更改数值工作负载。
 
 chooser API 仍保留 dbC 设计点，供显式代价模型查询使用；公式和硬件常数不变。
 显式缓冲 IR 仍沿用现有 lowering 路径。不同的物理 slot 本身不能证明 FIXPIPE

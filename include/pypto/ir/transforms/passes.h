@@ -653,12 +653,13 @@ Pass LegalizeTileCast();
  * ``PH-AT-006``.
  *
  * Full-K M/N grids may use output-, A-, or B-stationary loop orders.  Automatic
- * L0C double-buffering is excluded before candidate enumeration under every
- * planner, regardless of the stored legacy opt-in flag.  Under PYPTO, chained
+ * L0C double-buffering is excluded before candidate enumeration under PYPTO and
+ * DSA_RP. PTOAS retains its existing dbC selection for native allocator
+ * compatibility, independently of the stored legacy flag. Under PYPTO, chained
  * Mat-scratch producers remain output-stationary to avoid the allocator offset-packing
  * limitation tracked by issue #1908.
- * DSA_RP and PTOAS retain operand-stationary choices because their lifetime-aware
- * placement can subdivide the released operand range.
+ * DSA_RP and PTOAS retain operand-stationary choices; this does not guarantee
+ * that the native PTOAS allocator can repack every sequential buffer sequence.
  *
  * Existing already-L0 pipelines are not automatically marked for accumulator
  * double buffering.  Explicit ``pipeline_double_buffer_c`` attributes remain

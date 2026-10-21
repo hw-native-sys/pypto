@@ -147,6 +147,64 @@ class SingleCGrid:
     _compile_native(tmp_path, lowered, BackendType.Ascend910, addressed=False)
 
 
+@pytest.mark.parametrize(
+    "ascend_backend",
+    [
+        BackendType.Ascend910,
+        pytest.param(
+            BackendType.Ascend950,
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=RuntimeError,
+                reason="Pre-existing PTOAS A5 packing: a 64-KiB Left buffer followed by two 32-KiB buffers",
+            ),
+        ),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_ptoas_chained_matmul_retains_native_compilation(
+    tmp_path: Path, ascend_backend: BackendType, enable_buffer_ir: bool
+) -> None:
+    # This is the original system-test geometry, not an allocator workaround.
+    # Forcing PTOAS to single-C made its native greedy allocator request 96 KiB
+    # of Left storage against 64 KiB on A2/A3. Preserve its pre-policy chooser
+    # behavior and compile the complete, unchanged chain through both IR routes.
+    # A5 already fails on the pre-policy base: its native whole-buffer reuse
+    # cannot subdivide the dead producer buffer for the two consumer buffers.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[256, 256], pl.BF16],
+            b: pl.Tensor[[256, 256], pl.BF16],
+            e: pl.Tensor[[256, 64], pl.BF16],
+            out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+        ) -> pl.Tensor[[256, 64], pl.FP32]:
+            tile_a = pl.load(a, [0, 0], [256, 256], target_memory=pl.MemorySpace.Mat)
+            tile_b = pl.load(b, [0, 0], [256, 256], target_memory=pl.MemorySpace.Mat)
+            c = pl.matmul(tile_a, tile_b, out_dtype=pl.FP32)
+            cb = pl.cast(c, pl.BF16, mode="rint")
+            tile_e = pl.load(e, [0, 0], [256, 64], target_memory=pl.MemorySpace.Mat)
+            d = pl.matmul(cb, tile_e, out_dtype=pl.FP32)
+            out = pl.store(d, [0, 0], out)
+            return out
+
+    try:
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=enable_buffer_ir
+        ):
+            lowered = PassManager(OptimizationStrategy.Default).run_passes(Before)
+        _compile_native(tmp_path, lowered, ascend_backend, addressed=False)
+    except RuntimeError as error:
+        if ascend_backend == BackendType.Ascend950:
+            # Only this diagnosed native overflow is an expected failure; a
+            # different backend error must fail, and native success must XPASS.
+            assert "left overflow, requires 786432 bits while 524288 bits available" in str(error)
+        raise
+
+
 @pytest.mark.parametrize("ascend_backend", _BACKENDS, indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize(

@@ -7,10 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Golden checks on historical AutoTile dbC shapes with automatic dbC disabled.
+"""Golden checks on historical AutoTile shapes with planner-specific dbC policy.
 
 The legacy opt-in is exercised under every planner. These workloads retain
-ordinary tiling and operand pipelines, while accumulator selection uses single-C.
+ordinary tiling and operand pipelines. PYPTO and DSA-RP select single-C;
+PTOAS retains its previous automatic dbC selection.
 Explicit multi-buffer emission is covered by codegen and lowering unit tests.
 The historical filename is retained for existing targeted test invocations."""
 
@@ -29,8 +30,8 @@ from pypto.pypto_core.passes import MemoryPlanner
 PLATFORMS_DBC = ["a2a3", "a2a3sim"]
 
 
-def _choose_a2a3_dbc(m: int, k: int, n: int, *, bytes_a: int, bytes_b: int):
-    """Return the single-C 910B choice for a historical dbC problem."""
+def _choose_a2a3_dbc(m: int, k: int, n: int, *, planner: MemoryPlanner, bytes_a: int, bytes_b: int):
+    """Mirror the planner-specific 910B choice for a historical dbC problem."""
     cfg = _core_passes.l0_tile_chooser.L0TileConfig()
     cfg.M, cfg.K, cfg.N = m, k, n
     cfg.l0a_bytes = cfg.l0b_bytes = 64 * 1024
@@ -38,17 +39,17 @@ def _choose_a2a3_dbc(m: int, k: int, n: int, *, bytes_a: int, bytes_b: int):
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
-    cfg.allow_double_buffer_c = False
+    cfg.allow_double_buffer_c = planner == MemoryPlanner.PTOAS
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
 
-def _choose_a2a3_fp32_dbc(m: int, n: int):
-    return _choose_a2a3_dbc(m, 64, n, bytes_a=4, bytes_b=4)
+def _choose_a2a3_fp32_dbc(m: int, n: int, *, planner: MemoryPlanner):
+    return _choose_a2a3_dbc(m, 64, n, planner=planner, bytes_a=4, bytes_b=4)
 
 
 def _printed_after_auto_tile(test_case: PTOTestCase, planner: MemoryPlanner) -> str:
-    """Lower a device case through AutoTile to check the single-C policy."""
+    """Lower a device case through AutoTile to check its planner policy."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
     program = test_case.get_program()
@@ -149,7 +150,7 @@ class _DbcMatScratch(PTOTestCase):
     """Chained ``(a @ b) @ e`` with an on-chip L1/Mat intermediate.
 
     The oversized producer is assembled with ``tile.assemble`` and consumed
-    on-chip. AutoTile selects single-C under every planner.
+    on-chip. AutoTile retains dbC selection for PTOAS only.
     """
 
     __test__ = False
@@ -240,10 +241,10 @@ class _DbcMatScratch(PTOTestCase):
 
 
 class TestDbc2DoubleBuffer:
-    """Automatic dbC stays disabled under PYPTO, DSA-RP, and PTOAS."""
+    """Automatic dbC stays disabled under PYPTO/DSA-RP and available under PTOAS."""
 
-    # Historical shapes retain golden coverage; old dbC geometries are no
-    # longer asserted because AutoTile selects a fresh single-C plan.
+    # Historical shapes retain golden coverage. Check the selected buffering
+    # policy without forcing the old dbC geometry onto the in-tree planners.
     @pytest.mark.parametrize("platform", PLATFORMS_DBC)
     @pytest.mark.parametrize(
         "planner",
@@ -265,14 +266,14 @@ class TestDbc2DoubleBuffer:
     def test_direct_store_dbc(
         self, test_runner, platform, planner, m, n, tile_m, tile_n, tile_count, stationarity
     ):
-        """Retain direct-store numerical coverage with single-C selection."""
-        choice = _choose_a2a3_fp32_dbc(m, n)
+        """Retain direct-store numerical coverage with planner-specific selection."""
+        choice = _choose_a2a3_fp32_dbc(m, n, planner=planner)
         count = ((m + choice.m - 1) // choice.m) * ((n + choice.n - 1) // choice.n)
         assert count >= 1
-        assert not choice.double_buffer_c
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         case = _DbcDirectStore(m, n, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert "pipeline_double_buffer_c" not in printed
+        assert ("pipeline_double_buffer_c" in printed) == choice.double_buffer_c
         assert "slots=2" not in printed
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
@@ -294,22 +295,23 @@ class TestDbc2DoubleBuffer:
     )
     def test_one_dimensional_dbc(self, test_runner, platform, planner, m, n, tile_m, tile_n, holds_a):
         """Singleton axes do not automatically enable accumulator ping-pong."""
-        choice = _choose_a2a3_fp32_dbc(m, n)
+        choice = _choose_a2a3_fp32_dbc(m, n, planner=planner)
         assert not choice.double_buffer_c
 
         case = _DbcDirectStore(m, n, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert "pipeline_double_buffer_c" not in printed
+        assert ("pipeline_double_buffer_c" in printed) == choice.double_buffer_c
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS_DBC)
     def test_ptoas_384x256_operand_allocation(self, test_runner, platform):
         """Retain numerical coverage of the formerly oversized PTOAS operand."""
-        choice = _choose_a2a3_fp32_dbc(384, 256)
+        planner = MemoryPlanner.PTOAS
+        choice = _choose_a2a3_fp32_dbc(384, 256, planner=planner)
         count = ((384 + choice.m - 1) // choice.m) * ((256 + choice.n - 1) // choice.n)
         assert count >= 1
-        assert not choice.double_buffer_c
+        assert choice.double_buffer_c
         result = test_runner.run(_DbcDirectStore(384, 256, planner=MemoryPlanner.PTOAS, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
@@ -323,12 +325,12 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_mat_scratch_dbc(self, test_runner, platform, planner):
-        """Retain the Mat-scratch chain and its golden check with single-C."""
-        choice = _choose_a2a3_dbc(256, 64, 256, bytes_a=2, bytes_b=2)
-        assert not choice.double_buffer_c
+        """Retain the Mat-scratch chain under each planner's accumulator policy."""
+        choice = _choose_a2a3_dbc(256, 64, 256, planner=planner, bytes_a=2, bytes_b=2)
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         case = _DbcMatScratch(planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert "pipeline_double_buffer_c" not in printed
+        assert ("pipeline_double_buffer_c" in printed) == choice.double_buffer_c
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 
@@ -342,9 +344,9 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_non_divisible_tail_dbc(self, test_runner, platform, planner):
-        """Retain padded M/N boundary coverage without automatic dbC."""
-        choice = _choose_a2a3_fp32_dbc(320, 320)
-        assert not choice.double_buffer_c
+        """Retain padded M/N boundary coverage with planner-specific dbC selection."""
+        choice = _choose_a2a3_fp32_dbc(320, 320, planner=planner)
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         case = _DbcDirectStore(320, 320, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
         assert "pipeline_membership" not in printed

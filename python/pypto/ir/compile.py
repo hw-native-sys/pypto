@@ -388,8 +388,9 @@ def compile(  # noqa: PLR0913
             buffer.
         enable_pypto_l0c_double_buffer: Legacy compatibility flag. ``None``
             inherits the stored setting from an outer ``PassContext`` (else
-            ``False``), but automatic dbC is disabled for all planners
-            regardless of this flag. Explicit buffering is preserved.
+            ``False``). Automatic dbC is disabled for PYPTO and DSA_RP;
+            PTOAS retains its existing selection independently of this flag.
+            Explicit buffering is preserved.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Deprecated; use backend_type and execution_mode.

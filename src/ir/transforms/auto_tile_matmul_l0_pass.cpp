@@ -210,10 +210,10 @@ using transform_utils::PreserveCallAttrs;
 
 constexpr const char* kPassName = "AutoTileMatmulL0";
 
-// One policy covers both chooser enumeration and existing-pipeline recognition.
-// Distinct Acc slots establish separation, not the compute/drain overlap needed
-// to justify shrinking a tile to half of L0C. Keep explicit buffering unchanged.
-constexpr bool kAutomaticDbcEnabled = false;
+// Keep the PyPTO-only recognizer disabled independently of PTOAS's chooser
+// policy. Distinct Acc slots do not establish profitable compute/drain overlap;
+// caller-owned explicit buffering remains unchanged.
+constexpr bool kAutomaticPipelineDbcEnabled = false;
 
 ExprPtr MakeIndex(int64_t v, const Span& span) {
   return std::make_shared<ConstInt>(v, DataType::INDEX, span);
@@ -1142,11 +1142,13 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // PTOAS retain the operand-stationary candidates.
   cfg.allow_a_stationary = !force_output_stationary;
   cfg.allow_b_stationary = !force_output_stationary;
-  // Exclude dbC before enumeration: every planner must select its genuine
-  // single-C optimum at the full L0C budget, not strip buffering from a tile
-  // already selected at half capacity. The legacy opt-in remains API-compatible
-  // but cannot override this policy.
-  cfg.allow_double_buffer_c = kAutomaticDbcEnabled;
+  // PyPTO and DSA-RP select their genuine single-C optimum at full capacity,
+  // rather than strip buffering from geometry chosen at half capacity. Preserve
+  // PTOAS's existing dbC enumeration: forcing its chained Mat-scratch kernels
+  // to single-C exposes an unhandled native operand-allocation limitation.
+  // This is planner compatibility, not a claim that PTOAS dbC is faster. The
+  // legacy PyPTO opt-in does not alter either planner policy.
+  cfg.allow_double_buffer_c = ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
@@ -2900,9 +2902,9 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(
 /// over-approximates liveness but guarantees that the loop-wide schedule change
 /// cannot turn a previously fitting function into an L0C overflow.
 std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func) {
-  // The legacy recognizer is subject to the same policy as candidate selection.
-  // Do not inspect or annotate existing pipelines while automatic dbC is off.
-  if (!kAutomaticDbcEnabled) return {};
+  // This recognizer historically targets PyPTO only. Restoring PTOAS chooser
+  // enumeration does not enable automatic annotation of existing L0 pipelines.
+  if (!kAutomaticPipelineDbcEnabled) return {};
   const auto* ctx = PassContext::Current();
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
   // #2131 explicitly targets the PyPTO planner. PTOAS already gives the

@@ -187,7 +187,7 @@ def _choose_a2a3_l0(
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
-    cfg.allow_double_buffer_c = False
+    cfg.allow_double_buffer_c = planner == MemoryPlanner.PTOAS
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
@@ -1382,8 +1382,8 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
 _MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
 _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
-# Every row is (M, K, N, chosen k). These remain K-only single-C plans under
-# every planner; automatic accumulator double buffering is disabled.
+# Every row is (M, K, N, chosen k). These shapes remain K-only single-C plans
+# even when the PTOAS planner permits automatic accumulator double buffering.
 _AUTOL0_K_SPLIT_SHAPES = [
     (16, 128, 128, 64),
     (64, 192, 128, 64),
@@ -1736,20 +1736,20 @@ class TestMatmulOperations:
         [
             pytest.param(MemoryPlanner.PYPTO, 256, 128, 544, (256, 128, 128), id="pypto"),
             pytest.param(MemoryPlanner.DSA_RP, 48, 352, 96, (48, 96, 32), id="dsa_rp"),
-            pytest.param(MemoryPlanner.PTOAS, 48, 352, 96, (48, 96, 32), id="ptoas"),
+            pytest.param(MemoryPlanner.PTOAS, 48, 352, 96, (48, 32, 352), id="ptoas"),
         ],
     )
     def test_matmul_autol0_a_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
-        """Keep the historical shapes, pricing each in the single-C design space."""
+        """Keep the historical shapes with planner-specific accumulator policy."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
         expected_stationarity = (
             _core_passes.l0_tile_chooser.Stationarity.AStationary
-            if planner == MemoryPlanner.PYPTO
+            if planner != MemoryPlanner.DSA_RP
             else _core_passes.l0_tile_chooser.Stationarity.OutputStationary
         )
         assert choice.stationarity == expected_stationarity
-        assert not choice.double_buffer_c
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0AStationary(
@@ -1770,13 +1770,16 @@ class TestMatmulOperations:
                 planner,
                 platform,
                 id=f"{_planner_tag(planner)}-{platform}",
-                # Mark at collection so the batched harness does not precompile
-                # this known failure. Re-enable when PTOAS can repack the
-                # sequential 16/32 KiB Left buffers into the legal 64 KiB peak.
+                # A false skipif also disables this harness's batch discovery.
+                # Attach a skip only to the diagnosed planner/target pair.
                 marks=pytest.mark.skip(
-                    reason="Pinned PTOAS greedy Left allocation needs 96 KiB for a legal 64 KiB chain"
+                    reason=(
+                        "Pre-existing PTOAS A5 Left packing: the 64-KiB producer followed by two "
+                        "32-KiB consumer buffers requests 96 KiB against 64 KiB; native Tile/Buffer "
+                        "regressions track this exact overflow as a strict expected failure"
+                    ),
                 )
-                if planner == MemoryPlanner.PTOAS and platform in ("a2a3", "a2a3sim")
+                if planner == MemoryPlanner.PTOAS and platform in ("a5", "a5sim")
                 else (),
             )
             for planner in (MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS)
@@ -1833,20 +1836,20 @@ class TestMatmulOperations:
         [
             pytest.param(MemoryPlanner.PYPTO, 192, 64, 512, (64, 512, 64), id="pypto"),
             pytest.param(MemoryPlanner.DSA_RP, 64, 80, 256, (64, 256, 16), id="dsa_rp"),
-            pytest.param(MemoryPlanner.PTOAS, 64, 80, 256, (64, 256, 16), id="ptoas"),
+            pytest.param(MemoryPlanner.PTOAS, 64, 80, 256, (32, 256, 80), id="ptoas"),
         ],
     )
     def test_matmul_autol0_b_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
-        """Keep the historical shapes, pricing each in the single-C design space."""
+        """Keep the historical shapes with planner-specific accumulator policy."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
         expected_stationarity = (
             _core_passes.l0_tile_chooser.Stationarity.BStationary
-            if planner == MemoryPlanner.PYPTO
+            if planner != MemoryPlanner.DSA_RP
             else _core_passes.l0_tile_chooser.Stationarity.OutputStationary
         )
         assert choice.stationarity == expected_stationarity
-        assert not choice.double_buffer_c
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0BStationary(

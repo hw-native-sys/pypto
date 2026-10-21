@@ -303,8 +303,9 @@ class PassContext:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
         ``enable_pypto_l0c_double_buffer`` remains a stored compatibility
-        flag. Automatic dbC is disabled for every planner regardless of its
-        value; explicit buffering declarations are preserved.
+        flag. Automatic dbC is disabled for PYPTO and DSA_RP; PTOAS retains
+        its existing selection independently of this flag. Explicit buffering
+        declarations are preserved.
 
         ``runtime`` selects the target Simpler runtime ABI; its wire name is
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
@@ -352,7 +353,7 @@ class PassContext:
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
-        """Return the stored legacy flag; automatic dbC remains disabled."""
+        """Return the legacy flag; it does not override the planner's dbC policy."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -594,7 +595,8 @@ def auto_tile_matmul_l0() -> Pass:
     f32-to-bf16/f16 ``rint`` casts fold into the FIXPIPE writeback.
 
     Full-K grids support output-, A-, and B-stationary schedules. Automatic
-    dbC is excluded before selection for all planners and legacy flag values. Eligible calls
+    dbC is excluded before selection for PYPTO and DSA_RP; PTOAS retains its
+    existing selection independently of the legacy flag. Eligible calls
     require static 2D operands with B in Mat and A in Mat or Vec. When the
     chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is needed,
     although a chained result may still be remapped to Mat by the compatible

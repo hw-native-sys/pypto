@@ -2716,8 +2716,8 @@ def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     call in ``with PassContext([], enable_pypto_l0c_double_buffer=True)``, which
     ``ir.compile()`` inherits. ``RunConfig`` does not carry this PassContext-only
     flag, so the active context is the only source. Automatic dbC is disabled
-    under every planner regardless of this value. Existing cache-key handling
-    is retained for compatibility.
+    for PYPTO and DSA_RP; PTOAS retains it independently of this value.
+    Existing cache-key handling is retained for compatibility.
     """
     ctx = _passes.PassContext.current()
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False

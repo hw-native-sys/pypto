@@ -432,7 +432,7 @@ class TestMakeCacheKey:
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
     def test_dbc_double_buffer_flag_does_not_split_non_pypto_key(self, planner):
-        """Non-PYPTO keys omit the PYPTO-only legacy flag; automatic dbC stays disabled."""
+        """Non-PYPTO keys omit the legacy flag; their dbC policy is planner-owned."""
         kwargs: dict[str, Any] = {
             "param_names": ["a"],
             "tensor_shapes": {"a": (8, 8)},

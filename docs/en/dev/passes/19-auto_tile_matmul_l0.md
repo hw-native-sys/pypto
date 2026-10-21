@@ -1,9 +1,10 @@
 # AutoTileMatmulL0 Pass
 
-Automatic L0C double buffering is disabled for every planner, including the
-legacy `enable_pypto_l0c_double_buffer=True` opt-in. AutoTile selects the best
-single-C geometry using the full L0C capacity. Explicit buffering attributes
-are preserved; their lowering is not changed by this policy.
+Automatic L0C double buffering is disabled for PYPTO and DSA_RP, including the
+legacy `enable_pypto_l0c_double_buffer=True` opt-in. These planners select the
+best single-C geometry using the full L0C capacity. PTOAS retains its existing
+automatic dbC selection for native allocator compatibility, independently of
+the legacy flag. Explicit buffering attributes and their lowering are preserved.
 
 L0 tiling for static 2D `tile.matmul`, `tile.matmul_acc`, and `tile.matmul_bias`: pick an L0 tile shape `(m, n, k)` from the active backend's L0 capacities and rewrite the call into a 2-stage pipelined K-loop with per-iter Mat→Left/Right `tile.extract`s. Capacity checks use the accumulator's physical L0C footprint, not just its logical shape. When that footprint exceeds L0c, the pass M/N-tiles a fresh plain or biased matmul, or the canonical frontend split-K create/pipeline/store chain, into `[m, n]` output sub-tiles.
 
@@ -79,7 +80,7 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
    **Placement (direct-store vs Mat-scratch).** Both grids hand each `[m, n]` Acc sub-tile to a `SubtilePlacer`. The **`DirectGmPlacer`** stores it to the DDR output (`tile.store`, above). The **`MatScratchPlacer`** instead keeps the whole `[M, N]` result on-chip in an L1/**Mat** scratch — created once with `tile.create(target_memory=Mat)` (whose implicit NZ TileView `col_major/row_major` is the matmul-operand layout), then each sub-tile is assembled in place via `tile.assemble(scratch, sub, [mi, ni])`. For the low-precision bf16/f16 scratch used by the chained path this Acc→Mat writeback lowers to FIXPIPE `pto.tinsert`; a supported same-dtype full-window assemble uses `pto.subview` + `pto.tmov`. The pass selects Mat-scratch when the matmul result's uses are **all** matmul-operand reads *and* the `[M, N]` scratch fits the backend handler's Mat capacity (`GetCapacityBytes(MemorySpace::Mat)`) — a conservative necessary-condition gate that keeps oversized chained matmuls on the deferred `PH-AT-006` path instead of emitting an impossible on-chip allocation (a full packed-peak check that also accounts for coexisting Mat tensors is a follow-up). On selection it remaps the result `Var` to the scratch so the consumer reads it on-chip. `tile.assemble`'s `set_output_memory_inherit_input()` makes the chain share one Mat base, so the assemble is in place (no unsupported Mat→Mat preservation copy). Both the split-K (unrolled, constant offsets) and full-K (pipelined, loop-variable offsets) grids drive either placer.
 
-   > **Legacy-PyPTO limitation — operand-stationary chained producers + L0 packing.** A chained-matmul (Mat-scratch) producer shares L0 with its consumer (sequential; the intermediate stays in L1, never DDR — the `L0C→L1→L0A` trip). An A/B-stationary producer pins one monolithic full-L0 operand buffer while a pipelined consumer needs multiple smaller buffers. The legacy PYPTO planner's `AllocateMemoryAddr` bump-stacks reuse classes and never subdivides a freed region (for example, reusing a 64 KB producer buffer for one 32 KB consumer slot wastes 32 KB, and the other slot spills → L0 overflow), so the pass forces Mat-scratch producers to **output-stationary only under that planner**. `DSA_RP` and `PTOAS` retain the chooser's operand-stationary schedule. This does not guarantee native allocator success for every buffer-size sequence; the known A2/A3 PTOAS chained-matmul limitation remains separate from this policy. Adding equivalent lifetime-aware subdivision to the legacy allocator is tracked by [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908).
+   > **Legacy-PyPTO limitation — operand-stationary chained producers + L0 packing.** A chained-matmul (Mat-scratch) producer shares L0 with its consumer (sequential; the intermediate stays in L1, never DDR — the `L0C→L1→L0A` trip). An A/B-stationary producer pins one monolithic full-L0 operand buffer while a pipelined consumer needs multiple smaller buffers. The legacy PYPTO planner's `AllocateMemoryAddr` bump-stacks reuse classes and never subdivides a freed region (for example, reusing a 64 KB producer buffer for one 32 KB consumer slot wastes 32 KB, and the other slot spills → L0 overflow), so the pass forces Mat-scratch producers to **output-stationary only under that planner**. `DSA_RP` and `PTOAS` retain the chooser's operand-stationary schedule. PTOAS additionally retains its previous dbC enumeration to avoid the A2/A3 Left-memory packing regression exposed by forcing this chain to single-C. Adding equivalent lifetime-aware subdivision to the legacy allocator is tracked by [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908).
 7. **Rewrite the enclosing `SeqStmts`** — substitute uses of the original matmul's `Var` (K-only) or the consumer store's result (M/N) with the new `return_var`. Substitution is scoped to the `SeqStmts` that contains the rewrite, so it does not leak into sibling regions.
 
 8. **Preserve existing L0 pipelines** — automatic accumulator-buffer recognition is disabled before analysis. An explicit `pipeline_double_buffer_c` attribute remains unchanged.
@@ -108,11 +109,24 @@ held operand is pinned **single-buffered** across the moving grid (`k == K`) by
 a `ForKind::Sequential` outer loop in `BuildFullKPipelined`; a pipelined outer
 loop would require twice its full-L0 budget.
 
-**Automatic dbC selection is disabled.** `AutoTileMatmulL0` sets
-`allow_double_buffer_c=false` before invoking `ChooseL0Tile`, independently of
-the planner and the stored legacy flag. It also declines automatic recognition
-of existing L0 pipelines. It does not select at half capacity and then strip
-the buffering: the chooser searches its genuine single-C design space.
+**Planner-specific automatic dbC policy.** `AutoTileMatmulL0` sets
+`allow_double_buffer_c=false` before invoking `ChooseL0Tile` for PYPTO and
+DSA_RP, regardless of the stored legacy flag. These planners search the genuine
+single-C design space, rather than selecting at half capacity and stripping
+the buffering afterward. PTOAS retains `allow_double_buffer_c=true`: forcing
+its existing chained-matmul workloads to single-C exposes a native Left-memory
+packing limitation. Preserving its previous enumeration avoids that compile
+regression; it does not repair the allocator or establish a dbC speedup.
+Automatic recognition of existing L0 pipelines remains disabled for all planners.
+
+The original BF16 `(256x256 @ 256x256) @ 256x64` chain still exposes a
+**pre-existing PTOAS A5 limitation** with this preserved policy: a 64 KiB Left
+producer buffer precedes two co-live 32 KiB consumer buffers, but native
+whole-buffer reuse requests 96 KiB instead of subdividing the dead producer's
+storage. The same emitted program fails on the pre-policy base. Native Tile/Buffer
+tests track that exact overflow as a strict expected failure; the system test
+excludes only PTOAS on A5/A5 simulation. A2/A3 PTOAS coverage is restored.
+This policy does not repair PTOAS allocation or change the numerical workload.
 
 The chooser API retains its dbC design points for explicit cost-model queries;
 its formulas and hardware constants are unchanged. Explicit buffering IR still

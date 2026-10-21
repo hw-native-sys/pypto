@@ -197,8 +197,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         enable_pypto_l0c_double_buffer: Stored legacy flag resolved from the
             active ``PassContext``. Its existing key representation is retained
             for compatibility: included for ``PYPTO``, canonicalized to false
-            for ``DSA_RP`` and ``PTOAS``. Automatic dbC is disabled under all
-            planners regardless of this value.
+            for ``DSA_RP`` and ``PTOAS``. Automatic dbC is disabled for PYPTO
+            and DSA_RP; PTOAS retains it independently of this value.
         runtime: Effective Simpler runtime ABI resolved from the active
             ``PassContext``. Included in the key because it is baked into the
             artifact's ``kernel_config.py`` and decides which worker can bind
