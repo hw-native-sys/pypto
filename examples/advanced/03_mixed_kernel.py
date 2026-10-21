@@ -71,11 +71,11 @@ def mixed_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[p
     """
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        # The [128,128] FP32 tile that crosses the cube/vector boundary is 64KB.
-        # The C2V ring defaults to 2 slots of it (128KB), which fits the vector
-        # buffer; pl.cross_core_slot(slot_num=...) buys more cube run-ahead, but
-        # 4 slots (256KB) would already overflow that budget here.
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+        # Each C2V slot reserves 64 KiB for the [128,128] FP32 crossing tile.
+        # Each vector unit also needs separate 32 KiB bias and result tiles.
+        # One slot uses 128 KiB total; the default two slots would need 192 KiB,
+        # exceeding the 184 KiB vector budget on Ascend 910B.
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
         name_hint="mixed_up_down",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)  # cube (AIC)
@@ -88,7 +88,8 @@ def mixed_matmul_bias_lr(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Ou
     """Same as :func:`mixed_matmul_bias`, halved along the column axis."""
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
+        # The column split has the same ring and local-tile memory budget.
+        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT), pl.cross_core_slot(slot_num=1)],
         name_hint="mixed_left_right",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)

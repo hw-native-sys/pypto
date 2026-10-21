@@ -2923,7 +2923,7 @@ LocalMNFoldPlan AnalyzeLocalMNFoldPlan(const AssignStmtPtr& assign, const Siblin
       return plan;
     }
     scratch_bytes = m_extent * n_extent * bytes;
-    const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
+    const uint64_t mat_capacity = handler ? handler->GetCapacityBytes(MemorySpace::Mat) : 0;
     if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
       plan.diagnostic_message = "chained-matmul Mat scratch (" + std::to_string(scratch_bytes) +
                                 " bytes) exceeds Mat capacity (" + std::to_string(mat_capacity) +
@@ -2990,7 +2990,7 @@ LocalMNFoldPlan AnalyzeLocalMNFoldPlan(const AssignStmtPtr& assign, const Siblin
         mandatory_peak += candidate_bytes;
       }
     }
-    const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
+    const uint64_t mat_capacity = handler ? handler->GetCapacityBytes(MemorySpace::Mat) : 0;
     if (overflow || mat_capacity == 0 || mandatory_peak > mat_capacity) {
       plan.placement = LocalMNFoldPlacement::kNone;
       plan.allow_dbc = false;

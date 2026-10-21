@@ -1954,7 +1954,7 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref,
 
   Emit(selected_slot + " = pto.multi_tile_get " + region->region_ssa + "[" + slot_ssa +
        "] : " + region->mtb_type_str + " -> " + region->slot_type_str);
-  fs_.ssa_to_tile_buf_type[selected_slot] = region->slot_type_str;
+  RegisterTileBufType(selected_slot, region->slot_type_str, needs_view ? nullptr : tile_type);
   if (!needs_view) return true;
 
   INTERNAL_CHECK_SPAN(target.rows <= region->rows && target.cols <= region->cols, span)
@@ -1980,7 +1980,7 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref,
   }
   subview << " : " << region->slot_type_str << " -> " << view_type;
   Emit(subview.str());
-  fs_.ssa_to_tile_buf_type[tile_buf] = view_type;
+  RegisterTileBufType(tile_buf, view_type, tile_type);
   RegisterTileViewName(tile_buf);
   return true;
 }

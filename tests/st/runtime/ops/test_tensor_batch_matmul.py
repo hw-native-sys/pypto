@@ -30,6 +30,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from pypto.pypto_core.passes import MemoryPlanner
 
 
 class TestTensorMatmul2dBy3d(PTOTestCase):
@@ -306,8 +307,9 @@ class TestTensorBatchMatmul3dBy3dBTrans(PTOTestCase):
         *,
         platform: str | None = None,
         config=None,
+        memory_planner: MemoryPlanner | None = None,
     ):
-        super().__init__(config, platform=platform)
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
         # fp32 K-split matmul: the device reduces K in a different order than the
         # single-pass torch golden -> ~K*eps_fp32 drift (~1.5e-5 at K=128), above the
         # 1e-5 default for near-zero (cancellation) elements. Observed CI flake
@@ -322,7 +324,9 @@ class TestTensorBatchMatmul3dBy3dBTrans(PTOTestCase):
         self.N = n
 
     def get_name(self) -> str:
-        return f"tensor_batch_matmul_3d_by_3d_btrans_{self.B}x{self.M}x{self.K}x{self.N}"
+        planner = self.get_memory_planner()
+        suffix = f"_{planner.name.lower()}" if planner is not None else ""
+        return f"tensor_batch_matmul_3d_by_3d_btrans_{self.B}x{self.M}x{self.K}x{self.N}{suffix}"
 
     def define_tensors(self) -> list[TensorSpec]:
         B, M, K, N = self.B, self.M, self.K, self.N
@@ -485,11 +489,23 @@ class TestTensorBatchMatmulOperations:
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("b,m,k,n", [(4, 64, 128, 512)])
-    def test_tensor_batch_matmul_3d_btrans_not_fit(self, test_runner, platform, b, m, k, n):
-        """Large b_trans batch_matmul whose whole lhs+rhs exceed L1 -> the capacity gate
-        falls back to a PER-BATCH load of each operand (+ per-batch transpose_view),
-        instead of the whole-load + slice path. Verifies the !fit path end-to-end."""
-        result = test_runner.run(TestTensorBatchMatmul3dBy3dBTrans(b=b, m=m, k=k, n=n, platform=platform))
+    @pytest.mark.parametrize(
+        "planner",
+        [
+            pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, id="dsa-rp"),
+            pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
+        ],
+    )
+    def test_tensor_batch_matmul_3d_btrans_not_fit(self, test_runner, platform, b, m, k, n, planner):
+        """Issue #2872: per-batch loads and L0B blocking must work for every planner.
+
+        Whole lhs+rhs exceed L1, so the capacity gate selects per-batch loads.
+        AutoTile must then split the 256 KiB RHS into legal 64 KiB L0B panels.
+        """
+        result = test_runner.run(
+            TestTensorBatchMatmul3dBy3dBTrans(b=b, m=m, k=k, n=n, platform=platform, memory_planner=planner)
+        )
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)

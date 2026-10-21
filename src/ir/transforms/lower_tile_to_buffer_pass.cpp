@@ -51,9 +51,9 @@
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
 #include "pypto/ir/transforms/utils/multi_buffer_schedule.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
@@ -817,7 +817,9 @@ class TileToBufferMutator : public IRMutator {
  public:
   TileToBufferMutator(const StorageIndex& storage, std::map<const Stmt*, std::vector<StmtPtr>> definitions,
                       bool addressless, bool guarded_valid)
-      : storage_(storage), guarded_valid_(guarded_valid), definitions_(std::move(definitions)),
+      : storage_(storage),
+        guarded_valid_(guarded_valid),
+        definitions_(std::move(definitions)),
         addressless_(addressless) {}
 
   StmtPtr VisitStmt(const StmtPtr& stmt) override {
