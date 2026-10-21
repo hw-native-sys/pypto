@@ -52,6 +52,51 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 内部状态，或修改编译器/源码文件。持久复用还需要完整的
 [产物身份与缓存策略](../10-jit-cache.md)。
 
+### JIT 内联 helper 的 Tile 参数
+
+内联 helper 可以接收显式声明类型的片上 Tile：
+
+```python
+@pl.jit.inline(auto_scope=False)
+def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]) -> pl.Tile:
+    return tile
+```
+
+专门化（specialization）保留声明的形状、数据类型和内存空间，并折叠注解中引用的
+模块与闭包常量。如果延迟求值的注解引用 helper 自身的 `pl.constexpr` 参数，
+会先代入该调用的 constexpr 绑定，再求值注解；该绑定优先于模块或闭包中的同名常量。
+不同绑定会生成各自的 helper 专门化。`p.Tile` 或直接导入的 `Tile` 等 DSL 别名
+会转换为规范的 `pl` 路径，并保留 `TileView`、`MemRef` 元数据；用户恰好定义了
+无关的同名变量 `pl`，也不会干扰生成结果。若工厂函数的局部常量仅用于立即求值的
+Tile 注解、没有进入函数闭包，专门化可以保留原函数已经求值的注解。
+即使部分形状轴依赖 helper 形参，其他独立的形状轴与 dtype 仍会保留，依赖形参的
+部分则逐次代入调用参数；合并后的类型声明同样参与缓存身份计算。内存空间 constexpr
+同样逐次代入，并保留独立的工厂形状。元数据替换需保持原有类别，无法确定类别时
+会给出明确错误。若同一个表达式
+同时引用形参与无法恢复的工厂局部值，请把该局部值作为另一个 constexpr 参数传入，
+或在 helper 函数体中引用它以保留闭包。
+仅被 Tile 参数类型引用的动态符号也会生成模块级
+`pl.dynamic()` 声明，不再依赖 Tensor 参数同时引用这些符号。
+生成的符号名与 Tile 或 Tensor 形参同名时也会保留声明；真实的 Scalar 维度形参仍使用局部绑定。
+自由动态符号与不同的 Scalar 形参共用名字时，专门化会明确报告歧义；请为自由符号使用唯一的 `pl.dynamic()` 名字。
+
+`InlineFunctions` 在代入实参之前检查 Tile 的数据类型、物理维数与形状，以及双方
+已明确指定的内存空间是否冲突。泛型物理维度绑定到实参的物理尺寸，有效尺寸不参与
+这一检查；支持 `2*M` 绑定到 `16`、得到 `M=8` 等整数仿射绑定。
+推导前先代入已知 Scalar 实参：`n=8`、`n+M=16` 可推导出 `M=8`。
+不同 Tile 实参可以独立绑定各自的泛型物理维度，helper 返回 Tile 形参时也遵循这一规则。
+`tmp = second; return tmp` 等简单不可变别名也会沿用对应实参的返回类型。
+与 Tensor 类型、显式 Tile 视图或 Scalar 形参共用的维度仍需满足共享约束，没有返回值的 helper 也会检查。
+Scalar 实参值也约束只出现在视图中的维度：声明有效尺寸为 `n` 时，`n=8` 不能匹配实际有效尺寸 `3`。
+`n - 1` 等依赖 Scalar 的复合视图表达式也会在代入实参后比较，覆盖有效尺寸、stride 和 offset。
+这也包含通过 `rows = 2*n` 等共享维度间接依赖 Scalar 的表达式。
+实参省略有效形状时使用物理形状，省略 offset 时使用零；依赖 Scalar 的 stride 约定需要实参具有显式 stride 元数据。
+JIT 专门化也会保留嵌套 `pl.Tuple` 参数注解，包括其中完整的 Tile 类型、动态符号和逐次调用的 constexpr 绑定。
+tuple 参数内的 Tile 也会递归检查相同的物理类型和视图约束。
+为 Tile 注解生成的动态维度声明名必须使用 Python 规范化后可赋值的合法标识符，不能是 Python 关键字，也不能覆盖 DSL 别名 `pl` 或 `pld`。
+内联（inlining）直接代入调用方的 Tile，无需复制，并保留其有效形状
+（valid shape）。Tile 参数仅用于内联 helper，不会扩展到设备派发接口。
+
 ### 编译选项与诊断请求
 
 JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选项。

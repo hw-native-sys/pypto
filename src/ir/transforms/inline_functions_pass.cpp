@@ -22,19 +22,23 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
@@ -720,12 +724,121 @@ class NestedInlineCallHoister : public IRMutator {
 // describe different buffers, so operator results follow their actual operands.
 // =============================================================================
 
+// Inline arguments retain their caller-owned views, but the declared physical
+// Tile contract must be checked before replacing a formal with its actual.
+bool ContainsTileType(const TypePtr& type) {
+  if (As<TileType>(type)) return true;
+  if (auto tuple = As<TupleType>(type)) {
+    for (const auto& element : tuple->types_) {
+      if (ContainsTileType(element)) return true;
+    }
+  }
+  return false;
+}
+
+void ValidateInlineTileType(const TypePtr& expected_type, const TypePtr& actual_type,
+                            const std::unordered_map<const Var*, ExprPtr>& scalar_args,
+                            const std::string& context, const Span& span) {
+  if (auto expected_tuple = As<TupleType>(expected_type)) {
+    auto actual_tuple = As<TupleType>(actual_type);
+    CHECK_SPAN(actual_tuple, span) << context << "expected tuple argument, got "
+                                   << (actual_type ? actual_type->TypeName() : "an untyped value");
+    CHECK_SPAN(expected_tuple->types_.size() == actual_tuple->types_.size(), span)
+        << context << "tuple arity mismatch: expected " << expected_tuple->types_.size() << ", got "
+        << actual_tuple->types_.size();
+    for (size_t i = 0; i < expected_tuple->types_.size(); ++i) {
+      ValidateInlineTileType(expected_tuple->types_[i], actual_tuple->types_[i], scalar_args,
+                             context + "tuple element[" + std::to_string(i) + "]: ", span);
+    }
+    return;
+  }
+  auto expected = As<TileType>(expected_type);
+  if (!expected) return;
+  auto actual = As<TileType>(actual_type);
+  CHECK_SPAN(actual, span) << context << "expected Tile argument, got "
+                           << (actual_type ? actual_type->TypeName() : "an untyped value");
+  CHECK_SPAN(expected->dtype_ == actual->dtype_, span)
+      << context << "dtype mismatch: expected " << expected->dtype_.ToString() << ", got "
+      << actual->dtype_.ToString();
+  CHECK_SPAN(expected->shape_.size() == actual->shape_.size(), span)
+      << context << "physical rank mismatch: expected " << expected->shape_.size() << ", got "
+      << actual->shape_.size();
+  const auto expected_space = expected->GetMemorySpace();
+  const auto actual_space = actual->GetMemorySpace();
+  if (expected_space && actual_space) {
+    CHECK_SPAN(*expected_space == *actual_space, span)
+        << context << "memory space mismatch: expected " << MemorySpaceToString(*expected_space) << ", got "
+        << MemorySpaceToString(*actual_space);
+  }
+
+  // Bind generic dimensions per Tile from physical extents only. The general
+  // call-type deduction also binds valid extents, which can legitimately be
+  // smaller and must not constrain this check. Scalar shape parameters still
+  // use their actual values, and repeated dimensions within one Tile agree.
+  // Reuse structural expression binding (e.g. 2*M -> 2*N), but strip views
+  // from these analysis-only descriptors so valid extents never bind M.
+  var_collectors::VarDefUseCollector shape_vars;
+  for (const auto& dim : expected->shape_) shape_vars.VisitExpr(dim);
+  std::unordered_map<const Var*, ExprPtr> constant_scalar_args;
+  for (const auto* var : shape_vars.var_uses_ordered) {
+    if (const auto scalar = scalar_args.find(var); scalar != scalar_args.end()) {
+      if (auto constant = As<ConstInt>(arith::Analyzer().Simplify(scalar->second))) {
+        constant_scalar_args.emplace(var, constant);
+      }
+    }
+  }
+  std::vector<ExprPtr> physical_shape;
+  physical_shape.reserve(expected->shape_.size());
+  for (const auto& dim : expected->shape_) {
+    physical_shape.push_back(transform_utils::Substitute(dim, constant_scalar_args));
+  }
+  auto physical_param = std::make_shared<Var>(
+      "inline_tile", std::make_shared<TileType>(physical_shape, expected->dtype_), span);
+  auto physical_arg =
+      std::make_shared<Var>("inline_tile", std::make_shared<TileType>(actual->shape_, actual->dtype_), span);
+  auto physical_dims = DeduceCallTypeBindings({physical_param}, {physical_arg});
+  for (const auto* var : shape_vars.var_uses_ordered) {
+    if (scalar_args.count(var)) physical_dims.erase(var);
+  }
+  for (size_t axis = 0; axis < expected->shape_.size(); ++axis) {
+    auto dim = transform_utils::Substitute(expected->shape_[axis], scalar_args);
+    dim = transform_utils::Substitute(dim, physical_dims);
+    CHECK_SPAN(DimensionsEqual(dim, actual->shape_[axis]), span)
+        << context << "physical shape dimension[" << axis << "] mismatch: expected " << PythonPrint(dim)
+        << ", got " << PythonPrint(actual->shape_[axis]);
+  }
+}
+
+void ValidateInlineTileArgs(const FunctionPtr& callee, const std::vector<ExprPtr>& args, const Span& span) {
+  std::unordered_map<const Var*, ExprPtr> scalar_args;
+  for (size_t i = 0; i < callee->params_.size(); ++i) {
+    if (As<ScalarType>(callee->params_[i]->GetType())) {
+      scalar_args.emplace(callee->params_[i].get(), args[i]);
+    }
+  }
+  bool has_tile_arg = false;
+  for (size_t i = 0; i < callee->params_.size(); ++i) {
+    const auto& param = callee->params_[i];
+    if (!ContainsTileType(param->GetType())) continue;
+    has_tile_arg = true;
+    const std::string context =
+        "Inline call to '" + callee->name_ + "' parameter '" + param->name_hint_ + "': ";
+    ValidateInlineTileType(param->GetType(), args[i]->GetType(), scalar_args, context, span);
+  }
+  // Empty return types request shared Tile-contract validation, including void
+  // helpers that the parser never needs to run return-type deduction for.
+  if (has_tile_arg) DeduceCallReturnType(callee->params_, args, {}, /*is_inline=*/true);
+}
+
 class InlineCallsMutator : public IRMutator {
  public:
   InlineCallsMutator(const std::unordered_map<std::string, FunctionPtr>& inline_fns,
                      const FunctionPtr& caller, const InlineFunctionMap& functions,
                      const InlineParamBindingMap& param_bindings)
-      : inline_fns_(inline_fns), functions_(functions), param_bindings_(param_bindings) {
+      : inline_fns_(inline_fns),
+        functions_(functions),
+        param_bindings_(param_bindings),
+        validate_tile_args_(caller->func_type_ != FunctionType::Inline) {
     // Signature dimensions are in scope throughout the caller, including when
     // a particular inline call receives only locally allocated buffers.
     for (const auto& param : caller->params_) {
@@ -970,11 +1083,16 @@ class InlineCallsMutator : public IRMutator {
   //   4. Split it into pre-return statements and trailing return values;
   //      reject any non-trailing return.
   SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
-                                    std::vector<VarPtr> dump_vars) {
+                                    std::vector<VarPtr> dump_vars, const Span& span) {
     INTERNAL_CHECK_SPAN(callee->params_.size() == args.size(), callee->span_)
         << "Internal error: inline call to '" << callee->name_ << "' has " << args.size()
         << " argument(s) but callee expects " << callee->params_.size()
         << " (parser/type-checker should have caught arity mismatch before InlineFunctions)";
+
+    // Helper analysis can still carry generic wrapper dimensions. Validate
+    // only when emitting surviving callers, after their actual arguments have
+    // flowed through every nested call in the original helper bodies.
+    if (validate_tile_args_) ValidateInlineTileArgs(callee, args, span);
 
     // Callee-first preprocessing caches alias classification on expanded bodies,
     // but materialization still needs every syntactic def in the original body.
@@ -1267,7 +1385,8 @@ class InlineCallsMutator : public IRMutator {
         if (auto assign = As<AssignStmt>(stmt)) {
           spliced = SpliceAssignCallSite(callee, call->args_, assign->var_, assign->span_, call_dump_vars);
         } else if (auto eval = As<EvalStmt>(stmt)) {
-          spliced = SpliceInlineCallAsEval(callee, CloneInlineBody(callee, call->args_, call_dump_vars));
+          spliced = SpliceInlineCallAsEval(callee,
+                                           CloneInlineBody(callee, call->args_, call_dump_vars, call->span_));
         }
       }
     }
@@ -1280,8 +1399,8 @@ class InlineCallsMutator : public IRMutator {
           if (auto callee = LookupInlineCallee(call)) {
             call = As<Call>(VisitExpr(call));
             call_dump_vars = call->GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
-            spliced = SpliceInlineCallAsReturn(callee, CloneInlineBody(callee, call->args_, call_dump_vars),
-                                               ret->span_);
+            spliced = SpliceInlineCallAsReturn(
+                callee, CloneInlineBody(callee, call->args_, call_dump_vars, call->span_), ret->span_);
           }
         }
       }
@@ -1297,7 +1416,7 @@ class InlineCallsMutator : public IRMutator {
   std::vector<StmtPtr> SpliceAssignCallSite(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
                                             const VarPtr& lhs, const Span& span,
                                             const std::vector<VarPtr>& dump_vars) {
-    auto body = CloneInlineBody(callee, args, dump_vars);
+    auto body = CloneInlineBody(callee, args, dump_vars, span);
     if (InlineReturnsTuple(callee)) {
       std::vector<ExprPtr> sub;
       auto stmts = SpliceInlineCallAsTupleSub(callee, std::move(body), sub);
@@ -1330,6 +1449,7 @@ class InlineCallsMutator : public IRMutator {
   const std::unordered_map<std::string, FunctionPtr>& inline_fns_;
   const InlineFunctionMap& functions_;
   const InlineParamBindingMap& param_bindings_;
+  bool validate_tile_args_;
   std::unordered_set<const Var*> caller_dimensions_;
   bool changed_ = false;
   // LHS Var → return values, populated by SpliceAssignCallSite for multi-return

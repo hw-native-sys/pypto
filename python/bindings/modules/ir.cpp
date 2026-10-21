@@ -2465,7 +2465,7 @@ void BindIR(nb::module_& m) {
 
   // Cross-function call return type deduction
   ir.def("deduce_call_return_type", &DeduceCallReturnType, nb::arg("callee_params"), nb::arg("args"),
-         nb::arg("return_types"),
+         nb::arg("return_types"), nb::arg("is_inline") = false,
          "Deduce return types for a cross-function call by substituting "
          "dynamic shape variables from callee params with actual arg shapes.");
 }

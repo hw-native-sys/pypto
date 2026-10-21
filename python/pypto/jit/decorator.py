@@ -100,6 +100,7 @@ from .specializer import (
     build_specialize_context,
     free_name_source,
     func_name_lookup,
+    tile_annotation_fingerprints,
 )
 
 # ---------------------------------------------------------------------------
@@ -3114,6 +3115,14 @@ class JITFunction:
                 if folded is None:
                     continue
                 records.append((index, func.__module__, func.__qualname__, name, folded))
+            if jit_func._func_type == "inline":
+                # Tile annotations can retain factory values without closure
+                # cells or name DynVars with no body-value rendering. Hash the
+                # canonical annotation snapshot specialization uses.
+                for name, source in tile_annotation_fingerprints(func).items():
+                    records.append(
+                        (index, func.__module__, func.__qualname__, f"<annotation:{name}>", source)
+                    )
         return compute_source_hash([source_hash, json.dumps(records, separators=(",", ":"))])
 
     def _resolve_constexpr_bindings(self, entry_constexpr: Mapping[str, str]) -> _VariantPlan:
@@ -3654,6 +3663,9 @@ class JITFunction:
                 folded = free_name_source(name, namespace)
                 if folded is not None:
                     values.append((index, name, folded))
+            if fn._func_type == "inline":
+                for name, source in tile_annotation_fingerprints(fn._func).items():
+                    values.append((index, f"<annotation:{name}>", source))
             if fn._func_type == "extern":
                 external = external_source_digest(
                     fn._external_source_paths(),
