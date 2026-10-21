@@ -505,10 +505,29 @@ Two properties matter:
 `PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
 cannot describe (slots holding differently shaped tiles, slots declaring
 different valid shapes, two slots live at once inside a loop, a space other than
-Vec / Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as
-a phi, a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape,
+Vec / Mat / Acc, a runtime valid shape, a while-carried slot or a runtime-indexed
+if/for phi, a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape,
 because falling back to per-slot `alloc_tile` would let ptoas plan the slots on
-top of each other.
+top of each other. Compatible sequential regions share storage only if shared
+allocation constraints permit it: `forbid_alias` and target hazards are checked against every prior occupant, not just the first owner.
+An incompatible earliest-free region does not hide another safe free region.
+Load-derived regions have a separate reuse pool; looping written workspaces
+never enter a reusable pool. Explicit no-alias peers are indexed by physical
+region owner, including previous occupants after reuse.
+Static valid extents also key a slotted handle, so same-slot boundary views of identical physical shape cannot share an incompatible `pto.subview`.
+Acc subviews must preserve the physical row count (the L0C column pitch), also
+through Buffer IR; narrowing columns or valid rows does not change that pitch.
+A constant-slot `if` phi selects its region slot before either branch only when
+both yields refer to the same typed slot and their actual handle bindings agree.
+An earlier phi's independent handle must not be mistaken for its inherited slot.
+Different-slot yields retain their
+declared storage and copy into an independent phi destination, preserving any
+incoming value still read after the conditional. Cached handles must dominate
+the current use, including for uniform types; a selection inside a completed
+loop or sibling branch cannot be reused outside that scope.
+Mixed physical Mat slot shapes are rejected: a smaller covering subview cannot
+feed the native Mat-to-Left/Right move. Use uniform physical Mat shapes with
+valid extents for boundaries, or the PyPTO Tile pipeline.
 
 **One slot per iteration.** The co-live rejection is not a shape ptoas fails to
 *type* — it is one it fails to *synchronize*. Two forms of it have gone wrong:

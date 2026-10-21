@@ -249,6 +249,12 @@ def test_auto_tiled_matmul_extracts_l0_windows_from_mat(
     assert names["buffer.extract"] >= 2 and names["buffer.matmul"] + names["buffer.matmul_acc"] >= 2
     text = _compile_native(tmp_path, lowered, ascend_backend, planner != passes.MemoryPlanner.PTOAS)
     assert "pto.textract ins(" in text
+    if planner == passes.MemoryPlanner.PTOAS and ascend_backend == BackendType.Ascend950:
+        # Automatic dbC is disabled before selection. Multi-buffer lowering is
+        # tested independently with explicit slot declarations.
+        assert names["buffer.alloc_multi"] == 0
+        assert names["buffer.get_slot"] == 0
+        assert "pto.alloc_multi_tile" not in text
 
 
 @pl.program

@@ -23,6 +23,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -243,6 +244,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     // MemoryReuse's YieldFixupMutator ensures all branch yields already share
     // the return_var's canonical MemRef, so no codegen-level tmov is needed.
     std::vector<bool> returns_via_scf(op->return_vars_.size(), false);
+    std::vector<bool> shared_slot_phi(op->return_vars_.size(), false);
     std::vector<std::string> scf_return_names;
     std::vector<std::string> scf_return_types;
     std::vector<std::pair<std::string, AllocTileFields>> deferred_tile_valid_shapes;
@@ -291,9 +293,47 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             then_yield && i < then_yield->value_.size() ? ir::AsVarLike(then_yield->value_[i]) : nullptr;
         const auto else_value =
             else_yield && i < else_yield->value_.size() ? ir::AsVarLike(else_yield->value_[i]) : nullptr;
+        const auto memref = ir::GetDefinedMemRef(tile_type);
+        const bool is_slot_phi = GetMultiBufferRegion(memref) != nullptr;
+        auto yields_same_slot = [&](const ir::VarPtr& value) {
+          const auto source = value ? As<TileType>(value->GetType()) : nullptr;
+          return source && source->memref_.has_value() &&
+                 ir::GetDefinedMemRef(source)->base_.get() == memref->base_.get() &&
+                 ir::structural_equal(source, tile_type);
+        };
+        // InitMemRef inherits the then arm's storage, not a proof that the
+        // other arm can overwrite it. Keep explicit producer slots intact;
+        // disagreeing arms copy into an independent phi destination below.
         std::string ret_name =
             TryGetSharedTileBufHandle(tile_type, alloc_fields.type_str, then_value, else_value);
-        if (!ret_name.empty()) {
+        if (is_slot_phi && yields_same_slot(then_value) && yields_same_slot(else_value)) {
+          const auto then_binding = fs_.var_to_mlir.find(GetVarKey(then_value));
+          const auto else_binding = fs_.var_to_mlir.find(GetVarKey(else_value));
+          if (then_binding != fs_.var_to_mlir.end() && else_binding != fs_.var_to_mlir.end() &&
+              then_binding->second == else_binding->second) {
+            // A previous phi may already use an independent destination even
+            // though InitMemRef inherited this slot in its IR type. The actual
+            // bindings, not that inherited type, must agree with the slot.
+            const auto scope = fs_.tile_alloc_scope.find(then_binding->second);
+            const bool expired =
+                scope != fs_.tile_alloc_scope.end() && fs_.active_tile_alloc_scopes.count(scope->second) == 0;
+            shared_slot_phi[i] = then_binding->second == ret_name || (ret_name.empty() && expired);
+          }
+        }
+        if (is_slot_phi && !shared_slot_phi[i]) ret_name.clear();
+        if (shared_slot_phi[i]) {
+          // A constant slot may first be produced inside this if. Select it
+          // here, before either branch, rather than hoisting an unrelated
+          // alloc_tile and marking the slot handle already emitted.
+          if (ret_name.empty()) ret_name = NewNamedTemp(return_var->name_hint_);
+          if (fs_.emitted_tile_alloc_names.insert(ret_name).second) {
+            fs_.tile_alloc_scope[ret_name] = fs_.tile_alloc_scope_stack.back();
+            INTERNAL_CHECK_SPAN(
+                TryEmitMultiTileGet(ir::GetDefinedMemRef(tile_type), tile_type, ret_name, op->span_),
+                op->span_)
+                << "Internal error: planned phi slot must select its multi-buffer region";
+          }
+        } else if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already
           // emitted it before this region.
@@ -372,6 +412,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
           auto src = ir::AsVarLike(yield->value_[i]);
           if (!src) continue;
+          const auto src_tile = As<TileType>(src->GetType());
+          if (src_tile && src_tile->memref_.has_value() && ir::GetDefinedMemRef(src_tile)->slot_count_ > 1 &&
+              !shared_slot_phi[i]) {
+            continue;
+          }
           // Only re-point a branch-local producer; an outer var yielded through
           // the branch is read elsewhere and must keep its own handle.
           if (!IsDefinedInBranch(src.get(), body)) continue;

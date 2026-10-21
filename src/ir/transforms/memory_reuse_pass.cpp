@@ -2984,10 +2984,9 @@ class HazardInputCollector : public IRVisitor {
   /// escapes `reads_tpop` and its output may be coalesced onto `l`'s buffer.
   ///
   /// Two traversals suffice, and a third could never add anything: the base
-  /// sets are complete after the first pass.  `tpop_bases_` only ever takes a
-  /// `tile.tpop_from_aic` def, which is order-independent; `load_derived_bases_`
-  /// additionally takes view outputs, and a view shares its source's base, so
-  /// marking one inserts a base that is already present.  Only the *Var* sets
+  /// sets are complete after the first pass: the load and tpop definitions are
+  /// order-independent, and their zero-copy views share the source's base, so
+  /// marking a view inserts a base that is already present. Only the *Var* sets
   /// grow in the second pass, and those propagate in program order within it.
   /// Both traversals are O(N), so the collector stays linear.
   void Run(const StmtPtr& body) {
@@ -2996,7 +2995,9 @@ class HazardInputCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (GetTileTypeWithMemRef(op->var_->GetType())) {
+    // Cross-core pops and their views intentionally have no general-pool
+    // MemRef. Their provenance still participates in the target hazard guard.
+    if (As<TileType>(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
         // AsVarLike, not As<Var>: an operand may be an enclosing loop's IterArg
         // — the loop-carry shape of `tile.add(x, c_iter)` / `tile.matmul_acc(
@@ -3007,7 +3008,7 @@ class HazardInputCollector : public IRVisitor {
         for (const auto& arg : call->args_) {
           if (auto v = AsVarLike(arg)) input_vars.push_back(v);
         }
-        // load_derived closure: within one traversal defs precede uses, so a
+        // View provenance closure: within one traversal defs precede uses, so a
         // view's source is already classified by the time we reach the view;
         // a source that only becomes tainted across a loop back edge is picked
         // up by the second traversal (see `Run`).
@@ -3015,10 +3016,8 @@ class HazardInputCollector : public IRVisitor {
           MarkLoadDerived(op->var_);
         } else if (IsLegalTileViewOp(call->op_)) {
           for (const VarPtr& in : input_vars) {
-            if (IsLoadDerived(in)) {
-              MarkLoadDerived(op->var_);
-              break;
-            }
+            if (IsLoadDerived(in)) MarkLoadDerived(op->var_);
+            if (IsTpop(in)) MarkTpop(op->var_);
           }
         }
         if (IsOp(call, "tile.tpop_from_aic")) MarkTpop(op->var_);
@@ -3295,8 +3294,9 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
   if (func->func_type_ != FunctionType::AIV) return false;
   if (!backend::BackendConfig::IsConfigured()) return false;
   const auto* ctx = PassContext::Current();
-  if (ctx == nullptr) return false;
-  if (!ctx->GetBackendHandler()->RequiresSplitLoadTpopWorkaround()) return false;
+  // Codegen also consumes these constraints after the pass context has exited.
+  const auto* handler = ctx ? ctx->GetBackendHandler() : backend::GetBackend()->GetHandler();
+  if (!handler->RequiresSplitLoadTpopWorkaround()) return false;
   // A split AIV function needs the guard. The split may be signalled either as a
   // function-level mode (single-mode / standalone kernels carry ``split``) or
   // ONLY as the mode-agnostic ``split_aiv`` marker — multi-mode explicit
@@ -3364,6 +3364,132 @@ struct BoundMember {
   VarPtr var;
   int def_point;
   int last_use_point;
+};
+
+/// Track storage uses through carry/SSA aliases without recursively visiting
+/// initializer expressions at every use. Each alias resolves once to its lexical
+/// initializer, keeping nested-loop traversal O(N log N). A first-iteration
+/// fresh MAD may initialize an empty Acc carry; later-iteration reads then refer
+/// to that produced value, not to the initial empty seed. The seed's complete
+/// storage lifetime is transferred to that producer, never discarded.
+class NonInitializerUseCollector : public IRVisitor {
+ public:
+  std::set<const Var*> used;
+  std::map<const Var*, const Var*> initialized_by;
+  std::map<const Var*, size_t> seed_producers;
+
+ protected:
+  void VisitVarLike_(const VarPtr& var) override {
+    used.insert(var.get());
+    if (const auto source = aliases_.find(var.get());
+        source != aliases_.end() && later_iterations_.count(source->second.owner) == 0) {
+      used.insert(source->second.source);
+    }
+  }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (const auto source = AsVarLike(op->value_)) {
+      aliases_[op->var_.get()] = AliasFor(source);
+    }
+    if (const auto call = As<Call>(op->value_)) definitions_[op->var_.get()] = call;
+    VisitExpr(op->value_);
+  }
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    VisitStmt(op->then_body_);
+    const auto owner = FirstIterationOwner(op->condition_);
+    const bool added = owner && later_iterations_.insert(owner).second;
+    if (op->else_body_) VisitStmt(*op->else_body_);
+    if (added) later_iterations_.erase(owner);
+    RecordInitializingPhi(op, owner);
+  }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    loops_.emplace(op->loop_var_.get(), op.get());
+    BindInitializers(op, op.get());
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    VisitStmt(op->body_);
+    loops_.erase(op->loop_var_.get());
+  }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    BindInitializers(op, nullptr);
+    VisitExpr(op->condition_);
+    VisitStmt(op->body_);
+  }
+
+ private:
+  struct Alias {
+    const Var* source;
+    const ForStmt* owner;
+  };
+
+  [[nodiscard]] Alias AliasFor(const VarPtr& var) const {
+    const auto source = aliases_.find(var.get());
+    return source == aliases_.end() ? Alias{var.get(), nullptr} : source->second;
+  }
+
+  [[nodiscard]] const ForStmt* FirstIterationOwner(const ExprPtr& predicate) const {
+    const auto equal = As<Eq>(predicate);
+    if (!equal) return nullptr;
+    for (const auto& [index, start] :
+         {std::pair{equal->left_, equal->right_}, std::pair{equal->right_, equal->left_}}) {
+      const auto variable = AsVarLike(index);
+      const auto expected = variable ? loops_.find(variable.get()) : loops_.end();
+      if (expected != loops_.end() && structural_equal(start, expected->second->start_)) {
+        return expected->second;
+      }
+    }
+    return nullptr;
+  }
+
+  // Normalized branch bodies have a direct trailing yield. Do not recursively
+  // rescan nested branches: an unrecognized initialization stays conservative.
+  [[nodiscard]] CallPtr YieldedProducer(const StmtPtr& body) const {
+    const auto sequence = As<SeqStmts>(body);
+    const auto yield = As<YieldStmt>(sequence && !sequence->stmts_.empty() ? sequence->stmts_.back() : body);
+    if (!yield || yield->value_.size() != 1) return nullptr;
+    const auto var = AsVarLike(yield->value_[0]);
+    const auto definition = var ? definitions_.find(var.get()) : definitions_.end();
+    return definition == definitions_.end() ? nullptr : definition->second;
+  }
+
+  void RecordInitializingPhi(const IfStmtPtr& op, const ForStmt* owner) {
+    if (!owner || !op->else_body_) return;
+    const auto first = YieldedProducer(op->then_body_);
+    const auto next = YieldedProducer(*op->else_body_);
+    if (!first || !IsOp(first, "tile.matmul") || !next || !IsOp(next, "tile.matmul_acc")) return;
+    const auto carry = AsVarLike(next->args_[0]);
+    const auto alias = carry ? aliases_.find(carry.get()) : aliases_.end();
+    if (alias == aliases_.end() || alias->second.owner != owner) return;
+    const auto seed = alias->second.source;
+    const auto definition = definitions_.find(seed);
+    if (definition == definitions_.end() || !IsOp(definition->second, "tile.create")) return;
+    const auto sequence = As<SeqStmts>(op->then_body_);
+    const auto yield = As<YieldStmt>(sequence ? sequence->stmts_.back() : op->then_body_);
+    const auto producer = AsVarLike(yield->value_[0]);
+    const auto seed_memory = GetTypeMemRef(seed->GetType());
+    const auto first_memory = GetTypeMemRef(producer->GetType());
+    if (!seed_memory || !first_memory || !SamePhysicalWindow(*seed_memory, *first_memory)) return;
+    initialized_by.emplace(producer.get(), seed);
+    ++seed_producers[seed];
+  }
+
+  template <typename LoopPtr>
+  void BindInitializers(const LoopPtr& op, const ForStmt* owner) {
+    for (const auto& argument : op->iter_args_) {
+      if (const auto source = AsVarLike(argument->initValue_)) {
+        aliases_[argument.get()] = {AliasFor(source).source, owner};
+      }
+      // A computed initializer is a value use, not just a storage binding.
+      if (!AsVarLike(argument->initValue_)) VisitExpr(argument->initValue_);
+    }
+  }
+
+  std::map<const Var*, Alias> aliases_;
+  std::map<const Var*, const ForStmt*> loops_;
+  std::map<const Var*, CallPtr> definitions_;
+  std::set<const ForStmt*> later_iterations_;
 };
 
 /// Group the tiles a user *independently bound* to each pinned buffer.
@@ -3446,13 +3572,64 @@ class IndependentlyBoundCollector : public IRVisitor {
 /// be quadratic in the member count — which grows with the IR once a binding
 /// inside a loop body is unrolled.
 void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pinned_bases,
-                            const std::map<const Var*, std::pair<int, int>>& var_liveness) {
+                            const std::map<const Var*, std::pair<int, int>>& var_liveness,
+                            const std::map<const Var*, std::set<int>>& phi_family_ids) {
   if (pinned_bases.empty()) return;
+  NonInitializerUseCollector uses;
+  uses.VisitStmt(body);
   IndependentlyBoundCollector collector(pinned_bases, var_liveness);
   collector.VisitStmt(body);
 
+  // Replace an empty seed by its one proven initializing producer, retaining
+  // the seed's entire carry lifetime against every independent occupant. Do
+  // not merge multiple producers through a reused seed or skip any readable
+  // seed. This is a value-alias proof, not an exemption from storage occupancy.
+  std::map<const Var*, const Var*> seed_aliases;
+  for (const auto& [producer, seed] : uses.initialized_by) {
+    if (uses.used.count(seed) == 0 && uses.seed_producers.at(seed) == 1) seed_aliases.emplace(seed, producer);
+  }
+
   for (auto& [slot, members] : collector.by_slot) {
     const Var* base = slot.base;
+    std::set<const Var*> present;
+    for (const auto& member : members) present.insert(member.var.get());
+    std::vector<BoundMember> values;
+    for (auto member : members) {
+      if (const auto alias = seed_aliases.find(member.var.get());
+          alias != seed_aliases.end() && present.count(alias->second)) {
+        continue;
+      }
+      const auto seed = uses.initialized_by.find(member.var.get());
+      if (seed != uses.initialized_by.end() && seed_aliases.count(seed->second) &&
+          present.count(seed->second)) {
+        const auto& interval = var_liveness.at(seed->second);
+        member.def_point = std::min(member.def_point, interval.first);
+        member.last_use_point = std::max(member.last_use_point, interval.second);
+      }
+      values.push_back(std::move(member));
+    }
+    members = std::move(values);
+    // Branch-local sources of one phi are the same value on mutually exclusive
+    // paths, not independent live occupants. Reuse the lifetime analysis's
+    // proven families and retain their full union interval against other tiles.
+    // Only single-family members are collapsed: transitive union of different
+    // return slots through a multi-family source would invent unsafe aliases.
+    std::map<int, BoundMember> families;
+    std::vector<BoundMember> independent;
+    for (const auto& member : members) {
+      auto ids = phi_family_ids.find(member.var.get());
+      if (ids == phi_family_ids.end() || ids->second.size() != 1) {
+        independent.push_back(member);
+        continue;
+      }
+      auto [family, fresh] = families.emplace(*ids->second.begin(), member);
+      if (!fresh) {
+        family->second.def_point = std::min(family->second.def_point, member.def_point);
+        family->second.last_use_point = std::max(family->second.last_use_point, member.last_use_point);
+      }
+    }
+    for (const auto& [id, member] : families) independent.push_back(member);
+    members = std::move(independent);
     std::sort(members.begin(), members.end(),
               [](const BoundMember& a, const BoundMember& b) { return a.def_point < b.def_point; });
     for (size_t i = 1; i < members.size(); ++i) {
@@ -5951,7 +6128,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     static_cast<void>(size);
     result.declared_allocation_bases.insert(base);
   }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness,
+                         lifetimes.phi_family_ids);
 
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {

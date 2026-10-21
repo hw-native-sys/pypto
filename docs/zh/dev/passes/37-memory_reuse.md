@@ -173,6 +173,12 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 代价由作者承担：pin 是用容量换并行度，pin 过头的 kernel 会在 `AllocateMemoryAddr` 处硬报错，
 而不是被静默合并回去。
 
+create 保留其存储占用，包括通过循环携带值（loop carry）和 SSA 别名的读写。
+规范 Acc carry 若在所属循环的首次迭代由 fresh MAD 初始化，且空 seed 没有独立使用、
+只有一个已证明的初始化生产者，则可合并两者的生命周期。完整 seed/carry 区间仍与
+其他独立占用者检查冲突；带初始化条件的 `matmul_acc` 不会豁免存储重叠检查。
+单一 phi family 的源复用已有的已证明别名关系；其完整生命周期并集仍会与独立绑定值冲突。
+
 **重叠检查。** 独立绑定到**同一槽位**的两个 tile 不得同时存活——那不是复用，而是后写的数据
 摧毁了先前 tile 仍需要的内容。该检查按**槽位**而非按分配进行：`pl.MemRef(slots=N)` 声明中位于
 *不同*槽位的两个 tile 本来就应该同时存活（这正是 ping-pong 的用途），只有落在同一槽位的 tile
@@ -204,6 +210,9 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 carry 同时也打破了程序序，因此收集器会对函数体遍历**两次**。污染某条 carry buffer 的 producer 可能位于它所污染的那个 use **之后**——例如 `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p`，从第 1 次迭代起 `w` 就读到了 tpop 值，但单次前向遍历在见到 `p` 之前就已经对 `w` 完成了分类。第三次遍历不会带来任何新信息：第一次遍历后 base 集合即已完备（`tile.tpop_from_aic` 的定义与顺序无关，而 view 与其 source 共享 base），因此第二次遍历中只有 `Var` 集合会增长，且它们在该次遍历内部按程序序传播。两次遍历均为 O(N)。
 
 该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
+共享分配分析也为没有 MemRef 的 tile 及其零复制视图保留 TPOP 来源信息。pass 执行结束后，codegen
+从已配置的 backend 获取相同的目标守卫，不要求活动的 PassContext；显式多缓冲区域复用
+因此也保持这一约束。
 
 ## 被写工作区危害 {#written-workspace-hazard}
 
