@@ -1671,6 +1671,7 @@ jobs:
           git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git build/pypto-lib
 
       - name: Compile every formal library entry
+        id: compile
         env:
           LIB_PLATFORM: ${{ matrix.platform }}
         run: |
@@ -1680,7 +1681,8 @@ jobs:
             --output build/lib-compile-results
 
       - name: Upload compilation logs and manifest
-        if: always()
+        # Keep diagnostics for compile failures without uploading after successful runs.
+        if: failure() && steps.compile.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: pypto-lib-compile-${{ matrix.platform }}
