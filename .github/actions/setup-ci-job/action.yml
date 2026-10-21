@@ -829,7 +829,9 @@ runs:
         # an unchanged pin. Key on what was actually resolved rather than on the
         # file that asks for it, and both holes close at once.
         build_inputs_id="$(printf '%s' "$build_inputs" | sha256sum | cut -c1-12)"
-        cache_epoch=1
+        # Reproduction PR only: force a fresh wheel instead of reusing an older
+        # simpler build that can hide the onboard AICPU warning failure.
+        cache_epoch=a5-class-memaccess-repro-1
         cache_ready=true
         mkdir -p "$wheel_cache" 2>/dev/null || cache_ready=false
         # Guarded, not bare: an unresolvable tree must turn the cache off, not

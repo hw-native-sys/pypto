@@ -1,4 +1,6 @@
 name: CI
+# Reproduction PR only. Keep A5 setup and its metadata/lint prerequisites;
+# disable the other build/device jobs while investigating class-memaccess.
 
 on:
   push:
@@ -335,6 +337,7 @@ jobs:
         extra_args: --all-files
 
   clang-tidy:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Build inputs come from build-constraints.txt rather than from whatever
     # PyPI offers today; pip applies a constraints file to build-dependency
     # installs too, so this reaches the CMake configure below. The path carries
@@ -358,7 +361,6 @@ jobs:
     # Docs-only gate (see the `changes` job) — a prose-only PR touches no C++, and
     # skipping the gate here keeps the scarce cpu pool free.
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
@@ -441,6 +443,7 @@ jobs:
         fi
 
   prebuild-wheels:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Build the pypto and simpler wheels ONCE PER MACHINE, into that host's
     # wheel cache, so the eight jobs below install them instead of each
     # rebuilding the same commit. Nothing depends on this job: setup-ci-job's
@@ -488,7 +491,6 @@ jobs:
     # EXT_SUFFIX), so the two legs cannot collide even if they somehow shared a
     # cache root: they write different slots.
     needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     strategy:
@@ -534,6 +536,7 @@ jobs:
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
   prebuild-wheels-github:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # prebuild-wheels for the GitHub-hosted jobs. Same idea, different
     # plumbing, because GitHub-hosted runners share no disk: there is nothing
     # for a flock to coordinate and nothing that survives the job, so the wheels
@@ -564,7 +567,6 @@ jobs:
     # pinned version. simpler resolves its own pto-isa from
     # runtime/pto_isa.pin at build time, and no ptoas is installed.
     needs: [changes, pre-commit]
-    if: needs.changes.outputs.docs_only != 'true'
     # `packages: read` is not decoration. Declaring a `permissions:` block at
     # all narrows GITHUB_TOKEN to exactly what it lists, and pulling the job
     # container is an authenticated ghcr.io read — so `contents: read` alone
@@ -726,6 +728,7 @@ jobs:
           key: ccache-x86_64-prebuild-${{ github.sha }}
 
   unit-tests:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Build inputs come from build-constraints.txt rather than from whatever
     # PyPI offers today. Both variables on purpose: PIP_BUILD_CONSTRAINT is the
     # one pip applies to build dependencies, and PIP_CONSTRAINT is what older
@@ -766,10 +769,6 @@ jobs:
     # install step falls back to building in place instead, which is what this
     # job did before the prebuild existed.
     needs: [changes, pre-commit, clang-tidy, prebuild-wheels-github]
-    if: >-
-      !cancelled()
-      && needs.pre-commit.result == 'success'
-      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -842,6 +841,7 @@ jobs:
       run: echo "Every changed path is documentation — no build, no tests."
 
   docs-examples:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # The user manual's runnable code blocks, on the path examples-tests cannot
     # cover. That job is skipped for a documentation-only change -- which is
     # exactly when the blocks themselves are being edited -- so without this the
@@ -850,7 +850,6 @@ jobs:
     # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
     # blocks run inside examples-tests, against the code it changed.
     needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.docs_changed == 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, cpu]
@@ -892,6 +891,7 @@ jobs:
             -p a2a3sim --jobs 16
 
   examples-tests:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # The distributed examples ladder — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
     # material cannot silently rot.
@@ -901,7 +901,6 @@ jobs:
     # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
     # instead of rebuilding in an ephemeral container on every PR.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1000,6 +999,7 @@ jobs:
             -p a2a3sim --jobs "$EXAMPLE_JOBS"
 
   codegen-tests:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
     # on-board. --codegen-only skips assembly (ptoas), pto-isa, simpler and
     # device execution (see tests/st/harness/core/test_runner.py), so this
@@ -1017,7 +1017,6 @@ jobs:
     # clang-tidy, so it must not start until that pool's lint job is green.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
@@ -1069,6 +1068,7 @@ jobs:
             --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Batched shard A (mechanism A): the HEAVY device_batch directories — all of
     # tests/st EXCEPT runtime/ops + runtime/cross_core. The batched `Test system
     # tests` step used to run ~7-15 min and dominated the whole job, so it is
@@ -1103,7 +1103,6 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1218,6 +1217,7 @@ jobs:
           checkout-path: st-checkout
 
   system-tests-direct:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # The complement of `system-tests`, sized to balance it:
     #   1. Batched shard B (mechanism A): device_batch on the LIGHT dirs — only
     #      runtime/ops + runtime/cross_core. These have many tests but cheap
@@ -1240,7 +1240,6 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1454,6 +1453,7 @@ jobs:
           checkout-path: st-direct-checkout
 
   dist-system-tests:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
     # paths from set_env.sh). In docker the chip child silent-crashes in
     # comm_init.
@@ -1466,7 +1466,6 @@ jobs:
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1614,10 +1613,10 @@ jobs:
           checkout-path: dist-checkout
 
   pypto-lib-compile:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Compile all formal library entrypoints without executing device code.
     # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
@@ -1692,6 +1691,7 @@ jobs:
           retention-days: 7
 
   pypto-lib-model:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # No container: each model run borrows an NPU from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python
     # models/...` invocation, which compiles + runs in one process, is wrapped).
@@ -1704,7 +1704,6 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1882,6 +1881,7 @@ jobs:
           checkout-path: lib-checkout
 
   serving-guard:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Does a toolchain bump break generation in pypto-serving?
     #
     # `pypto-lib-model` proves the models still compile and run; it does not
@@ -1903,9 +1903,6 @@ jobs:
     #
     # Lint gate + docs-only gate, as every other device job here.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: >-
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.ptoas_version_changed == 'true'
     # Checkout + clone pypto-serving + test only.
     permissions:
       contents: read
@@ -2214,12 +2211,14 @@ jobs:
     #
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree that
     # doesn't lint. Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
+    needs: [changes, toolchain, pre-commit]
     if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, npu-a5]
+    # The reported failing A5 job ran on x86_64. Record the exact runner and HCC
+    # below instead of letting the ARM64 A5 pool substitute a different build.
+    runs-on: [self-hosted, linux, x64, npu-a5]
     defaults:
       run:
         working-directory: a5-checkout
@@ -2237,6 +2236,8 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # This experiment must invoke the compiler rather than reuse cached objects.
+      CCACHE_DISABLE: '1'
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -2251,6 +2252,16 @@ jobs:
           # need the token persisted into .git/config afterward (zizmor artipacked).
           persist-credentials: false
 
+      - name: Record onboard AICPU compiler before setup
+        working-directory: ${{ github.workspace }}
+        run: |
+          printf 'runner=%s arch=%s\n' "$RUNNER_NAME" "$RUNNER_ARCH"
+          printf 'CANN_ROOT=%s\n' "$CANN_ROOT"
+          readlink -f "$CANN_ROOT"
+          "$CANN_ROOT/tools/hcc/bin/aarch64-target-linux-gnu-g++" --version
+          printf 'SIMPLER_DISABLE_WARNINGS_AS_ERRORS=%s\n' \
+            "${SIMPLER_DISABLE_WARNINGS_AS_ERRORS-<unset>}"
+
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
@@ -2263,7 +2274,53 @@ jobs:
           # bundle and carries no conda env, so this is not optional here.
           toolchain: bundle
 
+      - name: Capture generated AICPU warning options
+        if: always()
+        run: |
+          # A failed wheel build must still expose the options it generated.
+          # The actual command is authoritative: a normal CMake variable can
+          # override the WERROR cache entry when the disable env var exists.
+          if [ -f activate.sh ]; then
+            source activate.sh
+          fi
+          printf 'SIMPLER_DISABLE_WARNINGS_AS_ERRORS=%s\n' \
+            "${SIMPLER_DISABLE_WARNINGS_AS_ERRORS-<unset>}"
+          git -C runtime rev-parse HEAD
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("runtime/build/cache")
+          for cache in sorted(root.glob("*/onboard/*/aicpu/CMakeCache.txt")):
+              print(f"=== {cache} ===", flush=True)
+              for line in cache.read_text().splitlines():
+                  if line.startswith(("WERROR:", "CMAKE_CXX_COMPILER:", "CMAKE_CXX_FLAGS:")):
+                      print(line, flush=True)
+              for identity in sorted((cache.parent / "CMakeFiles").glob("*/CMakeCXXCompiler.cmake")):
+                  for line in identity.read_text().splitlines():
+                      if line.startswith(("set(CMAKE_CXX_COMPILER_ID ", "set(CMAKE_CXX_COMPILER_VERSION ")):
+                          print(line, flush=True)
+              commands = cache.parent / "compile_commands.json"
+              if commands.is_file():
+                  for command in json.loads(commands.read_text()):
+                      if Path(command["file"]).name == "runtime_init.cpp":
+                          print(json.dumps(command, indent=2), flush=True)
+          PY
+
+      - name: Preserve AICPU build configuration
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a5-class-memaccess-build-configuration
+          path: |
+            a5-checkout/runtime/build/cache/*/onboard/*/aicpu/CMakeCache.txt
+            a5-checkout/runtime/build/cache/*/onboard/*/aicpu/compile_commands.json
+            a5-checkout/runtime/build/cache/*/onboard/*/aicpu/CMakeFiles/*/CMakeCXXCompiler.cmake
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: mixed-kernel-tests-a5
+        if: false # Compile-only reproduction; do not acquire an NPU card.
         timeout-minutes: 60
         # Mechanism B: one task-submit card session wrapping a single pytest run
         # (no precompile pipeline), executed in-process on the borrowed card. The
@@ -2282,6 +2339,7 @@ jobs:
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
+        if: false # Compile-only reproduction; do not acquire an NPU card.
         timeout-minutes: 60
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
@@ -2298,12 +2356,13 @@ jobs:
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: Kill orphaned task-submit tasks
-        if: always()
+        if: false # No task-submit sessions are created by this reproduction.
         uses: ./.github/actions/kill-orphaned-tasks
         with:
           checkout-path: a5-checkout
 
   system-tests-a5sim:
+    if: false # Reproduction PR: run only A5 setup and its prerequisites.
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
     # alongside it.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
@@ -2315,12 +2374,6 @@ jobs:
     # as before; the prebuild only decides whether the install step has a wheel
     # to use.
     needs: [changes, toolchain, pre-commit, clang-tidy, prebuild-wheels-github]
-    if: >-
-      !cancelled()
-      && needs.changes.outputs.docs_only != 'true'
-      && needs.pre-commit.result == 'success'
-      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
-      && needs.toolchain.result == 'success'
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
