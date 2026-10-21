@@ -46,6 +46,27 @@ def test_pto_codegen_rejects_register_scope_until_lowering_exists():
         codegen.PTOCodegen().generate(_program(scope))
 
 
+@pytest.mark.parametrize("function_type", [ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV])
+@pytest.mark.parametrize(
+    "dtype,kind", [(DataType.FP32, ir.RegKind.VecReg), (DataType.BOOL, ir.RegKind.MaskReg)]
+)
+def test_pto_codegen_rejects_register_typed_parameters_until_lowering_exists(function_type, dtype, kind):
+    """A bare register parameter must fail before the scalar-pointer ABI fallback."""
+    span = ir.Span.unknown()
+    register = ir.Var("r", ir.RegType(64, dtype, kind), span)
+    function = ir.Function(
+        "kernel",
+        [register],
+        [],
+        ir.SeqStmts([], span),
+        span,
+        type=function_type,
+    )
+    program = ir.Program([function], "VFBoundary", span)
+    with pytest.raises(ValueError, match="RegType parameters.*not supported"):
+        codegen.PTOCodegen().generate(program)
+
+
 def test_pto_codegen_rejects_unimplemented_required_hardware_loop():
     with pytest.raises(ValueError, match="Require.*not supported"):
         codegen.PTOCodegen().generate(_program(_loop()))

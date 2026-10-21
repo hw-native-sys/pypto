@@ -319,18 +319,37 @@ class ScalarType(Type):
         """
 
 class RegKind(enum.Enum):
+    """Register descriptor kind."""
+
     VecReg = 0
+    """Vector register holding non-BOOL lanes."""
+
     MaskReg = 1
+    """Predicate register holding BOOL lanes."""
 
 class RegType(Type):
     """Static logical register descriptor, independent of ShapedType storage."""
 
     shape: Final[int]
-    lanes: Final[int]
-    dtype: Final[DataType]
-    kind: Final[RegKind]
+    """Logical register lane count as declared by the shape argument."""
 
-    def __init__(self, shape: int, dtype: DataType, kind: RegKind) -> None: ...
+    lanes: Final[int]
+    """Logical lane count (alias of shape)."""
+
+    dtype: Final[DataType]
+    """Register element data type."""
+
+    kind: Final[RegKind]
+    """Register descriptor kind."""
+
+    def __init__(self, shape: int, dtype: DataType, kind: RegKind) -> None:
+        """Create a register descriptor with a positive logical lane count.
+
+        Args:
+            shape: Logical lane count.
+            dtype: Register element data type.
+            kind: Register descriptor kind.
+        """
 
 class ShapedType(Type):
     """Base class for shaped types (tensors and tiles)."""
@@ -2137,8 +2156,13 @@ class ReturnStmt(Stmt):
         ...
 
 class HardwareLoopPolicy(enum.Enum):
+    """Hardware loop intent."""
+
     Auto = 0
+    """Use the default hardware-loop lowering policy."""
+
     Require = 1
+    """Require hardware-loop lowering."""
 
 class ForStmt(Stmt):
     """For loop statement: for loop_var in range(start, stop, step): body."""
@@ -2200,6 +2224,7 @@ class ForStmt(Stmt):
             span: Source location
             kind: Loop kind (default: Sequential)
             attrs: Loop-level attributes (default: empty)
+            hardware_loop_policy: Hardware-loop intent (default: Auto)
         """
 
 class WhileStmt(Stmt):
@@ -2434,7 +2459,8 @@ class RegScopeStmt(ScopeStmt):
         span: Span,
         leading_comments: list[str] = [],
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Create a register lexical scope statement."""
 
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""

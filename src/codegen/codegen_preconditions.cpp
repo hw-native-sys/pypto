@@ -102,6 +102,19 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   // register boundary and ordinary scf.for emission would ignore Require.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
+    void VisitFunction(const ir::FunctionPtr& func) override {
+      // A bare register parameter has no scope to trigger the check below and
+      // would otherwise fall through to PTO's default pointer parameter ABI.
+      if (ir::IsInCoreType(func->func_type_)) {
+        for (const auto& param : func->params_) {
+          CHECK_SPAN(!ir::As<ir::RegType>(param->GetType()), param->span_)
+              << "RegType parameters are not supported by PTO code generation for "
+              << ir::FunctionTypeToString(func->func_type_) << " function '" << func->name_ << "'";
+        }
+      }
+      ir::IRVisitor::VisitFunction(func);
+    }
+
     void VisitStmt_(const ir::RegScopeStmtPtr& op) override {
       CHECK_SPAN(false, op->span_) << "RegScopeStmt code generation is not supported yet";
     }

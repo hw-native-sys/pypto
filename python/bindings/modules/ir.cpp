@@ -410,13 +410,13 @@ void BindIR(nb::module_& m) {
   BindFields<VoidType>(void_type_class);
 
   nb::enum_<RegKind>(ir, "RegKind", "Register descriptor kind")
-      .value("VecReg", RegKind::VecReg)
-      .value("MaskReg", RegKind::MaskReg);
+      .value("VecReg", RegKind::VecReg, "Vector register holding non-BOOL lanes")
+      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes");
   auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
   reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape"), nb::arg("dtype"),
-                     nb::arg("kind"));
+                     nb::arg("kind"), "Create a register descriptor with a positive logical lane count");
   BindFields<RegType>(reg_type_class);
-  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes);
+  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes, "Logical lane count (alias of shape)");
 
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
@@ -1678,8 +1678,8 @@ void BindIR(nb::module_& m) {
       .export_values();
 
   nb::enum_<HardwareLoopPolicy>(ir, "HardwareLoopPolicy", "Hardware loop intent")
-      .value("Auto", HardwareLoopPolicy::Auto)
-      .value("Require", HardwareLoopPolicy::Require);
+      .value("Auto", HardwareLoopPolicy::Auto, "Use the default hardware-loop lowering policy")
+      .value("Require", HardwareLoopPolicy::Require, "Require hardware-loop lowering");
 
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
@@ -1840,7 +1840,8 @@ void BindIR(nb::module_& m) {
                                 ConvertAttrsFromPython(attrs));
       },
       nb::arg("name_hint"), nb::arg("body"), nb::arg("span"),
-      nb::arg("leading_comments") = std::vector<std::string>{}, nb::arg("attrs") = nb::none());
+      nb::arg("leading_comments") = std::vector<std::string>{}, nb::arg("attrs") = nb::none(),
+      "Create a register lexical scope statement");
   BindFields<RegScopeStmt>(reg_scope_stmt_class);
   reg_scope_stmt_class.def_prop_ro(
       "attrs", [kwargs_to_pydict](const RegScopeStmtPtr& self) { return kwargs_to_pydict(self->attrs_); },

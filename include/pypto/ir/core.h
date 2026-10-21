@@ -139,7 +139,6 @@ enum class ObjectKind {
   // Op kinds
   Op,
   GlobalVar,
-
 };
 
 /**
