@@ -130,20 +130,16 @@ std::vector<std::string> InlineExpansionOrder(
 // sites of the same inline function. Pass execution is sequential, so a
 // plain static int suffices.
 //
-// `__` is reserved by the IR auto-naming utility (see
-// auto_name_utils.h::ValidateBaseName) for its own `name__role__version`
-// scheme; re-using `__` here trips the validator when downstream passes rename
-// the inlined Vars again.
-//
-// A single-underscore *suffix* is not enough on its own: `orig` may already end
-// in one — `_` is Python's throwaway name and the documented loop variable of
-// `for _ in pl.split_aiv(...)` — in which case plain concatenation *creates* the
-// reserved delimiter out of two individually-legal halves. JoinNameSuffix trims
-// that tail, so `_` inlines to `_inline7` rather than the rejected `__inline7`,
-// while leaving an already-invalid `a__b` invalid for ValidateBaseName to report.
+// Preserve auto-name role/version suffixes for downstream renamers. Ordinary
+// names use an underscore-safe join so `_` stays valid and `a__b` stays invalid.
 std::string FreshName(const std::string& orig) {
   static int counter = 0;
-  return auto_name::JoinNameSuffix(orig, "inline" + std::to_string(counter++));
+  const auto suffix = "inline" + std::to_string(counter++);
+  const auto parsed = auto_name::Parse(orig);
+  if (parsed.role.has_value() || parsed.version.has_value()) {
+    return auto_name::AddQualifier(orig, suffix);
+  }
+  return auto_name::JoinNameSuffix(orig, suffix);
 }
 
 // Counts ReturnStmts anywhere inside a body. Splicing only handles a trailing

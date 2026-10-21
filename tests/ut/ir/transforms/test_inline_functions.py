@@ -3535,13 +3535,94 @@ class TestInlineFunctionsDynamicShapes:
 
 
 class TestInlineFunctionsReservedDelimiter:
-    """A local whose name ends in `_` must not fuse with the `_inlineN` suffix.
+    """Inlining keeps ordinary names and compiler-generated names valid for SSA.
 
     `assert_structural_equal` compares under alpha-equivalence, so it cannot see
     a name-shape regression. These assert the produced name text directly, and
     that the first downstream renamer (ConvertToSSA, the first pass to re-derive
     an auto-name from a Var) accepts the result.
     """
+
+    def test_nested_hoist_temporaries_remain_valid_for_ssa(self):
+        """Issue #3041: nested inline expressions and repeated calls remain valid for SSA."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def base(self, requests: pl.Scalar[pl.INDEX], tokens: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                group_base = (requests + 16) // 16 * 16
+                group_end = group_base + 4 * tokens
+                return (group_end + 15) // 16 * 16
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def layout(
+                self, requests: pl.Scalar[pl.INDEX], tokens: pl.Scalar[pl.INDEX]
+            ) -> pl.Scalar[pl.INDEX]:
+                return self.base(requests, tokens) + 48 + 4 * tokens
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def wrapper(
+                self, requests: pl.Scalar[pl.INDEX], tokens: pl.Scalar[pl.INDEX]
+            ) -> pl.Scalar[pl.INDEX]:
+                result = self.layout(requests, tokens)
+                return result + 2 * requests
+
+            @pl.function
+            def main(self, requests: pl.Scalar[pl.INDEX], tokens: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                first = self.wrapper(requests, tokens)
+                second = self.wrapper(tokens, requests)
+                return first + second
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, requests: pl.Scalar[pl.INDEX], tokens: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                first_group_base = (requests + 16) // 16 * 16
+                first_group_end = first_group_base + 4 * tokens
+                first_base = (first_group_end + 15) // 16 * 16
+                first_layout = first_base + 48 + 4 * tokens
+                first = first_layout + 2 * requests
+                second_group_base = (tokens + 16) // 16 * 16
+                second_group_end = second_group_base + 4 * requests
+                second_base = (second_group_end + 15) // 16 * 16
+                second_layout = second_base + 48 + 4 * requests
+                second = second_layout + 2 * tokens
+                return first + second
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(passes.convert_to_ssa()(After), passes.convert_to_ssa()(Expected))
+
+    def test_auto_names_remain_valid_for_ssa(self):
+        """Compiler-generated role, version, and hoist names survive inlining."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                role__tmp = x + 1
+                version__v0 = role__tmp * 2
+                t__inline_arg_v0 = version__v0 + 3
+                return t__inline_arg_v0
+
+            @pl.function
+            def main(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                result = self.helper(x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                first = x + 1
+                second = first * 2
+                third = second + 3
+                result = third
+                return result
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(passes.convert_to_ssa()(After), passes.convert_to_ssa()(Expected))
 
     def test_underscore_local_does_not_fuse(self):
         """`_` is Python's throwaway name — inlining must not yield `__inlineN`."""
