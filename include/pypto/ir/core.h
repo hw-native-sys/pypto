@@ -99,10 +99,8 @@ enum class ObjectKind {
   RuntimeScopeStmt,
   CommDomainScopeStmt,
   GraphScopeStmt,
-  // Register scope is kept in the scope-statement region. Its explicit value
-  // preserves the numeric identity of the existing kinds below.
-  RegScopeStmt = 85,
-  SeqStmts = 56,
+  RegScopeStmt,
+  SeqStmts,
   EvalStmt,
   BreakStmt,
   ContinueStmt,
@@ -127,12 +125,10 @@ enum class ObjectKind {
   PrefetchAsyncContextType,
   AsyncEventType,
   AsyncSessionType,
-  // Register descriptors are types, so keep RegType with the other type kinds.
-  // Its explicit value preserves the numeric identity of the appended kind.
-  RegType = 84,
+  RegType,
 
   // Other IR node kinds
-  Function = 79,
+  Function,
   Program,
   WindowBuffer,
 
