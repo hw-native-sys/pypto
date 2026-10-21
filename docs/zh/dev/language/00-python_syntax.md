@@ -378,7 +378,7 @@ pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, sl
 `pl.system.barrier(*, pipe)` 要求传入 `pl.PipeType.V`、`M` 或 `ALL` 成员。
 它为所选流水线的前后工作建立顺序，不占用事件槽。`ALL` 只覆盖当前核；跨核屏障
 使用 `pl.system.syncall(...)`。原有 `bar_v()`、`bar_m()`、`bar_all()` 包装接口
-继续兼容，Python IR printer 统一打印为对应的 `barrier(pipe=...)` 写法。内部 IR
+已移除，Python IR printer 统一打印为对应的 `barrier(pipe=...)` 写法。内部 IR
 算子名及原生屏障下沉保持不变。独立的 `set_flag` / `wait_flag` 调用仍保留具有
 源、目标方向的流水线事件语义。
 

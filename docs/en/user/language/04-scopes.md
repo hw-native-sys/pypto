@@ -386,15 +386,15 @@ both loads above would wait for `b` as well as `a` before vector computation.
 Barriers neither allocate nor consume event slots; an outstanding `set_flag`
 still requires its matching `wait_flag`.
 
-Use the unified spelling for new code:
+Migrate removed APIs to the unified spelling:
 
-| Existing compatible call | Unified call |
-| ------------------------ | ------------ |
+| Removed call | Unified call |
+| ------------ | ------------ |
 | `pl.system.bar_v()` | `pl.system.barrier(pipe=pl.PipeType.V)` |
 | `pl.system.bar_m()` | `pl.system.barrier(pipe=pl.PipeType.M)` |
 | `pl.system.bar_all()` | `pl.system.barrier(pipe=pl.PipeType.ALL)` |
 
-The old wrappers remain supported. The Python IR printer emits the unified
+The old wrappers are no longer available. The Python IR printer emits the unified
 spelling for all three forms, with the same internal IR and native barriers.
 `ALL` does not synchronize different cores; cross-core arrival uses
 `pl.system.syncall(...)` as described below.

@@ -5492,7 +5492,7 @@ class TestFenceCodegen:
 
 
 class TestPipeBarrierCodegen:
-    """The unified and compatibility APIs emit the same native PTO barriers."""
+    """The parameterized API emits native PTO barriers without event slots."""
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -5563,8 +5563,8 @@ class TestPipeBarrierCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.barrier <PIPE_M>" in mlir, f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
 
-    @pytest.mark.parametrize("pipe, legacy_name", [("V", "bar_v"), ("M", "bar_m"), ("ALL", "bar_all")])
-    def test_legacy_barriers_have_identical_codegen(self, pipe, legacy_name):
+    @pytest.mark.parametrize("pipe", ["V", "M", "ALL"])
+    def test_barriers_do_not_emit_flags(self, pipe):
         source = """
 import pypto.language as pl
 
@@ -5580,20 +5580,15 @@ class Prog:
         BARRIER_CALL
         return pl.store(tile, [0, 0], out)
 """
-        legacy = pl.parse_program(source.replace("BARRIER_CALL", f"pl.system.{legacy_name}()"))
         unified = pl.parse_program(
             source.replace("BARRIER_CALL", f"pl.system.barrier(pipe=pl.PipeType.{pipe})")
         )
 
-        legacy_mlir = self._generate_mlir(legacy)
         unified_mlir = self._generate_mlir(unified)
 
         assert f"pto.barrier <PIPE_{pipe}>" in unified_mlir
         assert "pto.set_flag" not in unified_mlir
         assert "pto.wait_flag" not in unified_mlir
-        assert [strip_loc(line) for line in legacy_mlir.splitlines()] == [
-            strip_loc(line) for line in unified_mlir.splitlines()
-        ]
 
 
 def _cmo_cacheinvalid_line(mlir: str) -> str:

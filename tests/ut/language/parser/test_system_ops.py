@@ -240,56 +240,11 @@ class Before:
         assert f'pl.system.barrier(pipe=pl.PipeType.{pipe}, attrs={{"barrier_marker": 7}})' in printed
         ir.assert_structural_equal(before, pl.parse_program(printed))
 
-    def test_bar_v_round_trip(self):
-        """Legacy bar_v input prints the canonical barrier spelling."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.bar_v()
-                return x
-
-        printed = Before.as_python()
-        assert "pl.system.barrier(pipe=pl.PipeType.V)" in printed
-
-        reparsed = pl.parse_program(printed)
-        assert isinstance(reparsed, ir.Program)
-        ir.assert_structural_equal(Before, reparsed)
-
-    def test_bar_m_round_trip(self):
-        """Legacy bar_m input prints the canonical barrier spelling."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.bar_m()
-                return x
-
-        printed = Before.as_python()
-        assert "pl.system.barrier(pipe=pl.PipeType.M)" in printed
-
-        reparsed = pl.parse_program(printed)
-        assert isinstance(reparsed, ir.Program)
-        ir.assert_structural_equal(Before, reparsed)
-
-    def test_bar_all_round_trip(self):
-        """Legacy bar_all input prints the canonical barrier spelling."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.bar_all()
-                return x
-
-        printed = Before.as_python()
-        assert "pl.system.barrier(pipe=pl.PipeType.ALL)" in printed
-
-        reparsed = pl.parse_program(printed)
-        assert isinstance(reparsed, ir.Program)
-        ir.assert_structural_equal(Before, reparsed)
+    @pytest.mark.parametrize("name", ["bar_v", "bar_m", "bar_all"])
+    def test_removed_barrier_names(self, name):
+        """Only the parameterized barrier API is exposed at either Python layer."""
+        assert not hasattr(pl.system, name)
+        assert not hasattr(system_ops, name)
 
     def test_fence_round_trip(self):
         """Test round-trip for pl.system.fence."""
@@ -585,9 +540,9 @@ class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-                pl.system.bar_v()
+                pl.system.barrier(pipe=pl.PipeType.V)
                 pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
-                pl.system.bar_all()
+                pl.system.barrier(pipe=pl.PipeType.ALL)
                 return x
 
         printed = Before.as_python()

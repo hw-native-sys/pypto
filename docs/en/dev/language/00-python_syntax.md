@@ -406,8 +406,8 @@ pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, sl
 `pl.system.barrier(*, pipe)` requires a `pl.PipeType.V`, `M`, or `ALL` member.
 It orders preceding and following work on the selected pipeline(s), without
 using an event slot. `ALL` covers the current core, not other cores; use
-`pl.system.syncall(...)` for a cross-core barrier. The existing `bar_v()`,
-`bar_m()`, and `bar_all()` wrappers remain compatible, while the Python IR
+`pl.system.syncall(...)` for a cross-core barrier. The old `bar_v()`,
+`bar_m()`, and `bar_all()` APIs have been removed. The Python IR
 printer always emits the corresponding `barrier(pipe=...)` spelling. Internal
 IR operator names and native barrier lowering remain unchanged. The separate
 `set_flag` / `wait_flag` calls retain their directional pipeline-event semantics.

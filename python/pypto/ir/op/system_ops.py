@@ -411,21 +411,6 @@ def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
     return _create_barrier_op(op_names[pipe], span=span)
 
 
-def bar_v(*, span: Span | None = None) -> Call:
-    """Compatibility shorthand for ``barrier(pipe=PipeType.V)``."""
-    return _create_barrier_op("system.bar_v", span=span)
-
-
-def bar_m(*, span: Span | None = None) -> Call:
-    """Compatibility shorthand for ``barrier(pipe=PipeType.M)``."""
-    return _create_barrier_op("system.bar_m", span=span)
-
-
-def bar_all(*, span: Span | None = None) -> Call:
-    """Compatibility shorthand for ``barrier(pipe=PipeType.ALL)`` on this core."""
-    return _create_barrier_op("system.bar_all", span=span)
-
-
 def fence(*, span: Span | None = None) -> Call:
     """Memory barrier over global memory.
 

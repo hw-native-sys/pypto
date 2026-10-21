@@ -615,8 +615,8 @@ The public Python barrier API is `pl.system.barrier(*, pipe)`, accepting only
 `pl.PipeType.V`, `M`, and `ALL`. It constructs the existing zero-operand IR
 operators below; there is no new `system.barrier` IR operator or `pipe` IR attr.
 The Python IR printer emits `pl.system.barrier(pipe=...)` with the corresponding
-enum member. The `bar_v()`, `bar_m()`, and `bar_all()` Python wrappers remain
-compatibility shorthands. Barriers use no event slot, and
+enum member. The old `bar_v()`, `bar_m()`, and `bar_all()` Python APIs have been
+removed. Barriers use no event slot, and
 `ALL` orders all pipelines on the current core, not arrivals across cores.
 
 | Operation | Description | Kwargs |

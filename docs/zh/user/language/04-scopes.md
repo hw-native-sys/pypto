@@ -339,15 +339,15 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 `ALL` 屏障，就需要等 `a`、`b` 都完成加载，再执行向量计算。屏障既不分配也不
 消费事件槽；尚未配对的 `set_flag` 仍须对应一次 `wait_flag`。
 
-新代码统一采用以下写法：
+已移除的旧接口需迁移为以下写法：
 
-| 原有兼容调用 | 统一调用 |
+| 已移除的调用 | 统一调用 |
 | ------------ | -------- |
 | `pl.system.bar_v()` | `pl.system.barrier(pipe=pl.PipeType.V)` |
 | `pl.system.bar_m()` | `pl.system.barrier(pipe=pl.PipeType.M)` |
 | `pl.system.bar_all()` | `pl.system.barrier(pipe=pl.PipeType.ALL)` |
 
-原有包装接口继续可用。Python IR printer 将三种形式统一打印为新写法，内部 IR
+原有包装接口不再可用。Python IR printer 将三种形式统一打印为新写法，内部 IR
 及原生屏障保持相同。`ALL` 不表示跨核同步；跨核到达同步使用下文的
 `pl.system.syncall(...)`。
 

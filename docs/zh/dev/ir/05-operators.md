@@ -556,7 +556,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 `M`、`ALL`。它构造下表中已有的零操作数 IR 算子，不新增 `system.barrier` IR
 算子或 `pipe` IR 属性。Python IR printer 根据对应枚举成员，统一打印为
 `pl.system.barrier(pipe=...)` 的写法。原有 `bar_v()`、`bar_m()`、
-`bar_all()` Python 包装接口仍作为兼容简写。屏障不占用事件槽；`ALL` 为当前核
+`bar_all()` Python 接口已移除。屏障不占用事件槽；`ALL` 为当前核
 所有流水线建立顺序，不等待其他核到达。
 
 | 操作 | 描述 | Kwargs |
