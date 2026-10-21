@@ -862,27 +862,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     const auto& op_name = call->op_->name_;
 
-    // remote_load and GM view/slice types can embed scalar Vars remapped by this
-    // pass. Substitute the whole Call, even when only its type changes, and
-    // rebuild its defining Var together; otherwise a later Substitute on the
-    // consumer remaps only the Var's type and creates a definition-less clone
-    // (printed as __FREE_VAR).
-    if (IsOp(call, "pld.tile.remote_load") || IsOp(call, "tensor.view") || IsOp(call, "tensor.slice")) {
-      auto new_value = As<Call>(Substitute(assign->value_, ctx.var_map));
-      INTERNAL_CHECK_SPAN(new_value, assign->span_)
-          << "FlattenTileNdTo2D: descriptor substitution must remain a Call";
-      if (new_value.get() == call.get()) {
-        result.push_back(stmt);
-        ctx.Insert(assign->var_, assign->var_);
-      } else {
-        auto new_var =
-            std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        ctx.Insert(assign->var_, new_var);
-      }
-      continue;
-    }
-
     // ---- tile.load on >2D tile: flatten the result tile to 2D (hardware tiles
     //      are always 2D), keeping the tensor-rank source window for codegen —
     //      except a natural Mat load with a real batch (>1) collapses its window
@@ -1236,31 +1215,27 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
-    // ---- All other tile ops (an already-2D tile.reshape included) and non-tile
-    //      ops: substitute args ----
+    // Generic calls: arguments, cached result types and expression-valued attrs
+    // all contain live references. Substitute them together, including type-only
+    // and attrs-only changes, then bind the new value and record its defining Var.
+    // Otherwise a consumer can remap the stale type into a definition-less clone
+    // (printed as __FREE_VAR). This applies to every op, not just GM aliases.
     {
-      std::vector<ExprPtr> new_args;
-      new_args.reserve(call->args_.size());
-      bool changed = false;
-      for (const auto& arg : call->args_) {
-        auto new_arg = Substitute(arg, ctx.var_map);
-        new_args.push_back(new_arg);
-        if (new_arg != arg) changed = true;
-      }
-
-      if (!changed) {
+      auto new_call = As<Call>(Substitute(call, ctx.var_map));
+      INTERNAL_CHECK_SPAN(new_call, assign->span_)
+          << "FlattenTileNdTo2D: call substitution must remain a Call";
+      if (new_call == call) {
         result.push_back(stmt);
       } else {
-        // Re-create tile ops via OpRegistry for proper type deduction with 2D args;
-        // non-tile ops keep the original type.
-        CallPtr new_call;
-        if (op_name.substr(0, 5) == "tile.") {
-          auto deduced = op_registry.Create(op_name, new_args, call->kwargs_, span);
-          new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+        // Changed tile operands can have a lower rank. Re-deduce their result
+        // type, while retaining the substituted attrs (Create supplies none).
+        // Metadata-only changes need no re-deduction: the substituted cached
+        // type can carry view information absent from the operands.
+        if (op_name.substr(0, 5) == "tile." && new_call->args_ != call->args_) {
+          auto deduced = op_registry.Create(op_name, new_call->args_, new_call->kwargs_, span);
+          new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, new_call->attrs_,
                                             WithCarriedMemRef(deduced->GetType(), assign->var_->GetType()),
                                             deduced->span_);
-        } else {
-          new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
         }
 
         auto new_var =
@@ -1294,7 +1269,8 @@ FunctionPtr Rewrite(const FunctionPtr& func) {
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), func->span_);
 
   // return_types_ are unchanged: InCore functions return tensors (not tiles),
-  // and this pass only flattens tile ops. Tensor types are never modified.
+  // and this pass only flattens tile shapes. GM tensor metadata can still be
+  // remapped to reference rewritten scalar definitions.
   auto new_func = MutableCopy(func);
   new_func->body_ = new_body;
   return new_func;

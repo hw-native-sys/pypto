@@ -4127,6 +4127,42 @@ def test_pto_codegen_tensor_view_with_tile_scalar_shape_default_pipeline():
     assert any(f"pto.partition_view {view_ssa}," in line for line in lines)
 
 
+def test_pto_codegen_tensor_write_dynamic_view_default_pipeline():
+    """A GM write propagates dynamic view metadata through the default pipeline."""
+
+    @pl.program
+    class RuntimeTensorView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def core(
+            self,
+            x: pl.Tensor[[4, 512], pl.FP32],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            out: pl.Tensor[[2, 512], pl.FP32],
+        ) -> pl.Tensor[[2, 512], pl.FP32]:
+            ids = pl.tile.load(indices, [0, 0], [1, 16])
+            pitch = pl.cast(pl.tile.read(ids, [0, 0]), pl.INDEX)
+            if pitch == 1024:
+                alias = pl.tensor.view(x, shape=[2, pitch])
+                updated: pl.Tensor[[2, pitch], pl.FP32] = pl.tensor.write(
+                    alias, [0, 0], pl.const(1.0, pl.FP32)
+                )
+                value = pl.tile.load(updated, [0, 0], [2, 512])
+                out = pl.tile.store(value, [0, 0], out)
+            return out
+
+    lines = _get_mlir_lines(_generate_default_mlir(RuntimeTensorView))
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0, shape = [%c2_index,")
+    shape_stride = re.search(r"shape = \[%c2_index, (%\w+)\], strides = \[(%\w+), %c1_index\]", view_line)
+    assert shape_stride, f"Expected a dynamic 2D GM view, got: {view_line}"
+    pitch_ssa, row_stride = shape_stride.groups()
+    assert pitch_ssa == row_stride
+    assert any(line.startswith(f"{pitch_ssa} = arith.index_cast") for line in lines)
+    assert any("pto.store " in line for line in lines)
+    assert any("%updated__tile_pview = pto.partition_view " in line for line in lines)
+    assert any("pto.tload ins(%updated__tile_pview " in line for line in lines)
+    assert not any("__FREE_VAR" in line for line in lines)
+
+
 def test_pto_codegen_tensor_view_shape_and_layout():
     """In-core tensor.view emits the deduced shape and layout strides."""
     span = ir.Span.unknown()

@@ -967,8 +967,8 @@ class TestFlattenTileNdTo2DMultiOutput:
 # ----------------------------------------------------------------------------
 
 
-class TestFlattenTileNdTo2DGmAliases:
-    """GM aliases must follow scalar remapping without creating unbound Vars (#3046)."""
+class TestFlattenTileNdTo2DCallRemapping:
+    """Call references must follow scalar remapping without unbound Vars (#3046)."""
 
     @staticmethod
     def _definitions(program: ir.Program) -> dict[str, ir.AssignStmt]:
@@ -1034,9 +1034,12 @@ class TestFlattenTileNdTo2DGmAliases:
         assert cast(ir.TensorType, viewed.var.type).shape[0] is definitions["pitch"].var
         assert cast(ir.TensorType, viewed.value.type).shape[0] is definitions["pitch"].var
 
+    @pytest.mark.parametrize("alias_op", ["tensor.view", "tensor.write"])
     @pytest.mark.parametrize("dynamic_field", ["shape", "stride", "valid_shape"])
     @pytest.mark.parametrize("distributed", [False, True])
-    def test_gm_view_remaps_type_only_metadata(self, dynamic_field: str, distributed: bool):
+    def test_call_remaps_type_only_tensor_metadata(
+        self, dynamic_field: str, distributed: bool, alias_op: str
+    ):
         """Static Call arguments do not imply that its cached result type is unchanged."""
         span = ir.Span.unknown()
         tensor_type = ir.DistributedTensorType if distributed else ir.TensorType
@@ -1061,7 +1064,11 @@ class TestFlattenTileNdTo2DGmAliases:
                 memref,
                 ir.TensorView(stride, ir.TensorLayout.DN, valid_shape, ir.PadValue.zero),
             )
-            call = tensor_ops.view(source, [16, 4], layout=ir.TensorLayout.DN, span=span)
+            call = (
+                tensor_ops.view(source, [16, 4], layout=ir.TensorLayout.DN, span=span)
+                if alias_op == "tensor.view"
+                else tensor_ops.write(source, [0, 0], ir.ConstFloat(1.0, DataType.FP32, span), span=span)
+            )
             # Cached type metadata can be richer than the shape/layout operands;
             # construct it explicitly because the DSL re-deduces tensor.view.
             typed_call = ir.Call(
@@ -1094,9 +1101,136 @@ class TestFlattenTileNdTo2DGmAliases:
             )
             assert dimensions[1 if dynamic_field == "stride" else 0] is definitions["pitch"].var
         assert viewed_call.attrs["alias_marker"] == 3046
-        assert viewed_call.kwargs["layout"] == ir.TensorLayout.DN
+        assert viewed_call.kwargs == call.kwargs
         assert viewed_call.args[0] is source
-        assert _const_int_values(cast(ir.MakeTuple, viewed_call.args[1]).elements) == [16, 4]
+        assert _const_int_values(cast(ir.MakeTuple, viewed_call.args[1]).elements) == (
+            [16, 4] if alias_op == "tensor.view" else [0, 0]
+        )
+
+    @pytest.mark.parametrize("remap_operand", [False, True])
+    @pytest.mark.parametrize("tile_call", [False, True])
+    def test_call_remaps_attrs(self, tile_call: bool, remap_operand: bool):
+        """Attrs are live references, both with and without operand changes."""
+        span = ir.Span.unknown()
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            local = function.param("local", ir.TileType([1, 4], DataType.FP32))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1], span=span))
+            value = ib.let("value", tile_ops.read(loaded, [0], span=span))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+            operand = local if tile_call else source
+            if remap_operand:
+                operand = ib.let(
+                    "operand",
+                    tile_ops.load(source, [0, 0], [1, 4])
+                    if tile_call
+                    else tensor_ops.view(source, [pitch, 4]),
+                )
+            call = tile_ops.read(operand, [0, 0]) if tile_call else tensor_ops.read(operand, [0, 0])
+            tagged = ir.Call(call.op, list(call.args), call.kwargs, {"dependency": pitch}, call.type, span)
+            ib.let("tagged", tagged)
+            untouched = ib.let("untouched", call)
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "call_attrs", span)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        remapped = cast(ir.Call, definitions["tagged"].value)
+        assert definitions["pitch"].var is not pitch
+        assert remapped.attrs["dependency"] is definitions["pitch"].var
+        assert remapped.args[0] is (definitions["operand"].var if remap_operand else operand)
+        ir.assert_structural_equal(remapped.type, call.type)
+        if not remap_operand:
+            assert remapped.type is call.type
+            assert definitions["untouched"].var is untouched
+            assert definitions["untouched"].value is call
+
+    def test_tile_call_remaps_type_only_valid_shape(self):
+        """A static physical Tile can carry a dynamic valid_shape only in its type."""
+        span = ir.Span.unknown()
+        memref = ir.MemRef("local_storage", span)
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            local = function.param("local", ir.TileType([1, 4], DataType.FP32))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1], span=span))
+            pitch = ib.let("pitch", ir.cast(tile_ops.read(loaded, [0]), DataType.INDEX, span))
+            result_type = ir.TileType(
+                [1, 4], DataType.FP32, memref, ir.TileView(valid_shape=[1, pitch]), ir.MemorySpace.Vec
+            )
+            call = tile_ops.exp(local)
+            result = ib.let("result", ir.Call(call.op, list(call.args), call.kwargs, result_type, span))
+            ib.let("first", tile_ops.read(result, [0, 0]))
+            ib.let("second", tile_ops.read(result, [0, 0]))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "tile_type_only", span)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "result")
+        for actual_type in (definitions["result"].var.type, definitions["result"].value.type):
+            actual_type = cast(ir.TileType, actual_type)
+            assert actual_type.memref is memref
+            assert actual_type.memory_space == ir.MemorySpace.Vec
+            assert _const_int_values(actual_type.shape) == [1, 4]
+            assert actual_type.tile_view is not None
+            assert actual_type.tile_view.valid_shape[1] is definitions["pitch"].var
+
+    def test_dynamic_view_write_chain_remaps_definitions(self):
+        """GM tensor.write remains in the real pipeline and inherits the view type."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[4, 512], pl.FP32], metadata: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[4, 512], pl.FP32]:
+                loaded = pl.tile.load(metadata, [0], [1])
+                pitch = pl.cast(pl.tile.read(loaded, [0]), pl.INDEX)
+                viewed = pl.tensor.view(source, [2, pitch])
+                updated: pl.Tensor[[2, pitch], pl.FP32] = pl.tensor.write(
+                    viewed, [0, 0], pl.const(1.0, pl.FP32)
+                )
+                first = pl.tile.load(updated, [0, 0], [2, 512])
+                second = pl.tile.load(updated, [0, 0], [2, 512])
+                return source
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "updated")
+        updated = definitions["updated"]
+        assert cast(ir.Call, updated.value).args[0] is definitions["viewed"].var
+        for actual_type in (updated.var.type, updated.value.type):
+            assert cast(ir.TensorType, actual_type).shape[1] is definitions["pitch"].var
+
+    def test_tile_reshape_remaps_dynamic_target(self):
+        """Tile re-deduction must keep using the requested dynamic target shape."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[4, 512], pl.FP32], metadata: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[4, 512], pl.FP32]:
+                data = pl.tile.load(source, [0, 0], [4, 512])
+                loaded = pl.tile.load(metadata, [0], [1])
+                pitch = pl.cast(pl.tile.read(loaded, [0]), pl.INDEX)
+                reshaped = pl.tile.reshape(data, [2, pitch])
+                first = pl.tile.read(reshaped, [0, 0])
+                second = pl.tile.read(reshaped, [0, 0])
+                return source
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "reshaped")
+        reshaped = definitions["reshaped"]
+        for actual_type in (reshaped.var.type, reshaped.value.type):
+            assert cast(ir.TileType, actual_type).shape[1] is definitions["pitch"].var
 
     def test_gm_slice_view_chain_in_if_remaps_definitions(self):
         """Nested aliases inherit the enclosing scalar mapping and retain each binding."""
