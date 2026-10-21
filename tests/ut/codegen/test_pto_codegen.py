@@ -4096,6 +4096,37 @@ def test_pto_codegen_tensor_view_default_pipeline_variants():
         assert any(f"pto.partition_view {view_ssa}" in line for line in _get_mlir_lines(body))
 
 
+def test_pto_codegen_tensor_view_with_tile_scalar_shape_default_pipeline():
+    """A runtime GM view keeps its definition through the default pipeline (#3046)."""
+
+    @pl.program
+    class RuntimeTensorView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def core(
+            self,
+            x: pl.Tensor[[4, 512], pl.BF16],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            out: pl.Tensor[[2, 512], pl.BF16],
+        ) -> pl.Tensor[[2, 512], pl.BF16]:
+            ids = pl.tile.load(indices, [0, 0], [1, 16])
+            pitch = pl.cast(pl.tile.read(ids, [0, 0]), pl.INDEX)
+            if pitch == 1024:
+                alias = pl.tensor.view(x, shape=[2, pitch])
+                value = pl.tile.load(alias, [0, 0], [2, 512])
+                out = pl.tile.store(value, [0, 0], out)
+            return out
+
+    lines = _get_mlir_lines(_generate_default_mlir(RuntimeTensorView))
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0, shape = [%c2_index,")
+    shape_stride = re.search(r"shape = \[%c2_index, (%\w+)\], strides = \[(%\w+), %c1_index\]", view_line)
+    assert shape_stride, f"Expected a dynamic 2D GM view, got: {view_line}"
+    pitch_ssa, row_stride = shape_stride.groups()
+    assert pitch_ssa == row_stride
+    assert any(line.startswith(f"{pitch_ssa} = arith.index_cast") for line in lines)
+    view_ssa = view_line.split(" = ", 1)[0].strip()
+    assert any(f"pto.partition_view {view_ssa}," in line for line in lines)
+
+
 def test_pto_codegen_tensor_view_shape_and_layout():
     """In-core tensor.view emits the deduced shape and layout strides."""
     span = ir.Span.unknown()

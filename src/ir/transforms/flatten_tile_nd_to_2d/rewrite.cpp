@@ -862,15 +862,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     const auto& op_name = call->op_->name_;
 
-    // remote_load is a non-"tile." op that nevertheless produces a TileType
-    // whose valid_shape can embed variables remapped by this pass. Rebuild both
-    // the call and its defining Var together; otherwise a later Substitute on
-    // the consumer remaps only the Var's type and creates a definition-less
-    // clone (printed as __FREE_VAR).
-    if (IsOp(call, "pld.tile.remote_load")) {
+    // remote_load and GM view/slice types can embed scalar Vars remapped by this
+    // pass. Substitute the whole Call, even when only its type changes, and
+    // rebuild its defining Var together; otherwise a later Substitute on the
+    // consumer remaps only the Var's type and creates a definition-less clone
+    // (printed as __FREE_VAR).
+    if (IsOp(call, "pld.tile.remote_load") || IsOp(call, "tensor.view") || IsOp(call, "tensor.slice")) {
       auto new_value = As<Call>(Substitute(assign->value_, ctx.var_map));
       INTERNAL_CHECK_SPAN(new_value, assign->span_)
-          << "FlattenTileNdTo2D: remote_load substitution must remain a Call";
+          << "FlattenTileNdTo2D: descriptor substitution must remain a Call";
       if (new_value.get() == call.get()) {
         result.push_back(stmt);
         ctx.Insert(assign->var_, assign->var_);

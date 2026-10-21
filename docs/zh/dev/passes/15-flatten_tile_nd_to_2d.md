@@ -61,6 +61,13 @@ program_2d = flatten_pass(program)
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
 | 1D/2D Tile 操作 | 不变 |
 
+`tensor.view` 保持为 GM 别名。如果本 pass 替换了它的 shape、stride
+或 `valid_shape` 引用的标量，就会替换整个 Call（包括结果类型），并同步更新定义 Var
+及其使用映射。即使只有类型元数据发生变化，也必须这样处理：下游 load 必须引用实际
+定义的 Var，且其中的标量引用都已更新。
+如果改写时遇到 GM `tensor.slice` 描述符，也会采用相同处理；这不会放宽 `IncoreTileOps`
+的要求，因为正常流水线会在本 pass 之前转换 `tensor.slice`。
+
 N-D transpose 的 scratch 将 A 对齐到 32 个元素（8-bit 类型）或 16 个元素（16/32-bit 类型）。列方向至少保留一个 32 字节块，16-bit vtranspose 则保留两条覆盖完整高度的 16 列带。将所得 workspace 容量向上取整为每行 B 个元素的整行数，得到 `scratch_page_rows`；池的分配大小和每页偏移均使用该补齐值。因此，FP32 `[24, 8]` 页拥有 1024 字节 workspace，而 scratch 视图仍保持 `[24, 8]` 形状。 页维度必须为正，元素存储大小必须为 1、2 或 4 字节。workspace 对齐、池维度及池的总字节数必须可用 `int64_t` 表示；不支持的类型和超大 workspace 会在展开 batch 前被拒绝。
 
 **统一的操作数处理 —— 整块切片 vs 逐 batch load。** 每个 batch_matmul 操作数

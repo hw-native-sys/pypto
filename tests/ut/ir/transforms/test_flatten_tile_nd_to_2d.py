@@ -963,6 +963,242 @@ class TestFlattenTileNdTo2DMultiOutput:
 
 
 # ----------------------------------------------------------------------------
+# GM tensor.view / tensor.slice metadata and definition remapping
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DGmAliases:
+    """GM aliases must follow scalar remapping without creating unbound Vars (#3046)."""
+
+    @staticmethod
+    def _definitions(program: ir.Program) -> dict[str, ir.AssignStmt]:
+        class Collector(ir.IRVisitor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.definitions: dict[str, ir.AssignStmt] = {}
+
+            def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+                self.definitions[op.var.name_hint] = op
+                super().visit_assign_stmt(op)
+
+        function = program.get_function("kernel")
+        assert function is not None
+        collector = Collector()
+        collector.visit_stmt(function.body)
+        return collector.definitions
+
+    @staticmethod
+    def _assert_consumers_use_definition(definitions: dict[str, ir.AssignStmt], name: str) -> None:
+        # Structural equality alone can miss a fresh Var with the correct type
+        # but no defining statement. Both consumers must use the actual binding.
+        for consumer in ("first", "second"):
+            call = cast(ir.Call, definitions[consumer].value)
+            assert call.args[0] is definitions[name].var
+
+    def test_gm_view_remaps_dynamic_shape(self):
+        """A scalar load/read/cast changes identity before a root GM tensor.view."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[64], pl.FP32], metadata: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                loaded = pl.tile.load(metadata, [0], [1])
+                value = pl.tile.read(loaded, [0])
+                pitch = pl.cast(value, pl.INDEX)
+                viewed = pl.tensor.view(source, [pitch, 4])
+                first = pl.tile.load(viewed, [0, 0], [1, 4])
+                second = pl.tile.load(viewed, [1, 0], [1, 4])
+                return source
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[64], pl.FP32], metadata: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                loaded = pl.tile.load(metadata, [0], [1])
+                value = pl.tile.read(loaded, [0])
+                pitch = pl.cast(value, pl.INDEX)
+                viewed = pl.tensor.view(source, [pitch, 4])
+                first = pl.tile.load(viewed, [0, 0], [1, 4])
+                second = pl.tile.load(viewed, [1, 0], [1, 4])
+                return source
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "viewed")
+        viewed = definitions["viewed"]
+        assert cast(ir.TensorType, viewed.var.type).shape[0] is definitions["pitch"].var
+        assert cast(ir.TensorType, viewed.value.type).shape[0] is definitions["pitch"].var
+
+    @pytest.mark.parametrize("dynamic_field", ["shape", "stride", "valid_shape"])
+    @pytest.mark.parametrize("distributed", [False, True])
+    def test_gm_view_remaps_type_only_metadata(self, dynamic_field: str, distributed: bool):
+        """Static Call arguments do not imply that its cached result type is unchanged."""
+        span = ir.Span.unknown()
+        tensor_type = ir.DistributedTensorType if distributed else ir.TensorType
+        memref = ir.MemRef("gm_storage", span)
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", tensor_type([16, 4], DataType.FP32, memref))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1], span=span))
+            value = ib.let("value", tile_ops.read(loaded, [0], span=span))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+            shape = [
+                pitch if dynamic_field == "shape" else ir.ConstInt(16, DataType.INDEX, span),
+                ir.ConstInt(4, DataType.INDEX, span),
+            ]
+            stride = [1, pitch] if dynamic_field == "stride" else [1, 16]
+            valid_shape = [pitch, 4] if dynamic_field == "valid_shape" else [16, 4]
+            view_type = tensor_type(
+                shape,
+                DataType.FP32,
+                memref,
+                ir.TensorView(stride, ir.TensorLayout.DN, valid_shape, ir.PadValue.zero),
+            )
+            call = tensor_ops.view(source, [16, 4], layout=ir.TensorLayout.DN, span=span)
+            # Cached type metadata can be richer than the shape/layout operands;
+            # construct it explicitly because the DSL re-deduces tensor.view.
+            typed_call = ir.Call(
+                call.op, list(call.args), call.kwargs, {"alias_marker": 3046}, view_type, span
+            )
+            viewed = ib.let("viewed", typed_call)
+            ib.let("first", tile_ops.load(viewed, [0, 0], [1, 4], span=span))
+            ib.let("second", tile_ops.load(viewed, [1, 0], [1, 4], span=span))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "type_only_gm_view", span)
+
+        # Flattening rank <= 2 tiles changes SSA identities, not logical IR.
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "viewed")
+        viewed_stmt = definitions["viewed"]
+        viewed_call = cast(ir.Call, viewed_stmt.value)
+        for actual_type in (viewed_stmt.var.type, viewed_call.type):
+            assert isinstance(actual_type, ir.DistributedTensorType) is distributed
+            actual_type = cast(ir.TensorType, actual_type)
+            assert actual_type.memref is memref
+            assert actual_type.tensor_view is not None
+            assert actual_type.tensor_view.layout == ir.TensorLayout.DN
+            assert actual_type.tensor_view.pad == ir.PadValue.zero
+            dimensions = (
+                actual_type.shape
+                if dynamic_field == "shape"
+                else getattr(actual_type.tensor_view, dynamic_field)
+            )
+            assert dimensions[1 if dynamic_field == "stride" else 0] is definitions["pitch"].var
+        assert viewed_call.attrs["alias_marker"] == 3046
+        assert viewed_call.kwargs["layout"] == ir.TensorLayout.DN
+        assert viewed_call.args[0] is source
+        assert _const_int_values(cast(ir.MakeTuple, viewed_call.args[1]).elements) == [16, 4]
+
+    def test_gm_slice_view_chain_in_if_remaps_definitions(self):
+        """Nested aliases inherit the enclosing scalar mapping and retain each binding."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[16, 4], pl.FP32], metadata: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[16, 4], pl.FP32]:
+                loaded = pl.tile.load(metadata, [0], [1])
+                value = pl.tile.read(loaded, [0])
+                pitch = pl.cast(value, pl.INDEX)
+                if pitch > 0:
+                    sliced = pl.tensor.slice(source, [pitch, 4], [0, 0])
+                    viewed = pl.tensor.view(sliced, layout=pl.TensorLayout.DN)
+                    first = pl.tile.load(viewed, [0, 0], [1, 1])
+                    second = pl.tile.load(viewed, [1, 0], [1, 1])
+                return source
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[16, 4], pl.FP32], metadata: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[16, 4], pl.FP32]:
+                loaded = pl.tile.load(metadata, [0], [1])
+                value = pl.tile.read(loaded, [0])
+                pitch = pl.cast(value, pl.INDEX)
+                if pitch > 0:
+                    sliced = pl.tensor.slice(source, [pitch, 4], [0, 0])
+                    viewed = pl.tensor.view(sliced, layout=pl.TensorLayout.DN)
+                    first = pl.tile.load(viewed, [0, 0], [1, 1])
+                    second = pl.tile.load(viewed, [1, 0], [1, 1])
+                return source
+
+        # The normal pipeline lowers tensor.slice before this pass. Keep it as
+        # a GM descriptor here to isolate alias rewriting from IncoreTileOps,
+        # then explicitly check that the rewrite still preserves SSA.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.flatten_tile_nd_to_2d()(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        ir.assert_structural_equal(After, Expected)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "viewed")
+        assert cast(ir.Call, definitions["viewed"].value).args[0] is definitions["sliced"].var
+        assert cast(ir.TensorType, definitions["sliced"].var.type).shape[0] is definitions["pitch"].var
+        assert cast(ir.TensorType, definitions["viewed"].var.type).shape[1] is definitions["pitch"].var
+
+    def test_gm_view_slice_chain_in_for_remaps_definitions(self):
+        """A loop-local scalar and view mapping must be available to subsequent aliases."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[64], pl.FP32], metadata: pl.Tensor[[2], pl.INT32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(2):
+                    loaded = pl.tile.load(metadata, [i], [1])
+                    value = pl.tile.read(loaded, [0])
+                    pitch = pl.cast(value, pl.INDEX)
+                    viewed = pl.tensor.view(source, [pitch, 4])
+                    sliced = pl.tensor.slice(viewed, [1, 4], [0, 0])
+                    first = pl.tile.load(sliced, [0, 0], [1, 4])
+                    second = pl.tile.load(sliced, [0, 0], [1, 4])
+                return source
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, source: pl.Tensor[[64], pl.FP32], metadata: pl.Tensor[[2], pl.INT32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(2):
+                    loaded = pl.tile.load(metadata, [i], [1])
+                    value = pl.tile.read(loaded, [0])
+                    pitch = pl.cast(value, pl.INDEX)
+                    viewed = pl.tensor.view(source, [pitch, 4])
+                    sliced = pl.tensor.slice(viewed, [1, 4], [0, 0])
+                    first = pl.tile.load(sliced, [0, 0], [1, 4])
+                    second = pl.tile.load(sliced, [0, 0], [1, 4])
+                return source
+
+        # The normal pipeline lowers tensor.slice before this pass. Keep it as
+        # a GM descriptor here to isolate alias rewriting from IncoreTileOps,
+        # then explicitly check that the rewrite still preserves SSA.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.flatten_tile_nd_to_2d()(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        ir.assert_structural_equal(After, Expected)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "sliced")
+        assert cast(ir.Call, definitions["sliced"].value).args[0] is definitions["viewed"].var
+        assert cast(ir.TensorType, definitions["viewed"].var.type).shape[0] is definitions["pitch"].var
+
+
+# ----------------------------------------------------------------------------
 # Rank-raising tile.reshape / tile.reinterpret_view: the shape operand is the
 # only place a >2D tile can be introduced independently of any operand's type
 # ----------------------------------------------------------------------------
