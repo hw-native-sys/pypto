@@ -173,6 +173,9 @@ def _choose_a2a3_l0(
     planner: MemoryPlanner,
     bytes_a: int,
     bytes_b: int,
+    reduction_iterations: int = 1,
+    reduction_pipeline_stages: int = 1,
+    independent_output_tiles: bool = False,
 ) -> _core_passes.l0_tile_chooser.L0TileResult:
     """Mirror AutoTileMatmulL0's calibrated 910B chooser configuration.
 
@@ -185,6 +188,9 @@ def _choose_a2a3_l0(
     cfg.l0a_bytes = cfg.l0b_bytes = 64 * 1024
     cfg.l0c_bytes = 128 * 1024
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
+    cfg.reduction_iterations = reduction_iterations
+    cfg.reduction_pipeline_stages = reduction_pipeline_stages
+    cfg.independent_output_tiles = independent_output_tiles
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
     cfg.allow_double_buffer_c = planner == MemoryPlanner.PTOAS
@@ -1906,6 +1912,9 @@ class TestMatmulOperations:
             platform=platform,
             config=cfg,
         )
+        # PyPTO/DSA-RP choose the complete canonical reduction once. PTOAS
+        # retains ordinary per-call K tiling for backend-placement compatibility.
+        canonical_schedule = planner != MemoryPlanner.PTOAS
         choice = _choose_a2a3_l0(
             case.M,
             case.K_CHUNK,
@@ -1913,6 +1922,9 @@ class TestMatmulOperations:
             planner=planner,
             bytes_a=2,
             bytes_b=2,
+            reduction_iterations=case.NUM_CHUNKS if canonical_schedule else 1,
+            reduction_pipeline_stages=2 if canonical_schedule else 1,
+            independent_output_tiles=canonical_schedule,
         )
         assert not choice.double_buffer_c, "the nested-pipeline case must retain a K-only inner split"
         assert choice.k < case.K_CHUNK, "the inner per-chunk matmul must be K-tiled"

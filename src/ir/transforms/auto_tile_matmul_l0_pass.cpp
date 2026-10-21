@@ -1870,9 +1870,12 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
     return std::nullopt;
   }
   auto init_ty = As<TileType>(init->var_->GetType());
-  // A declared accumulator allocation or explicit buffering loop is a manual
-  // storage decision, not a placeholder that the canonical fold may replace.
-  if ((init_ty && init_ty->memref_.has_value()) || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
+  // Declared accumulator/operand storage and explicit buffering loops are
+  // manual decisions. Rebuilding even an unchanged Mat load from its deduced
+  // type would discard its declared allocation identity and slot selection.
+  // Leave these loads to ordinary K tiling, which retains their original Vars.
+  if ((init_ty && init_ty->memref_.has_value()) || lhs_ty->memref_.has_value() ||
+      rhs_ty->memref_.has_value() || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
     return std::nullopt;
   }
   auto init_m = init_ty && init_ty->shape_.size() == 2 ? As<ConstInt>(init_ty->shape_[0]) : nullptr;
@@ -1916,8 +1919,8 @@ class CanonicalSplitKRetiler : public IRMutator {
  public:
   CanonicalSplitKRetiler(const CanonicalSplitKAccMatch& match,
                          const std::unordered_map<const Var*, VarPtr>& clone_map, const VarPtr& init,
-                         int64_t mi, int64_t ni, CanonicalOutputWindow window, int64_t selected_k,
-                         std::string suffix)
+                         int64_t mi, int64_t ni, CanonicalOutputWindow window,
+                         std::optional<int64_t> selected_k, std::string suffix)
       : mi_(mi), ni_(ni), window_(window), k_(match.K), selected_k_(selected_k), suffix_(std::move(suffix)) {
     auto cloned = [&](const VarPtr& original) -> VarPtr {
       auto it = clone_map.find(original.get());
@@ -1979,7 +1982,7 @@ class CanonicalSplitKRetiler : public IRMutator {
       rebuilt = PreserveCallAttrs(call, deduced);
     }
     auto var = std::make_shared<Var>(op->var_->name_hint_ + suffix_, rebuilt->GetType(), op->var_->span_);
-    if (key == matmul_ || key == matmul_acc_) {
+    if (selected_k_ && (key == matmul_ || key == matmul_acc_)) {
       // Emit the outer decision directly, including boxed M/N boundaries.
       // Re-running the chooser on this narrowed call would discard selected_k.
       const bool is_acc = key == matmul_acc_;
@@ -1994,7 +1997,7 @@ class CanonicalSplitKRetiler : public IRMutator {
       plan.M = plan.m = window_.physical_m;
       plan.N = plan.n = window_.physical_n;
       plan.K = k_;
-      plan.k = selected_k_;
+      plan.k = *selected_k_;
       plan.valid_m = MakeIndex(window_.valid_m, op->span_);
       plan.valid_n = MakeIndex(window_.valid_n, op->span_);
       INTERNAL_CHECK_SPAN(plan.lhs_src && plan.rhs_src && (!is_acc || plan.acc_init), op->span_)
@@ -2038,7 +2041,9 @@ class CanonicalSplitKRetiler : public IRMutator {
   int64_t ni_ = 0;
   CanonicalOutputWindow window_;
   int64_t k_ = 0;
-  int64_t selected_k_ = 0;
+  // No selected K means the PTOAS compatibility route: narrow M/N only and
+  // retain the established ordinary K-tiling path for backend-owned placement.
+  std::optional<int64_t> selected_k_;
   std::string suffix_;
 };
 
@@ -2062,17 +2067,25 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   // K blocks. Use the conservative output-stationary chooser regime for the
   // output grid. Account for the same Mat boxing that RebuildLoad will apply to
   // every physical output window, so chooser capacity cannot admit a logical
-  // tile that becomes oversized after padding. Price the complete source
-  // reduction and emit its selected K directly, including boundary tiles and
-  // the K-only case; no second chooser invocation is needed.
-  auto tiling = AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true,
-                              output_box_alignment, /*direct_defs=*/nullptr,
-                              /*restrict_output_grid=*/false, match.loop);
-  if (!tiling) return std::nullopt;
-  INTERNAL_CHECK_SPAN(
-      tiling->stationarity == utils::Stationarity::kOutputStationary && !tiling->double_buffer_c,
-      match.loop->span_)
-      << "Internal error: canonical reduction requires an output-stationary single-C plan";
+  // tile that becomes oversized after padding. PyPTO-owned placement prices
+  // the complete source reduction and emits its selected K directly.
+  // PTOAS retains the established M/N-only pre-rewrite followed by ordinary
+  // K tiling: selected nested schedules can exceed native placement limits
+  // (e.g. M272/N384/K176, R3/stage2 overflows Left at 76 KiB).
+  // This is an explicit compatibility route, not a retry after a failed plan.
+  const auto* ctx = PassContext::Current();
+  const auto planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  const bool preserve_selected_k = planner != MemoryPlanner::PtoAS;
+  auto tiling = AnalyzeMatmul(
+      match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment,
+      /*direct_defs=*/nullptr, /*restrict_output_grid=*/false, preserve_selected_k ? match.loop : nullptr);
+  if (!tiling || (!preserve_selected_k && !tiling->needs_mn_tiling())) return std::nullopt;
+  if (preserve_selected_k) {
+    INTERNAL_CHECK_SPAN(
+        tiling->stationarity == utils::Stationarity::kOutputStationary && !tiling->double_buffer_c,
+        match.loop->span_)
+        << "Internal error: canonical reduction requires an output-stationary single-C plan";
+  }
 
   auto store_call = As<Call>(match.store->value_);
   auto offsets = As<MakeTuple>(store_call->args_[1]);
@@ -2112,7 +2125,8 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       auto cloned_loop = As<ForStmt>(clone.cloned_body);
       INTERNAL_CHECK_SPAN(cloned_loop, match.loop->span_)
           << "Internal error: canonical split-K loop clone is not a ForStmt";
-      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, window, tiling->k, suffix);
+      const auto selected_k = preserve_selected_k ? std::optional<int64_t>(tiling->k) : std::nullopt;
+      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, window, selected_k, suffix);
       auto narrowed = As<ForStmt>(retiler.VisitStmt(cloned_loop));
       INTERNAL_CHECK_SPAN(narrowed, match.loop->span_)
           << "Internal error: canonical split-K retiling did not return a ForStmt";
@@ -2179,8 +2193,9 @@ class CanonicalSplitKPreMutator : public IRMutator {
     // refer to the original function-wide read index. The qualified base visit
     // then reaches canonical triplets in nested source regions; newly generated
     // loops do not match because their fresh Vars are absent from that index.
-    // Their K schedule is already emitted; ordinary AutoTile sees Left/Right
-    // operands and must not make a second chooser decision for those calls.
+    // Under PyPTO-owned placement their K schedule is already emitted;
+    // ordinary AutoTile sees Left/Right operands and cannot choose again.
+    // The PTOAS compatibility route still leaves K to ordinary AutoTile.
     auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, use_counts_, hints_));
     INTERNAL_CHECK_SPAN(rewritten, op->span_)
         << "Internal error: canonical split-K pre-phase did not preserve SeqStmts";

@@ -74,7 +74,7 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
    In the predicated spelling `init_cond` must be a split-K seed test: `<x> == 0` where `x` is this loop's own induction variable, or a body-local scalar defined as `<induction variable> * <nonzero constant>` (the `k0 = kb * K_TILE` spelling every peeled kernel already uses for its `if`). Matching the induction variable by identity is what rejects a caller-supplied flag or another loop's variable — neither is evidence that the accumulator is overwritten on the first K block. Such a triplet is left untouched and reported with a `PH-AT-006` hint rather than silently losing M/N tiling.
 
-   The two distinct operands must come from direct per-iteration GM→Mat loads whose static shape and valid shape cover the full rectangular panels; the loop may contain only scalar address calculations besides those loads. The pass moves the output grid outside the source K loop: for each `(mi, ni)`, it creates a legal `[m, n]` Acc, clones the complete K loop, narrows both loads to that output window, completes the full K reduction, then stores the tile. The retiled loop keeps whichever spelling the source used, so both spellings produce the same output grid, the same narrowed loads and the same store chain, differing only in that reduction statement. The canonical retiler directly emits the selected inner-K schedule: the peeled spelling places its K schedules behind the branch, while the predicated spelling composes `init_cond and ko == 0`. There is no second chooser invocation on a narrowed call. This ordering is essential: slicing the existing full Acc would still require the impossible `[M, N]` L0C allocation.
+   The two distinct operands must come from direct per-iteration GM→Mat loads whose static shape and valid shape cover the full rectangular panels; the loop may contain only scalar address calculations besides those loads. The pass moves the output grid outside the source K loop: for each `(mi, ni)`, it creates a legal `[m, n]` Acc, clones the complete K loop, narrows both loads to that output window, completes the full K reduction, then stores the tile. The retiled loop keeps whichever spelling the source used, so both spellings produce the same output grid, the same narrowed loads and the same store chain, differing only in that reduction statement. Under PyPTO and DSA-RP placement, the canonical retiler directly emits the selected inner-K schedule: the peeled spelling places its K schedules behind the branch, while the predicated spelling composes `init_cond and ko == 0`. There is no second chooser invocation on a narrowed call for these planners; PTOAS retains the compatibility route described below. This ordering is essential: slicing the existing full Acc would still require the impossible `[M, N]` L0C allocation.
 
    The following M/N regimes remain **deferred**: an arbitrary standalone `tile.matmul_acc` with a caller-owned accumulator (it does not match the canonical chain above), a `Vec` left operand (PV path), a biased matmul whose already-`Bias`-resident source would need an unsupported Bias-to-Bias N sub-window, a Mat bias that is not a single-use 2D load with only sibling loads before the matmul, and a result consumed on-chip that is **not** consumed entirely as a matmul operand. Treating every non-load statement as a barrier preserves the original bias snapshot across intervening stores or other effects; removing the replaced full load avoids redundant traffic. A result consumed entirely as a matmul operand takes the Mat-scratch placement below.
 
@@ -272,14 +272,21 @@ Boundary sub-tiles (when `m`/`n` do not divide `M`/`N`) have logical extents `[m
 
 For a canonical split-K chain, the same grid encloses the **source** reduction rather than slicing its final Acc. In issue #2232, the logical INT32 `[16, 1152]` result occupies `32 × 1152 × 4 = 144 KiB` physically on Ascend910, so it is split along N. Each generated N tile runs all eight source K blocks and stores its result before the next N tile starts.
 
-The canonical chooser decision is also the emission contract: each full output
+For PyPTO and DSA-RP placement, the canonical chooser decision is also the emission contract: each full output
 tile and boxed M/N boundary emits the selected inner `k`, with a final
 `source_K % k` block when needed. The retiler calls the ordinary K-block
 builder directly, including for `k == source_K`; it does not recursively
 choose another schedule on each narrowed matmul. The same rule applies when
 only K needs tiling and the output already fits L0C.
 
-The chooser receives three independent schedule facts. `reduction_iterations`
+PTOAS-managed placement retains the established M/N pre-rewrite followed by
+ordinary call-level K tiling. This explicit compatibility route avoids a native
+PTOAS v0.67 Left-memory overflow for a legal nested boundary/tail schedule
+(`M=272, N=384, source_K=176`, three source iterations, stage two). The direct
+single-decision contract is not claimed for that planner, and its allocator is
+unchanged.
+
+The direct canonical route supplies three independent schedule facts. `reduction_iterations`
 counts source blocks before the one output drain; it scales load, MAD, traffic,
 and padded work, not the width used for operand legality. A value of zero means
 unknown and uses one source block as a cost lower bound without claiming dbC
@@ -291,8 +298,9 @@ also reserves source-depth operand slots beside an inner pipeline. Finally,
 reduction even when `k == source_K`; it excludes held-panel and dbC schedules
 that this emitter does not implement. Ordinary matmuls retain the default
 one-reduction, one-source-stage schedule. Hardware cost constants are unchanged.
-Declared accumulator MemRefs and explicitly buffered loops remain manual storage
-decisions; this canonical fold does not replace them with new output placeholders.
+Declared accumulator or Mat-operand MemRefs and explicitly buffered loops remain
+manual storage decisions; this canonical fold does not rebuild their allocations
+or slot selections. Ordinary K tiling can still retain and consume those loads.
 
 ### Fits-L0c chained matmul (cast-fold)
 
@@ -410,7 +418,7 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 | ---- | ------- |
 | `PH-AT-003` | Sub-byte dtype on operand or accumulator |
 | `PH-AT-005` | `ChooseL0Tile` rejected the configuration |
-| `PH-AT-006` | Output exceeds L0c but no supported M/N placement applies — for `tile.matmul_acc`, this specifically means a caller-owned accumulator outside the canonical create/split-K-pipeline/store chain, or a 4-operand call inside an otherwise canonical chain whose `init_cond` is not a split-K seed test on the loop's induction variable. It also covers a Vec left operand, an already-Bias-resident `tile.matmul_bias` source that would need N sub-windowing, a result consumed on-chip that is not entirely a matmul operand, or a chained-matmul scratch that exceeds Mat/L1 capacity. A canonical source trip count that is unknown or outside the model range also emits this hint, while retaining a single-C cost lower bound. The static canonical split-K case from issue #2232 does not emit this hint. |
+| `PH-AT-006` | Output exceeds L0c but no supported M/N placement applies — for `tile.matmul_acc`, this specifically means a caller-owned accumulator outside the canonical create/split-K-pipeline/store chain, or a 4-operand call inside an otherwise canonical chain whose `init_cond` is not a split-K seed test on the loop's induction variable. It also covers a Vec left operand, an already-Bias-resident `tile.matmul_bias` source that would need N sub-windowing, a result consumed on-chip that is not entirely a matmul operand, or a chained-matmul scratch that exceeds Mat/L1 capacity. Under PyPTO/DSA-RP, a canonical source trip count that is unknown or outside the model range also emits this hint, while retaining a single-C cost lower bound. The static canonical split-K case from issue #2232 does not emit this hint. |
 | `PH-AT-007` | Non-16-aligned `K` — no fractal-aligned K-tiling exists (any peeled tail or whole-K block would have non-fractal cols), so the matmul is left untouched |
 | `PH-AT-008` | `ChooseL0Tile` returned a fallback configuration with a perf hint message |
 | `PH-AT-009` | Backend needs a bf16/f16 on-chip Mat scratch (e.g. Ascend910) but the oversized chained-matmul intermediate is f32 — cast the matmul result to bf16/f16 before the consumer matmul; left on the deferred path |

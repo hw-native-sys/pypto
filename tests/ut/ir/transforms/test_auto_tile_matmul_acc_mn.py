@@ -1503,6 +1503,93 @@ def test_k_only_canonical_fold_preserves_declared_accumulator_slots():
     assert "slots=2" in ir.python_print(after)
 
 
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("operand", ["lhs", "rhs"])
+@pytest.mark.parametrize("slot_scale", [0, 1], ids=["constant", "rotating"])
+def test_k_only_canonical_fold_preserves_declared_operand_slots(planner, operand, slot_scale):
+    """Declining the canonical fold must preserve declared Mat storage exactly."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class LeftBound:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[128, 1024], pl.BF16],
+            b: pl.Tensor[[1024, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+        ) -> pl.Tensor[[128, 256], pl.FP32]:
+            seed = pl.tile.create([128, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for k0, (carry,) in pl.pipeline(0, 1024, 128, init_values=(seed,), stage=2):
+                at: pl.Tile[[128, 128], pl.BF16, slots[slot_scale * (k0 // 128 % 2)], pl.Mem.Mat] = (
+                    pl.tile.load(a, [0, k0], [128, 128], target_memory=pl.Mem.Mat)
+                )
+                bt = pl.tile.load(b, [k0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                product = pl.tile.matmul_acc(carry, at, bt, init_cond=(k0 == 0))
+                result = pl.yield_(product)
+            out = pl.tile.store(result, [0, 0], out)
+            return out
+
+    @pl.program
+    class RightBound:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[128, 1024], pl.BF16],
+            b: pl.Tensor[[1024, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+        ) -> pl.Tensor[[128, 256], pl.FP32]:
+            seed = pl.tile.create([128, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for k0, (carry,) in pl.pipeline(0, 1024, 128, init_values=(seed,), stage=2):
+                at = pl.tile.load(a, [0, k0], [128, 128], target_memory=pl.Mem.Mat)
+                bt: pl.Tile[[128, 256], pl.BF16, slots[slot_scale * (k0 // 128 % 2)], pl.Mem.Mat] = (
+                    pl.tile.load(b, [k0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                )
+                product = pl.tile.matmul_acc(carry, at, bt, init_cond=(k0 == 0))
+                result = pl.yield_(product)
+            out = pl.tile.store(result, [0, 0], out)
+            return out
+
+    before = LeftBound if operand == "lhs" else RightBound
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([ir.make_roundtrip_instrument()], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    before_func = next(func for func in before.functions.values() if func.name == "kernel")
+    after_func = next(func for func in after.functions.values() if func.name == "kernel")
+    assert isinstance(before_func.body, ir.SeqStmts) and isinstance(after_func.body, ir.SeqStmts)
+    before_loop, after_loop = before_func.body.stmts[1], after_func.body.stmts[1]
+    assert isinstance(before_loop, ir.ForStmt) and isinstance(after_loop, ir.ForStmt)
+    assert isinstance(before_loop.body, ir.SeqStmts) and isinstance(after_loop.body, ir.SeqStmts)
+    # Compare both complete load definitions, not just their printed shapes:
+    # MemRef identity, selected slot, view, and load operands must all survive.
+    for old, new in zip(before_loop.body.stmts[:2], after_loop.body.stmts[:2], strict=True):
+        ir.assert_structural_equal(old, new)
+    assert "slots=2" in ir.python_print(after)
+    # For this shape ordinary per-call tiling also declines M/N placement into
+    # a caller-owned accumulator. Retain the entire manual-storage program,
+    # rather than inventing a new allocation merely to force a K rewrite.
+    ir.assert_structural_equal(after, before)
+
+
+def test_ptoas_canonical_boundary_keeps_compatible_legacy_schedule(tmp_path):
+    """Retain PTOAS's working schedule instead of its known 76-KiB Left overflow."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    before = _canonical_selected_k_input(272, 384, 176, 3)
+    with passes.PassContext([ir.make_roundtrip_instrument()], memory_planner=passes.MemoryPlanner.PTOAS):
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    mlir = codegen.PTOCodegen().generate(allocated, emit_tile_addr=False)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source, output = tmp_path / "compatible.pto", tmp_path / "compatible.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2", "--enable-insert-sync"])
+    assert output.is_file()
+
+
 def test_unknown_canonical_trip_count_keeps_selected_k_without_assuming_repetition(capfd):
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)

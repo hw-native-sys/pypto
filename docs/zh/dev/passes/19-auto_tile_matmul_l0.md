@@ -73,7 +73,7 @@ program_tiled = l0_tile_pass(program)
 
    谓词写法中，`init_cond` 必须是 split-K 的首块判定：`<x> == 0`，其中 `x` 是该循环自身的归纳变量，或者是循环体内定义为 `<归纳变量> * <非零常量>` 的标量（即所有 peel 写法在 `if` 中已经使用的 `k0 = kb * K_TILE`）。按指针身份匹配归纳变量，正是用来拒绝调用方传入的标志位或另一个循环的变量——两者都不能证明累加器会在第一个 K block 上被覆写。这样的三元组会保持不变，并以 `PH-AT-006` 提示报告，而不是无声地失去 M/N 切分。
 
-   两个不同的操作数必须来自循环内直接的 GM→Mat load，且静态 shape 与 valid shape 都覆盖完整矩形面板；除此之外循环只能含标量地址计算。本 pass 把输出网格移到源 K-loop 外：对每个 `(mi, ni)` 创建合法的 `[m, n]` Acc，克隆完整 K-loop，把两次 load 收窄到该输出窗口，完成全部 K 归约后再 store。改写后的循环保留源使用的写法，因此两种写法产生相同的输出网格、相同的收窄 load 和相同的 store 链，只在那一条归约语句上不同。规范 retiler 直接发射选定的内部 K 调度：peel 写法在分支内放置 K 调度，谓词写法则组合 `init_cond and ko == 0`。不会对收窄后的调用再次运行 chooser。该顺序不可颠倒：只切片已有的完整 Acc 仍然需要不可能的 `[M, N]` L0C 分配。
+   两个不同的操作数必须来自循环内直接的 GM→Mat load，且静态 shape 与 valid shape 都覆盖完整矩形面板；除此之外循环只能含标量地址计算。本 pass 把输出网格移到源 K-loop 外：对每个 `(mi, ni)` 创建合法的 `[m, n]` Acc，克隆完整 K-loop，把两次 load 收窄到该输出窗口，完成全部 K 归约后再 store。改写后的循环保留源使用的写法，因此两种写法产生相同的输出网格、相同的收窄 load 和相同的 store 链，只在那一条归约语句上不同。在 PyPTO 与 DSA-RP 分配路径下，规范 retiler 直接发射选定的内部 K 调度：peel 写法在分支内放置 K 调度，谓词写法则组合 `init_cond and ko == 0`。这两个 planner 不会对收窄后的调用再次运行 chooser；PTOAS 保留下文说明的兼容路径。该顺序不可颠倒：只切片已有的完整 Acc 仍然需要不可能的 `[M, N]` L0C 分配。
 
    以下 M/N 形态仍然**暂不支持**：带调用方自有累加器、且不匹配上述规范链的任意独立 `tile.matmul_acc`；左操作数为 `Vec`（PV 路径）；带 bias 的 matmul 已位于 `Bias` 的源还需要不受支持的 Bias-to-Bias N 子窗口；Mat bias 不是仅使用一次、且到 matmul 之间只有同层 load 的 2D load；以及结果在片上被消费但并非完全作为矩阵乘操作数。把所有非 load 语句当作 barrier 会保留跨越 store 或其它 effect 时的原始 bias snapshot 语义，删除被替换的完整 load 则避免冗余流量。结果被完全作为矩阵乘操作数消费时走下面的 Mat-scratch 放置。普通路径使用 `PH-AT-006`，bias 窗口限制使用 `PH-AT-011`。
 
@@ -261,13 +261,18 @@ out_t1 = pl.store(c_t1, [256, 0], out_t0)  # 子块 store 到 out[256:512, 0:256
 
 对于规范 split-K 链，同一输出网格包围的是完整的**源 K 归约**，而不是切片最终 Acc。Issue #2232 中，逻辑 INT32 `[16, 1152]` 结果在 Ascend910 上的物理占用为 `32 × 1152 × 4 = 144 KiB`，因此需要沿 N 切分。每个生成的 N 子块都会运行全部八个源 K block 并 store 结果，然后才开始下一个 N 子块。
 
-规范路径的 chooser 决策也是代码发射契约：完整输出子块和经过 Mat box
+在 PyPTO 与 DSA-RP 分配路径下，规范路径的 chooser 决策也是代码发射契约：完整输出子块和经过 Mat box
 补齐的 M/N 边界都采用选定的内部 `k`；必要时最后发射宽度为
 `source_K % k` 的尾块。Retiler 直接调用常规 K-block builder，包含
 `k == source_K` 的情况，不再对收窄后的 matmul 递归选择另一个调度。
 即使输出已能放入 L0C、只需要切分 K，也遵守此规则。
 
-Chooser 分别接收三个调度事实。`reduction_iterations` 表示一次输出 drain
+PTOAS 管理分配时保留原有的 M/N 预改写，再由普通调用级路径切分 K。
+该显式兼容路径避免 PTOAS v0.67 对合法嵌套边界/尾块调度报告 Left 内存溢出
+（`M=272, N=384, source_K=176`，三次源迭代，stage 为二）。
+该 planner 不承诺直接的单次选择契约，其分配器保持不变。
+
+直接规范路径分别传入三个调度事实。`reduction_iterations` 表示一次输出 drain
 之前的源 K-block 数；它缩放 load、MAD、流量和补齐工作量，不改变操作数
 合法性检查所用的 K 宽度。零表示未知，此时以一个源 block 作为成本下界，
 不宣称 dbC 可获益。`reduction_pipeline_stages` 则描述操作数存储副本：
@@ -277,8 +282,8 @@ split-K 内部流水线深度与源深度相乘，full-K block 取常规深度�
 操作数，即使 `k == source_K` 也不例外；它排除该 emitter 未实现的
 held-panel 与 dbC 调度。普通 matmul 保持一个源归约、一个源 stage 的默认
 设置。硬件成本常数不变。
-已声明的累加器 MemRef 与显式缓冲循环仍属于手工存储决策；此规范折叠
-不会用新的输出占位值替换它们。
+已声明的累加器或 Mat 操作数 MemRef 与显式缓冲循环仍属于手工存储决策；
+此规范折叠不会重建其分配或槽位选择。普通 K 切分仍可保留并消费这些 load。
 
 ### Fits-L0c 链式 matmul（cast-fold）
 
@@ -392,7 +397,7 @@ L0/Mat 容量与 fractal 对齐都来自当前 `BackendHandler`。Pass 优先从
 | ---- | ---- |
 | `PH-AT-003` | 操作数或累加器使用了子字节 dtype |
 | `PH-AT-005` | `ChooseL0Tile` 拒绝了该配置 |
-| `PH-AT-006` | 输出超过 L0c，但没有受支持的 M/N 放置。对 `tile.matmul_acc` 而言，这特指位于规范 create/split-K-pipeline/store 链之外、由调用方持有的累加器，或者位于该链之内、但 `init_cond` 不是对循环归纳变量的首块判定的 4 操作数调用。该提示也覆盖 Vec 左操作数、需要 N 子窗口的已在 Bias 中的 `tile.matmul_bias` 源、并非完全作为矩阵乘操作数消费的片上结果、或超过 Mat/L1 容量的链式 matmul scratch。规范源循环次数未知或超出模型范围时也会发出此提示，但保留单 C 成本下界。Issue #2232 的静态规范 split-K 情形不会发出此提示。 |
+| `PH-AT-006` | 输出超过 L0c，但没有受支持的 M/N 放置。对 `tile.matmul_acc` 而言，这特指位于规范 create/split-K-pipeline/store 链之外、由调用方持有的累加器，或者位于该链之内、但 `init_cond` 不是对循环归纳变量的首块判定的 4 操作数调用。该提示也覆盖 Vec 左操作数、需要 N 子窗口的已在 Bias 中的 `tile.matmul_bias` 源、并非完全作为矩阵乘操作数消费的片上结果、或超过 Mat/L1 容量的链式 matmul scratch。在 PyPTO/DSA-RP 下，规范源循环次数未知或超出模型范围时也会发出此提示，但保留单 C 成本下界。Issue #2232 的静态规范 split-K 情形不会发出此提示。 |
 | `PH-AT-007` | 非 16 对齐的 `K`——不存在分形对齐的 K 切分（任何剥离尾块或整段 K 块的列数都非分形），故该 matmul 保持不变 |
 | `PH-AT-008` | `ChooseL0Tile` 返回了 fallback 配置并附带 perf hint |
 | `PH-AT-009` | 该 backend 需要 bf16/f16 的片上 Mat scratch（如 Ascend910），但超大链式 matmul 的中间结果是 f32——在消费 matmul 之前把 matmul 结果 cast 成 bf16/f16；否则留在延后路径上 |
