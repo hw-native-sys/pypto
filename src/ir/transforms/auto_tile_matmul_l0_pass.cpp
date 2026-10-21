@@ -852,7 +852,8 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false) {
+    const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false,
+    bool keep_output_shape = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1187,7 +1188,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // requirement for this optimization: narrowing it would replace a legal
   // K-only rewrite with an unsupported bias-window fold. Keep its old grid.
   const bool can_bound_bias = !is_bias || bias_load || bias_tile->GetMemorySpace() == MemorySpace::Bias;
-  if (restrict_output_grid && lhs_tile->GetMemorySpace() == MemorySpace::Mat && can_bound_bias) {
+  if (restrict_output_grid && !keep_output_shape && lhs_tile->GetMemorySpace() == MemorySpace::Mat && can_bound_bias) {
     auto work_extent = [&](int64_t physical, const ExprPtr& valid, int alignment) {
       const auto extent = As<ConstInt>(valid);
       if (!extent || extent->value_ <= 0) return physical;
@@ -1198,6 +1199,18 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     // without expanding a physical source that is below the chooser minimum.
     cfg.N = static_cast<int>(std::min<int64_t>(
         N, std::max<int64_t>(cfg.min_n, work_extent(N, output_valid_shape[1], cfg.align_n))));
+  }
+
+  if (keep_output_shape) {
+    // The consumer cannot accept an M/N grid. Search only reductions that keep
+    // the original output intact, rather than leaving oversized L0 operands
+    // for an allocator to pack. A K-only reduction has one accumulator and no
+    // output-grid pipeline, so dbC and operand-stationary regimes cannot apply.
+    cfg.min_m = cfg.M;
+    cfg.min_n = cfg.N;
+    cfg.allow_a_stationary = false;
+    cfg.allow_b_stationary = false;
+    cfg.allow_double_buffer_c = false;
   }
 
   utils::L0TileResult res;
@@ -3322,22 +3335,24 @@ class AutoTileMutator : public IRMutator {
         if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
                                         /*output_box_alignment=*/std::nullopt, &direct_defs,
                                         consumer && consumer->supports_output_grid)) {
-          if (!tiling->needs_mn_tiling()) {
-            // Whole output fits L0c — tile K only.  k < K here (k == K with
-            // m == M, n == N needs no matmul tiling and was skipped by
-            // AnalyzeMatmul); the chooser may return a non-divisor k that
-            // BuildKLoopRewrite peels.
-            INTERNAL_CHECK_SPAN(tiling->k < tiling->K, tiling->assign->span_)
-                << "Internal error: K-only tiling expects k < K (K=" << tiling->K << ", k=" << tiling->k
-                << ")";
+          auto emit_k_only = [&](const MatmulTiling& plan) {
+            // AnalyzeMatmul skips a full M/N/K fit, so a shape-preserving plan
+            // reaching this emitter must split K. Preserve the original result
+            // shape and consumer, including the batch-assemble path in #2872.
+            INTERNAL_CHECK_SPAN(!plan.needs_mn_tiling() && plan.k < plan.K, plan.assign->span_)
+                << "Internal error: K-only tiling expects unchanged M/N and k < K";
             auto rewrite = BuildKLoopRewrite(
-                MakeKLoop(*tiling, /*mi=*/nullptr, /*ni=*/nullptr, tiling->m, tiling->n, /*name_base=*/""));
+                MakeKLoop(plan, /*mi=*/nullptr, /*ni=*/nullptr, plan.m, plan.n, /*name_base=*/""));
             remap[assign->var_.get()] = rewrite.return_var;
-            for (auto& s : rewrite.stmts) out.push_back(std::move(s));
+            for (auto& stmt : rewrite.stmts) out.push_back(std::move(stmt));
             changed = true;
+          };
+          if (!tiling->needs_mn_tiling()) {
+            emit_k_only(*tiling);
             continue;
           }
-          // Output exceeds L0c — tile M/N by folding the consumer store, found
+          const size_t mn_hint_start = hints.size();
+          // The chooser selected an M/N grid; fold its consumer store, found
           // via the raw (un-substituted) SiblingIndex: the matmul's result is
           // freshly defined here, so its use count / store site are never
           // affected by the running remap.
@@ -3414,7 +3429,23 @@ class AutoTileMutator : public IRMutator {
               continue;  // drop the matmul; sub-tile stmts emit at the store site
             }
           }
-          // M/N tiling not applicable — fall through and leave it untouched.
+          // A cost-optimal M/N grid is not necessarily required for capacity.
+          // If neither placement can emit it, retry with the whole output held
+          // in one Acc tile. The chooser still checks physical L0A/B/C limits;
+          // truly oversized outputs remain deferred. This applies to every
+          // planner: lifetime packing cannot repair one oversized operand.
+          std::vector<Diagnostic> fallback_hints;
+          if (auto k_only = AnalyzeMatmul(assign, fallback_hints, /*force_output_stationary=*/true,
+                                          /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                          /*restrict_output_grid=*/false, /*keep_output_shape=*/true)) {
+            // The rejected grid's deferral no longer applies. Diagnostic spans
+            // are immutable, so remove by destruction and append by construction.
+            while (hints.size() > mn_hint_start) hints.pop_back();
+            for (auto& hint : fallback_hints) hints.push_back(std::move(hint));
+            emit_k_only(*k_only);
+            continue;
+          }
+          // Neither placement nor a K-only reduction is legal; leave untouched.
         }
       }
       auto visited = VisitStmt(current);

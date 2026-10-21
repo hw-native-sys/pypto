@@ -4244,5 +4244,43 @@ def test_existing_l0_pipeline_preserves_explicit_buffering_policy(planner, legac
     _assert_ssa_valid(lowered, "explicit_l0_pipeline_policy")
 
 
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_unfoldable_output_uses_k_only_fallback(planner, ascend_backend):
+    """Preserve the whole result when no consumer can place a selected M/N grid."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[64, 512], pl.FP32, pl.Mem.Acc]:
+            result = pl.tile.matmul(lhs, rhs)
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[64, 512], pl.FP32, pl.Mem.Acc]:
+            seed = pl.tile.create([64, 512], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for ko, (acc,) in pl.pipeline(0, 128, 16, init_values=(seed,), stage=2):
+                left = pl.tile.extract(lhs, 0, ko, shape=[64, 16], target_memory=pl.Mem.Left)
+                right = pl.tile.extract(rhs, ko, 0, shape=[16, 512], target_memory=pl.Mem.Right)
+                updated = pl.tile.matmul_acc(acc, left, right, init_cond=(ko == 0))
+                result = pl.yield_(updated)
+            return result
+
+    with passes.PassContext([], memory_planner=planner):
+        After = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

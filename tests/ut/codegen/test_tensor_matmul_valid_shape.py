@@ -9,9 +9,12 @@
 
 """Explicitly boxed tensor.matmul retains valid M/N through the full compiler."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.pypto_core import passes
 from pypto.runtime import RunConfig
 
 
@@ -115,6 +118,39 @@ def test_tensor_matmul_else_first_carry_compiles(tmp_path, ascend_backend, physi
     pto = "\n".join(file.read_text() for file in files)
     assert "pto.tmatmul.acc" in pto
     assert "!pto.partition_tensor_view<17x24xf32>" in pto
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
+def test_batch_transposed_matmul_l0b_capacity(tmp_path, ascend_backend, planner, buffer_ir):
+    """#2872: an unplaceable output grid must not leave a 256 KiB L0B operand."""
+
+    @pl.jit
+    def batch_transposed(
+        a: pl.Tensor[[4, 64, 128], pl.FP32],
+        b: pl.Tensor[[4, 512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[4, 64, 512], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            result = pl.matmul(a, b, b_trans=True, out_dtype=pl.FP32)
+            out = pl.assemble(out, result, [0, 0, 0])
+        return out
+
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
+        batch_transposed.compile(
+            config=RunConfig(codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path))
+        )
+    pto_files = list(tmp_path.rglob("*.pto"))
+    assert pto_files
+    pto = "\n".join(file.read_text() for file in pto_files)
+    right_shapes = re.findall(r"loc=right, dtype=f32, rows=(\d+), cols=(\d+)", pto)
+    assert right_shapes, pto
+    # One oversized buffer cannot be repaired by allocator lifetime packing.
+    assert all(int(rows) * int(cols) * 4 <= 65536 for rows, cols in right_shapes), right_shapes
+    if find_ptoas_binary() is not None:
+        assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
 if __name__ == "__main__":
