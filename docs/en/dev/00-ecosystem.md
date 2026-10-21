@@ -141,8 +141,9 @@ preserved, and the parent combines their compilation records. A child failure
 or missing, empty, or malformed child receipt fails the entry even if the
 parent exits successfully. This interception applies to the current entry
 script launched by the same Python interpreter.
-CI uploads per-entry logs, results, and a manifest
-containing the tested library revision and selected entries.
+On compilation failure, CI uploads per-entry logs, results, and a manifest
+containing the tested library revision and selected entries. Successful runs
+report results in the job log and summary without uploading artifacts.
 
 ### PTOAS — PTO Assembler & Optimizer
 
