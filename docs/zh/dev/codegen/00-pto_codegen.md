@@ -847,3 +847,70 @@ PTO 后端为每个 ptoas 生成的 InCore 函数添加包装器，以供运行�
 - [IR 构建器 (Builder)](../ir/06-builder.md): 以编程方式构造 IR
 - [操作符组织](../ir/05-operators.md): Tile 操作详情
 - [PTOAS Op 状态矩阵](../ptoas-op-status.md): 每个 PTOAS op 的前端 / ST 覆盖状态
+
+## PTOAS 后端对比
+
+`tests/ci/compare_ptoas_backends.py` 使用固定版本的 PTOAS，对比 `emitc` 和
+`vpto` 后端。测试覆盖逐元素算术、归约、循环累加、部分有效形状，以及
+FP16 输入、FP32 输出的矩阵乘法，每个用例均使用 PyPTO 和 PTOAS 两种内存规划。
+这组小规模用例保留为定向复现；现有 CI 测试集也会按下文所述运行两个后端。
+生产编译继续使用 PTOAS 的默认后端。
+
+```bash
+python tests/ci/compare_ptoas_backends.py --platform a2a3 --output build/backend-parity
+# In a device session, also validate both backends against deterministic CPU goldens:
+python tests/ci/compare_ptoas_backends.py --platform a5 --execute --device 0 --output build/backend-parity-a5
+```
+
+每次运行使用新的输出目录。即使不传 `--execute`，构建主机也需要固定版本的
+runtime、PTO-ISA、PTOAS 和目标 CANN 工具链。审计在相同源文件路径编译两个后端，
+绕过 JIT 缓存复用，要求非空的 PTO 输入和内核清单一致。
+
+PTOAS v0.65 的 EmitC 输出 C++，VPTO 输出内嵌 AICore 原生对象的主机对象。
+直接给 PyPTO 添加 `--pto-backend=vpto` 会在按 C++ 文本读取 ELF 时失败。
+审计使用实验性适配器：提取原生设备对象，将生成函数体替换为外部声明，再将原生对象
+与 PyPTO 的常规运行时入口包装器链接。EmitC 仅提供参考函数签名，其实现函数体在
+VPTO 构建前已被移除。适配器仅用于审计，没有为生产编译路径添加 VPTO 支持。
+PTOAS 自行控制原生后端的编译参数，报告中明确记录了适配器要求。
+`summary.json` 记录编译与执行错误、编译命令、SHA-256、大小、完整 ELF 是否一致、
+可执行节（executable section）是否一致及其大小、可分配节（allocated section）是否一致，
+以及运行时实际上传的 `.text` 载荷是否逐字节一致。
+对象文件、链接后的 ELF、运行时载荷、源代码差异、反汇编和十六进制差异一并保留。
+
+二进制差异属于测量结果，本身不会导致审计失败。两个后端均能编译、输入与内核清单一致，
+且请求的黄金结果验证通过时，审计通过。声明二进制完全相同前应检查全部一致性字段：
+调试数据可以改变完整 ELF 而不改变代码；常量数据或零初始化存储可以改变可分配映像，
+而不改变可执行节。本测试集一致不代表所有算子、模型或性能场景均等价。
+`ptoas-backend-parity` CI 任务在 A2/A3 和 A5 设备上执行审计，后端失败时仍上传证据。VPTO 不支持的下降路径保持为失败，不标记为跳过。
+
+### 使用两个后端运行现有测试集
+
+CI 将现有系统测试分片、分布式测试、A5 实机测试、模拟器测试、示例与文档代码块、
+库编译、模型测试及按条件触发的 serving 测试扩展为 `emitc`、`vpto` 两个变体。
+原有测试命令、参数、平台过滤条件、断言和 golden 均保留。后端检查明确标记
+`emitc` 或 `vpto`。轻量托管结果任务保留原有必需检查名称，即使文档或条件门禁在
+矩阵展开前跳过测试，也会生成对应状态；任一后端失败都会使结果任务失败。
+跳过的矩阵不分配 NPU runner。某个测试步骤失败不会阻止后续测试步骤。
+不调用 PTOAS 的单元测试和 `--codegen-only` 测试不代表 VPTO 执行，不计入后端对比。
+
+`tests/ci/ptoas_test_backend.py` 在依赖安装完成后，为 CI 任务的解释器安装实验性启动钩子。
+安装器为后续 CI 步骤设置 `PYPTO_PTOAS_AUDIT_READY=1`，构建期间保持钩子未激活。
+`PYPTO_PTOAS_TEST_BACKEND=emitc|vpto` 选择后端，`PYPTO_PTOAS_AUDIT_DIR` 选择证据目录。
+新 Python 进程、pytest worker 和 task-submit 子进程均加载同一个钩子。
+按后端和 CI 运行隔离缓存 epoch，防止 VPTO 测试复用 EmitC 产物。
+该钩子仅限测试环境，没有增加生产 API。
+
+VPTO 变体首先调用原生 PTOAS，原生编译失败保持为测试失败，不回退到 EmitC。
+成功生成的原生对象使用与定向复现相同的 ABI 适配器。每次实际构建内核时，
+在相同源文件路径分别编译 EmitC 实现与 VPTO 适配器，将选定二进制交给原有运行时
+和 golden 检查。测试原先生成的包装器不会被修改。按模块和内核保存完整 ELF、
+运行时 `.text`、编译命令和对比字段。手写外部内核单独登记，因为它们不调用 PTOAS。
+
+CPU 模拟器不能执行 AICore 原生 VPTO 对象。VPTO 模拟器变体将其记录为明确失败，
+不会执行 EmitC 后宣称 VPTO 通过。纯 CPU runner 上生成原生代码同样需要 CANN
+设备编译器；工具缺失保持为可见失败。
+
+每个测试集即使失败也上传 `ptoas-suite-*` 产物。其 `summary.json` 拒绝空的后端覆盖，并将实际收集的
+pytest node ID 和测试结果，与 PTOAS 调用次数、内核构建次数、外部内核、二进制对比
+分别统计。每次尝试的记录保留错误，并区分原生下降、参考实现及适配器阶段的失败。
+小规模五用例 `ptoas-backend-parity` 任务继续提供额外诊断，不代表全量 VPTO 覆盖范围。

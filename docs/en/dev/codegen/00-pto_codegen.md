@@ -904,3 +904,91 @@ The PTO backend wraps each ptoas-generated InCore function for runtime dispatch.
 - [IR Builder](../ir/06-builder.md): Constructing IR programmatically
 - [Operator Organization](../ir/05-operators.md): Block operation details
 - [PTOAS Op Status Matrix](../ptoas-op-status.md): Frontend / ST coverage per PTOAS op
+
+## PTOAS backend comparison
+
+`tests/ci/compare_ptoas_backends.py` audits the pinned PTOAS `emitc` and `vpto`
+backends on elementwise arithmetic, reduction, loop-carried accumulation,
+partial valid shapes, and FP16-to-FP32 matmul. Each case runs with both PyPTO
+and PTOAS memory planning. This small corpus remains a focused reproducer; the existing CI suites also run
+with both backends as described below. Production compilation keeps the PTOAS default.
+
+```bash
+python tests/ci/compare_ptoas_backends.py --platform a2a3 --output build/backend-parity
+# In a device session, also validate both backends against deterministic CPU goldens:
+python tests/ci/compare_ptoas_backends.py --platform a5 --execute --device 0 --output build/backend-parity-a5
+```
+
+Use a fresh output directory for each run. The build host needs the pinned
+runtime, PTO-ISA, PTOAS, and target CANN toolchain even without `--execute`.
+PTOAS v0.65 returns C++ for EmitC and a host fat object containing a native
+AICore object for VPTO. Passing `--pto-backend=vpto` directly to PyPTO therefore
+fails when its C++ reader decodes the ELF. The audit uses an experimental adapter:
+it extracts the native device object, replaces the generated function bodies with
+external declarations, and links the native object with PyPTO's usual runtime
+entry wrapper. EmitC supplies reference signatures only; its implementation
+bodies are removed from the VPTO build. This adapter is confined to the audit
+and does not add production VPTO support.
+
+The audit compiles both wrappers at the same source path and bypasses JIT reuse.
+PTOAS controls the native backend's own compiler flags. The audit requires
+identical nonempty PTO inputs and kernel inventories. `summary.json` records compilation/execution failures,
+compiler commands, SHA-256 hashes, sizes, whole-ELF equality, executable-section
+equality and sizes, allocated-section equality, and equality of the exact
+`.text` payload uploaded by the runtime. Objects, linked ELF files, runtime payloads, source and
+disassembly/hex dump diffs are retained beside it.
+
+Binary differences are measurements and do not alone fail the audit. An audit
+passes when both backends compile, the inputs and inventories match, and any
+requested golden executions pass. The VPTO result records its adapter requirement. Check all equality fields before
+claiming identical binary output: debug data can change a full ELF without
+changing code; constant data or zero-initialized storage can change an allocated
+image without changing executable sections. Equality on this corpus does not
+establish equivalence for every operator, model, or performance workload.
+The `ptoas-backend-parity` CI jobs run the audit on A2/A3 and A5 devices and
+upload the evidence even when a backend fails. Unsupported VPTO lowerings remain
+failures in the report rather than skips.
+
+### Existing test suites under both backends
+
+CI expands the existing system-test shards, distributed tests, A5 onboard tests,
+simulator tests, examples/documented snippets, library compilation, model tests,
+and conditional serving tests over `emitc` and `vpto`. The original test commands,
+parameters, platform filters, assertions, and goldens are retained. Backend
+checks explicitly name `emitc` or `vpto`. Lightweight hosted result gates preserve
+the original required check names, even when a documentation-only or conditional
+gate skips a matrix before expansion; a failure in either backend fails its gate.
+The skipped matrices allocate no NPU runner. A failure in one test step does not
+suppress later test steps.
+Unit tests and `--codegen-only` tests that never invoke PTOAS do not constitute
+VPTO execution and are not counted as backend comparisons.
+
+`tests/ci/ptoas_test_backend.py` installs an experimental bootstrap into the CI
+job's interpreter after package installation. The installer sets
+`PYPTO_PTOAS_AUDIT_READY=1` for subsequent CI steps, keeping the bootstrap
+inactive during builds. `PYPTO_PTOAS_TEST_BACKEND=emitc|vpto` selects the backend and
+`PYPTO_PTOAS_AUDIT_DIR` selects the evidence directory. Fresh Python processes,
+pytest workers, and task-submit children load the same bootstrap. Backend- and
+job-specific cache epochs prevent an EmitC artifact from satisfying a VPTO test.
+This bootstrap is restricted to test environments and adds no production API.
+
+The VPTO variant invokes native PTOAS first. A failed native compilation remains
+a test failure, with no EmitC fallback. Successful native objects use the same
+ABI adapter as the focused reproducer. At every actual kernel build, both the
+EmitC implementation and the VPTO adapter are compiled at the same source path;
+the selected binary is returned to the existing runtime and golden checks.
+The test's original generated wrapper is not modified. Full ELF, runtime `.text`,
+compiler commands, and comparison fields are saved per module/kernel. External
+handwritten kernels are recorded separately because they do not invoke PTOAS.
+
+CPU simulator execution cannot consume a native AICore VPTO object. The VPTO
+simulator variant records this as an explicit failure instead of executing
+EmitC and claiming a VPTO pass. Native code generation on CPU-only runners also
+requires the CANN device compiler; missing tools remain visible failures.
+
+Each suite uploads `ptoas-suite-*` artifacts even on failure. Their `summary.json`
+rejects empty backend coverage and separates actual collected pytest node IDs and test outcomes from PTOAS attempts,
+kernel builds, external kernels, and binary comparisons. Per-attempt records
+retain errors and distinguish native lowering from reference/adapter failures.
+The small five-case `ptoas-backend-parity` jobs remain additional diagnostics;
+they are not the scope of the full-suite VPTO coverage.
