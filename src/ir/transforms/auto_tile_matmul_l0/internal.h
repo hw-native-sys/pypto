@@ -143,7 +143,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
     const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false,
-    const ForStmtPtr& source_reduction = nullptr, int64_t fixed_output_m = 0);
+    bool keep_output_shape = false, const ForStmtPtr& source_reduction = nullptr, int64_t fixed_output_m = 0);
 
 /// Plan against the post-canonical-rewrite function so loop identities and capacity agree.
 /// Automatic annotation remains disabled; explicit caller buffering is preserved.
