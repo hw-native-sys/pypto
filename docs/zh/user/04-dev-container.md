@@ -336,21 +336,25 @@ docker run --rm -it \
 
 ### 更新源码并重建
 
-维护中的辅助脚本位于 [`.github/docker/`](../../../.github/docker/)。用该 Dockerfile
+维护中的辅助脚本位于 [`docker/scripts/`](../../../docker/scripts/)。用该 Dockerfile
 重新构建的镜像会把脚本安装到 `/opt/pypto/bin`，绑定挂载覆盖 `/workspace` 后仍然可用。
 已发布的旧镜像可能仍只在自带 checkout 中提供旧更新器；这时使用下面的仓库版本。
+
+如果已有容器的 checkout 仍将辅助脚本直接放在 `.github/docker/` 或 `docker/`，先执行
+`git -C "$PYPTO_SRC" pull --ff-only`，再运行下面的命令。旧版已安装更新器拉取目录迁移后
+若提示找不到辅助脚本，也可这样恢复。仓库中的更新器会刷新 `/opt/pypto/bin`，使其适配新目录。
 
 对于已经设置跟踪分支且没有本地改动的 checkout：
 
 ```bash
-bash "$PYPTO_SRC/.github/docker/pypto-update.sh"
+bash "$PYPTO_SRC/docker/scripts/pypto-update.sh"
 ```
 
 它在各个已有仓库的当前跟踪分支上做快进更新，更新所 pin 的子模块，按
 `toolchain/versions.env` 安装所需的 PTOAS，然后重建 PyPTO 和 simpler，最后运行
 `pypto-doctor`。它不会切换分支或 reset 提交。分离 HEAD、分支分叉或本地改动需要先自行处理，
 也可以使用 `--no-pull`。
-拉取完成后（使用 `--no-pull` 时则直接），更新器会使用 `$PYPTO_SRC/.github/docker` 中的辅助脚本，
+拉取完成后（使用 `--no-pull` 时则直接），更新器会使用 `$PYPTO_SRC/docker/scripts` 中的辅助脚本，
 从 `/opt/pypto/bin` 启动时也一样。所选 checkout 必须包含这些脚本；缺少时直接报错，不回退到镜像中的旧副本。
 每次更新都会原子替换已安装的辅助脚本和工具链配置，不带 `--reinstall-deps` 时也一样。
 当前 shell 需执行 `source "$PYPTO_HOME/bin/pypto-activate.sh"` 或重新进入，以加载新的激活逻辑。
@@ -359,7 +363,7 @@ bash "$PYPTO_SRC/.github/docker/pypto-update.sh"
 修改绑定挂载的 checkout 后，保留源码并重建：
 
 ```bash
-bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
+bash "$PYPTO_SRC/docker/scripts/pypto-update.sh" --no-pull --jobs 2
 ```
 
 | 参数 | 作用 |
@@ -374,8 +378,8 @@ bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
 只修复过旧的 PTOAS，不更新源码或重建：
 
 ```bash
-bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
-source "$PYPTO_SRC/.github/docker/pypto-activate.sh"
+bash "$PYPTO_SRC/docker/scripts/pypto-install-ptoas.sh"
+source "$PYPTO_SRC/docker/scripts/pypto-activate.sh"
 "$PTOAS_ROOT/bin/ptoas" --version
 ```
 
@@ -390,8 +394,12 @@ runtime 包始终显式安装到 `$PYPTO_HOME/venv`。
 环境需要已有 uv 和 CPython 3.10，已发布镜像满足这个条件。在其他 CANN 容器中配置环境时，
 从完整 checkout 运行 `pypto-setup.sh`；它安装同一份辅助脚本，并通过
 `build-constraints.txt` 约束构建工具。
-Setup 会检查其专用的 `$PYPTO_HOME/venv` 是否使用 CPython 3.10。
-不兼容或不完整的环境会在安装依赖之前重建；已有完整的 CPython 3.10 环境会保留。
+Setup 的专用 `$PYPTO_HOME/venv` 必须使用 CPython 3.10，并包含可读取的
+`Python.h`、`pyconfig.h` 和 Python 库以支持原生构建。不兼容或不完整的环境会在安装依赖前
+使用 uv 管理的 Python 重建；已有完整构建环境会保留。PTOAS 的独立运行时环境不要求开发文件。
+Setup 完成后（包括 `--helpers-only`），将输出的激活命令复制到当前 shell 执行。
+该命令会先导出选定的安装目录和 checkout 路径，再 source 激活脚本，
+支持通过 `--pypto-home` 和 `--pypto-src` 指定的路径。更新器输出的重新加载命令也会保留这些路径。
 Setup 将发现的 uv 可执行文件复制到 `$PYPTO_HOME/bin`，使 checkout 所有者执行的构建
 也能使用它，即使原始文件位于 root 的私有主目录下。
 如需固定 uv 版本，传入 `--uv-version TAG` 或设置 `UV_VERSION=TAG`；指定具体发布标签时，
@@ -421,7 +429,7 @@ Setup 将发现的 uv 可执行文件复制到 `$PYPTO_HOME/bin`，使 checkout 
 
 ```bash
 docker buildx build --load --target dist \
-  --file .github/docker/pypto_dev.Dockerfile \
+  --file docker/pypto_dev.Dockerfile \
   --build-arg DIST_BUILD_JOBS=2 \
   --build-arg PYPTO_REF=<pypto-commit> \
   --build-arg PYPTO_LIB_REF=<pypto-lib-commit> \
@@ -439,8 +447,8 @@ docker buildx build --load --target dist \
 构建前先确认该标签支持目标架构。先发布独立架构标签，在对应 NPU 宿主机上通过
 `pypto-doctor` 和模型验证后，再组合多架构 manifest。无 NPU 时构建成功只验证镜像构建过程。
 
-本地环境镜像可以用 `.github/docker/pypto-dev.sh build a3` 构建，
-用 `.github/docker/pypto-dev.sh run a3 0` 创建或重新进入容器。
+本地环境镜像可以用 `docker/scripts/pypto-dev.sh build a3` 构建，
+用 `docker/scripts/pypto-dev.sh run a3 0` 创建或重新进入容器。
 启动器支持 CANN 标签、镜像、缓存卷和代理覆盖，具体见源码。
 代理值通过环境传递，不在命令跟踪中打印凭据，也不作为命令参数传入。重新进入容器时保留容器原有环境。
 复用容器前，启动器会检查 checkout 路径、镜像（包括同一标签重新构建的情况）、缓存卷和设备配置。
@@ -474,7 +482,7 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 启动器会在创建或重新进入容器之前说明这一行为。允许这类访问时，可以显式选择：
 
 ```bash
-PYPTO_DEVICE_ACCESS=privileged .github/docker/pypto-dev.sh run a3 1
+PYPTO_DEVICE_ACCESS=privileged docker/scripts/pypto-dev.sh run a3 1
 ```
 
 启动器挂载宿主机驱动目录和管理工具，并设置 `PYPTO_DEVICE=1`，将物理卡 1 作为默认计算设备。

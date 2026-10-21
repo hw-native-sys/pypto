@@ -77,6 +77,12 @@ pypto_install_helpers() {
     pypto_install_copy 0644 "$constraints" "$PYPTO_HOME/toolchain/build-constraints.txt"
 }
 
+pypto_print_activation() {
+    printf 'export PYPTO_HOME=%q PYPTO_SRC=%q PTOAS_ROOT=%q PYPTO_LIB_SRC=%q; source %q\n' \
+        "$PYPTO_HOME" "$PYPTO_SRC" "${PTOAS_ROOT:-$PYPTO_HOME/ptoas}" \
+        "${PYPTO_LIB_SRC:-/workspace/pypto-lib}" "$PYPTO_HOME/bin/pypto-activate.sh"
+}
+
 toolchain_env="$PYPTO_SRC/toolchain/versions.env"
 constraints="$PYPTO_SRC/build-constraints.txt"
 if [ ! -f "$toolchain_env" ]; then toolchain_env="$PYPTO_HOME/toolchain/versions.env"; fi
@@ -87,7 +93,8 @@ if [ ! -f "$constraints" ]; then constraints="$PYPTO_HOME/toolchain/build-constr
 }
 if $helpers_only; then
     pypto_install_helpers
-    echo "Helpers refreshed. Activate with: source $PYPTO_HOME/bin/pypto-activate.sh"
+    printf 'Helpers refreshed. Activate with: '
+    pypto_print_activation
     exit 0
 fi
 source "$here/pypto-venv.sh"
@@ -124,7 +131,7 @@ export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PYPTO_HOME/python}"
 export PIP_USER=0
 uv python install 3.10
 python="$PYPTO_HOME/venv/bin/python"
-pypto_ensure_venv "$PYPTO_HOME/venv" cpython@3.10
+pypto_ensure_venv "$PYPTO_HOME/venv" cpython@3.10 development
 uv pip install --python "$python" "torch==$torch_version" --index-url "$torch_index"
 uv pip install --python "$python" --constraint "$constraints" \
     'scikit-build-core>=0.10.0' 'nanobind>=2.0.0,<3' 'ninja>=1.11.0' 'cmake>=3.15' \
@@ -134,4 +141,5 @@ uv pip install --python "$python" --constraint "$constraints" \
 "$here/pypto-install-ptoas.sh" --toolchain-env "$toolchain_env" --force
 
 pypto_install_helpers
-echo "Setup complete. Activate with: source $PYPTO_HOME/bin/pypto-activate.sh"
+printf 'Setup complete. Activate with: '
+pypto_print_activation

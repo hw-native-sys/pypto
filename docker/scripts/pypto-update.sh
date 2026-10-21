@@ -137,7 +137,7 @@ fi
 
 # Installed launchers can outlive the image's helper copies. Once the source is
 # current, use its helpers together so build, activation and pin handling agree.
-here="$PYPTO_SRC/.github/docker"
+here="$PYPTO_SRC/docker/scripts"
 for helper in pypto-build pypto-install-ptoas.sh pypto-setup.sh pypto-doctor; do
     [ -x "$here/$helper" ] || {
         echo "Missing checkout helper $here/$helper; select a checkout containing the container scripts" >&2
@@ -154,4 +154,6 @@ if [ -n "$jobs" ]; then export PYPTO_BUILD_JOBS="$jobs"; fi
 "$here/pypto-build"
 if $doctor; then "$here/pypto-doctor"; fi
 echo "PyPTO update complete"
-printf 'Reload this shell with: source %q\n' "$PYPTO_HOME/bin/pypto-activate.sh"
+printf 'Reload this shell with: export PYPTO_HOME=%q PYPTO_SRC=%q PTOAS_ROOT=%q PYPTO_LIB_SRC=%q; source %q\n' \
+    "$PYPTO_HOME" "$PYPTO_SRC" "${PTOAS_ROOT:-$PYPTO_HOME/ptoas}" \
+    "$PYPTO_LIB_SRC" "$PYPTO_HOME/bin/pypto-activate.sh"

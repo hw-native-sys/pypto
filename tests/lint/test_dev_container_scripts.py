@@ -11,6 +11,7 @@
 
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,9 @@ from pathlib import Path
 import pytest
 from check_headers import PY_HEADER, check_file_header
 
-SCRIPTS = Path(__file__).resolve().parents[2] / ".github/docker"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO_ROOT / "docker/scripts"
+DOCKERFILE = REPO_ROOT / "docker/pypto_dev.Dockerfile"
 
 
 def executable(path: Path, body: str) -> Path:
@@ -88,11 +91,30 @@ def container(tmp_path: Path) -> dict[str, str]:
         '        chmod +x "$target/bin/python"\n'
         '    else cp "$PYPTO_HOME/venv/bin/python" "$target/bin/python"; fi\n'
         'elif [[ "${*: -1}" = *.whl ]]; then\n'
-        '    printf "#!/bin/bash\\necho ptoas 0.65\\n" > "$PTOAS_ROOT/bin/ptoas"\n'
-        '    chmod +x "$PTOAS_ROOT/bin/ptoas"\n'
+        '    printf "#!/bin/bash\\necho ptoas 0.65\\n" > "${PTOAS_ROOT:-$PYPTO_HOME/ptoas}/bin/ptoas"\n'
+        '    chmod +x "${PTOAS_ROOT:-$PYPTO_HOME/ptoas}/bin/ptoas"\n'
         "fi",
     )
     return env
+
+
+@pytest.mark.parametrize("script", ["pypto-setup.sh", "pypto-install-ptoas.sh"])
+def test_helpers_infer_checkout_from_scripts_directory(container: dict[str, str], script: str) -> None:
+    source = Path(container.pop("PYPTO_SRC"))
+    shutil.copytree(SCRIPTS, source / "docker/scripts")
+    constraints = source / "build-constraints.txt"
+    constraints.write_text("nanobind==2.15.0\n")
+    # No installed pin fallback or PYPTO_SRC: the checkout must be inferred
+    # from the helper's location, independently of the caller's working directory.
+    result = run(source / "docker/scripts" / script, container)
+    assert result.returncode == 0, result.stderr
+    calls = Path(container["CALLS"]).read_text()
+    assert "ptoas-0.65-" in calls
+    if script == "pypto-setup.sh":
+        assert f"--constraint {constraints}" in calls
+        assert (Path(container["PYPTO_HOME"]) / "toolchain/versions.env").read_bytes() == (
+            source / "toolchain/versions.env"
+        ).read_bytes()
 
 
 @pytest.mark.parametrize("repeat", [False, True])
@@ -153,6 +175,109 @@ def test_setup_migrates_incompatible_venv(container: dict[str, str], version: st
         assert calls.index(recreated[0]) < next(
             i for i, call in enumerate(calls) if call.startswith("uv pip install")
         )
+
+
+@pytest.mark.parametrize("recreated_broken", [False, True])
+@pytest.mark.parametrize("missing", [None, "Python.h", "pyconfig.h", "libpython.so", "directory"])
+def test_setup_requires_development_files(
+    container: dict[str, str], tmp_path: Path, missing: str | None, recreated_broken: bool
+) -> None:
+    home = Path(container["PYPTO_HOME"])
+    (Path(container["PYPTO_SRC"]) / "build-constraints.txt").write_text("nanobind==2.15.0\n")
+    development = tmp_path / "development"
+    development.mkdir()
+    for name in ["Python.h", "pyconfig.h", "libpython.so"]:
+        (development / name).touch()
+    if missing == "directory":
+        (development / "Python.h").unlink()
+        (development / "Python.h").mkdir()
+    elif missing:
+        (development / missing).unlink()
+    # Execute the real probe with sysconfig pointing at controlled development
+    # files, while reporting 3.10 for the independent interpreter-version probe.
+    probe = (
+        "import sys, sysconfig; "
+        f"sysconfig.get_path = lambda key: {str(development)!r}; "
+        f"values = {{'LIBDIR': {str(development)!r}, 'LDLIBRARY': 'libpython.so'}}; "
+        "sysconfig.get_config_var = values.get; exec(sys.argv[1])"
+    )
+    executable(
+        home / "venv/bin/python",
+        'if [[ "${*: -1}" == *"import sysconfig"* ]]; then\n'
+        f'    exec {shlex.quote(sys.executable)} -I -c {shlex.quote(probe)} "${{*: -1}}"\n'
+        "fi\necho 3.10",
+    )
+    if recreated_broken:
+        saved = development / "python"
+        shutil.copy2(home / "venv/bin/python", saved)
+        uv = Path(container["PATH"].split(":")[0]) / "uv"
+        uv.write_text(
+            uv.read_text()
+            + 'if [ "$1" = venv ] && [ "${*: -1}" = "$PYPTO_HOME/venv" ]; then\n'
+            + f'    cp {shlex.quote(str(saved))} "$PYPTO_HOME/venv/bin/python"\nfi\n'
+        )
+    marker = home / "venv/existing"
+    marker.touch()
+    result = run(SCRIPTS / "pypto-setup.sh", container)
+    if recreated_broken and missing is not None:
+        assert result.returncode != 0
+        assert "Requires a complete CPython 3.10 virtual environment" in result.stderr
+        assert "uv pip install" not in Path(container["CALLS"]).read_text()
+    else:
+        assert result.returncode == 0, result.stderr
+    assert marker.exists() == (missing is None)
+    calls = Path(container["CALLS"]).read_text()
+    assert ("uv venv --managed-python --python cpython@3.10" in calls) == (missing is not None)
+
+
+@pytest.mark.parametrize("helpers_only", [False, True])
+@pytest.mark.parametrize("inferred", [False, True])
+def test_setup_activation_command_preserves_paths(
+    container: dict[str, str], tmp_path: Path, helpers_only: bool, inferred: bool
+) -> None:
+    home = tmp_path / "custom home 'quoted'"
+    source = tmp_path / "checkout ; literal"
+    Path(container["PYPTO_HOME"]).rename(home)
+    Path(container["PYPTO_SRC"]).rename(source)
+    # Refresh the fixture activation after moving its prefix.
+    fake_venv(home / "venv")
+    (source / "python").mkdir()
+    (source / "build-constraints.txt").write_text("nanobind==2.15.0\n")
+    shutil.copytree(SCRIPTS, source / "docker/scripts")
+    container.pop("PYPTO_HOME")
+    container.pop("PYPTO_SRC")
+    container.pop("PTOAS_ROOT")
+    args = ["--pypto-home", str(home)]
+    if not inferred:
+        args += ["--pypto-src", str(source)]
+    if helpers_only:
+        args += ["--helpers-only"]
+    result = run(source / "docker/scripts/pypto-setup.sh", container, *args)
+    assert result.returncode == 0, result.stderr
+    command = result.stdout.split("Activate with: ", 1)[1].strip()
+    # A different shell must not depend on exports made by the setup child.
+    parent = {**container, "PYPTO_HOME": "/stale", "PYPTO_SRC": "/stale", "PTOAS_ROOT": "/stale"}
+    activated = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command
+            + '\nprintf "%s\\n" "$PYPTO_HOME" "$PYPTO_SRC" "$PTOAS_ROOT"; '
+            + "command -v python; command -v pypto-build",
+        ],
+        env=parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert activated.returncode == 0, activated.stderr
+    assert activated.stdout.splitlines()[-5:] == [
+        str(home),
+        str(source),
+        str(home / "ptoas"),
+        str(home / "venv/bin/python"),
+        str(home / "bin/pypto-build"),
+    ]
 
 
 def test_setup_rejects_incorrect_recreated_python(container: dict[str, str]) -> None:
@@ -393,7 +518,7 @@ def updater(tmp_path: Path, container: dict[str, str]) -> tuple[Path, dict[str, 
     shutil.copy2(SCRIPTS / "pypto-owner.sh", scripts / "pypto-owner.sh")
     for name in ["pypto-install-ptoas.sh", "pypto-build", "pypto-doctor", "pypto-setup.sh"]:
         executable(scripts / name, f'echo {name} >> "$CALLS"')
-        executable(Path(container["PYPTO_SRC"]) / ".github/docker" / name, f'echo {name} >> "$CALLS"')
+        executable(Path(container["PYPTO_SRC"]) / "docker/scripts" / name, f'echo {name} >> "$CALLS"')
     return scripts / "pypto-update.sh", container
 
 
@@ -402,8 +527,8 @@ def test_updater_accepts_linked_worktree(tmp_path: Path, updater: tuple[Path, di
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "--initial-branch=main")
-    shutil.copytree(Path(env["PYPTO_SRC"]) / ".github", repo / ".github")
-    git(repo, "add", ".github/docker")
+    shutil.copytree(Path(env["PYPTO_SRC"]) / "docker", repo / "docker")
+    git(repo, "add", "docker")
     git(
         repo,
         "-c",
@@ -468,29 +593,41 @@ def test_no_pull_skips_git_operations(
 
 def test_updater_rejects_missing_checkout_helper(updater: tuple[Path, dict[str, str]]) -> None:
     script, env = updater
-    (Path(env["PYPTO_SRC"]) / ".github/docker/pypto-build").unlink()
+    (Path(env["PYPTO_SRC"]) / "docker/scripts/pypto-build").unlink()
     result = run(script, env, "--no-pull", "--skip-doctor")
     assert result.returncode != 0
     assert "Missing checkout helper" in result.stderr
     assert not Path(env["CALLS"]).exists()
 
 
+@pytest.mark.parametrize("old_directory", [".github/docker", "docker", "docker/scripts"])
 @pytest.mark.parametrize("reinstall", [False, True])
 def test_installed_updater_uses_pulled_helpers(
-    updater: tuple[Path, dict[str, str]], tmp_path: Path, reinstall: bool
+    updater: tuple[Path, dict[str, str]], tmp_path: Path, reinstall: bool, old_directory: str
 ) -> None:
     script, env = updater
     upstream = Path(env["PYPTO_SRC"])
     git(upstream, "init", "--initial-branch=main")
     git(upstream, "config", "user.name", "Test")
     git(upstream, "config", "user.email", "test@example.invalid")
-    git(upstream, "add", ".github/docker", "toolchain/versions.env")
+    helpers = ["pypto-install-ptoas.sh", "pypto-build", "pypto-doctor", "pypto-setup.sh"]
+    if old_directory != "docker/scripts":
+        (upstream / old_directory).mkdir(parents=True, exist_ok=True)
+        for helper in helpers:
+            (upstream / "docker/scripts" / helper).rename(upstream / old_directory / helper)
+        (upstream / "docker/scripts").rmdir()
+    git(upstream, "add", old_directory, "toolchain/versions.env")
     git(upstream, "commit", "-m", "old helpers")
     checkout = tmp_path / "checkout"
     git(upstream, "clone", str(upstream), str(checkout))
-    for helper in ["pypto-install-ptoas.sh", "pypto-build", "pypto-doctor", "pypto-setup.sh"]:
+    if old_directory != "docker/scripts":
+        # Resolve checkout helpers after pulling, even when the pull moves them.
+        (upstream / "docker/scripts").mkdir(parents=True)
+        for helper in helpers:
+            git(upstream, "mv", f"{old_directory}/{helper}", f"docker/scripts/{helper}")
+    for helper in helpers:
         executable(script.parent / helper, "exit 99")
-        executable(upstream / ".github/docker" / helper, f'echo "new {helper}" >> "$CALLS"')
+        executable(upstream / "docker/scripts" / helper, f'echo "new {helper}" >> "$CALLS"')
     git(upstream, "commit", "-am", "new helpers")
     env["PYPTO_SRC"] = str(checkout)
     result = run(script, env, *(["--reinstall-deps"] if reinstall else []))
@@ -507,7 +644,7 @@ def test_installed_updater_uses_pulled_helpers(
 def test_normal_update_refreshes_installed_helpers(container: dict[str, str]) -> None:
     home = Path(container["PYPTO_HOME"])
     source = Path(container["PYPTO_SRC"])
-    helpers = source / ".github/docker"
+    helpers = source / "docker/scripts"
     shutil.copytree(SCRIPTS, helpers)
     (source / "build-constraints.txt").write_text("nanobind==2.15.0\n")
     result = run(helpers / "pypto-setup.sh", container, "--helpers-only")
@@ -532,7 +669,7 @@ def test_normal_update_refreshes_installed_helpers(container: dict[str, str]) ->
         assert result.returncode == 0, result.stdout + result.stderr
         assert reader.read() == before
     assert "old-launcher-tail" in result.stdout and "new-launcher-tail" not in result.stdout
-    assert "Reload this shell with: source" in result.stdout
+    assert "Reload this shell with: export" in result.stdout
     for name in [
         "pypto-build",
         "pypto-doctor",
@@ -676,16 +813,16 @@ def test_build_respects_requested_jobs_and_machine_limit(
     (source / "CMakeLists.txt").touch()
     loader = source / ".claude/skills/testing/load-env.sh"
     loader.parent.mkdir(parents=True)
-    shutil.copy2(SCRIPTS.parents[1] / ".claude/skills/testing/load-env.sh", loader)
+    shutil.copy2(REPO_ROOT / ".claude/skills/testing/load-env.sh", loader)
     if updater:
-        helpers = source / ".github/docker"
+        helpers = source / "docker/scripts"
         executable(helpers / "pypto-build", f'exec "{SCRIPTS / "pypto-build"}" --pypto-only')
         for helper in ["pypto-install-ptoas.sh", "pypto-setup.sh", "pypto-doctor"]:
             executable(helpers / helper, "exit 0")
     git(source, "init", "--initial-branch=main")
     git(source, "add", "CMakeLists.txt", ".claude/skills/testing/load-env.sh")
     if updater:
-        git(source, "add", ".github/docker")
+        git(source, "add", "docker")
     git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init")
     # The profile exists only in the primary checkout. Missing profiles must
     # retain the actual loader's two-job fallback, even for an explicit request.
@@ -1117,6 +1254,27 @@ def test_launcher_uses_container_visible_device(
 
 
 @pytest.mark.parametrize("command", ["build", "run"])
+def test_launcher_infers_checkout_from_scripts_directory(container: dict[str, str], command: str) -> None:
+    source = Path(container["PYPTO_SRC"])
+    shutil.copytree(SCRIPTS, source / "docker/scripts")
+    shutil.copy2(DOCKERFILE, source / "docker/pypto_dev.Dockerfile")
+    executable(
+        Path(container["PATH"].split(":")[0]) / "docker",
+        'if [ "$1 $2" = "container inspect" ]; then exit 1; fi\nprintf "%s\\n" "$@" > "$CALLS"',
+    )
+    container["PYPTO_DEVICE_ACCESS"] = "runtime"
+    result = run(source / "docker/scripts/pypto-dev.sh", container, command, "a3")
+    assert result.returncode == 0, result.stderr
+    args = Path(container["CALLS"]).read_text().splitlines()
+    if command == "build":
+        assert args[args.index("--file") + 1] == str(source / "docker/pypto_dev.Dockerfile")
+        assert Path(args[args.index("--file") + 1]).is_file()
+        assert args[-1] == str(source)
+    else:
+        assert f"{source}:/workspace/pypto" in args
+
+
+@pytest.mark.parametrize("command", ["build", "run"])
 def test_launcher_forwards_proxy_without_disclosing_credentials(
     container: dict[str, str], command: str
 ) -> None:
@@ -1249,9 +1407,7 @@ def test_doctor_checks_installed_runtime_revision(
         package = packages / name
         package.mkdir(parents=True, exist_ok=True)
         (package / "__init__.py").touch()
-    shutil.copy2(
-        SCRIPTS.parents[1] / "python/pypto/runtime/runtime_pin.py", packages / "pypto/runtime/runtime_pin.py"
-    )
+    shutil.copy2(REPO_ROOT / "python/pypto/runtime/runtime_pin.py", packages / "pypto/runtime/runtime_pin.py")
     (packages / "pypto/runtime/__init__.py").write_text("from .runtime_pin import check_runtime_pin\n")
     (packages / "simpler/task_interface.py").touch()
     (packages / "_task_interface.py").write_text(
@@ -1474,7 +1630,7 @@ def test_dist_checkout_preserves_tracking_branches(
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     git(upstream, "init", "--initial-branch=main")
-    selected_helpers = upstream / ".github/docker"
+    selected_helpers = upstream / "docker/scripts"
     shutil.copytree(SCRIPTS, selected_helpers)
     shutil.copytree(Path(container["PYPTO_SRC"]) / "toolchain", upstream / "toolchain")
     (upstream / "build-constraints.txt").write_text("nanobind==2.15.0\n")
@@ -1488,7 +1644,7 @@ def test_dist_checkout_preserves_tracking_branches(
         'cmp "$PYPTO_HOME/toolchain/build-constraints.txt" "$PYPTO_SRC/build-constraints.txt"\n'
         'echo selected-build >> "$CALLS"',
     )
-    git(upstream, "add", ".github", "toolchain", "build-constraints.txt")
+    git(upstream, "add", "docker", "toolchain", "build-constraints.txt")
     git(
         upstream,
         "-c",
@@ -1511,7 +1667,7 @@ def test_dist_checkout_preserves_tracking_branches(
         PYPTO_LIB_REF=revision if ref == "commit" else ref,
         GIT_CONFIG_GLOBAL=str(tmp_path / "gitconfig"),
     )
-    dockerfile = (SCRIPTS / "pypto_dev.Dockerfile").read_text()
+    dockerfile = DOCKERFILE.read_text()
     start = dockerfile.index('RUN set -eu; \\\n    git clone "$PYPTO_REPO"')
     clone_step = dockerfile[start : dockerfile.index("\n\n", start)]
     workspace = tmp_path / "workspace"
@@ -1581,11 +1737,11 @@ def test_dist_checkout_preserves_tracking_branches(
     assert "ptoas-0.65-" in calls
     assert calls.splitlines()[-1] == "selected-build"
     for name in ["pypto-build", "pypto-setup.sh", "pypto-activate.sh"]:
-        assert (home / "bin" / name).read_bytes() == (workspace / "pypto/.github/docker" / name).read_bytes()
+        assert (home / "bin" / name).read_bytes() == (workspace / "pypto/docker/scripts" / name).read_bytes()
 
 
 def test_dist_rejects_ref_without_helpers(container: dict[str, str]) -> None:
-    dockerfile = (SCRIPTS / "pypto_dev.Dockerfile").read_text()
+    dockerfile = DOCKERFILE.read_text()
     start = dockerfile.index("RUN set -eu; \\\n    export PYPTO_SRC=")
     step = dockerfile[start : dockerfile.index("\n\n", start)]
     command = (
@@ -1595,7 +1751,7 @@ def test_dist_rejects_ref_without_helpers(container: dict[str, str]) -> None:
         ["/bin/sh", "-eu", "-c", command], env=container, text=True, capture_output=True, check=False
     )
     assert result.returncode != 0
-    assert "Selected PYPTO_REF lacks .github/docker/pypto-setup.sh" in result.stderr
+    assert "Selected PYPTO_REF lacks docker/scripts/pypto-setup.sh" in result.stderr
     assert not Path(container["CALLS"]).exists()
 
 
@@ -1756,8 +1912,8 @@ def test_remote_submodule_updates_repeat_without_losing_edits(
         git(repo, "init", "--initial-branch=main")
         git(repo, "config", "user.name", "Test")
         git(repo, "config", "user.email", "test@example.invalid")
-    shutil.copytree(Path(env["PYPTO_SRC"]) / ".github", parent / ".github")
-    git(parent, "add", ".github/docker")
+    shutil.copytree(Path(env["PYPTO_SRC"]) / "docker", parent / "docker")
+    git(parent, "add", "docker")
     (runtime / "abi.h").write_text("first")
     git(runtime, "add", "abi.h")
     git(runtime, "commit", "-m", "first")
@@ -1865,8 +2021,8 @@ def test_rootful_update_preserves_host_ownership(
     git(upstream, "init", "--initial-branch=main")
     git(upstream, "config", "user.name", "Test")
     git(upstream, "config", "user.email", "test@example.invalid")
-    shutil.copytree(Path(env["PYPTO_SRC"]) / ".github", upstream / ".github")
-    git(upstream, "add", ".github")
+    shutil.copytree(Path(env["PYPTO_SRC"]) / "docker", upstream / "docker")
+    git(upstream, "add", "docker")
     git(upstream, "commit", "-m", "initial helpers")
     primary = tmp_path / "primary"
     git(tmp_path, "clone", str(upstream), str(primary))

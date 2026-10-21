@@ -10,9 +10,9 @@
 #
 # Build and run the PyPTO on-device development image.
 #
-#   .github/docker/pypto-dev.sh build a3        # Ascend910B (A2/A3)
-#   .github/docker/pypto-dev.sh build a5        # Ascend950  (A5)
-#   .github/docker/pypto-dev.sh run   a3 [device-id]   # create or re-enter
+#   docker/scripts/pypto-dev.sh build a3        # Ascend910B (A2/A3)
+#   docker/scripts/pypto-dev.sh build a5        # Ascend950  (A5)
+#   docker/scripts/pypto-dev.sh run   a3 [device-id]   # create or re-enter
 #
 # Env overrides: CANN_REPO, CANN_VERSION, CANN_PY, TARGET, IMAGE,
 # PYPTO_SRC_HOST, PYPTO_LIB_SRC_HOST, PYPTO_CACHE_VOLUME, PYPTO_DEVICE_ACCESS.
@@ -103,7 +103,7 @@ build)
         [ -n "${!v:-}" ] && proxy_args+=(--build-arg "$v")
     done
     docker buildx build \
-        --file "$here/pypto_dev.Dockerfile" \
+        --file "$repo_root/docker/pypto_dev.Dockerfile" \
         --target "$TARGET" \
         --build-arg "CANN_REPO=$CANN_REPO" \
         --build-arg "CANN_TAG=$tag" \

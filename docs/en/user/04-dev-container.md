@@ -363,15 +363,21 @@ tag produces setup guidance instead of guessing a model target.
 
 ### Updating the source and rebuilding
 
-The maintained helpers are in [`.github/docker/`](../../../.github/docker/). Images
+The maintained helpers are in [`docker/scripts/`](../../../docker/scripts/). Images
 rebuilt from this Dockerfile install them under `/opt/pypto/bin`, which remains visible
 when a bind mount covers `/workspace`. Existing published images may still have the old
 updater only in their bundled checkout; use the repository copy below in those images.
 
+For an existing container whose checkout still has the helpers directly under
+`.github/docker/` or `docker/`, first run `git -C "$PYPTO_SRC" pull --ff-only`, then
+use the command below. This also recovers an old installed updater that pulled the
+directory move and then reported a
+missing helper. The repository updater refreshes `/opt/pypto/bin` to use the new layout.
+
 For a checkout with a tracking branch and no local changes:
 
 ```bash
-bash "$PYPTO_SRC/.github/docker/pypto-update.sh"
+bash "$PYPTO_SRC/docker/scripts/pypto-update.sh"
 ```
 
 This fast-forwards each existing repository on its current tracking branch, updates
@@ -380,7 +386,7 @@ rebuilds PyPTO and simpler, and runs `pypto-doctor`. It never switches branches 
 commits. A detached checkout, divergent branch, or local changes require you to resolve
 that state yourself or use `--no-pull`.
 After pulling (or immediately with `--no-pull`), the updater uses the helpers from
-`$PYPTO_SRC/.github/docker`, including when launched from `/opt/pypto/bin`. The selected
+`$PYPTO_SRC/docker/scripts`, including when launched from `/opt/pypto/bin`. The selected
 checkout must contain those helpers; missing helpers fail instead of using stale image copies.
 Every update also refreshes the installed helpers and toolchain inputs atomically,
 including without `--reinstall-deps`. Reload an existing shell with
@@ -390,7 +396,7 @@ including without `--reinstall-deps`. Reload an existing shell with
 For edits in a bind-mounted checkout, preserve the source and rebuild:
 
 ```bash
-bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
+bash "$PYPTO_SRC/docker/scripts/pypto-update.sh" --no-pull --jobs 2
 ```
 
 | Flag | Effect |
@@ -405,8 +411,8 @@ bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
 To fix only a stale PTOAS, without updating source or rebuilding:
 
 ```bash
-bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
-source "$PYPTO_SRC/.github/docker/pypto-activate.sh"
+bash "$PYPTO_SRC/docker/scripts/pypto-install-ptoas.sh"
+source "$PYPTO_SRC/docker/scripts/pypto-activate.sh"
 "$PTOAS_ROOT/bin/ptoas" --version
 ```
 
@@ -424,9 +430,15 @@ shadowing the pinned wheel. The installer isolates its own version probes automa
 The environment must already contain uv and CPython 3.10, as the published image does.
 Run `pypto-setup.sh` from a complete checkout to provision a different CANN container;
 it installs the same helper sources and uses `build-constraints.txt` for build tools.
-It verifies that its dedicated `$PYPTO_HOME/venv` uses CPython 3.10. Incompatible or
-incomplete environments are recreated before dependencies are installed; an existing
-complete CPython 3.10 environment is preserved.
+Its dedicated `$PYPTO_HOME/venv` must use CPython 3.10 and provide readable
+`Python.h`, `pyconfig.h`, and a Python library for the native build. Incompatible or
+incomplete environments are recreated with uv-managed Python before dependencies
+are installed; an existing complete build environment is preserved. PTOAS's separate
+runtime environment does not require development files.
+After setup (including `--helpers-only`), copy the printed activation command into
+your shell. It exports the selected installation and checkout paths before sourcing
+the helper, including paths supplied with `--pypto-home` or `--pypto-src`.
+The updater's reload command preserves these paths as well.
 Setup copies a discovered uv executable into `$PYPTO_HOME/bin`, so checkout-owner
 builds can use it even when the original executable is under root's private home.
 To pin uv, pass `--uv-version TAG` or set `UV_VERSION=TAG`; a concrete release tag
@@ -462,7 +474,7 @@ environment, `sim` adds GCC/G++ 15, and `dist` also clones and builds PyPTO and 
 
 ```bash
 docker buildx build --load --target dist \
-  --file .github/docker/pypto_dev.Dockerfile \
+  --file docker/pypto_dev.Dockerfile \
   --build-arg DIST_BUILD_JOBS=2 \
   --build-arg PYPTO_REF=<pypto-commit> \
   --build-arg PYPTO_LIB_REF=<pypto-lib-commit> \
@@ -483,8 +495,8 @@ tag first, and validate both `pypto-doctor` and a model on the matching NPU host
 combining architecture manifests. A successful build without an NPU verifies the image
 build only.
 
-Use `.github/docker/pypto-dev.sh build a3` for a local environment image and
-`.github/docker/pypto-dev.sh run a3 0` to create or re-enter a container. The launcher
+Use `docker/scripts/pypto-dev.sh build a3` for a local environment image and
+`docker/scripts/pypto-dev.sh run a3 0` to create or re-enter a container. The launcher
 supports CANN tag, image, cache-volume, and proxy overrides; see its source for details.
 Proxy values are forwarded from the environment without printing credentials in command
 traces or passing them as command arguments. Re-entry retains the container's existing
@@ -526,7 +538,7 @@ all host devices and cards. The launcher prints this behavior before creating or
 re-entering the container. Choose it explicitly when that access is acceptable:
 
 ```bash
-PYPTO_DEVICE_ACCESS=privileged .github/docker/pypto-dev.sh run a3 1
+PYPTO_DEVICE_ACCESS=privileged docker/scripts/pypto-dev.sh run a3 1
 ```
 
 The launcher mounts the host driver tree and management tools, and sets

@@ -6,7 +6,7 @@
 # alike. One Dockerfile; the chip series is the CANN base tag.
 #
 #   A2/A3  --build-arg CANN_TAG=9.0.0-a3-ubuntu22.04-py3.11-devel
-#   A5     --build-arg CANN_TAG=9.1.0-950-ubuntu22.04-py3.12-devel
+#   A5     --build-arg CANN_TAG=9.1.T500-950-ubuntu22.04-py3.11-devel
 #
 # Three deliberate choices, each measured rather than assumed:
 #
@@ -33,7 +33,7 @@
 #    environment; `pypto-build` builds the tree you mounted.
 #
 # Not included, by construction: the NPU driver. It comes from the host at
-# `docker run` time — see .github/docker/pypto-dev.sh.
+# `docker run` time — see docker/scripts/pypto-dev.sh.
 #
 # The build reaches github.com (uv, CPython, ptoas), PyPI and
 # download.pytorch.org. Build it where those are reachable and distribute the
@@ -94,9 +94,10 @@ RUN set -eu; \
 # Keep dependencies, PTOAS installation, and helper sources identical to the
 # in-container setup path. These remain reachable when /workspace is mounted.
 COPY toolchain/versions.env build-constraints.txt ${PYPTO_HOME}/toolchain/
-COPY .github/docker/pypto-owner.sh .github/docker/pypto-venv.sh .github/docker/pypto-activate.sh .github/docker/pypto-build .github/docker/pypto-doctor \
-     .github/docker/pypto-update.sh .github/docker/pypto-setup.sh \
-     .github/docker/pypto-install-ptoas.sh ${PYPTO_HOME}/bin/
+COPY docker/scripts/pypto-owner.sh docker/scripts/pypto-venv.sh \
+     docker/scripts/pypto-activate.sh docker/scripts/pypto-build docker/scripts/pypto-doctor \
+     docker/scripts/pypto-update.sh docker/scripts/pypto-setup.sh \
+     docker/scripts/pypto-install-ptoas.sh ${PYPTO_HOME}/bin/
 RUN chmod 0755 "$PYPTO_HOME/bin/pypto-build" "$PYPTO_HOME/bin/pypto-doctor" \
       "$PYPTO_HOME/bin/pypto-update.sh" "$PYPTO_HOME/bin/pypto-setup.sh" \
       "$PYPTO_HOME/bin/pypto-install-ptoas.sh" \
@@ -219,9 +220,10 @@ RUN set -eu; \
 # Do not activate the context's BASH_ENV while bootstrapping the selected setup.
 RUN set -eu; \
     export PYPTO_SRC=/workspace/pypto; \
-    helpers="$PYPTO_SRC/.github/docker"; \
-    for required in .github/docker/pypto-setup.sh .github/docker/pypto-build \
-        .github/docker/pypto-activate.sh .github/docker/pypto-venv.sh toolchain/versions.env build-constraints.txt; do \
+    helpers="$PYPTO_SRC/docker/scripts"; \
+    for required in docker/scripts/pypto-setup.sh docker/scripts/pypto-build \
+        docker/scripts/pypto-activate.sh docker/scripts/pypto-venv.sh \
+        toolchain/versions.env build-constraints.txt; do \
         test -r "$PYPTO_SRC/$required" || { \
             echo "Selected PYPTO_REF lacks $required; choose a ref with the dev-container helpers" >&2; \
             exit 1; \
