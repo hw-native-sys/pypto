@@ -50,6 +50,23 @@ struct L0TileConfig {
   int N = 0;
   int K = 0;
 
+  // Source K-block reductions accumulated before one output drain. K remains
+  // the width of each source block for capacity and inner-K legality. Zero
+  // means unknown: use one block as a cost lower bound, without dbC selection.
+  int reduction_iterations = 1;
+
+  // Storage multiplicity from the enclosing source pipeline, not arithmetic
+  // repetition. A split-K inner pipeline composes its operand depth with this
+  // depth; a full-K block uses the larger of the ordinary and source depths.
+  // A separate K peel alongside an inner pipeline also occupies source-depth
+  // operand slots; it is not free merely because its width is smaller than k.
+  int reduction_pipeline_stages = 1;
+
+  // Each output tile completes an independent source reduction. Both operands
+  // are reloaded even at k == K; there is no full-K held-panel sweep. This
+  // emitter supports output-stationary, single-C plans only.
+  bool independent_output_tiles = false;
+
   // L0 capacities in bytes (typically read from BackendHandler::GetCapacityBytes).
   uint32_t l0a_bytes = 0;
   uint32_t l0b_bytes = 0;
@@ -195,8 +212,8 @@ struct L0TileResult {
   //                              the one-tile pipeline fill/drain bubble; T = tiles)
   int64_t estimated_cost_cycles = 0;
 
-  // Padded compute volume = ceil(M/m)*m * ceil(N/n)*n * ceil(K/k)*k.
-  // Used as a tie-breaker.
+  // Padded work = ceil(M/m)*m * ceil(N/n)*n * ceil(K/k)*k,
+  // multiplied by max(1, reduction_iterations). Used as a tie-breaker.
   int64_t padded_compute_volume = 0;
 
   // --- Chosen design point (beyond the (m, n, k) tile) ---------------------
@@ -245,7 +262,8 @@ struct L0TileResult {
  * study) over the design space and returns the minimum-wall design point
  *   P = (m, n, k, stationarity, dbC),
  * where dbA / dbB are derived from `stationarity` (moving operand -> depth 2,
- * stationary -> depth 1) and prefetch depth is fixed at <= 2 (no multistage).
+ * stationary -> depth 1). Inner prefetch depth is at most 2; an enclosing
+ * source pipeline's storage replication is accounted for separately.
  * A "realizable mask" (the allow_* gates) restricts which points may be emitted;
  * it defaults to the conservative subset {output-stationary, dbC = 1}.
  *

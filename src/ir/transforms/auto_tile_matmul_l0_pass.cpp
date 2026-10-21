@@ -570,8 +570,8 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   INTERNAL_CHECK_SPAN((r.kind == MatmulKind::kBias) == (r.bias_src != nullptr), sp)
       << "Internal error: matmul kind and bias operand disagree";
 
-  INTERNAL_CHECK_SPAN(r.k < r.K, sp) << "Internal error: BuildKLoopRewrite expects a tiled K (k < K), got k="
-                                     << r.k << ", K=" << r.K;
+  INTERNAL_CHECK_SPAN(r.k > 0 && r.k <= r.K, sp)
+      << "Internal error: BuildKLoopRewrite expects 0 < k <= K, got k=" << r.k << ", K=" << r.K;
 
   // K-block decomposition.  With allow_k_boundary the chosen k need not divide
   // K: the reduction is `num_full` full blocks of width k plus a final partial
@@ -711,12 +711,9 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   } else if (num_full >= 2) {
     main_var = emit_k_loop(/*k_lo=*/0, loop_init, is_acc ? r.init_cond : nullptr);
   } else {
-    // num_full == 1: a single straight-line full block (k < K checked above, so a
-    // partial tail always follows).  This is a correctness guard, not a hot path:
-    // the roofline chooser never selects k in (K/2, K) -- a near-full k is wall-
-    // dominated (2x the MAD ceil-step of a divisor, and it loses the min-padding
-    // tie-break), so num_full is >= 2 in practice.  Kept so the emitter stays
-    // correct (no degenerate 1-trip pipeline) if the cost model ever changes.
+    // num_full == 1: emit the single full block directly, without a degenerate
+    // one-trip pipeline.  Canonical full-K plans use this path with k == K;
+    // plans with K/2 < k < K also use it before emitting their partial tail.
     // The caller's predicate passes through unmodified: this block *is* the
     // first (and only) full K block, so a generated ``ko == 0`` term would be
     // statically true and would only add a foldable node.
@@ -852,7 +849,8 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false) {
+    const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false,
+    const ForStmtPtr& source_reduction = nullptr) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1157,6 +1155,25 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
   // starts from a fresh Acc placeholder so C is write-only (gamma_c = 1).
   cfg.c_read = is_acc;
+  if (source_reduction) {
+    const auto iterations = transform_utils::EvalConstTripCount(source_reduction);
+    cfg.reduction_iterations = iterations && *iterations > 0 && *iterations <= std::numeric_limits<int>::max()
+                                   ? static_cast<int>(*iterations)
+                                   : 0;
+    cfg.reduction_pipeline_stages = std::max(1, source_reduction->GetAttr<int>(kPipelineStagesAttr, 1));
+    cfg.independent_output_tiles = true;
+    // A canonical reduction overwrites its placeholder on its first source
+    // iteration and drains once after all iterations. It has no held-panel
+    // output sweep or cross-output accumulator ping-pong emitter.
+    cfg.c_read = false;
+    cfg.allow_a_stationary = cfg.allow_b_stationary = cfg.allow_double_buffer_c = false;
+    if (cfg.reduction_iterations == 0) {
+      hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+                         "canonical split-K trip count is unknown or outside the cost model range; "
+                         "using one source block as a single-C cost lower bound",
+                         source_reduction->span_);
+    }
+  }
   cfg.allow_padding = false;
   // Permit a non-divisor final K block: the chooser may return a k that does not
   // divide K, and BuildKLoopRewrite peels the partial last K iteration.  The peel
@@ -1616,13 +1633,10 @@ struct CanonicalSplitKAccMatch {
   int64_t K = 0;  ///< K width of one source split-K iteration
   /// The statement whose operands and result type describe the whole reduction:
   /// the fresh seed when it exists, otherwise the predicated accumulate. Both
-  /// carry the same [M, K] x [K, N] -> [M, N] geometry and the same result
-  /// dtype, so ``AnalyzeMatmul`` selects the same ``(m, n, k)`` either way.
-  /// ``L0TileConfig::c_read`` is the only chooser input that differs (the acc
-  /// kind reads C), and it feeds only ``EstimateTraffic`` -> the reported
-  /// ``estimated_traffic_bytes``, never a ``Better()`` ranking key. Should
-  /// traffic ever become a ranking key, the two spellings would start picking
-  /// different output grids.
+  /// carry the same [M, K] x [K, N] -> [M, N] geometry and result dtype.
+  /// ``AnalyzeMatmul`` supplies the same source-reduction schedule for both,
+  /// including write-only C traffic: the first source iteration overwrites
+  /// the placeholder, so neither spelling reads an initial accumulator.
   [[nodiscard]] const AssignStmtPtr& shape_source() const { return matmul ? matmul : matmul_acc; }
 };
 
@@ -1856,6 +1870,11 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
     return std::nullopt;
   }
   auto init_ty = As<TileType>(init->var_->GetType());
+  // A declared accumulator allocation or explicit buffering loop is a manual
+  // storage decision, not a placeholder that the canonical fold may replace.
+  if ((init_ty && init_ty->memref_.has_value()) || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
+    return std::nullopt;
+  }
   auto init_m = init_ty && init_ty->shape_.size() == 2 ? As<ConstInt>(init_ty->shape_[0]) : nullptr;
   auto init_n = init_ty && init_ty->shape_.size() == 2 ? As<ConstInt>(init_ty->shape_[1]) : nullptr;
   if (!init_m || !init_n || init_m->value_ != M || init_n->value_ != N) return std::nullopt;
@@ -1897,8 +1916,9 @@ class CanonicalSplitKRetiler : public IRMutator {
  public:
   CanonicalSplitKRetiler(const CanonicalSplitKAccMatch& match,
                          const std::unordered_map<const Var*, VarPtr>& clone_map, const VarPtr& init,
-                         int64_t mi, int64_t ni, CanonicalOutputWindow window, std::string suffix)
-      : mi_(mi), ni_(ni), window_(window), k_(match.K), suffix_(std::move(suffix)) {
+                         int64_t mi, int64_t ni, CanonicalOutputWindow window, int64_t selected_k,
+                         std::string suffix)
+      : mi_(mi), ni_(ni), window_(window), k_(match.K), selected_k_(selected_k), suffix_(std::move(suffix)) {
     auto cloned = [&](const VarPtr& original) -> VarPtr {
       auto it = clone_map.find(original.get());
       INTERNAL_CHECK_SPAN(it != clone_map.end(), original->span_)
@@ -1959,6 +1979,30 @@ class CanonicalSplitKRetiler : public IRMutator {
       rebuilt = PreserveCallAttrs(call, deduced);
     }
     auto var = std::make_shared<Var>(op->var_->name_hint_ + suffix_, rebuilt->GetType(), op->var_->span_);
+    if (key == matmul_ || key == matmul_acc_) {
+      // Emit the outer decision directly, including boxed M/N boundaries.
+      // Re-running the chooser on this narrowed call would discard selected_k.
+      const bool is_acc = key == matmul_acc_;
+      const size_t lhs_index = is_acc ? 1 : 0;
+      KLoopRewrite plan;
+      plan.original = std::make_shared<AssignStmt>(var, rebuilt, op->span_, op->leading_comments_);
+      plan.kind = is_acc ? MatmulKind::kAccumulate : MatmulKind::kFresh;
+      plan.lhs_src = AsVarLike(rebuilt->args_[lhs_index]);
+      plan.rhs_src = AsVarLike(rebuilt->args_[lhs_index + 1]);
+      plan.acc_init = is_acc ? AsVarLike(rebuilt->args_[0]) : nullptr;
+      plan.init_cond = is_acc && rebuilt->args_.size() == 4 ? rebuilt->args_[3] : nullptr;
+      plan.M = plan.m = window_.physical_m;
+      plan.N = plan.n = window_.physical_n;
+      plan.K = k_;
+      plan.k = selected_k_;
+      plan.valid_m = MakeIndex(window_.valid_m, op->span_);
+      plan.valid_n = MakeIndex(window_.valid_n, op->span_);
+      INTERNAL_CHECK_SPAN(plan.lhs_src && plan.rhs_src && (!is_acc || plan.acc_init), op->span_)
+          << "Internal error: canonical reduction lost its operand or accumulator binding";
+      auto rewrite = BuildKLoopRewrite(plan);
+      var_remap_[op->var_.get()] = rewrite.return_var;
+      return SeqStmts::Flatten(std::move(rewrite.stmts), op->span_);
+    }
     var_remap_[op->var_.get()] = var;
     return std::make_shared<AssignStmt>(var, rebuilt, op->span_, op->leading_comments_);
   }
@@ -1994,6 +2038,7 @@ class CanonicalSplitKRetiler : public IRMutator {
   int64_t ni_ = 0;
   CanonicalOutputWindow window_;
   int64_t k_ = 0;
+  int64_t selected_k_ = 0;
   std::string suffix_;
 };
 
@@ -2017,11 +2062,17 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   // K blocks. Use the conservative output-stationary chooser regime for the
   // output grid. Account for the same Mat boxing that RebuildLoad will apply to
   // every physical output window, so chooser capacity cannot admit a logical
-  // tile that becomes oversized after padding. The recursively visited
-  // narrowed calls independently choose their legal inner K blocking.
-  auto tiling =
-      AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment);
-  if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
+  // tile that becomes oversized after padding. Price the complete source
+  // reduction and emit its selected K directly, including boundary tiles and
+  // the K-only case; no second chooser invocation is needed.
+  auto tiling = AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true,
+                              output_box_alignment, /*direct_defs=*/nullptr,
+                              /*restrict_output_grid=*/false, match.loop);
+  if (!tiling) return std::nullopt;
+  INTERNAL_CHECK_SPAN(
+      tiling->stationarity == utils::Stationarity::kOutputStationary && !tiling->double_buffer_c,
+      match.loop->span_)
+      << "Internal error: canonical reduction requires an output-stationary single-C plan";
 
   auto store_call = As<Call>(match.store->value_);
   auto offsets = As<MakeTuple>(store_call->args_[1]);
@@ -2061,7 +2112,7 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       auto cloned_loop = As<ForStmt>(clone.cloned_body);
       INTERNAL_CHECK_SPAN(cloned_loop, match.loop->span_)
           << "Internal error: canonical split-K loop clone is not a ForStmt";
-      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, window, suffix);
+      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, window, tiling->k, suffix);
       auto narrowed = As<ForStmt>(retiler.VisitStmt(cloned_loop));
       INTERNAL_CHECK_SPAN(narrowed, match.loop->span_)
           << "Internal error: canonical split-K retiling did not return a ForStmt";
@@ -2127,8 +2178,9 @@ class CanonicalSplitKPreMutator : public IRMutator {
     // Match before recursively mutating children so definition identities still
     // refer to the original function-wide read index. The qualified base visit
     // then reaches canonical triplets in nested source regions; newly generated
-    // loops do not match because their fresh Vars are absent from that index and
-    // wait for the ordinary AutoTile phase to K-tile their narrowed calls.
+    // loops do not match because their fresh Vars are absent from that index.
+    // Their K schedule is already emitted; ordinary AutoTile sees Left/Right
+    // operands and must not make a second chooser decision for those calls.
     auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, use_counts_, hints_));
     INTERNAL_CHECK_SPAN(rewritten, op->span_)
         << "Internal error: canonical split-K pre-phase did not preserve SeqStmts";

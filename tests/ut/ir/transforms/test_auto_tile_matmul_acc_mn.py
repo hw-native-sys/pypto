@@ -24,6 +24,10 @@ import pytest
 from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen
 
 _TILE_STORE_OP = ir.get_op("tile.store").name
 _TILE_MATMUL_OP = ir.get_op("tile.matmul").name
@@ -41,9 +45,30 @@ WIDE_K_TOTAL = 256
 WIDE_K_TILE = 128
 
 # Keep the same output boundary while making each source panel large enough for
-# AutoTile to apply its ordinary inner-K rewrite after the enclosing-loop fold.
+# AutoTile to emit the selected inner-K schedule within the enclosing-loop fold.
 COMPOSE_K_TOTAL = 768
 COMPOSE_K_TILE = 384
+
+
+def _canonical_choice(M, N, K, iterations, *, int8=False, stages=2):
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = M, N, K
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.bytes_a = cfg.bytes_b = 1 if int8 else 2
+    cfg.align_k = cfg.min_k = 32 if int8 else 16
+    cfg.l0c_align_m = 32 if int8 else 16
+    cfg.box_align_m, cfg.box_align_n = 16, 32 if int8 else 16
+    cfg.allow_k_boundary = True
+    cfg.independent_output_tiles = True
+    cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = stages
+    return passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+
+def _canonical_grid_size(M, N, choice):
+    return ((M + choice.m - 1) // choice.m) * ((N + choice.n - 1) // choice.n)
+
 
 # Full-pipeline counterpart to the reviewer's (656,80,768) chooser case. The
 # old logical candidate (576,48,32) boxes to physical Acc [576,64] = 144 KiB,
@@ -140,7 +165,7 @@ def canonical_split_k_n_boundary_retiles_k(
     b: pl.Tensor[[COMPOSE_K_TOTAL, WIDE_N], pl.INT8],
     c: pl.Out[pl.Tensor[[WIDE_M, WIDE_N], pl.INT32]],
 ):
-    """Compose an N-tail padded output with the ordinary inner-K rewrite."""
+    """Compose an N-tail padded output with selected inner-K emission."""
     for _ in pl.spmd(1):
         acc = pl.create_tensor([WIDE_M, WIDE_N], dtype=pl.INT32)
         for kb in pl.pipeline(0, COMPOSE_K_TOTAL // COMPOSE_K_TILE, stage=2):
@@ -388,16 +413,30 @@ class _PeelToPredicate(ir.IRMutator):
         if not isinstance(stmt, ir.IfStmt) or len(stmt.return_vars) != 1 or stmt.else_body is None:
             return stmt
         arms = []
+        prefixes = []
         for body in (stmt.then_body, stmt.else_body):
-            if not isinstance(body, ir.SeqStmts) or len(body.stmts) != 2:
+            if not isinstance(body, ir.SeqStmts) or len(body.stmts) not in (2, 4):
                 return stmt
-            assign = body.stmts[0]
+            assign = body.stmts[-2]
             if not isinstance(assign, ir.AssignStmt) or not isinstance(assign.value, ir.Call):
                 return stmt
             arms.append(assign.value)
+            prefixes.append(list(body.stmts[:-2]))
         seed_call, acc_call = arms
         if seed_call.op.name != _TILE_MATMUL_OP or acc_call.op.name != _TILE_MATMUL_ACC_OP:
             return stmt
+        if len(prefixes[0]) != len(prefixes[1]):
+            return stmt
+        remap = []
+        for seed_extract, acc_extract in zip(*prefixes):
+            if not isinstance(seed_extract, ir.AssignStmt) or not isinstance(acc_extract, ir.AssignStmt):
+                return stmt
+            if not ir.structural_equal(seed_extract.value, acc_extract.value):
+                return stmt
+            remap.append((acc_extract.var, seed_extract.var))
+        remapped = ir.substitute_expr(acc_call, remap)
+        assert isinstance(remapped, ir.Call)
+        acc_call = remapped
         phi = stmt.return_vars[0]
         predicated = ir.Call(
             acc_call.op,
@@ -407,7 +446,7 @@ class _PeelToPredicate(ir.IRMutator):
             phi.type,
             acc_call.span,
         )
-        return ir.AssignStmt(phi, predicated, stmt.span)
+        return ir.SeqStmts([*prefixes[0], ir.AssignStmt(phi, predicated, stmt.span)], stmt.span)
 
 
 def test_issue_2232_canonical_input_shape():
@@ -469,11 +508,12 @@ def test_issue_2232_loop_level_mn_tiling():
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
     assert "[128, 1152], [128, 1152]" not in printed
-    assert printed.count("in pl.pipeline(8, stage=2") == 2
-    assert printed.count("pl.tile.store(") == 2
+    choice = _canonical_choice(M, N, K_TILE, K_TOTAL // K_TILE, int8=True)
+    count = _canonical_grid_size(M, N, choice)
+    assert printed.count("in pl.pipeline(8, stage=2") == count
+    assert printed.count("pl.tile.store(") == count
     assert "n0__ssa_v0 + " in printed
-    # The local matmul/matmul_acc path still applies the supported inner K
-    # blocking after the enclosing loop has been output-tiled.
+    # The enclosing-loop fold emits the selected inner-K blocking directly.
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
     _assert_int8_l0_k_alignment(after)
@@ -489,8 +529,10 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
     assert "[128, 1152], [128, 1152]" not in printed
-    assert printed.count("in pl.pipeline(8, stage=2") == 2
-    assert printed.count("pl.tile.store(") == 2
+    choice = _canonical_choice(M, N, K_TILE, K_TOTAL // K_TILE, int8=True)
+    count = _canonical_grid_size(M, N, choice)
+    assert printed.count("in pl.pipeline(8, stage=2") == count
+    assert printed.count("pl.tile.store(") == count
     assert "n0__ssa_v0 + " in printed
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
@@ -549,39 +591,51 @@ def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
 
 def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     """A box-padded 16-column output tail remains logically 16 columns when
-    the post-fold matmul is K-tiled again. In particular, the inner loop's Acc
+    the selected K schedule is emitted. In particular, the inner loop's Acc
     initializer must not widen its valid N extent back to the physical 32."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
+    count = _canonical_grid_size(WIDE_M, WIDE_N, choice)
+    assert printed.count("in pl.pipeline(2, stage=2") == count
+    assert printed.count("pl.tile.store(") == count
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        f"[{choice.k}, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[{choice.k}, 16], "
+        "compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    tail_m = WIDE_M % choice.m or choice.m
+    assert (
+        f"pl.Tile[[{tail_m}, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[{tail_m}, 16])]" in printed
+    )
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
 
 def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
-    """Composing the predicated fold with the ordinary inner-K rewrite keeps the
+    """Emitting the selected K schedule in the predicated fold keeps the
     16-column logical tail, exactly as the peeled spelling does."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
+    count = _canonical_grid_size(WIDE_M, WIDE_N, choice)
+    assert printed.count("in pl.pipeline(2, stage=2") == count
+    assert printed.count("pl.tile.store(") == count
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        f"[{choice.k}, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[{choice.k}, 16], "
+        "compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    tail_m = WIDE_M % choice.m or choice.m
+    assert (
+        f"pl.Tile[[{tail_m}, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[{tail_m}, 16])]" in printed
+    )
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
@@ -598,8 +652,9 @@ def test_peeled_and_predicated_retile_to_structurally_equal_output():
     predicated form and comparing structurally proves.
 
     ``canonical_split_k_mn`` is the kernel where the comparison can be made
-    whole-body: its narrowed per-tile K fits one L0 block, so no secondary K
-    rewrite runs. Where one does run the two spellings stop being collapsible
+    whole-body: its selected per-tile K fits one L0 block, so the identical
+    operand extracts in both branches can be hoisted for normalization.
+    Where an inner K pipeline is needed the spellings stop being collapsible
     -- the peel becomes *two* inner K-loops behind a branch while the predicate
     becomes one -- and
     ``test_peeled_and_predicated_emit_the_same_output_grid`` covers the grid
@@ -1151,7 +1206,7 @@ def test_canonical_split_k_chooser_accounts_for_full_window_boxing(planner, sour
 
 
 def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
-    """After secondary K tiling, PTO still allocates N=32 with valid N=16."""
+    """Selected K emission still allocates physical N=32 with valid N=16."""
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
     from pypto.pypto_core import codegen  # noqa: PLC0415
 
@@ -1173,9 +1228,11 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     # writes: allocated at the box-aligned physical width (cols=32) and narrowed
     # to the logical N=16 by the explicit set_validshape the accumulator seed
     # carries.  Pin the pair on the buffer the boundary tstore actually drains.
+    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
+    expected_tail_m = WIDE_M % choice.m or choice.m
     tail_store = re.search(
         r"pto\.tstore ins\((?P<acc>%[\w.]+) : !pto\.tile_buf<loc=acc, dtype=i32, "
-        r"rows=(?P<rows>128|144), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
+        rf"rows=(?P<rows>{expected_tail_m}), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
         pto,
     )
     assert tail_store, pto
@@ -1192,7 +1249,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         pto,
     ), pto
     assert re.search(
-        r"!pto\.tile_buf<loc=right, dtype=i8, rows=192, cols=32, "
+        rf"!pto\.tile_buf<loc=right, dtype=i8, rows={choice.k}, cols=32, "
         r"v_row=\?, v_col=\?, blayout=row_major, slayout=col_major, fractal=512, pad=0, compact=1>",
         pto,
     ), pto
@@ -1257,6 +1314,225 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
         assert "compact=pl.CompactMode.normal" in view, (
             f"every row-narrowed Acc tile in the K chain must stay compact, got {view!r}:\n{printed}"
         )
+
+
+def _canonical_selected_k_input(M, N, source_k, iterations, stages=2, *, int8=False):
+    total_k = source_k * iterations
+    operand_dtype = pl.INT8 if int8 else pl.BF16
+    accumulator_dtype = pl.INT32 if int8 else pl.FP32
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, total_k], operand_dtype],
+            b: pl.Tensor[[total_k, N], operand_dtype],
+            out: pl.Out[pl.Tensor[[M, N], accumulator_dtype]],
+        ) -> pl.Tensor[[M, N], accumulator_dtype]:
+            seed = pl.tile.create([M, N], dtype=accumulator_dtype, target_memory=pl.Mem.Acc)
+            for k0, (carry,) in pl.pipeline(0, total_k, source_k, init_values=(seed,), stage=stages):
+                at = pl.tile.load(a, [0, k0], [M, source_k], target_memory=pl.Mem.Mat)
+                bt = pl.tile.load(b, [k0, 0], [source_k, N], target_memory=pl.Mem.Mat)
+                product = pl.tile.matmul_acc(carry, at, bt, init_cond=(k0 == 0))
+                result = pl.yield_(product)
+            out = pl.tile.store(result, [0, 0], out)
+            return out
+
+    return Before
+
+
+def test_k_only_canonical_reduction_emits_one_selected_inner_schedule():
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[128, 1024], pl.BF16],
+            b: pl.Tensor[[1024, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+        ) -> pl.Tensor[[128, 256], pl.FP32]:
+            seed = pl.tile.create([128, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for k0, (carry,) in pl.pipeline(0, 1024, 128, init_values=(seed,), stage=2):
+                at = pl.tile.load(a, [0, k0], [128, 128], target_memory=pl.Mem.Mat)
+                bt = pl.tile.load(b, [k0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                product = pl.tile.matmul_acc(carry, at, bt, init_cond=(k0 == 0))
+                result = pl.yield_(product)
+            out = pl.tile.store(result, [0, 0], out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[128, 1024], pl.BF16],
+            b: pl.Tensor[[1024, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+        ) -> pl.Tensor[[128, 256], pl.FP32]:
+            seed = pl.tile.create([128, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for k0, (carry,) in pl.pipeline(0, 1024, 128, init_values=(seed,), stage=2):
+                at = pl.tile.load(a, [0, k0], [128, 128], target_memory=pl.Mem.Mat)
+                bt = pl.tile.load(b, [k0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                for ko, (inner,) in pl.pipeline(0, 128, 32, init_values=(carry,), stage=2):
+                    sa = pl.tile.extract(at, 0, ko, [128, 32], target_memory=pl.Mem.Left)
+                    sb = pl.tile.extract(bt, ko, 0, [32, 256], target_memory=pl.Mem.Right)
+                    product = pl.tile.matmul_acc(inner, sa, sb, init_cond=((k0 == 0) and (ko == 0)))
+                    blocked = pl.yield_(product)
+                result = pl.yield_(blocked)
+            stored = pl.tile.store(result, [0, 0], out)
+            return stored
+
+    choice = _canonical_choice(128, 256, 128, 8)
+    assert (choice.m, choice.n, choice.k) == (128, 256, 32)
+    with passes.PassContext([ir.make_roundtrip_instrument()]):
+        after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
+class _CanonicalMadOperands(ir.IRVisitor):
+    def __init__(self):
+        super().__init__()
+        self.ks = set()
+
+    def visit_call(self, op):
+        if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+            start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+            lhs, rhs = op.args[start : start + 2]
+            assert isinstance(lhs.type, ir.TileType)
+            assert isinstance(rhs.type, ir.TileType)
+            assert lhs.type.memory_space == ir.MemorySpace.Left
+            assert rhs.type.memory_space == ir.MemorySpace.Right
+            k = lhs.type.shape[1]
+            rhs_k = rhs.type.shape[0]
+            assert isinstance(k, ir.ConstInt) and isinstance(rhs_k, ir.ConstInt)
+            assert rhs_k.value == k.value
+            self.ks.add(k.value)
+        super().visit_call(op)
+
+
+@pytest.mark.parametrize(
+    "planner,dbc",
+    [
+        (passes.MemoryPlanner.PYPTO, False),
+        (passes.MemoryPlanner.PYPTO, True),
+        (passes.MemoryPlanner.DSA_RP, False),
+    ],
+)
+@pytest.mark.parametrize(
+    "M,N,K,R,int8",
+    [
+        (128, 256, 128, 8, False),  # K-only rewrite: source output already fits L0C.
+        (64, 384, 96, 3, False),  # Old recursive call discarded selected k=16.
+        (80, 288, 80, 3, False),  # A boxed N boundary with full-K blocks.
+        (128, 256, 80, 3, False),  # Selected k=32 with a 16-wide K tail.
+        (272, 384, 176, 3, False),  # M boundary plus separately allocated K-tail operands.
+        (16, 1152, 128, 8, True),  # #2232: INT32 accumulator has 32 physical rows.
+        (272, 144, 384, 2, True),  # INT8 boundary: physical N=32, valid N=16.
+    ],
+)
+def test_canonical_selected_k_survives_boundaries_and_native_codegen(
+    M, N, K, R, int8, planner, dbc, tmp_path
+):
+    """Preserve selected K with PyPTO-owned placement, not PTOAS-managed allocation."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    expected = _canonical_choice(M, N, K, R, int8=int8)
+    before = _canonical_selected_k_input(M, N, K, R, int8=int8)
+    with passes.PassContext(
+        [ir.make_roundtrip_instrument()], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc
+    ):
+        after = passes.auto_tile_matmul_l0()(before)
+        operands = _CanonicalMadOperands()
+        operands.visit_program(after)
+        expected_ks = {expected.k}
+        if K % expected.k:
+            expected_ks.add(K % expected.k)
+        assert operands.ks == expected_ks
+        assert len(_collect_store_calls(after)) == ((M + expected.m - 1) // expected.m) * (
+            (N + expected.n - 1) // expected.n
+        )
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    mlir = codegen.PTOCodegen().generate(allocated, emit_tile_addr=True)
+    assert "pto.tmatmul" in mlir
+    native_ks = {int(k) for k in re.findall(r"!pto.tile_buf<loc=left,[^>]*cols=(\d+)", mlir)}
+    assert native_ks == expected_ks
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "canonical_selected_k.pto"
+    output = tmp_path / "canonical_selected_k.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    assert output.is_file()
+
+
+def test_k_only_canonical_fold_preserves_declared_accumulator_slots():
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[64, 1024], pl.BF16],
+            b: pl.Tensor[[1024, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+        ) -> pl.Tensor[[64, 256], pl.FP32]:
+            seed: pl.Tile[[64, 256], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [64, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for k0, (carry,) in pl.pipeline(0, 1024, 128, init_values=(seed,), stage=2):
+                at = pl.tile.load(a, [0, k0], [64, 128], target_memory=pl.Mem.Mat)
+                bt = pl.tile.load(b, [k0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                product = pl.tile.matmul_acc(carry, at, bt, init_cond=(k0 == 0))
+                result = pl.yield_(product)
+            out = pl.tile.store(result, [0, 0], out)
+            return out
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([ir.make_roundtrip_instrument()]):
+        after = passes.auto_tile_matmul_l0()(Before)
+    before_body = next(func for func in Before.functions.values() if func.name == "kernel").body
+    after_body = next(func for func in after.functions.values() if func.name == "kernel").body
+    assert isinstance(before_body, ir.SeqStmts) and isinstance(after_body, ir.SeqStmts)
+    ir.assert_structural_equal(after_body.stmts[0], before_body.stmts[0])
+    assert "slots=2" in ir.python_print(after)
+
+
+def test_unknown_canonical_trip_count_keeps_selected_k_without_assuming_repetition(capfd):
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[64, 288], pl.BF16],
+            b: pl.Tensor[[288, 384], pl.BF16],
+            out: pl.Out[pl.Tensor[[64, 384], pl.FP32]],
+            stop: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 384], pl.FP32]:
+            seed = pl.tile.create([64, 384], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for k0, (carry,) in pl.pipeline(0, stop, 96, init_values=(seed,), stage=2):
+                at = pl.tile.load(a, [0, k0], [64, 96], target_memory=pl.Mem.Mat)
+                bt = pl.tile.load(b, [k0, 0], [96, 384], target_memory=pl.Mem.Mat)
+                product = pl.tile.matmul_acc(carry, at, bt, init_cond=(k0 == 0))
+                result = pl.yield_(product)
+            out = pl.tile.store(result, [0, 0], out)
+            return out
+
+    with passes.PassContext([ir.make_roundtrip_instrument()]):
+        after = passes.auto_tile_matmul_l0()(Before)
+    operands = _CanonicalMadOperands()
+    operands.visit_program(after)
+    assert operands.ks
+    assert "stop" in ir.python_print(after)
+    assert "single-C cost lower bound" in capfd.readouterr().err
 
 
 if __name__ == "__main__":

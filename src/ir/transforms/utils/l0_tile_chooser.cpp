@@ -171,10 +171,10 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
     case Stationarity::kOutputStationary:
       // Full-K OS hoists one operand (mirror LoadCycles' min-hoist via OSHoldsHoldA so
       // this metric matches the wall the tile was scored under); split-K re-streams both.
-      if (static_cast<int64_t>(k) >= K && OSHoldsHoldA(m, n, cfg)) {
+      if (!cfg.independent_output_tiles && static_cast<int64_t>(k) >= K && OSHoldsHoldA(m, n, cfg)) {
         a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K;           // A held once
         b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N * ceil_m;  // B streamed
-      } else if (static_cast<int64_t>(k) >= K) {
+      } else if (!cfg.independent_output_tiles && static_cast<int64_t>(k) >= K) {
         a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K * ceil_n;  // A streamed
         b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N;           // B held once
       } else {
@@ -185,11 +185,21 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
   }
   const int64_t gamma_c = cfg.c_read ? 2 : 1;
   const int64_t c_traffic = gamma_c * static_cast<int64_t>(cfg.bytes_c) * M * N;
-  return a_traffic + b_traffic + c_traffic;
+  const int64_t repetitions = std::max(1, cfg.reduction_iterations);
+  CHECK(a_traffic + b_traffic <= (std::numeric_limits<int64_t>::max() - c_traffic) / repetitions)
+      << "ChooseL0Tile: repeated reduction traffic exceeds int64 range";
+  return (a_traffic + b_traffic) * repetitions + c_traffic;
+}
+
+int64_t RepeatedReductionWork(int64_t work, const L0TileConfig& cfg) {
+  const int64_t repetitions = std::max(1, cfg.reduction_iterations);
+  CHECK(work >= 0 && work <= std::numeric_limits<int64_t>::max() / repetitions)
+      << "ChooseL0Tile: repeated reduction work exceeds int64 range";
+  return work * repetitions;
 }
 
 int64_t PaddedComputeVolume(int m, int n, int k, const L0TileConfig& cfg) {
-  return CeilDiv(cfg.M, m) * m * CeilDiv(cfg.N, n) * n * CeilDiv(cfg.K, k) * k;
+  return RepeatedReductionWork(CeilDiv(cfg.M, m) * m * CeilDiv(cfg.N, n) * n * CeilDiv(cfg.K, k) * k, cfg);
 }
 
 // Roofline cost model (output-stationary, single L0C -- the algorithm
@@ -218,7 +228,7 @@ int64_t MadCycles(int m, int n, int k, const L0TileConfig& cfg) {
   const int64_t k_fractals = num_full * CeilDiv(k, kt) + (k_tail > 0 ? CeilDiv(k_tail, kt) : 0);
   const int64_t per_mn =
       k_blocks * cfg.mad_head + cpr * CeilDiv(m, cfg.align_m) * k_fractals * CeilDiv(n, cfg.align_n);
-  return CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn;
+  return RepeatedReductionWork(CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn, cfg);
 }
 
 // Bandwidth-weighted held-A vs held-B interior load cycles for a full-K OS tile
@@ -286,7 +296,7 @@ double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r)
     case Stationarity::kBStationary:
       return held_b;  // B held (requires k == K)
     case Stationarity::kOutputStationary:
-      if (k >= static_cast<int>(K)) {
+      if (!cfg.independent_output_tiles && k >= static_cast<int>(K)) {
         // Route through the shared hoist decision so the scored cost matches the
         // operand BuildFullKPipelined actually hoists (recorded in os_holds_a).
         return OSHoldsHoldA(m, n, cfg) ? held_a : held_b;
@@ -361,7 +371,8 @@ double DrainCycles(int m, int n, const L0TileConfig& cfg) {
 // exposed tile is smaller, so this is a slight -- and safe (conservative) --
 // over-correction. Tail-accurate pricing is a follow-up (see docs).
 int64_t WallCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
-  const double compute = std::max(LoadCycles(m, n, k, cfg, r), static_cast<double>(MadCycles(m, n, k, cfg)));
+  const double compute = std::max(LoadCycles(m, n, k, cfg, r) * std::max(1, cfg.reduction_iterations),
+                                  static_cast<double>(MadCycles(m, n, k, cfg)));
   const double drain = DrainCycles(m, n, cfg);
   double wall;
   if (r.dbc) {
@@ -431,7 +442,7 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
   c.traffic = EstimateTraffic(m, n, k, cfg, regime);
   c.cost_cycles = WallCycles(m, n, k, cfg, regime);
   c.padded_compute = PaddedComputeVolume(m, n, k, cfg);
-  c.load_cycles = LoadCycles(m, n, k, cfg, regime);
+  c.load_cycles = LoadCycles(m, n, k, cfg, regime) * std::max(1, cfg.reduction_iterations);
   c.regime = regime;
   return c;
 }
@@ -487,6 +498,26 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
       }
       for (const int k : EnumerateLegalKs(static_cast<int>(m), static_cast<int>(n), cfg, A0, B0)) {
         if (require_full_k && k != cfg.K) continue;
+        // Source and inner pipelines compose storage memberships, not source
+        // reduction arithmetic. A boundary window cannot exceed this boxed
+        // maximum, so this also validates its selected K and peeled K tail.
+        const auto db = DeriveOperandDB(regime.stat);
+        const int64_t depth_a = k < cfg.K ? (db.a ? 2LL : 1LL) * cfg.reduction_pipeline_stages
+                                          : std::max(db.a ? 2 : 1, cfg.reduction_pipeline_stages);
+        const int64_t depth_b = k < cfg.K ? (db.b ? 2LL : 1LL) * cfg.reduction_pipeline_stages
+                                          : std::max(db.b ? 2 : 1, cfg.reduction_pipeline_stages);
+        // With a source pipeline, the separately emitted K peel is replicated
+        // beside the inner pipeline's operand roots. Reserve it as well. A
+        // lone full block plus peel is already covered by the two-slot budget.
+        const int64_t tail = cfg.reduction_pipeline_stages > 1 && cfg.K / k >= 2 ? cfg.K % k : 0;
+        const int64_t extra_tail = tail * static_cast<int64_t>(cfg.reduction_pipeline_stages);
+        const int64_t stored_k_a = depth_a * k + extra_tail;
+        const int64_t stored_k_b = depth_b * k + extra_tail;
+        const auto boxed_n = BoxedExtent(n, cfg.box_align_n);
+        if (!boxed_n || *boxed_m > cfg.l0a_bytes / cfg.bytes_a / stored_k_a ||
+            *boxed_n > cfg.l0b_bytes / cfg.bytes_b / stored_k_b) {
+          continue;
+        }
         auto c = MakeCandidate(static_cast<int>(m), static_cast<int>(n), k, cfg, C0, regime);
         if (c && (!best || Better(*c, *best, cfg))) best = c;
       }
@@ -516,6 +547,8 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   // 1. Validate inputs.
   CHECK(cfg.M > 0 && cfg.N > 0 && cfg.K > 0)
       << "ChooseL0Tile: M, N, K must all be positive (got " << cfg.M << ", " << cfg.N << ", " << cfg.K << ")";
+  CHECK(cfg.reduction_iterations >= 0) << "ChooseL0Tile: reduction_iterations must be non-negative";
+  CHECK(cfg.reduction_pipeline_stages > 0) << "ChooseL0Tile: reduction_pipeline_stages must be positive";
   CHECK(cfg.l0a_bytes > 0 && cfg.l0b_bytes > 0 && cfg.l0c_bytes > 0)
       << "ChooseL0Tile: L0 capacities must be positive";
   CHECK(cfg.bytes_a > 0 && cfg.bytes_b > 0 && cfg.bytes_c > 0)
@@ -608,7 +641,7 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   // by the realizable mask and adopted only on a STRICTLY lower wall (ties keep
   // the simpler, earlier regime -- the baseline first).
   const bool is_tiled = !(best->m == cfg.M && best->n == cfg.N && best->k == cfg.K);
-  if (is_tiled) {
+  if (is_tiled && !cfg.independent_output_tiles) {
     std::vector<Stationarity> stats = {Stationarity::kOutputStationary};
     if (cfg.allow_a_stationary) stats.push_back(Stationarity::kAStationary);
     if (cfg.allow_b_stationary) stats.push_back(Stationarity::kBStationary);
@@ -617,7 +650,7 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       const int64_t a0 = L0aBudget(cfg, db);
       const int64_t b0 = L0bBudget(cfg, db);
       const bool is_os = stat == Stationarity::kOutputStationary;
-      for (int dbc = 0; dbc <= (cfg.allow_double_buffer_c ? 1 : 0); ++dbc) {
+      for (int dbc = 0; dbc <= (cfg.allow_double_buffer_c && cfg.reduction_iterations > 0 ? 1 : 0); ++dbc) {
         const Regime r{stat, /*dbc=*/dbc == 1};
         if (is_os && !r.dbc) continue;  // baseline, already scored
         const int64_t c0 = L0cBudget(cfg, r);

@@ -227,7 +227,7 @@ void BindPass(nb::module_& m) {
              "Host CPU builds the whole task graph up front; required for Graph Execution");
 
   passes.def("runtime_kind_to_name", &RuntimeKindToName, nb::arg("kind"),
-             "Wire name written to RUNTIME_CONFIG[\"runtime\"], e.g. \"host_build_graph\"");
+             R"(Wire name written to RUNTIME_CONFIG["runtime"], e.g. "host_build_graph")");
   passes.def("runtime_kind_from_name", &RuntimeKindFromName, nb::arg("name"),
              "Parse a RUNTIME_CONFIG[\"runtime\"] wire name back into a RuntimeKind");
 
@@ -378,8 +378,10 @@ void BindPass(nb::module_& m) {
       .def("get_disabled_diagnostics", &PassContext::GetDisabledDiagnostics,
            "Get the diagnostic checks suppressed by this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
-      .def("get_backend", &PassContext::GetBackend, nb::rv_policy::reference,
-           "Get the configured backend for operator queries; does not bind a new target")
+      .def(
+          "get_backend", [](const PassContext& ctx) -> const backend::Backend* { return ctx.GetBackend(); },
+          nb::rv_policy::reference,
+          "Get the configured backend for operator queries; does not bind a new target")
       .def("get_memory_planner", &PassContext::GetMemoryPlanner,
            "Get the memory planner selection for this context")
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
@@ -896,6 +898,9 @@ void BindPass(nb::module_& m) {
       .def_rw("M", &utils::L0TileConfig::M)
       .def_rw("N", &utils::L0TileConfig::N)
       .def_rw("K", &utils::L0TileConfig::K)
+      .def_rw("reduction_iterations", &utils::L0TileConfig::reduction_iterations)
+      .def_rw("reduction_pipeline_stages", &utils::L0TileConfig::reduction_pipeline_stages)
+      .def_rw("independent_output_tiles", &utils::L0TileConfig::independent_output_tiles)
       .def_rw("l0a_bytes", &utils::L0TileConfig::l0a_bytes)
       .def_rw("l0b_bytes", &utils::L0TileConfig::l0b_bytes)
       .def_rw("l0c_bytes", &utils::L0TileConfig::l0c_bytes)

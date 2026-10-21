@@ -1010,11 +1010,21 @@ class l0_tile_chooser:
         used under one level of a full-K output-grid pipeline, while
         ``max_n_nested_pipelined`` covers two nested pipeline levels. A value
         of zero leaves the corresponding bound disabled.
+
+        ``reduction_iterations`` counts source K blocks before one drain (zero
+        means unknown, costed as a one-block lower bound without dbC).
+        ``reduction_pipeline_stages`` describes enclosing operand storage
+        replication, independently of that arithmetic count.
+        ``independent_output_tiles`` reloads both operands per output reduction
+        and excludes held-panel and dbC schedules not implemented by that route.
         """
 
         M: int
         N: int
         K: int
+        reduction_iterations: int
+        reduction_pipeline_stages: int
+        independent_output_tiles: bool
         l0a_bytes: int
         l0b_bytes: int
         l0c_bytes: int
