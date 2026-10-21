@@ -817,6 +817,25 @@ The codegen:
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
 
+### Scalar Boolean Casts
+
+`pl.cast(flag, dtype)` maps scalar `False` to numeric zero and `True` to numeric
+one, for both literals and runtime values. BOOL uses MLIR `i1`, but must not be
+interpreted as a signed one-bit integer during conversion.
+
+| Destination | Lowering |
+| ----------- | -------- |
+| Signed integer | `arith.extui` from `i1` to the destination width |
+| Unsigned integer | `arith.extui` to signless `iN`, then bridge to `uiN` |
+| INDEX | `arith.index_castui` |
+| Floating point | Zero-extend to `i32`, then `arith.sitofp` |
+| BOOL | Identity |
+
+The floating-point path uses an integer carrier because direct `(float)bool`
+casts emitted by PTOAS are rejected by A3's device compiler. Ordinary signed
+integer widening still uses sign extension. These rules apply to scalar casts;
+tensor and tile conversion operators have their own lowering.
+
 ### Memory Space Mapping
 
 | PyPTO MemorySpace | PTO Address Space |

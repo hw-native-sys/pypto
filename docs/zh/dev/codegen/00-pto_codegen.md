@@ -759,6 +759,24 @@ tile_c = pl.mul(tile_a, tile_b)
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
 
+### 标量布尔转换
+
+`pl.cast(flag, dtype)` 将标量 `False` 转为数值零，将 `True` 转为数值一，
+字面量与运行时值遵循相同语义。BOOL 使用 MLIR `i1`，但转换时不能将其解释为
+有符号的一位整数。
+
+| 目标类型 | 降低方式 |
+| -------- | -------- |
+| 有符号整数 | 用 `arith.extui` 将 `i1` 扩展到目标位宽 |
+| 无符号整数 | 用 `arith.extui` 扩展到无符号性（signless）的 `iN`，再桥接到 `uiN` |
+| INDEX | `arith.index_castui` |
+| 浮点 | 零扩展到 `i32`，再使用 `arith.sitofp` |
+| BOOL | 恒等转换 |
+
+浮点路径使用整数中间值，因为 A3 设备编译器拒绝 PTOAS 生成的直接 `(float)bool`
+转换。普通有符号整数扩宽仍使用符号扩展（sign extension）。上述规则针对标量转换；
+Tensor 和 Tile 转换算子有各自的降低规则。
+
 ### 内存空间映射
 
 | PyPTO 内存空间 | PTO 地址空间 |

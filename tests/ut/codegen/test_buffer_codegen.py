@@ -794,6 +794,22 @@ def test_native_explicit_buffer_stage_handles_empty_and_scalar_only_kernels(tmp_
     _compile_native(tmp_path, text, addressed=False)
 
 
+@pytest.mark.parametrize("dtype", [DataType.UINT8, DataType.UINT16, DataType.UINT32, DataType.UINT64])
+def test_explicit_buffer_stage_accepts_bool_to_unsigned_cast(tmp_path, dtype):
+    """The Buffer validator must admit the shared emitter's BOOL-to-unsigned recipe."""
+    flag = _scalar("flag", DataType.BOOL)
+    value = _scalar("value", dtype)
+    program = _program(
+        [ir.AssignStmt(value, ir.Cast(flag, dtype, SPAN), SPAN)],
+        [flag],
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    text = _emit(program)
+    assert "arith.extui %arg0 : i1 to i" in text
+    assert "builtin.unrealized_conversion_cast" in text
+    _compile_native(tmp_path, text, addressed=False)
+
+
 def test_explicit_buffer_stage_rejects_logical_tile_calls_without_any_buffer_operand():
     index = _scalar("index")
     call = _call("tile.get_block_idx", [], ir.ScalarType(DataType.INDEX))

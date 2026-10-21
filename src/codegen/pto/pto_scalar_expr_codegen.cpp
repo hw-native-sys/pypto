@@ -278,6 +278,30 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   if (src_dtype == dst_dtype) {
     fs_.current_expr_value = src;
     return;
+  } else if (src_dtype == DataType::BOOL && (dst_dtype.IsInt() || dst_is_index || dst_is_float)) {
+    // A logical BOOL is 0/1, whereas interpreting its i1 representation as
+    // signed would make true equal -1. Normalize before numeric conversion.
+    if (dst_is_index) {
+      mlir_op = "arith.index_castui";
+    } else if (dst_is_float) {
+      // PTOAS can lower a direct i1-to-float cast to (float)bool, which A3
+      // rejects. An i32 carrier preserves 0/1 and avoids that device cast.
+      src = EmitCastToI32(op->operand_, src);
+      src_type = "i32";
+      mlir_op = "arith.sitofp";
+    } else if (dst_is_uint) {
+      // Arithmetic extensions require signless result types. Bridge to uiN
+      // only after zero-extending the logical value to the matching iN.
+      const std::string signless_dst = dst_type.substr(1);
+      const std::string extended = NewTemp();
+      Emit(extended + " = arith.extui " + src + " : i1 to " + signless_dst);
+      Emit(result + " = builtin.unrealized_conversion_cast " + extended + " : " + signless_dst + " to " +
+           dst_type);
+      fs_.current_expr_value = result;
+      return;
+    } else {
+      mlir_op = "arith.extui";
+    }
   } else if (src_is_index || dst_is_index) {
     CHECK(!src_is_float && !dst_is_float) << "Cast between float and index types is not supported";
     // arith.index_cast requires signless integer types. For unsigned source/destination,
@@ -387,7 +411,8 @@ std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string
       } else if (scalar_type->dtype_.GetBit() > 32) {
         mlir_op = "arith.trunci";
       } else {
-        mlir_op = is_unsigned ? "arith.extui" : "arith.extsi";
+        // BOOL is not an unsigned integer dtype, but still represents 0/1.
+        mlir_op = (is_unsigned || scalar_type->dtype_ == DataType::BOOL) ? "arith.extui" : "arith.extsi";
       }
       Emit(i32_name + " = " + mlir_op + " " + source_name + " : " + src_type + " to i32");
       return i32_name;

@@ -344,10 +344,10 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     if (As<ir::Cast>(expr)) {
       const auto source = ir::GetScalarDtype(expr->operand_);
       const auto target = ir::GetScalarDtype(expr);
-      // The inherited emitter supports index -> unsigned and same-width
+      // The inherited emitter supports BOOL/index -> unsigned and same-width
       // integer bitcasts. Other unsigned casts need a separate native recipe.
       CHECK_SPAN((!source.IsUnsignedInt() && !target.IsUnsignedInt()) || source == DataType::INDEX ||
-                     source == target ||
+                     source == DataType::BOOL || source == target ||
                      (!source.IsFloat() && target != DataType::INDEX && !target.IsFloat() &&
                       source.GetBit() == target.GetBit()),
                  expr->span_)

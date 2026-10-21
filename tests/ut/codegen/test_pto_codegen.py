@@ -1115,7 +1115,7 @@ def test_float_floor_mod_keeps_float_remainder():
 def _run_scalar_ptoas_on_cpu(
     tmp_path, mlir: str, function_name: str, output_count: int, cases: list[tuple[int, int]]
 ) -> list[list[int]]:
-    """Run untouched PTOAS arithmetic with device synchronization stubbed on CPU.
+    """Run untouched PTOAS arithmetic with device setup and synchronization stubbed on CPU.
 
     UBSan traps without its runtime library, including undefined arithmetic in
     a speculatively evaluated correction branch.
@@ -1133,6 +1133,8 @@ def _run_scalar_ptoas_on_cpu(
 #include <iostream>
 #define __aicore__
 #define __gm__
+// Execute the vector kernel body emitted by the default compilation pipeline.
+#define __DAV_VEC__
 constexpr int PIPE_ALL = 0, PIPE_MTE3 = 1, PIPE_S = 2, EVENT_ID0 = 0;
 enum class cache_line_t {{ SINGLE_CACHE_LINE, ENTIRE_DATA_CACHE }};
 enum class mem_dsb_t {{ ALL }};
@@ -1141,6 +1143,8 @@ void set_flag(int, int, int) {{}}
 void wait_flag(int, int, int) {{}}
 void dcci(void*, cache_line_t) {{}}
 void dsb(mem_dsb_t) {{}}
+void set_mask_norm() {{}}
+void set_vector_mask(uint64_t, uint64_t) {{}}
 {cpp}
 int main() {{
     int64_t dividend, divisor;
@@ -1185,6 +1189,88 @@ int main() {{
     )
     assert executed.returncode == 0, executed.stderr
     return [list(map(int, line.split())) for line in executed.stdout.splitlines()]
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        DataType.INT8,
+        DataType.INT16,
+        DataType.INT32,
+        DataType.INT64,
+        DataType.UINT8,
+        DataType.UINT16,
+        DataType.UINT32,
+        DataType.UINT64,
+        DataType.INDEX,
+        DataType.FP32,
+        DataType.BOOL,
+    ],
+    ids=str,
+)
+def test_scalar_bool_cast_ptoas_matches_python_without_device(tmp_path, dtype):
+    """Literal and runtime BOOL casts must agree on 0/1, including after PTOAS folding."""
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([5], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("scalar_bool_cast", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        signed = f.param("signed", ir.ScalarType(DataType.INT8))
+        flag = f.param("flag", ir.ScalarType(DataType.BOOL))
+        f.return_type(output_type)
+        condition = ir.gt(signed, ir.ConstInt(0, DataType.INT8, span))
+        for offset, operand in enumerate(
+            (ir.ConstBool(False, span), ir.ConstBool(True, span), flag, condition)
+        ):
+            value = ib.let(f"cast_{offset}", ir.Cast(operand, dtype, span))
+            if dtype.is_unsigned_int():
+                # Preserve 0/1 while bridging the unsigned result to a same-width
+                # signed carrier; general unsigned widening is a separate recipe.
+                signed_dtype = {
+                    DataType.UINT8: DataType.INT8,
+                    DataType.UINT16: DataType.INT16,
+                    DataType.UINT32: DataType.INT32,
+                    DataType.UINT64: DataType.INT64,
+                }[dtype]
+                value = ib.let(f"signed_{offset}", ir.Cast(value, signed_dtype, span))
+            ib.let(
+                f"store_{offset}", tensor_ops.write(output, [offset], ir.Cast(value, DataType.INT64, span))
+            )
+        # BOOL needs zero extension, but ordinary negative integers still need
+        # sign extension. Keep that control in the same generated function.
+        ib.let("signed_control", tensor_ops.write(output, [4], ir.Cast(signed, DataType.INT64, span)))
+        ib.return_stmt(output)
+
+    mlir = _generate_mlir(ir.Program([f.get_result()], "ScalarBoolCast", span))
+    assert not re.search(r"arith\.(extsi|sitofp|index_cast) [^\n]*: i1 to", mlir), mlir
+    cases = [(-1, 0), (0, 1), (1, 0), (1, 1)]
+    actual = _run_scalar_ptoas_on_cpu(tmp_path, mlir, "scalar_bool_cast", 5, cases)
+    assert actual == [[0, 1, flag, int(signed > 0), signed] for signed, flag in cases]
+
+
+def test_scalar_bool_cast_dsl_matches_python_without_device(tmp_path):
+    """The public pl.cast surface retains the same semantics through the default pipeline."""
+
+    @pl.program
+    class BoolCasts:
+        @pl.function(type=pl.FunctionType.InCore)
+        def scalar_bool_cast_dsl(
+            self,
+            output: pl.Out[pl.Tensor[[5], pl.INT64]],
+            signed: pl.Scalar[pl.INT8],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[5], pl.INT64]:
+            output = pl.write(output, [0], pl.cast(pl.const(False, pl.BOOL), pl.INT64))
+            output = pl.write(output, [1], pl.cast(pl.const(True, pl.BOOL), pl.INT64))
+            output = pl.write(output, [2], pl.cast(flag, pl.INT64))
+            output = pl.write(output, [3], pl.cast(signed > pl.const(0, pl.INT8), pl.INT64))
+            output = pl.write(output, [4], pl.cast(signed, pl.INT64))
+            return output
+
+    mlir = _generate_default_mlir(BoolCasts)
+    cases = [(-1, 0), (0, 1), (1, 0), (1, 1)]
+    actual = _run_scalar_ptoas_on_cpu(tmp_path, mlir, "scalar_bool_cast_dsl", 5, cases)
+    assert actual == [[0, 1, flag, int(signed > 0), signed] for signed, flag in cases]
 
 
 def _signed_floor_divmod_cases(
