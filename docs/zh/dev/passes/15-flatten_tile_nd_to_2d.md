@@ -78,8 +78,8 @@ MemRef 则可以仅保留在左侧定义。
 补回的分配元数据中的运行时表达式也会在登记新定义前完成重映射，包括 pinned MemRef
 的 `slot_index_`。即使 RHS 完全不变，只要 LHS 元数据引用变化，也会重建定义。
 load、分配、reshape、assemble 和 transpose 改写路径采用相同的类型引用重映射规则。
-ND transpose 在创建输出缓冲区及逐页 assemble 的结果定义时同样保留该绑定，
-临时 scratch 缓冲区仍独立分配。
+ND transpose 在创建输出缓冲区时保留该绑定，临时 scratch 缓冲区仍独立分配。
+生成的 assemble 结果不携带显式绑定，由 `InitMemRef` 从其目标输入继承实际分配。
 常量 slot 保留原 MemRef 对象。仅当 RHS 和 LHS 类型引用均不变时才保留原定义。
 重建赋值时，其 `leading_comments_` 只保留在第一条替换语句上，包括 lowering 引入的辅助语句。
 未改写的赋值保留原注释，不重复附加。batch-matmul 与 store 融合时，被消费的 store 注释

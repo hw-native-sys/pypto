@@ -208,8 +208,9 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
     // Assemble the [B, A] result into the flat output at row offset i*B.
     auto out_offset = MakeShapeTupleFromInts({i * b, 0}, span);
     auto assemble = op_registry.Create("tile.assemble", {out_var, transpose_var, out_offset}, span);
-    auto assembled_type = WithRemappedAllocation(assemble->GetType(), out_var->GetType(), ctx);
-    out_var = std::make_shared<Var>(out_var->name_hint_, assembled_type, span);
+    // An assemble result inherits its target's storage in InitMemRef. Repeating
+    // a pinned binding here would turn an alias into a forbidden user binding.
+    out_var = std::make_shared<Var>(out_var->name_hint_, assemble->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, assign->span_));
   }
 

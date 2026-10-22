@@ -1010,6 +1010,43 @@ class TestFlattenTileNdTo2DCallRemapping:
         Collector().visit_stmt(function.body)
         assert comments == expected
 
+    def _assert_nd_transpose_storage(self, program: ir.Program) -> ir.MemRef:
+        def output_bindings(program: ir.Program) -> list[ir.AssignStmt]:
+            bindings: list[ir.AssignStmt] = []
+
+            class Collector(ir.IRVisitor):
+                def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+                    if op.var.name_hint == "result":
+                        bindings.append(op)
+                    super().visit_assign_stmt(op)
+
+            function = program.get_function("kernel")
+            assert function is not None
+            Collector().visit_stmt(function.body)
+            assert len(bindings) == 3  # Output allocation and two page writebacks.
+            return bindings
+
+        bindings = output_bindings(program)
+        assert cast(ir.Call, bindings[0].value).op.name == _OP_TILE_CREATE
+        declared = cast(ir.TileType, bindings[0].var.type).memref
+        assert declared is not None
+        scratch = self._definitions(program)["trans_tmp_pool"].var
+        assert cast(ir.TileType, scratch.type).memref is not declared
+
+        # Explicit bindings belong on allocations. InitMemRef must inherit the
+        # storage through assemble, rather than reject a new user-bound result.
+        initialized = passes.init_mem_ref()(passes.infer_tile_memory_space()(program))
+        for binding in bindings[1:]:
+            assert cast(ir.TileType, binding.var.type).memref is None
+        initialized_bindings = output_bindings(initialized)
+        allocation = cast(ir.TileType, initialized_bindings[0].var.type).memref
+        assert allocation is not None
+        assert allocation.slot_count_ == declared.slot_count_
+        for binding in initialized_bindings:
+            assert cast(ir.TileType, binding.var.type).memref is allocation
+        self._assert_consumers_use_definition(self._definitions(initialized), "result")
+        return declared
+
     def test_gm_view_remaps_dynamic_shape(self):
         """A scalar load/read/cast changes identity before a root GM tensor.view."""
 
@@ -1547,11 +1584,17 @@ class TestFlattenTileNdTo2DCallRemapping:
         with ib.function("kernel", type=ir.FunctionType.InCore) as function:
             source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
             nd_source = function.param("nd_source", ir.TensorType([2, 1, 4], DataType.FP32))
-            local = function.param(
-                "local", ir.TileType([1, 4], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+            local = (
+                function.param("local", ir.TileType([1, 4], DataType.FP32, memory_space=ir.MemorySpace.Vec))
+                if producer != "nd_transpose"
+                else None
             )
             metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
             function.return_type(source.type)
+            if local is None:
+                local = ib.let(
+                    "local", tile_ops.load(source, [0, 0], [1, 4], target_memory=ir.MemorySpace.Vec)
+                )
             loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
             value = ib.let("value", tile_ops.read(loaded, [0]))
             pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
@@ -1616,7 +1659,11 @@ class TestFlattenTileNdTo2DCallRemapping:
         self._assert_assignment_comments(After, [["result binding comment"]])
         definitions = self._definitions(After)
         self._assert_consumers_use_definition(definitions, "result")
-        actual = cast(ir.TileType, definitions["result"].var.type).memref
+        actual = (
+            self._assert_nd_transpose_storage(After)
+            if producer == "nd_transpose"
+            else cast(ir.TileType, definitions["result"].var.type).memref
+        )
         assert actual is not None
         assert actual.base_ is pinned.base_
         assert actual.byte_offset_ is pinned.byte_offset_
@@ -1631,24 +1678,6 @@ class TestFlattenTileNdTo2DCallRemapping:
             assert cast(ir.ConstInt, actual.slot_index_.right).value == 2
         else:
             assert actual is pinned
-        if producer == "nd_transpose":
-            output_bindings: list[ir.AssignStmt] = []
-
-            class OutputCollector(ir.IRVisitor):
-                def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
-                    if op.var.name_hint == "result":
-                        output_bindings.append(op)
-                    if op.var.name_hint == "trans_tmp_pool":
-                        assert cast(ir.TileType, op.var.type).memref is not actual
-                    super().visit_assign_stmt(op)
-
-            function = After.get_function("kernel")
-            assert function is not None
-            OutputCollector().visit_stmt(function.body)
-            assert len(output_bindings) == 3  # Output allocation and two page writebacks.
-            assert cast(ir.Call, output_bindings[0].value).op.name == _OP_TILE_CREATE
-            for binding in output_bindings:
-                assert cast(ir.TileType, binding.var.type).memref is actual
         assert "__FREE_VAR" not in str(After)
 
     @pytest.mark.parametrize("dynamic_slot", [False, True])

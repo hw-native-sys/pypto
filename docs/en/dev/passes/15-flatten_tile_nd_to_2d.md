@@ -85,8 +85,9 @@ Runtime expressions in carried allocation metadata are remapped before recording
 the new definition, including a pinned MemRef's `slot_index_`. A change confined
 to LHS metadata also rebuilds the definition, even if the RHS is unchanged. The
 load, allocation, reshape, assemble, and transpose rewrite paths use the same
-type-reference remapping rule. ND transpose applies it to its output allocation
-and each per-page assemble result; its scratch allocations remain independent.
+type-reference remapping rule. ND transpose applies it to its output allocation;
+its scratch allocations remain independent. Synthesized assemble results carry
+no explicit binding: `InitMemRef` inherits the target allocation for each writeback.
 Constant slots retain the original MemRef.
 A definition is retained only when both its RHS and LHS type references are unchanged.
 Rebuilt assignments retain their `leading_comments_` once on the first emitted
