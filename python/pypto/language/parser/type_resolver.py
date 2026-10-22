@@ -73,7 +73,9 @@ def _implicit_tile_view_defaults(
     """Return (blayout, slayout, fractal) implicit defaults for a given shape + memory space."""
     default_blayout = _infer_implicit_tile_layout_from_shape(shape)
     default_slayout = ir.TileLayout.none_box
-    default_fractal = ir.TileView().fractal
+    # pypto_core.ir.TileView has no working zero-arg pybind constructor;
+    # the documented default fractal is 512 (see the TileView overload).
+    default_fractal = 512
     if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
         default_blayout = ir.TileLayout.col_major
         default_slayout = ir.TileLayout.row_major
