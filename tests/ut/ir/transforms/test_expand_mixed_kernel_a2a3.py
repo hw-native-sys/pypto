@@ -2629,6 +2629,87 @@ def test_nested_yield_of_an_enclosing_scope_value_is_not_rewritten():
     )
 
 
+def test_scalar_parameter_branch_results_survive_on_both_lanes():
+    """Both lanes must retain live if results yielding a parameter or its expression.
+
+    Parameters have no defining statement in the body. Omitting them from the
+    branch cleanup scope used to erase both result slots but keep their uses.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def parameter_branch(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vec_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            if n > 1:
+                selected, limit = pl.yield_(n - 1, n)
+            else:
+                selected, limit = pl.yield_(0, 1)
+            if selected < limit:
+                a = pl.load(x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a, target_memory=pl.MemorySpace.Left)
+                a_right = pl.move(a, target_memory=pl.MemorySpace.Right)
+                product = pl.matmul(a_left, a_right)
+                pl.store(product, [0, 0], out)
+                zero = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                pl.store(zero, [0, 0], vec_out)
+            return out, vec_out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def parameter_branch_aic(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vec_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ):
+            if n > 1:
+                selected, limit = pl.yield_(n - 1, n)
+            else:
+                selected, limit = pl.yield_(0, 1)
+            if selected < limit:
+                a = pl.load(x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a, target_memory=pl.MemorySpace.Left)
+                a_right = pl.move(a, target_memory=pl.MemorySpace.Right)
+                product = pl.matmul(a_left, a_right)
+                pl.store(product, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def parameter_branch_aiv(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vec_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            pl.func_attr({"dual_aiv_dispatch": True})
+            if n > 1:
+                selected, limit = pl.yield_(n - 1, n)
+            else:
+                selected, limit = pl.yield_(0, 1)
+            if selected < limit:
+                zero = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                pl.store(zero, [0, 0], vec_out)
+            return out, vec_out
+
+    After = _expand_no_verify(Before)
+    ExpectedSSA = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    _assert_no_free_var(After)
+    for lane in ("aic", "aiv"):
+        name = f"parameter_branch_{lane}"
+        actual = After.get_function(name)
+        expected = ExpectedSSA.get_function(name)
+        assert actual is not None and expected is not None
+        ir.assert_structural_equal(actual, expected)
+
+
 def test_nested_yield_of_a_function_parameter_is_not_rewritten():
     """A parameter is bound by the signature, so no statement in the body defines it.
 

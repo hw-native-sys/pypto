@@ -848,7 +848,15 @@ std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
   auto repaired = StripDeadIterArgs(stmts);
   repaired = FixupIterArgInitValues(repaired, original_def_map, params, extra_defined);
   repaired = FixupDanglingYieldValues(repaired, params, extra_defined);
-  repaired = StripDanglingIfReturnVars(repaired, extra_defined);
+  // Parameters are defined at function entry on both split lanes, even though
+  // no statement in the body binds them. Include them alongside pending remap
+  // keys so a live branch yielding a parameter (or an expression of it) survives.
+  auto defined_on_entry = extra_defined;
+  defined_on_entry.reserve(extra_defined.size() + params.size());
+  for (const auto& param : params) {
+    if (param) defined_on_entry.insert(param.get());
+  }
+  repaired = StripDanglingIfReturnVars(repaired, defined_on_entry);
   repaired = dce::EliminateDeadCode(repaired);
   repaired = StripDeadIterArgs(repaired);
   return dce::EliminateDeadCode(repaired);

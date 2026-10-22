@@ -341,6 +341,8 @@ program_expanded = expand_pass(program)
        因此仅被用于喂给另一个存活槽位的 carry（多级 FIFO 轮转）会被保留
      - 为保留下来的 iter_args 补回缺失的 init value 定义
      - 当分支局部值被裁剪后，将悬空 yield 改写为 identity yield
+     - 将函数参数和待重映射变量加入分支结果清理的初始作用域，
+       在两侧保留仍被使用、直接引用参数或 `n - 1` 等表达式的 if/yield 结果
      - 将悬空的 tile.store 结果变量（被 AIC 侧拆分裁剪的 SSA 版本）重映射到对应的输出参数
   7. 对两个函数体运行死代码消除（递归进入循环）
   8. 再次归一化循环携带状态，因为 DCE 可能移除仅用于过渡的 SHARED 后续引用，

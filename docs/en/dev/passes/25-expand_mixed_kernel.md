@@ -398,6 +398,9 @@ Phase 2 — Expand each InCore function F:
        rotation) stays alive
      - Pull back missing init-value definitions for surviving iter_args
      - Rewrite dangling yields to identity yields when a branch-local value was stripped
+     - Seed branch-result cleanup with function parameters and pending remap keys,
+       preserving live if/yield results that directly reference a parameter or
+       an expression such as `n - 1` on either lane
      - Remap dangling tile.store result vars (SSA versions stripped by AIC-side splitting) to the corresponding output parameter
   7. Run dead code elimination on both bodies (recursive into loops)
   8. Normalize loop-carried state again, because DCE may remove a SHARED-only
