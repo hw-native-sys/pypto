@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -43,6 +44,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
+#include "pypto/ir/transforms/utils/call_shape_binding.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -3000,12 +3002,17 @@ class CallTypeSubstituter : public IRMutator {
   TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
 };
 
+using CallShapePlans = std::map<std::string, CallShapeBindingPlan>;
+
 class OutputParameterRewriter : public TypePropagatingMutator {
  public:
   OutputParameterRewriter(const AddedOutputMap& added_outputs,
                           const std::unordered_map<std::string, FunctionPtr>& functions,
-                          FunctionPtr wrapper = nullptr)
-      : added_outputs_(added_outputs), functions_(functions), wrapper_(std::move(wrapper)) {
+                          const CallShapePlans& shape_plans, FunctionPtr wrapper = nullptr)
+      : added_outputs_(added_outputs),
+        functions_(functions),
+        wrapper_(std::move(wrapper)),
+        shape_plans_(shape_plans) {
     if (wrapper_) {
       params_ = wrapper_->params_;
       directions_ = wrapper_->param_directions_;
@@ -3052,9 +3059,9 @@ class OutputParameterRewriter : public TypePropagatingMutator {
   }
 
  private:
-  ExprPtr MakeStorage(const VarPtr& output, CallTypeSubstituter& arguments, const Span& span,
-                      size_t local_index, std::vector<StmtPtr>& prefix) {
-    auto type = arguments.RemapType(output->GetType());
+  ExprPtr MakeStorage(const VarPtr& output, CallTypeSubstituter& arguments, CallShapeInstantiation* shapes,
+                      const Span& span, size_t local_index, std::vector<StmtPtr>& prefix) {
+    auto type = shapes ? shapes->InstantiateType(output->GetType()) : arguments.RemapType(output->GetType());
     auto tensor = As<TensorType>(type);
     CHECK_SPAN(tensor != nullptr, span)
         << "Cannot materialize output parameter '" << output->name_hint_
@@ -3130,6 +3137,18 @@ class OutputParameterRewriter : public TypePropagatingMutator {
     // Submit, even when this pass added no new outputs to that callee.
     if (bindings.empty() && (!wrapper_ || supplied == original_nonctx)) return value;
 
+    // Bind the original signature. Added Out parameters must not alter the
+    // admission contract or provide the size of their own allocation.
+    const auto& plan = shape_plans_.at(global->name_);
+    CallShapeMap shape_bindings;
+    size_t shape_budget = kCallShapeBudget;
+    std::unique_ptr<CallShapeInstantiation> shapes;
+    if (plan.Bind(old_args, shape_bindings, shape_budget) == CallShapeStatus::Success) {
+      shapes = std::make_unique<CallShapeInstantiation>(std::move(shape_bindings));
+    }
+    // Richer legacy signatures keep their existing lowering path; dedup retains
+    // their symbol-identity guard and never relies on this fallback.
+
     std::vector<ExprPtr> args(old_args.begin(), old_args.begin() + static_cast<std::ptrdiff_t>(supplied));
     CallTypeSubstituter arguments;
     for (size_t i = 0; i < supplied; ++i) arguments.Bind(callee->params_[i], old_args[i]);
@@ -3143,15 +3162,15 @@ class OutputParameterRewriter : public TypePropagatingMutator {
     for (size_t i = supplied; i < original_nonctx; ++i) {
       CHECK_SPAN(callee->param_directions_[i] == ParamDirection::Out, span)
           << "Cannot materialize omitted non-Out parameter " << i << " of '" << global->name_ << "'";
-      auto storage = MakeStorage(callee->params_[i], arguments, span, local_index++, prefix);
+      auto storage = MakeStorage(callee->params_[i], arguments, shapes.get(), span, local_index++, prefix);
       args.push_back(storage);
       arguments.Bind(callee->params_[i], storage);
     }
     for (const auto& binding : bindings) {
       INTERNAL_CHECK_SPAN(binding.param_index == args.size() && binding.param_index < new_nonctx, span)
           << "Internal error: added output parameter positions do not precede the CommCtx suffix";
-      auto storage =
-          MakeStorage(callee->params_[binding.param_index], arguments, span, local_index++, prefix);
+      auto storage = MakeStorage(callee->params_[binding.param_index], arguments, shapes.get(), span,
+                                 local_index++, prefix);
       args.push_back(storage);
       arguments.Bind(callee->params_[binding.param_index], storage);
     }
@@ -3162,7 +3181,9 @@ class OutputParameterRewriter : public TypePropagatingMutator {
     // shape variables rather than the callee's scalar parameter identities.
     std::vector<TypePtr> types;
     types.reserve(callee->return_types_.size() + (submit ? 1 : 0));
-    for (const auto& type : callee->return_types_) types.push_back(arguments.RemapType(type));
+    for (const auto& type : callee->return_types_) {
+      types.push_back(shapes ? shapes->InstantiateType(type) : arguments.RemapType(type));
+    }
     if (call) {
       TypePtr result_type = types.empty()       ? GetUnknownType()
                             : types.size() == 1 ? types[0]
@@ -3185,6 +3206,7 @@ class OutputParameterRewriter : public TypePropagatingMutator {
   const AddedOutputMap& added_outputs_;
   const std::unordered_map<std::string, FunctionPtr>& functions_;
   FunctionPtr wrapper_;
+  const CallShapePlans& shape_plans_;
   std::vector<VarPtr> params_;
   std::vector<ParamDirection> directions_;
   AddedOutputBindings outputs_;
@@ -3198,8 +3220,8 @@ struct WrapperTransformResult {
 
 WrapperTransformResult PropagateOutputsThroughWrapper(
     const FunctionPtr& func, const AddedOutputMap& added_outputs,
-    const std::unordered_map<std::string, FunctionPtr>& functions) {
-  OutputParameterRewriter mutator(added_outputs, functions, func);
+    const std::unordered_map<std::string, FunctionPtr>& functions, const CallShapePlans& shape_plans) {
+  OutputParameterRewriter mutator(added_outputs, functions, shape_plans, func);
   auto body = mutator.VisitStmt(func->body_);
   if (body == func->body_ && mutator.outputs().empty()) return {func, {}};
   auto result = MutableCopy(func);
@@ -3211,8 +3233,9 @@ WrapperTransformResult PropagateOutputsThroughWrapper(
 }
 
 FunctionPtr UpdateCallSites(const FunctionPtr& func, const AddedOutputMap& added_outputs,
-                            const std::unordered_map<std::string, FunctionPtr>& functions) {
-  OutputParameterRewriter mutator(added_outputs, functions);
+                            const std::unordered_map<std::string, FunctionPtr>& functions,
+                            const CallShapePlans& shape_plans) {
+  OutputParameterRewriter mutator(added_outputs, functions, shape_plans);
   auto body = mutator.VisitStmt(func->body_);
   if (body == func->body_) return func;
   auto result = MutableCopy(func);
@@ -3231,7 +3254,9 @@ Pass ConvertTensorToTileOps() {
     AddedOutputMap all_added_outputs;
     std::unordered_map<std::string, FunctionPtr> all_transformed_funcs;
     std::vector<FunctionPtr> functions_phase1;
+    CallShapePlans shape_plans;
     for (const auto& [gvar, func] : program->functions_) {
+      shape_plans.emplace(func->name_, CallShapeBindingPlan(func));
       // Buffer kernels already carry explicit storage and separate data /
       // metadata effects; functional tensor-to-tile conversion must leave
       // their bodies and signatures intact.
@@ -3287,7 +3312,8 @@ Pass ConvertTensorToTileOps() {
           << "Recursive Group/Spmd wrappers cannot propagate output parameters";
       wrapper_state[name] = 1;
       for (const auto& callee : edges->second) self(self, callee);
-      auto result = PropagateOutputsThroughWrapper(func, all_added_outputs, all_transformed_funcs);
+      auto result =
+          PropagateOutputsThroughWrapper(func, all_added_outputs, all_transformed_funcs, shape_plans);
       all_added_outputs[name] = std::move(result.added_outputs);
       all_transformed_funcs[name] = result.func;
       wrapper_state[name] = 2;
@@ -3303,7 +3329,8 @@ Pass ConvertTensorToTileOps() {
           IsWrapperType(func->func_type_)) {
         functions_phase2b.push_back(func);
       } else {
-        functions_phase2b.push_back(UpdateCallSites(func, all_added_outputs, all_transformed_funcs));
+        functions_phase2b.push_back(
+            UpdateCallSites(func, all_added_outputs, all_transformed_funcs, shape_plans));
       }
     }
 

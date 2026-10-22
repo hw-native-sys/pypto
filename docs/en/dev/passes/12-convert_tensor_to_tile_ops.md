@@ -26,6 +26,16 @@ New output parameters propagate through Group/Spmd wrappers to orchestration or
 opaque callers, where `tensor.create` allocates their storage. Internal Group
 outputs need not be part of the Group's logical return tuple.
 
+For supported physical-shape signatures, each call binds both explicit scalars
+and implicit tensor dimensions before allocating outputs or propagating return
+types. Substitution is simultaneous: for `[N, M] -> [M, 128]`, the first result
+stays `M`. Caller expressions are not recursively substituted as callee symbols.
+Binding uses the original signature before adding output parameters. Calls that
+need no output storage keep their existing arguments and caller-coordinate result
+types; runtime-allocated Submit outputs remain omitted. Each Spmd/Group forwarding
+layer uses its own caller coordinates. Richer signatures retain their
+existing lowering path and dedup identity guards.
+
 **Requirements**:
 
 - Input IR must be in SSA form

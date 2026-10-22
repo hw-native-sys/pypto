@@ -33,6 +33,13 @@ Tensor 源的 assemble，也能保留局部标量更新，避免引入不支持�
 并生成 `tile.col_sum(input, scratch)`。Tensor 层的策略属性在这里消费，
 codegen 根据额外的 Tile 参数选择 `isBinary=true`。
 
+对于支持的 physical shape 签名，每个调用在分配输出或传播返回类型前，同时绑定显式
+scalar 和 tensor 类型中的隐式维度。替换是同时进行的：`[N, M] -> [M, 128]` 的
+第一个结果仍为 M，不能把调用者表达式继续按 callee 符号递归替换。
+绑定使用新增输出形参之前的原始签名。不需要输出存储的调用保留原实参和调用者坐标下的
+返回类型；Submit 由运行时分配的输出仍保持省略。Spmd/Group 每一层转发分别使用当前调用者的符号坐标。更复杂的签名保留原有 lowering
+路径及去重身份保护。
+
 ## API
 
 | C++ | Python | 级别 |

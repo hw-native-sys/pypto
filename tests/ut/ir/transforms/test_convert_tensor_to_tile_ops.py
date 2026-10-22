@@ -8384,5 +8384,77 @@ def test_col_sum_binary_uses_half_row_scratch(rows):
     _assert_convert_equal(Before, Expected)
 
 
+@pytest.mark.parametrize("mapping", ["chain", "swap", "self_expression"])
+@pytest.mark.parametrize("parameter_count", [2, 256])
+def test_shared_callee_instantiates_shapes_simultaneously(mapping, parameter_count):
+    """Caller expressions are opaque even when they reuse a callee Var object."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    index = ir.ScalarType(DataType.INDEX)
+    n, m = ir.Var("N", index, span), ir.Var("M", index, span)
+    x = ir.Var("x", ir.TensorType([n], DataType.FP32), span)
+    y = ir.Var("y", ir.TensorType([m], DataType.FP32), span)
+    result = ir.Var("result", x.type, span)
+    extra_params = [ir.Var(f"extra_{i}", x.type, span) for i in range(parameter_count - 2)]
+    kernel = ir.Function(
+        "shared",
+        [x, y, *extra_params],
+        [x.type],
+        ir.SeqStmts([ir.AssignStmt(result, tensor_ops.add(x, x), span), ir.ReturnStmt([result], span)], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    if mapping == "chain":
+        first, second = m, ir.ConstInt(128, DataType.INDEX, span)
+    elif mapping == "swap":
+        first, second = m, n
+    else:
+        first, second = n + 1, m
+    a = ir.Var("a", ir.TensorType([first], DataType.FP32), span)
+    b = ir.Var("b", ir.TensorType([second], DataType.FP32), span)
+    output = ir.Var("output", a.type, span)
+    main = ir.Function(
+        "main",
+        [a, b],
+        [a.type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    output,
+                    ir.Call(ir.GlobalVar("shared"), [a, b, *([a] * len(extra_params))], a.type, span),
+                    span,
+                ),
+                ir.ReturnStmt([output], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, main], "test", span))
+    dispatches = []
+    allocations = []
+
+    class Collector(ir.IRVisitor):
+        def visit_call(self, op):
+            if isinstance(op.op, ir.GlobalVar):
+                dispatches.append(op)
+            elif op.op.name == ir.get_op("tensor.create").name:
+                allocations.append(op)
+            super().visit_call(op)
+
+    lowered_main = after.get_function("main")
+    assert lowered_main is not None
+    Collector().visit_function(lowered_main)
+    assert len(allocations) == 1 and len(dispatches) == 1
+    call = dispatches[0]
+    assert call.args[0] is a and call.args[1] is b
+    ir.assert_structural_equal(call.type, a.type)
+    ir.assert_structural_equal(call.args[-1].type, a.type)
+    ir.assert_structural_equal(allocations[0].type, a.type)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
