@@ -1240,6 +1240,18 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     return std::nullopt;
   }
   if (is_bias && res.n != N && bias_tile->GetMemorySpace() == MemorySpace::Mat && !bias_load) {
+    // An unsupported bias window rules out this N grid, not a K-only plan.
+    // Retry once with the full output so the original bias snapshot can be
+    // reused without reconstructing loads. keep_output_shape bounds recursion;
+    // failed retries retain the original window diagnostic below.
+    if (!keep_output_shape) {
+      std::vector<Diagnostic> fallback_hints;
+      if (auto k_only =
+              AnalyzeMatmul(assign, fallback_hints, true, output_box_alignment, direct_defs, true)) {
+        for (const auto& hint : fallback_hints) hints.push_back(hint);
+        return k_only;
+      }
+    }
     hints.emplace_back(
         DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-011",
         "tile.matmul_bias needs N tiling, but its Mat bias is not a single-use full-rectangular [1, N] "
