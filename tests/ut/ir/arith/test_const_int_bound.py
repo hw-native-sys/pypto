@@ -231,6 +231,19 @@ class TestFloorDivBound:
         assert b.max_value == 0
         analyzer.unbind(x)
 
+    def test_floordiv_unbounded_below_reaches_int64_min(self):
+        """`x // 7` for an unbound `x` still reaches floordiv(INT64_MIN, 7).
+
+        kNegInf is stored as INT64_MIN + 1, so floor-dividing the stored value
+        recorded a minimum one above the reachable floordiv(INT64_MIN, 7), folding
+        `x // 7 == -1317624576693539402` to False although `x == INT64_MIN` produces
+        it.
+        """
+        analyzer.update(x, ConstIntBound(ConstIntBound.kNegInf, ConstIntBound.kPosInf))
+        b = analyzer(ir.FloorDiv(x, ci(7), INT, S))
+        assert b.min_value == INT64_MIN // 7
+        analyzer.unbind(x)
+
 
 # ============================================================================
 # Floor mod
@@ -558,25 +571,112 @@ class TestVarIdentity:
 
 class TestEdgeCases:
     def test_neg_int64_min(self):
-        """Negating INT64_MIN should not cause UB — saturate to kPosInf."""
+        """Negating INT64_MIN is unrepresentable, so nothing is known about the result.
+
+        `-INT64_MIN` does not fit int64, and the hardware wraps rather than
+        saturating: `arith.subi` on INT64_MIN yields INT64_MIN back, which is
+        negative. Reporting [+inf, +inf] claimed the result was exactly
+        INT64_MAX, an interval that excludes every value the node can hold.
+        """
         b = analyzer(ir.Neg(ci(INT64_MIN), INT, S))
-        # -INT64_MIN overflows int64, so bound saturates
-        assert b.min_value == ConstIntBound.kPosInf
-        assert b.max_value == ConstIntBound.kPosInf
+        assert b.is_everything()
 
     def test_abs_int64_min(self):
-        """Abs of INT64_MIN should saturate rather than UB."""
+        """Abs of INT64_MIN is unrepresentable, so nothing is known about the result.
+
+        Deliberately *not* [0, kPosInf]: two's-complement `abs(INT64_MIN)` is
+        INT64_MIN itself, i.e. still negative, so any non-negativity claim here
+        would be a fresh unsoundness rather than a conservative one.
+        """
         b = analyzer(ir.Abs(ci(INT64_MIN), INT, S))
-        assert b.min_value == ConstIntBound.kPosInf
-        assert b.max_value == ConstIntBound.kPosInf
+        assert b.is_everything()
+
+    def test_negating_an_unbounded_below_interval_cannot_claim_a_sign(self):
+        """`-x` where `x` has no lower bound is not provably non-negative.
+
+        kNegInf is how "no lower bound" is spelled, so the interval contains
+        INT64_MIN, and `arith.subi 0, x : i64` wraps INT64_MIN back onto itself
+        -- still negative. Mirroring the endpoints reported [0, +inf], which
+        folded `-x < 0` to False at the one input that satisfies it.
+        """
+        analyzer.bind(x, -INT64_MAX, 1)  # [kNegInf, 0] -- unbounded below
+        b = analyzer(ir.Neg(x, INT, S))
+        assert b.is_everything()
+        analyzer.unbind(x)
+
+    def test_abs_of_an_unbounded_below_interval_cannot_claim_a_sign(self):
+        """Abs reaches the same wrap as Neg and must widen with it.
+
+        For an all-negative interval Abs mirrors the endpoints exactly as Neg
+        does, so an unbounded lower endpoint carries INT64_MIN through
+        `abs(INT64_MIN) == INT64_MIN` and the result is not non-negative.
+        """
+        analyzer.bind(x, -INT64_MAX, 1)  # [kNegInf, 0] -- unbounded below
+        b = analyzer(ir.Abs(x, INT, S))
+        assert b.is_everything()
+        analyzer.unbind(x)
+
+    def test_unbounded_below_times_minus_one_cannot_claim_a_sign(self):
+        """Multiplying by -1 is a negation, and shares its one wrapping input.
+
+        The +-1 identities in the endpoint multiply must not shortcut past this:
+        `x * -1` is emitted as a multiply, but it wraps on INT64_MIN exactly
+        where `-x` does.
+        """
+        analyzer.bind(x, -INT64_MAX, 1)  # [kNegInf, 0] -- unbounded below
+        b = analyzer(ir.Mul(x, ci(-1), INT, S))
+        assert b.is_everything()
+        analyzer.unbind(x)
+
+    def test_subtracting_zero_from_an_unbounded_below_interval_cannot_claim_a_sign(self):
+        """`0 - x` where `x` has no lower bound reaches INT64_MIN, so it wraps.
+
+        `0 - x` is the negation of an unbounded-below interval: at `x == INT64_MIN`
+        the emitted `arith.subi` yields INT64_MIN, still negative. Reading kNegInf
+        as a value gave `0 - INT64_MIN + 1 == INT64_MAX` for the upper endpoint and
+        reported `[0, +inf]`, which folded `0 - x < 0` to False at that input.
+        """
+        analyzer.bind(x, -INT64_MAX, 1)  # [kNegInf, 0] -- unbounded below
+        b = analyzer(ir.Sub(ci(0), x, INT, S))
+        assert b.is_everything()
+        analyzer.unbind(x)
+
+    def test_adding_a_positive_offset_keeps_int64_min_reachable(self):
+        """`x + 2` where `x` has no lower bound still reaches INT64_MIN + 2.
+
+        kNegInf is stored as INT64_MIN + 1, so treating it as a value gave
+        [INT64_MIN + 3, 2] and folded `x + 2 == INT64_MIN + 2` to False although
+        `x == INT64_MIN` produces exactly that without wrapping.
+        """
+        analyzer.bind(x, -INT64_MAX, 1)  # [kNegInf, 0] -- unbounded below
+        b = analyzer(ir.Add(x, ci(2), INT, S))
+        assert b.min_value == INT64_MIN + 2
+        analyzer.unbind(x)
+
+    def test_upper_endpoint_sentinel_is_not_demoted(self):
+        """`z + 2` where `z` is pinned to kNegInf keeps INT64_MIN + 3 reachable.
+
+        `z = x - 1` for `x == INT64_MIN + 2` gives the exact bound
+        [kNegInf, kNegInf]. kNegInf means "reaches INT64_MIN" only as a *lower*
+        endpoint; as an upper endpoint it is the exact stored value INT64_MIN + 1.
+        Demoting both endpoints folded `z + 2 == INT64_MIN + 3` to False although
+        `z == INT64_MIN + 1` makes it always true.
+        """
+        analyzer.bind(x, INT64_MIN + 2, INT64_MIN + 3)  # [INT64_MIN + 2, INT64_MIN + 2]
+        b = analyzer(ir.Add(ir.Sub(x, ci(1), INT, S), ci(2), INT, S))
+        assert b.max_value == INT64_MIN + 3
+        analyzer.unbind(x)
 
     def test_large_pow_exponent(self):
-        """Large exponent should not cause O(e) slowdown — O(log e) expected."""
+        """Large exponent should not cause O(e) slowdown — O(log e) expected.
+
+        The result overflows int64, where `arith.muli` wraps and can land on any
+        value the dtype holds, so the bound is unknown rather than +inf. The
+        exponent stays large to keep this a guard on the O(log e) squaring loop.
+        """
         analyzer.bind(x, 2, 4)  # [2, 3]
         b = analyzer(ir.Pow(x, ci(1000000), INT, S))
-        # Result overflows to inf but should compute fast
-        assert b.min_value == ConstIntBound.kPosInf or b.min_value > 0
-        assert b.max_value == ConstIntBound.kPosInf
+        assert b.is_everything()
         analyzer.unbind(x)
 
     def test_cast_to_unsigned(self):
@@ -596,6 +696,222 @@ class TestEdgeCases:
         assert b.min_value == -128
         assert b.max_value == 127
         analyzer.unbind(x)
+
+    def test_narrowing_cast_wraps_instead_of_clamping(self):
+        """A source range that overflows the target wraps, so the result is the full target range.
+
+        A scalar integer cast truncates: `[120, 139]` to INT8 yields 120..127 and -128..-117.
+        Clamping to `[120, 127]` would let a caller prove `cast(x, INT8) >= 0`.
+        """
+        analyzer.bind(x, 120, 140)  # [120, 139]
+        b = analyzer(ir.Cast(x, DataType.INT8, S))
+        assert b.min_value == -128
+        assert b.max_value == 127
+        analyzer.unbind(x)
+
+    def test_cast_to_uint64_is_unknown(self):
+        """UINT64 has no int64 range to clamp to, so the source interval is not passed through.
+
+        `[-10, -1]` describes none of the values a UINT64 holds — the wrap puts them
+        near 2^64 — so reporting it would let a caller prove the result negative.
+        """
+        analyzer.bind(x, -10, 0)  # [-10, -1]
+        b = analyzer(ir.Cast(x, DataType.UINT64, S))
+        assert b.is_everything()
+        analyzer.unbind(x)
+
+    def test_constraint_cannot_pin_an_endpoint_onto_a_sentinel(self):
+        """A constraint whose endpoint lands on a sentinel value is dropped, not recorded.
+
+        `x > INT64_MIN` steps the endpoint to INT64_MIN + 1, which *is* kNegInf, so
+        pairing it with `x < -9223372036854775806` pinned `x` to [kNegInf, kNegInf].
+        Endpoint arithmetic reads that as unbounded while the fold reads it as a value,
+        so `x * 2` was proved negative although `arith.muli : i64` wraps positive there
+        ((-2**63 + 1) * 2 is 2). Dropping the constraint only widens the bound.
+        """
+        full = Analyzer()
+        with full.constraint_context(ir.Gt(x, ci(INT64_MIN), DataType.BOOL, S)):
+            with full.constraint_context(ir.Lt(x, ci(INT64_MIN + 2), DataType.BOOL, S)):
+                b = full.const_int_bound(ir.Mul(x, ci(2), INT, S))
+                # The only value x can take is INT64_MIN + 1, whose doubling wraps to 2.
+                assert not b.max_value < 0, f"product proved negative: [{b.min_value}, {b.max_value}]"
+
+    def test_narrowing_cast_keeps_a_range_that_fits(self):
+        """A source range inside the target range is unchanged by the cast."""
+        analyzer.bind(x, 3, 100)  # [3, 99]
+        b = analyzer(ir.Cast(x, DataType.INT8, S))
+        assert b.min_value == 3
+        assert b.max_value == 99
+        analyzer.unbind(x)
+
+    def test_signed_64_bit_cast_keeps_an_int64_min_endpoint(self):
+        """A cast between 64-bit signed types is the identity, so its bound is the source's.
+
+        kNegInf is stored as INT64_MIN + 1, so a range check against the INT64 "range"
+        [kNegInf, kPosInf] reads a genuine INT64_MIN endpoint as out of range and widens
+        the result to unknown. That only loses precision by itself, but it hands
+        `CanProveGreaterEqual` an interval it then misreads (see test_analyzer.py).
+        """
+        idx = ir.Var("idx", ir.ScalarType(DataType.INDEX), S)
+        analyzer.bind(idx, INT64_MIN, INT64_MIN + 3)  # MIN, MIN+1, MIN+2
+        b = analyzer(ir.Cast(idx, DataType.INT64, S))
+        assert b.min_value == INT64_MIN
+        assert b.max_value == INT64_MIN + 2
+        analyzer.unbind(idx)
+
+    def test_unknown_plus_pos_inf_sentinel_stays_unknown(self):
+        """`x + INT64_MAX` for an unbound `x` is unknown, not `+inf`.
+
+        The literal is numerically the `+inf` sentinel, so once stored in a bound
+        it cannot be told apart from an unbounded operand. Resolving the lower
+        endpoint to `+inf` would claim `x + INT64_MAX > 0` for every `x`.
+        """
+        b = analyzer(ir.Add(x, ci(INT64_MAX), INT, S))
+        assert b.is_everything()
+
+    def test_unknown_minus_neg_inf_sentinel_stays_unknown(self):
+        """`x - (-INT64_MAX)` for an unbound `x` subtracts the `-inf` sentinel: still unknown."""
+        b = analyzer(ir.Sub(x, ci(-INT64_MAX), INT, S))
+        assert b.is_everything()
+
+    def test_finite_range_plus_pos_inf_sentinel_is_not_decided(self):
+        """A *finite* range plus a sentinel-valued literal must not collapse to [+inf, +inf].
+
+        `x` in [-5, -1] gives `x + INT64_MAX` in [INT64_MAX-5, INT64_MAX-1]. The
+        literal is numerically kPosInf, so the old code took the "operand is
+        infinite" path for both endpoints and reported [+inf, +inf] -- an
+        interval excluding every value the sum can take, which would decide
+        `x + INT64_MAX == 0` as false for the wrong reason. The literal is
+        refused instead, so the comparison is kept.
+        """
+        analyzer.bind(x, -5, 0)  # [-5, -1]
+        b = analyzer(ir.Add(x, ci(INT64_MAX), INT, S))
+        assert b.min_value <= INT64_MAX - 5
+        assert b.max_value >= INT64_MAX - 1
+        analyzer.unbind(x)
+
+    def test_subtracting_int64_min_cancels_exactly(self):
+        """`x - INT64_MIN` for `x == INT64_MIN` is 0, so `x == INT64_MIN` is decidable.
+
+        INT64_MIN is deliberately not a sentinel (kNegInf is -INT64_MAX), so it
+        stays an ordinary exact endpoint. Routing the subtraction through a
+        negation used to destroy it -- `-INT64_MIN` is unrepresentable and
+        saturated to +inf -- giving [+inf, +inf], an interval excluding 0 that
+        folded the true predicate `x == INT64_MIN` to False.
+        """
+        analyzer.bind(x, INT64_MIN, INT64_MIN + 1)  # [INT64_MIN, INT64_MIN]
+        b = analyzer(ir.Sub(x, ci(INT64_MIN), INT, S))
+        assert b.min_value == 0
+        assert b.max_value == 0
+        analyzer.unbind(x)
+
+    def test_multiplication_overflow_is_unknown(self):
+        """A product that leaves int64 wraps, so its sign is not known.
+
+        `x` in [2, 3] times 4611686018427387903 has an exact lower corner but an
+        overflowing upper one. Reporting the hull of saturated corners gave
+        [INT64_MAX-1, INT64_MAX] -- "definitely positive" -- while the emitted
+        `arith.muli : i64` wraps to a negative value at `x == 3`.
+        """
+        analyzer.bind(x, 2, 4)  # [2, 3]
+        b = analyzer(ir.Mul(x, ci(4611686018427387903), INT, S))
+        assert not b.is_positive()
+        analyzer.unbind(x)
+
+    def test_unbounded_operand_can_overflow_so_the_product_is_unknown(self):
+        """`x * x` for an unbounded non-negative `x` is not non-negative.
+
+        An endpoint at a sentinel means the operand may be any int64, so the
+        emitted `arith.muli : i64` can wrap: at `x == 3037000500` the product is
+        negative. Treating an infinite endpoint as an exact value recorded the
+        operand's own `[0, +inf]` for the product and "proved" `x * x >= 0`.
+        """
+        # `update` is inclusive, so this really pins the upper endpoint to the
+        # sentinel; `bind` is half-open and would give a large finite bound.
+        analyzer.update(x, ConstIntBound(0, ConstIntBound.kPosInf))
+        b = analyzer(ir.Mul(x, x, INT, S))
+        assert not b.is_non_negative()
+        analyzer.unbind(x)
+
+    def test_unbounded_times_a_constant_is_unknown(self):
+        """Scaling an unbounded operand is not safe at any multiplier.
+
+        An earlier revision exempted a single unbounded operand on the grounds
+        that the product is "linear in the unbounded side". The multiplier's own
+        magnitude decides, not the operator: against 4611686018427387903 the
+        product already wraps at 3, and even `x * 8` wraps once `x` reaches
+        2**60. Precision for a real scaled index is recovered at the source --
+        `BoundFromOpSemantics` caps the hardware identity queries, so
+        `get_subblock_idx() * 8` stays exact -- rather than by exempting the
+        multiply.
+        """
+        analyzer.update(x, ConstIntBound(0, ConstIntBound.kPosInf))
+        assert not analyzer(ir.Mul(x, ci(8), INT, S)).is_non_negative()
+        analyzer.unbind(x)
+
+    def test_multiplying_by_one_keeps_an_unbounded_endpoint(self):
+        """`x * 1` and `x * -1` compute nothing, so they cannot wrap.
+
+        `-kPosInf` is exactly `kNegInf`, so negation through a unit multiplier
+        stays inside the domain and keeps the operand's own bound.
+        """
+        analyzer.update(x, ConstIntBound(0, ConstIntBound.kPosInf))
+        assert analyzer(ir.Mul(x, ci(1), INT, S)).is_non_negative()
+        negated = analyzer(ir.Mul(x, ci(-1), INT, S))
+        assert negated.max_value == 0
+        analyzer.unbind(x)
+
+    def test_scaled_launch_index_stays_exact(self):
+        """A hardware launch index is bounded, so products derived from it are exact.
+
+        `get_subblock_idx()` is `[0, 2**31)` rather than `[0, +inf)`: a launch
+        grid is not unbounded, and saying it is would make `idx * 8` wrap-prone
+        and cost the ragged shard extent `min(max(rows - idx * 8, 0), 8)` its
+        fold for nothing.
+        """
+        idx = ir.Call(ir.get_op("tile.get_subblock_idx"), [], ir.ScalarType(DataType.INDEX), S)
+        b = analyzer(ir.Mul(idx, ir.ConstInt(8, DataType.INDEX, S), DataType.INDEX, S))
+        assert b.is_non_negative()
+        assert b.max_value < ConstIntBound.kPosInf
+
+    def test_adding_zero_keeps_an_unbounded_endpoint(self):
+        """`x + 0` and `x - 0` are the identity and cannot overflow.
+
+        The overflow rule above must not widen them: rewritten index
+        expressions produce these shapes, and `max(n, 0)` folds only while
+        `n - 0` still carries `n`'s own non-negativity.
+        """
+        analyzer.update(x, ConstIntBound(0, ConstIntBound.kPosInf))
+        assert analyzer(ir.Add(x, ci(0), INT, S)).is_non_negative()
+        assert analyzer(ir.Sub(x, ci(0), INT, S)).is_non_negative()
+        analyzer.unbind(x)
+
+    def test_narrow_addition_wraps_to_the_whole_dtype_range(self):
+        """INT8 addition wraps at its own width, so a result past 127 is not positive.
+
+        For `i` in [120, 127], `cast(i, INT8) + 1` is emitted as
+        `arith.addi : i8` and yields -128 at `i == 127`. The mathematical
+        [121, 128] would prove the sum non-negative.
+        """
+        analyzer.bind(i, 120, 128)  # [120, 127]
+        narrowed = ir.Cast(i, DataType.INT8, S)
+        b = analyzer(ir.Add(narrowed, ir.ConstInt(1, DataType.INT8, S), DataType.INT8, S))
+        assert b.min_value == -128
+        assert b.max_value == 127
+        analyzer.unbind(i)
+
+    def test_index_addition_keeps_full_precision(self):
+        """A 64-bit INDEX result is never narrowed: the width check is a no-op there.
+
+        Guards the fold this analyzer change exists to protect -- a replicated
+        K-loop's `ko + 128` must stay exact so that `ko + 128 == 0` still folds.
+        """
+        ko = ir.Var("ko", ir.ScalarType(DataType.INDEX), S)
+        analyzer.bind(ko, 0, 512)  # [0, 511]
+        b = analyzer(ir.Add(ko, ir.ConstInt(128, DataType.INDEX, S), DataType.INDEX, S))
+        assert b.min_value == 128
+        assert b.max_value == 639
+        analyzer.unbind(ko)
 
 
 if __name__ == "__main__":

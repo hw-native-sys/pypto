@@ -606,6 +606,11 @@ CompareResult TransitiveComparisonAnalyzer::Impl::TryCompare(const ExprPtr& lhs_
 
 void TransitiveComparisonAnalyzer::Impl::Bind(const VarPtr& var, const ExprPtr& expr,
                                               bool /*allow_override*/) {
+  // Facts are integer-only, matching TryCompare, which answers kUnknown for
+  // anything else. Recording a BOOL binding (`flag = False`) would also throw:
+  // Eq rejects BOOL operands.
+  auto stype = std::dynamic_pointer_cast<const ScalarType>(var->GetType());
+  if (!stype || !stype->dtype_.IsInt()) return;
   ExprPtr var_expr = std::static_pointer_cast<const Expr>(var);
   AddKnown(MakeEq(var_expr, expr), &knowns_);
 }

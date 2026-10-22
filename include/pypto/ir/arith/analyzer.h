@@ -57,6 +57,21 @@ inline CompareResult& operator&=(CompareResult& lhs, CompareResult rhs) {
 }
 
 /// Inclusive integer bounds [min_value, max_value] for an expression.
+///
+/// The interval is over **int64 values**, not over mathematical integers.
+/// kNegInf/kPosInf are that domain's extremes rather than infinities: every
+/// integer PyPTO computes is held in at most 64 bits, so `[kNegInf, kPosInf]`
+/// means both "nothing is known" and "any int64" -- the same set. Reading them
+/// as infinities made a literal INT64_MAX indistinguishable from an unbounded
+/// operand, so `x + INT64_MAX` for `x` in [-5, -1] collapsed to [+inf, +inf].
+///
+/// Two properties bind every producer of a bound:
+///  - An endpoint only ever moves *outward*. A value the endpoint cannot hold
+///    saturates toward its own side -- kNegInf for a lower endpoint, kPosInf
+///    for an upper one -- never toward the opposite one.
+///  - The interval describes what the *node* holds at run time. Codegen
+///    evaluates each arithmetic node at that node's own dtype, so a result the
+///    dtype cannot hold wraps, and the bound must widen to that dtype's range.
 struct ConstIntBound {
   int64_t min_value;
   int64_t max_value;
@@ -64,6 +79,12 @@ struct ConstIntBound {
   /// Sentinel for positive infinity. Uses INT64_MAX so that -kPosInf avoids overflow.
   static constexpr int64_t kPosInf = std::numeric_limits<int64_t>::max();
   /// Sentinel for negative infinity (= -kPosInf, NOT INT64_MIN).
+  ///
+  /// The asymmetry is deliberate and load-bearing: INT64_MIN is therefore *not*
+  /// a sentinel, so a literal INT64_MIN stays an ordinary exact endpoint and
+  /// `x - INT64_MIN` cancels to 0. A literal equal to kPosInf or kNegInf cannot
+  /// be told apart from an unbounded operand, so const_int_bound.cpp refuses to
+  /// bound one rather than let `x + INT64_MAX` masquerade as "+inf".
   static constexpr int64_t kNegInf = -kPosInf;
 
   [[nodiscard]] bool is_const() const { return min_value == max_value; }
@@ -389,6 +410,9 @@ class Analyzer : public std::enable_shared_from_this<Analyzer> {
   ExprPtr Simplify(const ExprPtr& expr, int steps = 2);
 
   /// Prove that expr >= lower_bound for all possible variable values.
+  ///
+  /// An operand with no lower bound can reach INT64_MIN (the kNegInf sentinel is
+  /// stored as INT64_MIN + 1), so it proves only `lower_bound == INT64_MIN`.
   bool CanProveGreaterEqual(const ExprPtr& expr, int64_t lower_bound);
 
   /// Prove that expr < upper_bound for all possible variable values.

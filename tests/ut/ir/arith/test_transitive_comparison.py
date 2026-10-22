@@ -82,6 +82,16 @@ class TestBind:
         t.bind(v, 5, 6)  # exactly 5
         assert t.try_compare(v, ci(5)) == CompareResult.kEQ
 
+    def test_bind_bool_var_is_ignored(self):
+        """Comparison facts are integer-only: binding a BOOL var records nothing and does not raise.
+
+        `Eq` rejects BOOL operands, so recording `flag == False` used to throw.
+        """
+        t = TransitiveComparisonAnalyzer()
+        flag = ir.Var("flag", ir.ScalarType(DataType.BOOL), S)
+        t.bind(flag, ir.ConstBool(False, S))
+        assert t.try_compare(flag, ir.ConstBool(False, S)) == CompareResult.kUnknown
+
     def test_bind_range_bounds(self):
         # x is bound to [-100, 100) — not enough to prove x >= 0
         assert tca.try_compare(x, ci(0)) == CompareResult.kUnknown

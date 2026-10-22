@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -87,6 +88,12 @@ ExprPtr Analyzer::Simplify(const ExprPtr& expr, int steps) {
 
 bool Analyzer::CanProveGreaterEqual(const ExprPtr& expr, int64_t lower_bound) {
   auto bound = const_int_bound(Simplify(expr));
+  // As a lower endpoint kNegInf (stored as INT64_MIN + 1) means "no lower bound": the
+  // value can reach INT64_MIN. Comparing it numerically would prove `>= INT64_MIN + 1`
+  // for an operand that can equal INT64_MIN. Only INT64_MIN itself is provable then.
+  if (bound.min_value == ConstIntBound::kNegInf) {
+    return lower_bound == std::numeric_limits<int64_t>::min();
+  }
   return bound.min_value >= lower_bound;
 }
 

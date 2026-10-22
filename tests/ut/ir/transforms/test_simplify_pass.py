@@ -1537,6 +1537,767 @@ class TestConstantIfCollapse:
 # ============================================================================
 
 
+class TestProvableComparisonFold:
+    """A comparison the analyzer can decide becomes a literal in any expression position.
+
+    `Analyzer::Simplify` only *rewrites* a comparison — `i + 128 == 0` becomes
+    `i == -128` — without consulting the bound on `i`. Fold A (`TestConstantIfCollapse`)
+    decides `IfStmt` conditions with `CanProve`; these cases pin the same decision for
+    comparisons that are *operands*, here the `init_cond` call argument of
+    `matmul_acc`. That is the shape LowerPipelineLoops leaves on every replica after the
+    first (`ko + k*step == 0`), and only a literal `init_cond` lets codegen emit a single
+    MAD instead of an `scf.if` on a compile-time constant.
+
+    All loops run `i` over `pl.range(0, 512, 128)`, i.e. `i ∈ [0, 512)` for the analyzer
+    unless stated otherwise.
+    """
+
+    def test_provably_false_comparison_folds_to_false(self):
+        """`i + 128 ∈ [128, 639]`, so `i + 128 == 0` is false for every iteration."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i + 128 == 0))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=False)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_provably_true_comparison_folds_to_true(self):
+        """`i + 128 != 0` holds for every iteration, so it folds to `True`."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i + 128 != 0))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=True)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_undecidable_comparison_is_kept(self):
+        """`i == 256` is true on one iteration and false on the others: no literal."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i == 256))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_reachable_zero_is_kept(self):
+        """The bound must contain every reachable value, so a reachable zero blocks the fold.
+
+        `pl.range(-2, 6, 4)` runs `i ∈ {-2, 2}`, so `i + 2 == 0` is *true* on the first
+        iteration. This is the replica predicate of `pl.pipeline(-2, 6, 2, stage=2)` after
+        LowerPipelineLoops: folding it to `False` would make the first K block accumulate
+        onto an uninitialised accumulator. Simplify only applies its ordinary rewrite
+        (`x + c1 == c2 → x == c2 - c1`).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(-2, 6, 4, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i + 2 == 0))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(-2, 6, 4, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i == -2))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_runtime_loop_bound_is_kept(self):
+        """A runtime `stop` leaves the loop variable unbound, so nothing is provable."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, n, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i + 128 == 0))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, n, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(i == -128))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_composed_and_folds_through_the_provable_operand(self):
+        """`flag and (i + 128 == 0)`: the comparison folds first, then `x and False → False`.
+
+        The user's `flag` is runtime, so the conjunction is only decidable because its
+        generated operand is — the composed `init_cond` AutoTileMatmulL0 builds when the
+        user passes their own predicate.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(flag and (i + 128 == 0)))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=False)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_composed_or_keeps_the_runtime_operand(self):
+        """`flag or (i + 128 == 0)` reduces to `flag`: only the provable operand is removed."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(flag or (i + 128 == 0)))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=flag)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_if_branch_constraint_decides_a_call_argument(self):
+        """Inside `if n < 8`, the branch constraint bounds `n`, so `n < 16` is true."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                if n < 8:
+                    nxt = pl.matmul_acc(seed, a, b, init_cond=(n < 16))
+                    out = pl.tensor.assemble(out, nxt, [0, 0])
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                if n < 8:
+                    nxt = pl.matmul_acc(seed, a, b, init_cond=True)
+                    out = pl.tensor.assemble(out, nxt, [0, 0])
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_float_comparison_is_kept(self):
+        """A float comparison is not an interval question: `x == x` is false for NaN."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                x: pl.Scalar[pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                # The self-comparison is the point: it is false for NaN, so it must survive.
+                nxt = pl.matmul_acc(seed, a, b, init_cond=(x == x))  # noqa: PLR0124
+                return pl.tensor.assemble(out, nxt, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_reassigned_loop_var_uses_its_current_bound(self):
+        """Pre-SSA: after `i = i + 100`, `i ∈ [100, 107]`, so `i < 8` is *false*.
+
+        Regression for an unsound fold. The loop header binds `i ∈ [0, 8)`; the
+        reassignment re-binds only the analyzer's `ConstIntBound`, while its
+        transitive-comparison and int-set facts keep the stale header range. Deciding
+        through `Analyzer::CanProve` (which consults those) folded `i < 8` to `True`.
+        The fold reads `ConstIntBound` alone, which this pass keeps current, so
+        `acc or (i < 8)` reduces to `acc`; the dead reassignment is then dropped.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]) -> pl.Tensor[[8], pl.INDEX]:
+                acc: pl.Scalar[pl.BOOL] = False
+                for i in pl.range(0, 8):
+                    i = i + 100
+                    acc = acc or (i < 8)
+                r: pl.Scalar[pl.INDEX] = pl.cast(acc, pl.INDEX)
+                pl.tensor.write(out, [0], r)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]) -> pl.Tensor[[8], pl.INDEX]:
+                acc: pl.Scalar[pl.BOOL] = False
+                for i in pl.range(0, 8):  # noqa: B007
+                    # The IR Simplify leaves behind once `acc or False` reduces to `acc`.
+                    acc = acc  # noqa: PLW0127
+                r: pl.Scalar[pl.INDEX] = pl.cast(acc, pl.INDEX)
+                pl.tensor.write(out, [0], r)
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_twice_reassigned_loop_var_drops_its_header_bound(self):
+        """Pre-SSA: after two `i = i + 100`, `i ∈ [200, 207]`, so `i < 8` is *false*.
+
+        Regression for an unsound fold. A Var assigned more than once is never bound by
+        its assignments (a later one would invalidate the value), so neither reassignment
+        re-binds `i` — and the loop header's `i ∈ [0, 8)` used to survive both, folding
+        `i < 8` to `True`. A skipped assignment must drop the stale bound instead: `i` is
+        then unknown and the comparison is kept.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]) -> pl.Tensor[[8], pl.INDEX]:
+                acc: pl.Scalar[pl.BOOL] = False
+                for i in pl.range(0, 8):
+                    i = i + 100
+                    i = i + 100
+                    acc = acc or (i < 8)
+                r: pl.Scalar[pl.INDEX] = pl.cast(acc, pl.INDEX)
+                pl.tensor.write(out, [0], r)
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_reassignment_under_a_constraining_branch_keeps_the_bound_unknown(self):
+        """An enclosing `if i < 4` must not restore `i ∈ [0, 7]` after a nested reassignment.
+
+        `i` is reassigned inside `if c`, which sits inside `if i < 4`. The outer branch
+        tightens `i` to `[0, 3]` and, on exit, restores the bound it saw on entry —
+        the loop header's `[0, 7]` — although `i` may now be 200..207. `i < 8` after
+        the branches must stay undecided.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX], c: pl.Scalar[pl.BOOL]) -> pl.Tensor[[8], pl.INDEX]:
+                acc: pl.Scalar[pl.BOOL] = False
+                for i in pl.range(0, 8):
+                    if i < 4:
+                        if c:
+                            i = i + 100
+                            i = i + 100
+                    acc = acc or (i < 8)
+                r: pl.Scalar[pl.INDEX] = pl.cast(acc, pl.INDEX)
+                pl.tensor.write(out, [0], r)
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_narrowing_cast_comparison_is_kept(self):
+        """`cast(i, INT8)` wraps for `i ∈ [128, 139]`, so `cast(i, INT8) < 0` is not decidable.
+
+        Regression for an unsound bound. A scalar integer cast truncates (codegen emits
+        `arith.index_cast` / `arith.trunci`), but the Cast bound used to *clamp* the
+        source range `[120, 139]` to `[120, 127]`, which folded the comparison to `False`
+        although iterations 128..139 see -128..-117.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(120, 140, init_values=(seed,)):
+                    c: pl.Scalar[pl.INT8] = pl.cast(i, pl.INT8)
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(c < pl.const(0, pl.INT8)))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_comparison_with_the_neg_inf_sentinel_value_is_kept(self):
+        """`x == -9223372036854775807` for an unknown `x` must not fold.
+
+        Regression for an unsound bound. That literal is numerically `ConstIntBound`'s
+        `-inf` sentinel, so once stored it cannot be told apart from an unbounded
+        operand: `x - literal` was bounded as `[-inf + +inf, +inf + +inf]`, and
+        `-inf + +inf` evaluated to `+inf`, proving `lo > 0` and folding the comparison
+        to `False`. A literal equal to either sentinel is refused outright instead.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+                x: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                nxt = pl.matmul_acc(acc, a, b, init_cond=(x == -9223372036854775807))
+                return nxt
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_negated_unbounded_operand_comparison_is_kept(self):
+        """Inside `if n <= 0`, `-n < 0` is still reachable and must not fold.
+
+        The branch constraint pins only the *upper* endpoint, leaving `n` as
+        [kNegInf, 0] -- unbounded below, so INT64_MIN is in it. Negation used to
+        mirror that to [0, +inf] and decide this predicate False, but
+        `arith.subi 0, n : i64` wraps INT64_MIN onto itself, which is negative:
+        the predicate is true at that input. The negated bound has to widen
+        instead, and the comparison stays.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                if n <= 0:
+                    nxt = pl.matmul_acc(seed, a, b, init_cond=(-n < 0))
+                    out = pl.tensor.assemble(out, nxt, [0, 0])
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_unbound_comparison_with_int64_min_is_kept(self):
+        """`x == INT64_MIN` for an *unbound* `x` must not fold — that value is reachable.
+
+        Regression for the operand-interval comparison. An unbound scalar is
+        `[kNegInf, kPosInf]`, and kNegInf is deliberately INT64_MIN + 1 (so that a
+        *pinned* INT64_MIN stays an exact endpoint — see the test below). Comparing the
+        two numerically makes the intervals look disjoint, because kNegInf is strictly
+        greater than INT64_MIN, and folded this true predicate to False. A sentinel
+        endpoint has to be read as unbounded rather than as the value it is stored as.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+                x: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                nxt = pl.matmul_acc(acc, a, b, init_cond=(x == -9223372036854775808))
+                return nxt
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_comparison_with_int64_min_is_decided(self):
+        """A scalar pinned to INT64_MIN really does equal INT64_MIN, so the fold fires.
+
+        Regression for an unsound bound in the opposite direction: this predicate is
+        *true*, and it used to fold to `False`. INT64_MIN is not a sentinel (kNegInf is
+        -INT64_MAX), so the loop-body binding records it exactly; bounding `x - INT64_MIN`
+        through a negated endpoint then destroyed it, because `-INT64_MIN` is
+        unrepresentable and saturated to `+inf`, giving the interval [+inf, +inf] that
+        excludes 0. Subtracting the endpoints directly cancels them to 0.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 4, init_values=(seed,)):
+                    x: pl.Scalar[pl.INDEX] = -9223372036854775808
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(x == -9223372036854775808))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 4, init_values=(seed,)):
+                    # `x` is dead once the predicate folds, so DCE removes its binding.
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=True)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_narrow_addition_overflow_comparison_is_kept(self):
+        """INT8 arithmetic wraps at its own width, so `cast(i, INT8) + 1 < 0` is undecidable.
+
+        Regression for an unsound bound. The analyzer propagated the mathematical
+        [121, 128] into the sum and folded the comparison to `False`, but codegen emits
+        `arith.addi : i8`, which produces -128 at `i == 127` — where the comparison is
+        true. A result the node's own dtype cannot hold must widen to that dtype's range.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(120, 128, init_values=(seed,)):
+                    c: pl.Scalar[pl.INT8] = pl.cast(i, pl.INT8)
+                    j: pl.Scalar[pl.INT8] = c + pl.const(1, pl.INT8)
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(j < pl.const(0, pl.INT8)))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_narrow_addition_overflow_inline_comparison_is_kept(self):
+        """The same predicate written inline must stay undecided too.
+
+        `c + 1 < 0` with `c` in [120, 127] is `{-128} U [121, 127]` mapped through the
+        comparison: true at c == 127, false elsewhere. The rewrite `x + c1 < c2 ->
+        x < c2 - c1` turned it into `c < -1`, which the bound fold then decided `False`,
+        dropping the branch that c == 127 needs. The temporary-variable form above hides
+        this because `j` is a separate node the rewriter never looks through.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(120, 128, init_values=(seed,)):
+                    c: pl.Scalar[pl.INT8] = pl.cast(i, pl.INT8)
+                    nxt = pl.matmul_acc(
+                        acc, a, b, init_cond=(c + pl.const(1, pl.INT8) < pl.const(0, pl.INT8))
+                    )
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_narrow_equality_with_a_moved_constant_is_kept(self):
+        """`c + 100 == -100` is true at c == 56 and must stay undecided at INT8.
+
+        Moving the constant gives `c == -200`, a literal the dtype cannot hold: it is stored as written (the
+        constant folder only checks int64 overflow), so the bound fold saw `[0, 127]` against `[-200]`,
+        called them disjoint, and decided `False` although c == 56 is reachable.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 128, init_values=(seed,)):
+                    c: pl.Scalar[pl.INT8] = pl.cast(i, pl.INT8)
+                    cond = c + pl.const(100, pl.INT8) == pl.const(-100, pl.INT8)
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=cond)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_multiplication_overflow_comparison_is_kept(self):
+        """A product that overflows int64 wraps, so its sign is undecidable.
+
+        Regression for an unsound bound. Multiplying a bound's four corners saturated the
+        overflowing corner to `+inf` and kept the exact one as the minimum, reporting
+        "definitely positive" — while the emitted `arith.muli : i64` wraps to a negative
+        value at `i == 3`. One inexact corner makes the whole hull meaningless.
+
+        The predicate is spelled `0 < i * k` rather than `i * k > 0` because the rewrite
+        rules canonicalise `Gt` to `Lt`; writing it canonically keeps "unchanged" as the
+        assertion, so a future fold here shows up as a structural diff rather than noise.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(2, 4, init_values=(seed,)):
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=(0 < i * 4611686018427387903))
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_bool_scalar_bound_to_a_literal_does_not_crash(self):
+        """A top-level `flag: BOOL = False` is a constant binding; binding it must not raise.
+
+        Regression: the analyzer's transitive-comparison facts record a bound value as
+        `var == value`, and `Eq` rejects BOOL operands, so Simplify raised
+        `TypeError: Operator 'eq' does not accept bool dtype`. The provable-comparison fold
+        reaches this from any top-level comparison it decides. Once bound, `flag` is
+        substituted into the `if`, the dead branch is dropped, and so is the unused binding.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX], x: pl.Scalar[pl.INDEX]) -> pl.Tensor[[8], pl.INDEX]:
+                flag: pl.Scalar[pl.BOOL] = False
+                if flag:
+                    pl.tensor.write(out, [0], x)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX], x: pl.Scalar[pl.INDEX]) -> pl.Tensor[[8], pl.INDEX]:
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_submit_argument_is_decided(self):
+        """A comparison passed to `pl.submit` inside `pl.manual_scope` folds like a Call argument."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, t: pl.Tensor[[4, 8], pl.FP32], f: pl.Scalar[pl.BOOL]
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                t: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+                with pl.manual_scope():
+                    for i in pl.range(0, 4):
+                        res = pl.submit(self.kernel, t, i + 1 == 0)  # noqa: F841
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, t: pl.Tensor[[4, 8], pl.FP32], f: pl.Scalar[pl.BOOL]
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                t: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+                with pl.manual_scope():
+                    for i in pl.range(0, 4):  # noqa: B007
+                        res = pl.submit(self.kernel, t, False)  # noqa: F841
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+
 class TestSingleTripLoopCollapse:
     def test_single_iteration_preserves_enclosing_loop_carry(self):
         """Lifting sibling inner loops must keep the outer tensor carry bound (#2955)."""

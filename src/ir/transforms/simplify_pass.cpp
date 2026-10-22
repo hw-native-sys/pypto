@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -25,9 +26,11 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/ir_mutator_with_analyzer.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -340,11 +343,162 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// (Call, MakeTuple), so an Add buried inside a shape arg would otherwise
   /// reach downstream with patterns like `K + 0` un-folded.
   ExprPtr VisitBinaryExpr_(const BinaryExprPtr& op) override {
-    return analyzer_->Simplify(IRMutator::VisitBinaryExpr_(op));
+    return FoldProvableComparison(analyzer_->Simplify(IRMutator::VisitBinaryExpr_(op)));
   }
 
   ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op) override {
     return analyzer_->Simplify(IRMutator::VisitUnaryExpr_(op));
+  }
+
+  /// Decide an integer comparison from the analyzer's constant bounds, in any
+  /// expression position — including call arguments.
+  ///
+  /// `Analyzer::Simplify` only rewrites a comparison: `ko + 128 == 0` becomes
+  /// `ko == -128` and stops there, because no rewrite rule consults the bound
+  /// on `ko`. This decides it: with `[al, ah]` and `[bl, bh]` the `ConstIntBound`
+  /// intervals of the two operands, a comparison is a literal when the intervals
+  /// lie entirely on one side of each other (e.g. `==` is false when they are
+  /// disjoint, `ah < bl || bh < al`). The operands are compared directly, never
+  /// through a synthesised `lhs - rhs`, which the program does not compute.
+  /// That is how the `init_cond` of a `tile.matmul_acc` replicated by
+  /// LowerPipelineLoops (`ko + k*step == 0`, with `ko` bound to the main
+  /// loop's `[start, stop)`) becomes a literal instead of reaching codegen as a
+  /// runtime `scf.if`.
+  ///
+  /// Only the `ConstIntBound` sub-analyzer is consulted — deliberately not
+  /// `Analyzer::CanProve`, which Fold A uses for IfStmt conditions:
+  ///  - Cost. `CanProve` falls back to `transitive_cmp`, whose DFS rescans
+  ///    every known fact, so running it once per comparison node would make
+  ///    the pass quadratic in the number of bound scalars. A bound query is
+  ///    one walk of each (already simplified) operand.
+  ///  - Consistency. This pass keeps `ConstIntBound` in step with the IR — a
+  ///    reassigned scalar or loop variable is re-bound (or reset to unknown
+  ///    when it is assigned more than once), every binding is unbound on scope
+  ///    exit, and an enclosing `if` does not restore a bound its branch
+  ///    reassigned. `transitive_cmp` and `int_set` are not updated by a
+  ///    reassignment, and `int_set` is not cleared by `Unbind`, so on pre-SSA
+  ///    input they can still claim a stale `[start, stop)` range.
+  ///
+  /// Only signed-integer and INDEX operands are decided: a float comparison is
+  /// not an interval question (`x == x` is false for NaN), and unsigned
+  /// operands are not bound-decided here. Each operand's interval contains every
+  /// value the bindings allow — the loop-var range `[start, stop)` over-approximates the values a
+  /// stepped loop takes — so a literal is produced only when one polarity
+  /// holds for all of them; otherwise the comparison is returned unchanged.
+  ///
+  /// Only comparison nodes are decided. Their children were visited first, so
+  /// a composed predicate (`c and (ko + 128 == 0)`) then reduces through the
+  /// ordinary And/Or/Not rewrite rules once the comparison is a literal. The
+  /// decision runs here, at the pass level, rather than inside
+  /// `RewriteSimplifier`, which the bound query's `Simplify` call re-enters.
+  ExprPtr FoldProvableComparison(const ExprPtr& expr) {
+    auto cmp = As<BinaryExpr>(expr);
+    if (!cmp) return expr;
+    const ObjectKind kind = expr->GetKind();
+    switch (kind) {
+      case ObjectKind::Eq:
+      case ObjectKind::Ne:
+      case ObjectKind::Lt:
+      case ObjectKind::Le:
+      case ObjectKind::Gt:
+      case ObjectKind::Ge:
+        break;
+      default:
+        return expr;
+    }
+    const DataType operand_dtype = GetScalarDtype(cmp->left_);
+    if (!(operand_dtype.IsSignedInt() || operand_dtype == DataType::INDEX)) return expr;
+    if (GetScalarDtype(cmp->right_) != operand_dtype) return expr;
+
+    // Compare the two operands' own intervals rather than the interval of a
+    // synthesised `lhs - rhs`.
+    //
+    // That difference is not an expression the program computes, so bounding it
+    // asks the analyzer a question about a node that is never emitted -- and the
+    // analyzer answers in terms of what the hardware would do, including
+    // wrapping at the node's width. The two readings disagree exactly where it
+    // matters: for `n` in [-inf, 7], an emitted `n - 16` really can wrap, so its
+    // bound is unknown, yet `n < 16` is still decidable because every value `n`
+    // can take is below 16. Reasoning about the operands keeps the question
+    // mathematical and keeps the bounds honest about the machine.
+    //
+    // It is also strictly more precise for narrow types: INT8 `a` in [100, 127]
+    // and `b` in [-128, -100] decide `a > b` here, where the difference would
+    // have escaped INT8 and widened to the whole dtype range.
+    const auto lhs_bound = analyzer_->const_int_bound(cmp->left_);
+    const auto rhs_bound = analyzer_->const_int_bound(cmp->right_);
+    const int64_t al = lhs_bound.min_value;
+    const int64_t ah = lhs_bound.max_value;
+    const int64_t bl = rhs_bound.min_value;
+    const int64_t bh = rhs_bound.max_value;
+    // A sentinel endpoint means *unbounded*, not the int64 value it is stored
+    // as, and the two readings disagree at the domain edge. kNegInf is
+    // deliberately INT64_MIN + 1 (see analyzer.h), while the literal INT64_MIN
+    // keeps its exact bound, so comparing them numerically concludes that an
+    // unbound `x` is strictly greater than INT64_MIN -- and folds the true
+    // predicate `x == INT64_MIN` to false. Every ordering below therefore goes
+    // through these helpers, which answer "no" whenever the endpoint that would
+    // have to be finite is a sentinel.
+    const auto unbounded_below = [](int64_t v) { return v == arith::ConstIntBound::kNegInf; };
+    const auto unbounded_above = [](int64_t v) { return v == arith::ConstIntBound::kPosInf; };
+    // Every value of the first interval is below (or at most) every value of
+    // the second one.
+    const auto all_below = [&](int64_t upper, int64_t lower) {
+      return !unbounded_above(upper) && !unbounded_below(lower) && upper < lower;
+    };
+    const auto all_at_most = [&](int64_t upper, int64_t lower) {
+      return !unbounded_above(upper) && !unbounded_below(lower) && upper <= lower;
+    };
+    const auto all_above = [&](int64_t lower, int64_t upper) {
+      return !unbounded_below(lower) && !unbounded_above(upper) && lower > upper;
+    };
+    const auto all_at_least = [&](int64_t lower, int64_t upper) {
+      return !unbounded_below(lower) && !unbounded_above(upper) && lower >= upper;
+    };
+    // Equal only when both sides are pinned to the same single *finite* value;
+    // unequal when the intervals are disjoint. A degenerate interval sitting on
+    // a sentinel describes an unbounded value, not a known one, so it decides
+    // nothing.
+    const bool same_single_value =
+        al == ah && bl == bh && al == bl && !unbounded_below(al) && !unbounded_above(al);
+    const bool disjoint = all_below(ah, bl) || all_above(al, bh);
+    //
+    // Each arm below tests the two polarities with independent `if`s. They are
+    // mutually exclusive for any non-empty interval, so at most one assigns.
+    // An inverted interval (`min > max`, which contradictory constraints can
+    // still produce) would satisfy both and the later assignment would win --
+    // harmless, because such a bound only describes an unreachable branch.
+    std::optional<bool> decided;
+    switch (kind) {
+      case ObjectKind::Eq:
+        if (same_single_value) decided = true;
+        if (disjoint) decided = false;
+        break;
+      case ObjectKind::Ne:
+        if (same_single_value) decided = false;
+        if (disjoint) decided = true;
+        break;
+      case ObjectKind::Lt:
+        if (all_below(ah, bl)) decided = true;
+        if (all_at_least(al, bh)) decided = false;
+        break;
+      case ObjectKind::Le:
+        if (all_at_most(ah, bl)) decided = true;
+        if (all_above(al, bh)) decided = false;
+        break;
+      case ObjectKind::Gt:
+        if (all_above(al, bh)) decided = true;
+        if (all_at_most(ah, bl)) decided = false;
+        break;
+      case ObjectKind::Ge:
+        if (all_at_least(al, bh)) decided = true;
+        if (all_below(ah, bl)) decided = false;
+        break;
+      default:
+        break;
+    }
+    if (!decided) return expr;
+    return std::make_shared<const ConstBool>(*decided, expr->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -372,12 +526,23 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // lives, keeping the fold sound for pre-SSA callers.
     //
     // Skip a Var that MultiAssignCollector flagged as assigned more than once:
-    // a later assignment would invalidate the value bound here.
-    if (As<ScalarType>(new_type) && multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
-      if (IsConstScalar(new_value) && scope_depth_ == 0) {
-        BindScalar(new_var, new_value);
+    // a later assignment would invalidate the value bound here. Skipping is not
+    // enough on its own, though: the Var may still carry a bound from elsewhere --
+    // a pre-SSA loop variable reassigned in its body keeps the header's
+    // `[start, stop)` -- and that bound no longer describes the value. Reset it
+    // to unknown (logged, so it is unbound with the region) so FoldProvableComparison
+    // cannot decide `i < stop` from it after `i = i + 100; i = i + 100`.
+    if (As<ScalarType>(new_type)) {
+      if (multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
+        if (IsConstScalar(new_value) && scope_depth_ == 0) {
+          BindScalar(new_var, new_value);
+        } else {
+          BindScalarBound(new_var, new_value);
+        }
       } else {
-        BindScalarBound(new_var, new_value);
+        analyzer_->const_int_bound.Update(new_var,
+                                          {arith::ConstIntBound::kNegInf, arith::ConstIntBound::kPosInf});
+        scalar_binding_log_.push_back(new_var);
       }
     }
 

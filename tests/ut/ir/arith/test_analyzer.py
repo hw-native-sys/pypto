@@ -245,6 +245,25 @@ class TestCanProve:
         assert analyzer.can_prove_greater_equal(x, 1) is False
         analyzer.unbind(x)
 
+    def test_can_prove_greater_equal_does_not_trust_the_neg_inf_sentinel(self):
+        """An unbounded-below operand can reach INT64_MIN, so `>= INT64_MIN + 1` is not provable.
+
+        kNegInf is stored as INT64_MIN + 1 but, as a lower endpoint, means "no lower bound".
+        Comparing it numerically proved the inequality for every unbound value.
+        """
+        a = Analyzer()
+        assert a.can_prove_greater_equal(x, -(2**63) + 1) is False
+        assert a.can_prove_greater_equal(x, -(2**63)) is True  # trivially true for any int64
+
+    def test_can_prove_greater_equal_with_a_pinned_int64_min_endpoint(self):
+        """`x` in {MIN, MIN+1, MIN+2} reaches MIN, so it is `>= MIN` but not `>= MIN + 1`."""
+        a = Analyzer()
+        idx = ir.Var("idx", ir.ScalarType(DataType.INDEX), S)
+        a.bind(idx, -(2**63), -(2**63) + 3)
+        e = ir.Cast(idx, DataType.INT64, S)
+        assert a.can_prove_greater_equal(e, -(2**63)) is True
+        assert a.can_prove_greater_equal(e, -(2**63) + 1) is False
+
     def test_can_prove_less_true(self):
         analyzer.bind(x, 0, 10)
         assert analyzer.can_prove_less(x, 10) is True

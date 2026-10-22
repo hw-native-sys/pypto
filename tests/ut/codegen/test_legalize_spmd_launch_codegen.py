@@ -229,7 +229,25 @@ class Program:
 
 @pytest.mark.parametrize("auto_deps", [False, True])
 def test_composite_positive_bound_survives_late_simplify(auto_deps):
-    """Codegen must retain Simplify's proof for a guarded ceil-div launch count."""
+    """A launch count derived from an unbounded parameter keeps its generated guard.
+
+    `remaining` is `total - active`, both `INDEX` parameters, so the branch
+    constrains it to `[1, +inf]` and nothing bounds it above. `remaining + 15`
+    therefore may wrap -- `arith.addi : i64` on a `remaining` near INT64_MAX
+    yields a negative sum -- so the bound widens and the launch count is no
+    longer provably positive.
+
+    This test previously asserted the opposite, that the author's `if` sufficed
+    and no `_nonempty` guard was emitted. That fold rested on treating an
+    unbounded operand as exact, which is unsound: see
+    `test_unbounded_times_a_constant_is_unknown` in
+    `tests/ut/ir/arith/test_const_int_bound.py` for the same mistake at the
+    multiply. The precision is recoverable only where the quantity genuinely has
+    an upper limit -- a launch *index* does, and is capped in
+    `BoundFromOpSemantics` -- whereas a user `INDEX` parameter does not and must
+    not be given one (issue #2500). The residual cost is one host-side branch
+    the author's own guard already dominates.
+    """
 
     @pl.program
     class Program:
@@ -250,8 +268,9 @@ def test_composite_positive_bound_survives_late_simplify(auto_deps):
     result, code = _compile(Program, auto_deps)
     assert code.count(".launch_spec.set_block_num(") == 1
     assert "if (" in code
-    # The author guard suffices; no generated launch-count guard is needed.
-    assert "_nonempty" not in ir.python_print(result)
+    # The generated guard is present: the launch count cannot be proven positive
+    # while `remaining` is unbounded above. See the docstring.
+    assert "_nonempty" in ir.python_print(result)
 
 
 @pytest.mark.parametrize("conditional", [False, True])
