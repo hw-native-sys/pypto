@@ -508,6 +508,52 @@ def test_submit_preserves_omitted_runtime_output_and_predicate():
         assert dispatch.type is task_type
 
 
+@pytest.mark.parametrize("shared_symbol", [False, True])
+@pytest.mark.parametrize("omit_output", [False, True])
+def test_submit_runtime_outputs_keep_shape_distinct_callees(shared_symbol, omit_output):
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    n = var("N", ir.ScalarType(D.INDEX))
+    m = n if shared_symbol else var("M", ir.ScalarType(D.INDEX))
+    functions, inputs, statements = [], [], []
+    for name, dim in [("a", n), ("b", m)]:
+        typ = ir.TensorType([dim], D.FP32)
+        x, out = var(name + "_x", typ), var(name + "_out", typ)
+        functions.append(
+            ir.Function(
+                name,
+                [(x, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+                [typ],
+                ir.ReturnStmt([out], S),
+                S,
+                type=ir.FunctionType.InCore,
+            )
+        )
+        actuals = [var(name + "_input", typ)]
+        if not omit_output:
+            actuals.append(var(name + "_output", typ))
+        inputs.extend(actuals)
+        task_type = ir.TupleType([typ, ir.ScalarType(D.TASK_ID)])
+        dispatch = ir.Submit(ir.GlobalVar(name), actuals, [], {}, {}, task_type, S)
+        statements.append(ir.AssignStmt(var(name + "_result", task_type), dispatch, S))
+    functions.append(
+        ir.Function("main", inputs, [], ir.SeqStmts(statements, S), S, type=ir.FunctionType.Orchestration)
+    )
+    source = program(functions)
+    after = run(source)
+    can_merge = shared_symbol or not omit_output
+    assert names(after) == ({"a", "main"} if can_merge else {"a", "b", "main"})
+    with passes.PassContext([]):
+        lowered = passes.convert_tensor_to_tile_ops()(after)
+    for old, new in zip(calls(source), calls(lowered), strict=True):
+        assert new.args == old.args and new.type is old.type
+        if omit_output:
+            callee = lowered.get_function(new.op.name)
+            assert callee is not None
+            # Runtime codegen reads the omitted shape directly from this type.
+            ir.assert_structural_equal(callee.params[-1].type, old.args[0].type)
+
+
 @pytest.mark.parametrize("left,right", [(0.0, -0.0), (1.0, 2.0)])
 def test_float_bits_and_constants_are_not_interchangeable(left, right):
     functions = []

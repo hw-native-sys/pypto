@@ -459,7 +459,10 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
     for (const auto& site : sites[candidate.names[0]]) {
       auto call = As<Call>(site);
       const auto& args = call ? call->args_ : As<Submit>(site)->args_;
-      if (call && args.size() != info.at(name).function->params_.size()) return false;
+      // Runtime-synthesized Submit outputs still read the callee's parameter
+      // shapes directly. A local proof cannot transport those bindings into
+      // codegen, so shape-distinct aliases must supply every output explicitly.
+      if (args.size() != info.at(name).function->params_.size()) return false;
       CallShapeMap binding;
       // Use the same per-call cap as lowering, within the global search budget.
       size_t remaining = std::min(site_budget, kCallShapeBudget);

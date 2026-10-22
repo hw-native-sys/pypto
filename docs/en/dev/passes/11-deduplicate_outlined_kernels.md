@@ -31,7 +31,10 @@ merge when every affected Call/Submit binds the canonical signature consistently
 and reproduces the original caller-coordinate result type. This includes calls
 inside Spmd wrappers, scalar parameters also used as dimensions, repeated symbols,
 and same-structure expressions such as `N * 128`. Bindings come from supplied
-arguments, never from a missing output. No algebraic inversion or runtime shape
+arguments, never from a missing output. Shape-distinct aliases must supply every
+parameter, including Submit outputs: runtime-synthesized outputs still read the
+callee signature directly, without these call-site bindings. Identical-signature
+merges retain their existing omitted-output behavior. No algebraic inversion or runtime shape
 guard is introduced. Return aliases and void memory effects remain unchanged.
 
 The initial contract accepts scalar parameters and ordinary Tensor types without
