@@ -3047,8 +3047,10 @@ class DistributedWorker(Worker):
             raise ValueError(f"host dtype {host.dtype} does not match stacked dtype {stacked.dtype}")
         self._require_copy_host_tensor(host, "copy_stacked_from(host=...)")
         for i, (shard, w) in enumerate(zip(stacked.shards, stacked.worker_ids, strict=True)):
-            # The public raw-pointer API targets the parent view; copy_from
-            # handles the child-visible POSIX-shm staging internally.
+            # `_device_buffer` accepts the allocation base only, not an interior
+            # view pointer, so pass the base and let copy_from apply the view's
+            # byte offset on the device side. copy_from still owns the
+            # child-visible POSIX-shm staging internally.
             self.copy_from(
                 host[i].data_ptr(),
                 shard.data_ptr - shard.byte_offset,

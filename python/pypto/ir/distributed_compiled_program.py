@@ -134,7 +134,7 @@ def _distributed_config_from_dict(meta: dict[str, Any], meta_path: Path) -> Dist
     """Rebuild the :class:`DistributedConfig` a sidecar recorded.
 
     Validated like every other sidecar field (see
-    :func:`~pypto.ir.compiled_program._load_meta`): the block must be an object
+    :func:`~pypto.ir._artifact_metadata._load_meta`): the block must be an object
     keyed only by ``DistributedConfig`` fields, each correctly typed. A
     hand-edited ``device_ids`` therefore fails here, naming the file, instead of
     reaching ``DistributedConfig(**raw)`` as a raw ``TypeError`` or surfacing

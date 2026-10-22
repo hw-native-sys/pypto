@@ -45,15 +45,20 @@ class DeviceTensor:
     """Handle to a buffer already resident on a Worker.
 
     Attributes:
-        data_ptr: Device pointer in the owning Worker's address space.
+        data_ptr: Device pointer of the first element this handle addresses.
+            For a borrowed view this is ``buffer.base + byte_offset``, not the
+            allocation base.
         shape: Logical tensor shape (all dimensions positive).
         dtype: Element ``torch.dtype``.
+        byte_offset: Distance in bytes from the owning allocation's base to
+            ``data_ptr``. Zero for a whole allocation, nonzero for a view
+            created by :meth:`Worker.view_tensor`; must be aligned to ``dtype``.
         buffer: Optional simpler ``Buffer`` retained for address-free wire
-            dispatch. It is populated by :meth:`Worker.alloc_tensor`; a
-            manually constructed raw-pointer tensor can be used only with
-            low-level direct-chip compatibility helpers. All public
-            ``Worker.run`` paths require :meth:`Worker.alloc_tensor` and its
-            retained owner ``Buffer``.
+            dispatch. It is populated by :meth:`Worker.alloc_tensor` and
+            inherited by :meth:`Worker.view_tensor`; a manually constructed
+            raw-pointer tensor can be used only with low-level direct-chip
+            compatibility helpers. All public ``Worker.run`` paths require
+            :meth:`Worker.alloc_tensor` and its retained owner ``Buffer``.
     """
 
     data_ptr: int

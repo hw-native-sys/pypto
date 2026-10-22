@@ -195,6 +195,12 @@ class Worker(ABC):
         Workers, freed handles, and pointer-reuse (ABA) cases before a stale
         wire descriptor can enter simpler ``Worker.run``.
 
+        A borrowed view (:meth:`view_tensor`) keeps its source's Buffer and a
+        nonzero ``byte_offset``. ``_device_buffers`` is keyed by the allocation
+        base, so the lookup subtracts ``byte_offset`` first; the view is
+        accepted only while that owning allocation is still live, and
+        :meth:`free_tensor` refuses to free the view itself.
+
         When the caller does not name the placement, the retained Buffer
         usually does: simpler stamps ``owner_worker_id`` on every allocation it
         hands out, making the owning key derivable rather than searched.  That
@@ -326,10 +332,12 @@ class Worker(ABC):
         cleanup races with auto-free.
 
         Raises:
-            ValueError: if ``t.data_ptr`` is still tracked but under a different
-                ``worker_id`` — silently no-oping there would leak the buffer
-                until ``close()`` — or if the address is now owned by a newer
-                allocation, so a stale handle cannot free the replacement.
+            ValueError: if *t* is a borrowed view (``t.byte_offset != 0``) —
+                free the owning allocation instead; if ``t.data_ptr`` is still
+                tracked but under a different ``worker_id`` — silently no-oping
+                there would leak the buffer until ``close()``; or if the address
+                is now owned by a newer allocation, so a stale handle cannot
+                free the replacement.
         """
         if t.byte_offset:
             raise ValueError("free_tensor requires the owning allocation, not a view")

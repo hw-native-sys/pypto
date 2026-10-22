@@ -500,8 +500,8 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
   // tile.transpose_view(input) — zero-copy fractal-layout reinterpretation that swaps
   // the trailing two dims and maps the block/scatter layout to its transpose
   // dual (NZ<->ZN, NN<->ZZ, ND<->DN). A tile and its dual over the same bytes are
-  // mutual transposes (docs/_build/nz_zn_layout_qa.md), so the result aliases the
-  // source buffer byte-for-byte — no data movement is emitted in codegen, and
+  // mutual transposes, so the result aliases the source buffer byte-for-byte —
+  // no data movement is emitted in codegen, and
   // InitMemRef shares the source MemRef via set_output_memory_inherit_input.
   CHECK(args.size() == 1) << "tile.transpose_view requires exactly 1 argument (input), but got "
                           << args.size();
