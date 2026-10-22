@@ -25,3 +25,6 @@ from ..typing import IntLike, Scalar
 def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
+
+
+__all__ = ["_normalize_intlike"]
