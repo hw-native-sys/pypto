@@ -48,6 +48,12 @@ bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3);
 ///         or @p arg_count is too small for the declared index
 [[nodiscard]] std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count);
 
+/// Argument whose buffer a call result aliases: prefer the registry's declared
+/// output-reuse operand, then operand zero for buffer-aliasing views. Returns
+/// nullopt for fresh results or absent operands. Lifetime and escape analyses
+/// must agree on this index; buffer reuse is not limited to view operations.
+[[nodiscard]] std::optional<size_t> BufferAliasArgIndex(const CallPtr& call);
+
 /// True if the Call targets a tpop op (tile.tpop_from_aic / tile.tpop_from_aiv).
 /// Decided by the registry's CrossCoreRole, not by op-name string matching.
 bool IsTPop(const CallPtr& call);
