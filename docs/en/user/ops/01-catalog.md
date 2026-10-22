@@ -79,6 +79,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | [`ands`][pypto.language.ands] [`ors`][pypto.language.ors] [`xors`][pypto.language.xors] | `pl.` | Bitwise logic against a scalar |
 | [`shl`][pypto.language.shl] [`shr`][pypto.language.shr] | `pl.` | Shift left / right |
 | [`shls`][pypto.language.shls] [`shrs`][pypto.language.shrs] | `pl.` | Shift by a scalar amount |
+| [`interleave`][pypto.language.interleave] | `pl.` | Byte-lane interleave of two tiles along the last dim (INT8/UINT8): `out[..., 2i] = lhs[i]`, `out[..., 2i+1] = rhs[i]`. Maps to VINTLV; end-to-end use requires PTOAS tile-level `tintlv` support |
 
 ## Reductions
 

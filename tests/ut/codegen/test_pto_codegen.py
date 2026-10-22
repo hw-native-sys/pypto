@@ -1449,9 +1449,30 @@ def test_pto_codegen_tile_shift_scalar_index_operand_is_cast_to_i32(op_name, pto
     assert any("arith.index_cast" in line and "index to i32" in line for line in lines)
 
 
+def test_pto_codegen_tile_interleave_emits_tintlv():
+    """tile.interleave lowers to the tile-level pto.tintlv op (VINTLV family)."""
+
+    @pl.program
+    class InterleaveProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def interleave_test(
+            self,
+            a: pl.Tensor[[32, 32], pl.UINT8],
+            b: pl.Tensor[[32, 32], pl.UINT8],
+            out: pl.Tensor[[32, 64], pl.UINT8],
+        ):
+            tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+            tile_b = pl.load(b, offsets=[0, 0], shapes=[32, 32])
+            tile_c = pl.interleave(tile_a, tile_b)
+            pl.store(tile_c, offsets=[0, 0], output_tensor=out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(InterleaveProgram))
+    tintlv = _single_line(lines, "pto.tintlv")
+    assert "ins" in tintlv, f"interleave operands missing: {tintlv}"
+
+
 def test_pto_codegen_tile_bitwise_unsigned_scalar_is_normalized_without_bridge():
     """UINT32 literal sugar directly creates the same-width signless i32 operand."""
-
     @pl.program
     class UIntAndsProgram:
         @pl.function(type=pl.FunctionType.InCore)

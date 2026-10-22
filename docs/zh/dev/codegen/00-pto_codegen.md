@@ -185,6 +185,7 @@ print(pto_code)
 | `tile.and_(lhs, rhs)` / `tile.ands(lhs, scalar)` | `pto.tand` / `pto.tands`；scalar 使用同位宽 signless `iN` |
 | `tile.or_(lhs, rhs)` / `tile.ors(lhs, scalar)` | `pto.tor` / `pto.tors`；scalar 使用同位宽 signless `iN` |
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`；scalar 使用同位宽 signless `iN` |
+| `tile.interleave(lhs, rhs)` | `pto.tintlv ins(%lhs, %rhs) outs(%dst)`（字节交错，INT8/UINT8，末维加倍；依赖 PTOAS tile 层 `tintlv` 配套） |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
