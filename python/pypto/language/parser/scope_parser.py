@@ -2474,6 +2474,15 @@ class ScopeParser:
                         "producer TaskId.",
                     )
 
+                if func.attr == "reg_scope":
+                    if context_expr.args or context_expr.keywords:
+                        raise ParserSyntaxError(
+                            "reg_scope takes no arguments (captures are implicit)",
+                            span=self.services.span_tracker.get_span(stmt),
+                        )
+                    self.parse_scope_body(stmt, ir.ScopeKind.Reg, self.services.span_tracker.get_span(stmt))
+                    return
+
                 # Unified runtime scope: with pl.scope(mode=...): ...
                 if func.attr == "scope":
                     self.parse_scope(stmt, context_expr)

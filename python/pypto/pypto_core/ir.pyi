@@ -3559,6 +3559,15 @@ class IRBuilder:
     def __init__(self) -> None:
         """Create an IR builder."""
 
+    def begin_reg_scope(self, span: Span) -> None: ...
+    def end_reg_scope(self, span: Span) -> Stmt: ...
+    def emit_reg(
+        self, name: str, op_name: str, args: Sequence[Expr], kwargs: dict[str, Any], span: Span
+    ) -> Var: ...
+    def emit_reg_store(
+        self, name: str, tile: Expr, offset: Expr, value: Expr, mask: Expr | None, span: Span
+    ) -> Var: ...
+
     # Function building
     def begin_function(
         self,
@@ -4452,4 +4461,12 @@ class IRMutator:
 
 def returned_param_indices(func: Function, program: Program) -> list[int | None]:
     """Trace each return to its external parameter."""
+    ...
+
+def get_reg_memory_effect(call: Call) -> dict[str, Any]:
+    """Get target, root, access, begin/end (None if unknown), and mask."""
+    ...
+
+def get_reg_op_spec(op_name: str) -> dict[str, Any]:
+    """Get register schema scope and emitter requirements."""
     ...

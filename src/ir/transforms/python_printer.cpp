@@ -2494,9 +2494,10 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const RegScopeStmtPtr& op) {
-  // PR1 has a binary IR fixture, but no scope DSL parser yet. Omitting this
-  // override would silently print the body without its register boundary.
-  CHECK_SPAN(false, op->span_) << "RegScopeStmt Python DSL printing is not supported yet; use serialization";
+  stream_ << "with " << prefix_ << ".reg_scope():\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
 }
 
 void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {

@@ -82,6 +82,7 @@ from .dsl_api import (
 )
 from .op import array_ops as array
 from .op import prefetch_ops as prefetch
+from .op import reg_ops as reg
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
@@ -252,7 +253,7 @@ from .op.unified_ops import (
 from .optimizations import cross_core_slot, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
+from .scope import ScopeMode, manual_scope, reg_scope, scope, spmd_submit, submit
 from .typing import (
     RUNTIME,
     Array,
@@ -531,6 +532,8 @@ __all__ = [
     "Level",
     "MemRef",
     "Reg",
+    "reg",
+    "reg_scope",
     "RegKind",
     "Role",
     "SplitMode",

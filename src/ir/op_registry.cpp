@@ -396,7 +396,7 @@ TypePtr OpRegistry::ResolveAndValidateCallType(const OpRegistryEntry& entry, con
   try {
     if (!kwargs.empty()) {
       const auto& allowed_kwargs = op->GetAttrs();
-      if (!allowed_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer) {
+      if (!allowed_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer || entry.GetRegSpec()) {
         ValidateKwargs(kwargs, allowed_kwargs, op_name);
       }
     }
