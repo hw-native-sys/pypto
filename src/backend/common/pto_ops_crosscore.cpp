@@ -560,7 +560,7 @@ static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase
 void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
-    if (exclude_ops.count(op_name) > 0) return;
+    if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 

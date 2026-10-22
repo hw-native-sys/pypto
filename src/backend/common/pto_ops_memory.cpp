@@ -868,7 +868,7 @@ static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::E
 void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
-    if (exclude_ops.count(op_name) > 0) return;
+    if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
@@ -1074,7 +1074,7 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   });
 
   // tile.mscatter: src and idx must be row_major (MTE3 DMA reads UB linearly)
-  if (exclude_ops.count("tile.mscatter") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.mscatter")) {
     backend.RegisterOp("tile.mscatter")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeTileMscatterCodegenPTO(op, codegen);
@@ -1083,7 +1083,7 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
         .set_input_layout(1, ir::TileLayout::row_major);
   }
 
-  if (exclude_ops.count("tile.mgather") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.mgather")) {
     backend.RegisterOp("tile.mgather").f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileMgatherCodegenPTO(op, codegen);
     });

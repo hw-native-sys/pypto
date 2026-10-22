@@ -1179,12 +1179,12 @@ static std::string MakeTMovX2ZzCodegenPTO(const CallPtr& op, codegen::CodegenBas
 void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
-    if (exclude_ops.count(op_name) > 0) return;
+    if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
   // tile.sort32 (TSORT32): all inputs and output must be row_major per ISA
-  if (exclude_ops.count("tile.sort32") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.sort32")) {
     backend.RegisterOp("tile.sort32")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeSort32CodegenPTO("pto.tsort32", op, codegen);
@@ -1219,7 +1219,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
   });
 
   // tile.mrgsort_format2 (TMRGSORT format2): all inputs and output must be row_major per ISA
-  if (exclude_ops.count("tile.mrgsort_format2") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.mrgsort_format2")) {
     backend.RegisterOp("tile.mrgsort_format2")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
@@ -1231,7 +1231,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         .set_output_layout(ir::TileLayout::row_major);
   }
   // tile.mrgsort_format1 (TMRGSORT format1): src and output must be row_major per ISA
-  if (exclude_ops.count("tile.mrgsort_format1") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.mrgsort_format1")) {
     backend.RegisterOp("tile.mrgsort_format1")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeMrgSort1CodegenPTO("pto.tmrgsort", op, codegen);
