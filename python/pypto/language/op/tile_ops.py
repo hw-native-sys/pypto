@@ -189,6 +189,7 @@ from pypto.pypto_core.ir import (
 )
 
 from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, Tile, predicate_to_expr
+from ._utils import _normalize_intlike
 from .system_ops import (  # noqa: F401
     tpop_from_aic,
     tpop_from_aiv,
@@ -282,11 +283,6 @@ def alloc(
 def _unwrap_rhs(rhs: int | float | Expr | Tile | Scalar) -> int | float | Expr:
     """Unwrap rhs operands into the IR-layer representation."""
     return rhs.unwrap() if isinstance(rhs, (Tile, Scalar)) else rhs
-
-
-def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
-    """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
-    return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
 def _scalar_operand_to_expr(value: int | Scalar | Expr) -> Expr:

@@ -18,6 +18,7 @@ from pypto.pypto_core import DataType, ir
 from ..typing.dynamic import DynVar
 from ..typing.scalar import Scalar
 from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserTypeError
+from .span_tracker import get_span_or_unknown
 
 if TYPE_CHECKING:
     from .span_tracker import SpanTracker
@@ -201,10 +202,7 @@ class ExprEvaluator:
 
     def _get_span(self, node: ast.AST) -> "ir.Span":
         """Get span for an AST node, falling back to unknown."""
-        if self.span_tracker is not None:
-            return self.span_tracker.get_span(node)
-
-        return ir.Span.unknown()
+        return get_span_or_unknown(self.span_tracker, node)
 
 
 __all__ = ["ExprEvaluator"]

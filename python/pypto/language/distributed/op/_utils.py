@@ -9,10 +9,9 @@
 
 """Shared helpers for ``pld.*`` DSL wrappers."""
 
-from collections.abc import Sequence
 from typing import Any, overload
 
-from pypto.language.typing import IntLike, Scalar
+from pypto.language.op._utils import _normalize_intlike
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import Expr
 
@@ -27,11 +26,6 @@ def _unwrap(value: Any) -> Any:
     if hasattr(value, "unwrap"):
         return value.unwrap()
     return value
-
-
-def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
-    """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
-    return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
 @overload

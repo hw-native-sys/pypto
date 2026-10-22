@@ -21,6 +21,7 @@ from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserError, ParserTypeError
 from .expr_evaluator import ExprEvaluator
+from .span_tracker import get_span_or_unknown
 
 
 def _is_dump_call(node: object, name: str | None = None) -> TypeGuard[ast.Call]:
@@ -1548,9 +1549,7 @@ class TypeResolver:
 
     def _get_span(self, node: ast.AST) -> ir.Span:
         """Get span for an AST node, falling back to unknown."""
-        if self.span_tracker is not None:
-            return self.span_tracker.get_span(node)
-        return ir.Span.unknown()
+        return get_span_or_unknown(self.span_tracker, node)
 
     def _resolve_shape_dim(self, name_node: ast.Name) -> int | ir.Expr:
         """Resolve a variable name used as a shape dimension.
