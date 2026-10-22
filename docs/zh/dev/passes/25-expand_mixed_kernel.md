@@ -156,7 +156,11 @@ V2C pipe `id` 及出现顺序配对 push/pop，从实际消费方 `tpop` 契约�
 | --------------- | ------ | ------ |
 | Cube store → Vector load | `tile.store ...; tpush_to_aiv(stored_tile)` | `tok = tpop_from_aic(); tfree_to_aic(tok); tile.load ...` |
 
-为避免死锁，仅当满足以下条件时才生成握手：(1) 该 GM 源张量恰好只有一个生产侧 store；(2) 对侧 load 位于**同一结构化作用域**（同一循环/分支，使 `tpush`/`tpop` 执行次数一致）；(3) store 先于 load。跨越不同循环或分支的配对保持不变。
+对于单个生产侧 store，消费者必须位于它之后的同一结构化作用域或嵌套作用域。嵌套情况下，等待提升到外围循环/分支之前，使其每次生产只执行一次，而非每次消费迭代执行一次。位于不相交作用域的单 store 配对保留现有的未支持行为。
+
+同一 GM 源张量的多个 store 支持组成位于所有向量读取之前的**单个顶层写入阶段**（issue #2745）。Pass 在最后一次 store 后生成一次 `tpush`，在首次消费前生成一次 `tpop`，并将等待提升到消费者循环/分支外。例如，四次展开后的分区写入接八次向量读取只需要一次握手，而非四次或八次。生产侧 push 前的 `system.bar_all` 等待 GM 写入完成；消费侧 pop 后的 `system.bar_all` 使后续 MTE2 读取排在令牌等待之后，包括在 PIPE_V 上等待的 A5 C2V-UB 路径。令牌由原有 pipe finalizer 释放。
+
+循环/分支内的多次写入、交错的向量读取、中间穿插的跨核通信以及重叠的 GM 握手区间会产生带源码位置的错误，建议拆为带 `deps=[producer]` 的独立任务。这一保守限制同时避免重复覆盖缓冲区的竞争和 FIFO 令牌顺序错配。Pass 沿张量 SSA store 链、循环携带变量及同源分支合并追踪源张量，以检测这些尚不支持的依赖，而非静默遗漏同步。无需新增用户 API。
 
 仅对 **Cube→Vector** 方向（cube `tile.store` → vector `tile.load`）插入栅栏。AIC 侧的 `tpush` 直接发送被存储的 tile（与常规边界 C2V 推送在两种后端上的行为一致），AIV 侧 `tpop` 落在 `Vec`。反向的 Vector→Cube 方向需要 `tile.move` 边界路径在 `tpush_to_aic` 前所做的 V→C fractal 布局适配；在该方向发送未经适配的原始 tile 会破坏跨核传输契约，因此 V2C 的 GM 交换保持不加栅栏。
 

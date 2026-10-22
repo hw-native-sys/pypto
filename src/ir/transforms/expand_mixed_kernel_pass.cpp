@@ -1314,12 +1314,14 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
 struct GmSyncPush {
   CoreSide producer_side;
   ExprPtr push_tile;
+  bool fence_gm_phase = false;
 };
 
 struct GmSyncPop {
   CoreSide consumer_side;
   TypePtr pop_tile_type;
   std::string token_name;
+  bool fence_gm_phase = false;
 };
 
 /// Resolve a tensor SSA Var to its origin (the parameter / create result it
@@ -1328,13 +1330,20 @@ struct GmSyncPop {
 /// the loaded version and the stored version may differ; resolving to a common
 /// origin lets us match them.
 const Var* ResolveTensorOrigin(const Var* var,
-                               const std::unordered_map<const Var*, const Var*>& store_result_to_dest) {
+                               std::unordered_map<const Var*, const Var*>& store_result_to_dest) {
   std::unordered_set<const Var*> seen;
+  std::vector<const Var*> path;
   while (var) {
     auto it = store_result_to_dest.find(var);
     if (it == store_result_to_dest.end()) break;
     if (!seen.insert(var).second) break;  // guard against cycles
+    path.push_back(var);
     var = it->second;
+  }
+  // Many partition stores form a long SSA chain. Compress it once rather than
+  // walking every prefix for every access (quadratic in the number of stores).
+  for (const Var* entry : path) {
+    if (entry != var) store_result_to_dest[entry] = var;
   }
   return var;
 }
@@ -1350,12 +1359,30 @@ const Var* ResolveTensorOrigin(const Var* var,
 /// compound that encloses the load. Either way the tpush and tpop execute the
 /// same number of times (the store body's trip count), so the ring buffer cannot
 /// deadlock. Pairs split across sibling/disjoint bodies are left untouched.
+/// Multiple stores are supported only as one top-level write phase preceding
+/// all vector reads, with no overlapping cross-core communication. Unsupported
+/// multi-store dependencies fail with a task-separation diagnostic (#2745).
 void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
                              const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+                             const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                              std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
                              std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
   // Pass 1: build tensor origin chains from tile.store results.
   std::unordered_map<const Var*, const Var*> store_result_to_dest;
+  // Tensor loop carries retain their GM allocation. Index both the body and
+  // result names so unsupported multi-store loops are diagnosed, not missed
+  // merely because the consumer uses the loop's returned SSA version.
+  auto record_carries = [&](const auto& loop) {
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& arg = loop->iter_args_[i];
+      auto init = AsVarLike(arg->initValue_);
+      if (!init || !AsTensorTypeLike(arg->GetType())) continue;
+      store_result_to_dest[arg.get()] = init.get();
+      if (i < loop->return_vars_.size()) {
+        store_result_to_dest[loop->return_vars_[i].get()] = init.get();
+      }
+    }
+  };
   std::function<void(const std::vector<StmtPtr>&)> build_origins = [&](const std::vector<StmtPtr>& ss) {
     for (const auto& stmt : ss) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -1367,11 +1394,31 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
         }
       }
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        record_carries(for_stmt);
         build_origins(FlattenBody(for_stmt->body_));
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         build_origins(FlattenBody(if_stmt->then_body_));
         if (if_stmt->else_body_.has_value()) build_origins(FlattenBody(*if_stmt->else_body_));
+        auto then_yield = transform_utils::GetLastYieldStmt(if_stmt->then_body_);
+        auto else_yield = if_stmt->else_body_.has_value()
+                              ? transform_utils::GetLastYieldStmt(*if_stmt->else_body_)
+                              : nullptr;
+        if (then_yield && else_yield) {
+          const size_t count =
+              std::min({if_stmt->return_vars_.size(), then_yield->value_.size(), else_yield->value_.size()});
+          for (size_t i = 0; i < count; ++i) {
+            if (!AsTensorTypeLike(if_stmt->return_vars_[i]->GetType())) continue;
+            auto lhs = AsVarLike(then_yield->value_[i]);
+            auto rhs = AsVarLike(else_yield->value_[i]);
+            if (!lhs || !rhs) continue;
+            const Var* origin = ResolveTensorOrigin(lhs.get(), store_result_to_dest);
+            if (origin == ResolveTensorOrigin(rhs.get(), store_result_to_dest)) {
+              store_result_to_dest[if_stmt->return_vars_[i].get()] = origin;
+            }
+          }
+        }
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        record_carries(while_stmt);
         build_origins(FlattenBody(while_stmt->body_));
       }
     }
@@ -1392,13 +1439,26 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   std::vector<AccessRec> loads;
   size_t order_counter = 0;
   int next_body_id = 1;  // 0 == function top level
+  std::unordered_map<const Stmt*, size_t> statement_order;
+  std::vector<size_t> communication_order;
   // body_id -> (enclosing compound stmt, parent body_id). Lets a consumer load
   // nested under the producer store's body be fenced by hoisting the tpop to the
   // loop/branch that sits in the store's body (see the C2V pairing below).
   std::unordered_map<int, std::pair<const Stmt*, int>> body_info;
+  std::unordered_map<int, const Stmt*> top_level_encloser;
   std::function<void(const std::vector<StmtPtr>&, int)> collect = [&](const std::vector<StmtPtr>& ss,
                                                                       int body_id) {
     for (const auto& stmt : ss) {
+      const size_t order = order_counter++;
+      statement_order.emplace(stmt.get(), order);
+      CallPtr stmt_call;
+      if (auto assign = As<AssignStmt>(stmt)) stmt_call = As<Call>(assign->value_);
+      if (auto eval = As<EvalStmt>(stmt)) stmt_call = As<Call>(eval->expr_);
+      if (boundary_moves.count(stmt.get()) || op_predicates::IsTPush(stmt_call) ||
+          op_predicates::IsTPop(stmt_call) || IsOp(stmt_call, "system.sync_set") ||
+          IsOp(stmt_call, "system.sync_wait")) {
+        communication_order.push_back(order);
+      }
       auto aff_it = stmt_map.find(stmt.get());
       CoreAffinity aff = (aff_it != stmt_map.end()) ? aff_it->second : CoreAffinity::SHARED;
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -1408,32 +1468,36 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
             stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest), side, call,
-                              body_id, order_counter++});
+                              body_id, order});
           }
         } else if (single_lane && IsOp(call, "tile.load") && !call->args_.empty()) {
           if (auto src = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
             loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), store_result_to_dest), side, call,
-                             body_id, order_counter++});
+                             body_id, order});
           }
         }
       }
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         int child = next_body_id++;
         body_info[child] = {stmt.get(), body_id};
+        top_level_encloser[child] = body_id == 0 ? stmt.get() : top_level_encloser.at(body_id);
         collect(FlattenBody(for_stmt->body_), child);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         int then_id = next_body_id++;
         body_info[then_id] = {stmt.get(), body_id};
+        top_level_encloser[then_id] = body_id == 0 ? stmt.get() : top_level_encloser.at(body_id);
         collect(FlattenBody(if_stmt->then_body_), then_id);
         if (if_stmt->else_body_.has_value()) {
           int else_id = next_body_id++;
           body_info[else_id] = {stmt.get(), body_id};
+          top_level_encloser[else_id] = top_level_encloser.at(then_id);
           collect(FlattenBody(*if_stmt->else_body_), else_id);
         }
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         int child = next_body_id++;
         body_info[child] = {stmt.get(), body_id};
+        top_level_encloser[child] = body_id == 0 ? stmt.get() : top_level_encloser.at(body_id);
         collect(FlattenBody(while_stmt->body_), child);
       }
     }
@@ -1461,6 +1525,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
 
   // Is `anc` equal to, or an ancestor body of, `desc`?
   auto is_ancestor_body = [&](int anc, int desc) -> bool {
+    if (anc == 0) return true;
     int cur = desc;
     std::unordered_set<int> guard;
     while (cur != anc) {
@@ -1475,6 +1540,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   // consumer fence can be hoisted before it. Returns nullptr if `desc` is not
   // nested under `anc`.
   auto enclosing_stmt_in_body = [&](int anc, int desc) -> const Stmt* {
+    if (anc == 0 && desc != 0) return top_level_encloser.at(desc);
     int cur = desc;
     std::unordered_set<int> guard;
     while (true) {
@@ -1486,10 +1552,37 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     }
   };
 
+  struct FenceInterval {
+    size_t push_order;
+    size_t pop_order;
+    bool multiple_stores;
+    const AccessRec* store;
+  };
+  std::vector<FenceInterval> fence_intervals;
   for (const Var* origin : ordered_origins) {
     const auto& origin_stores = stores_by_origin.at(origin);
-    if (origin_stores.size() != 1) continue;  // require a unique producer store
-    const AccessRec& store = *origin_stores.front();
+    const bool multiple_stores = origin_stores.size() > 1;
+    // A top-level, write-then-read phase needs just the final producer's
+    // notification. Never issue one token per partition against one loop wait.
+    const AccessRec& store = *origin_stores.back();
+    auto loads_it = loads_by_origin.find(origin);
+    if (loads_it == loads_by_origin.end()) continue;
+    const bool has_vector_load = std::any_of(loads_it->second.begin(), loads_it->second.end(),
+                                             [](const auto* load) { return load->side == CoreSide::AIV; });
+    const bool has_cube_store = std::any_of(origin_stores.begin(), origin_stores.end(),
+                                            [](const auto* write) { return write->side == CoreSide::AIC; });
+    if (multiple_stores && has_cube_store && has_vector_load) {
+      const bool top_level_writes =
+          std::all_of(origin_stores.begin(), origin_stores.end(),
+                      [](const auto* write) { return write->side == CoreSide::AIC && write->body_id == 0; });
+      const bool reads_follow_writes = std::all_of(
+          loads_it->second.begin(), loads_it->second.end(),
+          [&](const auto* load) { return load->side != CoreSide::AIV || load->order > store.order; });
+      CHECK_SPAN(top_level_writes && reads_follow_writes, store.stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' with multiple stores requires a top-level write phase before all vector reads; "
+             "split producer and consumer into tasks with deps=[producer]";
+    }
 
     // Restrict to the cube-store -> vector-load (C2V) direction. The producer
     // store is on AIC, the consumer load on AIV: the AIC tpush sends the source
@@ -1503,8 +1596,6 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     if (store.side != CoreSide::AIC) continue;
 
     const AccessRec* chosen = nullptr;
-    auto loads_it = loads_by_origin.find(origin);
-    if (loads_it == loads_by_origin.end()) continue;
     for (const AccessRec* load : loads_it->second) {
       if (load->side != CoreSide::AIV) continue;  // C2V only: consumer on the vector lane
       // The consumer load must share the store's body (a 1:1 fence) or be nested
@@ -1528,6 +1619,19 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
       if (pop_stmt == nullptr) continue;  // defensive: not actually nested under the store
     }
 
+    const size_t pop_order = statement_order.at(pop_stmt);
+    if (multiple_stores) {
+      // A token must not overtake an existing boundary transfer in the same
+      // FIFO, or introduce a cycle through an explicit cross-core wait.
+      auto communication =
+          std::upper_bound(communication_order.begin(), communication_order.end(), store.order);
+      CHECK_SPAN(communication == communication_order.end() || *communication >= pop_order,
+                 chosen->stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' with multiple stores crosses other core communication; "
+             "split producer and consumer into tasks with deps=[producer]";
+    }
+
     auto src_tile_type = std::dynamic_pointer_cast<const TileType>(store.call->args_[0]->GetType());
     if (!src_tile_type) continue;  // need a TileType for cross-core slot sizing
 
@@ -1537,10 +1641,35 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
                                                     std::nullopt, std::nullopt, consumer_mem);
     std::string token_name = origin->name_hint_ + "_gm_sync";
 
-    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
+    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0], multiple_stores};
     // A vector per stmt: several GM dependencies can hoist to the same enclosing
     // stmt (e.g. two scratch loads in one outer loop) — each needs its own fence.
-    gm_sync_pops[pop_stmt].push_back(GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)});
+    gm_sync_pops[pop_stmt].push_back(
+        GmSyncPop{consumer_side, pop_tile_type, std::move(token_name), multiple_stores});
+    fence_intervals.push_back({store.order, pop_order, multiple_stores, &store});
+  }
+
+  // Other GM fences are also transfers on the shared FIFO. Initially support
+  // disjoint phases: overlapping intervals can reverse the pop order or mix
+  // a one-shot fence with a repeated one. Sort once, then sweep in O(N log N).
+  std::sort(fence_intervals.begin(), fence_intervals.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.push_order < rhs.push_order; });
+  size_t last_pop = 0;
+  size_t last_multiple_pop = 0;
+  bool has_previous = false;
+  bool has_multiple = false;
+  for (const auto& fence : fence_intervals) {
+    CHECK_SPAN((!has_multiple || fence.push_order > last_multiple_pop) &&
+                   (!fence.multiple_stores || !has_previous || fence.push_order > last_pop),
+               fence.store->stmt->span_)
+        << "GM dependency with multiple stores overlaps another GM handshake; "
+           "split producer and consumer into tasks with deps=[producer]";
+    last_pop = std::max(last_pop, fence.pop_order);
+    has_previous = true;
+    if (fence.multiple_stores) {
+      last_multiple_pop = std::max(last_multiple_pop, fence.pop_order);
+      has_multiple = true;
+    }
   }
 }
 
@@ -1761,6 +1890,12 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         auto pop_var = std::make_shared<Var>(info.token_name, info.pop_tile_type, stmt->span_);
         result.push_back(std::make_shared<AssignStmt>(
             pop_var, CreateTpop(pop_op, info.pop_tile_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
+        if (info.fence_gm_phase) {
+          // A5 C2V-UB tokens wait on PIPE_V, while the following GM loads use
+          // MTE2. Drain the wait before allowing any load pipe to proceed.
+          result.push_back(std::make_shared<EvalStmt>(
+              OpRegistry::GetInstance().Create("system.bar_all", {}, {}, stmt->span_), stmt->span_));
+        }
       }
     }
 
@@ -1770,6 +1905,12 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       // after the store that writes the shared GM tensor.
       if (auto push_it = gm_sync_pushes.find(stmt.get());
           push_it != gm_sync_pushes.end() && side == push_it->second.producer_side) {
+        if (push_it->second.fence_gm_phase) {
+          // The token's payload is incidental: all preceding GM writes must
+          // complete before the notification, including earlier partitions.
+          result.push_back(std::make_shared<EvalStmt>(
+              OpRegistry::GetInstance().Create("system.bar_all", {}, {}, stmt->span_), stmt->span_));
+        }
         result.push_back(std::make_shared<EvalStmt>(
             CreateTpush(push_op, push_it->second.push_tile, stmt->span_), stmt->span_));
       }
@@ -2052,7 +2193,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
   std::map<const Stmt*, std::vector<GmSyncPop>> gm_sync_pops;
-  CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
+  CollectGmCrossLaneSyncs(stmts, stmt_map, boundary_moves, gm_sync_pushes, gm_sync_pops);
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;
