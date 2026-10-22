@@ -178,6 +178,10 @@ CallShapeStatus CallShapeBindingPlan::Bind(const std::vector<ExprPtr>& args, Cal
     const auto& param = function_->params_[i];
     if (!matcher.Type(param->GetType(), args[i]->GetType(), &result)) return matcher.status;
     if (As<ScalarType>(param->GetType()) && !matcher.Match(param, args[i], &result)) return matcher.status;
+    // A wrapper can acquire private outputs from a richer child signature.
+    // Their types may query tensor.dim(param, ...), so preserve tensor actuals
+    // as substitution sources too, even when the original signature is simple.
+    result.emplace(param.get(), args[i]);
   }
   for (size_t i = args.size(); i < function_->params_.size(); ++i) {
     if (function_->param_directions_[i] != ParamDirection::Out) return CallShapeStatus::Conflict;

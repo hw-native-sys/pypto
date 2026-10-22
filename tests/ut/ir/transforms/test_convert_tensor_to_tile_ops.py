@@ -8456,5 +8456,82 @@ def test_shared_callee_instantiates_shapes_simultaneously(mapping, parameter_cou
     ir.assert_structural_equal(allocations[0].type, a.type)
 
 
+@pytest.mark.parametrize("wrapper_type", [ir.FunctionType.Group, ir.FunctionType.Spmd])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_private_wrapper_output_rebinds_tensor_dim_operand(wrapper_type, use_submit):
+    """A simple wrapper can acquire a richer output type from its child kernel."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([64], DataType.FP32)
+    x = ir.Var("kernel_input", tensor_type, span)
+    create = tensor_ops.create([tensor_ops.dim(x, 0)], DataType.FP32)
+    result = ir.Var("result", create.type, span)
+    load = tile_ops.load(x, [0], [64], target_memory=MemorySpace.Vec)
+    loaded = ir.Var("loaded", load.type, span)
+    kernel = ir.Function(
+        "kernel",
+        [x],
+        [result.type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(result, create, span),
+                ir.AssignStmt(loaded, load, span),
+                ir.EvalStmt(tile_ops.store(loaded, [0], result), span),
+                ir.ReturnStmt([result], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    w = ir.Var("wrapper_input", tensor_type, span)
+    wrapped_type = ir.TensorType([tensor_ops.dim(w, 0)], DataType.FP32)
+    wrapper = ir.Function(
+        "wrapper",
+        [w],
+        [],
+        ir.SeqStmts(
+            [
+                ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [w], wrapped_type, span), span),
+                ir.ReturnStmt([], span),
+            ],
+            span,
+        ),
+        span,
+        type=wrapper_type,
+    )
+    a = ir.Var("caller_input", tensor_type, span)
+    dispatch = (
+        ir.Submit(
+            ir.GlobalVar("wrapper"), [a], [], {}, {}, ir.TupleType([ir.ScalarType(DataType.TASK_ID)]), span
+        )
+        if use_submit
+        else ir.Call(ir.GlobalVar("wrapper"), [a], ir.UnknownType(), span)
+    )
+    main = ir.Function(
+        "main",
+        [a],
+        [],
+        ir.SeqStmts([ir.EvalStmt(dispatch, span), ir.ReturnStmt([], span)], span),
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, wrapper, main], "test", span))
+    lowered_main = after.get_function("main")
+    lowered_wrapper = after.get_function("wrapper")
+    assert lowered_main is not None and lowered_wrapper is not None
+    allocation = _find_first_call_to(lowered_main, "tensor.create")
+    assert allocation is not None and isinstance(allocation.type, ir.TensorType)
+    extent = allocation.type.shape[0]
+    assert isinstance(extent, ir.Call) and extent.op.name == ir.get_op("tensor.dim").name
+    assert extent.args[0] is a  # Must not reference the out-of-scope wrapper_input.
+    private_type = lowered_wrapper.params[-1].type
+    assert isinstance(private_type, ir.TensorType)
+    private_extent = private_type.shape[0]
+    assert isinstance(private_extent, ir.Call) and private_extent.args[0] is w
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
