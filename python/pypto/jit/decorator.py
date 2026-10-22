@@ -62,6 +62,7 @@ import copy
 import functools
 import inspect
 import json
+import math
 import os
 import re
 import textwrap
@@ -1989,12 +1990,21 @@ def _extract_local_tensor_metas(
         shape = _resolve_shape(shape_node)
         if shape is None:
             return None
-        # A reshape re-groups the dims a layout describes, so the source layout
-        # need not hold on the result — but claiming ND instead would be the
-        # same silent mis-declaration. Decline the meta and let _build_params
-        # raise its clear "missing type annotation" error.
+        # Other non-ND reshapes reinterpret layout coordinates, so claiming ND
+        # would mis-declare the result. The whole static NZ buffer is the one
+        # exception: its rank-1 physical view needs no coordinate rewrite.
+        # Match BlockNzTensorViews::IsWholeTensorFlatten; symbolic bounds do
+        # not prove the runtime element count. The reshape result is ND.
         if src_meta.layout not in (None, _ir.TensorLayout.ND):
-            return None
+            whole_nz_flatten = (
+                src_meta.layout == _ir.TensorLayout.NZ
+                and len(shape) == 1
+                and type(shape[0]) is int
+                and all(type(dim) is int for dim in src_meta.shape)
+                and math.prod(cast(tuple[int, ...], src_meta.shape)) == shape[0]
+            )
+            if not whole_nz_flatten:
+                return None
         return TensorMeta(shape=shape, dtype=src_meta.dtype)
 
     def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:

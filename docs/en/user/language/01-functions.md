@@ -170,6 +170,14 @@ A device kernel (`@pl.jit.incore`) cannot allocate, so it always takes the secon
 `pl.create_tensor` belongs on the control plane. An `@pl.jit.inline` helper is spliced into
 the caller, so either form is available to it.
 
+A complete one-dimensional view of an NZ tensor also keeps inferable metadata. For
+`w: pl.Tensor[[256, 512], pl.INT8, pl.NZ]`, `w_flat = pl.reshape(w, [131072])`
+can be passed to a helper declared with `src: pl.Tensor`; specialization supplies
+`src: pl.Tensor[[131072], pl.INT8]` (ND). The reshape creates a view of the existing physical
+bytes without layout conversion or copying. Every source dimension and the target length must be
+static, and the target length must equal the source element count. Other NZ reshape
+targets and symbolic NZ flattening remain unsupported.
+
 An extent the specializer cannot compute statically is *not* by itself a problem. A
 `pl.create_tensor` sized from a value only the device knows — `pl.tensor.read(cfg, [0])`,
 `pld.world_size()` — becomes a dynamic dimension and keeps flowing, and the shared pass

@@ -1901,6 +1901,59 @@ class TestSliceAndDepReturnMetadata:
         assert metas["x_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
         assert metas["out_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
 
+    @pytest.mark.parametrize("source_shape", [(256, 512), (2, 256, 256)])
+    def test_whole_nz_flatten_has_nd_metadata(self, source_shape):
+        """A complete physical NZ flatten keeps the storage but has a rank-1 ND type."""
+
+        def body(src):
+            flat = pl.reshape(src, [131072])
+            qualified = pl.tensor.reshape(tensor=src, shape=[131072])
+            return flat, qualified
+
+        seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=ir.TensorLayout.NZ)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        expected = TensorMeta(shape=(131072,), dtype=DataType.INT8)
+        assert metas["flat"] == expected
+        assert metas["qualified"] == expected
+        assert metas["src"] == seed["src"]
+
+    @pytest.mark.parametrize(
+        "source_shape, target_shape, layout",
+        [
+            ((256, 512), (128, 1024), ir.TensorLayout.NZ),
+            ((256, 512), (65536,), ir.TensorLayout.NZ),
+            ((DynDim(name="M", literal="M", static_bound=256), 512), (131072,), ir.TensorLayout.NZ),
+            ((256, 512), (DynDim(name="N", literal="N", static_bound=131072),), ir.TensorLayout.NZ),
+            ((256, 512), (131072,), ir.TensorLayout.DN),
+        ],
+        ids=["rank-2", "wrong-size", "dynamic-source", "dynamic-target", "other-layout"],
+    )
+    def test_unproven_non_nd_reshape_has_no_metadata(self, source_shape, target_shape, layout):
+        """Only the static whole-NZ case is safe; a dynamic upper bound is not its extent."""
+
+        def body(src):
+            flat = pl.reshape(src, target_shape)
+            return flat
+
+        seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=layout)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "flat" not in metas
+
+    def test_nz_flatten_to_dynamic_dim_alias_has_no_metadata(self):
+        """A resolved symbolic target is still not proof of the physical storage size."""
+
+        def body(src, shape_ref):
+            flat = pl.reshape(src, [shape_ref.shape[0]])
+            return flat
+
+        seed = {
+            "src": TensorMeta(shape=(256, 512), dtype=DataType.INT8, layout=ir.TensorLayout.NZ),
+            "shape_ref": TensorMeta(
+                shape=(DynDim(name="N", literal="N", static_bound=131072),), dtype=DataType.INT8
+            ),
+        }
+        assert "flat" not in _extract_local_tensor_metas(body, seed_meta=seed)
+
     @staticmethod
     def _resolve_callsite_metadata(caller):
         seed = {

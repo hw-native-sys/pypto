@@ -18,6 +18,7 @@ import ctypes
 import importlib
 import re
 import warnings
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
@@ -711,6 +712,71 @@ class TestNzOnTensorIsNotJitSpecific:
         assert isinstance(param_type, ir.TensorType)
         assert param_type.tensor_view is not None
         assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+
+
+def test_nz_whole_tensor_flatten_reaches_explicit_incore_helper():
+    """Issue #3062: a physical NZ byte range can cross an explicit helper boundary."""
+
+    @jit.incore
+    def copy_head(flat: pl.Tensor[[131072], pl.INT8], out: pl.Out[pl.Tensor[[16], pl.INT8]]):
+        tile = pl.load(flat, [0], [16])
+        out = pl.store(tile, [0], out)
+        return out
+
+    @jit
+    def entry(weight: pl.Tensor[[256, 512], pl.INT8, pl.NZ], out: pl.Out[pl.Tensor[[16], pl.INT8]]):
+        flat = pl.reshape(weight, [131072])
+        with pl.spmd(1):
+            out = copy_head(flat, out)
+        return out
+
+    # The whole-buffer flatten describes raw contiguous storage. Its consumer
+    # needs an ordinary rank-1 tensor, while the original weight stays NZ.
+    program = entry.specialize()
+    weight_type = program.get_function("entry").params[0].type
+    assert isinstance(weight_type, ir.TensorType)
+    for dim, extent in zip(weight_type.shape, [256, 512], strict=True):
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == extent
+    assert weight_type.tensor_view is not None
+    assert weight_type.tensor_view.layout == ir.TensorLayout.NZ
+
+    flat_type = program.get_function("copy_head").params[0].type
+    assert isinstance(flat_type, ir.TensorType)
+    assert len(flat_type.shape) == 1
+    flat_extent = flat_type.shape[0]
+    assert isinstance(flat_extent, ir.ConstInt)
+    assert flat_extent.value == 131072
+    assert flat_type.dtype == pl.INT8
+    assert flat_type.tensor_view is None
+
+
+def test_nz_whole_tensor_flatten_compiles_with_explicit_incore_helper():
+    """The inferred view also survives passes and code generation with a legal tile store."""
+
+    @jit.incore
+    def copy_head(flat: pl.Tensor[[131072], pl.INT8], out: pl.Out[pl.Tensor[[1, 32], pl.INT8]]):
+        tile = pl.load(flat, [0], [32], target_memory=pl.Mem.Vec)
+        # PTO stores need a 2D valid_shape and a 32-byte-aligned INT8 row.
+        row = pl.tile.reshape(tile, [1, 32])
+        pl.store(row, [0, 0], out)
+        return out
+
+    @jit
+    def entry(weight: pl.Tensor[[256, 512], pl.INT8, pl.NZ], out: pl.Out[pl.Tensor[[1, 32], pl.INT8]]):
+        flat = pl.reshape(weight, [131072])
+        with pl.spmd(1):
+            out = copy_head(flat, out)
+        return out
+
+    # The module fixture keeps this source-only, without an assembler or NPU.
+    compiled = entry.compile()
+    assert isinstance(compiled, CompiledProgram)
+    pto_files = list(Path(compiled.output_dir).rglob("*.pto"))
+    assert pto_files
+    source = "\n".join(path.read_text() for path in pto_files)
+    assert "pto.tload" in source
+    assert "pto.tstore" in source
 
 
 def _request_kernel(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:

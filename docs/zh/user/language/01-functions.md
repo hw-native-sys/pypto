@@ -139,6 +139,13 @@ def entry(x: pl.Tensor[[1, 8], pl.FP32], out: pl.Out[pl.Tensor[[1, 8], pl.FP32]]
 设备 kernel（`@pl.jit.incore`）不能分配内存，所以它只能用第二种写法 —— `pl.create_tensor`
 属于控制平面。`@pl.jit.inline` helper 会被拼接进调用方，两种写法都可以用。
 
+NZ 张量的完整一维视图也能保留可推断的元数据。例如，对于
+`w: pl.Tensor[[256, 512], pl.INT8, pl.NZ]`，`w_flat = pl.reshape(w, [131072])`
+可以传给声明为 `src: pl.Tensor` 的 helper；特化后参数为
+`src: pl.Tensor[[131072], pl.INT8]`（ND）。reshape 在现有物理字节上建立视图，不进行布局转换或复制。
+源张量的每个维度和目标长度都必须是静态值，且目标长度必须等于源张量的元素总数。
+其他 NZ reshape 目标形状和符号维度的 NZ 展平仍不受支持。
+
 特化器无法静态计算某个维度本身**不是**问题。由只有设备才知道的值决定尺寸的
 `pl.create_tensor` —— `pl.tensor.read(cfg, [0])`、`pld.world_size()` —— 会变成一个动态
 维度并继续向下传递，之后由共享的 pass 流水线来判定程序对它做了什么（例如把整个张量作为
