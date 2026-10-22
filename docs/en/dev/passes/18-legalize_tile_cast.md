@@ -19,6 +19,21 @@ Unreachable pairs hard-fail with src/dst/arch in the diagnostic.
 
 **Requires / Produces / Invalidates**: none (empty `PassProperties`).
 
+## Native A5 FP4 conversion
+
+Packed `FP4E2M1X2` converts directly to exact `FP8E4M3FN` on A5, with either
+memory planner. Carrier columns and valid columns expand 2:1 at the numerical
+cast boundary; source shapes, strides and offsets remain in carrier bytes.
+E1M2 has no native conversion edge. Public `pl.cast` keeps an ND result. The emitted `pto.tcvt` uses the ISA byte-register
+LUT without compiler LUT, index or scratch allocations. Other conversion pairs
+retain the general graph, rounding, saturation and A2/A3 scratch rules.
+
+[ExpandMixedKernel](25-expand_mixed_kernel.md) can combine a sole compatible NZ
+move into that conversion before allocation. A store or additional consumer
+keeps the native ND cast. The direct conversion requires the companion
+PTOAS and pto-isa support described in [FP4](../fp4.md#cast-policy-ascend950);
+the public PTOAS v0.67 pin alone does not support it.
+
 ## Destination saturation
 
 `pl.cast`, `pl.tensor.cast` and `pl.tile.cast` take a keyword-only
@@ -152,19 +167,19 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 
 | from | native (1 instruction) | legalized chain (n instructions) |
 | ---- | ---------------------- | -------------------------------- |
-| `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
-| `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
-| `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
-| `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
-| `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
-| `int16` | `fp16`, `fp32`, `int32`, `uint32`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int8`(2), `uint16`(2), `fp4`(3) |
-| `int32` | `fp32`, `int16`, `int64`, `uint16`, `uint8` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `fp4`(3), `int8`(3) |
-| `int64` | `fp32`, `int32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `uint16`(2), `uint8`(2), `fp4`(3), `int8`(3) |
-| `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+| `bf16` | `fp16`, `fp32`, `fp4e2m1x2`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
+| `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4e2m1x2`(3) |
+| `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4e2m1x2`(2), `int8`(2), `uint16`(2), `uint8`(2) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3` | `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4e2m1x2`(3), `int8`(3), `uint16`(3), `uint8`(3) |
+| `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4e2m1x2`(3), `int8`(3), `uint16`(3), `uint8`(3) |
+| `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4e2m1x2`(3), `int8`(3), `uint16`(3), `uint8`(3) |
+| `int16` | `fp16`, `fp32`, `int32`, `uint32`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int8`(2), `uint16`(2), `fp4e2m1x2`(3) |
+| `int32` | `fp32`, `int16`, `int64`, `uint16`, `uint8` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `fp4e2m1x2`(3), `int8`(3) |
+| `int64` | `fp32`, `int32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `uint16`(2), `uint8`(2), `fp4e2m1x2`(3), `int8`(3) |
+| `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4e2m1x2`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
-| `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+| `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4e2m1x2`(4) |
 
 ### Ascend910 (a2a3)
 

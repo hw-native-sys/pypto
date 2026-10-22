@@ -54,9 +54,10 @@ E1M2 numerical casts, new transfer layouts, or MXFP4 quantization.
 | Packed GM views | ND carrier dimensions and strides; PTOAS v0.67 handles DMA descriptor conversion |
 | E2M1x2 ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
 | E2M1x2 ↔ BF16 cast | Native TCVT; the last axis expands/contracts 2:1; packing requires a static positive even source extent |
-| E2M1x2 → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1x2 → FP8E4M3FN cast | One exact native TCVT on A5; eligible private cast-plus-move chains write FP8 NZ directly |
+| E2M1x2 → FP8E5M2 cast | Legalized through BF16 and FP32, with a warning |
 | E1M2 numerical casts and E2M1↔E1M2 conversion | Deferred |
-| DN, NZ, column-major, column-vector `[M,1]`, or layout-changing packed views | Not enabled by this change |
+| Packed DN, NZ, column-major, column-vector `[M,1]`, or layout-changing packed views | Not enabled by this change |
 | Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
 | Native packed FP4 `matmul_mx` and MXFP4 `quant_mx` | Unsupported; the existing E2M1-to-FP8 cast can prepare an FP8 matrix operand |
 | Ascend910/A2A3 packed FP4 execution | Unsupported |
@@ -103,6 +104,38 @@ PYPTO and DSA_RP planning emit addressed aliases. PTOAS planning remains
 unsupported for this path because its `treshape` rejects the packed FP4 type.
 These existing alias constraints do not establish additional E1M2 operator
 support.
+
+## Cast 策略（Ascend950）
+
+ISA 转换已合入规范仓库
+[cann/pto-isa!1967](https://gitcode.com/cann/pto-isa/merge_requests/1967)。
+[GitHub 镜像 #355](https://github.com/hw-native-sys/pto-isa/pull/355) 已关闭，
+但关闭并不证明镜像或运行时 pin 已包含实现。当前 runtime/ISA pin 仍缺少此实现。
+编译器支持仍由 [PTOAS #1637](https://github.com/hw-native-sys/PTOAS/pull/1637) 和
+[#1669](https://github.com/hw-native-sys/PTOAS/issues/1669) 跟踪。
+公开 PTOAS v0.67 pin 及 v0.69 发布版均缺少直接转换路径；
+此处未声明具备全部前置条件的发布版本。
+
+公开 cast 接受行优先 ND E2M1 carrier，并返回新分配的行优先 ND FP8 tile。
+PYPTO 和 PTOAS 两种内存规划器均使用一次原生转换，不产生编译器 LUT/索引
+tile、BF16/FP32 中转或转换 scratch。源 shape、有效范围、stride 和 GM
+offset 保持字节 carrier 单位；仅 cast 结果的列和有效列按两倍展开。
+例如 `[32,256]`、有效范围 `[23,129]` 转为 FP8 `[32,512]`、
+有效范围 `[23,258]`。在对齐的物理 tile 几何范围内，奇数 carrier
+有效列仍包含完整数值对，因此合法；物理 ND/NZ 对齐限制仍然适用。
+
+分配前，`ExpandMixedKernel` 可将 cast 与其唯一兼容 NZ move 合并，
+在原 cast 位置直接写入独立 FP8 NZ 结果。共享结果、跨区域使用、已分配别名
+或不匹配的布局/有效元数据会保留 ND cast 和独立 move。
+`[32,256]` packed 源与 `[32,512]` FP8 NZ 结果分别使用互不重叠的
+8,192 和 16,384 字节缓冲区，不产生 FP8 ND 中间值。
+此能力仅增加 NZ **输出**，不增加 packed NZ 或列优先输入。
+NK 矩阵路径先解码行优先 packed `[N,K/2]`，再转置 FP8；
+packed reshape 和 transpose 仍不支持。
+
+E1M2 数值 cast 及 E2M1/E1M2 互转仍不支持。E2M1 到 E5M2 仍经
+BF16/FP32 中转并发出警告。A2/A3 packed 执行、公开字节别名的内存规划器
+限制和其他 cast/scratch 规则保持不变。
 
 ## See also
 

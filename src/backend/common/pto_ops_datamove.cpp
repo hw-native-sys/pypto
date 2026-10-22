@@ -1541,11 +1541,12 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         << "Internal error: tile.reinterpret_view requires TileType source and result";
 
     const bool fp4_alias = source_tile->dtype_.IsPackedFp4() || result_tile->dtype_.IsPackedFp4();
-    // PTOAS 0.65 cannot infer the packed dtype's byte width for treshape or
-    // bitcast. Only aliases declared at one verified static UB address work.
+    // Public packed aliases require one verified static UB address. The
+    // pinned PTOAS treshape/bitcast path cannot represent this packed view;
+    // internal direct-cast layout views have a separate lowering contract.
     CHECK_SPAN(!fp4_alias || codegen.EmitTileAddr(), op->span_)
         << "tile.reinterpret_view: FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory; "
-           "PTOAS 0.65 does not support FP4 tile treshape";
+           "the pinned PTOAS does not support FP4 tile treshape";
 
     const std::string result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
     const bool result_has_memref = result_tile->memref_.has_value();
@@ -1586,6 +1587,26 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // so it must materialize a typed SSA view below.
     if (codegen.EmitTileAddr() && result_has_memref && !existing_type.empty() &&
         existing_type == result_type) {
+      return std::string("");
+    }
+
+    // A 1-byte dtype alias (INT8<->FP8E4M3FN) whose auto-shape equals the
+    // source shape is a pure relabel of one buffer address: when the result
+    // var owns an inherited MemRef, its own alloc_tile at that address already
+    // carries the target type, so the alias needs no op at all -- the same
+    // "two alloc_tile decls at the same addr ARE the mechanism" the
+    // transpose_view handler below relies on. PTOAS's treshape rejects
+    // FP8E4M3FN on either side, so the relabel must not go through it.
+    const bool byte_pair_alias =
+        (source_tile->dtype_ == DataType::INT8 && result_tile->dtype_ == DataType::FP8E4M3FN) ||
+        (source_tile->dtype_ == DataType::FP8E4M3FN && result_tile->dtype_ == DataType::INT8);
+    const bool same_shape =
+        result_tile->shape_.size() == source_tile->shape_.size() &&
+        ir::tile_view_semantics::ShapeExprListsEquivalent(result_tile->shape_, source_tile->shape_);
+    if (codegen.EmitTileAddr() && result_has_memref && byte_pair_alias && same_shape &&
+        ir::tile_view_semantics::ShapeExprListsEquivalent(
+            ir::tile_view_semantics::GetEffectiveTileView(*result_tile).valid_shape,
+            ir::tile_view_semantics::GetEffectiveTileView(*source_tile).valid_shape)) {
       return std::string("");
     }
 

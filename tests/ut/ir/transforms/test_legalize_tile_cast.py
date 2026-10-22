@@ -16,6 +16,7 @@ from pypto.backend import BackendType
 from pypto.language.parser.diagnostics import InvalidOperationError
 
 _TILE_CAST = ir.get_op("tile.cast").name
+_TILE_GATHER = ir.get_op("tile.gather").name
 
 
 class _CastTargetCollector(ir.IRVisitor):
@@ -80,6 +81,107 @@ def test_a5_int32_to_fp16_becomes_fp32_bridge():
     after = _run(Before, BackendType.Ascend950)
     pairs = _cast_pairs(after)
     assert pairs == [("int32", "fp32"), ("fp32", "fp16")], pairs
+
+
+def test_a5_explicit_packed_fp4_to_fp8_preserves_partial_valid_region():
+    """Native direct conversion preserves the original geometry and SSA contract."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 32], valid_shape=[8, 24])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+    # E2M1 -> E4M3FN is one native conversion for packed E2M1 sources.
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+
+
+def test_a5_packed_fp4_only_e5m2_cast_warns(capfd):
+    """E4M3 stays native and silent; E5M2 retains its three-hop warning."""
+    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
+
+    @pl.program
+    class E4M3:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 32])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        after = _run(E4M3, BackendType.Ascend950)
+        err_e4m3 = capfd.readouterr().err
+    finally:
+        set_log_level(prev)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    assert "LegalizeTileCast" not in err_e4m3  # native route: silent
+
+    @pl.program
+    class E5M2:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E5M2]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E5M2]:
+            t = pl.load(x, [0, 0], [16, 32])
+            c = pl.cast(t, pl.FP8E5M2)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        _run(E5M2, BackendType.Ascend950)
+        err_e5m2 = capfd.readouterr().err
+    finally:
+        set_log_level(prev)
+    assert "LegalizeTileCast" in err_e5m2
+    assert "FP4→BF16→FP32→FP8" in err_e5m2
+    assert "fp8e5m2" in err_e5m2.lower()
+
+
+def test_a5_fp4_to_bf16_cast_is_silent(capfd):
+    """DSv4.1 c1a path: FP4↔BF16 must not warn."""
+    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+        ) -> pl.Tensor[[16, 64], pl.BF16]:
+            t = pl.load(x, [0, 0], [16, 32])
+            c = pl.cast(t, pl.BF16)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        after = _run(Before, BackendType.Ascend950)
+    finally:
+        set_log_level(prev)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "bfloat16")]
+    err = capfd.readouterr().err
+    assert "LegalizeTileCast" not in err
+    assert "FP4→BF16→FP32→FP8" not in err
 
 
 def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
@@ -150,8 +252,8 @@ def test_a5_uint8_ub_alias_to_bf16_stays_one_native_cast():
     assert _cast_pairs(after) == [("fp4e2m1x2", "bfloat16")]
 
 
-def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
-    """Packed E2M1→FP8 is legalized with a warning about the three-hop bridge."""
+def test_a5_fp4e2m1x2_to_fp8_cast_is_silent(capfd):
+    """Native direct conversion preserves the original geometry and SSA contract."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -173,19 +275,14 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
         after = _run(Before, BackendType.Ascend950)
     finally:
         set_log_level(prev)
-    assert _cast_pairs(after) == [
-        ("fp4e2m1x2", "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
+    pairs = _cast_pairs(after)
+    assert pairs == [("fp4e2m1x2", "fp8e4m3fn")]
     err = capfd.readouterr().err
-    assert "LegalizeTileCast" in err
-    assert "FP4→BF16→FP32→FP8" in err
-    assert "LUT" in err
+    assert "LegalizeTileCast" not in err  # native route: silent
 
 
 def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
-    """Hand-written FP4E2M1X2→FP8 legalization expands the last axis 2:1."""
+    """Native direct conversion preserves the original geometry and SSA contract."""
 
     @pl.program
     class Before:
@@ -201,11 +298,8 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
 
     after = _run(Before, BackendType.Ascend950)
 
-    assert _cast_pairs(after) == [
-        ("fp4e2m1x2", "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
+    pairs = _cast_pairs(after)
+    assert pairs == [("fp4e2m1x2", "fp8e4m3fn")]
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -226,33 +320,7 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     collector = _ValidShapeCollector()
     collector.visit_program(after)
     assert collector.shapes
-    assert collector.shapes[0] == (8, 48)
-    assert all(shape == (8, 48) for shape in collector.shapes)
-
-    class _StrideCollector(ir.IRVisitor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.strides: list[list[int]] = []
-
-        def visit_call(self, op: ir.Call) -> None:
-            if op.op.name == _TILE_CAST:
-                tile_type = op.type
-                assert isinstance(tile_type, ir.TileType)
-                stride = tile_type.get_effective_tile_view().stride
-                values: list[int] = []
-                for dim in stride:
-                    assert isinstance(dim, ir.ConstInt)
-                    values.append(dim.value)
-                self.strides.append(values)
-            super().visit_call(op)
-
-    strides = _StrideCollector()
-    strides.visit_program(after)
-    assert strides.strides
-    # Packed physical [16, 32] stride [32, 1] unpacks to [16, 64] stride [64, 1].
-    # valid_shape [8, 24] → [8, 48] is the sub-rectangle, not the row pitch.
-    assert strides.strides[0] == [64, 1]
-    assert all(stride == [64, 1] for stride in strides.strides)
+    assert collector.shapes == [(8, 48)], collector.shapes
 
 
 @pytest.mark.parametrize(
@@ -613,3 +681,103 @@ def test_legalized_chain_keeps_a_caller_supplied_tmp_on_the_final_hop():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_a5_partial_valid_shape_survives_native_cast():
+    """Native direct conversion preserves the original geometry and SSA contract."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 32], valid_shape=[8, 24])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+
+    class _ChainValidCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gather_valid: list[tuple[int, int]] = []
+            self.f8_valid: list[tuple[int, int]] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if not isinstance(op.type, ir.TileType):
+                return
+            valid = op.type.get_effective_tile_view().valid_shape
+            dims = []
+            ok = len(valid) == 2
+            for d in valid:
+                if not isinstance(d, ir.ConstInt):
+                    ok = False
+                else:
+                    dims.append(d.value)
+            if ok:
+                if op.op.name == _TILE_GATHER:
+                    self.gather_valid.append((dims[0], dims[1]))
+                elif op.op.name == _TILE_CAST and str(op.type.dtype) == "fp8e4m3fn":
+                    self.f8_valid.append((dims[0], dims[1]))
+            super().visit_call(op)
+
+    c = _ChainValidCollector()
+    c.visit_program(after)
+    assert not c.gather_valid, "Native conversion must not materialize a LUT"
+    assert c.f8_valid == [(8, 48)], c.f8_valid
+
+
+def test_a5_dynamic_packed_shape_preserves_native_cast_ssa():
+    """Native direct conversion preserves the original geometry and SSA contract."""
+
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(ir.DataType.INDEX), span)
+    two_n = ir.Mul(ir.ConstInt(2, ir.DataType.INDEX, span), n, ir.DataType.INDEX, span)
+    src_tile = ir.Var(
+        "t",
+        ir.TileType(
+            [ir.ConstInt(16, ir.DataType.INDEX, span), two_n],
+            ir.DataType.FP4E2M1X2,
+            None,
+            ir.TileView(valid_shape=[ir.ConstInt(16, ir.DataType.INDEX, span), two_n]),
+            ir.MemorySpace.Vec,
+        ),
+        span,
+    )
+    load_t = ir.Var("t_load", src_tile.type, span)
+    call = ir.create_op_call(
+        "tile.cast",
+        [load_t],
+        {"target_type": ir.DataType.FP8E4M3FN, "mode": 2},
+        span,
+    )
+    out_var = ir.Var("c", call.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(load_t, src_tile, span), ir.AssignStmt(out_var, call, span)], span)
+    func = ir.Function(
+        "k",
+        [(n, ir.ParamDirection.In), (src_tile, ir.ParamDirection.In)],
+        [],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([func], "dyn_valid", span)
+
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    properties.insert(passes.IRProperty.AssignTypeSymmetry)
+    passes.verify_properties(properties, program, "before FP4 lowering")
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    try:
+        after = passes.legalize_tile_cast()(program)
+    finally:
+        backend.reset_for_testing()
+    text = ir.python_print(after)
+    assert "tile.gather" not in text, text[:800]
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    passes.verify_properties(properties, after, "after FP4 lowering")

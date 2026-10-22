@@ -54,9 +54,10 @@ E1M2 numerical casts, new transfer layouts, or MXFP4 quantization.
 | Packed GM views | ND carrier dimensions and strides; PTOAS v0.67 handles DMA descriptor conversion |
 | E2M1x2 ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
 | E2M1x2 ↔ BF16 cast | Native TCVT; the last axis expands/contracts 2:1; packing requires a static positive even source extent |
-| E2M1x2 → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1x2 → FP8E4M3FN cast | One exact native TCVT on A5; eligible private cast-plus-move chains write FP8 NZ directly |
+| E2M1x2 → FP8E5M2 cast | Legalized through BF16 and FP32, with a warning |
 | E1M2 numerical casts and E2M1↔E1M2 conversion | Deferred |
-| DN, NZ, column-major, column-vector `[M,1]`, or layout-changing packed views | Not enabled by this change |
+| Packed DN, NZ, column-major, column-vector `[M,1]`, or layout-changing packed views | Not enabled by this change |
 | Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
 | Native packed FP4 `matmul_mx` and MXFP4 `quant_mx` | Unsupported; the existing E2M1-to-FP8 cast can prepare an FP8 matrix operand |
 | Ascend910/A2A3 packed FP4 execution | Unsupported |
@@ -64,6 +65,10 @@ E1M2 numerical casts, new transfer layouts, or MXFP4 quantization.
 PTO GM views retain carrier coordinates. The conversion to the lower-level
 instruction's value geometry belongs to PTOAS; scaling the GM shape again in
 PyPTO would double its row pitch.
+
+Pass torch `float4_e2m1fn_x2` tensors with shapes counted in carriers to compiled
+programs. Dispatch checks the carrier shape and rejects a tensor that uses
+logical nibble extents for a packed parameter.
 
 ## Decode a UINT8 carrier through a UB alias (Ascend950)
 
@@ -103,6 +108,43 @@ PYPTO and DSA_RP planning emit addressed aliases. PTOAS planning remains
 unsupported for this path because its `treshape` rejects the packed FP4 type.
 These existing alias constraints do not establish additional E1M2 operator
 support.
+
+## Cast policy (Ascend950)
+
+The ISA conversion is merged in canonical
+[cann/pto-isa!1967](https://gitcode.com/cann/pto-isa/merge_requests/1967).
+The closed [GitHub mirror #355](https://github.com/hw-native-sys/pto-isa/pull/355)
+does not establish mirror or runtime-pin availability. The current runtime/ISA
+pins still lack the implementation. Compiler support remains tracked by
+[PTOAS #1637](https://github.com/hw-native-sys/PTOAS/pull/1637) and
+[#1669](https://github.com/hw-native-sys/PTOAS/issues/1669).
+The public PTOAS v0.67 pin and v0.69 release lack the direct path; a release
+containing all prerequisites is not declared here.
+
+A public cast from row-major ND E2M1 carriers returns a fresh row-major ND
+FP8 tile. Both PYPTO and PTOAS memory planners use one native conversion,
+without compiler LUT/index tiles, BF16/FP32 staging, or conversion scratch.
+Source shape, valid extents, strides, and GM offsets retain byte-carrier units;
+only the cast result expands columns and valid columns by two.
+For example, a source with shape `[32,256]` and valid extent `[23,129]`
+produces FP8 shape `[32,512]` and valid extent `[23,258]`.
+Odd carrier valid-column extents are valid within aligned physical tile
+geometry; they already represent complete pairs. Physical ND/NZ alignment
+restrictions still apply.
+
+Before allocation, `ExpandMixedKernel` may combine that cast with its sole
+compatible NZ move. This private path writes the fresh FP8 NZ result at the
+original cast position. Shared results, cross-region uses, allocated aliases,
+or mismatching layout/valid metadata retain the ND cast and separate move.
+A `[32,256]` packed source and `[32,512]` FP8 NZ result require disjoint
+8,192-byte and 16,384-byte buffers, with no FP8 ND intermediate.
+This enables NZ **output**, without adding packed NZ or column-major input.
+NK matrix addressing decodes row-major packed `[N,K/2]` then transposes FP8;
+packed reshape and transpose remain unsupported.
+
+E1M2 numerical casts and E2M1/E1M2 conversion remain unsupported.
+E2M1-to-E5M2 retains the BF16/FP32 bridge and warning. A2/A3 packed execution,
+public byte-alias planner restrictions, and other cast/scratch rules are unchanged.
 
 ## See also
 

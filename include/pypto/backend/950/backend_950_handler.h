@@ -59,6 +59,11 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return false; }
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return false; }
   [[nodiscard]] bool SplitsCubeToVectorTransportInHardware() const override { return true; }
+  [[nodiscard]] bool SupportsFp4CastToNZ() const override { return true; }
+  // FP8 data can consume the transposed view of the same V2C FIFO slot.
+  [[nodiscard]] bool SupportsTransposeBoundaryPop(DataType dtype) const override {
+    return dtype == DataType::FP8E4M3FN;
+  }
   // A5 acc->mat tinsert accepts dst=f32, so the Mat scratch may stay f32.
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return false; }
 

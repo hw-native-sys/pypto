@@ -41,6 +41,7 @@ namespace {
 
 using ir::As;
 using ir::CallPtr;
+using ir::ExprPtr;
 using pto_ops_detail::AsPto;
 using pto_ops_detail::EmitInsOutsWithViewTypes;
 using pto_ops_detail::EnsureStaticViewTileSsa;
@@ -131,6 +132,59 @@ OpScratchPlan PlanCastScratch(CastTarget target, const OpScratchRequest& request
                             CeilDivI64(bytes, kTcvtScratchAlignBytes) * kTcvtScratchAlignBytes);
   return {OpScratchStatus::Required, TileScratchSpec{DataType::INT8, 1, bytes}, ""};
 }
+// Direct FP4 TCVT requires static valid columns, while alloc_tile deliberately
+// carries both valid axes as operands. A full-size, zero-offset subview refines
+// only that metadata: PTOAS resolves it to the same address and retains the
+// runtime valid-row operand. A treshape cannot carry that operand, and
+// set_validshape requires both axes dynamic, so neither can express this view.
+static std::pair<std::string, std::string> MakeFp4CastValidView(const ExprPtr& expr,
+                                                                codegen::PTOCodegen& codegen,
+                                                                const std::string& hint) {
+  const auto tile_type = As<ir::TileType>(expr->GetType());
+  INTERNAL_CHECK_SPAN(tile_type && tile_type->shape_.size() == 2 && tile_type->memory_space_.has_value(),
+                      expr->span_)
+      << "Internal error: direct FP4 cast requires a 2D tile with a memory space";
+  const auto rows = As<ir::ConstInt>(tile_type->shape_[0]);
+  const auto cols = As<ir::ConstInt>(tile_type->shape_[1]);
+  INTERNAL_CHECK_SPAN(rows && cols, expr->span_)
+      << "Internal error: direct FP4 cast requires static physical tile dimensions";
+  auto components = codegen::ExtractTileTypeInfo(*tile_type, codegen.GetTypeString(tile_type->dtype_));
+  const auto valid_shape = ir::GetValidShape(tile_type);
+  INTERNAL_CHECK_SPAN(valid_shape.size() == 2, expr->span_)
+      << "Internal error: direct FP4 cast requires two valid extents";
+  const auto valid_row = As<ir::ConstInt>(valid_shape[0]);
+  const auto valid_col = As<ir::ConstInt>(valid_shape[1]);
+  CHECK_SPAN(valid_col && valid_col->value_ > 0, expr->span_)
+      << "Direct FP4-to-FP8 cast requires a positive compile-time valid column extent";
+  INTERNAL_CHECK_SPAN(!valid_row || valid_row->value_ > 0, expr->span_)
+      << "Internal error: empty direct FP4 casts must be handled before valid-view emission";
+  components.v_row_dynamic = valid_row == nullptr;
+  if (valid_row) components.v_row = valid_row->value_;
+  components.v_col_dynamic = false;
+  components.v_col = valid_col->value_;
+  // All packed source geometry already counts byte carriers. Only the
+  // numerical cast boundary expands the destination into FP8 values.
+  const auto view_type = codegen::FormatTileBufTypeString(
+      codegen::MemorySpaceToMLIR(*tile_type->memory_space_), components.dtype_str, components.rows,
+      components.cols, components.blayout, components.slayout, components.fractal, components.pad,
+      components.compact, components.v_row, components.v_col, components.v_row_dynamic,
+      components.v_col_dynamic);
+  const auto source = codegen.GetExprAsCode(expr);
+  const auto source_type = codegen.GetExprTypeAnnotation(expr);
+  const auto row_operand =
+      valid_row ? codegen.GetOrEmitConstant(components.v_row, DataType::INDEX)
+                : codegen.EmitCastToIndex(valid_shape[0], codegen.GetExprAsCode(valid_shape[0]));
+  const auto col_operand = codegen.GetOrEmitConstant(components.v_col, DataType::INDEX);
+  const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+  const auto view = codegen.NewNamedTemp(hint);
+  codegen.Emit(view + " = pto.subview " + source + "[" + zero + ", " + zero + "] sizes [" +
+               std::to_string(components.rows) + ", " + std::to_string(components.cols) + "] valid [" +
+               row_operand + ", " + col_operand + "] : " + source_type + " -> " + view_type);
+  codegen.RegisterTileBufType(view, view_type);
+  codegen.RegisterTileViewName(view);
+  return {view, view_type};
+}
+
 // A2/A3 scratch-backed tcvt requires static validity in both forms: level3
 // verifies an explicit tmp, while level2 sizes an implicit tmp in PlanMemory.
 // alloc_tile types keep v_row=?, v_col=?, so bridge src/dst without changing
@@ -191,6 +245,36 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
       << "Internal error: tile.cast saturation_mode out of range: " << saturation_mode;
   config_attr += ", satmode = #pto<saturation_mode " + ir::SaturationModeToPTOString(saturation_mode) + ">";
   config_attr += "}";
+
+  const auto source_type = As<ir::TileType>(op->args_[0]->GetType());
+  const auto result = codegen.GetCurrentResultVar();
+  const auto result_type = result ? As<ir::TileType>(result->GetType()) : nullptr;
+  if (op->args_.size() == 1 && codegen.GetBackendHandler()->SupportsFp4CastToNZ() && source_type &&
+      result_type && source_type->dtype_ == DataType::FP4E2M1X2 &&
+      result_type->dtype_ == DataType::FP8E4M3FN) {
+    const auto source_valid = ir::GetValidShape(source_type);
+    const auto result_valid = ir::GetValidShape(result_type);
+    INTERNAL_CHECK_SPAN(source_valid.size() == 2 && result_valid.size() == 2, op->span_)
+        << "Internal error: direct FP4 cast requires two source and result valid extents";
+    ir::arith::Analyzer analyzer;
+    const auto source_row = As<ir::ConstInt>(analyzer.Simplify(source_valid[0]));
+    const auto result_row = As<ir::ConstInt>(analyzer.Simplify(result_valid[0]));
+    const bool source_empty = source_row && source_row->value_ == 0;
+    const bool result_empty = result_row && result_row->value_ == 0;
+    if (source_empty || result_empty) {
+      INTERNAL_CHECK_SPAN(source_empty && result_empty, op->span_)
+          << "Internal error: direct FP4 cast source and result must agree on zero valid rows";
+      // A statically empty conversion reads and writes nothing. Keep its
+      // allocated handles for downstream consumers, avoiding an ISA Tile with
+      // unsupported staticRow=0. Runtime rows, including zero, stay dynamic.
+      return "";
+    }
+    const auto source_view = MakeFp4CastValidView(op->args_[0], codegen, "tcvt_src_view");
+    const auto result_view = MakeFp4CastValidView(result, codegen, "tcvt_dst_view");
+    codegen.Emit("pto.tcvt ins(" + source_view.first + " " + config_attr + " : " + source_view.second +
+                 ") outs(" + result_view.first + " : " + result_view.second + ")");
+    return "";
+  }
 
   auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
@@ -259,6 +343,16 @@ void RegisterCastOps(Backend& backend, BackendType backend_type) {
       })
       .set_input_layout(0, ir::TileLayout::row_major)
       .set_output_layout(ir::TileLayout::row_major);
+
+  // Direct NZ casts share conversion semantics but must not inherit the
+  // ordinary cast's row-major destination constraint.
+  backend.RegisterOp("tile.cast_to_nz")
+      .f_codegen([&backend, target](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+        CHECK_SPAN(AsPto(codegen).GetBackendHandler()->SupportsFp4CastToNZ(), op->span_)
+            << "tile.cast_to_nz is unsupported by this backend";
+        return MakeTcvtCodegenPTO(backend, target, op, codegen);
+      })
+      .set_input_layout(0, ir::TileLayout::row_major);
 }
 
 }  // namespace pypto::backend
