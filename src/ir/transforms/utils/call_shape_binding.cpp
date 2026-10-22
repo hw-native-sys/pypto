@@ -11,15 +11,20 @@
 
 #include "pypto/ir/transforms/utils/call_shape_binding.h"
 
+#include <cstddef>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/signature_symbols.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 namespace {
@@ -95,8 +100,9 @@ class ShapeMatcher {
     if (!tensor || !other || tensor->memref_ || other->memref_ || !HasLayoutOnlyView(tensor) ||
         !HasLayoutOnlyView(other) || tensor->tensor_view_.has_value() != other->tensor_view_.has_value() ||
         (tensor->tensor_view_ && tensor->tensor_view_->layout != other->tensor_view_->layout) ||
-        tensor->dtype_ != other->dtype_ || tensor->shape_.size() != other->shape_.size())
+        tensor->dtype_ != other->dtype_ || tensor->shape_.size() != other->shape_.size()) {
       return Conflict();
+    }
     for (size_t i = 0; i < tensor->shape_.size(); ++i) {
       if (!Match(tensor->shape_[i], other->shape_[i], bindings)) return false;
     }

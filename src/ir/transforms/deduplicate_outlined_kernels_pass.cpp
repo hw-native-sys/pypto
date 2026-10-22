@@ -448,8 +448,9 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
     // Ordinary kernels may be called through Spmd: their incoming Call still
     // supplies that wrapper's own arguments and shape symbols.
     if (candidate.names.size() != 1 || representative.names.size() != 1 ||
-        info.at(candidate.names[0]).function->func_type_ != FunctionType::InCore)
+        info.at(candidate.names[0]).function->func_type_ != FunctionType::InCore) {
       return false;
+    }
     const auto& name = representative.names[0];
     auto plan = shape_plans.find(name);
     if (plan == shape_plans.end()) {
@@ -458,7 +459,11 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
     if (!plan->second.supported()) return false;
     for (const auto& site : sites[candidate.names[0]]) {
       auto call = As<Call>(site);
-      const auto& args = call ? call->args_ : As<Submit>(site)->args_;
+      auto submit = As<Submit>(site);
+      // Keep the proof conservative if the incoming-site index ever expands
+      // beyond the two call-like kinds collected today.
+      if (!call && !submit) return false;
+      const auto& args = call ? call->args_ : submit->args_;
       // Runtime-synthesized Submit outputs still read the callee's parameter
       // shapes directly. A local proof cannot transport those bindings into
       // codegen, so shape-distinct aliases must supply every output explicitly.

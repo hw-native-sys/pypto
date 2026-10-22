@@ -17,8 +17,11 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 
@@ -35,7 +38,7 @@ enum class CallShapeStatus { Success, Unsupported, Conflict, MissingSource, Budg
 class CallShapeBindingPlan {
  public:
   explicit CallShapeBindingPlan(FunctionPtr function);
-  bool supported() const { return supported_; }
+  [[nodiscard]] bool supported() const { return supported_; }
   CallShapeStatus Bind(const std::vector<ExprPtr>& args, CallShapeMap& bindings, size_t& budget) const;
   bool MatchesResult(const ExprPtr& call, const CallShapeMap& bindings, size_t& budget) const;
 
