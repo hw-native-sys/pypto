@@ -164,6 +164,28 @@ plan to attach a debugger:
 SKBUILD_CMAKE_DEFINE=PYPTO_DEBUG_INFO_LEVEL=1 pip install .
 ```
 
+The `libbacktrace` dependency uses different parallelism policies for the two build
+generators. With Unix Makefiles, its build and install steps share the outer GNU
+Make jobserver, so `cmake --build build --parallel N` controls their shared budget.
+With Ninja, both steps use a finite local budget, selected at CMake configuration
+time in this order:
+
+1. The explicit CMake option `-DPYPTO_EXTERNAL_BUILD_JOBS=N`.
+2. The nonempty `CMAKE_BUILD_PARALLEL_LEVEL` environment variable.
+3. One job when neither is supplied.
+
+For a Ninja-based pip build, an explicit dependency budget can be passed as:
+
+```bash
+SKBUILD_CMAKE_DEFINE=PYPTO_EXTERNAL_BUILD_JOBS=2 pip install .
+```
+
+The selected value must be a positive decimal integer; an explicitly empty CMake
+option is an error, while an empty environment variable uses the default. The
+option applies only to non-Makefile generators. Ninja's outer tasks and the
+dependency do not share a global budget. Changing only the later build command's
+`--parallel` value does not update the dependency budget; reconfigure to change it.
+
 `ccache` is detected and used automatically when present, which makes repeated builds
 substantially cheaper:
 
