@@ -779,6 +779,35 @@ def test_nz_whole_tensor_flatten_compiles_with_explicit_incore_helper():
     assert "pto.tstore" in source
 
 
+@pytest.mark.parametrize("source_layout", [pl.ND, pl.NZ])
+def test_reshape_nd_result_is_not_overridden_by_helper_layout(source_layout):
+    """Known reshape metadata takes precedence over the helper's declared layout."""
+
+    @jit.incore
+    def copy_head(flat: pl.Tensor[[131072], pl.INT8, pl.NZ], out: pl.Out[pl.Tensor[[1, 32], pl.INT8]]):
+        tile = pl.load(flat, [0], [32], target_memory=pl.Mem.Vec)
+        row = pl.tile.reshape(tile, [1, 32])
+        pl.store(row, [0, 0], out)
+        return out
+
+    @jit
+    def entry(
+        weight: pl.Tensor[[256, 512], pl.INT8, source_layout],
+        out: pl.Out[pl.Tensor[[1, 32], pl.INT8]],
+    ):
+        flat = pl.reshape(weight, [131072])
+        with pl.spmd(1):
+            out = copy_head(flat, out)
+        return out
+
+    flat_type = entry.specialize().get_function("copy_head").params[0].type
+    assert isinstance(flat_type, ir.TensorType)
+    assert flat_type.tensor_view is None
+    # Compilation runs the layout verifier too: the physical ND view must not
+    # be restamped NZ merely because the helper's source annotation says NZ.
+    assert isinstance(entry.compile(), CompiledProgram)
+
+
 def _request_kernel(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
     with pl.at(level=pl.Level.CORE_GROUP):
         result = pl.add(x, x)

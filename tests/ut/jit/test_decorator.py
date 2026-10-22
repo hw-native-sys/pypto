@@ -1898,8 +1898,9 @@ class TestSliceAndDepReturnMetadata:
         }
         metas = _extract_local_tensor_metas(_reshape_body, seed_meta=seed)
         # reshape changes rank but keeps element count; dtype inherited from src.
-        assert metas["x_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
-        assert metas["out_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+        expected = TensorMeta(shape=(128, 128), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
+        assert metas["x_flat"] == expected
+        assert metas["out_flat"] == expected
 
     @pytest.mark.parametrize("source_shape", [(256, 512), (2, 256, 256)])
     def test_whole_nz_flatten_has_nd_metadata(self, source_shape):
@@ -1912,10 +1913,32 @@ class TestSliceAndDepReturnMetadata:
 
         seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=ir.TensorLayout.NZ)}
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
-        expected = TensorMeta(shape=(131072,), dtype=DataType.INT8)
+        expected = TensorMeta(shape=(131072,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
         assert metas["flat"] == expected
         assert metas["qualified"] == expected
         assert metas["src"] == seed["src"]
+
+    @pytest.mark.parametrize(
+        "source_layout", [None, ir.TensorLayout.ND, ir.TensorLayout.NZ], ids=["unannotated", "nd", "nz"]
+    )
+    def test_reshape_result_layout_is_not_overwritten_by_dep_annotation(self, source_layout):
+        """A computed ND view is known metadata, not an omitted layout for a dep to fill."""
+
+        @jit.incore
+        def consume(flat: pl.Tensor[[512], pl.INT8, pl.NZ]):
+            return flat
+
+        def caller(src):
+            flat = pl.reshape(src, [512])
+            alias = flat
+            return consume(alias)
+
+        seed = {"src": TensorMeta(shape=(16, 32), dtype=DataType.INT8, layout=source_layout)}
+        metas, scalar_dtypes = _resolve_dep_call_metadata(consume, caller, seed, {}, {})
+        # The helper's declaration must not turn raw one-dimensional storage
+        # back into an NZ matrix when the caller metadata is specialized.
+        assert metas["flat"] == TensorMeta(shape=(512,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
+        assert scalar_dtypes == {}
 
     @pytest.mark.parametrize(
         "source_shape, target_shape, layout",
@@ -1973,13 +1996,13 @@ class TestSliceAndDepReturnMetadata:
     def test_dep_metadata_uses_plain_rebinding_at_callsite(self):
         """A plain assignment shadows the parameter only until the selected call."""
         metas = self._resolve_callsite_metadata(_plain_rebind_callsite)
-        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
         assert metas["out"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_dep_metadata_uses_annotated_rebinding_at_callsite(self):
         """Annotated and plain assignments expose the same point-in-time metadata."""
         metas = self._resolve_callsite_metadata(_annotated_rebind_callsite)
-        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_dep_metadata_tracks_all_chained_assignment_targets(self):
         """Every target gets RHS metadata from the pre-assignment state."""
@@ -1994,7 +2017,7 @@ class TestSliceAndDepReturnMetadata:
     def test_dep_metadata_nested_scope_preserves_source_order(self):
         """Nested DSL scopes stop at their consumer after processing prior producers."""
         metas = self._resolve_callsite_metadata(_nested_rebind_callsite)
-        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_extract_local_tensor_metas_subscript_slice(self):
         """``_extract_local_tensor_metas`` tracks subscript-slice sugar
@@ -2639,7 +2662,7 @@ class TestPldTensorRebindPreservesMetadata:
 
         seed = {"src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16)}
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
-        assert metas["flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+        assert metas["flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
 
     def test_alloc_window_buffer_does_not_preserve_stale_metadata(self):
         """``pld.tensor.alloc_window_buffer`` returns a ``Ptr``, not a
@@ -2818,7 +2841,7 @@ class TestPldTensorRebindPreservesMetadata:
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert metas["sliced"] == seed["src"]
-        assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32)
+        assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
 
 class TestDtypeOperandResolution:
@@ -2932,7 +2955,7 @@ class TestShapeOperandResolution:
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP16)}
         metas = _extract_local_tensor_metas(_shape_constant_views_body, seed_meta=seed)
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP16)
-        assert metas["flat"] == TensorMeta(shape=(32,), dtype=DataType.FP16)
+        assert metas["flat"] == TensorMeta(shape=(32,), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
         assert metas["win"] == TensorMeta(shape=(4, 8), dtype=DataType.INT32)
 
     def test_local_shadowing_extent_constant_is_runtime(self):

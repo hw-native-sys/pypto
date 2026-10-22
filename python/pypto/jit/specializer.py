@@ -98,11 +98,11 @@ class TensorMeta:
         shape: Per-dim entries. Each entry is either a static ``int`` or a
             :class:`DynDim` capturing a JIT-time-bound dynamic dim.
         dtype: DataType resolved from the torch tensor.
-        layout: Layout the user wrote in the annotation's third slot
-            (``pl.Tensor[[...], dtype, pl.NZ]``), or None when the annotation
-            omits it. Carried so the regenerated ``@pl.function`` source keeps
-            the slot the user wrote — a dropped layout would silently downgrade
-            the parameter to ND.
+        layout: Layout declared by an annotation or inferred from a producing
+            operation. None means an omitted layout that a dependency's
+            annotation may fill; explicit ND means the layout is known and
+            must not be overwritten. Non-ND layouts keep their third slot in
+            the regenerated ``@pl.function`` source.
     """
 
     shape: tuple[ShapeDim, ...]
