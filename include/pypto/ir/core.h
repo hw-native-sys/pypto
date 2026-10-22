@@ -128,7 +128,7 @@ enum class ObjectKind {
   RegType,
 
   // Other IR node kinds
-  Function = 79,
+  Function,
   Program,
   WindowBuffer,
 
