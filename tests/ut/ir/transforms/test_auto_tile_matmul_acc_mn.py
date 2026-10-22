@@ -759,6 +759,55 @@ def test_padding_only_output_columns_are_not_grid_work():
     ir.assert_structural_equal(after, Expected)
 
 
+def test_nd_store_padding_only_output_columns_are_not_grid_work():
+    """Bound a physical ND window to valid columns while retaining both batch offsets."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            out: pl.Out[pl.Tensor[[2, 3, 16, 64], pl.FP32]],
+        ) -> pl.Tensor[[2, 3, 16, 64], pl.FP32]:
+            product = pl.tile.matmul(a, b)
+            stored = pl.tile.store(product, [1, 2, 0, 0], out, shapes=[1, 1, 16, 64])
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[256, 16])],
+            out: pl.Out[pl.Tensor[[2, 3, 16, 64], pl.FP32]],
+        ) -> pl.Tensor[[2, 3, 16, 64], pl.FP32]:
+            for mi, (outer,) in pl.pipeline(
+                0, 16, 16, init_values=(out,), stage=2, attrs={"pipeline_overlap_stores": False}
+            ):
+                left = pl.tile.extract(a, mi, 0, [16, 256], target_memory=pl.Mem.Left)
+                for ni, (inner,) in pl.pipeline(
+                    0, 16, 16, init_values=(outer,), stage=2, attrs={"pipeline_overlap_stores": False}
+                ):
+                    right = pl.tile.extract(b, 0, ni, [256, 16], target_memory=pl.Mem.Right)
+                    product = pl.tile.matmul(left, right)
+                    # The dynamic N offset intersects the padded source's valid
+                    # prefix; later folding can simplify the one-trip loop.
+                    stored = pl.tile.store(
+                        product, [1, 2, mi, ni], inner, shapes=[1, 1, 16, pl.min(pl.max(16 - ni, 0), 16)]
+                    )
+                    inner_result = pl.yield_(stored)
+                outer_result = pl.yield_(inner_result)
+            return outer_result
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
 @pytest.mark.parametrize("accumulate", [False, True], ids=["returned-result", "caller-accumulator"])
 def test_padded_result_without_a_grid_consumer_keeps_physical_shape(accumulate):
     """Logical bounds must not change a caller-owned accumulator or a returned tile's ABI."""

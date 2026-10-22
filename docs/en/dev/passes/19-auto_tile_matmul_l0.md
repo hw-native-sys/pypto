@@ -222,7 +222,8 @@ The full rationale (the perf-sim derivation of the bandwidth / MAD numbers, the 
 
 ### Static valid-output bounds
 
-For a supported local direct-store or Mat-scratch consumer, the chooser and
+For a supported local direct-store (including singleton-batch ND windows) or
+Mat-scratch consumer, the chooser and
 both output-grid emitters use the same aligned static valid M/N rectangle.
 Complete padding-only boxes are storage, not output work: a 416-column source
 with valid N=17 needs only the aligned prefix, not tiles with valid N=0.
@@ -235,7 +236,10 @@ or an unsupported consumer. A Bias-resident operand still requires full N;
 a Mat bias without a reconstructible load snapshot retains its original grid.
 Symbolic valid extents retain the existing physical-bound policy; no runtime
 extent is guessed, and no new dynamic-empty-tile lowering is introduced.
-The chooser's cost coefficients, K search, and dbC policy are unchanged.
+Store eligibility is checked against the original physical matrix shape before
+bounding the work grid. Unsupported windows retain the full-shape K-only fallback;
+its result is never narrowed to the valid prefix. The chooser's cost coefficients,
+K search, and dbC policy are unchanged.
 
 ## Examples
 

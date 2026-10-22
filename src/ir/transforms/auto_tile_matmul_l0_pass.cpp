@@ -1923,7 +1923,7 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
 /// Mat-resident, so only the output Acc overflows; sub-tiling keeps every Acc
 /// tile within L0c. This helper handles the direct-store consumer:
 ///
-///   * **Direct-store** — the sole consumer is a 2D ``tile.store(c, base, out)``:
+///   * **Direct-store** — the sole consumer stores a matrix page via ``tile.store``:
 ///     each sub-tile stores straight to ``out[mi:, ni:]`` (the DDR-output case
 ///     our solver kernels need).  The store is folded in and emitted at the
 ///     store site.
@@ -2523,7 +2523,8 @@ class AutoTileMutator : public IRMutator {
           std::vector<Diagnostic> fallback_hints;
           if (auto k_only = AnalyzeMatmul(assign, fallback_hints, /*force_output_stationary=*/true,
                                           /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                          /*restrict_output_grid=*/false, /*keep_output_shape=*/true)) {
+                                          /*restrict_output_grid=*/false, /*keep_output_shape=*/true,
+                                          /*source_reduction=*/nullptr, consumer->fixed_output_m)) {
             // The rejected grid's deferral no longer applies. Diagnostic spans
             // are immutable, so remove by destruction and append by construction.
             while (hints.size() > mn_hint_start) hints.pop_back();
