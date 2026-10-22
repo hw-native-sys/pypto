@@ -3165,6 +3165,7 @@ class OutputParameterRewriter : public TypePropagatingMutator {
       auto storage = MakeStorage(callee->params_[i], arguments, shapes.get(), span, local_index++, prefix);
       args.push_back(storage);
       arguments.Bind(callee->params_[i], storage);
+      if (shapes) shapes->BindOutput(callee->params_[i], storage);
     }
     for (const auto& binding : bindings) {
       INTERNAL_CHECK_SPAN(binding.param_index == args.size() && binding.param_index < new_nonctx, span)
@@ -3173,6 +3174,7 @@ class OutputParameterRewriter : public TypePropagatingMutator {
                                  local_index++, prefix);
       args.push_back(storage);
       arguments.Bind(callee->params_[binding.param_index], storage);
+      if (shapes) shapes->BindOutput(callee->params_[binding.param_index], storage);
     }
     args.insert(args.end(), old_args.begin() + static_cast<std::ptrdiff_t>(supplied), old_args.end());
     const auto& attrs = call ? call->attrs_ : submit->attrs_;

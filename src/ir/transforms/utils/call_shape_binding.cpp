@@ -228,6 +228,14 @@ bool CallShapeBindingPlan::MatchesResult(const ExprPtr& call, const CallShapeMap
   return true;
 }
 
+void CallShapeInstantiation::BindOutput(const VarPtr& output, const ExprPtr& storage) {
+  bindings_.emplace(output.get(), storage);
+  // Earlier output types may reference this newly materialized parameter.
+  // Cached substitutions belong to the preceding environment.
+  expressions_.clear();
+  types_.clear();
+}
+
 ExprPtr CallShapeInstantiation::Replace(const VarPtr& var) const {
   auto found = bindings_.find(var.get());
   return found == bindings_.end() ? var : found->second;

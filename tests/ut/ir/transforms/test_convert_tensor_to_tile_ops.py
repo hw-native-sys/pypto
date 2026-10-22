@@ -8533,5 +8533,97 @@ def test_private_wrapper_output_rebinds_tensor_dim_operand(wrapper_type, use_sub
     assert isinstance(private_extent, ir.Call) and private_extent.args[0] is w
 
 
+@pytest.mark.parametrize("wrapper_type", [ir.FunctionType.Group, ir.FunctionType.Spmd])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_dependent_private_outputs_bind_earlier_storage(wrapper_type, use_submit):
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    first = ir.Var("first", ir.TensorType([64], DataType.FP32), span)
+    second = ir.Var("second", ir.TensorType([tensor_ops.dim(first, 0)], DataType.FP32), span)
+    kernel = ir.Function(
+        "kernel",
+        [(first, ir.ParamDirection.Out), (second, ir.ParamDirection.Out)],
+        [],
+        ir.ReturnStmt([], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    task_type = ir.TupleType([ir.ScalarType(DataType.TASK_ID)])
+    inner = ir.Submit(ir.GlobalVar("kernel"), [], [], {}, {}, task_type, span)
+    wrapper = ir.Function("wrapper", [], [], ir.EvalStmt(inner, span), span, type=wrapper_type)
+    outer = (
+        ir.Submit(ir.GlobalVar("wrapper"), [], [], {}, {}, task_type, span)
+        if use_submit
+        else ir.Call(ir.GlobalVar("wrapper"), [], ir.UnknownType(), span)
+    )
+    main = ir.Function("main", [], [], ir.EvalStmt(outer, span), span, type=ir.FunctionType.Orchestration)
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, wrapper, main], "test", span))
+    lowered_main = after.get_function("main")
+    lowered_wrapper = after.get_function("wrapper")
+    assert lowered_main is not None and lowered_wrapper is not None
+    assert isinstance(lowered_main.body, ir.SeqStmts)
+    allocations = [stmt for stmt in lowered_main.body.stmts if isinstance(stmt, ir.AssignStmt)]
+    assert len(allocations) == 2
+    second_type = allocations[1].var.type
+    assert isinstance(second_type, ir.TensorType)
+    extent = second_type.shape[0]
+    assert isinstance(extent, ir.Call) and extent.args[0] is allocations[0].var
+    second_param_type = lowered_wrapper.params[1].type
+    assert isinstance(second_param_type, ir.TensorType)
+    private_extent = second_param_type.shape[0]
+    assert isinstance(private_extent, ir.Call) and private_extent.args[0] is lowered_wrapper.params[0]
+
+
+def test_added_output_rebinds_omitted_original_out_storage():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([64], DataType.FP32)
+    x = ir.Var("x", tensor_type, span)
+    out = ir.Var("out", tensor_type, span)
+    create = tensor_ops.create([tensor_ops.dim(out, 0)], DataType.FP32)
+    result = ir.Var("result", create.type, span)
+    load = tile_ops.load(x, [0], [64], target_memory=MemorySpace.Vec)
+    loaded = ir.Var("loaded", load.type, span)
+    kernel = ir.Function(
+        "kernel",
+        [(x, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+        [],  # Return type is inferred from the body during conversion.
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(result, create, span),
+                ir.AssignStmt(loaded, load, span),
+                ir.EvalStmt(tile_ops.store(loaded, [0], result), span),
+                ir.ReturnStmt([result], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    actual = ir.Var("actual", tensor_type, span)
+    task_type = ir.TupleType([tensor_type, ir.ScalarType(DataType.TASK_ID)])
+    dispatch = ir.Submit(ir.GlobalVar("kernel"), [actual], [], {}, {}, task_type, span)
+    main = ir.Function(
+        "main", [actual], [], ir.EvalStmt(dispatch, span), span, type=ir.FunctionType.Orchestration
+    )
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, main], "test", span))
+    lowered_main = after.get_function("main")
+    assert lowered_main is not None and isinstance(lowered_main.body, ir.SeqStmts)
+    allocations = [stmt for stmt in lowered_main.body.stmts if isinstance(stmt, ir.AssignStmt)]
+    assert len(allocations) == 2
+    output_type = allocations[1].var.type
+    assert isinstance(output_type, ir.TensorType)
+    extent = output_type.shape[0]
+    assert isinstance(extent, ir.Call) and extent.args[0] is allocations[0].var
+    statement = lowered_main.body.stmts[-1]
+    assert isinstance(statement, ir.EvalStmt) and isinstance(statement.expr, ir.Submit)
+    assert isinstance(statement.expr.type, ir.TupleType)
+    ir.assert_structural_equal(statement.expr.type.types[0], output_type)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

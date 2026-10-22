@@ -45,13 +45,15 @@ class CallShapeBindingPlan {
   std::vector<VarPtr> required_;
 };
 
-// The environment is immutable. An actual expression is already in caller
-// coordinates: never follow a second callee mapping inside its replacement.
+// Actual expressions are already in caller coordinates: never follow a second
+// callee mapping inside a replacement. Original argument bindings stay fixed;
+// newly materialized output parameters extend the environment in order.
 // One instance per call keeps memoized DAGs isolated between callers.
 class CallShapeInstantiation : public IRMutator {
  public:
   explicit CallShapeInstantiation(CallShapeMap bindings) : bindings_(std::move(bindings)) {}
   TypePtr InstantiateType(const TypePtr& type);
+  void BindOutput(const VarPtr& output, const ExprPtr& storage);
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& var) override;
@@ -61,7 +63,7 @@ class CallShapeInstantiation : public IRMutator {
 
  private:
   ExprPtr Replace(const VarPtr& var) const;
-  const CallShapeMap bindings_;
+  CallShapeMap bindings_;
   std::unordered_map<const Expr*, ExprPtr> expressions_;
   std::unordered_map<const Type*, TypePtr> types_;
 };
