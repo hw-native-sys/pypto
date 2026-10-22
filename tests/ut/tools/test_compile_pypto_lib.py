@@ -213,6 +213,90 @@ def test_caught_child_start_failure_cannot_pass(library, tmp_path):
     assert len(result["compilations"]) == 2
 
 
+@pytest.mark.parametrize("keyword_args", [False, True])
+def test_self_dispatch_collects_each_case(library, tmp_path, keyword_args):
+    invocation = "args=command" if keyword_args else "command"
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "cases = ['golden', 'runner', 'compile', 'module', 'guard', 'last']\n"
+        "if '--case' not in sys.argv:\n"
+        "    for case in cases:\n"
+        "        command = [sys.executable, str(Path(__file__).resolve()),\n"
+        "                   '--case', case, '-d', '3,5', '--label', 'two words']\n"
+        f"        subprocess.run({invocation}, check=True)\n"
+        "else:\n"
+        "    case = sys.argv[2]\n"
+        "    assert sys.argv[1:] == ['--case', case, '-d', '3,5', '--label', 'two words']\n"
+        "    if case in ('golden', 'last'):\n"
+        "        from golden import run\n"
+        "        run('ok', [], False, 'cached')\n"
+        "    elif case == 'runner':\n"
+        "        from golden.runner import run\n"
+        "        run('ok', [])\n"
+        "    elif case == 'compile':\n"
+        "        from pypto.ir import compile\n"
+        "        compile('ok', skip_ptoas=True)\n"
+        "    elif case == 'module':\n"
+        "        from pypto.ir.compile import compile\n"
+        "        compile('ok')\n"
+        "    else:\n"
+        "        from golden.runner import _prepare_inputs, run\n"
+        "        try:\n"
+        "            _prepare_inputs()\n"
+        "        except RuntimeError as error:\n"
+        "            assert 'prepare runtime inputs' in str(error)\n"
+        "        else:\n"
+        "            raise AssertionError('Runtime guard was not installed')\n"
+        "        run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 20)
+    assert result["passed"]
+    assert len(result["compilations"]) == 6
+
+
+@pytest.mark.parametrize(
+    "child_body",
+    [
+        "from golden import run; run('bad', [])",
+        "from golden import run; run('ok', []); raise SystemExit(3)",
+        "raise SystemExit(0)",
+        "import os; os._exit(0)",
+        "from golden import run; run('ok', []); import json; json.dumps = lambda *a, **kw: '['",
+    ],
+)
+def test_self_dispatch_cannot_hide_failed_or_unobserved_child(library, tmp_path, child_body):
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "if '--child' in sys.argv:\n"
+        f"    {child_body}\n"
+        "else:\n"
+        "    subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child'], check=False)\n"
+        "    from golden import run\n"
+        "    run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert not result["passed"]
+    assert any(not record["passed"] for record in result["compilations"])
+    assert any(record["passed"] for record in result["compilations"])
+
+
+def test_unrelated_subprocess_preserves_arguments_and_output(library, tmp_path):
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "result = subprocess.run([sys.executable, '-c', 'print(42)'],\n"
+        "                        check=True, capture_output=True, text=True)\n"
+        "assert result.stdout == '42\\n'\n"
+        "from golden import run\n"
+        "run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
 def test_timeout_cannot_reuse_previous_receipt(library, tmp_path):
     script = library / "models/case.py"
     output = tmp_path / "out"

@@ -590,11 +590,18 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // arithmetic (e.g. `core_num=MAX // TILE` where both operands are closure
     // ints) may still need one simplify pass after SSA conversion.
     auto new_core_num = SimplifyExpr(op->core_num_);
+    // Before outlining, task dependencies and dispatch predicates live in
+    // scope attrs. Rewrite them under the enclosing carry mappings just like
+    // Submit operands, before visiting definitions local to the scope body.
+    auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
     auto new_body = VisitScopedBody(op->body_);
-    if (new_core_num.get() == op->core_num_.get() && new_body.get() == op->body_.get()) return op;
+    if (new_core_num.get() == op->core_num_.get() && new_body.get() == op->body_.get() && !attrs_changed) {
+      return op;
+    }
     auto result = MutableCopy(op);
     result->core_num_ = new_core_num;
     result->body_ = new_body;
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
     return result;
   }
 

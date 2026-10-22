@@ -2670,6 +2670,80 @@ class TestSpmdScopeCoreNum:
 
 
 class TestManualScopeSubmit:
+    @pytest.mark.parametrize("normalization", ["simplify", "init_mem_ref"])
+    def test_rebuilt_carry_keeps_spmd_scope_dependency_in_scope(self, normalization: str):
+        """Pre-outline SPMD deps must follow carry remaps even when body/core_num do not change."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                initial: pl.Scalar[pl.INDEX] = 0
+                seed: pl.Scalar[pl.INDEX] = initial
+                with pl.manual_scope():
+                    first_tid = pl.system.task_dummy(deps=[])
+                    dependency_seed: pl.Scalar[pl.TASK_ID] = first_tid
+                    for _i, (count, dependency) in pl.range(2, init_values=(seed, dependency_seed)):
+                        with pl.spmd(4, deps=[dependency]) as next_tid:
+                            self.kernel(t)
+                        final_count, _final_tid = pl.yield_(count + 1, next_tid)
+                pl.tensor.write(t, [final_count, 0], pl.const(1.0, pl.FP32))
+                return t
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+
+        def verify(program: ir.Program):
+            diagnostics = passes.PropertyVerifierRegistry.verify(properties, program)
+            assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
+        def collect(program: ir.Program):
+            loops: list[ir.ForStmt] = []
+            scopes: list[ir.SpmdScopeStmt] = []
+
+            class Collector(ir.IRVisitor):
+                def visit_for_stmt(self, op):
+                    loops.append(op)
+                    super().visit_for_stmt(op)
+
+                def visit_spmd_scope_stmt(self, op):
+                    scopes.append(op)
+                    super().visit_spmd_scope_stmt(op)
+
+            Collector().visit_program(program)
+            return loops[0], scopes[0]
+
+        program = passes.convert_to_ssa()(Before)
+        verify(program)
+        old_loop, old_scope = collect(program)
+        old_dependency = next(
+            carry
+            for carry in old_loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.TASK_ID
+        )
+        # Keep semantic verification without print/reparse so a stale dependency
+        # is reported as a use outside its binder, not an incidental text mismatch.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            program = getattr(passes, normalization)()(program)
+        loop, scope = collect(program)
+        dependency = next(
+            carry
+            for carry in loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.TASK_ID
+        )
+        assert not dependency.same_as(old_dependency), "the constant seed must rebuild the carry group"
+        assert scope.attrs["manual_dep_edges"][0].same_as(dependency)
+        assert isinstance(scope.core_num, ir.ConstInt) and scope.core_num.value == 4
+        if normalization == "simplify":
+            assert scope.body.same_as(old_scope.body), "only the dependency attr needs rewriting"
+            assert scope.core_num.same_as(old_scope.core_num)
+        verify(program)
+
     def test_folds_shape_into_submit_arg_preserving_submit(self):
         """A top-level constant folds into a tensor shape that feeds a
         pl.submit inside pl.manual_scope.
