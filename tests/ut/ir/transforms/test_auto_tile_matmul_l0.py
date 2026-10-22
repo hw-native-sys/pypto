@@ -4268,6 +4268,79 @@ def test_existing_l0_pipeline_preserves_explicit_buffering_policy(planner, legac
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
+@pytest.mark.parametrize("m,n", [(64, 256), (512, 256), (64, 512)])
+def test_unwindowable_mat_bias_uses_legal_k_only_fallback(planner, ascend_backend, m, n, capfd):
+    """A Mat bias parameter can be reused whole, but cannot be reloaded by N window."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[m, 256], pl.BF16, pl.Mem.Mat],
+            rhs: pl.Tile[[256, n], pl.BF16, pl.Mem.Mat],
+            bias: pl.Tile[[1, n], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[m, n], pl.FP32, pl.Mem.Acc]:
+            result = pl.tile.matmul_bias(lhs, rhs, bias)
+            return result
+
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(Before)
+    diagnostics = capfd.readouterr().err
+    if (m, n) != (64, 256):
+        # Splitting K cannot repair an oversized full output or Bias vector.
+        ir.assert_structural_equal(after, Before)
+        assert "PH-AT-011" in diagnostics or "PH-AT-006" in diagnostics
+        return
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat],
+            rhs: pl.Tile[[256, 256], pl.BF16, pl.Mem.Mat],
+            bias: pl.Tile[[1, 256], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[64, 256], pl.FP32, pl.Mem.Acc]:
+            bias_l0 = pl.tile.move(bias, target_memory=pl.Mem.Bias)
+            first_left = pl.tile.extract(lhs, 0, 0, shape=[64, 64], target_memory=pl.Mem.Left)
+            first_right = pl.tile.extract(rhs, 0, 0, shape=[64, 256], target_memory=pl.Mem.Right)
+            seed = pl.tile.matmul_bias(first_left, first_right, bias_l0)
+            for ko, (acc,) in pl.pipeline(64, 256, 64, init_values=(seed,), stage=2):
+                left = pl.tile.extract(lhs, 0, ko, shape=[64, 64], target_memory=pl.Mem.Left)
+                right = pl.tile.extract(rhs, ko, 0, shape=[64, 256], target_memory=pl.Mem.Right)
+                updated = pl.tile.matmul_acc(acc, left, right)
+                result = pl.yield_(updated)
+            return result
+
+    ir.assert_structural_equal(after, Expected)
+    printed = ir.python_print(after)
+    assert "PH-AT-011" not in diagnostics
+    assert printed.count("pl.tile.matmul_bias(") == 1
+    assert "pl.tile.matmul_acc(" in printed
+    assert printed.count("pl.tile.move(bias, target_memory=pl.Mem.Bias)") == 1
+    assert "pl.tile.load(" not in printed
+    assert "pl.tile.extract(bias" not in printed
+    _assert_ssa_valid(after, "unwindowable_mat_bias_k_only_fallback")
+
+    torch = pytest.importorskip("torch")
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    # Small integers make all products and sums exactly representable, catching
+    # missing K blocks and repeated bias without floating-point tolerances.
+    generator = torch.Generator().manual_seed(2872)
+    lhs = torch.randint(-2, 3, (m, 256), generator=generator).to(torch.bfloat16)
+    rhs = torch.randint(-2, 3, (256, n), generator=generator).to(torch.bfloat16)
+    bias = torch.randint(1, 5, (1, n), generator=generator).float()
+    ns: dict = {}
+    exec(torch_codegen(after), ns)  # noqa: S102 -- execute the generated reference
+    actual = ns["kernel"](lhs, rhs, bias)
+    torch.testing.assert_close(actual, lhs.float() @ rhs.float() + bias, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
 def test_unfoldable_output_uses_k_only_fallback(planner, ascend_backend):
     """Preserve the whole result when no consumer can place a selected M/N grid."""
 

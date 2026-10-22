@@ -83,7 +83,7 @@ program_tiled = l0_tile_pass(program)
 
    > **旧版 PYPTO planner 的限制 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而流水化消费者需要多块较小缓冲。旧版 PYPTO planner 的 `AllocateMemoryAddr` 只是把复用类顺序堆叠、从不细分已释放区域（例如，一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者 slot 会浪费 32 KB，另一块 slot 溢出 → L0 超限），因此本 pass 仅在该 planner 下强制 Mat-scratch 生产者使用 **output-stationary**。`DSA_RP` 与 `PTOAS` 保留 chooser 选出的 operand-stationary 调度，PTOAS 还保留原有 dbC 候选枚举，以避免强制此链使用 single-C 时暴露的 A2/A3 Left 内存打包回归。为旧版 allocator 增加等价的按生命周期细分能力仍由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
 
-   **保持输出形状的回退（shape-preserving fallback）。** 当两种 M/N 放置方式都无法适配结果的消费者时，以 `m == M`、`n == N`、output-stationary 和单个累加器重新选择分块。这条仅切分 K 的路径保留结果形状及消费者，并在所有 planner 下切分超大操作数。chooser 仍检查物理 L0A/L0B/L0C 容量；输出本身超过 L0C 时仍保持延后处理。例如 FP32 batch-transposed `(B, M, K, N) = (4, 64, 128, 512)` 保留 batch assemble，按合法面板切分 K，避免在 64 KiB L0B 中分配 256 KiB Right tile。能够正常发射的 M/N 调度仍使用原有 planner 和缓冲策略。
+   **保持输出形状的回退（shape-preserving fallback）。** 当两种 M/N 放置方式都无法适配结果的消费者时，以 `m == M`、`n == N`、output-stationary 和单个累加器重新选择分块。这条仅切分 K 的路径保留结果形状及消费者，并在所有 planner 下切分超大操作数。 当选中的 N 网格需要无法重建的 Mat bias 窗口时，也进行同样的重试：复用原始完整 bias 快照，仅在第一个 K 块应用 bias。完整输出和完整 Bias 向量都必须满足各自的物理存储容量，否则保留原有拒绝结果。chooser 仍检查物理 L0A/L0B/L0C 容量；输出本身超过 L0C 时仍保持延后处理。例如 FP32 batch-transposed `(B, M, K, N) = (4, 64, 128, 512)` 保留 batch assemble，按合法面板切分 K，避免在 64 KiB L0B 中分配 256 KiB Right tile。能够正常发射的 M/N 调度仍使用原有 planner 和缓冲策略。
 
 7. **改写所在 `SeqStmts`** —— 把原 matmul 的 `Var`（K 切分）或消费 store 的结果（M/N 切分）用法改成新的 `return_var`。替换作用域只限当前 `SeqStmts`，不会泄漏到兄弟区域。
 
