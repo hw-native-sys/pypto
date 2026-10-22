@@ -177,11 +177,13 @@ def test_transposed_matmul_l0b_capacity(tmp_path, ascend_backend, planner, buffe
     assert right_shapes, pto
     # One oversized buffer cannot be repaired by allocator lifetime packing.
     assert all(int(rows) * int(cols) * 4 <= 65536 for rows, cols in right_shapes), right_shapes
-    if batch_shape and planner != passes.MemoryPlanner.PYPTO:
-        # Pin the newly supported M/N path: the old K-only fallback also fit
-        # L0B, but stored one full [1,64,512] page per batch.
+    if batch_shape and planner == passes.MemoryPlanner.PTOAS:
+        # PTOAS retains automatic dbC and selects the supported M/N path.
+        # PYPTO and DSA_RP disable automatic dbC and select full-output K tiling.
         assert "!pto.partition_tensor_view<1x32x128xf32>" in pto, pto
         assert "!pto.partition_tensor_view<1x64x512xf32>" not in pto, pto
+    elif batch_shape:
+        assert "!pto.partition_tensor_view<1x64x512xf32>" in pto, pto
     if find_ptoas_binary() is not None:
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 

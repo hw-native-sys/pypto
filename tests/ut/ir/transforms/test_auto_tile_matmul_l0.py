@@ -4389,7 +4389,7 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
         def kernel(
             self,
             lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
-            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[128, 17])],
             out: pl.Out[pl.Tensor[[2, 64, 512], pl.FP32]],
         ) -> pl.Tensor[[2, 64, 512], pl.FP32]:
             result = pl.tile.matmul(lhs, rhs)
@@ -4402,10 +4402,11 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
         def kernel(
             self,
             lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
-            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[128, 17])],
             out: pl.Out[pl.Tensor[[2, 64, 512], pl.FP32]],
         ) -> pl.Tensor[[2, 64, 512], pl.FP32]:
-            seed = pl.tile.create([64, 512], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            storage = pl.tile.create([64, 512], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            seed = pl.tile.set_validshape(storage, 64, 17)
             for ko, (acc,) in pl.pipeline(0, 128, 16, init_values=(seed,), stage=2):
                 left = pl.tile.extract(lhs, 0, ko, shape=[64, 16], target_memory=pl.Mem.Left)
                 right = pl.tile.extract(rhs, ko, 0, shape=[16, 512], target_memory=pl.Mem.Right)

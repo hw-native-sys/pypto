@@ -1188,7 +1188,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // requirement for this optimization: narrowing it would replace a legal
   // K-only rewrite with an unsupported bias-window fold. Keep its old grid.
   const bool can_bound_bias = !is_bias || bias_load || bias_tile->GetMemorySpace() == MemorySpace::Bias;
-  if (restrict_output_grid && !keep_output_shape && lhs_tile->GetMemorySpace() == MemorySpace::Mat && can_bound_bias) {
+  if (restrict_output_grid && !keep_output_shape && lhs_tile->GetMemorySpace() == MemorySpace::Mat &&
+      can_bound_bias) {
     auto work_extent = [&](int64_t physical, const ExprPtr& valid, int alignment) {
       const auto extent = As<ConstInt>(valid);
       if (!extent || extent->value_ <= 0) return physical;
@@ -1246,8 +1247,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     // failed retries retain the original window diagnostic below.
     if (!keep_output_shape) {
       std::vector<Diagnostic> fallback_hints;
-      if (auto k_only =
-              AnalyzeMatmul(assign, fallback_hints, true, output_box_alignment, direct_defs, true)) {
+      if (auto k_only = AnalyzeMatmul(assign, fallback_hints, true, output_box_alignment, direct_defs,
+                                      /*restrict_output_grid=*/false, /*keep_output_shape=*/true)) {
         for (const auto& hint : fallback_hints) hints.push_back(hint);
         return k_only;
       }
@@ -2406,13 +2407,48 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
   return {std::move(stmts), chain};
 }
 
+/// Selection and emission must agree on the store's physical matrix window.
+/// Bounding a grid for a store that later rejects placement would change the
+/// shape of the fallback result. Check the original M/N, not the valid prefix.
+const char* UnsupportedDirectStoreReason(const CallPtr& store, int64_t m, int64_t n) {
+  if (!store || (store->args_.size() != 3 && store->args_.size() != 4)) {
+    return "tile.store has unsupported arguments — M/N fold not applicable; left untouched";
+  }
+  auto offsets = As<MakeTuple>(store->args_[1]);
+  if (!offsets || offsets->elements_.size() < 2) {
+    return "tile.store offsets do not contain matrix axes — M/N fold not applicable; left untouched";
+  }
+  const size_t rank = offsets->elements_.size();
+  if (store->args_.size() == 4) {
+    auto shape = As<MakeTuple>(store->args_[3]);
+    // FlattenTileNdTo2D can collapse multiple destination axes into matrix
+    // rows. Only singleton batch prefixes support (..., base_m+mi, base_n+ni).
+    bool matrix_page = shape && shape->elements_.size() == rank;
+    for (size_t i = 0; matrix_page && i < rank; ++i) {
+      auto dim = As<ConstInt>(shape->elements_[i]);
+      const int64_t expected = i + 2 < rank ? 1 : (i + 2 == rank ? m : n);
+      matrix_page = dim && dim->value_ == expected;
+    }
+    if (!matrix_page) {
+      return "tile.store partition is not a singleton-batch matrix page — M/N fold not applicable; "
+             "left untouched";
+    }
+  } else if (rank != 2) {
+    return "ND tile.store has no explicit partition shape — M/N fold not applicable; left untouched";
+  }
+  if (!AsVarLike(store->args_[2])) {
+    return "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched";
+  }
+  return nullptr;
+}
+
 /// Try to fold a Mat-resident plain ``tile.matmul`` whose [M, N] output exceeds
 /// L0c into a ``ceil(M/m) x ceil(N/n)`` grid of sub-tile matmuls, each computing
 /// an ``[m, n]`` (partial on the boundary) Acc result.  Operands are already
 /// Mat-resident, so only the output Acc overflows; sub-tiling keeps every Acc
 /// tile within L0c. This helper handles the direct-store consumer:
 ///
-///   * **Direct-store** — the sole consumer is a 2D ``tile.store(c, base, out)``:
+///   * **Direct-store** — the sole consumer stores a matrix page via ``tile.store``:
 ///     each sub-tile stores straight to ``out[mi:, ni:]`` (the DDR-output case
 ///     our solver kernels need).  The store is folded in and emitted at the
 ///     store site.
@@ -2462,36 +2498,10 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
     auto store_call = As<Call>(store_stmt->value_);
     INTERNAL_CHECK_SPAN(store_call, store_stmt->span_)
         << "Internal error: SiblingIndex store_of mapped a non-Call AssignStmt";
+    if (const char* reason = UnsupportedDirectStoreReason(store_call, t.M, t.N)) return skip(reason);
     auto offs = As<MakeTuple>(store_call->args_[1]);
-    if (!offs || offs->elements_.size() < 2) {
-      return skip("tile.store offsets do not contain matrix axes — M/N fold not applicable; left untouched");
-    }
-    const size_t rank = offs->elements_.size();
     const bool explicit_shape = store_call->args_.size() == 4;
-    if (explicit_shape) {
-      auto shape = As<MakeTuple>(store_call->args_[3]);
-      // FlattenTileNdTo2D can also collapse multiple destination axes into a
-      // matrix row. Only singleton batch prefixes preserve the simple mapping
-      // (mi, ni) -> (..., base_m + mi, base_n + ni) used by this placer.
-      bool matrix_page = shape && shape->elements_.size() == rank;
-      for (size_t i = 0; matrix_page && i < rank; ++i) {
-        auto dim = As<ConstInt>(shape->elements_[i]);
-        const int64_t expected = i + 2 < rank ? 1 : (i + 2 == rank ? t.M : t.N);
-        matrix_page = dim && dim->value_ == expected;
-      }
-      if (!matrix_page) {
-        return skip(
-            "tile.store partition is not a singleton-batch matrix page — M/N fold not applicable; "
-            "left untouched");
-      }
-    } else if (rank != 2) {
-      return skip("ND tile.store has no explicit partition shape — M/N fold not applicable; left untouched");
-    }
     auto out_in = AsVarLike(store_call->args_[2]);
-    if (!out_in) {
-      return skip(
-          "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched");
-    }
     DirectGmPlacer placer(offs->elements_, explicit_shape, out_in, store_call->kwargs_, store_call->attrs_,
                           sp);
     auto [stmts, last_out] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
@@ -2591,7 +2601,8 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
 
   if (plan.store_stmt && plan.result_uses == 1) {
     const auto store = As<Call>(plan.store_stmt->value_);
-    const auto offsets = store ? As<MakeTuple>(store->args_[1]) : nullptr;
+    const auto m = type->shape_.size() == 2 ? As<ConstInt>(type->shape_[0]) : nullptr;
+    const auto n = type->shape_.size() == 2 ? As<ConstInt>(type->shape_[1]) : nullptr;
     // Reconstructed bias loads may not move across an effect to the store.
     // A resident Bias operand needs no reload and retains its full-N minimum.
     const auto bias = IsOp(call, "tile.matmul_bias") && call->args_.size() == 3
@@ -2600,7 +2611,7 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
     const bool bias_snapshot_safe = !IsOp(call, "tile.matmul_bias") || plan.store_stmt == next_effect ||
                                     (bias && bias->GetMemorySpace() == MemorySpace::Bias);
     plan.supports_output_grid =
-        offsets && offsets->elements_.size() == 2 && AsVarLike(store->args_[2]) && bias_snapshot_safe;
+        m && n && !UnsupportedDirectStoreReason(store, m->value_, n->value_) && bias_snapshot_safe;
   }
   if (plan.result_uses >= 1 && plan.operand_uses == plan.result_uses &&
       backend::BackendConfig::IsConfigured()) {
