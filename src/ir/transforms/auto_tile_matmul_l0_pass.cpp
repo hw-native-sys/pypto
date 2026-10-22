@@ -724,7 +724,25 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
   if (!offsets || !tensor) return std::nullopt;
   const bool is_nz = tensor->tensor_view_ && tensor->tensor_view_->layout == TensorLayout::NZ;
   if (!is_nz) {
-    if (call->args_.size() != 3 || offsets->elements_.size() != 2) return std::nullopt;
+    const size_t rank = offsets->elements_.size();
+    if (rank < 2 || tensor->shape_.size() != rank) return std::nullopt;
+    if (call->args_.size() == 4) {
+      auto source = As<TileType>(call->args_[0]->GetType());
+      auto shape = As<MakeTuple>(call->args_[3]);
+      if (!source || source->shape_.size() != 2 || !shape || shape->elements_.size() != rank) {
+        return std::nullopt;
+      }
+      // Only singleton batch prefixes preserve the matrix row/column mapping.
+      for (size_t axis = 0; axis < rank; ++axis) {
+        auto dim = As<ConstInt>(shape->elements_[axis]);
+        auto expected = axis + 2 < rank ? nullptr : As<ConstInt>(source->shape_[axis + 2 - rank]);
+        if (!dim || (axis + 2 < rank ? dim->value_ != 1 : !expected || dim->value_ != expected->value_)) {
+          return std::nullopt;
+        }
+      }
+    } else if (rank != 2) {
+      return std::nullopt;
+    }
     return DirectGmStoreInfo{call};
   }
 
@@ -783,7 +801,7 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
 ///   * ``use_counts[v]`` — number of reads of ``v`` (excluding defs).
 ///   * ``store_of[v]`` — the top-level direct ``tile.store`` whose source operand
 ///     is ``v`` (its sole direct consumer when ``use_counts[v] == 1``).
-///     Includes ordinary 2-D stores and blocked rank-5 NZ partitions.
+///     Includes ordinary 2-D stores, ND batch pages, and blocked rank-5 NZ partitions.
 /// Counts/sites reflect the original (pre-rewrite) siblings, which is what the
 /// foldability check needs (a matmul result is freshly defined; its uses do
 /// not change until we rewrite it).
@@ -803,8 +821,7 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
     if (!as) continue;
     auto call = As<Call>(as->value_);
     if (!call || !call->op_) continue;
-    // Keep existing three-argument stores indexed, and additionally recognize
-    // the explicit rank-5 partition carried by an NZ direct store.
+    // Keep ordinary stores indexed, and recognize supported ND/NZ partitions.
     if (IsOp(call, "tile.store") && (call->args_.size() == 3 || AnalyzeDirectGmStore(call).has_value())) {
       if (auto src = AsVarLike(call->args_[0])) idx.store_of.emplace(src.get(), as.get());
     } else if (IsOp(call, "tile.cast") && !call->args_.empty()) {
@@ -874,8 +891,19 @@ class DirectGmPlacer : public SubtilePlacer {
     std::vector<ExprPtr> offsets = base_offsets->elements_;
     ExprPtr partition;
     if (!store_.is_nz()) {
-      offsets[0] = AddOffset(offsets[0], row_off, sp_);
-      offsets[1] = AddOffset(offsets[1], col_off, sp_);
+      const size_t rank = offsets.size();
+      offsets[rank - 2] = AddOffset(offsets[rank - 2], row_off, sp_);
+      offsets[rank - 1] = AddOffset(offsets[rank - 1], col_off, sp_);
+      if (store_.call->args_.size() == 4) {
+        auto tile = As<TileType>(sub->GetType());
+        INTERNAL_CHECK_SPAN(tile, sp_) << "Internal error: direct-store subtile lost its TileType";
+        const auto valid = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
+        INTERNAL_CHECK_SPAN(valid.size() == 2, sp_) << "Internal error: direct-store subtile must be 2D";
+        // The destination window follows valid elements, not padded allocation.
+        std::vector<ExprPtr> shape(rank - 2, MakeIndex(1, sp_));
+        shape.insert(shape.end(), valid.begin(), valid.end());
+        partition = std::make_shared<MakeTuple>(std::move(shape), sp_);
+      }
     } else {
       auto tile = As<TileType>(sub->GetType());
       auto rows = tile && tile->shape_.size() == 2 ? As<ConstInt>(tile->shape_[0]) : nullptr;
@@ -1958,7 +1986,7 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
   }
 
   return skip(
-      "tile.matmul output exceeds L0c but its result is not consumed by a single 2D tile.store "
+      "tile.matmul needs M/N tiling but its result is not consumed by a single supported tile.store "
       "(direct-store) — a result consumed on-chip (chained matmul / elementwise), stored-and-reused, "
       "or fed to a non-store consumer is deferred; left untouched");
 }
