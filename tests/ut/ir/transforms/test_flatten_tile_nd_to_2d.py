@@ -1181,6 +1181,114 @@ class TestFlattenTileNdTo2DCallRemapping:
             assert actual_type.tile_view is not None
             assert actual_type.tile_view.valid_shape[1] is definitions["pitch"].var
 
+    @pytest.mark.parametrize("change", ["attrs", "type", "operands"])
+    @pytest.mark.parametrize("tensor_result", [False, True])
+    def test_call_preserves_lhs_only_allocation(self, change: str, tensor_result: bool):
+        """Rebuilding a definition must preserve allocation metadata absent from its RHS."""
+        span = ir.Span.unknown()
+        pinned = ir.MemRef("pinned_result", span)
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            local = function.param("local", ir.TileType([1, 4], DataType.FP32))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1], span=span))
+            pitch = ib.let("pitch", ir.cast(tile_ops.read(loaded, [0]), DataType.INDEX, span))
+            operand = source if tensor_result else local
+            if change == "operands":
+                operand = ib.let(
+                    "operand",
+                    tensor_ops.write(source, [0, 0], ir.cast(pitch, DataType.FP32, span))
+                    if tensor_result
+                    else tile_ops.load(source, [0, 0], [1, 4]),
+                )
+            valid_shape = [1, pitch] if change == "type" else [1, 4]
+            if tensor_result:
+                view = ir.TensorView([4, 1], ir.TensorLayout.ND, valid_shape)
+                rhs_type = ir.TensorType([1, 4], DataType.FP32, tensor_view=view)
+                lhs_type = ir.TensorType([1, 4], DataType.FP32, pinned, view)
+                call = tensor_ops.write(operand, [0, 0], ir.ConstFloat(1.0, DataType.FP32, span))
+            else:
+                tile_view = ir.TileView(valid_shape=valid_shape)
+                rhs_type = ir.TileType(
+                    [1, 4], DataType.FP32, tile_view=tile_view, memory_space=ir.MemorySpace.Vec
+                )
+                lhs_type = ir.TileType([1, 4], DataType.FP32, pinned, tile_view, ir.MemorySpace.Vec)
+                call = tile_ops.exp(operand)
+            attrs = {"dependency": pitch} if change == "attrs" else {}
+            tagged_call = ir.Call(call.op, list(call.args), call.kwargs, attrs, rhs_type, span)
+            result = ir.Var("result", lhs_type, span)
+            ib.assign(result, tagged_call)
+            plain = ir.Var("plain", lhs_type, span)
+            if change == "attrs":
+                plain_call = ir.Call(call.op, list(call.args), call.kwargs, rhs_type, span)
+                ib.assign(plain, plain_call)
+            if not tensor_result:
+                ib.let("first", tile_ops.read(result, [0, 0]))
+                ib.let("second", tile_ops.read(result, [0, 0]))
+            else:
+                ib.let("first", tile_ops.load(result, [0, 0], [1, 4]))
+                ib.let("second", tile_ops.load(result, [0, 0], [1, 4]))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "lhs_allocation", span)
+        assert cast(ir.ShapedType, tagged_call.type).memref is None
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "result")
+        rebuilt = definitions["result"]
+        actual_type = cast(ir.ShapedType, rebuilt.var.type)
+        assert rebuilt.var is not result
+        assert actual_type.memref is pinned
+        assert pinned.is_pinned_
+        if change == "attrs":
+            assert definitions["plain"].var is plain
+            assert cast(ir.ShapedType, definitions["plain"].var.type).memref is pinned
+        if not tensor_result:
+            assert cast(ir.TileType, actual_type).memory_space == ir.MemorySpace.Vec
+        remapped_call = cast(ir.Call, rebuilt.value)
+        assert cast(ir.ShapedType, remapped_call.type).memref is None
+        if change != "operands":
+            assert remapped_call.args[0] is operand
+        if change == "attrs":
+            assert remapped_call.attrs["dependency"] is definitions["pitch"].var
+        if change == "type":
+            actual_view = (
+                cast(ir.TensorType, actual_type).tensor_view
+                if tensor_result
+                else cast(ir.TileType, actual_type).tile_view
+            )
+            assert actual_view is not None
+            assert actual_view.valid_shape[1] is definitions["pitch"].var
+
+    def test_non_call_assignment_preserves_lhs_only_allocation(self):
+        """The expression-assignment path must retain the same LHS allocation contract."""
+        span = ir.Span.unknown()
+        pinned = ir.MemRef("pinned_alias", span)
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(source, [0, 0], [1, 4], target_memory=ir.MemorySpace.Vec))
+            loaded_type = cast(ir.TileType, loaded.type)
+            result = ir.Var(
+                "result",
+                ir.TileType([1, 4], DataType.FP32, pinned, loaded_type.tile_view, loaded_type.memory_space),
+                span,
+            )
+            ib.assign(result, loaded)
+            ib.let("first", tile_ops.read(result, [0, 0]))
+            ib.let("second", tile_ops.read(result, [0, 0]))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "lhs_alias_allocation", span)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "result")
+        assert definitions["result"].value is definitions["loaded"].var
+        assert cast(ir.TileType, definitions["result"].var.type).memref is pinned
+
     def test_dynamic_view_write_chain_remaps_definitions(self):
         """GM tensor.write remains in the real pipeline and inherits the view type."""
 

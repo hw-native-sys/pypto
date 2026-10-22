@@ -837,8 +837,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     if (!call || global_var) {
       auto new_value = Substitute(assign->value_, ctx.var_map);
       if (new_value != assign->value_) {
-        auto new_var =
-            std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
+        auto new_type = WithCarriedMemRef(new_value->GetType(), assign->var_->GetType());
+        auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
         ctx.Insert(assign->var_, new_var);
       } else {
@@ -1234,12 +1234,13 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         if (op_name.substr(0, 5) == "tile." && new_call->args_ != call->args_) {
           auto deduced = op_registry.Create(op_name, new_call->args_, new_call->kwargs_, span);
           new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, new_call->attrs_,
-                                            WithCarriedMemRef(deduced->GetType(), assign->var_->GetType()),
-                                            deduced->span_);
+                                            deduced->GetType(), deduced->span_);
         }
 
-        auto new_var =
-            std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+        // Allocation annotations can live only on the defining Var. Carry them
+        // for every rebuild, including changes confined to the type or attrs.
+        auto new_type = WithCarriedMemRef(new_call->GetType(), assign->var_->GetType());
+        auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
         ctx.Insert(assign->var_, new_var);
       }

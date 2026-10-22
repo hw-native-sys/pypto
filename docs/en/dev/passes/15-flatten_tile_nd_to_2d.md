@@ -70,7 +70,10 @@ bindings even when the operands are unchanged. GM operations such as `tensor.vie
 and `tensor.write` retain their logical tensor shapes and view metadata; there is
 no operator whitelist. If a generic `tile.*` Call has changed operands, its result
 type is re-deduced from those operands to propagate rank flattening, while keeping
-the substituted attributes. An unchanged Call retains its existing definition.
+the substituted attributes. Every rebuilt definition carries any missing allocation
+metadata (MemRef and tile memory space) from its original left-hand Var, even
+when only the result type or attributes changed and the RHS has no MemRef.
+An unchanged Call retains its existing definition.
 
 For N-D transpose scratch, round A to 32 elements for 8-bit types or 16 for 16/32-bit types. Reserve at least one 32-byte column block, or two full-height 16-column strips for 16-bit vtranspose. Round the resulting workspace capacity up to whole rows of B elements to obtain `scratch_page_rows`; both the pool allocation and each page offset use this padded size. Thus an FP32 `[24, 8]` page has a 1024-byte workspace while its scratch view retains shape `[24, 8]`. Page dimensions must be positive and element storage must be 1, 2, or 4 bytes. Workspace rounding, pool dimensions, and the total pool byte size must fit in `int64_t`; unsupported types and oversized workspaces are rejected before batch expansion.
 
