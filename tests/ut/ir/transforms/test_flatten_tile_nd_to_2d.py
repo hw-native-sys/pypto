@@ -995,6 +995,21 @@ class TestFlattenTileNdTo2DCallRemapping:
             call = cast(ir.Call, definitions[consumer].value)
             assert call.args[0] is definitions[name].var
 
+    @staticmethod
+    def _assert_assignment_comments(program: ir.Program, expected: list[list[str]]) -> None:
+        comments: list[list[str]] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+                if op.leading_comments:
+                    comments.append(list(op.leading_comments))
+                super().visit_assign_stmt(op)
+
+        function = program.get_function("kernel")
+        assert function is not None
+        Collector().visit_stmt(function.body)
+        assert comments == expected
+
     def test_gm_view_remaps_dynamic_shape(self):
         """A scalar load/read/cast changes identity before a root GM tensor.view."""
 
@@ -1355,7 +1370,12 @@ class TestFlattenTileNdTo2DCallRemapping:
             if producer == "eval":
                 ib.eval_stmt(tagged)
             else:
-                ib.let("tagged", tagged)
+                ib.emit(
+                    ir.attach_leading_comments(
+                        ir.AssignStmt(ir.Var("tagged", tagged.type, span), tagged, span),
+                        ["original assignment", "keep both lines in order"],
+                    )
+                )
             ib.return_stmt(source)
         Before = ir.Program([function.get_result()], "specialized_call_attrs", span)
         properties = passes.IRPropertySet()
@@ -1370,6 +1390,11 @@ class TestFlattenTileNdTo2DCallRemapping:
 
         After = passes.flatten_tile_nd_to_2d()(Before)
         passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        expected_comments = (
+            [] if producer == "eval" else [["original assignment", "keep both lines in order"]]
+        )
+        self._assert_assignment_comments(Before, expected_comments)
+        self._assert_assignment_comments(After, expected_comments)
         new_pitch = self._definitions(After)["pitch"].var
         assert new_pitch is not pitch
         replacements: list[ir.Call] = []
@@ -1437,14 +1462,23 @@ class TestFlattenTileNdTo2DCallRemapping:
                 compute = tile_ops.batch_matmul_acc(acc, left, right)
             else:
                 compute = tile_ops.batch_matmul(left, right)
-            result = ib.let("result", tagged(compute, "compute"))
+            computation = tagged(compute, "compute")
+            result = ir.Var("result", computation.type, span)
+            ib.emit(ir.attach_leading_comments(ir.AssignStmt(result, computation, span), ["compute comment"]))
             if lowering in ("acc", "fused"):
-                stored = ib.let("stored", tagged(tile_ops.store(result, [0, 0, 0], output), "store"))
+                store = tagged(tile_ops.store(result, [0, 0, 0], output), "store")
+                stored = ir.Var("stored", store.type, span)
+                ib.emit(ir.attach_leading_comments(ir.AssignStmt(stored, store, span), ["store comment"]))
                 ib.return_stmt(stored)
             else:
                 ib.return_stmt(output)
         Before = ir.Program([function.get_result()], "page_attrs", span)
         After = passes.flatten_tile_nd_to_2d()(Before)
+        expected_comments = [["compute comment"]]
+        if lowering in ("acc", "fused"):
+            expected_comments.append(["store comment"])
+        self._assert_assignment_comments(Before, expected_comments)
+        self._assert_assignment_comments(After, expected_comments)
         new_pitch = self._definitions(After)["pitch"].var
         observed: dict[str, list[ir.Call]] = {"load": [], "compute": []}
         if lowering in ("acc", "fused"):
@@ -1561,7 +1595,7 @@ class TestFlattenTileNdTo2DCallRemapping:
                 list(rhs_tile.shape), DataType.FP32, pinned, rhs_tile.tile_view, ir.MemorySpace.Vec
             )
             result = ir.Var("result", lhs_type, span)
-            ib.assign(result, rhs)
+            ib.emit(ir.attach_leading_comments(ir.AssignStmt(result, rhs, span), ["result binding comment"]))
             ib.let("first", tile_ops.exp(result))
             ib.let("second", tile_ops.exp(result))
             ib.return_stmt(source)
@@ -1578,6 +1612,8 @@ class TestFlattenTileNdTo2DCallRemapping:
 
         After = passes.flatten_tile_nd_to_2d()(Before)
         passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        self._assert_assignment_comments(Before, [["result binding comment"]])
+        self._assert_assignment_comments(After, [["result binding comment"]])
         definitions = self._definitions(After)
         self._assert_consumers_use_definition(definitions, "result")
         actual = cast(ir.TileType, definitions["result"].var.type).memref

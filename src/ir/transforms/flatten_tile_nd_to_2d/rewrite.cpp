@@ -618,8 +618,32 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
   }
 
+  // Finalize the previous assignment at the next iteration (and after the
+  // loop), so every early continue and delegated lowering shares this policy.
+  // A replacement sequence receives its source comments exactly once, before
+  // its first emitted statement; unchanged assignments already carry them.
+  AssignStmtPtr previous_assign;
+  size_t first_emitted = 0;
+  auto preserve_assignment_comments = [&]() {
+    if (!previous_assign || previous_assign->leading_comments_.empty() || result.size() == first_emitted ||
+        result[first_emitted] == previous_assign) {
+      return;
+    }
+    auto first_assign = As<AssignStmt>(result[first_emitted]);
+    INTERNAL_CHECK_SPAN(first_assign, previous_assign->span_)
+        << "FlattenTileNdTo2D: an assignment replacement must start with an assignment";
+    auto commented = MutableCopy(first_assign);
+    commented->leading_comments_.insert(commented->leading_comments_.begin(),
+                                        previous_assign->leading_comments_.begin(),
+                                        previous_assign->leading_comments_.end());
+    result[first_emitted] = commented;
+  };
+
   for (size_t stmt_index = 0; stmt_index < stmts.size(); ++stmt_index) {
+    preserve_assignment_comments();
     const auto& stmt = stmts[stmt_index];
+    previous_assign = As<AssignStmt>(stmt);
+    first_emitted = result.size();
     // Statement-level nodes below each carry their own source node's span
     // (`ret->span_`, `assign->span_`, `for_stmt->body_->span_`, ...). Ops rebuilt
     // from an RHS `Call` use that Call's tighter span — see `span`, bound once the
@@ -1291,6 +1315,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
   }
 
+  preserve_assignment_comments();
   return result;
 }
 

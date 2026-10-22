@@ -89,6 +89,12 @@ type-reference remapping rule. ND transpose applies it to its output allocation
 and each per-page assemble result; its scratch allocations remain independent.
 Constant slots retain the original MemRef.
 A definition is retained only when both its RHS and LHS type references are unchanged.
+Rebuilt assignments retain their `leading_comments_` once on the first emitted
+replacement statement, including auxiliary statements introduced by lowering.
+An unchanged assignment keeps its existing comments without duplication. Fused
+batch-matmul stores retain the consumed store's comments on the first page store,
+separately from the matmul's comments. Comment preservation shallow-copies only
+the annotated assignment, leaving the input IR and variable identities unchanged.
 
 For N-D transpose scratch, round A to 32 elements for 8-bit types or 16 for 16/32-bit types. Reserve at least one 32-byte column block, or two full-height 16-column strips for 16-bit vtranspose. Round the resulting workspace capacity up to whole rows of B elements to obtain `scratch_page_rows`; both the pool allocation and each page offset use this padded size. Thus an FP32 `[24, 8]` page has a 1024-byte workspace while its scratch view retains shape `[24, 8]`. Page dimensions must be positive and element storage must be 1, 2, or 4 bytes. Workspace rounding, pool dimensions, and the total pool byte size must fit in `int64_t`; unsupported types and oversized workspaces are rejected before batch expansion.
 

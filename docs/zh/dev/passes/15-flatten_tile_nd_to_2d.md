@@ -81,6 +81,10 @@ load、分配、reshape、assemble 和 transpose 改写路径采用相同的类�
 ND transpose 在创建输出缓冲区及逐页 assemble 的结果定义时同样保留该绑定，
 临时 scratch 缓冲区仍独立分配。
 常量 slot 保留原 MemRef 对象。仅当 RHS 和 LHS 类型引用均不变时才保留原定义。
+重建赋值时，其 `leading_comments_` 只保留在第一条替换语句上，包括 lowering 引入的辅助语句。
+未改写的赋值保留原注释，不重复附加。batch-matmul 与 store 融合时，被消费的 store 注释
+保留在第一条逐页 store 上，与 matmul 自身的注释分别处理。附加注释只浅拷贝接收注释的赋值，
+不修改输入 IR，也不改变变量身份。
 
 N-D transpose 的 scratch 将 A 对齐到 32 个元素（8-bit 类型）或 16 个元素（16/32-bit 类型）。列方向至少保留一个 32 字节块，16-bit vtranspose 则保留两条覆盖完整高度的 16 列带。将所得 workspace 容量向上取整为每行 B 个元素的整行数，得到 `scratch_page_rows`；池的分配大小和每页偏移均使用该补齐值。因此，FP32 `[24, 8]` 页拥有 1024 字节 workspace，而 scratch 视图仍保持 `[24, 8]` 形状。 页维度必须为正，元素存储大小必须为 1、2 或 4 字节。workspace 对齐、池维度及池的总字节数必须可用 `int64_t` 表示；不支持的类型和超大 workspace 会在展开 batch 前被拒绝。
 

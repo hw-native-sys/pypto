@@ -795,7 +795,11 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
       auto batch_store_var =
           std::make_shared<Var>(direct_store.store_assign->var_->name_hint_ + "_" + std::to_string(i),
                                 batch_store->GetType(), direct_store.store_assign->var_->span_);
-      out.stmts.push_back(std::make_shared<AssignStmt>(batch_store_var, batch_store, store_stmt_span));
+      // The caller skips the consumed store, so preserve its comments here,
+      // on the first page store rather than duplicating them on every page.
+      out.stmts.push_back(std::make_shared<AssignStmt>(
+          batch_store_var, batch_store, store_stmt_span,
+          i == 0 ? direct_store.store_assign->leading_comments_ : std::vector<std::string>{}));
       current_store_tensor = batch_store_var;
     } else {
       // Non-fused path: assemble into output tile.
