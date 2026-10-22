@@ -1287,6 +1287,9 @@ class TestFlattenTileNdTo2DCallRemapping:
                 tile_ops.load(nd_source, [0, 0, 0], [1, 1, 4], target_memory=ir.MemorySpace.Vec),
             )
             call = tile_ops.assemble(target, part, [0, 0, 0])
+        elif producer == "nd_transpose":
+            operand = ib.let("operand", tile_ops.load(nd_source, [0, 0, 0], [2, 1, 4]))
+            call = tile_ops.transpose(operand, 1, 2)
         elif producer == "transpose":
             call = tile_ops.transpose(local, 0, 1)
         else:
@@ -1295,6 +1298,180 @@ class TestFlattenTileNdTo2DCallRemapping:
             )
             call = tile_ops.exp(operand)
         return call
+
+    @pytest.mark.parametrize(
+        "producer",
+        [
+            "load",
+            "nd_load",
+            "nd_create",
+            "nd_full",
+            "nd_reshape",
+            "nd_assemble",
+            "transpose",
+            "nd_transpose",
+            "store",
+            "nd_store",
+            "eval",
+        ],
+    )
+    def test_specialized_call_preserves_and_remaps_attrs(self, producer: str):
+        """Every replacement of an original operation retains its live attributes."""
+        span = ir.Span.unknown()
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            nd_source = function.param("nd_source", ir.TensorType([2, 1, 4], DataType.FP32))
+            local = function.param(
+                "local", ir.TileType([1, 4], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+            )
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
+            value = ib.let("value", tile_ops.read(loaded, [0]))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+            if producer == "nd_full":
+                call = tile_ops.full([2, 1, 4], DataType.FP32, 1.0)
+            elif producer == "nd_transpose":
+                operand = ib.let("operand", tile_ops.load(nd_source, [0, 0, 0], [2, 1, 4]))
+                call = tile_ops.transpose(operand, 1, 2)
+            elif producer in ("store", "nd_store"):
+                operand = local
+                if producer == "nd_store":
+                    operand = ib.let("operand", tile_ops.load(nd_source, [0, 0, 0], [2, 1, 4]))
+                call = tile_ops.store(
+                    operand,
+                    [0, 0, 0] if producer == "nd_store" else [0, 0],
+                    nd_source if producer == "nd_store" else source,
+                )
+            else:
+                call = self._make_slot_test_call(ib, producer, source, nd_source, local)
+            attrs = {
+                "dependency": pitch,
+                "scalar_expression": ir.mod(pitch, ir.ConstInt(2, DataType.INDEX, span), span),
+                "audit_marker": "preserved",
+            }
+            tagged = ir.Call(call.op, list(call.args), call.kwargs, attrs, call.type, span)
+            if producer == "eval":
+                ib.eval_stmt(tagged)
+            else:
+                ib.let("tagged", tagged)
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "specialized_call_attrs", span)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.SSAForm,
+            passes.IRProperty.IncoreTileOps,
+            passes.IRProperty.NormalizedStmtStructure,
+            passes.IRProperty.AssignTypeSymmetry,
+        ):
+            properties.insert(prop)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, Before)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        new_pitch = self._definitions(After)["pitch"].var
+        assert new_pitch is not pitch
+        replacements: list[ir.Call] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == tagged.op.name and op.args[0] is not metadata:
+                    replacements.append(op)
+                super().visit_call(op)
+
+        function = After.get_function("kernel")
+        assert function is not None
+        Collector().visit_stmt(function.body)
+        assert replacements
+        for replacement in replacements:
+            assert replacement.attrs["audit_marker"] == "preserved"
+            assert replacement.attrs["dependency"] is new_pitch
+            expression = replacement.attrs["scalar_expression"]
+            assert isinstance(expression, ir.FloorMod)
+            assert expression.left is new_pitch
+            assert cast(ir.ConstInt, expression.right).value == 2
+
+    @pytest.mark.parametrize("lowering", ["single", "batch", "acc", "fused", "noncontiguous_load"])
+    def test_page_lowering_preserves_and_remaps_attrs(self, lowering: str):
+        """Page operations inherit their own original attrs, not scratch-buffer attrs."""
+        span = ir.Span.unknown()
+        batch = 1 if lowering == "single" else 2
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            lhs = function.param(
+                "lhs",
+                ir.TensorType([batch, 32 if lowering == "noncontiguous_load" else 16, 32], DataType.BF16),
+            )
+            rhs = function.param("rhs", ir.TensorType([batch, 32, 16], DataType.BF16))
+            output = function.param("output", ir.TensorType([batch, 16, 16], DataType.FP32))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(output.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
+            value = ib.let("value", tile_ops.read(loaded, [0]))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+
+            def tagged(call: ir.Call, marker: str) -> ir.Call:
+                return ir.Call(
+                    call.op,
+                    list(call.args),
+                    call.kwargs,
+                    {"dependency": pitch, "audit_marker": marker},
+                    call.type,
+                    span,
+                )
+
+            left = ib.let(
+                "left",
+                tagged(
+                    tile_ops.load(lhs, [0, 0, 0], [batch, 16, 32], target_memory=ir.MemorySpace.Mat), "load"
+                ),
+            )
+            right = ib.let(
+                "right", tile_ops.load(rhs, [0, 0, 0], [batch, 32, 16], target_memory=ir.MemorySpace.Mat)
+            )
+            if lowering == "acc":
+                acc = ib.let(
+                    "acc", tile_ops.create([batch, 16, 16], DataType.FP32, target_memory=ir.MemorySpace.Acc)
+                )
+                compute = tile_ops.batch_matmul_acc(acc, left, right)
+            else:
+                compute = tile_ops.batch_matmul(left, right)
+            result = ib.let("result", tagged(compute, "compute"))
+            if lowering in ("acc", "fused"):
+                stored = ib.let("stored", tagged(tile_ops.store(result, [0, 0, 0], output), "store"))
+                ib.return_stmt(stored)
+            else:
+                ib.return_stmt(output)
+        Before = ir.Program([function.get_result()], "page_attrs", span)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        new_pitch = self._definitions(After)["pitch"].var
+        observed: dict[str, list[ir.Call]] = {"load": [], "compute": []}
+        if lowering in ("acc", "fused"):
+            observed["store"] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                marker = op.attrs.get("audit_marker")
+                if marker in observed:
+                    observed[marker].append(op)
+                super().visit_call(op)
+
+        function = After.get_function("kernel")
+        assert function is not None
+        Collector().visit_stmt(function.body)
+        expected_ops = {
+            "load": "tile.load",
+            "compute": "tile.matmul_acc" if lowering == "acc" else "tile.matmul",
+            "store": "tile.store",
+        }
+        for marker, calls in observed.items():
+            assert calls, marker
+            expected_count = 1 if marker == "load" and lowering != "noncontiguous_load" else batch
+            assert len(calls) == expected_count
+            for call in calls:
+                assert call.op.name == expected_ops[marker]
+                assert call.attrs["dependency"] is new_pitch
 
     @pytest.mark.parametrize(
         "producer,lhs_only,slot_kind",
@@ -1324,6 +1501,9 @@ class TestFlattenTileNdTo2DCallRemapping:
             ("transpose", True, "variable"),
             # Transpose used to drop even a constant binding during rebuilding.
             ("transpose", True, "constant"),
+            # ND transpose allocates and assembles a separate output buffer.
+            ("nd_transpose", True, "constant"),
+            ("nd_transpose", True, "variable"),
         ],
     )
     def test_pinned_slot_follows_definition_remapping(self, producer: str, lhs_only: bool, slot_kind: str):
@@ -1415,6 +1595,24 @@ class TestFlattenTileNdTo2DCallRemapping:
             assert cast(ir.ConstInt, actual.slot_index_.right).value == 2
         else:
             assert actual is pinned
+        if producer == "nd_transpose":
+            output_bindings: list[ir.AssignStmt] = []
+
+            class OutputCollector(ir.IRVisitor):
+                def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+                    if op.var.name_hint == "result":
+                        output_bindings.append(op)
+                    if op.var.name_hint == "trans_tmp_pool":
+                        assert cast(ir.TileType, op.var.type).memref is not actual
+                    super().visit_assign_stmt(op)
+
+            function = After.get_function("kernel")
+            assert function is not None
+            OutputCollector().visit_stmt(function.body)
+            assert len(output_bindings) == 3  # Output allocation and two page writebacks.
+            assert cast(ir.Call, output_bindings[0].value).op.name == _OP_TILE_CREATE
+            for binding in output_bindings:
+                assert cast(ir.TileType, binding.var.type).memref is actual
         assert "__FREE_VAR" not in str(After)
 
     @pytest.mark.parametrize("dynamic_slot", [False, True])

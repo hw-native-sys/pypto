@@ -112,6 +112,15 @@ struct FlattenContext {
   }
 };
 
+/// Preserve attributes on semantic replacements, remapping every supported
+/// expression-valued attribute by stored type rather than by attribute name.
+CallPtr WithRemappedCallAttrs(const CallPtr& original, const CallPtr& rewritten, const FlattenContext& ctx);
+
+/// Carry LHS-only allocation metadata and remap its live expressions before
+/// registering a new definition, including outputs of decomposed operations.
+TypePtr WithRemappedAllocation(const TypePtr& value_type, const TypePtr& original_type,
+                               const FlattenContext& ctx);
+
 bool IsNdTile(const TileTypePtr& tile_type);
 int64_t GetStaticDim(const ExprPtr& expr, const std::string& context);
 std::pair<int64_t, int64_t> ComputeMergedShape(const std::vector<ExprPtr>& shape, const std::string& context);

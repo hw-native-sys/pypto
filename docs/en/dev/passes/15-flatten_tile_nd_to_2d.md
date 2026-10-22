@@ -70,7 +70,13 @@ bindings even when the operands are unchanged. GM operations such as `tensor.vie
 and `tensor.write` retain their logical tensor shapes and view metadata; there is
 no operator whitelist. If a generic `tile.*` Call has changed operands, its result
 type is re-deduced from those operands to propagate rank flattening, while keeping
-the substituted attributes. Every rebuilt definition carries any missing allocation
+the substituted attributes. Specialized rewrites also retain the original Call's
+attributes and remap their expression references using the shared `MapAttrExprs`
+visitor rules, without an attribute-name whitelist. When an operation is expanded
+into pages, its attributes follow the corresponding per-page operations (loads,
+transposes, matmuls, or stores), rather than unrelated scratch allocations.
+Re-deduced `EvalStmt` Calls retain the already substituted attributes as well.
+Every rebuilt definition carries any missing allocation
 metadata (MemRef and tile memory space) from its original left-hand Var, even
 when only the result type or attributes changed and the RHS has no MemRef.
 Tile memory space is part of the value type and is also restored on the rebuilt
@@ -79,7 +85,9 @@ Runtime expressions in carried allocation metadata are remapped before recording
 the new definition, including a pinned MemRef's `slot_index_`. A change confined
 to LHS metadata also rebuilds the definition, even if the RHS is unchanged. The
 load, allocation, reshape, assemble, and transpose rewrite paths use the same
-type-reference remapping rule. Constant slots retain the original MemRef.
+type-reference remapping rule. ND transpose applies it to its output allocation
+and each per-page assemble result; its scratch allocations remain independent.
+Constant slots retain the original MemRef.
 A definition is retained only when both its RHS and LHS type references are unchanged.
 
 For N-D transpose scratch, round A to 32 elements for 8-bit types or 16 for 16/32-bit types. Reserve at least one 32-byte column block, or two full-height 16-column strips for 16-bit vtranspose. Round the resulting workspace capacity up to whole rows of B elements to obtain `scratch_page_rows`; both the pool allocation and each page offset use this padded size. Thus an FP32 `[24, 8]` page has a 1024-byte workspace while its scratch view retains shape `[24, 8]`. Page dimensions must be positive and element storage must be 1, 2, or 4 bytes. Workspace rounding, pool dimensions, and the total pool byte size must fit in `int64_t`; unsupported types and oversized workspaces are rejected before batch expansion.

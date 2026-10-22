@@ -131,7 +131,12 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
       {"target_memory", target_mem},
   };
   auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
-  VarPtr out_var = std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), span);
+  // This allocation is the original transpose result, not a scratch buffer.
+  // Keep its declared storage and remap runtime slots before assembling pages.
+  auto output_type = WithRemappedAllocation(create_out->GetType(), assign->var_->GetType(), ctx);
+  create_out = std::make_shared<Call>(create_out->op_, create_out->args_, create_out->kwargs_,
+                                      create_out->attrs_, output_type, create_out->span_);
+  VarPtr out_var = std::make_shared<Var>(assign->var_->name_hint_, output_type, assign->var_->span_);
   out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, assign->span_));
 
   // A2/A3 TTrans.hpp: BLOCK_BYTE_SIZE, Y_ELEM_B8, Y_ELEM_OTHER, and the
@@ -196,13 +201,15 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
     // Transpose the page [A, B] -> [B, A]. Ranks match, CHECK passes.
     auto transpose =
         op_registry.Create("tile.transpose", {src_page, axis0_expr, axis1_expr, scratch_page}, span);
+    transpose = WithRemappedCallAttrs(call, transpose, ctx);
     auto transpose_var = std::make_shared<Var>("trans_" + suffix, transpose->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(transpose_var, transpose, assign->span_));
 
     // Assemble the [B, A] result into the flat output at row offset i*B.
     auto out_offset = MakeShapeTupleFromInts({i * b, 0}, span);
     auto assemble = op_registry.Create("tile.assemble", {out_var, transpose_var, out_offset}, span);
-    out_var = std::make_shared<Var>(out_var->name_hint_, assemble->GetType(), span);
+    auto assembled_type = WithRemappedAllocation(assemble->GetType(), out_var->GetType(), ctx);
+    out_var = std::make_shared<Var>(out_var->name_hint_, assembled_type, span);
     out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, assign->span_));
   }
 

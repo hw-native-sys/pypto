@@ -49,6 +49,15 @@ using transform_utils::Substitute;
 namespace flatten_tile_nd_to_2d {
 namespace rewrite_internal {
 
+CallPtr WithRemappedCallAttrs(const CallPtr& original, const CallPtr& rewritten, const FlattenContext& ctx) {
+  auto attrs = original->attrs_;
+  for (auto& [key, value] : attrs) {
+    auto remapped = MapAttrExprs(value, [&](const ExprPtr& expr) { return Substitute(expr, ctx.var_map); });
+    if (remapped) value = std::move(*remapped);
+  }
+  return transform_utils::PreserveCallAttrs(attrs, rewritten);
+}
+
 // Allocation annotations are live IR: in particular, a pinned runtime slot may
 // name a scalar rebuilt earlier in this block. Reuse the type remapper (including
 // RemapPinnedMemRefExprs) before binding the result, never at its consumers.
@@ -142,8 +151,9 @@ VarPtr EmitFlattenedTileAlloc(const CallPtr& call, const AssignStmtPtr& assign,
   }
   auto deduced = op_registry.Create(op_name, new_args, create_kwargs, span);
   auto created_type = WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx);
-  auto new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
-                                         created_type, deduced->span_);
+  CallPtr new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+                                            created_type, deduced->span_);
+  new_call = WithRemappedCallAttrs(call, new_call, ctx);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, created_type, assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
   return flat_var;
@@ -193,9 +203,10 @@ VarPtr TryFoldNdAssembleOffset(const CallPtr& call, const AssignStmtPtr& assign,
   };
 
   auto deduced = op_registry.Create("tile.assemble", new_args, call->kwargs_, span);
-  auto new_call = std::make_shared<Call>(
+  CallPtr new_call = std::make_shared<Call>(
       deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
       WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx), deduced->span_);
+  new_call = WithRemappedCallAttrs(call, new_call, ctx);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
   return flat_var;
@@ -240,9 +251,10 @@ VarPtr TryFlattenRankRaisingView(const CallPtr& call, const AssignStmtPtr& assig
   std::vector<ExprPtr> new_args = {Substitute(call->args_[0], ctx.var_map),
                                    MakeShapeTupleFromInts({merged, last}, span)};
   auto deduced = op_registry.Create(op_name, new_args, call->kwargs_, span);
-  auto new_call = std::make_shared<Call>(
+  CallPtr new_call = std::make_shared<Call>(
       deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
       WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx), deduced->span_);
+  new_call = WithRemappedCallAttrs(call, new_call, ctx);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
   return flat_var;
@@ -300,6 +312,7 @@ VarPtr EmitPackedAccumulatorDrain(const AccPackingPlan& plan, const CallPtr& cal
           std::make_shared<MakeTuple>(std::vector<ExprPtr>{row, offsets->elements_[1]}, span);
       auto page_store =
           op_registry.Create("tile.store", {page_var, store_offsets, out_tensor}, call->kwargs_, span);
+      page_store = WithRemappedCallAttrs(call, page_store, ctx);
       last_store = std::make_shared<Var>(assign->var_->name_hint_ + "_" + suffix, page_store->GetType(),
                                          assign->var_->span_);
       result->push_back(std::make_shared<AssignStmt>(last_store, page_store, assign->span_));
@@ -313,6 +326,7 @@ VarPtr EmitPackedAccumulatorDrain(const AccPackingPlan& plan, const CallPtr& cal
         "tile.store",
         {page_var, store_offsets, out_tensor, std::make_shared<MakeTuple>(partition_shape, span)},
         call->kwargs_, span);
+    page_store = WithRemappedCallAttrs(call, page_store, ctx);
     last_store = std::make_shared<Var>(assign->var_->name_hint_ + "_" + suffix, page_store->GetType(),
                                        assign->var_->span_);
     result->push_back(std::make_shared<AssignStmt>(last_store, page_store, assign->span_));
@@ -817,6 +831,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         if (auto call = As<Call>(new_expr)) {
           if (call->op_ && call->op_->name_.substr(0, 5) == "tile.") {
             auto new_call = op_registry.Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
+            new_call = transform_utils::PreserveCallAttrs(call, new_call);
             result.push_back(std::make_shared<EvalStmt>(new_call, eval->span_));
             continue;
           }
@@ -1005,8 +1020,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         if (pending_batch_matmul_mat) {
           flat_kwargs.emplace_back("target_memory", MemorySpace::Mat);
         }
-        auto flat_call = std::make_shared<Call>(call->op_, sub_args, flat_kwargs, call->attrs_,
-                                                flat_tile_type, call->span_);
+        CallPtr flat_call = std::make_shared<Call>(call->op_, sub_args, flat_kwargs, call->attrs_,
+                                                   flat_tile_type, call->span_);
+        flat_call = WithRemappedCallAttrs(call, flat_call, ctx);
         auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, flat_call, assign->span_));
         ctx.Insert(assign->var_, flat_var);
@@ -1015,8 +1031,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       // ≤2D tile.load: honor any pending var_map substitutions
       auto deduced_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
       auto loaded_type = WithRemappedAllocation(deduced_call->GetType(), assign->var_->GetType(), ctx);
-      auto new_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
-                                             call->attrs_, loaded_type, deduced_call->span_);
+      CallPtr new_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
+                                                call->attrs_, loaded_type, deduced_call->span_);
+      new_call = WithRemappedCallAttrs(call, new_call, ctx);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, loaded_type, assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
       ctx.Insert(assign->var_, new_var);
@@ -1093,7 +1110,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       // Construct call directly: store result type = output tensor type (args[2])
       auto out_type = new_args[2]->GetType();
-      auto new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, out_type, call->span_);
+      CallPtr new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, out_type, call->span_);
+      new_call = WithRemappedCallAttrs(call, new_call, ctx);
       auto new_type = WithRemappedAllocation(new_call->GetType(), assign->var_->GetType(), ctx);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
@@ -1149,8 +1167,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         for (const auto& arg : call->args_) args.push_back(Substitute(arg, ctx.var_map));
         args[2] = PackedRowWindowOffsets(*plan, call->args_[2], ctx, span);
         auto rewritten = op_registry.Create(op_name, args, call->kwargs_, span);
-        auto new_call = std::make_shared<Call>(rewritten->op_, rewritten->args_, rewritten->kwargs_,
-                                               call->attrs_, rewritten->GetType(), span);
+        CallPtr new_call = std::make_shared<Call>(rewritten->op_, rewritten->args_, rewritten->kwargs_,
+                                                  call->attrs_, rewritten->GetType(), span);
+        new_call = WithRemappedCallAttrs(call, new_call, ctx);
         auto new_type = WithRemappedAllocation(new_call->GetType(), assign->var_->GetType(), ctx);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
@@ -1193,6 +1212,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
         auto t_call =
             op_registry.Create("tile.transpose", {in, call->args_[1], call->args_[2], scratch_var}, span);
+        t_call = WithRemappedCallAttrs(call, t_call, ctx);
         auto output_type = WithRemappedAllocation(t_call->GetType(), assign->var_->GetType(), ctx);
         auto t_var = std::make_shared<Var>(assign->var_->name_hint_, output_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(t_var, t_call, assign->span_));
