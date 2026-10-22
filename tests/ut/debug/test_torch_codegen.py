@@ -1470,6 +1470,14 @@ def test_unsupported_op_raises():
         torch_codegen(func)
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_fp4_debug_reference_rejects_instead_of_emitting_float32(dtype):
+    src = _tensor_var("src", [32, 64], dtype)
+    func = _simple_function("fp4_identity", [src], ir.ReturnStmt([src], _span()), [src.type])
+    with pytest.raises(ValueError, match="does not implement packed FP4 encoding or decoding"):
+        torch_codegen(func)
+
+
 # ---------------------------------------------------------------------------
 # Test: write ops return container (not None)
 # ---------------------------------------------------------------------------

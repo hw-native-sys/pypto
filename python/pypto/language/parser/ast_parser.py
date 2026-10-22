@@ -7709,7 +7709,9 @@ class ASTParser:
         # governed by pl.submit conventions, not by the callee's implicit return.
         if func_obj is not None and not return_types and not as_submit:
             return_types = self._effective_return_types(func_obj)
-        if func_obj is not None and return_types:
+        # Argument format checks also apply to void calls and submits whose
+        # only result is a TaskId; retain the existing omitted-output mapping.
+        if func_obj is not None:
             callee_params_for_return, args_for_return = self._call_args_for_return_deduction(
                 func_obj,
                 args,

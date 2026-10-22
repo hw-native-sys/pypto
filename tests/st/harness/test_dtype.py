@@ -20,7 +20,7 @@ from harness.core.harness import DataType
     [
         ("FP8E4M3FN", "float8_e4m3fn"),
         ("FP8E8M0", "float8_e8m0fnu"),
-        ("FP4", "float4_e2m1fn_x2"),
+        ("FP4E2M1X2", "float4_e2m1fn_x2"),
     ],
 )
 def test_mx_dtype_maps_to_torch(member, torch_name):

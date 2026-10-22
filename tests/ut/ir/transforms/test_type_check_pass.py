@@ -617,5 +617,69 @@ def test_device_dispatch_layout_direction_for_call_and_submit(submit, caller_lay
     assert mismatched is not accepted
 
 
+@pytest.mark.parametrize("type_class", [ir.TensorType, ir.TileType])
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize("actual_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_void_call_checks_packed_fp4_formats_without_inline_functions(type_class, submit, actual_dtype):
+    """Hand-built calls and submits must not reinterpret one packed format as the other."""
+    formal = ir.Var("formal", type_class([16, 32], DataType.FP4E2M1X2), _SPAN)
+    actual = ir.Var("actual", type_class([16, 32], actual_dtype), _SPAN)
+    callee = ir.Function("sink", [formal], [], ir.ReturnStmt([], _SPAN), _SPAN)
+    if submit:
+        call = ir.Submit(
+            ir.GlobalVar("sink"), [actual], [], ir.TupleType([ir.ScalarType(DataType.TASK_ID)]), _SPAN
+        )
+    else:
+        call = ir.Call(ir.GlobalVar("sink"), [actual], ir.TupleType([]), _SPAN)
+    caller = ir.Function("caller", [actual], [], ir.EvalStmt(call, _SPAN), _SPAN)
+    diagnostics = _layout_diagnostics(ir.Program([callee, caller], "PackedFormats", _SPAN))
+    if actual_dtype == DataType.FP4E2M1X2:
+        assert diagnostics == []
+    else:
+        assert len(diagnostics) == 1
+        assert diagnostics[0].error_code == passes.TypeCheckErrorType.DTYPE_MISMATCH.value
+        assert "packed FP4 formats must match" in diagnostics[0].message
+
+
+@pytest.mark.parametrize("direction", [ir.ParamDirection.Out, ir.ParamDirection.InOut])
+@pytest.mark.parametrize("actual_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_submit_packed_format_checks_skip_omitted_outputs_before_commctx(direction, actual_dtype):
+    """An omitted output cannot steal a required input or the trailing context argument."""
+    e2_type = ir.TensorType([16, 32], DataType.FP4E2M1X2)
+    e1_type = ir.TensorType([16, 32], DataType.FP4E1M2X2)
+    before = ir.Var("before", e2_type, _SPAN)
+    source = ir.Var("source", e1_type, _SPAN)
+    after = ir.Var("after", e2_type, _SPAN)
+    context = ir.Var("context", ir.CommCtxType(), _SPAN)
+    callee = ir.Function(
+        "sink",
+        [
+            (before, direction),
+            (source, ir.ParamDirection.In),
+            (after, direction),
+            (context, ir.ParamDirection.In),
+        ],
+        [],
+        ir.ReturnStmt([], _SPAN),
+        _SPAN,
+    )
+    actual = ir.Var("actual", ir.TensorType([16, 32], actual_dtype), _SPAN)
+    actual_context = ir.Var("actual_context", ir.CommCtxType(), _SPAN)
+    call = ir.Submit(
+        ir.GlobalVar("sink"),
+        [actual, actual_context],
+        [],
+        ir.TupleType([ir.ScalarType(DataType.TASK_ID)]),
+        _SPAN,
+    )
+    caller = ir.Function("caller", [actual, actual_context], [], ir.EvalStmt(call, _SPAN), _SPAN)
+    diagnostics = _layout_diagnostics(ir.Program([callee, caller], "PackedFormats", _SPAN))
+    if actual_dtype == DataType.FP4E1M2X2:
+        assert diagnostics == []
+    else:
+        assert len(diagnostics) == 1
+        assert "parameter 'source' expects fp4e1m2x2" in diagnostics[0].message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

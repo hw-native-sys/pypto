@@ -44,7 +44,22 @@ _DTYPE_MAP: dict[str, str] = {
 
 
 def _torch_dtype(dt: DataType) -> str:
+    if dt in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
+        raise ValueError(
+            "torch_codegen does not implement packed FP4 encoding or decoding; "
+            "use an independent byte-level reference for FP4 verification"
+        )
     return _DTYPE_MAP.get(str(dt), "torch.float32")
+
+
+def _validate_reference_type(typ: _ir.Type) -> None:
+    if isinstance(typ, (_ir.TensorType, _ir.TileType, _ir.BufferType, _ir.ScalarType)):
+        _torch_dtype(typ.dtype)
+    elif isinstance(typ, _ir.TupleType):
+        for element in typ.types:
+            _validate_reference_type(element)
+    elif isinstance(typ, _ir.MultiBufferType):
+        _validate_reference_type(typ.element_type)
 
 
 # ---------------------------------------------------------------------------
@@ -1546,6 +1561,10 @@ class TorchCodegen(_ir.IRVisitor):
                 self._emit(f"{name} = {param_name}.shape[{axis}]")
 
     def visit_function(self, func: _ir.Function) -> None:
+        for param in func.params:
+            _validate_reference_type(param.type)
+        for result_type in func.return_types:
+            _validate_reference_type(result_type)
         # Keep names function-local. IR may reuse object ids across functions;
         # sharing maps at program scope can emit stale names.
         self._var_names_by_id = {}
@@ -1704,6 +1723,7 @@ class TorchCodegen(_ir.IRVisitor):
         return True
 
     def visit_call(self, op: _ir.Call) -> None:
+        _validate_reference_type(op.type)
         op_name = op.op.name
         handler = _OP_MAP.get(op_name)
 

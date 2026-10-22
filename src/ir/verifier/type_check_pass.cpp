@@ -128,6 +128,10 @@ class TypeChecker : public IRVisitor {
   void CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span,
                            bool is_device_dispatch);
 
+  /// Check packed numerical formats independently of layouts and return types.
+  void CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span,
+                                 bool is_submit);
+
   /**
    * @brief Trace an ND argument of a ``device=`` dispatch back to what it hands
    * an NZ parameter
@@ -450,13 +454,59 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
   }
 }
 
+void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::vector<ExprPtr>& args,
+                                            const Span& span, bool is_submit) {
+  if (!program_ || !As<GlobalVar>(callee_op)) return;
+  auto callee = program_->GetFunction(callee_op->name_);
+  if (!callee) return;
+
+  // Match the parser's optional Out/InOut binding in one linear walk. Reserve
+  // actuals for all required inputs, including a trailing CommCtx suffix, so
+  // an omitted output never shifts a packed input onto the wrong formal.
+  size_t remaining_required = static_cast<size_t>(
+      std::count(callee->param_directions_.begin(), callee->param_directions_.end(), ParamDirection::In));
+  const bool omitted_outputs = is_submit && args.size() < callee->params_.size();
+  size_t arg_index = 0;
+  for (size_t param_index = 0; param_index < callee->params_.size() && arg_index < args.size();
+       ++param_index) {
+    if (omitted_outputs) {
+      if (callee->param_directions_[param_index] == ParamDirection::In) {
+        --remaining_required;
+      } else if (args.size() - arg_index <= remaining_required) {
+        continue;
+      }
+    }
+    const size_t actual_index = arg_index++;
+    const auto& param = callee->params_[param_index];
+    if (!param || !args[actual_index]) continue;
+    auto expected = std::dynamic_pointer_cast<const ShapedType>(param->GetType());
+    auto actual = std::dynamic_pointer_cast<const ShapedType>(args[actual_index]->GetType());
+    if (!expected || !actual || !expected->dtype_.IsPackedFp4() || !actual->dtype_.IsPackedFp4() ||
+        expected->dtype_ == actual->dtype_) {
+      continue;
+    }
+    std::ostringstream msg;
+    msg << "Dtype mismatch at argument " << actual_index << " of call to '" << callee->name_
+        << "': parameter '" << param->name_hint_ << "' expects " << expected->dtype_.ToString()
+        << " but the argument is " << actual->dtype_.ToString()
+        << "; packed FP4 formats must match; use an explicit numerical cast";
+    RecordError(typecheck::ErrorType::DTYPE_MISMATCH, msg.str(), span);
+  }
+}
+
 void TypeChecker::VisitExpr_(const CallPtr& op) {
-  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+  if (op) {
+    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+    CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
+  }
   IRVisitor::VisitExpr_(op);
 }
 
 void TypeChecker::VisitExpr_(const SubmitPtr& op) {
-  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+  if (op) {
+    CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+    CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, true);
+  }
   IRVisitor::VisitExpr_(op);
 }
 

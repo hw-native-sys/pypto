@@ -47,6 +47,12 @@ namespace pypto {
 namespace ir {
 namespace serialization {
 
+DataType detail::DataTypeFromSerializedCode(uint8_t code) {
+  CHECK(code != 0x30) << "Serialized logical FP4 dtype code 0x30 is no longer supported; use FP4E2M1X2 or "
+                         "FP4E1M2X2 with byte-carrier shapes, strides, and offsets";
+  return DataType(code);
+}
+
 namespace {
 
 using TypeFields = std::unordered_map<std::string, msgpack::object>;
@@ -447,7 +453,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       const auto fields = ReadRequiredTypeFields(obj, type_kind, {"type_kind", "shape", "dtype", "kind"});
       return std::make_shared<RegType>(
           ReadTypeInteger<int64_t>(fields.at("shape"), "shape"),
-          DataType(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
+          detail::DataTypeFromSerializedCode(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
           static_cast<RegKind>(ReadTypeInteger<uint8_t>(fields.at("kind"), "kind")));
     }
     if (type_kind == "VoidType") {
@@ -461,7 +467,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
                                   "blayout", "slayout", "fractal", "pad", "compact"});
       return std::make_shared<BufferType>(
           ReadBufferShape(fields.at("physical_shape"), "physical_shape"),
-          DataType(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
+          detail::DataTypeFromSerializedCode(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
           static_cast<MemorySpace>(ReadTypeInteger<uint8_t>(fields.at("memory_space"), "memory_space")),
           ReadBufferShape(fields.at("valid_shape"), "valid_shape"),
           static_cast<TileLayout>(ReadTypeInteger<uint8_t>(fields.at("blayout"), "blayout")),
@@ -533,7 +539,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     }
 
     if (type_kind == "ScalarType") {
-      return std::make_shared<ScalarType>(DataType(dtype_code));
+      return std::make_shared<ScalarType>(detail::DataTypeFromSerializedCode(dtype_code));
     } else if (type_kind == "TensorType") {
       std::optional<MemRefPtr> memref;
       std::optional<TensorView> tensor_view;
@@ -545,7 +551,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         tensor_view = DeserializeTensorView(tensor_view_obj, zone);
       }
 
-      return std::make_shared<TensorType>(shape, DataType(dtype_code), memref, tensor_view);
+      return std::make_shared<TensorType>(shape, detail::DataTypeFromSerializedCode(dtype_code), memref,
+                                          tensor_view);
     } else if (type_kind == "DistributedTensorType") {
       std::optional<MemRefPtr> memref;
       std::optional<TensorView> tensor_view;
@@ -560,8 +567,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         window_buffer =
             std::static_pointer_cast<const WindowBuffer>(DeserializeNode(window_buffer_obj, zone));
       }
-      return std::make_shared<DistributedTensorType>(shape, DataType(dtype_code), memref, tensor_view,
-                                                     window_buffer);
+      return std::make_shared<DistributedTensorType>(shape, detail::DataTypeFromSerializedCode(dtype_code),
+                                                     memref, tensor_view, window_buffer);
     } else if (type_kind == "TileType") {
       std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;
@@ -577,10 +584,11 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         memory_space = static_cast<MemorySpace>(memory_space_code);
       }
 
-      return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view, memory_space);
+      return std::make_shared<TileType>(shape, detail::DataTypeFromSerializedCode(dtype_code), memref,
+                                        tile_view, memory_space);
     } else if (type_kind == "ArrayType") {
       CHECK(shape.size() == 1) << "ArrayType must have rank-1 shape, got " << shape.size();
-      return std::make_shared<ArrayType>(DataType(dtype_code), shape[0]);
+      return std::make_shared<ArrayType>(detail::DataTypeFromSerializedCode(dtype_code), shape[0]);
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "WindowBufferType") {

@@ -610,7 +610,6 @@ def test_unsigned_for_bound_fails_before_emission():
     [
         (_type(shape=(2, 16, 32)), "rank-1 or rank-2"),
         (_type(blayout=ir.TileLayout.col_major), "dense row-major Vec"),
-        (ir.BufferType([16, 32], DataType.FP4, ir.MemorySpace.Vec), "dense row-major Vec"),
     ],
 )
 def test_unsupported_physical_descriptors_fail_explicitly(descriptor, message):

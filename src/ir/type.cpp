@@ -64,16 +64,6 @@ std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optiona
   return memory_space;
 }
 
-void ValidatePackedFp4Shape(const DataType& dtype, const std::vector<ExprPtr>& shape) {
-  if (dtype != DataType::FP4) return;
-  CHECK(!shape.empty()) << "Packed FP4 shaped types must have rank >= 1";
-  auto packed_extent = As<ConstInt>(shape.back());
-  if (!packed_extent) return;
-  CHECK(packed_extent->value_ > 0 && packed_extent->value_ % 2 == 0)
-      << "Packed FP4 shaped types require a positive even logical last dimension, but got "
-      << packed_extent->value_;
-}
-
 std::vector<ExprPtr> MakeShapeExprs(const std::vector<int64_t>& shape) {
   std::vector<ExprPtr> result;
   result.reserve(shape.size());
@@ -399,7 +389,6 @@ ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr mem
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {
   detail::CheckValueOperands(shape_, Span::unknown(), "ShapedType dimension");
-  ValidatePackedFp4Shape(dtype_, shape_);
 }
 
 TensorType::TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,

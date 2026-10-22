@@ -58,6 +58,8 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
     "INT32": (ctypes.c_int32, torch.int32),
     "INT64": (ctypes.c_int64, torch.int64),
     "UINT8": (ctypes.c_uint8, torch.uint8),
+    # Simpler's FP4E2M1 element is one packed x2 byte; shapes/strides use carriers.
+    "FP4E2M1": (ctypes.c_uint8, torch.uint8),
 }
 
 

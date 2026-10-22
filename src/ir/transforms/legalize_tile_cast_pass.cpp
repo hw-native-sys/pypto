@@ -244,9 +244,9 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
 
 bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
 
-/// FP4 / FP4E2M1X2 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
+/// Packed FP4 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
 void MaybeWarnFp4FamilyToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
-  if (!diags || !src.IsFp4Family() || !IsFp8DataCastTarget(dst)) return;
+  if (!diags || !src.IsPackedFp4() || !IsFp8DataCastTarget(dst)) return;
   diags->emplace_back(DiagnosticSeverity::Warning, "LegalizeTileCast", 0,
                       "cast from " + src.ToString() + " to " + dst.ToString() +
                           " expands to FP4→BF16→FP32→FP8, which is slow and memory-heavy; prefer a LUT "

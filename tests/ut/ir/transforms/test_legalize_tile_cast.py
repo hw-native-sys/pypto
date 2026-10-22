@@ -82,114 +82,6 @@ def test_a5_int32_to_fp16_becomes_fp32_bridge():
     assert pairs == [("int32", "fp32"), ("fp32", "fp16")], pairs
 
 
-def test_a5_explicit_fp4_to_fp8_cast_becomes_three_native_hops():
-    """The public FP4→FP8 cast expands in LegalizeTileCast and preserves valid_shape."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            x: pl.Tensor[[16, 64], pl.FP4],
-            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
-        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
-            t = pl.load(x, [0, 0], [16, 64], valid_shape=[8, 48])
-            c = pl.cast(t, pl.FP8E4M3FN)
-            return pl.store(c, [0, 0], out)
-
-    after = _run(Before, BackendType.Ascend950)
-    assert _cast_pairs(after) == [
-        ("fp4", "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
-
-    class _ValidShapeCollector(ir.IRVisitor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.shapes: list[tuple[int, int]] = []
-
-        def visit_call(self, op: ir.Call) -> None:
-            if op.op.name == _TILE_CAST:
-                tile_type = op.type
-                assert isinstance(tile_type, ir.TileType)
-                valid = tile_type.get_effective_tile_view().valid_shape
-                assert len(valid) == 2
-                rows, cols = valid
-                assert isinstance(rows, ir.ConstInt)
-                assert isinstance(cols, ir.ConstInt)
-                self.shapes.append((rows.value, cols.value))
-            super().visit_call(op)
-
-    collector = _ValidShapeCollector()
-    collector.visit_program(after)
-    assert collector.shapes == [(8, 48), (8, 48), (8, 48)]
-
-
-def test_a5_fp4_to_fp8_cast_emits_warning(capfd):
-    """FP4→FP8* is legalized but emits a Warning (prefer LUT / host precast)."""
-    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            x: pl.Tensor[[16, 64], pl.FP4],
-            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
-        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
-            t = pl.load(x, [0, 0], [16, 64])
-            c = pl.cast(t, pl.FP8E4M3FN)
-            return pl.store(c, [0, 0], out)
-
-    prev = get_log_level()
-    set_log_level(LogLevel.WARN)
-    try:
-        capfd.readouterr()
-        after = _run(Before, BackendType.Ascend950)
-    finally:
-        set_log_level(prev)
-    assert _cast_pairs(after) == [
-        ("fp4", "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
-    err = capfd.readouterr().err
-    assert "LegalizeTileCast" in err
-    assert "FP4→BF16→FP32→FP8" in err
-    assert "LUT" in err
-    assert "fp8e4m3fn" in err.lower() or "FP8E4M3FN" in err
-
-
-def test_a5_fp4_to_bf16_cast_is_silent(capfd):
-    """DSv4.1 c1a path: FP4↔BF16 must not warn."""
-    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            x: pl.Tensor[[16, 64], pl.FP4],
-            out: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
-        ) -> pl.Tensor[[16, 64], pl.BF16]:
-            t = pl.load(x, [0, 0], [16, 64])
-            c = pl.cast(t, pl.BF16)
-            return pl.store(c, [0, 0], out)
-
-    prev = get_log_level()
-    set_log_level(LogLevel.WARN)
-    try:
-        capfd.readouterr()
-        after = _run(Before, BackendType.Ascend950)
-    finally:
-        set_log_level(prev)
-    assert _cast_pairs(after) == [("fp4", "bfloat16")]
-    err = capfd.readouterr().err
-    assert "LegalizeTileCast" not in err
-    assert "FP4→BF16→FP32→FP8" not in err
-
-
 def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
     """Hand-written FP4E2M1X2→BF16 is a native hop; last axis expands 2:1."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
@@ -259,7 +151,7 @@ def test_a5_uint8_ub_alias_to_bf16_stays_one_native_cast():
 
 
 def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
-    """Hand-written FP4E2M1X2→FP8* is allowed with the same Warning as logical FP4."""
+    """Packed E2M1→FP8 is legalized with a warning about the three-hop bridge."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -281,9 +173,11 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
         after = _run(Before, BackendType.Ascend950)
     finally:
         set_log_level(prev)
-    pairs = _cast_pairs(after)
-    assert pairs[0][0] == "fp4e2m1x2"
-    assert pairs[-1][1] == "fp8e4m3fn"
+    assert _cast_pairs(after) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
     err = capfd.readouterr().err
     assert "LegalizeTileCast" in err
     assert "FP4→BF16→FP32→FP8" in err
@@ -307,10 +201,11 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
 
     after = _run(Before, BackendType.Ascend950)
 
-    pairs = _cast_pairs(after)
-    assert pairs[0][0] == "fp4e2m1x2"
-    assert pairs[0][1] == "bfloat16"
-    assert pairs[-1][1] == "fp8e4m3fn"
+    assert _cast_pairs(after) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -360,20 +255,24 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     assert all(stride == [64, 1] for stride in strides.strides)
 
 
-def test_fp4_family_internal_cast_is_rejected():
-    """FP4 ↔ FP4E2M1X2 must fail at type deduction (geometry disagree)."""
-    with pytest.raises(InvalidOperationError, match="cast between FP4 and FP4E2M1X2"):
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    [(pl.FP4E2M1X2, pl.FP4E1M2X2), (pl.FP4E1M2X2, pl.FP4E2M1X2)],
+)
+def test_packed_fp4_format_cast_is_rejected(source_dtype, target_dtype):
+    """Equal byte geometry must not silently relabel distinct packed formats."""
+    with pytest.raises(InvalidOperationError, match="cast between FP4E2M1X2 and FP4E1M2X2"):
 
         @pl.program
         class Bad:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                x: pl.Tensor[[16, 64], pl.FP4],
-                out: pl.Out[pl.Tensor[[16, 32], pl.FP4E2M1X2]],
-            ) -> pl.Tensor[[16, 32], pl.FP4E2M1X2]:
-                t = pl.load(x, [0, 0], [16, 64])
-                c = pl.cast(t, pl.FP4E2M1X2)
+                x: pl.Tensor[[16, 32], source_dtype],
+                out: pl.Out[pl.Tensor[[16, 32], target_dtype]],
+            ) -> pl.Tensor[[16, 32], target_dtype]:
+                t = pl.load(x, [0, 0], [16, 32])
+                c = pl.cast(t, target_dtype)
                 return pl.store(c, [0, 0], out)
 
 

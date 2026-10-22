@@ -33,7 +33,7 @@ MX_GROUP_SIZE = 32
 SCALE_BLOCK_SIZE = 16
 SCALE_C0_SIZE = 2
 
-_MX_DATA_DTYPES = (DataType.FP4, DataType.FP8E4M3FN)
+_MX_DATA_DTYPES = (DataType.FP4E2M1X2, DataType.FP8E4M3FN)
 
 
 def _pack_a_scale(scale_codes: torch.Tensor) -> torch.Tensor:
@@ -244,7 +244,7 @@ class MatmulMxTestCase(PTOTestCase):
         super().__init__(RunConfig(rtol=0.0, atol=0.0), platform="a5")
         self._lhs_dtype = lhs_dtype
         self._rhs_dtype = rhs_dtype
-        self._lhs_fp4 = lhs_dtype == DataType.FP4
+        self._lhs_fp4 = lhs_dtype == DataType.FP4E2M1X2
 
     def get_name(self) -> str:
         return f"matmul_mx_{self._lhs_dtype.value}_x_{self._rhs_dtype.value}_base_acc"
@@ -283,7 +283,7 @@ class TestMatmulMx:
         ("lhs_dtype", "rhs_dtype"),
         [
             pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="mxfp8-x-mxfp8"),
-            pytest.param(DataType.FP4, DataType.FP8E4M3FN, id="mxfp4-x-mxfp8"),
+            pytest.param(DataType.FP4E2M1X2, DataType.FP8E4M3FN, id="mxfp4-x-mxfp8"),
         ],
     )
     def test_matmul_mx_base_and_acc(self, test_runner, lhs_dtype, rhs_dtype):

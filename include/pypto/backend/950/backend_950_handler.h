@@ -40,9 +40,9 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_block_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a5sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a5"}; }
-  // A5 supports both legacy logical FP4 and packed FP4E2M1X2; INT4/UINT4/HF4 stay rejected.
+  // A5 supports both packed FP4 formats; INT4/UINT4/HF4 stay rejected.
   [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
-    return dtype.GetBit() != 4 || dtype == DataType::FP4 || dtype.IsPackedFp4();
+    return dtype.GetBit() != 4;
   }
   [[nodiscard]] bool HonorsHighPrecisionAlgorithm() const override { return true; }
 

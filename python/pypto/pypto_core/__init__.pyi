@@ -52,7 +52,7 @@ class DataType:
     UINT16: DataType  # 16-bit unsigned integer
     UINT32: DataType  # 32-bit unsigned integer
     UINT64: DataType  # 64-bit unsigned integer
-    FP4: DataType  # 4-bit floating point (logical nibble)
+    FP4E1M2X2: DataType  # Packed pair of E1M2 FP4 (PTOAS carrier)
     FP4E2M1X2: DataType  # Packed pair of E2M1 FP4 (PTOAS / Torch carrier)
     FP8E4M3FN: DataType  # 8-bit floating point (IEEE 754 e4m3fn format)
     FP8E5M2: DataType  # 8-bit floating point (IEEE 754 e5m2 format)
@@ -107,7 +107,7 @@ class DataType:
 
     def is_float(self) -> bool:
         """
-        Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).
+        Check if this data type is a floating point type (packed FP4, FP8, FP16, FP32, BF16, HF4, HF8).
 
         Returns:
             True if the data type is a floating point type, False otherwise

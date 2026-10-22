@@ -564,7 +564,7 @@ class TestSliceView:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    @pytest.mark.parametrize("dtype", [pl.FP4, pl.INT4, pl.UINT4, pl.HF4])
+    @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])
     def test_four_bit_dtypes_share_packed_allocation_accounting(self, dtype):
         """All semantic 4-bit dtypes occupy one byte per two logical elements."""
 
@@ -586,41 +586,45 @@ class TestSliceView:
         assert re.search(rf"tile_a: .*pl\.MemRef\(mem_vec_\d+, {zero}, 64\)", printed), printed
         assert "pl.tile.alloc(pl.Mem.Vec, 64)" in printed
 
-    def test_fp4_slice_uses_packed_byte_offset_and_span(self):
+    @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+    def test_fp4_slice_uses_carrier_byte_offset_and_span(self, dtype):
         @pl.program
         class Before:
             @pl.function
             def main(
                 self,
-                input_a: pl.Tensor[[8, 16], pl.FP4],
-                output: pl.Out[pl.Tensor[[1, 16], pl.FP4]],
-            ) -> pl.Tensor[[1, 16], pl.FP4]:
+                input_a: pl.Tensor[[8, 16], dtype],
+                output: pl.Out[pl.Tensor[[1, 16], dtype]],
+            ) -> pl.Tensor[[1, 16], dtype]:
                 tile_a = pl.load(input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
                 row = pl.tile.slice(tile_a, [1, 16], [1, 0])
                 return pl.store(row, [0, 0], output)
 
         printed = ir.python_print(passes.init_mem_ref()(Before))
-        assert "pl.tile.alloc(pl.Mem.Vec, 64)" in printed
+        assert "pl.tile.alloc(pl.Mem.Vec, 128)" in printed
         assert re.search(
-            r"row: .*pl\.MemRef\(mem_vec_\d+, pl\.const\(8, pl\.INDEX\), 8\)",
+            r"row: .*pl\.MemRef\(mem_vec_\d+, pl\.const\(16, pl\.INDEX\), 16\)",
             printed,
         ), printed
 
-    def test_fp4_slice_rejects_second_nibble_origin(self):
+    @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+    def test_fp4_slice_accepts_odd_carrier_origin(self, dtype):
         @pl.program
         class Before:
             @pl.function
             def main(
                 self,
-                input_a: pl.Tensor[[8, 16], pl.FP4],
-                output: pl.Out[pl.Tensor[[1, 14], pl.FP4]],
-            ) -> pl.Tensor[[1, 14], pl.FP4]:
+                input_a: pl.Tensor[[8, 16], dtype],
+                output: pl.Out[pl.Tensor[[1, 14], dtype]],
+            ) -> pl.Tensor[[1, 14], dtype]:
                 tile_a = pl.load(input_a, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
                 tail = pl.tile.slice(tile_a, [1, 14], [0, 1])
                 return pl.store(tail, [0, 0], output)
 
-        with pytest.raises(ValueError, match="Packed 4-bit slice origins must be byte-aligned"):
-            passes.init_mem_ref()(Before)
+        printed = ir.python_print(passes.init_mem_ref()(Before))
+        assert re.search(r"tail: .*pl\.MemRef\(mem_vec_\d+, pl\.const\(1, pl\.INDEX\), 14\)", printed), (
+            printed
+        )
 
     @staticmethod
     def _acc_column_window_program(col_offset: int, window_cols: int = 128):

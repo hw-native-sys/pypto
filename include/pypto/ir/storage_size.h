@@ -22,9 +22,9 @@ namespace pypto::ir::storage_size {
 
 /// Physical storage width of one logical element.
 ///
-/// Every semantic 4-bit dtype uses packed nibble storage. Other sub-byte
-/// dtypes, notably BOOL, remain byte-addressable to preserve their existing
-/// buffer ABI.
+/// INT4, UINT4, and HF4 use packed nibble storage. Both FP4 x2 formats
+/// are eight-bit byte carriers. Other sub-byte dtypes, notably BOOL, remain
+/// byte-addressable to preserve their existing buffer ABI.
 inline uint64_t GetStorageBitWidth(const DataType& dtype) {
   return dtype.GetBit() == 4 ? 4 : static_cast<uint64_t>(dtype.GetByte()) * 8;
 }

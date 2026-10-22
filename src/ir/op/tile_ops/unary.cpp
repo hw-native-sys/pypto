@@ -173,7 +173,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
       << " equals input dtype; same-dtype cast is not a valid operation. "
       << "Remove the cast or use a different target_type.";
 
-  // Logical FP4 keeps a 1:1 geometry until PackFp4. Packed FP4E2M1X2 ↔ a wider
+  // Packed FP4E2M1X2 ↔ a wider
   // type is a 2:1 last-axis conversion (bf16[M,K] ↔ f4x2[M,K/2]): shape,
   // valid_shape, and ND stride all follow that change.
   const Span& span = args[0]->span_;

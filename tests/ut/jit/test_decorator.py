@@ -84,24 +84,42 @@ class TestJitDecoration:
         assert meta.dtype == DataType.INT64
         assert meta.static_shape() == (4,)
 
-    def test_param_dtypes_only_records_fp4_family(self):
-        """_param_dtypes is FP4 dual-path only; INDEX/FP32 annotations are omitted."""
+    def test_param_dtypes_only_records_packed_fp4_formats(self):
+        """Only packed annotations select a numerical format for raw byte carriers."""
 
         def kernel(
             idx: pl.Tensor[[4], pl.INDEX],
             x: pl.Tensor[[8, 16], pl.FP32],
             packed: pl.Tensor[[8, 16], pl.FP4E2M1X2],
-            logical: pl.Tensor[[8, 32], pl.FP4],
+            e1m2: pl.Tensor[[8, 16], pl.fp4e1m2x2],
         ):
-            return idx, x, packed, logical
+            return idx, x, packed, e1m2
 
         assert _param_dtypes(kernel) == {
             "packed": DataType.FP4E2M1X2,
-            "logical": DataType.FP4,
+            "e1m2": DataType.FP4E1M2X2,
         }
 
-    def test_torch_fp4_x2_default_keeps_carrier_shape(self):
-        """Bare / packed annotation: torch float4 stays FP4E2M1X2 carrier extents."""
+    @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+    def test_packed_fp4_annotation_accepts_raw_byte_carriers(self, dtype):
+        torch = pytest.importorskip("torch")
+        data = torch.empty((8, 32), dtype=torch.uint8)
+        meta = _extract_tensor_meta(data, expected_dtype=dtype)
+        assert meta.dtype == dtype
+        assert meta.static_shape() == (8, 32)
+        # Untyped bytes keep their type; only the explicit annotation selects FP4.
+        assert _extract_tensor_meta(data).dtype == DataType.UINT8
+
+    def test_e1m2_rejects_torch_e2m1_format(self):
+        torch = pytest.importorskip("torch")
+        torch_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if torch_dtype is None:
+            pytest.skip("torch.float4_e2m1fn_x2 required")
+        with pytest.raises(TypeError, match="pass torch.uint8 carriers"):
+            _extract_tensor_meta(torch.empty((8, 32), dtype=torch_dtype), expected_dtype=pl.fp4e1m2x2)
+
+    def test_torch_fp4_x2_inference_preserves_carrier_shape(self):
+        """Native Torch x2 tensors use the same dtype and shape with or without an annotation."""
         torch = pytest.importorskip("torch")
         fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
         if fp4_dtype is None:
@@ -114,17 +132,6 @@ class TestJitDecoration:
         meta_x2 = _extract_tensor_meta(packed, expected_dtype=DataType.FP4E2M1X2)
         assert meta_x2.dtype == DataType.FP4E2M1X2
         assert meta_x2.static_shape() == (128, 32)
-
-    def test_torch_fp4_x2_with_logical_fp4_annotation_expands(self):
-        """pl.FP4 annotation restores legacy carrier→nibble expand at the API boundary."""
-        torch = pytest.importorskip("torch")
-        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-        if fp4_dtype is None:
-            pytest.skip("torch.float4_e2m1fn_x2 required")
-        packed = torch.empty((128, 32), dtype=fp4_dtype)
-        meta = _extract_tensor_meta(packed, expected_dtype=DataType.FP4)
-        assert meta.dtype == DataType.FP4
-        assert meta.static_shape() == (128, 64)
 
     def test_torch_fp4_x2_rejects_empty_packed_dimension(self):
         torch = pytest.importorskip("torch")
@@ -193,6 +200,91 @@ class TestJitDecoration:
 
         assert isinstance(entry, JITFunction)
         assert entry._auto_scope is True
+
+
+class TestFp4DependencyContracts:
+    """Packed dependencies preserve carrier shapes and numerical formats."""
+
+    @pytest.mark.parametrize(
+        "declared_dtype, caller_dtype",
+        [
+            (DataType.FP4E2M1X2, DataType.FP4E2M1X2),
+            (DataType.FP4E1M2X2, DataType.FP4E1M2X2),
+            (DataType.FP32, DataType.FP4E2M1X2),
+        ],
+    )
+    @pytest.mark.parametrize("width", [31, DynDim(name="width", literal="width", static_bound=32)])
+    def test_dep_metadata_keeps_carrier_shape(self, declared_dtype, caller_dtype, width):
+        @jit.incore
+        def dep(src: pl.Tensor[[16, 32], declared_dtype]):
+            return src
+
+        def caller(src: pl.Tensor):
+            dep(src)
+
+        rows = DynDim(name="rows", literal="rows", static_bound=16)
+        original = TensorMeta(shape=(rows, width), dtype=caller_dtype, layout=ir.TensorLayout.NZ)
+        metas, _ = _resolve_dep_call_metadata(dep, caller, {"src": original}, {}, {})
+        assert metas["src"] == original
+        assert metas["src"].shape[0] is rows
+        assert original.shape == (rows, width)
+        assert original.dtype == caller_dtype
+
+    @pytest.mark.parametrize("return_kind", ["identity", "allocated", "out"])
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_returned_metadata_keeps_carrier_shape(self, return_kind, dtype):
+        @jit.inline
+        def identity(src: pl.Tensor[[16, 32], dtype]):
+            return src
+
+        @jit.inline
+        def allocated(src: pl.Tensor[[16, 32], dtype]):
+            result = pl.create_tensor([16, 32], dtype=dtype)
+            return result
+
+        @jit.incore
+        def out(src: pl.Out[pl.Tensor[[16, 32], dtype]]):
+            return src
+
+        producer = {"identity": identity, "allocated": allocated, "out": out}[return_kind]
+
+        @jit.incore
+        def consume(src: pl.Tensor):
+            return src
+
+        @jit
+        def entry(src: pl.Tensor):
+            packed = producer(src)
+            consume(packed)
+            return packed
+
+        seed = {"src": TensorMeta(shape=(16, 32), dtype=dtype)}
+        contexts = entry._build_contexts(seed, {}, {}, {})
+        consumer = next(ctx for ctx in contexts if ctx.func_name == "consume")
+        assert consumer.tensor_meta["src"] == TensorMeta(shape=(16, 32), dtype=dtype)
+        assert seed["src"] == TensorMeta(shape=(16, 32), dtype=dtype)
+
+    @pytest.mark.parametrize(
+        "declared_dtype, caller_dtype",
+        [
+            (DataType.FP4E2M1X2, DataType.FP32),
+            (DataType.FP4E1M2X2, DataType.FP32),
+            (DataType.FP4E1M2X2, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.FP4E1M2X2),
+        ],
+    )
+    def test_packed_fp4_dependency_format_mismatch_is_rejected(self, declared_dtype, caller_dtype):
+        @jit.incore
+        def dep(src: pl.Tensor[[16, 32], declared_dtype]):
+            return src
+
+        def caller(src: pl.Tensor):
+            dep(src)
+
+        with pytest.raises(TypeError, match="cast explicitly to change formats"):
+            _resolve_dep_call_metadata(
+                dep, caller, {"src": TensorMeta(shape=(16, 32), dtype=caller_dtype)}, {}, {}
+            )
 
 
 # ---------------------------------------------------------------------------

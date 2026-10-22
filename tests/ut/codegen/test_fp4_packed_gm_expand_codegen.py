@@ -47,21 +47,6 @@ def _emit_incore_mlir(program, planner=passes.MemoryPlanner.PYPTO) -> str:
     return "\n".join(parts)
 
 
-def test_logical_fp4_gm_view_rejected_before_emitting_carrier_abi():
-    @pl.program
-    class LogicalFp4Copy:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            src: pl.Tensor[[2, 128], pl.FP4],
-            out: pl.Out[pl.Tensor[[2, 128], pl.FP4]],
-        ) -> pl.Tensor[[2, 128], pl.FP4]:
-            return pl.store(pl.load(src, [0, 0], [2, 128]), [0, 0], out)
-
-    with pytest.raises(ValueError, match="Logical FP4 is not supported for in-core PTO codegen"):
-        _emit_incore_mlir(LogicalFp4Copy)
-
-
 def _uint8_ub_fp4_decode_program():
     @pl.program
     class Decode:

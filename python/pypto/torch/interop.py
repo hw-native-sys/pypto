@@ -27,6 +27,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 from pypto.ir.param_info import (
     _DATATYPE_TO_CTYPE,
     ParamInfo,
+    _matches_torch_dtype,
     _to_torch_dtype,
     bind_complete_args,
     block_nz_shape,
@@ -161,7 +162,7 @@ def _validate_tensor(tensor: Any, info: ParamInfo, dtype: torch.dtype) -> None:
         raise ValueError(f"Parameter {info.name!r} has an unresolved conjugate or negative view")
     if tensor.requires_grad and torch.is_grad_enabled():
         raise ValueError(f"Parameter {info.name!r} requires gradients; this adapter has no autograd contract")
-    if tensor.dtype != dtype:
+    if not _matches_torch_dtype(info.dtype, tensor.dtype):
         raise TypeError(f"Parameter {info.name!r} expects dtype {dtype}, got {tensor.dtype}")
     # Torch uses the logical signature; only assembly sees blocked NZ dimensions.
     shape = tuple(tensor.shape)

@@ -136,7 +136,7 @@ DataType DeserializeDataType(const msgpack::object& fields_obj, const std::strin
   }
 
   if (is_dtype) {
-    return DataType(dtype_code);
+    return detail::DataTypeFromSerializedCode(dtype_code);
   } else {
     throw TypeError("Invalid kwarg MAP type for key: " + field_name);
   }

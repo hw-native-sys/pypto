@@ -153,17 +153,21 @@ class TestMxScaleMemSpaces:
         with pytest.raises(ValueError, match="does not support MX-layout source tensors"):
             tile.gather_row(tile_acc, src, [0, 0], [0, 0], [1, 8])
 
-    @pytest.mark.parametrize("invalid_cols", [31, 0])
-    def test_fp4_set_validshape_rejects_invalid_packed_dimension(self, invalid_cols):
-        src = _tile_var(_const_shape(16, 64), DataType.FP4, memory=ir.MemorySpace.Vec)
-        with pytest.raises(ValueError, match="packed FP4 valid dimension.*positive even"):
-            tile.set_validshape(src, 8, invalid_cols)
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_packed_fp4_set_validshape_preserves_odd_carrier_dimension(self, dtype):
+        src = _tile_var(_const_shape(16, 64), dtype, memory=ir.MemorySpace.Vec)
+        call = tile.set_validshape(src, 8, 31)
+        assert isinstance(call.type, ir.TileType)
+        valid = call.type.get_effective_tile_view().valid_shape
+        assert [dim.value for dim in valid if isinstance(dim, ir.ConstInt)] == [8, 31]
 
-    def test_fp4_set_validshape_rejects_dynamic_packed_dimension(self):
-        src = _tile_var(_const_shape(16, 64), DataType.FP4, memory=ir.MemorySpace.Vec)
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_packed_fp4_set_validshape_preserves_dynamic_carrier_dimension(self, dtype):
+        src = _tile_var(_const_shape(16, 64), dtype, memory=ir.MemorySpace.Vec)
         dynamic_cols = ir.Var("valid_cols", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
-        with pytest.raises(ValueError, match="packed FP4 valid dimension.*static positive even"):
-            tile.set_validshape(src, 8, dynamic_cols)
+        call = tile.set_validshape(src, 8, dynamic_cols)
+        assert isinstance(call.type, ir.TileType)
+        assert str(call.type.get_effective_tile_view().valid_shape[1]) == "valid_cols"
 
     def test_mx_layout_rejects_non_2d_load_window(self):
         tensor = _mx_tensor_var("s", 16, 8)

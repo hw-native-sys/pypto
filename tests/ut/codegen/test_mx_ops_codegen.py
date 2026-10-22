@@ -57,7 +57,7 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         alloc = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line and "f4E2M1x2" in line)
         set_valid = next(line for line in mlir.splitlines() if "pto.set_validshape" in line)
-        # Carrier extents are emitted as-is (no /2); logical FP4 would still /2 on Vec.
+        # Carrier extents are emitted without unit conversion.
         assert "valid_row = %c16_index valid_col = %c32_index" in alloc
         assert "v_row=?, v_col=?" in alloc
         assert ", %c8_index, %c32_index :" in set_valid
@@ -339,7 +339,7 @@ class TestMxMatmulCodegen:
         assert "pto.tmatmul.mx" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
 
-    @pytest.mark.parametrize("dtype", [pl.FP4, pl.INT4, pl.UINT4, pl.HF4])
+    @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])
     def test_a2a3_rejects_all_four_bit_incore_abis(self, dtype):
         @pl.program
         class Program:

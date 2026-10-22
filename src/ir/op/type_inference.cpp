@@ -1640,6 +1640,11 @@ const std::vector<ExprPtr>& GetEffectiveTileValidShape(const TileType& type) {
   return type.shape_;
 }
 
+void CheckCallPackedFp4Format(DataType expected, DataType actual, const std::string& context) {
+  CHECK(!(expected.IsPackedFp4() && actual.IsPackedFp4()) || expected == actual)
+      << context << ": packed FP4 formats must match; use an explicit numerical cast";
+}
+
 void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const std::string& context,
                              TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints) {
   if (!pattern || !value) return;
@@ -1658,6 +1663,7 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   if (auto pattern_tensor = AsTensorTypeLike(pattern)) {
     auto value_tensor = AsTensorTypeLike(value);
     if (!value_tensor) return;
+    CheckCallPackedFp4Format(pattern_tensor->dtype_, value_tensor->dtype_, context);
     CollectCallExprVectorBindings(pattern_tensor->shape_, value_tensor->shape_, context + " physical shape",
                                   var_map, constraints);
     CollectCallExprVectorBindings(GetEffectiveTensorValidShape(*pattern_tensor),
@@ -1673,6 +1679,7 @@ void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const
   auto pattern_tile = As<TileType>(pattern);
   auto value_tile = As<TileType>(value);
   if (!pattern_tile || !value_tile) return;
+  CheckCallPackedFp4Format(pattern_tile->dtype_, value_tile->dtype_, context);
   CollectCallExprVectorBindings(pattern_tile->shape_, value_tile->shape_, context + " physical shape",
                                 var_map, constraints);
   CollectCallExprVectorBindings(GetEffectiveTileValidShape(*pattern_tile),
@@ -1750,11 +1757,12 @@ std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector
 std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_params,
                                           const std::vector<ExprPtr>& args,
                                           const std::vector<TypePtr>& return_types) {
-  if (return_types.empty()) return return_types;
   TypeVarMap var_map;
   std::vector<CallTypeBindingConstraint> constraints;
   CollectCallTypeBindings(callee_params, args, var_map, constraints);
-  if (var_map.empty()) return return_types;
+  // Void callees still consume their arguments: equal carrier geometry must
+  // not let an E2M1 buffer reach an E1M2 body (or vice versa) without a cast.
+  if (return_types.empty() || var_map.empty()) return return_types;
 
   // Validate repeated bindings only after all arguments have contributed.
   // A constraint may mention another callee placeholder that is bound by a

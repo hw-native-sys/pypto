@@ -2435,10 +2435,6 @@ class TestTensorReinterpretViewIR:
         with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
             tensor.reinterpret_view(self._var([4, 64], source_dtype), target_dtype, shape=shape)
 
-    def test_rejects_logical_fp4_reinterpret(self):
-        with pytest.raises(ValueError, match="does not support source dtype"):
-            tensor.reinterpret_view(self._var([4, 64], DataType.FP4), DataType.UINT8)
-
     def test_rejects_fp4e2m1x2_to_bf16_reinterpret(self):
         with pytest.raises(ValueError, match="FP4E2M1X2 aliases"):
             tensor.reinterpret_view(self._var([4, 64], DataType.FP4E2M1X2), DataType.BF16)

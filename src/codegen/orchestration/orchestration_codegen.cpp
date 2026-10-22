@@ -332,14 +332,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
                                     std::set<std::string> param_name_set,
                                     std::map<std::string, int> param_name_to_orch_index,
-                                    std::map<std::string, int64_t> packed_fp4_axis,
                                     std::unordered_map<std::string, std::string> dist_param_to_ctx_param)
       : program_(prog),
         registrations_(registrations),
         emit_name_map_(std::move(param_to_emit_name)),
         param_name_set_(std::move(param_name_set)),
         param_name_to_orch_index_(std::move(param_name_to_orch_index)),
-        packed_fp4_axis_(std::move(packed_fp4_axis)),
         dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
     declared_var_names_ = param_name_set_;
     // Function ``Scalar[TASK_ID]`` parameters (and lineage aliases seeded into
@@ -629,11 +627,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
                      std::to_string(axis) + "]";
     } else {
       physical_dim = "(int64_t)" + name + ".shapes[" + std::to_string(axis) + "]";
-    }
-    auto packed = packed_fp4_axis_.find(name);
-    if (packed != packed_fp4_axis_.end() && packed->second == axis) {
-      return "([&]() -> int64_t { const int64_t fp4_carrier_dim = " + physical_dim +
-             "; always_assert(fp4_carrier_dim > 0); return fp4_carrier_dim * 2; }())";
     }
     return physical_dim;
   }
@@ -1491,12 +1484,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
     std::string var_name = ReserveVarEmitName(assign->var_.get());
-    if (auto tensor_type = AsTensorTypeLike(assign->var_->GetType())) {
-      if (tensor_type->dtype_ == DataType::FP4) {
-        packed_fp4_axis_[var_name] = static_cast<int64_t>(tensor_type->shape_.size() - 1);
-      }
-    }
-
     // Funnel Submit through the existing Call codepath via the synthetic
     // SubmitToCallView adapter (deps_ → attrs[manual_dep_edges]). The IR
     // still has Submit as the canonical form; only this view is consumed
@@ -2201,18 +2188,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       for (size_t i = 0; i < ndim; ++i) {
         if (i > 0) shapes << ", ";
         std::string dim_str = GenerateExprString(tensor_ty->shape_[i]);
-        if (As<ConstInt>(tensor_ty->shape_[i])) {
-          if (tensor_ty->dtype_ == DataType::FP4 && i + 1 == ndim) {
-            shapes << GetConstIntValue(tensor_ty->shape_[i]) / 2;
-          } else {
-            shapes << dim_str;
-          }
-        } else {
-          if (tensor_ty->dtype_ != DataType::FP4 || i + 1 != ndim) {
-            dim_str = "static_cast<uint32_t>(" + dim_str + ")";
-          }
-          shapes << GetRuntimeTensorShapeDim(tensor_ty->dtype_, i, ndim, dim_str);
+        if (!As<ConstInt>(tensor_ty->shape_[i])) {
+          dim_str = "static_cast<uint32_t>(" + dim_str + ")";
         }
+        shapes << dim_str;
       }
       shapes << "};";
       EmitIndentedLine(shapes.str());
@@ -4662,7 +4641,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
-  std::map<std::string, int64_t> packed_fp4_axis_;
   CodeEmitter emitter_;
   CodeEmitter* active_emitter_ = &emitter_;
   std::string current_result_var_;
@@ -4960,7 +4938,7 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
     }
     OrchestrationStmtCodegen body_codegen(program, registrations, std::move(emit_name_map),
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
-                                          /*packed_fp4_axis=*/{}, /*dist_param_to_ctx_param=*/{});
+                                          /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
     body_codegen.SetGraphScalarParams(graph_func->params_);
     // The prologue below declares one C++ name per parameter. They are not in
@@ -5058,7 +5036,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   std::set<std::string> param_name_set;
   std::set<std::string> external_tensor_names;
   std::map<std::string, int> param_name_to_orch_index;
-  std::map<std::string, int64_t> packed_fp4_axis;
   int tensor_param_count = 0;
   struct ScalarParamInfo {
     std::string emit_name;
@@ -5082,9 +5059,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     if (auto tensor_type = AsTensorTypeLike(var->GetType())) {
       external_tensor_names.insert("ext_" + auto_name::GetCompatibleBaseName(var->name_hint_));
       param_name_to_orch_index[emit_name] = tensor_param_count;
-      if (tensor_type->dtype_ == DataType::FP4) {
-        packed_fp4_axis[emit_name] = static_cast<int64_t>(tensor_type->shape_.size() - 1);
-      }
       tensor_param_count++;
       orchestration_signature.emplace_back(ParamDirectionToRuntimeName(func->param_directions_[param_idx]));
       if (As<DistributedTensorType>(var->GetType())) {
@@ -5121,7 +5095,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   OrchestrationStmtCodegen stmt_codegen(program, &registrations, std::move(emit_name_map),
                                         std::move(param_name_set), std::move(param_name_to_orch_index),
-                                        std::move(packed_fp4_axis), std::move(dist_param_to_ctx_param));
+                                        std::move(dist_param_to_ctx_param));
   // Reserve every external reference before allocating NZ temporaries, even
   // those for parameters later in the signature. Reserve the temporaries before
   // visiting the body too, so body variables share the same naming discipline.

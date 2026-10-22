@@ -37,8 +37,8 @@ void BindCore(nb::module_& m) {
       .def_ro_static("UINT16", &DataType::UINT16, "16-bit unsigned integer")
       .def_ro_static("UINT32", &DataType::UINT32, "32-bit unsigned integer")
       .def_ro_static("UINT64", &DataType::UINT64, "64-bit unsigned integer")
-      .def_ro_static("FP4", &DataType::FP4, "4-bit floating point")
       .def_ro_static("FP4E2M1X2", &DataType::FP4E2M1X2, "Packed pair of E2M1 FP4 (PTOAS / Torch carrier)")
+      .def_ro_static("FP4E1M2X2", &DataType::FP4E1M2X2, "Packed pair of E1M2 FP4 (PTOAS carrier)")
       .def_ro_static("FP8E4M3FN", &DataType::FP8E4M3FN, "8-bit floating point (E4M3FN format)")
       .def_ro_static("FP8E5M2", &DataType::FP8E5M2, "8-bit floating point (E5M2 format)")
       .def_ro_static("FP8E8M0", &DataType::FP8E8M0, "8-bit floating point (E8M0 MX block-scale exponent)")
@@ -68,7 +68,7 @@ void BindCore(nb::module_& m) {
       .def("to_c_type_string", &DataType::ToCTypeString,
            "Get C style type string for code generation (e.g., 'float', 'half', 'int32_t').")
       .def("is_float", &DataType::IsFloat,
-           "Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).")
+           "Check if this data type is a floating point type (packed FP4, FP8, FP16, FP32, BF16, HF4, HF8).")
       .def("is_signed_int", &DataType::IsSignedInt,
            "Check if this data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).")
       .def("is_unsigned_int", &DataType::IsUnsignedInt,

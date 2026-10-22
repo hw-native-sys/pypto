@@ -10,7 +10,6 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
-import warnings
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
@@ -32,15 +31,6 @@ def _is_dump_call(node: object, name: str | None = None) -> TypeGuard[ast.Call]:
         and isinstance(node.func.value, ast.Attribute)
         and node.func.value.attr == "_dump"
         and isinstance(node.func.value.value, ast.Name)
-    )
-
-
-def _warn_incomplete_fp4() -> None:
-    warnings.warn(
-        "PyPTO's FP4 support is incomplete in the current release; "
-        "use with caution. Prefer FP4E2M1X2 instead.",
-        UserWarning,
-        stacklevel=3,
     )
 
 
@@ -188,8 +178,10 @@ class TypeResolver:
     """Resolves Python type annotations to IR types."""
 
     _DTYPE_MAP: dict[str, DataType] = {
-        "FP4": DataType.FP4,
         "FP4E2M1X2": DataType.FP4E2M1X2,
+        "FP4E1M2X2": DataType.FP4E1M2X2,
+        "fp4e2m1x2": DataType.FP4E2M1X2,
+        "fp4e1m2x2": DataType.FP4E1M2X2,
         "FP8E4M3FN": DataType.FP8E4M3FN,
         "FP8E5M2": DataType.FP8E5M2,
         "FP8E8M0": DataType.FP8E8M0,
@@ -1621,8 +1613,6 @@ class TypeResolver:
         if isinstance(dtype_node, ast.Attribute):
             dtype_name = dtype_node.attr
             if dtype_name in self._DTYPE_MAP:
-                if dtype_name == "FP4":
-                    _warn_incomplete_fp4()
                 return self._DTYPE_MAP[dtype_name]
 
             # Distinguish DataType.UNKNOWN from pl.UNKNOWN for error message quality
@@ -1645,8 +1635,6 @@ class TypeResolver:
         if isinstance(dtype_node, ast.Name):
             dtype_name = dtype_node.id
             if dtype_name in self._DTYPE_MAP:
-                if dtype_name == "FP4":
-                    _warn_incomplete_fp4()
                 return self._DTYPE_MAP[dtype_name]
 
             # Try evaluating via ExprEvaluator for DataType values from closure

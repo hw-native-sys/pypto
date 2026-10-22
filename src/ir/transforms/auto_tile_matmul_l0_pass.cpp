@@ -280,7 +280,7 @@ bool IsStatic2DTuple(const ExprPtr& expr, int64_t dim0, int64_t dim1) {
 }
 
 /// Element width in bytes for a tile dtype.  Returns 0 for sub-byte types
-/// (INT4, FP4 et al.) which the cube path does not support; the caller emits
+/// (INT4, UINT4, HF4) which the cube path does not support; the caller emits
 /// a ``PerfHint`` and skips in that case.
 uint32_t DTypeBytes(const DataType& dt) {
   size_t bits = dt.GetBit();

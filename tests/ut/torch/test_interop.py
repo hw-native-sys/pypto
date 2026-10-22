@@ -100,6 +100,18 @@ def test_each_call_snapshots_values_and_current_stream(npu):
         setattr(first, "device_index", 1)
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_accepts_borrowed_byte_carriers(npu, dtype):
+    value = _tensor(dtype=torch.uint8)
+    frame = interop.CallSignature([_param(dtype=dtype)]).describe_call((value,))
+    assert frame.tensors[0].tensor is value
+    assert frame.tensors[0].metadata.dtype == dtype
+    assert frame.tensors[0].metadata.shape == (2, 3)
+    assert frame.tensors[0].metadata.nbytes == 6
+    with pytest.raises(TypeError, match="expects dtype"):
+        interop.CallSignature([_param(dtype=dtype)]).describe_call((_tensor(dtype=torch.float16),))
+
+
 def test_frame_keeps_storage_and_return_aliases_alive(npu):
     """Deleting caller references preserves the exact tensor and its borrowed storage."""
     value = _tensor()

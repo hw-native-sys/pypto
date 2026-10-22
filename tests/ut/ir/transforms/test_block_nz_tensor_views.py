@@ -1100,36 +1100,27 @@ def test_rejects_vec_target():
         _run(VecLoad)
 
 
-def test_rejects_sub_byte_dtype():
-    """A 4-bit dtype has no NZ C0 line, and must not be blocked with a byte-derived c0.
-
-    `DataType.GetByte()` is `ceil(bits/8)`, so FP4 reports 1 byte and a
-    byte-based `c0` would come out as 32 instead of the 64 elements that fit in
-    a 32-byte C0 line. That is doubly wrong: the trailing dim would be `[.., 16,
-    32]`, and the alignment check would accept extents that are not multiples of
-    64 (`C = 544` passes `% 32`). pto-isa's `TLOAD` lists no 4-bit dtype for the
-    NZ path at all — 4-bit operands use the `HIF4_A_ZZ` / `HIF4_B_NN` layouts —
-    so the annotation is refused rather than silently mis-addressed.
-
-    The rejection fires in phase 1, while the *parameter* type is blocked, so a
-    plain load/store kernel is enough to reach it — no matmul needed (FP4
-    operands would trip the Cube accumulator's dtype rule at parse time first).
-    """
+@pytest.mark.parametrize(
+    ("dtype", "error"),
+    [(pl.INT4, "sub-byte dtype"), (pl.UINT4, "sub-byte dtype"), (pl.HF4, "sub-byte dtype")],
+)
+def test_rejects_sub_byte_dtype(dtype, error):
+    """Sub-byte dtypes cannot use the byte-based NZ C0 geometry."""
 
     @pl.program
-    class Fp4Nz:
+    class SubByteNz:
         @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
-            w: pl.Tensor[[256, 512], pl.FP4, pl.NZ],
-            out: pl.Tensor[[256, 512], pl.FP4],
+            w: pl.Tensor[[256, 512], dtype, pl.NZ],
+            out: pl.Tensor[[256, 512], dtype],
         ):
             wt = pl.load(w, [0, 0], [256, 512], target_memory=pl.Mem.Vec)
             pl.store(wt, [0, 0], out)
             return out
 
-    with pytest.raises(ValueError, match="sub-byte dtype"):
-        _run(Fp4Nz)
+    with pytest.raises(ValueError, match=error):
+        _run(SubByteNz)
 
 
 def test_c0_is_derived_from_bit_width():

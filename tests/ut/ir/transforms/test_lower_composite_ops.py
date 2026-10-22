@@ -3703,19 +3703,14 @@ def test_allgather_stage_tile_is_capped_to_one_chunk(size):
 @pytest.mark.parametrize(
     "size,expected_cols",
     [
-        (34, 34),  # even, below one 64-element packed row: documented unrounded gap
-        (66, 64),  # even, just past one packed 32-byte row: floor, never round up
-        (65536, 32768),  # full 16-KiB packed-FP4 chunk, not the GetByte() ceiling
+        (17, 17),  # below one 32-byte carrier row: retain the short transfer extent
+        (33, 32),  # floor to one 32-byte carrier row
+        (65536, 16384),  # one 16-KiB chunk contains 16384 byte carriers
     ],
 )
-def test_allgather_fp4_stage_uses_physical_storage_width(size, expected_cols):
-    """Packed FP4 geometry uses 4 physical bits per logical element.
-
-    A 16-KiB stage therefore holds 32768 FP4 elements, not 16384 as
-    ``DataType.get_byte()``'s byte-ceiling would imply. Packed last
-    dimensions must be even; 66 is the short aligned-floor case (64), and
-    34 is below one 32-byte packed row so it stays unrounded.
-    """
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_allgather_fp4_stage_uses_carrier_storage_width(size, expected_cols, dtype):
+    """A 16-KiB stage stores 16384 byte carriers of either packed format."""
     nr = 2
 
     @pl.program
@@ -3723,10 +3718,10 @@ def test_allgather_fp4_stage_uses_physical_storage_width(size, expected_cols):
         @pl.function(type=pl.FunctionType.InCore)
         def gather_step(
             self,
-            inp: pl.Tensor[[1, size], pl.FP4],
-            data: pl.InOut[pld.DistributedTensor[[nr, size], pl.FP4]],
+            inp: pl.Tensor[[1, size], dtype],
+            data: pl.InOut[pld.DistributedTensor[[nr, size], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pld.DistributedTensor[[nr, size], pl.FP4]:
+        ) -> pld.DistributedTensor[[nr, size], dtype]:
             return pld.tensor.allgather(inp, data, signal)
 
     After = passes.lower_composite_ops()(Before)

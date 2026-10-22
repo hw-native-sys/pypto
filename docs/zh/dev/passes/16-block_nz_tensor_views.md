@@ -339,10 +339,10 @@ NZ 实参到达 orchestration 入口时同样带着*逻辑* shape：调用方就
 reshape，元素与顺序都不变），这样由它派生的每个 `Tensor::view` 都是按同一个 rank
 去做 clamp 的。
 
-sub-byte dtype（INT4 / UINT4 / FP4 / HF4 / BOOL）被拒绝，这是 **PyPTO 里程碑 1 的
-范围限制，不是硬件限制**——pto-isa 的 NZ 机制确实处理 FP4（`tload_common.hpp` 中有
-显式的 `caps::IsFP4` 分支，并断言 `staticShape[4] == C0_SIZE_BYTE / sizeof(DType)`）。
-`c0` 已按位宽推导，因此等 packed-nibble 寻址端到端验证完成后，算术部分即可直接复用。
+Sub-byte dtypes (`INT4`, `UINT4`, `HF4`, and `BOOL`) remain outside this
+lowering's supported scope. Packed FP4 x2 types have byte-sized carrier elements;
+their type definition does not enable NZ execution. The existing packed layout
+restrictions are documented in [FP4](../fp4.md).
 
 对齐类诊断是面向用户的（`CHECK_SPAN` → `ValueError`），位于 `BlockNzShape`。
 到了下游，*未分块*的 NZ view 属于 pass 顺序不变量（`INTERNAL_CHECK_SPAN`），由

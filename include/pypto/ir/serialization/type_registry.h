@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_SERIALIZATION_TYPE_REGISTRY_H_
 #define PYPTO_IR_SERIALIZATION_TYPE_REGISTRY_H_
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,7 @@
 #include <msgpack.hpp>
 // clang-format on
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
@@ -35,6 +37,9 @@ class IRDeserializer;
 
 // Deserialization context interface exposed for type deserializers.
 namespace detail {
+/// Decode a dtype without accepting the retired logical-FP4 wire code.
+DataType DataTypeFromSerializedCode(uint8_t code);
+
 class DeserializerContext {
  public:
   virtual ~DeserializerContext() = default;

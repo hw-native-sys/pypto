@@ -25,6 +25,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 from pypto.ir.param_info import (
     _DATATYPE_TO_CTYPE,
     ParamInfo,
+    _matches_torch_dtype,
     _to_torch_dtype,
     bind_complete_args,
     validate_parameter_names,
@@ -147,7 +148,7 @@ class RegistrationSignature:
                 raise ValueError(f"Parameter {info.name!r} has device {arg.device}, expected {device}")
             device = arg.device
             dtype = _to_torch_dtype(info.dtype)
-            if arg.dtype != dtype:
+            if not _matches_torch_dtype(info.dtype, arg.dtype):
                 raise TypeError(f"Parameter {info.name!r} expects dtype {dtype}, got {arg.dtype}")
             if arg.layout != torch.strided or not arg.is_contiguous():
                 raise ValueError(f"Parameter {info.name!r} requires a contiguous strided tensor")

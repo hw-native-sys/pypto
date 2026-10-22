@@ -286,50 +286,36 @@ def _extract_tensor_meta(
 ) -> TensorMeta:
     """Extract TensorMeta from a torch.Tensor (shape/dtype only — no data read).
 
-    ``layout`` and ``expected_dtype`` come from the parameter's annotation, not
-    the tensor: torch has no notion of a PyPTO layout, and ``float4_e2m1fn_x2``
-    alone cannot distinguish logical ``pl.FP4`` (nibble IR, expand last dim) from
-    packed ``pl.FP4E2M1X2`` (carrier IR, no expand). ``expected_dtype`` is only
-    consulted for that FP4-family dual path; other annotations are ignored here.
+    ``layout`` and ``expected_dtype`` come from the parameter's annotation.
+    Torch's ``float4_e2m1fn_x2`` maps directly to packed ``pl.FP4E2M1X2``.
+    Explicit packed annotations also accept raw UINT8 carriers; E1M2 uses this
+    ABI because Torch has no E1M2 dtype. Shapes always count carrier elements.
+    Other dtype annotations are ignored here.
     """
     torch_dtype = _torch_dtype_to_pypto(tensor.dtype)
+    dtype = torch_dtype
     extents = list(tensor.shape)
-
     if torch_dtype == DataType.FP4E2M1X2 or (
-        expected_dtype is not None and expected_dtype in (DataType.FP4, DataType.FP4E2M1X2)
+        expected_dtype is not None and expected_dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2)
     ):
         if not extents:
-            raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")
+            raise TypeError("Packed FP4 tensors must have rank >= 1")
         if extents[-1] <= 0:
             raise TypeError(
-                "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
+                "Packed FP4 tensors require a positive runtime x2 carrier last "
                 f"dimension; got shape {tuple(extents)}"
             )
 
-    # expected_dtype is FP4-family only (see ``_param_dtypes``). Other annotations
-    # such as ``pl.INDEX`` are semantic IR types whose torch ABI is INT64; do not
-    # introduce a general annotation↔torch strict check here.
-    if expected_dtype is not None and expected_dtype == DataType.FP4:
-        if torch_dtype not in (DataType.FP4, DataType.FP4E2M1X2):
+    # Only packed annotations give raw carriers their numerical format. Other
+    # annotations such as pl.INDEX are semantic IR types with an INT64 ABI and
+    # must not introduce a general annotation-to-Torch strict dtype check here.
+    if expected_dtype is not None and expected_dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
+        if torch_dtype not in (DataType.UINT8, expected_dtype):
             raise TypeError(
-                f"Parameter annotated pl.FP4 but got torch dtype mapped to {torch_dtype}; "
-                "pass torch.float4_e2m1fn_x2 or change the annotation"
+                f"Parameter annotated packed {expected_dtype} but got torch dtype mapped to {torch_dtype}; "
+                "pass torch.uint8 carriers (or torch.float4_e2m1fn_x2 for E2M1)"
             )
-        # Legacy logical FP4 path: expand carrier → nibble extents at the API boundary.
-        extents[-1] *= 2
-        dtype = DataType.FP4
-    elif expected_dtype is not None and expected_dtype == DataType.FP4E2M1X2:
-        if torch_dtype not in (DataType.FP4, DataType.FP4E2M1X2):
-            raise TypeError(
-                f"Parameter annotated pl.FP4E2M1X2 but got torch dtype mapped to {torch_dtype}; "
-                "pass torch.float4_e2m1fn_x2 or change the annotation"
-            )
-        # Torch and IR both count packed x2 carriers for FP4E2M1X2; do not expand.
-        dtype = DataType.FP4E2M1X2
-    else:
-        # No FP4-family annotation (or bare pl.Tensor): keep the torch→IR default
-        # (packed FP4E2M1X2 for float4_e2m1fn_x2, no expand).
-        dtype = torch_dtype
+        dtype = expected_dtype
 
     return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 
@@ -434,12 +420,11 @@ def _param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
 
 
 def _param_dtypes(func: Any) -> dict[str, DataType]:
-    """Map parameter name → annotated FP4-family dtype, for shaped tensor params.
+    """Map shaped parameter names to their annotated packed FP4 formats.
 
-    Used by the torch-argument path so ``pl.FP4`` vs ``pl.FP4E2M1X2`` can select
-    the expand / no-expand ABI for ``torch.float4_e2m1fn_x2``. Non-FP4 annotations
-    (e.g. ``pl.INDEX``) are omitted: they are not needed for that dual-path and
-    must not drive a general torch↔annotation dtype check.
+    Explicit annotations give raw UINT8 carriers their numerical format at
+    runtime and preserve that format across dependency boundaries. Other
+    annotations (e.g. ``pl.INDEX``) must not drive a general dtype check here.
     """
     try:
         sig = inspect.signature(func)
@@ -453,7 +438,7 @@ def _param_dtypes(func: Any) -> dict[str, DataType]:
             continue
         annotation = _resolve_annotation(param.annotation, ann_ns)
         dtype = getattr(annotation, "dtype", None)
-        if isinstance(dtype, DataType) and dtype in (DataType.FP4, DataType.FP4E2M1X2):
+        if isinstance(dtype, DataType) and dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
             dtypes[name] = dtype
     return dtypes
 
@@ -1075,12 +1060,20 @@ def _dep_out_metas(
     for kw in call.keywords:
         if kw.arg is not None:
             mapping[kw.arg] = kw.value.id if isinstance(kw.value, ast.Name) else None
-    result: dict[str, TensorMeta] = {}
-    for vname, out_param in zip(names, out_params, strict=True):
+    output_metas: dict[str, TensorMeta] = {}
+    for out_param in out_params:
         caller_arg = mapping.get(out_param)
         if caller_arg is not None and caller_arg in local:
-            result[vname] = local[caller_arg]
-    return result
+            output_metas[out_param] = local[caller_arg]
+    dep = deps.funcs.get(dep_name)
+    if dep is not None:
+        # A returned Out buffer must retain the callee's declared packed format.
+        _validate_dep_packed_fp4_dtypes(dep, output_metas)
+    return {
+        vname: output_metas[out_param]
+        for vname, out_param in zip(names, out_params, strict=True)
+        if out_param in output_metas
+    }
 
 
 class _DepReturn(NamedTuple):
@@ -1149,6 +1142,7 @@ def _dep_return_metas(
             continue
         if caller_arg in local:
             seed_meta[dep_param] = local[caller_arg]
+    _validate_dep_packed_fp4_dtypes(dep, seed_meta)
     callee_metas = _extract_local_tensor_metas(
         dep._func,
         seed_meta=seed_meta,
@@ -1194,9 +1188,9 @@ def _dep_out_metas_or_return(
 ) -> _DepReturn:
     """Resolve one ``v1, ..., vk = dep(args)`` target, ``Out`` convention first.
 
-    The ``Out`` rule needs nothing but the caller's own pool, and where both
-    rules apply they agree — a returned ``Out`` param resolves to the same
-    caller buffer either way — so it wins and never marks a target stale.
+    The ``Out`` rule validates the caller's buffer against the callee's packed
+    format without descending into its body. Where both rules apply they agree,
+    so it wins and never marks a target stale.
     """
     out_metas = _dep_out_metas(call, dep_name, target, deps, local)
     if out_metas:
@@ -2594,10 +2588,25 @@ def _resolve_dep_call_metadata(
         dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}
         dep_scalar_dtypes = {n: caller_scalar_dtypes[n] for n in dep_param_names if n in caller_scalar_dtypes}
 
+    _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta)
     _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
     _overlay_dep_declared_layouts(dep, dep_tensor_meta)
 
     return dep_tensor_meta, dep_scalar_dtypes
+
+
+def _validate_dep_packed_fp4_dtypes(dep: JITFunction, dep_tensor_meta: dict[str, TensorMeta]) -> None:
+    """Require dependency arguments to preserve their declared packed FP4 format."""
+    for dep_param, dtype in _param_dtypes(dep._func).items():
+        meta = dep_tensor_meta.get(dep_param)
+        if meta is None or meta.dtype == dtype:
+            continue
+        dtype_name = str(dtype).upper()
+        context = f"@pl.jit function {dep.__name__!r}: parameter {dep_param!r} annotated pl.{dtype_name}"
+        raise TypeError(
+            f"{context} but got tensor metadata dtype {meta.dtype}; "
+            "pass the declared FP4 format (cast explicitly to change formats)"
+        )
 
 
 def _overlay_dep_declared_dyn_dims(
@@ -3278,7 +3287,8 @@ class JITFunction:
         )
         entry_dyn_map = per_func_dyn_maps[id(self._func)]
         # A layout has no runtime counterpart on a torch tensor, so it comes
-        # from the annotation even on this path. FP4 vs FP4E2M1X2 likewise.
+        # from the annotation even on this path. Raw UINT8 carriers likewise
+        # need the annotation to identify their packed FP4 format.
         param_layouts = _param_layouts(self._func, self.__name__)
         param_dtypes = _param_dtypes(self._func)
         tensor_meta: dict[str, TensorMeta] = {}

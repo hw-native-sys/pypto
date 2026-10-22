@@ -1392,7 +1392,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // — see test_tensor_expand_clone[broadcast_dim=2] where input
     // ``[B, N, 1]`` is loaded into a ColMajor tile and PTOAS TLoad enforces
     // ``tile.BLayout == tensor.Layout``).
-    // Packed FP4E2M1X2 last-axis units are carriers, not logical column-vector
+    // Packed FP4 x2 last-axis units are carriers, not logical column-vector
     // width 1 — ND-only; reject non-ND annotations and the [M,1] DN force.
     bool is_column_vector = false;
     if (rank >= 2) {
@@ -1408,10 +1408,12 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     }
     if (tensor_type->dtype_.IsPackedFp4()) {
       CHECK_SPAN(layout == ir::TensorLayout::ND, param->span_)
-          << "FP4E2M1X2 supports ND layout only; non-ND layouts and layout conversions "
+          << DataTypeToString(tensor_type->dtype_)
+          << " supports ND layout only; non-ND layouts and layout conversions "
              "are not supported (see docs/en/dev/fp4.md)";
       CHECK_SPAN(!is_column_vector, param->span_)
-          << "FP4E2M1X2 tensors with last carrier dimension 1 are not supported: "
+          << DataTypeToString(tensor_type->dtype_)
+          << " tensors with last carrier dimension 1 are not supported: "
              "the ordinary [M,1] column-vector path forces a DN layout conversion "
              "invalid for packed x2 carriers (see docs/en/dev/fp4.md)";
     }
@@ -1614,35 +1616,12 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     return wide;
   };
 
-  // FP4 Vec tile_bufs use PTOAS's physical x2-carrier coordinates along the
-  // BLayout packed axis. PyPTO keeps logical nibble shapes internally; matrix
-  // spaces are excluded because TMATMUL_MX has its own logical-dimension ABI.
-  //
-  // PTOAS special requirement (FP4 Vec physical valid_shape): valid_row /
-  // valid_col operands on pto.alloc_tile must use the packed physical extent
-  // (logical / 2) on that axis. Skipping this conversion makes PTOAS reject
-  // or mis-size the tile relative to the f4E2M1x2 carrier.
-  const auto memory_space = tile_type->GetMemorySpace();
-  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
-  const bool packed_fp4_vec =
-      tile_type->dtype_ == DataType::FP4 && memory_space.has_value() && *memory_space == ir::MemorySpace::Vec;
-  const size_t packed_dim = tile_view.blayout == ir::TileLayout::col_major ? 0 : 1;
-
   // Lower a single valid_shape dim expression to an `index` SSA value.
-  auto lower_dim = [&](const ir::ExprPtr& expr, size_t dim) -> std::string {
+  auto lower_dim = [&](const ir::ExprPtr& expr) -> std::string {
     if (!expr) return "";
     if (auto ci = As<ir::ConstInt>(expr)) {
-      int64_t value = ci->value_;
-      if (packed_fp4_vec && dim == packed_dim) {
-        CHECK(value > 0 && value % 2 == 0)
-            << "FP4 Vec valid_shape packed dimension must be a positive even logical extent for PTOAS, got "
-            << value;
-        value /= 2;
-      }
-      return GetOrEmitConstant(value, DataType::INDEX);
+      return GetOrEmitConstant(ci->value_, DataType::INDEX);
     }
-    CHECK(!(packed_fp4_vec && dim == packed_dim)) << "Dynamic FP4 Vec valid_shape on the packed dimension is "
-                                                     "not supported; provide a static even extent";
     return cast_to_index(GetExprAsCode(expr), expr);
   };
 
@@ -1662,10 +1641,10 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     if (dims->size() == 1) {
       // Match ExtractTileTypeInfo: 1-D tile maps to rows=1, cols=shape[0].
       fields.valid_row_ssa = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      fields.valid_col_ssa = lower_dim((*dims)[0], 1);
+      fields.valid_col_ssa = lower_dim((*dims)[0]);
     } else {
-      if (dims->size() >= 1) fields.valid_row_ssa = lower_dim((*dims)[0], 0);
-      if (dims->size() >= 2) fields.valid_col_ssa = lower_dim((*dims)[1], 1);
+      if (dims->size() >= 1) fields.valid_row_ssa = lower_dim((*dims)[0]);
+      if (dims->size() >= 2) fields.valid_col_ssa = lower_dim((*dims)[1]);
     }
   }
 
@@ -2212,15 +2191,9 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
       << op_name << ": FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory; "
       << "PTOAS does not support packed-FP4 tile treshape";
 
-  // Mirror the storage constraints of PTOAS treshape. FP4 Vec descriptors use
-  // an eight-bit packed carrier after ExtractTileTypeInfo halves one axis.
-  auto carrier_bits = [](const std::shared_ptr<const ir::TileType>& type) {
-    return type->dtype_ == DataType::FP4 && type->GetMemorySpace() == ir::MemorySpace::Vec
-               ? 8
-               : type->dtype_.GetBit();
-  };
-  const __int128 src_bits = static_cast<__int128>(src.rows) * src.cols * carrier_bits(actual->second);
-  const __int128 dst_bits = static_cast<__int128>(dst.rows) * dst.cols * carrier_bits(tile_type);
+  // Mirror the storage constraints of PTOAS treshape.
+  const __int128 src_bits = static_cast<__int128>(src.rows) * src.cols * actual->second->dtype_.GetBit();
+  const __int128 dst_bits = static_cast<__int128>(dst.rows) * dst.cols * tile_type->dtype_.GetBit();
   const bool src_boxed = src.slayout != ir::TileLayout::none_box;
   const bool dst_boxed = dst.slayout != ir::TileLayout::none_box;
   CHECK_SPAN(same_space && src_bits == dst_bits && src_boxed == dst_boxed, var->span_)
@@ -2689,7 +2662,7 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
   if (!handler->SupportsIncoreDataType(dtype)) {
     const std::string arch = handler->GetPtoTargetArch();
     const char* dtype_kind = (dtype.GetBit() == 4) ? "The 4-bit dtype " : "The dtype ";
-    if (arch == "a2a3" && (dtype.GetBit() == 4 || dtype.IsFp4Family())) {
+    if (arch == "a2a3" && (dtype.GetBit() == 4 || dtype.IsPackedFp4())) {
       CHECK(false) << dtype_kind << dtype.ToString()
                    << " is not supported for end-to-end in-core codegen on backend 'a2a3'. "
                       "A2/A3 exposes only an isolated FP16<->INT4 conversion, while direct packed "
@@ -2697,15 +2670,9 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
     }
     CHECK(false) << dtype_kind << dtype.ToString()
                  << " is not supported for end-to-end in-core codegen on backend '" << arch
-                 << "'. A5 supports packed FP4E2M1X2 among FP4-family / 4-bit paths; "
+                 << "'. A5 supports packed FP4E2M1X2 and FP4E1M2X2; "
                     "INT4 / UINT4 / HF4 are rejected (see docs/en/dev/fp4.md)";
   }
-  // Logical FP4 dimensions count nibbles, while PTOAS v0.67 interprets
-  // !pto.f4E2M1x2 GM views and partition windows as packed carriers. Mapping
-  // FP4 to that type without PackFp4 would double multi-row pitches and can
-  // address beyond the backing allocation. Reject it before emitting any PTO.
-  CHECK(dtype != DataType::FP4) << "Logical FP4 is not supported for in-core PTO codegen with PTOAS v0.67: "
-                                   "use FP4E2M1X2 with physical carrier dimensions (see docs/en/dev/fp4.md)";
   return DataTypeToMLIR(dtype);
 }
 
@@ -2926,11 +2893,6 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
   // EmitStaticValidTileView (pto.tquant.mx / X-to-ZZ requireStaticShape): the
   // treshape result type must carry concrete v_row/v_col, not `?`.
   //
-  // PTOAS special requirement (FP4 Vec physical valid_shape): when the tile is
-  // FP4 in Vec, also convert the BLayout packed axis from logical nibble
-  // extent to f4E2M1x2 physical extent (/2) so the static type matches the
-  // carrier coordinates PTOAS expects on that tile_buf.
-  //
   // The one valid_shape that must stay dynamic is the all-zero lane-1 replay
   // sentinel: a static `v_row=0, v_col=0` has no pto-isa GetValidRow overload
   // (see IsZeroValidShapeSentinel). Rendering it dynamic is what the sibling
@@ -2938,17 +2900,6 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
   const bool zero_sentinel = ir::tile_view_semantics::IsZeroValidShapeSentinel(valid);
-  const bool packed_fp4_vec = tile_type->dtype_ == DataType::FP4 && *memory_space == ir::MemorySpace::Vec;
-  const size_t packed_dim = view.blayout == ir::TileLayout::col_major ? 0 : 1;
-  auto physical_valid = [&](int64_t value, size_t dim) {
-    if (packed_fp4_vec && dim == packed_dim) {
-      CHECK(value > 0 && value % 2 == 0) << "FP4 Vec view valid_shape packed dimension must be a positive "
-                                            "even logical extent for PTOAS, got "
-                                         << value;
-      return value / 2;
-    }
-    return value;
-  };
   if (!zero_sentinel) {
     if (valid.size() == 1) {
       // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
@@ -2956,7 +2907,7 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
       // dynamic zero-valid extent and its consumers become silent no-ops.
       if (auto v_col = As<ir::ConstInt>(valid[0])) {
         c.v_row = 1;
-        c.v_col = physical_valid(v_col->value_, 1);
+        c.v_col = v_col->value_;
         c.v_row_dynamic = false;
         c.v_col_dynamic = false;
       }
@@ -2964,8 +2915,8 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
       auto v_row = As<ir::ConstInt>(valid[0]);
       auto v_col = As<ir::ConstInt>(valid[1]);
       if (v_row && v_col) {
-        c.v_row = physical_valid(v_row->value_, 0);
-        c.v_col = physical_valid(v_col->value_, 1);
+        c.v_row = v_row->value_;
+        c.v_col = v_col->value_;
         c.v_row_dynamic = false;
         c.v_col_dynamic = false;
       }

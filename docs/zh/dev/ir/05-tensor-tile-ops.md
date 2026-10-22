@@ -65,7 +65,7 @@ Flat tile 可以携带显式步长（stride），但必须与完整物理 shape 
 Ascend950 上的 FP4E2M1X2 ↔ UINT8/INT8 alias 保持 carrier shape 和字节数不变。
 InCore tensor 和 tile 均下降为连续、带地址的二维 row-major Vec 存储，要求静态
 UB offset，使用 PYPTO 或 DSA_RP 内存规划器。PTOAS 规划器和编排层 tensor alias
-暂不支持；需要变形时先单独 reshape 字节视图，再转换回 packed alias。契约与用法示例见 [FP4 UB 解码](../fp4.md#通过-ub-alias-解码-uint8-carrierascend950)。
+暂不支持；需要变形时先单独 reshape 字节视图，再转换回 packed alias。契约与用法示例见 [FP4 UB 解码](../fp4.md#decode-a-uint8-carrier-through-a-ub-alias-ascend950)。
 
 **示例：**
 

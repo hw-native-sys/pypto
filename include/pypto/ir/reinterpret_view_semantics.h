@@ -267,9 +267,9 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
                         (source_dtype == DataType::FP8E4M3FN && target_dtype == DataType::INT8) ||
                         (source_dtype == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
                         (source_dtype == DataType::FP8E8M0 && target_dtype == DataType::UINT8);
-  // Packed FP4E2M1X2 is a 1-byte carrier; allow only UINT8/INT8 byte-identical aliases so
-  // models can reshape on a UINT8 view without a packed-FP4 reshape path. Other FP4-family
-  // reinterprets (including logical FP4) stay rejected.
+  // Both packed FP4 formats use 1-byte carriers; allow UINT8/INT8 byte-identical aliases
+  // so models can reshape on a byte view without a packed-FP4 reshape path. Other
+  // packed FP4 reinterpretations stay rejected.
   const bool involves_packed_fp4 = source_dtype.IsPackedFp4() || target_dtype.IsPackedFp4();
   const bool packed_fp4_alias =
       (source_dtype.IsPackedFp4() && (target_dtype == DataType::UINT8 || target_dtype == DataType::INT8)) ||
@@ -277,7 +277,7 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
   CHECK_SPAN(!involves_packed_fp4 || packed_fp4_alias, span)
       << op_name
       << " FP4E2M1X2 aliases are limited to UINT8/INT8 (same-shape byte views); "
-         "logical FP4 and other dtype pairs are not supported";
+         "other dtype pairs are not supported";
   const bool uses_unsupported_fp8 =
       (!IsSupportedDType(source_dtype) && source_dtype.IsFloat() && source_dtype.GetBit() == 8) ||
       (!IsSupportedDType(target_dtype) && target_dtype.IsFloat() && target_dtype.GetBit() == 8);

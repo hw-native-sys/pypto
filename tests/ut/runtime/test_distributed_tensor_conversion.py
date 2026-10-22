@@ -44,6 +44,18 @@ def test_mapped_arg_strides_are_preserved():
     torch.testing.assert_close(tensor, torch.tensor([[0.0, 1.0], [3.0, 4.0]]))
 
 
+def test_packed_fp4_mapped_arg_preserves_carrier_units_and_aliases():
+    backing = bytearray([0x10, 0x32, 0xFF, 0x54, 0x76])
+    arg = SimpleNamespace(buffer=memoryview(backing), shapes=(2, 2), strides=(3, 1), dtype="DataType.FP4E2M1")
+    tensor = _tensor_from_continuous(arg)
+    assert tensor.dtype == torch.uint8
+    assert tensor.shape == (2, 2)
+    assert tensor.stride() == (3, 1)
+    assert torch.equal(tensor, torch.tensor([[0x10, 0x32], [0x54, 0x76]], dtype=torch.uint8))
+    tensor[1, 1] = 0x98
+    assert backing[4] == 0x98
+
+
 def test_legacy_data_pointer_remains_supported():
     backing = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
     arg = SimpleNamespace(data=ctypes.addressof(backing), shapes=(2, 2), dtype=_Float32())

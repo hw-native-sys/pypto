@@ -4222,10 +4222,6 @@ class TestTileReinterpretViewIR:
         with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
             tile.reinterpret_view(self._var([4, 64], source_dtype), target_dtype, shape=shape)
 
-    def test_rejects_logical_fp4_reinterpret(self):
-        with pytest.raises(ValueError, match="does not support source dtype"):
-            tile.reinterpret_view(self._var([4, 64], DataType.FP4), DataType.UINT8)
-
     @pytest.mark.parametrize("layout", [ir.TileLayout.row_major, ir.TileLayout.col_major])
     def test_complete_mx_scale_byte_alias_preserves_layout(self, layout):
         view = ir.TileView(blayout=layout, slayout=layout, fractal=32)

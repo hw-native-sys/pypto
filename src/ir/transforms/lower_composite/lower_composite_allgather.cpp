@@ -139,7 +139,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         // ring reduce-scatter / ring allgather emit ("so the TPUT single-shot
         // path reads exactly the transfer width").  Statically sized transfers
         // already get a stage <= the transfer from MakeCollectiveStageShape, and
-        // sub-byte packed dtypes (FP4) require a static even packed valid
+        // sub-byte dtypes (INT4/UINT4/HF4) require a static even valid
         // dimension, so both keep the raw stage.
         ExprPtr push_stage = put_stage;
         if (!As<ConstInt>(size_expr) && chunk_geometry.storage_bits >= 8) {

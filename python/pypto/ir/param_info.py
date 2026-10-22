@@ -54,6 +54,9 @@ _DATATYPE_TO_TORCH: dict[str, torch.dtype] = {
     "int32": torch.int32,
     "int64": torch.int64,
     "uint8": torch.uint8,
+    # Torch has no E1M2 dtype; annotated kernels exchange one byte per x2 carrier.
+    "fp4e1m2x2": torch.uint8,
+    "fp4e2m1x2": torch.uint8,
     "bool": torch.bool,
     "index": torch.int64,
 }
@@ -66,8 +69,8 @@ for _name in ("uint16", "uint32", "uint64"):
         _DATATYPE_TO_TORCH[_name] = _torch_dtype
 del _name, _torch_dtype
 # Float8 / MX scale dtypes (PyTorch 2.1+ / 2.3+ / 2.7+); map IR string → torch.dtype.
-# Packed MXFP4 (fp4 ↔ float4_e2m1fn_x2) must be here so return-style execution
-# can allocate FP4 outputs after JIT specialization accepts the torch dtype.
+# Prefer Torch's native E2M1 x2 carrier when available; E1M2 uses raw UINT8.
+# Both formats retain the IR carrier shape during return-style allocation.
 _ir_name: str = ""
 _torch_name: str = ""
 _torch_dtype: torch.dtype | None = None
@@ -75,7 +78,6 @@ for _ir_name, _torch_name in (
     ("fp8e4m3fn", "float8_e4m3fn"),
     ("fp8e5m2", "float8_e5m2"),
     ("fp8e8m0", "float8_e8m0fnu"),
-    ("fp4", "float4_e2m1fn_x2"),
     ("fp4e2m1x2", "float4_e2m1fn_x2"),
 ):
     _torch_dtype = getattr(torch, _torch_name, None)
@@ -108,6 +110,13 @@ _DATATYPE_TO_CTYPE: "dict[str, type[ctypes._SimpleCData[Any]]]" = {
 def _to_torch_dtype(dtype: DataType) -> torch.dtype | None:
     """Convert an IR DataType to the corresponding torch.dtype."""
     return _DATATYPE_TO_TORCH.get(str(dtype))
+
+
+def _matches_torch_dtype(dtype: DataType, actual: torch.dtype) -> bool:
+    """Accept the declared dtype's native Torch representation or packed byte carrier."""
+    return actual == _to_torch_dtype(dtype) or (
+        dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2) and actual == torch.uint8
+    )
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,7 @@ def bind_complete_args(
 # ``_to_torch_dtype`` is shared (leaf-imported) by the compiled-program tiers;
 # the listing keeps pyright's unused-function check satisfied.
 __all__ = [
+    "_matches_torch_dtype",
     "_to_torch_dtype",
     "_param_info_to_dict",
     "_param_info_from_dict",
@@ -234,8 +244,8 @@ _dt: DataType | None = None
 _dt_name: str = ""
 for _dt_name in (
     "BOOL", "INT4", "INT8", "INT16", "INT32", "INT64", "UINT4", "UINT8", "UINT16",
-    "UINT32", "UINT64", "FP4", "FP4E2M1X2", "FP8E4M3FN", "FP8E5M2", "FP8E8M0", "FP16", "FP32", "BF16",
-    "HF4", "HF8", "INDEX", "TASK_ID",
+    "UINT32", "UINT64", "FP4E2M1X2", "FP4E1M2X2", "FP8E4M3FN", "FP8E5M2", "FP8E8M0",
+    "FP16", "FP32", "BF16", "HF4", "HF8", "INDEX", "TASK_ID",
 ):  # fmt: skip
     _dt = getattr(DataType, _dt_name, None)
     if _dt is not None:
@@ -352,20 +362,6 @@ def validate_l2_capacity(parameters: Sequence[ParamInfo]) -> None:
         raise ValueError("Signature exceeds L2 argument capacity")
 
 
-def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
-    """Convert compiled IR shape to the runtime carrier shape.
-
-    ``DataType.FP4E2M1X2`` last dims already match ``torch.float4_e2m1fn_x2``
-    (no halving). Logical ``DataType.FP4`` still counts nibbles, so the call
-    ABI halves a static last dim at this boundary only.
-    """
-    runtime_shape = list(shape)
-    if dtype == DataType.FP4 and runtime_shape[-1] != -1:
-        # Static FP4 shape validity is centralized in ShapedType construction.
-        runtime_shape[-1] //= 2
-    return runtime_shape
-
-
 def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[int], list[Any]]:
     """Extract parameter metadata from a specific IR function.
 
@@ -383,8 +379,7 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
 
         if isinstance(param_type, ShapedType):
             dtype = param_type.dtype
-            logical_shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
-            shape = _to_runtime_shape(logical_shape, dtype)
+            shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
             view = getattr(param_type, "tensor_view", None)
             layout = view.layout.name if view is not None else "ND"
         elif isinstance(param_type, ScalarType):

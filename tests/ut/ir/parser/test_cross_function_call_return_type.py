@@ -26,7 +26,8 @@ declares no annotation, so both the original build and the reparse agree.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import ir
+from pypto import DataType, ir
+from pypto.language.parser.diagnostics.exceptions import ParserError
 
 
 def _user_call_types(program: ir.Program, callee_name: str) -> list[ir.Type]:
@@ -182,6 +183,100 @@ def test_annotationless_callee_dynamic_shape_is_substituted():
     assert isinstance(call_type, ir.TensorType)
     assert [str(d) for d in call_type.shape] == ["32", "16"]
     _assert_roundtrips(Prog)
+
+
+@pytest.mark.parametrize(
+    "formal_dtype, actual_dtype, width, expected_width",
+    [
+        (DataType.FP4E2M1X2, DataType.FP4E2M1X2, 32, 32),
+        (DataType.FP4E1M2X2, DataType.FP4E1M2X2, 32, 32),
+    ],
+)
+def test_symbolic_fp4_return_metadata_preserves_carrier_units(
+    formal_dtype, actual_dtype, width, expected_width
+):
+    """Return dimensions, valid shape, and strides retain packed carrier units."""
+    span = ir.Span.unknown()
+
+    def dim(value: int) -> ir.ConstInt:
+        return ir.ConstInt(value, DataType.INDEX, span)
+
+    k, valid, stride = (
+        ir.Var(name, ir.ScalarType(DataType.INDEX), span) for name in ("K", "VALID", "STRIDE")
+    )
+    formal_view = ir.TensorView(
+        valid_shape=[dim(16), valid], stride=[stride, dim(1)], layout=ir.TensorLayout.ND
+    )
+    formal_type = ir.TensorType([dim(16), k], formal_dtype, None, formal_view)
+    formal = ir.Var("formal", formal_type, span)
+    valid_width, row_stride = width * 3 // 4, width * 2
+    actual_view = ir.TensorView(
+        valid_shape=[dim(16), dim(valid_width)],
+        stride=[dim(row_stride), dim(1)],
+        layout=ir.TensorLayout.ND,
+    )
+    actual_type = ir.TensorType([dim(16), dim(width)], actual_dtype, None, actual_view)
+    actual = ir.Var("actual", actual_type, span)
+
+    (deduced,) = ir.deduce_call_return_type([formal], [actual], [formal_type])
+    assert isinstance(deduced, ir.TensorType)
+    assert deduced.dtype == formal_dtype
+    assert [str(d) for d in deduced.shape] == ["16", str(expected_width)]
+    assert deduced.tensor_view is not None
+    assert [str(d) for d in deduced.tensor_view.valid_shape] == ["16", str(expected_width * 3 // 4)]
+    assert [str(d) for d in deduced.tensor_view.stride] == [str(expected_width * 2), "1"]
+    assert actual.type is actual_type
+    assert actual_type.dtype == actual_dtype
+    assert [str(d) for d in actual_type.shape] == ["16", str(width)]
+    assert [str(d) for d in actual_view.valid_shape] == ["16", str(valid_width)]
+    assert [str(d) for d in actual_view.stride] == [str(row_stride), "1"]
+
+
+@pytest.mark.parametrize("type_class", [ir.TensorType, ir.TileType])
+@pytest.mark.parametrize("formal_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize("has_return", [False, True])
+def test_packed_fp4_calls_reject_format_relabeling(type_class, formal_dtype, has_return):
+    """Identical carrier shapes do not make the two numerical formats interchangeable."""
+    span = ir.Span.unknown()
+    actual_dtype = DataType.FP4E1M2X2 if formal_dtype == DataType.FP4E2M1X2 else DataType.FP4E2M1X2
+    formal_type = type_class([16, 32], formal_dtype)
+    formal = ir.Var("formal", formal_type, span)
+    actual = ir.Var("actual", type_class([16, 32], actual_dtype), span)
+    returns = [formal_type] if has_return else []
+    with pytest.raises(ValueError, match="packed FP4 formats must match"):
+        ir.deduce_call_return_type([formal], [actual], returns)
+    matched = ir.Var("matched", formal_type, span)
+    assert ir.deduce_call_return_type([formal], [matched], returns) == returns
+
+
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        "self.sink(x, out)",
+        "_tid = pl.submit(self.sink, x)",
+        "_tid = pl.spmd_submit(self.sink, x, core_num=1)",
+    ],
+)
+def test_void_packed_fp4_dispatch_checks_format_before_lowering(dispatch):
+    """Void dispatches validate formats even when runtime-allocated outputs are omitted."""
+    source = f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def sink(self, x: pl.Tensor[[16, 32], pl.FP4E1M2X2],
+             out: pl.Out[pl.Tensor[[16, 32], pl.FP4E1M2X2]]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def caller(self, x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP4E1M2X2]]):
+        with pl.manual_scope():
+            {dispatch}
+        return
+"""
+    with pytest.raises(ParserError, match="packed FP4 formats must match"):
+        pl.parse_program(source)
+    assert isinstance(pl.parse_program(source.replace("pl.FP4E2M1X2", "pl.FP4E1M2X2")), ir.Program)
 
 
 def test_explicit_return_annotation_still_roundtrips():

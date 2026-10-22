@@ -98,6 +98,17 @@ def test_empty_meta_slice_preserves_offset(column_start):
     assert value.storage_offset() == 6 + column_start
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_meta_accepts_byte_carriers(dtype):
+    signature = registration.RegistrationSignature(
+        [_param(dtype=dtype, direction=ParamDirection.InOut)], return_aliases=(0,)
+    )
+    value = torch.empty((2, 3), device="meta", dtype=torch.uint8)
+    assert signature.fake(value) is value
+    with pytest.raises(TypeError, match="expects dtype"):
+        signature.fake(torch.empty((2, 3), device="meta", dtype=torch.float16))
+
+
 def test_symbolic_shapes_remain_symbolic():
     mode = FakeTensorMode(shape_env=ShapeEnv())
     value = mode.from_tensor(torch.empty(4, 3), static_shapes=False)

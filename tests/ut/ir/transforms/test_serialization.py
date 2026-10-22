@@ -985,9 +985,62 @@ class TestRobustness:
         with pytest.raises(ValueError):
             ir.deserialize_from_file("/nonexistent/path/file.msgpack")
 
+    @pytest.mark.parametrize(
+        "make_type",
+        [
+            pytest.param(lambda: ir.ScalarType(DataType.FP32), id="scalar"),
+            pytest.param(lambda: ir.TensorType([3, 7], DataType.FP32), id="tensor"),
+            pytest.param(lambda: ir.DistributedTensorType([3, 7], DataType.FP32), id="distributed"),
+            pytest.param(lambda: ir.TileType([3, 7], DataType.FP32), id="tile"),
+            pytest.param(lambda: ir.ArrayType(DataType.INT32, 7), id="array"),
+            pytest.param(lambda: ir.BufferType([3, 8], DataType.FP32, ir.MemorySpace.Vec), id="buffer"),
+            pytest.param(lambda: ir.RegType(64, DataType.FP32, ir.RegKind.VecReg), id="register"),
+        ],
+    )
+    def test_deserialize_rejects_retired_logical_fp4_descriptor(self, make_type):
+        """The old nibble-unit wire code cannot silently become a byte-carrier type."""
+        value_type = make_type()
+        value = ir.Var("value", value_type, ir.Span.unknown())
+        payload = ir.serialize(value)
+        dtype_field = b"\xa5dtype" + bytes([value_type.dtype.code()])
+        assert payload.count(dtype_field) == 1
+        retired_payload = payload.replace(dtype_field, b"\xa5dtype\x30")
+
+        with pytest.raises(ValueError, match="logical FP4 dtype code 0x30 is no longer supported"):
+            ir.deserialize(retired_payload)
+
+    def test_deserialize_rejects_retired_logical_fp4_kwarg(self):
+        """A dtype kwarg must obey the same wire contract as a type descriptor."""
+        call = ir.Call(
+            ir.Op("test_dtype_kwarg"),
+            [],
+            {"dtype": DataType.FP4E2M1X2},
+            ir.ScalarType(DataType.INT32),
+            ir.Span.unknown(),
+        )
+        payload = ir.serialize(call)
+        code_field = b"\xa4code" + bytes([DataType.FP4E2M1X2.code()])
+        assert payload.count(code_field) == 1
+        retired_payload = payload.replace(code_field, b"\xa4code\x30")
+
+        with pytest.raises(ValueError, match="logical FP4 dtype code 0x30 is no longer supported"):
+            ir.deserialize(retired_payload)
+
 
 class TestTypeSerialization:
     """Tests for type serialization, especially optional fields."""
+
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    @pytest.mark.parametrize("type_cls", [ir.TensorType, ir.TileType])
+    def test_packed_fp4_round_trip_preserves_format_and_carrier_shape(self, dtype, type_cls):
+        """Odd byte-carrier extents survive without nibble-unit conversion."""
+        restored = _round_trip_type(type_cls([3, 7], dtype))
+        assert isinstance(restored, (ir.TensorType, ir.TileType))
+        assert restored.dtype == dtype
+        assert len(restored.shape) == 2
+        for actual, expected in zip(restored.shape, [3, 7]):
+            assert isinstance(actual, ir.ConstInt)
+            assert actual.value == expected
 
     def test_tiletype_memory_space_survives_round_trip(self):
         """TileType memory_space is preserved through serialize/deserialize."""

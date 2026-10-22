@@ -79,6 +79,7 @@ from .param_info import (  # noqa: F401  -- re-export
     _DATATYPE_TO_CTYPE,
     _extract_func_param_infos,
     _extract_param_infos,
+    _matches_torch_dtype,
     _param_info_from_dict,
     _param_info_to_dict,
     _ParamInfo,
@@ -114,8 +115,8 @@ if TYPE_CHECKING:
 
 
 def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> None:
-    """Validate the runtime x2 carrier shape for one FP4 / FP4E2M1X2 parameter."""
-    if info.dtype not in (DataType.FP4, DataType.FP4E2M1X2):
+    """Validate the runtime byte-carrier shape for a packed FP4 parameter."""
+    if info.dtype not in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
         return
     if not shape:
         raise TypeError(f"Packed FP4 parameter {info.name!r} must have rank >= 1")
@@ -153,7 +154,10 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
                 )
     _validate_fp4_carrier_shape(arg.shape, info)
     expected_dtype = _to_torch_dtype(info.dtype)
-    if expected_dtype is not None and arg.dtype != expected_dtype:
+    is_packed_byte_carrier = (
+        info.dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2) and arg.dtype == torch.uint8
+    )
+    if expected_dtype is not None and arg.dtype != expected_dtype and not is_packed_byte_carrier:
         raise TypeError(
             f"Parameter {info.name!r} expects dtype {expected_dtype}; got DeviceTensor dtype {arg.dtype}"
         )
@@ -186,7 +190,10 @@ def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None
                 )
     _validate_fp4_carrier_shape(arg.full_shape, info)
     expected_dtype = _to_torch_dtype(info.dtype)
-    if expected_dtype is not None and arg.dtype != expected_dtype:
+    is_packed_byte_carrier = (
+        info.dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2) and arg.dtype == torch.uint8
+    )
+    if expected_dtype is not None and arg.dtype != expected_dtype and not is_packed_byte_carrier:
         raise TypeError(
             f"Parameter {info.name!r} expects dtype {expected_dtype}; "
             f"got StackedDeviceTensor dtype {arg.dtype}"
@@ -287,6 +294,21 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
                 _validate_device_tensor(arg, info)
             else:
                 _validate_fp4_carrier_shape(arg.shape, info)
+                if info.dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
+                    if not _matches_torch_dtype(info.dtype, arg.dtype):
+                        raise TypeError(
+                            f"Parameter {info.name!r} expects dtype {_to_torch_dtype(info.dtype)} "
+                            f"or torch.uint8 carriers; got torch.Tensor dtype {arg.dtype}"
+                        )
+                    declared_shape = _arg_shape_as_declared(arg.shape, info)
+                    if len(declared_shape) != len(info.shape) or any(
+                        expected >= 0 and expected != actual
+                        for expected, actual in zip(info.shape, declared_shape)
+                    ):
+                        raise TypeError(
+                            f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
+                            f"got torch.Tensor shape {tuple(arg.shape)}"
+                        )
             coerced.append(arg)
 
     return coerced, return_style

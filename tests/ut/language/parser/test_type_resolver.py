@@ -161,6 +161,12 @@ class TestTypeResolver:
             result = resolver.resolve_dtype(node)
             assert result == expected
 
+    @pytest.mark.parametrize("annotation", ["pl.fp4", "pl.FP4", "DataType.FP4", "fp4", "FP4"])
+    def test_removed_fp4_dtype_is_rejected(self, annotation):
+        resolver = _make_resolver()
+        with pytest.raises(ParserTypeError, match="Unknown (dtype|DataType)"):
+            resolver.resolve_dtype(ast.parse(annotation, mode="eval").body)
+
     def test_resolve_invalid_dtype(self):
         """Test error on invalid dtype."""
         resolver = _make_resolver()

@@ -383,12 +383,10 @@ blocked. The entry restates it in blocked terms once (a metadata-only reshape,
 same elements in the same order), so every `Tensor::view` derived from it clamps
 against the rank it is written in.
 
-Sub-byte dtypes (INT4 / UINT4 / FP4 / HF4 / BOOL) are rejected as a **PyPTO
-milestone-1 scope limit, not a hardware one** — pto-isa's NZ machinery does
-handle FP4 (`tload_common.hpp` carries explicit `caps::IsFP4` branches and
-asserts `staticShape[4] == C0_SIZE_BYTE / sizeof(DType)`). `c0` is already
-derived from the bit width, so the arithmetic is ready when the packed-nibble
-addressing is validated end to end.
+Sub-byte dtypes (`INT4`, `UINT4`, `HF4`, and `BOOL`) remain outside this
+lowering's supported scope. Packed FP4 x2 types have byte-sized carrier elements;
+their type definition does not enable NZ execution. The existing packed layout
+restrictions are documented in [FP4](../fp4.md).
 
 The alignment diagnostics are user-facing (`CHECK_SPAN` → `ValueError`) and live
 in `BlockNzShape`. Downstream, an *unblocked* NZ view is a pass-ordering

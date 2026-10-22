@@ -60,7 +60,7 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return true; }
   // A2/A3 has no packed fp4 load/store ABI; reject the whole FP4 family.
   [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
-    return dtype.GetBit() != 4 && !dtype.IsFp4Family();
+    return dtype.GetBit() != 4 && !dtype.IsPackedFp4();
   }
 
   // A2/A3 store pipe supports bf16 atomic-add (pto-isa set_atomic_bf16).
