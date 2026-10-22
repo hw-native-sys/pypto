@@ -10,8 +10,6 @@
  */
 
 #include <algorithm>
-#include <cctype>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -136,10 +134,10 @@ class HazardInputCollector : public IRVisitor {
   /// escapes `reads_tpop` and its output may be coalesced onto `l`'s buffer.
   ///
   /// Two traversals suffice, and a third could never add anything: the base
-  /// sets are complete after the first pass.  `tpop_bases_` only ever takes a
-  /// `tile.tpop_from_aic` def, which is order-independent; `load_derived_bases_`
-  /// additionally takes view outputs, and a view shares its source's base, so
-  /// marking one inserts a base that is already present.  Only the *Var* sets
+  /// sets are complete after the first pass. Direct producer defs are
+  /// order-independent; propagated views and aliases share their source's base,
+  /// so marking one inserts a base that is already present (or no base for a
+  /// buffer-less value). Only the *Var* sets
   /// grow in the second pass, and those propagate in program order within it.
   /// Both traversals are O(N), so the collector stays linear.
   void Run(const StmtPtr& body) {
@@ -148,7 +146,10 @@ class HazardInputCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (GetTileTypeWithMemRef(op->var_->GetType())) {
+    // Producer provenance is independent of general-pool ownership. InitMemRef
+    // deliberately leaves TPOP results and their zero-copy views without a
+    // MemRef: their storage belongs to the cross-core pipe instead.
+    if (As<TileType>(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
         // AsVarLike, not As<Var>: an operand may be an enclosing loop's IterArg
         // — the loop-carry shape of `tile.add(x, c_iter)` / `tile.matmul_acc(
@@ -173,13 +174,26 @@ class HazardInputCollector : public IRVisitor {
             }
           }
         }
-        if (IsOp(call, "tile.tpop_from_aic")) MarkTpop(op->var_);
+        if (IsOp(call, "tile.tpop_from_aic")) {
+          MarkTpop(op->var_);
+        } else if (call->op_ && op_predicates::IsBufferAliasingViewOp(call->op_->name_) &&
+                   !call->args_.empty()) {
+          if (const auto source = AsVarLike(call->args_[0]); source && IsTpop(source)) {
+            MarkTpop(op->var_);
+          }
+        }
         for (const VarPtr& in : input_vars) {
           if (IsTpop(in)) {
             inputs_.reads_tpop.insert(op->var_.get());
             break;
           }
         }
+      } else if (const auto source = AsVarLike(op->value_)) {
+        // A bare SSA rename preserves the same physical value, including when
+        // neither side owns a MemRef. Do not confuse this with a data-producing
+        // operation which may independently choose a different allocation.
+        if (IsLoadDerived(source)) MarkLoadDerived(op->var_);
+        if (IsTpop(source)) MarkTpop(op->var_);
       }
     }
     IRVisitor::VisitStmt_(op);
@@ -445,8 +459,11 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
   if (func->func_type_ != FunctionType::AIV) return false;
   if (!backend::BackendConfig::IsConfigured()) return false;
   const auto* ctx = PassContext::Current();
-  if (ctx == nullptr) return false;
-  if (!ctx->GetBackendHandler()->RequiresSplitLoadTpopWorkaround()) return false;
+  // AllocationConstraintAnalysis is also used directly outside a pass scope.
+  // PassContext's accessor delegates to this same configured backend; absence
+  // of a context must not silently turn off a target correctness constraint.
+  const auto* handler = ctx ? ctx->GetBackendHandler() : backend::GetBackend()->GetHandler();
+  if (!handler->RequiresSplitLoadTpopWorkaround()) return false;
   // A split AIV function needs the guard. The split may be signalled either as a
   // function-level mode (single-mode / standalone kernels carry ``split``) or
   // ONLY as the mode-agnostic ``split_aiv`` marker — multi-mode explicit
