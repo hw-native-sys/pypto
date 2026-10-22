@@ -202,6 +202,9 @@ bool CallShapeBindingPlan::MatchesResult(const ExprPtr& call, const CallShapeMap
   auto tuple = As<TupleType>(call->GetType());
   std::vector<TypePtr> actual;
   if (As<Submit>(call)) {
+    if (function_->return_types_.empty()) {
+      if (auto task = As<ScalarType>(call->GetType())) return task->dtype_ == DataType::TASK_ID;
+    }
     if (!tuple || tuple->types_.size() != function_->return_types_.size() + 1) return false;
     auto task = As<ScalarType>(tuple->types_.back());
     if (!task || task->dtype_ != DataType::TASK_ID) return false;

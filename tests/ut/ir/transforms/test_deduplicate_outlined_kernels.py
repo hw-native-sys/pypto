@@ -838,6 +838,33 @@ def test_deepseek_shape_cases_preserve_buffers_and_dispatch(case, wrapped, use_s
                 ir.assert_structural_equal(call.type, expected)
 
 
+@pytest.mark.parametrize("tuple_result", [False, True])
+@pytest.mark.parametrize("task_dtype", [D.TASK_ID, D.INT64])
+@pytest.mark.parametrize("has_value_return", [False, True])
+def test_shape_distinct_submit_checks_task_only_result(tuple_result, task_dtype, has_value_return):
+    case = "kv_touch" if has_value_return else "csa_cache_writeback"
+    task_type = ir.ScalarType(task_dtype)
+    result_type = ir.TupleType([task_type]) if tuple_result else task_type
+    functions, inputs, statements = [], [], []
+    for name in ["a", "b"]:
+        func, _ = _deepseek_shape_case(case, name)
+        functions.append(func)
+        actuals = [var(name + p.name_hint, p.type) for p in func.params]
+        inputs.extend(actuals)
+        dispatch = ir.Submit(ir.GlobalVar(name), actuals, [], {}, {}, result_type, S)
+        statements.append(ir.AssignStmt(var(name + "task", result_type), dispatch, S))
+    functions.append(
+        ir.Function("main", inputs, [], ir.SeqStmts(statements, S), S, type=ir.FunctionType.Orchestration)
+    )
+    source = program(functions)
+    after = run(source)
+    can_merge = not has_value_return and task_dtype == D.TASK_ID
+    assert names(after) == ({"a", "main"} if can_merge else {"a", "b", "main"})
+    assert [call.op.name for call in calls(after)] == (["a", "a"] if can_merge else ["a", "b"])
+    for old, new in zip(calls(source), calls(after), strict=True):
+        assert new.args == old.args and new.type is old.type
+
+
 @pytest.mark.parametrize("conflict", ["scalar", "repeated", "result"])
 def test_shape_conflict_at_any_site_keeps_entire_candidate(conflict):
     n, m = var("N", ir.ScalarType(D.INDEX)), var("M", ir.ScalarType(D.INDEX))
