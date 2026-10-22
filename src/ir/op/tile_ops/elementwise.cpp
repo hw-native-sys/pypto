@@ -129,6 +129,22 @@ static std::shared_ptr<TileType> MakePackedPredicateTileType(
   return std::make_shared<TileType>(mask_shape, DataType::UINT8, std::nullopt, tile_view);
 }
 
+/// Build the result of a broadcast tile-binary operation.
+///
+/// The physical shape comes from `BroadcastShapes`; valid_shape and layout are
+/// inherited from the left operand.
+///
+/// TODO(YunjiQin): this assumes both operands carry the same valid_shape. A
+/// broadcast whose operands have different valid extents (e.g. after
+/// broadcasting) is not modelled yet.
+static TypePtr MakeBroadcastTileType(const std::vector<ExprPtr>& shape, DataType dtype,
+                                     const TileTypePtr& prototype) {
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(prototype);
+  InheritTileViewLayout(tile_view, prototype);
+  return std::make_shared<TileType>(shape, dtype, std::nullopt, tile_view);
+}
+
 // Forward declarations: trem/trems reuse the tmp-carrying deducers defined
 // further down (also used by xor/xors), so they must be visible here.
 TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
@@ -213,12 +229,7 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 // Tile-tile shift ops (shl, shr): RHS is the shift amount, result type equals LHS tile type,
@@ -244,12 +255,7 @@ TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, tile_type1->dtype_, tile_type1);
 }
 
 TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
@@ -994,12 +1000,7 @@ TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 static void CheckCarryTileMatches(const std::shared_ptr<const TileType>& reference,
@@ -1088,12 +1089,7 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs tiles have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 // TADDSC/TSUBSC use one exact dtype for src0, scalar, carry, and dst.
@@ -1363,12 +1359,7 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 REGISTER_OP("tile.sel")
@@ -1387,7 +1378,7 @@ REGISTER_OP("tile.sel")
     .set_output_memory(MemorySpace::Vec)
     // TSEL reads the predicate mask (arg 0) and tmp scratch (arg 3) while
     // writing dst. Dead lhs/rhs value operands may be reused when lifetimes
-    // allow; mask/tmp stay forbidden via registry (see 35-memory_reuse.md).
+    // allow; mask/tmp stay forbidden via registry (see 37-memory_reuse.md).
     .forbid_output_alias(0)
     .forbid_output_alias(3)
     .set_lane_invariant_arg(3)
