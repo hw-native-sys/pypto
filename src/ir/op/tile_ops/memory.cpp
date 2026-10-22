@@ -1473,6 +1473,18 @@ bool IsNdTensor(const TensorType& type) {
 }
 }  // namespace
 
+/// Deduce the result type of `tile.mgather`.
+///
+/// The output space decides both the index carrier and the shape rule:
+/// * `Vec` output: `idx` is an INT32 tile. `coalesce=elem` copies the index
+///   tile's shape; `coalesce=row` turns a `[1, R]`/`[R, 1]` index into `[R, C]`
+///   using `mem`'s element extent.
+/// * `Mat` output: `idx` is an INT32 GM tensor and the result is a col-major L0
+///   tile. `coalesce=elem` additionally requires a distinct GM scratch buffer;
+///   `coalesce=row` accepts only an optional `valid_shape`.
+///
+/// Both paths converge on a static output shape and reject an explicit
+/// `valid_shape` that exceeds it.
 TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs,
                               const std::string& op_name) {
@@ -1493,6 +1505,8 @@ TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
   CHECK(!mem_type->shape_.empty()) << "The operator " << op_name
                                    << " requires mem to have at least one dimension";
 
+  // Three kwargs select the dispatch: row vs elem coalescing, the out-of-bounds
+  // policy, and the output space (Vec tile vs Mat GM).
   int coalesce = GetKwarg<int>(kwargs, "coalesce", static_cast<int>(MgatherCoalesceMode::kRow));
   CHECK(coalesce == static_cast<int>(MgatherCoalesceMode::kRow) ||
         coalesce == static_cast<int>(MgatherCoalesceMode::kElem))
@@ -1509,6 +1523,8 @@ TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> output_valid_shape;
   TileView tile_view;
   if (target_memory == MemorySpace::Vec) {
+    // Vec output: the index is an on-chip tile. Elem mode keeps its layout;
+    // row mode expands a vector index along mem's last (element) extent.
     CHECK_SPAN(!mem_type->tensor_view_ || !IsMxTensorLayout(mem_type->tensor_view_->layout), args[0]->span_)
         << "The operator " << op_name << " with Vec output does not support MX-layout source tensors";
     CHECK(args.size() == 2) << "The operator " << op_name << " permits scratch only for Mat elem mode";
@@ -1547,6 +1563,9 @@ TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
     }
     tile_view.blayout = TileLayout::row_major;
   } else {
+    // Mat output: the index is a GM INT32 tensor and the result is addressed as
+    // a col-major L0 tile. Elem mode stages through a caller-provided scratch
+    // buffer; row mode has no scratch and only accepts an optional valid_shape.
     CHECK(IsNdTensor(*mem_type)) << "The operator " << op_name
                                  << " with Mat output requires mem to use ND tensor layout";
     auto idx_type = AsTensorTypeLike(args[1]->GetType());
@@ -1600,6 +1619,7 @@ TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
           << "The operator " << op_name << " Mat row mode requires a [1, R] GM idx tensor";
       output_shape = {idx_type->shape_[1], mem_type->shape_.back()};
     }
+    // Both Mat paths converge on a static, fractal-aligned physical shape.
     auto output_rows = As<ConstInt>(output_shape[0]);
     auto output_cols = As<ConstInt>(output_shape[1]);
     CHECK(output_rows && output_cols) << "The operator " << op_name << " Mat output shape must be static";
@@ -1610,6 +1630,8 @@ TypePtr DeduceTileMgatherType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " Mat output rows must be a multiple of 16";
     CHECK(output_cols->value_ % c0 == 0)
         << "The operator " << op_name << " Mat output cols must be a multiple of " << c0;
+    // An explicit valid_shape, when present, must be constant and fit the
+    // physical output; otherwise the full output is valid.
     output_valid_shape = output_shape;
     const size_t valid_shape_index = coalesce == static_cast<int>(MgatherCoalesceMode::kElem) ? 3 : 2;
     if (args.size() > valid_shape_index) {
