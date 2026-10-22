@@ -124,6 +124,23 @@ DataType ParseDtype(const std::vector<std::pair<std::string, std::any>>& kwargs)
   return dtype;
 }
 
+// MX scale algorithm: "ocp" (OCP MX spec, floor exponent; PTOAS default) or
+// "nv" (NVIDIA recipe, ceil(log2(max/FP8_MAX)) upward exponent). Flows
+// unchanged through lowering to pto.tquant.mx's quantScaleAlg attribute.
+std::string ParseScaleAlg(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                          const std::string& op_name, const Span& span) {
+  std::string scale_alg = "ocp";
+  for (const auto& [key, value] : kwargs) {
+    if (key == "scale_alg") {
+      scale_alg = AnyCast<std::string>(value, "kwarg key: scale_alg");
+      CHECK_SPAN(scale_alg == "ocp" || scale_alg == "nv", span)
+          << "The operator " << op_name << " scale_alg must be \"ocp\" or \"nv\", but got \"" << scale_alg
+          << "\"";
+    }
+  }
+  return scale_alg;
+}
+
 void CheckSrcBasics(const TileTypePtr& src_type, const std::string& op_name, const Span& span) {
   CHECK_SPAN(src_type, span) << "The operator " << op_name << " requires src to be a TileType";
   CHECK_SPAN(src_type->shape_.size() == 2, span) << "The operator " << op_name << " requires 2D src tile";
@@ -150,6 +167,7 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
 
   const DataType dtype = ParseDtype(kwargs);
   const int group_axis = ParseGroupAxis(kwargs, kOpName, span, /*required=*/true);
+  (void)ParseScaleAlg(kwargs, kOpName, span);
   const MxQuantTypeInfo type_info = ResolveMxQuantType(dtype, kOpName, span);
 
   ExprPtr dim0 = src_type->shape_[0];
@@ -212,6 +230,7 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
 
   const DataType dtype = ParseDtype(kwargs);
   const int group_axis = ParseGroupAxis(kwargs, kOpName, span, /*required=*/true);
+  (void)ParseScaleAlg(kwargs, kOpName, span);
   const MxQuantTypeInfo type_info = ResolveMxQuantType(dtype, kOpName, span);
 
   auto dim0_const = As<ConstInt>(src_type->shape_[0]);
@@ -394,6 +413,7 @@ REGISTER_OP("tile.tquant_mx")
     .add_argument("src", "Source tile (FP16/FP32/BF16, 2D)")
     .set_attr<DataType>("dtype")
     .set_attr<int>("group_axis")
+    .set_attr<std::string>("scale_alg")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     // Two results (dst, scale), carried by the deduced TupleType; the single
@@ -416,6 +436,7 @@ REGISTER_OP("tile.tquant_mx_raw")
     .add_argument("scaling", "Per-group scaling workspace matching src dtype (write-only)")
     .set_attr<DataType>("dtype")
     .set_attr<int>("group_axis")
+    .set_attr<std::string>("scale_alg")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)

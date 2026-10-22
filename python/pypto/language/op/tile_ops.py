@@ -1428,6 +1428,7 @@ def quant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    scale_alg: str = "ocp",
 ) -> tuple[Tile, Tile]:
     """MXFP8 block-32 dynamic quantization with PTOAS ``grpAxis`` selection.
 
@@ -1446,6 +1447,9 @@ def quant_mx(
             ``group_axis=0``: ``[N, K]`` with ``N%32==0``, ``K%64==0``.
         group_axis: PTOAS grouping axis — ``1`` (A-side) or ``0`` (B-side).
         dtype: Must be ``FP8E4M3FN`` (default).
+        scale_alg: E8M0 scale rule — ``"ocp"`` (OCP MX spec, floor exponent;
+            PTOAS default) or ``"nv"`` (NVIDIA recipe, upward/ceil exponent
+            ``2^ceil(log2(max/448))``, matching ``quantize_mxfp8_upward_e8m0``).
 
     Returns:
         ``group_axis=1``: ``(quant[M,K], scale[M,K/32])`` row/row ZZ scale.
@@ -1461,7 +1465,9 @@ def quant_mx(
         raise ValueError(f"pl.quant_mx group_axis must be 0 or 1, but got {group_axis!r}")
     if dtype != DataType.FP8E4M3FN:
         raise ValueError(f"pl.quant_mx supports only FP8E4M3FN (MXFP8), but got {dtype}")
-    call_expr = _ir_ops.tquant_mx(src.unwrap(), dtype=dtype, group_axis=group_axis)
+    if scale_alg not in ("ocp", "nv"):
+        raise ValueError(f"pl.quant_mx scale_alg must be 'ocp' or 'nv', but got {scale_alg!r}")
+    call_expr = _ir_ops.tquant_mx(src.unwrap(), dtype=dtype, group_axis=group_axis, scale_alg=scale_alg)
     span = call_expr.span
     return (
         Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),

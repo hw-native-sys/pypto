@@ -1991,11 +1991,17 @@ def tquant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
-    """MX block-32 dynamic quantization returning quantized data and scale."""
+    """MX block-32 dynamic quantization returning quantized data and scale.
+
+    ``scale_alg`` selects the E8M0 scale rule: ``"ocp"`` (OCP MX spec, floor
+    exponent; PTOAS default) or ``"nv"`` (NVIDIA recipe, upward/ceil exponent
+    ``2^ceil(log2(max/448))``).
+    """
     actual_span = _get_span_or_capture(span)
-    kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
+    kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis, "scale_alg": scale_alg}
     return _ir_core.create_op_call("tile.tquant_mx", [src], kwargs, actual_span)
 
 
@@ -2006,6 +2012,7 @@ def tquant_mx_raw(
     *,
     dtype: DataType = DataType.FP8E4M3FN,
     group_axis: int = 1,
+    scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
     """Build the compiler-internal value-returning raw MX quantization Call.
@@ -2017,7 +2024,7 @@ def tquant_mx_raw(
     return _ir_core.create_op_call(
         "tile.tquant_mx_raw",
         [src, max_scratch, scaling_scratch],
-        {"dtype": dtype, "group_axis": group_axis},
+        {"dtype": dtype, "group_axis": group_axis, "scale_alg": scale_alg},
         actual_span,
     )
 

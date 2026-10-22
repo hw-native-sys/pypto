@@ -1145,10 +1145,18 @@ static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBas
   const int group_axis = op->GetKwarg<int>("group_axis", 1);
   INTERNAL_CHECK_SPAN(group_axis == 0 || group_axis == 1, op->span_)
       << "Internal error: tile.tquant_mx_raw group_axis must be 0 or 1";
+  const std::string scale_alg = op->GetKwarg<std::string>("scale_alg", std::string("ocp"));
+  INTERNAL_CHECK_SPAN(scale_alg == "ocp" || scale_alg == "nv", op->span_)
+      << "Internal error: tile.tquant_mx_raw scale_alg must be ocp or nv, but got " << scale_alg;
   oss << ") outs(" << dst_view.ssa << ", " << scale_view.ssa << ", " << max_view.ssa << ", "
       << scaling_view.ssa << " : " << dst_view.type << ", " << scale_view.type << ", " << max_view.type
-      << ", " << scaling_view.type << ") {quant_type = #pto<quant_type MXFP8"
-      << ">, grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
+      << ", " << scaling_view.type << ") {quant_type = #pto<quant_type MXFP8";
+  if (scale_alg != "ocp") {
+    // PTOAS defaults quantScaleAlg to OCP; only emit the attribute when the
+    // caller overrides it (e.g. NV = upward/ceil E8M0 exponent).
+    oss << ">, quantScaleAlg = #pto<quant_scale_alg " << scale_alg;
+  }
+  oss << ">, grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
   codegen.Emit(oss.str());
   return "";
 }

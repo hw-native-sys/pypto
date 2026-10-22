@@ -1151,11 +1151,11 @@ def fillpad_expand(
 @overload
 def quant_mx(src: Tensor, *, group_axis: int, dtype: DataType = ...) -> tuple[Tensor, Tensor]: ...
 @overload
-def quant_mx(src: Tile, *, group_axis: int, dtype: DataType = ...) -> tuple[Tile, Tile]: ...
+def quant_mx(src: Tile, *, group_axis: int, dtype: DataType = ..., scale_alg: str = ...) -> tuple[Tile, Tile]: ...
 
 
 def quant_mx(
-    src: object, group_axis: int, dtype: DataType = DataType.FP8E4M3FN
+    src: object, group_axis: int, dtype: DataType = DataType.FP8E4M3FN, scale_alg: str = "ocp"
 ) -> tuple[Tensor, Tensor] | tuple[Tile, Tile]:
     """MXFP8 quantization, dispatched for GM tensors and tiles.
 
@@ -1163,11 +1163,16 @@ def quant_mx(
     tile calls retain the existing on-chip behavior. Both forms use
     ``group_axis=1`` for A-oriented input and ``group_axis=0`` for B-oriented
     input.
+
+    ``scale_alg`` selects the E8M0 scale rule (``"ocp"`` default / ``"nv"``
+    upward exponent) and is currently supported by the tile form only.
     """
     if isinstance(src, Tensor):
+        if scale_alg != "ocp":
+            raise ValueError(f"pl.quant_mx scale_alg is supported for Tile inputs only, but got {scale_alg!r}")
         return _tensor.quant_mx(src, group_axis=group_axis, dtype=dtype)
     if isinstance(src, Tile):
-        return _tile.quant_mx(src, group_axis=group_axis, dtype=dtype)
+        return _tile.quant_mx(src, group_axis=group_axis, dtype=dtype, scale_alg=scale_alg)
     _raise_type_dispatch_error("quant_mx", src)
 
 

@@ -148,9 +148,10 @@ ExprPtr LowerTileTQuantMxRule(const CallPtr& call, const std::vector<ExprPtr>& a
   // then project dst/exp so InitMemRef + ResolveTupleResultElements see real
   // TupleGetItem consumers. max/scaling remain write-only workspace inputs.
   DataType dtype = call->GetKwarg<DataType>("dtype", DataType::FP8E4M3FN);
+  const std::string scale_alg = call->GetKwarg<std::string>("scale_alg", std::string("ocp"));
   auto raw_tuple = b.Bind("tq_raw",
                           reg.Create("tile.tquant_mx_raw", {src, max_tile, scaling_tile},
-                                     {{"dtype", dtype}, {"group_axis", group_axis}}, span),
+                                     {{"dtype", dtype}, {"group_axis", group_axis}, {"scale_alg", scale_alg}}, span),
                           span);
   auto raw_dst = b.Bind("tq_dst", std::make_shared<TupleGetItemExpr>(raw_tuple, 0, span), span);
   auto raw_exp = b.Bind("tq_exp", std::make_shared<TupleGetItemExpr>(raw_tuple, 1, span), span);
