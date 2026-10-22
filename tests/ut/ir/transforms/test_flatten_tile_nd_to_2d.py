@@ -1296,24 +1296,34 @@ class TestFlattenTileNdTo2DCallRemapping:
             call = tile_ops.exp(operand)
         return call
 
-    @pytest.mark.parametrize("slot_kind", ["constant", "variable", "expression"])
-    @pytest.mark.parametrize("lhs_only", [False, True])
     @pytest.mark.parametrize(
-        "producer",
+        "producer,lhs_only,slot_kind",
         [
-            "attrs",
-            "lhs_only",
-            "type",
-            "operand",
-            "alias",
-            "load",
-            "nd_load",
-            "create",
-            "nd_create",
-            "reshape",
-            "nd_reshape",
-            "nd_assemble",
-            "transpose",
+            # Exercise all slot forms and both binding locations once on the
+            # generic path; specialized paths reuse the same type remapper.
+            ("plain", True, "constant"),
+            ("plain", True, "variable"),
+            ("plain", True, "expression"),
+            ("plain", False, "constant"),
+            ("plain", False, "variable"),
+            ("plain", False, "expression"),
+            # Different reasons to rebuild a generic Call or an alias definition.
+            ("attrs", True, "variable"),
+            ("type", True, "variable"),
+            ("operand", True, "variable"),
+            ("alias", True, "variable"),
+            ("alias", False, "variable"),
+            # Each specialized path must carry and remap an LHS-only binding.
+            ("load", True, "variable"),
+            ("nd_load", True, "variable"),
+            ("create", True, "variable"),
+            ("nd_create", True, "variable"),
+            ("reshape", True, "variable"),
+            ("nd_reshape", True, "variable"),
+            ("nd_assemble", True, "variable"),
+            ("transpose", True, "variable"),
+            # Transpose used to drop even a constant binding during rebuilding.
+            ("transpose", True, "constant"),
         ],
     )
     def test_pinned_slot_follows_definition_remapping(self, producer: str, lhs_only: bool, slot_kind: str):
