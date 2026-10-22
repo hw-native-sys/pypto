@@ -883,3 +883,9 @@ workspace or silently turn a requested prefetch into a no-op. See
 ## References
 
 Core definitions live in `include/pypto/core/common.h` and `include/pypto/ir/`; registry and type-inference implementations are in `src/ir/`, with operator implementations grouped under `src/ir/op/{tensor_ops,tile_ops,sync_ops}/`.
+
+## Register operations
+
+The `reg.*` P0 schemas use category `RegOp`, explicit argument effects and
+register-region requirements. See [register operations](../language/06-register-operations.md)
+for dtype, memory, conversion and ownership contracts.

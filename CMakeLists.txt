@@ -124,6 +124,7 @@ set(PYPTO_SOURCES
     src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
     src/ir/op/buffer_ops/view.cpp
+    src/ir/op/reg_ops/reg_ops.cpp
     src/ir/op/tile_ops/batch_matmul.cpp
     src/ir/op/tile_ops/broadcast.cpp
     src/ir/op/tile_ops/elementwise.cpp
@@ -330,6 +331,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp
+    src/ir/verifier/verify_reg_scope.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
     src/ir/verifier/verify_inline_functions_eliminated.cpp
     src/ir/verifier/verify_use_after_def.cpp

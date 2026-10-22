@@ -854,6 +854,34 @@ void BindIR(nb::module_& m) {
   comm_layout_mod.attr("WINDOW_SLOT_STRIDE") = pypto::codegen::distributed::comm_layout::kWindowSlotStride;
   comm_layout_mod.attr("COMM_CTX_SIZE") = pypto::codegen::distributed::comm_layout::kCommCtxSize;
 
+  ir.def(
+      "get_reg_memory_effect",
+      [](const CallPtr& call) {
+        const auto effect = GetRegMemoryEffect(call);
+        nb::dict result;
+        result["target"] = nb::cast(effect.target);
+        result["root"] = nb::cast(effect.root);
+        result["access"] = nb::cast(effect.access);
+        result["begin"] = nb::cast(effect.begin);
+        result["end"] = nb::cast(effect.end);
+        result["mask"] = nb::cast(effect.mask);
+        return result;
+      },
+      nb::arg("call"), "Get the schema memory interval in root element coordinates");
+  ir.def(
+      "get_reg_op_spec",
+      [](const std::string& name) {
+        const auto& spec = OpRegistry::GetInstance().GetEntry(name).GetRegSpec();
+        CHECK(spec.has_value()) << "Expected a register schema";
+        nb::dict result;
+        result["emitter"] = spec->emitter;
+        result["requires_reg_scope"] = spec->requires_reg_scope;
+        result["output_reuses_input_arg"] =
+            nb::cast(OpRegistry::GetInstance().GetEntry(name).GetOutputReusesInputArg());
+        return result;
+      },
+      nb::arg("op_name"), "Get register scope and emitter metadata");
+
   // OpRegistry
   nb::enum_<OpIRStage>(ir, "OpIRStage", "Representation consumed and produced by an operator")
       .value("Functional", OpIRStage::Functional)

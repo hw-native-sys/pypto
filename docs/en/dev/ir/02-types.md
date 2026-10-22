@@ -39,8 +39,9 @@ The annotation forms are `pl.Reg[64, pl.FP32]` (VecReg by default) and
 `ir.RegScopeStmt(name_hint, body, span, leading_comments=[], attrs=None)`, and
 `ir.ForStmt.hardware_loop_policy` are IR infrastructure. Direct construction,
 visitor/mutator traversal, structural comparison and binary serialization are
-supported. Register operations, `pl.reg_scope`, complete scope DSL roundtrips
-and VF code generation are reserved for later changes.
+supported. P0 register operations and `pl.reg_scope()` support validated DSL
+construction and text roundtrips; see [register operations](../language/06-register-operations.md).
+VF code generation remains reserved for PR3.
 
 `HardwareLoopPolicy.Auto` is the default for new loops and old serialized
 loops that omit the field. `Require` is persistent semantic metadata; it must

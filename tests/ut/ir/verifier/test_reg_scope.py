@@ -136,7 +136,7 @@ def test_builder_constructs_store_as_assignment():
     store = scope.body.stmts[1]
     assert isinstance(store, ir.AssignStmt)
     assert isinstance(store.value, ir.Call)
-    assert store.value.op.name == "reg.store"
+    assert store.value.op.name == ir.get_op("reg.store").name
     ir.assert_structural_equal(store.var.type, src.type)
 
 

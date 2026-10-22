@@ -38,9 +38,11 @@ out of that, at the cost of everything the compiler could have concluded from kn
 count `L`. The optional third parameter is `pl.RegKind.VecReg` (the default) or
 `pl.RegKind.MaskReg`. MaskReg requires `pl.BOOL`; VecReg forbids it. For example,
 `pl.Reg[64, pl.FP32]` and `pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]` are valid
-annotations. These descriptors currently support IR construction and binary
-serialization. Register operations, scope DSL execution and VF compilation are
-not yet available; see [register IR descriptors](../../dev/ir/02-types.md#register-ir-descriptors).
+annotations. `pl.reg` provides P0 register operations inside `pl.reg_scope()`;
+inputs are captured implicitly and Reg/local Scalar values cannot escape.
+IR construction, validation, binary serialization and DSL text roundtrips are
+supported. VF backend compilation remains unavailable until PR3.
+See [register operations](../../dev/language/06-register-operations.md).
 
 ## Quickstart: reading a signature
 

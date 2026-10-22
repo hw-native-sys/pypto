@@ -35,6 +35,7 @@
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/reg_scope.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -522,6 +523,7 @@ class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
+      VerifyRegScopes(func, diagnostics, true);
       if (func->func_type_ == FunctionType::InCore) {
         MixedKernelExpandedVerifier verifier(diagnostics, func->name_);
         verifier.VisitStmt(func->body_);

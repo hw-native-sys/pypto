@@ -172,7 +172,8 @@ void BindPass(nb::module_& m) {
       .value("TileStorageLegalized", IRProperty::TileStorageLegalized,
              "Device region boundaries use canonical, nonoverlapping allocation windows")
       .value("TileStorageAllocated", IRProperty::TileStorageAllocated,
-             "Device region storage and transfers also have nonoverlapping effective address windows");
+             "Device region storage and transfers also have nonoverlapping effective address windows")
+      .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

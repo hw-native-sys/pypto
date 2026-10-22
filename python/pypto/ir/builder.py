@@ -53,6 +53,37 @@ class IRBuilder:
         self._begin_spans: dict[int, ir.Span] = {}  # Track begin spans for multi-line contexts
         self._ctx_counter = 0  # Counter for unique context IDs
 
+    @contextmanager
+    def reg_scope(self, span: ir.Span | None = None) -> Iterator[None]:
+        """Build a register region with implicit captures and no yields."""
+        with self.scope(ir.ScopeKind.Reg, span):
+            yield
+
+    def emit_reg(
+        self,
+        name: str,
+        op_name: str,
+        args: Sequence[ir.Expr],
+        kwargs: dict[str, Any] | None = None,
+        span: ir.Span | None = None,
+    ) -> ir.Var:
+        """Infer, validate and assign a register operation."""
+        return self._builder.emit_reg(name, op_name, args, kwargs or {}, span or self._capture_call_span())
+
+    def emit_reg_store(
+        self,
+        name: str,
+        tile: ir.Expr,
+        value: ir.Expr,
+        offset: int | ir.Expr = 0,
+        mask: ir.Expr | None = None,
+        span: ir.Span | None = None,
+    ) -> ir.Var:
+        """Assign a store result with the destination Tile type and storage."""
+        span = span or self._capture_call_span()
+        off = ir.ConstInt(offset, DataType.INDEX, span) if isinstance(offset, int) else offset
+        return self._builder.emit_reg_store(name, tile, off, value, mask, span)
+
     # ========== Context Managers for Multi-line Constructs ==========
 
     @contextmanager
