@@ -99,12 +99,6 @@ AssignStmtPtr RetypeStrideRefinedAssignment(const AssignStmtPtr& original, const
   return assign;
 }
 
-bool IsTensorTypedArg(const ExprPtr& arg) {
-  TypePtr ty = arg ? arg->GetType() : TypePtr{};
-  if (!ty) return false;
-  return AsTensorTypeLike(ty) || As<TupleType>(ty);
-}
-
 // ============================================================================
 // Pattern 1: IterArgReuseOptimizer
 //

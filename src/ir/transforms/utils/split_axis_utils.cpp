@@ -505,10 +505,6 @@ ExprPtr MakeConstLike(const ExprPtr& ref, int64_t value, const Span& span) {
   return std::make_shared<ConstInt>(value, GetScalarDtype(ref), span);
 }
 
-ExprPtr MakeIndexConst(int64_t value, const Span& span) {
-  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
-}
-
 // Lane L's valid extent on the split axis: ``clamp(V - L * S, 0, S)``, where
 // @p lane_extent is the partition stride S (the tile's physical half under the
 // default box partition, the balanced ``ceil(V / 2)`` under a rebalanced body).

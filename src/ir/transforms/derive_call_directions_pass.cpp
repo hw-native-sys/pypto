@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 
@@ -44,15 +45,7 @@ namespace {
 using ::pypto::ir::buffer_root::AmbiguousRootPolicy;
 using ::pypto::ir::buffer_root::BufferRootCollector;
 using ::pypto::ir::op_predicates::IsBuiltinOp;
-
-/// Decide whether an argument expression refers to a tensor (not a scalar/index).
-bool IsTensorTypedArg(const ExprPtr& arg) {
-  TypePtr ty = arg ? arg->GetType() : TypePtr{};
-  if (!ty) return false;
-  if (AsTensorTypeLike(ty)) return true;
-  if (As<TupleType>(ty)) return true;
-  return false;
-}
+using ::pypto::ir::transform_utils::IsTensorTypedArg;
 
 /// Phase 0 — write each Group/Spmd wrapper's *effective* param directions back
 /// into its own signature.

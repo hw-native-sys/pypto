@@ -176,10 +176,6 @@ std::vector<std::pair<std::string, std::any>> WithSplitAttrs(const FunctionPtr& 
   return attrs;
 }
 
-ExprPtr MakeIndexConst(int64_t value, const Span& span) {
-  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
-}
-
 TypePtr WithZeroValidShape(const TypePtr& type, const Span& span) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt) return type;

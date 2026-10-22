@@ -418,6 +418,18 @@ inline BinaryOperands PromoteIntBinaryOperands(const ExprPtr& left, const ExprPt
   return {std::move(promoted_left), std::move(promoted_right), promoted_dtype};
 }
 
+// ========== Constant Construction Functions ==========
+
+/// Materialize an index-typed integer constant.
+///
+/// ``INDEX`` is the dtype loop bounds, offsets, and shape extents use throughout
+/// the passes. Naming the construction here keeps call sites from spelling out
+/// ``ConstInt(value, DataType::INDEX, span)`` and from accidentally choosing a
+/// different integer dtype.
+inline ExprPtr MakeIndexConst(int64_t value, const Span& span = Span::unknown()) {
+  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+}
+
 // ========== Binary Operator Construction Functions ==========
 
 inline ExprPtr MakeCast(const ExprPtr& operand, DataType dtype, const Span& span = Span::unknown()) {

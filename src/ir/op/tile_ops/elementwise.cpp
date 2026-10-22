@@ -46,10 +46,6 @@ namespace ir {
 
 constexpr int64_t kPackedPredicateBitsPerByte = 8;
 
-static ExprPtr MakeIndexConst(int64_t value, const Span& span = Span::unknown()) {
-  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
-}
-
 static ExprPtr MakeCeilDivIndex(const ExprPtr& value, int64_t divisor) {
   if (auto const_value = As<ConstInt>(value)) {
     return MakeIndexConst((const_value->value_ + divisor - 1) / divisor, value->span_);

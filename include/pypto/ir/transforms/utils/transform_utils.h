@@ -34,6 +34,18 @@
 
 namespace pypto::ir::transform_utils {
 
+/// True when @p arg carries a tensor-like or tuple type.
+///
+/// ``AsTensorTypeLike`` matches a ``DistributedTensorType`` window as well as a
+/// plain ``TensorType``: at this layer a window is this rank's local GM data.
+/// Tuples count because call arguments are often packed tuples of tensors.
+inline bool IsTensorTypedArg(const ExprPtr& arg) {
+  if (!arg) return false;
+  TypePtr type = arg->GetType();
+  if (!type) return false;
+  return AsTensorTypeLike(type) || As<TupleType>(type);
+}
+
 /// Substitute variable references in an expression by pointer identity.
 ///
 /// Recursively traverses Call, MakeTuple, BinaryExpr, UnaryExpr, and
