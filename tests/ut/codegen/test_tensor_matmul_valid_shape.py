@@ -125,7 +125,7 @@ def test_tensor_matmul_else_first_carry_compiles(tmp_path, ascend_backend, physi
 )
 @pytest.mark.parametrize("buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
 def test_batch_transposed_matmul_l0b_capacity(tmp_path, ascend_backend, planner, buffer_ir):
-    """#2872: an unplaceable output grid must not leave a 256 KiB L0B operand."""
+    """#2872: batch stores support the selected M/N grid and legal L0B panels."""
 
     @pl.jit
     def batch_transposed(
@@ -149,6 +149,11 @@ def test_batch_transposed_matmul_l0b_capacity(tmp_path, ascend_backend, planner,
     assert right_shapes, pto
     # One oversized buffer cannot be repaired by allocator lifetime packing.
     assert all(int(rows) * int(cols) * 4 <= 65536 for rows, cols in right_shapes), right_shapes
+    if planner != passes.MemoryPlanner.PYPTO:
+        # Pin the newly supported M/N path: the old K-only fallback also fit
+        # L0B, but stored one full [1,64,512] page per batch.
+        assert "!pto.partition_tensor_view<1x32x128xf32>" in pto, pto
+        assert "!pto.partition_tensor_view<1x64x512xf32>" not in pto, pto
     if find_ptoas_binary() is not None:
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 

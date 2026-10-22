@@ -1369,7 +1369,7 @@ class SiblingUseCounter : public IRVisitor {
 /// One-shot index over a SeqStmts' children, built lazily on the first
 /// oversized matmul and reused for the rest so M/N folding stays O(N):
 ///   * ``use_counts[v]`` — number of reads of ``v`` (excluding defs).
-///   * ``store_of[v]`` — the top-level 2D ``tile.store`` whose source operand
+///   * ``store_of[v]`` — the top-level ``tile.store`` whose source operand
 ///     is ``v`` (its sole direct consumer when ``use_counts[v] == 1``).
 /// Counts/sites reflect the original (pre-rewrite) siblings, which is what the
 /// foldability check needs (a matmul result is freshly defined; its uses do
@@ -1390,8 +1390,8 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
     if (!as) continue;
     auto call = As<Call>(as->value_);
     if (!call || !call->op_) continue;
-    // Record top-level 2D ``tile.store(src, offsets, out)`` by source operand.
-    if (IsOp(call, "tile.store") && call->args_.size() == 3) {
+    // Index both ordinary stores and stores with an explicit ND partition window.
+    if (IsOp(call, "tile.store") && (call->args_.size() == 3 || call->args_.size() == 4)) {
       if (auto src = AsVarLike(call->args_[0])) idx.store_of.emplace(src.get(), as.get());
     } else if (IsOp(call, "tile.cast") && !call->args_.empty()) {
       // Record ``cb = tile.cast(src, dtype)`` by source: a chained matmul whose
@@ -1440,15 +1440,15 @@ class SubtilePlacer {
                                        const ExprPtr& col_off, const VarPtr& chain_in, int step) = 0;
 };
 
-/// Direct-store placement: ``out = tile.store(sub, [base_r + mi, base_c + ni],
-/// out_prev)`` per sub-tile, chaining the DDR output tensor in SSA form.
+/// Direct-store placement preserves batch coordinates and advances only the
+/// trailing matrix axes, chaining the DDR output tensor in SSA form.
 class DirectGmPlacer : public SubtilePlacer {
  public:
-  DirectGmPlacer(ExprPtr base_r, ExprPtr base_c, VarPtr out_in,
+  DirectGmPlacer(std::vector<ExprPtr> base_offsets, bool explicit_shape, VarPtr out_in,
                  std::vector<std::pair<std::string, std::any>> store_kwargs,
                  std::vector<std::pair<std::string, std::any>> store_attrs, Span span)
-      : base_r_(std::move(base_r)),
-        base_c_(std::move(base_c)),
+      : base_offsets_(std::move(base_offsets)),
+        explicit_shape_(explicit_shape),
         out_in_(std::move(out_in)),
         out_base_(out_in_->name_hint_),
         kwargs_(std::move(store_kwargs)),
@@ -1460,9 +1460,24 @@ class DirectGmPlacer : public SubtilePlacer {
   [[nodiscard]] VarPtr PlaceAt(std::vector<StmtPtr>& stmts, const VarPtr& sub, const ExprPtr& row_off,
                                const ExprPtr& col_off, const VarPtr& chain_in, int step) override {
     auto& reg = OpRegistry::GetInstance();
-    auto offs = std::make_shared<MakeTuple>(
-        std::vector<ExprPtr>{AddOffset(base_r_, row_off, sp_), AddOffset(base_c_, col_off, sp_)}, sp_);
-    auto deduced = reg.Create("tile.store", {sub, offs, chain_in}, kwargs_, sp_);
+    auto offsets = base_offsets_;
+    const size_t rank = offsets.size();
+    offsets[rank - 2] = AddOffset(offsets[rank - 2], row_off, sp_);
+    offsets[rank - 1] = AddOffset(offsets[rank - 1], col_off, sp_);
+    std::vector<ExprPtr> args{sub, std::make_shared<MakeTuple>(offsets, sp_), chain_in};
+    if (explicit_shape_) {
+      // The matcher proved that each leading axis selects one batch page.
+      // A partition is a destination box, not the padded Acc allocation: use
+      // the actual transfer extent so boundary tiles cannot cross that box.
+      auto tile = As<TileType>(sub->GetType());
+      INTERNAL_CHECK_SPAN(tile, sp_) << "Internal error: direct-store subtile lost its TileType";
+      const auto valid = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
+      INTERNAL_CHECK_SPAN(valid.size() == 2, sp_) << "Internal error: direct-store subtile must be 2D";
+      std::vector<ExprPtr> shape(rank - 2, MakeIndex(1, sp_));
+      shape.insert(shape.end(), valid.begin(), valid.end());
+      args.push_back(std::make_shared<MakeTuple>(shape, sp_));
+    }
+    auto deduced = reg.Create("tile.store", args, kwargs_, sp_);
     auto scall = PreserveCallAttrs(attrs_, deduced);
     auto sv = std::make_shared<Var>(out_base_ + "_t" + std::to_string(step), scall->GetType(), sp_);
     stmts.push_back(std::make_shared<AssignStmt>(sv, scall, sp_));
@@ -1470,7 +1485,8 @@ class DirectGmPlacer : public SubtilePlacer {
   }
 
  private:
-  ExprPtr base_r_, base_c_;
+  std::vector<ExprPtr> base_offsets_;
+  bool explicit_shape_;
   VarPtr out_in_;
   std::string out_base_;
   std::vector<std::pair<std::string, std::any>> kwargs_;
@@ -2041,7 +2057,7 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   auto out_in = AsVarLike(store_call->args_[2]);
   INTERNAL_CHECK_SPAN(offsets && out_in, match.store->span_)
       << "Internal error: matched canonical split-K store became invalid";
-  DirectGmPlacer placer(offsets->elements_[0], offsets->elements_[1], out_in, store_call->kwargs_,
+  DirectGmPlacer placer(offsets->elements_, /*explicit_shape=*/false, out_in, store_call->kwargs_,
                         store_call->attrs_, match.store->span_);
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
@@ -2424,8 +2440,9 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
   // K-loop+peel, so test k == K rather than the integer-division proxy K/k < 2.
   const bool full_k = t.k == t.K;
 
-  // Direct-store: the sole consumer is a 2D tile.store.  The grid is emitted
-  // later at the store site, where the caller re-applies the then-current remap
+  // Direct-store: the sole consumer stores one matrix (possibly one ND batch
+  // page). The grid is emitted later at the store site, where the caller
+  // re-applies the then-current remap
   // — so a prior fold that redefined this output is rewritten correctly (a
   // stale-output SSA guard); resolving it here would miss folds emitted before
   // this one.
@@ -2434,22 +2451,43 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
     INTERNAL_CHECK_SPAN(store_call, store_stmt->span_)
         << "Internal error: SiblingIndex store_of mapped a non-Call AssignStmt";
     auto offs = As<MakeTuple>(store_call->args_[1]);
-    if (!offs || offs->elements_.size() != 2) {
-      return skip("tile.store offsets are not a 2D tuple — M/N fold not applicable; left untouched");
+    if (!offs || offs->elements_.size() < 2) {
+      return skip("tile.store offsets do not contain matrix axes — M/N fold not applicable; left untouched");
+    }
+    const size_t rank = offs->elements_.size();
+    const bool explicit_shape = store_call->args_.size() == 4;
+    if (explicit_shape) {
+      auto shape = As<MakeTuple>(store_call->args_[3]);
+      // FlattenTileNdTo2D can also collapse multiple destination axes into a
+      // matrix row. Only singleton batch prefixes preserve the simple mapping
+      // (mi, ni) -> (..., base_m + mi, base_n + ni) used by this placer.
+      bool matrix_page = shape && shape->elements_.size() == rank;
+      for (size_t i = 0; matrix_page && i < rank; ++i) {
+        auto dim = As<ConstInt>(shape->elements_[i]);
+        const int64_t expected = i + 2 < rank ? 1 : (i + 2 == rank ? t.M : t.N);
+        matrix_page = dim && dim->value_ == expected;
+      }
+      if (!matrix_page) {
+        return skip(
+            "tile.store partition is not a singleton-batch matrix page — M/N fold not applicable; "
+            "left untouched");
+      }
+    } else if (rank != 2) {
+      return skip("ND tile.store has no explicit partition shape — M/N fold not applicable; left untouched");
     }
     auto out_in = AsVarLike(store_call->args_[2]);
     if (!out_in) {
       return skip(
           "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched");
     }
-    DirectGmPlacer placer(offs->elements_[0], offs->elements_[1], out_in, store_call->kwargs_,
-                          store_call->attrs_, sp);
+    DirectGmPlacer placer(offs->elements_, explicit_shape, out_in, store_call->kwargs_, store_call->attrs_,
+                          sp);
     auto [stmts, last_out] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
     return MNFold{std::move(stmts), last_out, store_stmt->var_, store_stmt};
   }
 
   return skip(
-      "tile.matmul output exceeds L0c but its result is not consumed by a single 2D tile.store "
+      "tile.matmul needs M/N tiling but its result is not consumed by a single supported tile.store "
       "(direct-store) — a result consumed on-chip (chained matmul / elementwise), stored-and-reused, "
       "or fed to a non-store consumer is deferred; left untouched");
 }
