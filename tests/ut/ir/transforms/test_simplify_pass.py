@@ -2671,8 +2671,9 @@ class TestSpmdScopeCoreNum:
 
 class TestManualScopeSubmit:
     @pytest.mark.parametrize("normalization", ["simplify", "init_mem_ref"])
-    def test_rebuilt_carry_keeps_spmd_scope_dependency_in_scope(self, normalization: str):
-        """Pre-outline SPMD deps must follow carry remaps even when body/core_num do not change."""
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_rebuilt_carry_keeps_spmd_scope_dependency_in_scope(self, normalization: str, loop_kind: str):
+        """Pre-outline dependencies and runtime predicates must follow rebuilt loop carries."""
 
         @pl.program
         class Before:
@@ -2681,14 +2682,16 @@ class TestManualScopeSubmit:
                 return t
 
             @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+            def main(
+                self, t: pl.Tensor[[4, 8], pl.FP32], gates: pl.Tensor[[4, 8], pl.INT32]
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
                 initial: pl.Scalar[pl.INDEX] = 0
                 seed: pl.Scalar[pl.INDEX] = initial
                 with pl.manual_scope():
                     first_tid = pl.system.task_dummy(deps=[])
                     dependency_seed: pl.Scalar[pl.TASK_ID] = first_tid
                     for _i, (count, dependency) in pl.range(2, init_values=(seed, dependency_seed)):
-                        with pl.spmd(4, deps=[dependency]) as next_tid:
+                        with pl.spmd(4, deps=[dependency], predicate=(gates[count, 0] > 0)) as next_tid:
                             self.kernel(t)
                         final_count, _final_tid = pl.yield_(count + 1, next_tid)
                 pl.tensor.write(t, [final_count, 0], pl.const(1.0, pl.FP32))
@@ -2703,13 +2706,17 @@ class TestManualScopeSubmit:
             assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
 
         def collect(program: ir.Program):
-            loops: list[ir.ForStmt] = []
+            loops: list[ir.ForStmt | ir.WhileStmt] = []
             scopes: list[ir.SpmdScopeStmt] = []
 
             class Collector(ir.IRVisitor):
                 def visit_for_stmt(self, op):
                     loops.append(op)
                     super().visit_for_stmt(op)
+
+                def visit_while_stmt(self, op):
+                    loops.append(op)
+                    super().visit_while_stmt(op)
 
                 def visit_spmd_scope_stmt(self, op):
                     scopes.append(op)
@@ -2719,8 +2726,27 @@ class TestManualScopeSubmit:
             return loops[0], scopes[0]
 
         program = passes.convert_to_ssa()(Before)
+        if loop_kind == "while":
+            # Reuse the exact SSA carry group and scope body, changing only the
+            # loop kind and its condition so both carry-rebuilding paths are covered.
+            class ToWhile(ir.IRMutator):
+                def visit_for_stmt(self, op):
+                    count = next(
+                        carry
+                        for carry in op.iter_args
+                        if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.INDEX
+                    )
+                    condition = ir.Lt(count, ir.ConstInt(2, DataType.INDEX, op.span), DataType.BOOL, op.span)
+                    return ir.WhileStmt(condition, op.iter_args, op.body, op.return_vars, op.span)
+
+            program = ToWhile().visit_program(program)
         verify(program)
         old_loop, old_scope = collect(program)
+        old_count = next(
+            carry
+            for carry in old_loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.INDEX
+        )
         old_dependency = next(
             carry
             for carry in old_loop.iter_args
@@ -2731,16 +2757,36 @@ class TestManualScopeSubmit:
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             program = getattr(passes, normalization)()(program)
         loop, scope = collect(program)
+        count = next(
+            carry
+            for carry in loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.INDEX
+        )
         dependency = next(
             carry
             for carry in loop.iter_args
             if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.TASK_ID
         )
         assert not dependency.same_as(old_dependency), "the constant seed must rebuild the carry group"
+        assert not count.same_as(old_count)
         assert scope.attrs["manual_dep_edges"][0].same_as(dependency)
+        predicate = scope.attrs["predicate"]
+        assert isinstance(predicate, (ir.Gt, ir.Lt)), "dispatch must still depend on a runtime tensor read"
+        # Full Simplify canonicalizes read > 0 to 0 < read; constant-only
+        # normalization retains the original comparison orientation.
+        read = predicate.left if isinstance(predicate, ir.Gt) else predicate.right
+        threshold = predicate.right if isinstance(predicate, ir.Gt) else predicate.left
+        assert isinstance(threshold, ir.ConstInt) and threshold.value == 0
+        while isinstance(read, ir.Cast):
+            read = read.operand
+        assert isinstance(read, ir.Call) and read.op.name == ir.get_op("tensor.read").name
+        indices = read.args[1]
+        assert isinstance(indices, ir.MakeTuple) and indices.elements[0].same_as(count)
+        if isinstance(loop, ir.WhileStmt):
+            assert isinstance(loop.condition, ir.Lt) and loop.condition.left.same_as(count)
         assert isinstance(scope.core_num, ir.ConstInt) and scope.core_num.value == 4
         if normalization == "simplify":
-            assert scope.body.same_as(old_scope.body), "only the dependency attr needs rewriting"
+            assert scope.body.same_as(old_scope.body), "only dispatch attrs need rewriting"
             assert scope.core_num.same_as(old_scope.core_num)
         verify(program)
 

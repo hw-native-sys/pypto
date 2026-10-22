@@ -23,7 +23,7 @@
 
 **失效 (Invalidates)**：无。
 
-`PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 足够保守，会保留调用方此前可能已经建立的所有属性（`SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等）——它只重写表达式、删除标量绑定，从不改变语句结构。
+`PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 在重写表达式、删除死绑定，以及折叠可证明的分支或纯零次/单次循环时，仍保留 `SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等已建立的属性。InitMemRef 使用的仅常量辅助函数则保留这些控制流语句及其 yield 槽位。
 
 整数及 INDEX 表达式重写保留声明的结果类型。若化简选中的操作数具有不同的整数类型，会保留转换（插入 cast，或折叠为对应类型的常量）。例如，结果声明为 INT32 的 `(index + 1) - 1` 会化简为 `cast(index, INT32)`。打印器通过 `pl.const(value, dtype)` 保留非 INDEX 整数常量的类型，包括传播到嵌套 Call 参数中的常量。
 
@@ -72,7 +72,7 @@ program_simplified = simplify_pass(program)
    - `ForStmt`：先在外层作用域化简每个 carry 的初值。只要循环头的值或类型发生变化，就先创建并登记整组 carry，再重建类型，使已分配的偏移或槽位下标能够引用后声明的标量 carry；完全不变的循环头保留原对象身份。随后使用完整映射访问循环体；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
    - `IfStmt`：进入 `Analyzer::GetConstraintContext(cond)` 处理 then 分支，进入 `Not(cond)` 处理 else 分支；每个分支内绑定的标量会在该分支结束后解绑，以免泄漏到另一分支或越过 `IfStmt`。保留分支时，在共同的基线映射下重建 `return_vars_`，使结果类型跟随外层变量的重建，同时不引入分支内部的定义。可由分析器证明的条件也会被折叠 —— 见下文「控制流折叠」。
    - `WhileStmt`：除没有循环边界外与 `ForStmt` 相同 —— 在访问条件与循环体前复用同样的两阶段 carry 整组重建，在访问循环体前后快照并恢复 `var_remap_`，随后重建 `return_vars_`，并采用同样的区域化标量解绑方式。先建立完整的循环头映射，使条件、循环体与存储元数据中的引用始终指向声明的节点，不依赖 carry 的排列顺序。
-   - `SpmdScopeStmt`：以同样的区域化标量解绑方式访问其语句体，并额外折叠 `core_num_`（如 `MAX // TILE` 这样的闭包算术，可能需要 SSA 之后再化简一次）。
+   - `SpmdScopeStmt`：先在外层 carry 映射下折叠 `core_num_`，并重写任务依赖、运行时谓词等表达式属性，再访问语句体；体内标量绑定采用同样的区域化解绑方式。这样，调度使用点会指向重建后的 For/While 循环头，同时不会把运行时谓词固定为常量。
 3. **类型重建**：`SimplifyType` 递归地处理 `TensorType`、`TileType`、`TupleType`，对嵌入的表达式（shape、stride、valid_shape、start_offset、view 字段）调用 `SimplifyExpr`。`RemapPinnedMemRefExprs` 还会在 pinned 声明式分配的槽位下标转换为字节偏移之前化简该下标。非 pinned MemRef 在内部变量未被重映射时保留指针身份；若循环 carry 等变量被重建，其 base、字节偏移和保留的槽位下标会同步重绑，不经过分析器常量折叠，并通过共享缓存确保变量与 Call 类型使用同一个新 MemRef。仅在地址元数据中使用的标量定义仍会在 DCE 中保持存活。类型无变化时保留原对象，使往返一致性检查仍然便宜。
 4. **标量 DCE + 死 yield 槽位裁剪**：mutator 完成后，`dce::EliminateDeadScalarAssignments` 在展平的函数体上运行，删除所有「全部使用都被折掉了」的标量 `AssignStmt`。该 DCE 是保守的：永远不会删除 Call 支撑的赋值，因为 IR 目前还没有纯度标注，`Call` 可能存在可观察的副作用。两次标量 DCE 之间由 `dce::EliminateDeadYieldSlots` 裁掉没有任何读者的 yield 槽位——`IfStmt` 中无人使用的 phi `return_vars_[i]`，以及 `ForStmt` / `WhileStmt` 中 `iter_args_[i]`（循环体内读）与 `return_vars_[i]`（循环后读）都未被使用的循环携带槽位——同时删除对应的 `YieldStmt` 槽位。跨两个 scope 复用同一个 Python 局部变量恰好会产生这种死携带：SSA 用前一个 scope 的值给第二个循环做初值，循环体每一轮都覆盖它，两端都没有人读。若保留下来，它会让前一个 scope 的值变成 live-out；对设备 scope 而言，这会迫使外提出的 kernel 返回一个 `Scalar`——参见 [08-outline_incore_scopes.md](09-outline_incore_scopes.md)。
 5. **循环状态修复**：如果 DCE 删除了任何语句，由 `loop_repair::MakeBody` 重新组装函数体，确保循环携带元信息（yield/return 映射）保持一致。
