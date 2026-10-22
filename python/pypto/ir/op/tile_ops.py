@@ -1338,6 +1338,25 @@ def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.ands", [lhs, rhs_expr], {}, actual_span)
 
 
+def interleave(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Interleave the last dimension of two byte tiles.
+
+    Computes ``out[..., 2*i] = lhs[..., i]`` and ``out[..., 2*i + 1] = rhs[..., i]``;
+    the result's last dimension is ``2 * lhs.shape[-1]``. Both operands must share
+    dtype (INT8 or UINT8) and physical shape. Maps to the VINTLV hardware intrinsic.
+
+    Args:
+        lhs: Left-hand side tile (TileType)
+        rhs: Right-hand side tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for the lane interleave
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.interleave", [lhs, rhs], {}, actual_span)
+
+
 def or_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise bitwise OR of two tiles.
 

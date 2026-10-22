@@ -66,6 +66,13 @@ static ExprPtr MakeRoundUpIndex(const ExprPtr& value, int64_t alignment) {
   return MakeMul(MakeCeilDivIndex(value, alignment), MakeIndexConst(alignment, value->span_), value->span_);
 }
 
+static ExprPtr MakeDoubleIndex(const ExprPtr& value) {
+  if (auto const_value = As<ConstInt>(value)) {
+    return MakeIndexConst(const_value->value_ * 2, value->span_);
+  }
+  return MakeMul(value, MakeIndexConst(2, value->span_), value->span_);
+}
+
 static bool IsTDivDataType(DataType dtype) {
   return dtype == DataType::INT16 || dtype == DataType::INT32 || dtype == DataType::FP16 ||
          dtype == DataType::FP32;
@@ -521,6 +528,38 @@ TypePtr DeduceTileOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(src0->shape_, src0->dtype_, std::nullopt, tile_view);
 }
 
+TypePtr DeduceTileOpInterleaveType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+
+  auto lhs = As<TileType>(args[0]->GetType());
+  auto rhs = As<TileType>(args[1]->GetType());
+  CHECK(lhs) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+             << args[0]->GetType()->TypeName();
+  CHECK(rhs) << "The operator " << op_name << " requires second argument to be a TileType, but got "
+             << args[1]->GetType()->TypeName();
+  CHECK(lhs->dtype_ == DataType::INT8 || lhs->dtype_ == DataType::UINT8)
+      << "The operator " << op_name << " requires dtype in {INT8, UINT8} (byte interleave), but got "
+      << lhs->dtype_.ToString();
+  CHECK(!lhs->shape_.empty()) << "The operator " << op_name << " requires a non-empty tile shape";
+  CheckBitwiseTileMatches(lhs, rhs, "rhs", op_name);
+
+  // out[..., 2*i] = lhs[..., i], out[..., 2*i + 1] = rhs[..., i]: the last
+  // dimension doubles while every leading dimension is preserved.
+  const size_t col_axis = lhs->shape_.size() - 1;
+  std::vector<ExprPtr> out_shape = lhs->shape_;
+  out_shape[col_axis] = MakeDoubleIndex(lhs->shape_[col_axis]);
+
+  TileView tile_view;
+  auto valid_shape = GetValidShape(lhs);
+  valid_shape[col_axis] = MakeDoubleIndex(valid_shape[col_axis]);
+  tile_view.valid_shape = valid_shape;
+  InheritTileViewLayout(tile_view, lhs);
+  return std::make_shared<TileType>(out_shape, lhs->dtype_, std::nullopt, tile_view);
+}
+
 TypePtr DeduceTileOpBitwiseScalarType(const std::vector<ExprPtr>& args,
                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
                                       const std::string& op_name, bool has_tmp = false) {
@@ -936,6 +975,23 @@ REGISTER_OP("tile.ands")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpBitwiseScalarType(args, kwargs, "tile.ands");
+    });
+
+REGISTER_OP("tile.interleave")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description(
+        "Interleave the last dimension of two byte tiles: out[..., 2*i] = lhs[..., i], "
+        "out[..., 2*i + 1] = rhs[..., i]. Lowers to the VINTLV hardware intrinsic.")
+    .add_argument("lhs", "Left-hand side tile (TileType)")
+    .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpInterleaveType(args, kwargs, "tile.interleave");
     });
 
 REGISTER_OP("tile.or")

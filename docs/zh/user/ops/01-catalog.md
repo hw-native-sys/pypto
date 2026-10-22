@@ -74,6 +74,7 @@
 | [`ands`][pypto.language.ands] [`ors`][pypto.language.ors] [`xors`][pypto.language.xors] | `pl.` | 与标量的位逻辑 |
 | [`shl`][pypto.language.shl] [`shr`][pypto.language.shr] | `pl.` | 左移 / 右移 |
 | [`shls`][pypto.language.shls] [`shrs`][pypto.language.shrs] | `pl.` | 按标量位数移位 |
+| [`interleave`][pypto.language.interleave] | `pl.` | 两个字节 Tile 沿末维交错（INT8/UINT8）：`out[..., 2i] = lhs[i]`、`out[..., 2i+1] = rhs[i]`。对应 VINTLV；端到端使用依赖 PTOAS tile 层 `tintlv` 配套 |
 
 ## 规约
 

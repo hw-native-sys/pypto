@@ -87,6 +87,7 @@ static const std::unordered_set<std::string_view>& RowMajorOps() {
       "tile.add",
       "tile.and",
       "tile.fmod",
+      "tile.interleave",
       "tile.maximum",
       "tile.minimum",
       "tile.mul",
@@ -863,6 +864,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.xor",             "pto.txor",             3},  // src0, src1, tmp
     {"tile.shl",             "pto.tshl",             2},
     {"tile.shr",             "pto.tshr",             2},
+    // Byte-wise lane interleave of two tiles (out[..., 2i] = lhs[i], out[..., 2i+1] = rhs[i]).
+    // Requires PTOAS support for the tile-level tintlv op (VINTLV lowering).
+    {"tile.interleave",      "pto.tintlv",           2},
     // Tile x Tile comparison/selection operations
     {"tile.maximum",         "pto.tmax",             2},
     {"tile.minimum",         "pto.tmin",             2},

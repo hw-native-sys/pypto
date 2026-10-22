@@ -197,6 +197,7 @@ print(pto_code)
 | `tile.and_(lhs, rhs)` / `tile.ands(lhs, scalar)` | `pto.tand` / `pto.tands`; scalar is same-width signless `iN` |
 | `tile.or_(lhs, rhs)` / `tile.ors(lhs, scalar)` | `pto.tor` / `pto.tors`; scalar is same-width signless `iN` |
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`; scalar is same-width signless `iN` |
+| `tile.interleave(lhs, rhs)` | `pto.tintlv ins(%lhs, %rhs) outs(%dst)` (byte-lane interleave, INT8/UINT8, last dim doubles; requires PTOAS tile-level `tintlv` support) |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
 **`tile.slice` / `tile.assemble` lowering details.** `tile.slice` and the

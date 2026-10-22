@@ -5360,6 +5360,63 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.shr" in ir_str
 
+    def test_tile_interleave(self):
+        """Test tile.interleave operator - byte interleave of two tiles along the last dim."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.UINT8],
+                b: pl.Tensor[[128, 128], pl.UINT8],
+                output: pl.Tensor[[128, 128], pl.UINT8],
+            ) -> pl.Tensor[[128, 128], pl.UINT8]:
+                tile_a: pl.Tile[[16, 16], pl.UINT8] = pl.load(a, [0, 0], [16, 16])
+                tile_b: pl.Tile[[16, 16], pl.UINT8] = pl.load(b, [0, 0], [16, 16])
+                tile_c: pl.Tile[[16, 32], pl.UINT8] = pl.interleave(tile_a, tile_b)
+                result: pl.Tensor[[128, 128], pl.UINT8] = pl.store(tile_c, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.interleave" in ir_str
+
+    def test_tile_interleave_deduces_doubled_last_dim(self):
+        """tile.interleave keeps dtype/leading dims and doubles the last dim (incl. valid_shape)."""
+        span = ir.Span.unknown()
+        view = ir.TileView(
+            valid_shape=[8, 12],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+        )
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.INT8, tile_view=view), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.INT8, tile_view=view), span)
+
+        call = tile.interleave(lhs, rhs)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT8
+        assert _shape_ints(call.type.shape) == [8, 32]
+        assert _shape_ints(call.type.get_effective_tile_view().valid_shape) == [8, 24]
+
+    def test_tile_interleave_rejects_non_byte_dtype(self):
+        """tile.interleave is a byte-lane op (VINTLV b8); wider dtypes must be rejected."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.UINT16), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.UINT16), span)
+
+        with pytest.raises(ValueError, match=r"byte interleave"):
+            tile.interleave(lhs, rhs)
+
+    def test_tile_interleave_rejects_shape_mismatch(self):
+        """VINTLV interleaves two equally shaped register streams; mismatch must be rejected."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.UINT8), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 32], DataType.UINT8), span)
+
+        with pytest.raises(ValueError, match=r"same physical shape"):
+            tile.interleave(lhs, rhs)
+
     def test_tile_prelu(self):
         """Test tile.prelu operator - element-wise parametric ReLU with slope and tmp buffer."""
 
