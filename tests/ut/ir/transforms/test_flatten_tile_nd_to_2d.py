@@ -1249,6 +1249,8 @@ class TestFlattenTileNdTo2DCallRemapping:
             assert cast(ir.TileType, actual_type).memory_space == ir.MemorySpace.Vec
         remapped_call = cast(ir.Call, rebuilt.value)
         assert cast(ir.ShapedType, remapped_call.type).memref is None
+        if not tensor_result:
+            assert cast(ir.TileType, remapped_call.type).memory_space == ir.MemorySpace.Vec
         if change != "operands":
             assert remapped_call.args[0] is operand
         if change == "attrs":
@@ -1261,6 +1263,47 @@ class TestFlattenTileNdTo2DCallRemapping:
             )
             assert actual_view is not None
             assert actual_view.valid_shape[1] is definitions["pitch"].var
+
+    def test_re_deduced_view_preserves_call_memory_space(self):
+        """An unplaced input cannot supply the output's explicitly annotated space."""
+        span = ir.Span.unknown()
+        pinned = ir.MemRef("pinned_view", span)
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            local = function.param("local", ir.TileType([1, 4], DataType.FP32))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
+            pitch = ib.let("pitch", ir.cast(tile_ops.read(loaded, [0]), DataType.INDEX, span))
+            call = tile_ops.reshape(local, [1, pitch])
+            rhs_type = ir.TileType([1, pitch], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+            typed_call = ir.Call(call.op, list(call.args), call.kwargs, rhs_type, span)
+            result = ir.Var(
+                "result",
+                ir.TileType([1, pitch], DataType.FP32, pinned, memory_space=ir.MemorySpace.Vec),
+                span,
+            )
+            ib.assign(result, typed_call)
+            ib.let("first", tile_ops.read(result, [0, 0]))
+            ib.let("second", tile_ops.read(result, [0, 0]))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "carried_memory_space", span)
+
+        with passes.PassContext(
+            [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
+            passes.VerificationLevel.ROUNDTRIP,
+        ):
+            After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "result")
+        result_stmt = definitions["result"]
+        rhs = cast(ir.Call, result_stmt.value)
+        assert cast(ir.TileType, rhs.type).memory_space == ir.MemorySpace.Vec
+        assert cast(ir.TileType, result_stmt.var.type).memory_space == ir.MemorySpace.Vec
+        assert cast(ir.TileType, result_stmt.var.type).memref is pinned
+        assert cast(ir.TileType, rhs.type).memref is None
+        assert cast(ir.TileType, rhs.type).shape[1] is definitions["pitch"].var
 
     def test_non_call_assignment_preserves_lhs_only_allocation(self):
         """The expression-assignment path must retain the same LHS allocation contract."""

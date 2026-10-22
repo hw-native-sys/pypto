@@ -69,6 +69,8 @@ shape、stride 和 `valid_shape` 也必须引用改写后的标量定义，不�
 重新推导结果类型，以传播降维后的 Tile 类型，同时保留替换后的属性。
 每次重建定义时，都会从原左侧 Var 补齐缺失的分配元数据（MemRef 和 Tile memory space），
 包括只有结果类型或属性变化、RHS 没有 MemRef 的情况。
+Tile memory space 属于值类型，也会同步恢复到重建的 Call，保证左右两侧类型一致；
+MemRef 则可以仅保留在左侧定义。
 完全没有变化的 Call 保留原定义。
 
 N-D transpose 的 scratch 将 A 对齐到 32 个元素（8-bit 类型）或 16 个元素（16/32-bit 类型）。列方向至少保留一个 32 字节块，16-bit vtranspose 则保留两条覆盖完整高度的 16 列带。将所得 workspace 容量向上取整为每行 B 个元素的整行数，得到 `scratch_page_rows`；池的分配大小和每页偏移均使用该补齐值。因此，FP32 `[24, 8]` 页拥有 1024 字节 workspace，而 scratch 视图仍保持 `[24, 8]` 形状。 页维度必须为正，元素存储大小必须为 1、2 或 4 字节。workspace 对齐、池维度及池的总字节数必须可用 `int64_t` 表示；不支持的类型和超大 workspace 会在展开 batch 前被拒绝。

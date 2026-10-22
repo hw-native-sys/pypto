@@ -1240,6 +1240,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // Allocation annotations can live only on the defining Var. Carry them
         // for every rebuild, including changes confined to the type or attrs.
         auto new_type = WithCarriedMemRef(new_call->GetType(), assign->var_->GetType());
+        auto rhs_tile = As<TileType>(new_call->GetType());
+        auto lhs_tile = As<TileType>(new_type);
+        if (rhs_tile && lhs_tile && rhs_tile->memory_space_ != lhs_tile->memory_space_) {
+          // Memory space is part of the value type and must match on both sides.
+          // MemRef is allocation metadata and may remain only on the defining Var.
+          auto call_type = CloneTypeWithMemRef(new_type, GetTypeMemRef(new_call->GetType()));
+          new_call = std::make_shared<Call>(new_call->op_, new_call->args_, new_call->kwargs_,
+                                            new_call->attrs_, call_type, new_call->span_);
+        }
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
         ctx.Insert(assign->var_, new_var);
