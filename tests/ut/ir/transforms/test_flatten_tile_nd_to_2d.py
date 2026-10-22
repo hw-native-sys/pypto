@@ -1264,6 +1264,205 @@ class TestFlattenTileNdTo2DCallRemapping:
             assert actual_view is not None
             assert actual_view.valid_shape[1] is definitions["pitch"].var
 
+    @staticmethod
+    def _make_slot_test_call(
+        ib: IRBuilder, producer: str, source: ir.Var, nd_source: ir.Var, local: ir.Var
+    ) -> ir.Call:
+        if producer == "load":
+            call = tile_ops.load(source, [0, 0], [1, 4], target_memory=ir.MemorySpace.Vec)
+        elif producer == "nd_load":
+            call = tile_ops.load(nd_source, [0, 0, 0], [2, 1, 4], target_memory=ir.MemorySpace.Vec)
+        elif producer in ("create", "nd_create"):
+            shape = [2, 1, 4] if producer == "nd_create" else [1, 4]
+            call = tile_ops.create(shape, DataType.FP32, target_memory=ir.MemorySpace.Vec)
+        elif producer in ("reshape", "nd_reshape"):
+            call = tile_ops.reshape(local, [1, 1, 4] if producer == "nd_reshape" else [1, 4])
+        elif producer == "nd_assemble":
+            target = ib.let(
+                "target",
+                tile_ops.load(nd_source, [0, 0, 0], [2, 1, 4], target_memory=ir.MemorySpace.Vec),
+            )
+            part = ib.let(
+                "part",
+                tile_ops.load(nd_source, [0, 0, 0], [1, 1, 4], target_memory=ir.MemorySpace.Vec),
+            )
+            call = tile_ops.assemble(target, part, [0, 0, 0])
+        elif producer == "transpose":
+            call = tile_ops.transpose(local, 0, 1)
+        else:
+            operand = (
+                ib.let("operand", tile_ops.load(source, [0, 0], [1, 4])) if producer == "operand" else local
+            )
+            call = tile_ops.exp(operand)
+        return call
+
+    @pytest.mark.parametrize("slot_kind", ["constant", "variable", "expression"])
+    @pytest.mark.parametrize("lhs_only", [False, True])
+    @pytest.mark.parametrize(
+        "producer",
+        [
+            "attrs",
+            "lhs_only",
+            "type",
+            "operand",
+            "alias",
+            "load",
+            "nd_load",
+            "create",
+            "nd_create",
+            "reshape",
+            "nd_reshape",
+            "nd_assemble",
+            "transpose",
+        ],
+    )
+    def test_pinned_slot_follows_definition_remapping(self, producer: str, lhs_only: bool, slot_kind: str):
+        """A runtime slot is a live reference even when the entire RHS is unchanged."""
+        span = ir.Span.unknown()
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", ir.TensorType([1, 4], DataType.FP32))
+            nd_source = function.param("nd_source", ir.TensorType([2, 1, 4], DataType.FP32))
+            local = function.param(
+                "local", ir.TileType([1, 4], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+            )
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
+            value = ib.let("value", tile_ops.read(loaded, [0]))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+            slot = ib.let("slot", ir.mod(pitch, ir.ConstInt(2, DataType.INDEX, span), span))
+            index: ir.Expr
+            if slot_kind == "variable":
+                index = slot
+            elif slot_kind == "expression":
+                index = ir.mod(pitch, ir.ConstInt(2, DataType.INDEX, span), span)
+            else:
+                index = ir.ConstInt(0, DataType.INDEX, span)
+            pool = ir.MemRef("pinned_slots", span, slots=2)
+            pinned = ir.MemRef(pool.base_, 0, 0, span, is_pinned=True, slots=2, slot=index)
+            rhs: ir.Expr
+            if producer == "alias":
+                if not lhs_only:
+                    bound_type = ir.TileType([1, 4], DataType.FP32, pinned, memory_space=ir.MemorySpace.Vec)
+                    base_call = tile_ops.exp(local)
+                    bound = ir.Var("bound", bound_type, span)
+                    ib.assign(
+                        bound, ir.Call(base_call.op, list(base_call.args), base_call.kwargs, bound_type, span)
+                    )
+                    rhs = bound
+                else:
+                    rhs = local
+            else:
+                call = self._make_slot_test_call(ib, producer, source, nd_source, local)
+                base_type = cast(ir.TileType, call.type)
+                view = ir.TileView(valid_shape=[1, pitch]) if producer == "type" else base_type.tile_view
+                rhs_type = ir.TileType(
+                    list(base_type.shape),
+                    DataType.FP32,
+                    None if lhs_only else pinned,
+                    view,
+                    ir.MemorySpace.Vec,
+                )
+                attrs = {"dependency": pitch} if producer == "attrs" else {}
+                rhs = ir.Call(call.op, list(call.args), call.kwargs, attrs, rhs_type, span)
+            rhs_tile = cast(ir.TileType, rhs.type)
+            lhs_type = ir.TileType(
+                list(rhs_tile.shape), DataType.FP32, pinned, rhs_tile.tile_view, ir.MemorySpace.Vec
+            )
+            result = ir.Var("result", lhs_type, span)
+            ib.assign(result, rhs)
+            ib.let("first", tile_ops.exp(result))
+            ib.let("second", tile_ops.exp(result))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "pinned_slot_remapping", span)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.SSAForm,
+            passes.IRProperty.IncoreTileOps,
+            passes.IRProperty.NormalizedStmtStructure,
+            passes.IRProperty.AssignTypeSymmetry,
+        ):
+            properties.insert(prop)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, Before)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "result")
+        actual = cast(ir.TileType, definitions["result"].var.type).memref
+        assert actual is not None
+        assert actual.base_ is pinned.base_
+        assert actual.byte_offset_ is pinned.byte_offset_
+        assert actual.size_ == pinned.size_
+        assert actual.is_pinned_ and actual.slot_count_ == 2
+        if slot_kind == "variable":
+            assert actual.slot_index_ is definitions["slot"].var
+            assert actual.slot_index_ is not slot
+        elif slot_kind == "expression":
+            assert isinstance(actual.slot_index_, ir.FloorMod)
+            assert actual.slot_index_.left is definitions["pitch"].var
+            assert cast(ir.ConstInt, actual.slot_index_.right).value == 2
+        else:
+            assert actual is pinned
+        assert "__FREE_VAR" not in str(After)
+
+    @pytest.mark.parametrize("dynamic_slot", [False, True])
+    @pytest.mark.parametrize("distributed", [False, True])
+    def test_gm_lhs_slot_only_change_remaps_definition(self, distributed: bool, dynamic_slot: bool):
+        """Allocation remapping preserves GM type kind even with an unchanged RHS."""
+        span = ir.Span.unknown()
+        tensor_type = ir.DistributedTensorType if distributed else ir.TensorType
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            source = function.param("source", tensor_type([1, 4], DataType.FP32))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(source.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
+            value = ib.let("value", tile_ops.read(loaded, [0]))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+            slot = ib.let("slot", ir.mod(pitch, ir.ConstInt(2, DataType.INDEX, span), span))
+            index = slot if dynamic_slot else ir.ConstInt(0, DataType.INDEX, span)
+            pool = ir.MemRef("gm_slots", span, slots=2)
+            pinned = ir.MemRef(pool.base_, 0, 0, span, is_pinned=True, slots=2, slot=index)
+            call = tensor_ops.write(source, [0, 0], ir.ConstFloat(1.0, DataType.FP32, span))
+            result = ir.Var("result", tensor_type([1, 4], DataType.FP32, pinned), span)
+            ib.assign(result, call)
+            ib.let("first", tile_ops.load(result, [0, 0], [1, 4]))
+            ib.let("second", tile_ops.load(result, [0, 0], [1, 4]))
+            ib.return_stmt(source)
+        Before = ir.Program([function.get_result()], "gm_slot_remapping", span)
+
+        # Tensor slot annotations are not accepted by the text parser yet.
+        # Keep native property verification and test the rewrite independently.
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.SSAForm,
+            passes.IRProperty.IncoreTileOps,
+            passes.IRProperty.NormalizedStmtStructure,
+            passes.IRProperty.AssignTypeSymmetry,
+        ):
+            properties.insert(prop)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, Before)
+        with passes.PassContext(
+            [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
+            passes.VerificationLevel.BASIC,
+        ):
+            After = passes.flatten_tile_nd_to_2d()(Before)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, After)
+        definitions = self._definitions(After)
+        self._assert_consumers_use_definition(definitions, "result")
+        actual_type = cast(ir.TensorType, definitions["result"].var.type)
+        assert isinstance(actual_type, ir.DistributedTensorType) is distributed
+        assert definitions["result"].value is call
+        assert actual_type.memref is not None
+        assert actual_type.memref.base_ is pinned.base_
+        if dynamic_slot:
+            assert actual_type.memref.slot_index_ is definitions["slot"].var
+        else:
+            assert definitions["result"].var is result
+            assert actual_type.memref is pinned
+
     def test_re_deduced_view_preserves_call_memory_space(self):
         """An unplaced input cannot supply the output's explicitly annotated space."""
         span = ir.Span.unknown()

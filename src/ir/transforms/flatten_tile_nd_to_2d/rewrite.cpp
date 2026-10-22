@@ -49,6 +49,19 @@ using transform_utils::Substitute;
 namespace flatten_tile_nd_to_2d {
 namespace rewrite_internal {
 
+// Allocation annotations are live IR: in particular, a pinned runtime slot may
+// name a scalar rebuilt earlier in this block. Reuse the type remapper (including
+// RemapPinnedMemRefExprs) before binding the result, never at its consumers.
+TypePtr RemapTypeReferences(const TypePtr& type, const FlattenContext& ctx) {
+  return CloneTypeWithMemRefAndRemapExprs(type, GetTypeMemRef(type),
+                                          [&](const ExprPtr& expr) { return Substitute(expr, ctx.var_map); });
+}
+
+TypePtr WithRemappedAllocation(const TypePtr& value_type, const TypePtr& original_type,
+                               const FlattenContext& ctx) {
+  return RemapTypeReferences(WithCarriedMemRef(value_type, original_type), ctx);
+}
+
 bool IsNaturalNzMatLoad(const TileTypePtr& result_tile, bool assume_mat = false) {
   if (!result_tile) return false;
   if (result_tile->memory_space_ != MemorySpace::Mat && !assume_mat) return false;
@@ -128,7 +141,7 @@ VarPtr EmitFlattenedTileAlloc(const CallPtr& call, const AssignStmtPtr& assign,
     create_kwargs.emplace_back("target_memory", MemorySpace::Acc);
   }
   auto deduced = op_registry.Create(op_name, new_args, create_kwargs, span);
-  auto created_type = WithCarriedMemRef(deduced->GetType(), assign->var_->GetType());
+  auto created_type = WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx);
   auto new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
                                          created_type, deduced->span_);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, created_type, assign->var_->span_);
@@ -180,9 +193,9 @@ VarPtr TryFoldNdAssembleOffset(const CallPtr& call, const AssignStmtPtr& assign,
   };
 
   auto deduced = op_registry.Create("tile.assemble", new_args, call->kwargs_, span);
-  auto new_call =
-      std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
-                             WithCarriedMemRef(deduced->GetType(), assign->var_->GetType()), deduced->span_);
+  auto new_call = std::make_shared<Call>(
+      deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+      WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx), deduced->span_);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
   return flat_var;
@@ -227,9 +240,9 @@ VarPtr TryFlattenRankRaisingView(const CallPtr& call, const AssignStmtPtr& assig
   std::vector<ExprPtr> new_args = {Substitute(call->args_[0], ctx.var_map),
                                    MakeShapeTupleFromInts({merged, last}, span)};
   auto deduced = op_registry.Create(op_name, new_args, call->kwargs_, span);
-  auto new_call =
-      std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
-                             WithCarriedMemRef(deduced->GetType(), assign->var_->GetType()), deduced->span_);
+  auto new_call = std::make_shared<Call>(
+      deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+      WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx), deduced->span_);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
   return flat_var;
@@ -836,8 +849,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // Non-call assignment or function call (GlobalVar): substitute and pass through
     if (!call || global_var) {
       auto new_value = Substitute(assign->value_, ctx.var_map);
-      if (new_value != assign->value_) {
-        auto new_type = WithCarriedMemRef(new_value->GetType(), assign->var_->GetType());
+      auto new_lhs_type = RemapTypeReferences(assign->var_->GetType(), ctx);
+      if (new_value != assign->value_ || new_lhs_type != assign->var_->GetType()) {
+        auto new_type = WithRemappedAllocation(new_value->GetType(), new_lhs_type, ctx);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
         ctx.Insert(assign->var_, new_var);
@@ -922,10 +936,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // sits on the assigned Var; `result_tile` is the RHS Call's deduced type,
         // which never carries a MemRef — see WithCarriedMemRef.
         auto bound_memref = GetTypeMemRef(assign->var_->GetType());
-        auto flat_tile_type =
+        auto flat_tile_type = RemapTypeReferences(
             std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_,
                                        bound_memref.has_value() ? bound_memref : result_tile->memref_,
-                                       flat_tile_view, flat_memory_space);
+                                       flat_tile_view, flat_memory_space),
+            ctx);
 
         // A natural Mat load lowers to ND2NZ, which requires a 2D GlobalTensor.
         // Materialize that source-window collapse in IR with tensor.view; plain
@@ -999,11 +1014,10 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
       // ≤2D tile.load: honor any pending var_map substitutions
       auto deduced_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
-      auto loaded_type = WithCarriedMemRef(deduced_call->GetType(), assign->var_->GetType());
+      auto loaded_type = WithRemappedAllocation(deduced_call->GetType(), assign->var_->GetType(), ctx);
       auto new_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
                                              call->attrs_, loaded_type, deduced_call->span_);
-      auto new_var =
-          std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+      auto new_var = std::make_shared<Var>(assign->var_->name_hint_, loaded_type, assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
       ctx.Insert(assign->var_, new_var);
       continue;
@@ -1080,8 +1094,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       // Construct call directly: store result type = output tensor type (args[2])
       auto out_type = new_args[2]->GetType();
       auto new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, out_type, call->span_);
-      auto new_var =
-          std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+      auto new_type = WithRemappedAllocation(new_call->GetType(), assign->var_->GetType(), ctx);
+      auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
       ctx.Insert(assign->var_, new_var);
       continue;
@@ -1095,9 +1109,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
                                                         span, &result));
         continue;
       }
-      // ≤2D: pass through
-      result.push_back(stmt);
-      continue;
+      // Already-2D allocations still need the generic rewrite below: their
+      // fill value or LHS-only allocation slot can reference a rewritten scalar.
     }
 
     // ---- tile.batch_matmul: delegate to LowerBatchMatmul ----
@@ -1138,8 +1151,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto rewritten = op_registry.Create(op_name, args, call->kwargs_, span);
         auto new_call = std::make_shared<Call>(rewritten->op_, rewritten->args_, rewritten->kwargs_,
                                                call->attrs_, rewritten->GetType(), span);
-        auto new_var =
-            std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+        auto new_type = WithRemappedAllocation(new_call->GetType(), assign->var_->GetType(), ctx);
+        auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
         ctx.Insert(assign->var_, new_var);
         continue;
@@ -1180,7 +1193,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
         auto t_call =
             op_registry.Create("tile.transpose", {in, call->args_[1], call->args_[2], scratch_var}, span);
-        auto t_var = std::make_shared<Var>(assign->var_->name_hint_, t_call->GetType(), assign->var_->span_);
+        auto output_type = WithRemappedAllocation(t_call->GetType(), assign->var_->GetType(), ctx);
+        auto t_var = std::make_shared<Var>(assign->var_->name_hint_, output_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(t_var, t_call, assign->span_));
         ctx.Insert(assign->var_, t_var);
         continue;
@@ -1224,7 +1238,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_call = As<Call>(Substitute(call, ctx.var_map));
       INTERNAL_CHECK_SPAN(new_call, assign->span_)
           << "FlattenTileNdTo2D: call substitution must remain a Call";
-      if (new_call == call) {
+      auto new_lhs_type = RemapTypeReferences(assign->var_->GetType(), ctx);
+      if (new_call == call && new_lhs_type == assign->var_->GetType()) {
         result.push_back(stmt);
       } else {
         // Changed tile operands can have a lower rank. Re-deduce their result
@@ -1239,7 +1254,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
         // Allocation annotations can live only on the defining Var. Carry them
         // for every rebuild, including changes confined to the type or attrs.
-        auto new_type = WithCarriedMemRef(new_call->GetType(), assign->var_->GetType());
+        auto new_type = WithRemappedAllocation(new_call->GetType(), new_lhs_type, ctx);
         auto rhs_tile = As<TileType>(new_call->GetType());
         auto lhs_tile = As<TileType>(new_type);
         if (rhs_tile && lhs_tile && rhs_tile->memory_space_ != lhs_tile->memory_space_) {
