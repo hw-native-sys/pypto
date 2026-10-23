@@ -56,8 +56,13 @@ jobs:
 
   image:
     needs: config
-    # PRs build and validate; only main can reach the publishing step.
-    if: github.repository == 'hw-native-sys/pypto'
+    # Only explicitly trusted PR source repositories may execute on this host.
+    # Review additions to this allowlist as changes to runner trust.
+    if: >-
+      github.repository == 'hw-native-sys/pypto' &&
+      (github.event_name != 'pull_request' ||
+       contains(fromJSON('["hw-native-sys/pypto", "luohuan19/pypto"]'),
+                github.event.pull_request.head.repo.full_name))
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
@@ -92,6 +97,17 @@ jobs:
           mkdir -m 700 -p "$docker_config" "$image_state"
           echo "IMAGE_STATE=$image_state" >> "$GITHUB_ENV"
           echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+      - name: Install Buildx in the isolated Docker configuration
+        uses: docker/setup-buildx-action@v3
+        env:
+          HTTP_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+          HTTPS_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
+          # Keep the host builder/cache; our cleanup removes DOCKER_CONFIG.
+          cleanup: false
       - name: Build native image from frozen revisions
         run: |
           pypto-toolchain verify --require python=3.10
@@ -141,6 +157,9 @@ jobs:
       - name: Upload image maintenance evidence
         if: always() && steps.prepare.outcome == 'success'
         uses: actions/upload-artifact@v4
+        env:
+          HTTP_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+          HTTPS_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
         with:
           name: image-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.IMAGE_STATE }}

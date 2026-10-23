@@ -63,6 +63,8 @@ def state(ci: ModuleType, tmp_path: Path) -> dict:
         ("build_jobs", 0),
         ("build_jobs", True),
         ("task_max_seconds", 0),
+        ("task_timeout_seconds", 1200),
+        ("task_timeout_seconds", 1800),
         ("platform", "linux/amd64"),
         ("validation_platform", "a5"),
         ("cann_digest", "sha256:missing"),

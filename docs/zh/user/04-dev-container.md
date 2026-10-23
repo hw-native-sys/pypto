@@ -480,16 +480,20 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 [`docker/images.json`](../../../docker/images.json) 是镜像维护入口。
 `Maintain Development Images` workflow 每天在 UTC 19:37（北京时间 03:37）运行；
 `main` 上的 `docker/`、工具链版本、构建约束或该 workflow 变化时也会触发，
-还可通过 **Run workflow** 手动运行。修改上述路径的 PR 先在 GitHub 托管 runner 上运行配置检查和
-离线脚本测试，再在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡 all-reduce 验证。
+还可通过 **Run workflow** 手动运行。修改上述路径的 PR 在 GitHub 托管 runner 上运行配置检查和
+离线脚本测试。仅当 PR 来源仓库为 `hw-native-sys/pypto` 或明确认可的可信 fork `luohuan19/pypto` 时，
+才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡 all-reduce 验证；其他 fork 跳过该 job。
+允许名单位于 workflow 的 `image.if` 条件中；新增仓库意味着允许其代码在持久化宿主机上执行，
+必须由维护者审核其可信性。
 PR 不发布镜像，也不获取 SWR 凭据。
 硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
 
 首期仅启用 `arm-a2a3`，使用 CANN 9.2.0，以及 `self-hosted`、`linux`、`ARM64`、`npu-xp` 标签。
 预检还要求 runner 名称为 `227-npu-a2a3-XP-1`。如果标签池扩大，应给这台服务器添加专用标签，
-并更新 `runners`，避免调度到其他服务器。runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker/buildx、
+并更新 `runners`，避免调度到其他服务器。runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
 Ascend Docker Runtime，以及支持 `--find`/`--kill` 的 `task-submit`；不使用宿主机的 PyPTO 安装。
 宿主机维护命令会显式进入该工具链环境，不依赖可能较旧的系统 `python3`。
+workflow 在独立 Docker 配置中安装 Buildx v0.35.0，使用宿主机的默认 Docker builder，保留共享构建缓存。
 
 首次发布前，在仓库设置中配置：
 
@@ -502,6 +506,7 @@ Ascend Docker Runtime，以及支持 `--find`/`--kill` 的 `task-submit`；不�
 由 `always()` 步骤删除。不要提交临时登录 token。
 workflow 设置 `PYPTO_DOCKER_PROXY=http://127.0.0.1:7892`，使用 CI runner 上的本地代理，
 无需配置 GitHub Actions 代理 Variable。代理传给 Git 和 Docker build arguments，不写入最终镜像环境。
+Buildx 安装和 GitHub artifact 上传也使用该代理。
 手动调用脚本时，将 `PYPTO_DOCKER_PROXY` 环境变量设置为当前机器可访问的代理。
 首期配置设置了 `proxy_required: true`，缺少该环境变量时预检直接失败。
 `--network=host` 作用于构建步骤；拉取基础镜像仍依赖 Docker daemon 的网络和代理。
@@ -534,7 +539,8 @@ CANN 9.2.0 / 驱动 26.0.rc1 是当前部署的验证配置，不代表一般性
 另一次双卡借卡运行 pypto-lib 的 all-reduce 示例。物理卡来自 `TASK_DEVICE`，模型参数使用容器内编号 `0` 或 `0,1`。
 宿主机驱动元数据以只读方式挂载。两个模型都必须退出码为零且输出 `[RUN] PASS`；
 缺少 PASS、超时或测试失败都禁止发布。`task_timeout_seconds` 限制排队加执行的总等待时间，
-`task_max_seconds` 单独限制设备执行时间。清理步骤约束孤儿任务，
+`task_max_seconds` 单独限制设备执行时间。总超时必须大于执行上限；首期每个用例允许总计 3600 秒，
+其中设备执行最多 1800 秒。清理步骤约束孤儿任务，
 只删除本次运行的容器和任务，不清理共享构建缓存。
 
 验证通过后，先将测试过的准确 image ID 推送到临时标签
