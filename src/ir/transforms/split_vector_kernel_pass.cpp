@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
