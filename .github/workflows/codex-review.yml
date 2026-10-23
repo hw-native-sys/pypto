@@ -118,6 +118,9 @@ jobs:
       number: ${{ steps.context.outputs.number }}
       head: ${{ steps.context.outputs.head }}
       base: ${{ steps.context.outputs.base }}
+      # Successful jobs retain their outputs on partial reruns. Consumers must
+      # use the producer's artifact name, not their own github.run_attempt.
+      context_artifact: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout trusted context collector
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -168,11 +171,14 @@ jobs:
       head: ${{ needs.prepare.outputs.head }}
       base: ${{ needs.prepare.outputs.base }}
       completed: ${{ steps.codex.outputs.completed }}
+      # Keep the reviewed snapshot paired with this result even if only publish reruns.
+      context_artifact: ${{ needs.prepare.outputs.context_artifact }}
+      review_artifact: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Download discussion snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.prepare.outputs.context_artifact }}
           path: ${{ runner.temp }}/codex-context
       - name: Create a fresh review checkout directory
         id: workspace
@@ -650,13 +656,13 @@ jobs:
       - name: Download review result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.review.outputs.review_artifact }}
           path: ${{ runner.temp }}/codex-review-artifact
 
       - name: Download reviewed discussion snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.review.outputs.context_artifact }}
           path: ${{ runner.temp }}/codex-context
       - name: Publish review and conditionally approve
         env:

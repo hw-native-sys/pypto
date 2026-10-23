@@ -91,12 +91,20 @@ The command is handled by Actions; it does not require a GitHub account named
 The comment run first looks for a verifiable `pull_request_target` Codex Review
 run for this PR's current head and base branch. It reuses a queued/running run,
 or reruns **all jobs** of a completed run (including successful runs when a new
-assessment is requested). This updates the existing PR Actions checks and
-rebuilds both context and result artifacts under the same attempt number.
+assessment is requested). This requests fresh discussion collection and review
+while updating the existing PR Actions checks.
 The comment run itself remains a separate, short routing run; its Actions
 summary links to the selected PR run. Requests for the same PR are serialized,
 with up to 100 pending preparation jobs retained; further arrivals are canceled
 when that queue is full.
+
+Artifact names are passed through job outputs from the job that uploaded them.
+If `prepare` is reused from attempt 1 and `review` runs in attempt 2, review
+downloads the attempt-1 discussion snapshot and uploads an attempt-2 result.
+`publish` receives both names from `review`, so rerunning only publication also
+uses the result's matching snapshot. Partial reruns reuse that discussion;
+request a full rerun to collect new discussion. If a required artifact has
+expired, rerun its producing job and dependents, or start a fresh PR run.
 
 Configure the repository secret `CODEX_REVIEW_RERUN_TOKEN` with a dedicated
 fine-grained PAT restricted to this repository with **Actions: write**. It is
