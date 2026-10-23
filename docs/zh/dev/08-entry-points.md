@@ -26,7 +26,7 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 
 | 你手上有 | 你想要 | 用 |
 | -------- | ------ | -- |
-| 一个 `@pl.jit` 内核和 torch 张量 | 结果 | `kernel(*args, config=...)` |
+| 一个 `@pl.jit` 内核和 NPU 张量 | Eager 入队 | `pypto.torch.init()` 后调用 `kernel(*args, config=...)` |
 | 一个 `@pl.jit` 内核 | 产物，用于反复派发 | `kernel.compile(*args, config=...)` |
 | 一个 `@pl.jit` 内核 | IR，不做 codegen | `kernel.lower(*args)` |
 | 一个 `@pl.program` 类 | 产物 | `ir.compile(program, ...)` |
@@ -36,10 +36,18 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 | 磁盘上的一个构建目录 | 派发一次，不重新编译 | `CompiledProgram.from_dir(work_dir)(*args, config=...)` |
 | 一个 `CompiledProgram` | 计时派发 | `benchmark(compiled, args, ...)` |
 
-## 内部 torch 适配
+## Torch eager 执行
 
-[Kernel mode 集成基础](runtime/kernel-mode.md) 校验 NPU metadata 并构造每次调用
-的 frame，不改变上面的公开入口，也不提供 kernel launch 接口。
+直接 `kernel(*args, config=CompileOptions(...))` 要求先成功执行 `pypto.torch.init()`，
+然后绑定参数、编译并向当前 Torch NPU stream 入队。所有 Out/InOut buffer 必须显式
+传入，返回值为调用方 Tensor 别名。省略 config 时使用 onboard 编译。直接调用不接受
+`RunConfig`，runtime 配置由进程初始化持有。
+
+`kernel.compile(..., config=RunConfig(...))` 保留 program 语义，不要求 kernel 初始化。
+通过返回的 `CompiledProgram` 显式执行 program，可使用 host Tensor、模拟器或分布式
+执行。PROGRAM 与 KERNEL 共用编译/缓存实现，能力 key 不同。capture/replay 即使预热
+也不支持。队列顺序、资源生命周期和验证边界见
+[Torch eager kernel 执行](runtime/kernel-mode.md)。
 
 ## 编译
 

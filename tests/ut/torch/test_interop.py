@@ -435,6 +435,14 @@ def test_native_nz_requires_declared_layout_and_target(npu, monkeypatch, layout,
     query.assert_not_called()
 
 
+@pytest.mark.parametrize("tensor_format", [0, 2])
+def test_nz_signature_rejects_unconverted_base_storage(npu, tensor_format):
+    npu.get_npu_format.return_value = tensor_format
+    param = replace(_param(shape=(32, 64), dtype=DataType.BF16), layout="NZ")
+    with pytest.raises(ValueError, match="native NZ storage"):
+        interop.CallSignature([param], platform="a2a3").describe_call((_tensor((32, 64), torch.bfloat16),))
+
+
 def test_native_nz_preserves_layout_and_validates_physical_storage(npu, monkeypatch):
     npu.get_npu_format.return_value = 29
     query = Mock(return_value=(4, 2, 16, 16))
