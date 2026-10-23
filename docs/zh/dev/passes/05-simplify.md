@@ -66,7 +66,7 @@ program_simplified = simplify_pass(program)
 1. **多次赋值收集**：`MultiAssignCollector` 遍历函数体，记录所有被多次赋值的标量 `Var`。这些 `Var` 不会被绑定到分析器，避免某个过期的值越过后续的重新赋值被使用。仅被赋值一次的 `Var`——即使位于循环体或分支内部——也可以安全绑定：`SimplifyMutator` 会把每个绑定限定在赋值所在的区域内（见阶段 2），在离开该区域时解绑。在 SSA 形式下每个 `Var` 都只被赋值一次，因此不会收集到任何 `Var`。
 2. **`SimplifyMutator` 遍历**：继承自 `arith::IRMutatorWithAnalyzer`。分析器维护一个约束栈（循环变量边界、if 分支条件、标量绑定）。折叠发生在叶子节点而非仅顶层表达式，因为分析器顶层的 `Simplify` 不会递归进入非算术容器（`Call`、`MakeTuple`）：
    - `VarPtr` / `IterArgPtr`：先按变量重映射表替换，再交给分析器化简。循环携带变量的使用点视为叶子节点：仅在循环头重建其类型与初值。在使用点重新处理携带变量的 MemRef 偏移可能产生新的未定义变量，尤其是在作用域独立的不同分支中。
-   - `BinaryExpr` / `UnaryExpr`：先访问子节点，再折叠重建后的节点。
+   - `BinaryExpr` / `UnaryExpr`：先访问子节点，再折叠重建后的节点。由循环静态范围可判定的 `INDEX` 类型 `loop_var OP constant` 比较会被替换为 `ConstBool`，参见[操作数中的可证明比较](#操作数中的可证明比较)。
    - `CallPtr`：刷新结果 `type_`，让 shape 参数被折叠后的 Call 与重新解析得到的 Call 在结构上相等。
    - `AssignStmt`：对不在 `multi_assigned_` 中的标量 LHS `Var`，把化简后的 RHS 注册到分析器。无论位于函数体顶层还是嵌套区域内，`ConstInt`/`ConstFloat`/`ConstBool` RHS 都会被完整绑定（字面量代入下游使用点）。符号 RHS 只贡献一个 `ConstIntBound`，使恒死的分支守卫得以折叠而不会内联该标量。每个绑定都会被记录，以便所在区域的访问器在退出时解绑。这不会把循环携带值绑定为其初值，也不会假定不同分支的结果相同。
    - `ForStmt`：先在外层作用域化简每个 carry 的初值。只要循环头的值或类型发生变化，就先创建并登记整组 carry，再重建类型，使已分配的偏移或槽位下标能够引用后声明的标量 carry；完全不变的循环头保留原对象身份。随后使用完整映射访问循环体；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
@@ -117,6 +117,20 @@ Fold B 克隆窗口视图时同样保留外层通信域槽位的身份。克隆�
 对逃逸的 `return_vars[i]`，`LiftBodyToReturnVars` 不再记录 remap，而是在折叠点产出 `AssignStmt(return_vars[i], yielded_value[i])`。该赋值必须留在被提升的区域*内部*：yielded 值可能引用循环体内的局部 `Var`，无法外提到循环之后；而在 leak 语义下「最后一次迭代最后写入」恰好就是循环后读取所期望的值。
 
 SSA 形式下不存在逃逸：区域内定义的值不会在区域外被引用，且每个使用点都被其定义支配。由于流水线只在 `ConvertToSSA` 之后运行 Simplify，该物化路径在流水线中不会触发 —— 它服务于直接对 pre-SSA IR 运行 Simplify 的调用方，而在那里上述别名赋值的顾虑并不成立，因为 SSA 转换仍会在其后运行。
+
+### 操作数中的可证明比较
+
+Fold A 判定 `IfStmt` 的条件，但作为操作数出现的比较 —— 例如 `tile.matmul_acc` 的 `init_cond` 这样的调用实参，或赋值的右值 —— 只会经过表达式重写，而重写无法利用循环变量的范围得到字面量。因此 `VisitBinaryExpr_` 判定**静态边界情形**，并将其替换为 `ConstBool` —— 即分析器自身常量折叠产生、Fold A 也能识别的节点：
+
+```python
+# Before (after LowerPipelineLoops replicates a stage=2 split-K loop, ko in [0, 512);
+# the rewriter has already turned ko + 128 == 0 into ko == -128)
+acc = pl.tile.matmul_acc(acc, a, b, init_cond=ko == -128)
+# After Simplify
+acc = pl.tile.matmul_acc(acc, a, b, init_cond=False)
+```
+
+只有形如 `loop_var OP constant`（任意顺序，`OP` 为 `==`、`!=`、`<`、`<=`、`>`、`>=` 之一）的比较才会被判定，其中 `loop_var` 是 `start`/`stop` 均为 `INDEX` 常量的外层循环的 `INDEX` 循环变量，且在函数中没有其他定义，常量也是 `INDEX` 字面量。判定只是把循环头范围 `[start, stop - 1]`（包含该变量取到的所有值）与常量比较：不涉及算术，也不使用分析器给出的边界。其余情形一律保持原样，因为分析器的边界在 int64 边缘以及窄 dtype 回绕下并不可靠；漏掉一次折叠总是安全的，错误的字面量则是错误编译。
 
 两种折叠在同一次 Pass 中可以叠加：当 Fold B 把 `loop_var → 0` 代入循环体后，类似 `if loop_var == 0` 的谓词会变成 `if 0 == 0` → `ConstBool(true)`，紧接着就被 Fold A 折掉，无需再跑一次 Simplify。
 

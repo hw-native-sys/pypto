@@ -1383,7 +1383,7 @@ class TestAutoTileMatmulL0PredicatedAcc:
 
         (body_call,) = _matmul_acc_calls(After)
         assert len(body_call.args) == 4
-        assert ir.python_print(body_call.args[3]) == "pl.const(1, pl.BOOL) and c_l0_ko == 0"
+        assert ir.python_print(body_call.args[3]) == "True and c_l0_ko == 0"
 
 
 class TestAutoTileMatmulL0MNTiling:

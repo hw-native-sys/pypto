@@ -263,6 +263,33 @@ class TestAutoTiledPredicateFolds:
         assert mlir.count("pto.tmatmul.acc") == 1, mlir
         assert mlir.count("pto.tmatmul ") == 1, mlir
 
+    def test_surviving_k_loop_folds_the_replica_predicate_but_keeps_the_seed_test(self):
+        """`128x512 @ 512x128` at `stage=2`: the replicated main loop survives with
+        `ko in [0, 512)`. Replica 0's `ko == 0` is a genuine runtime test (it seeds the
+        accumulator), while replica 1's `ko + 128 == 0` is never true, so Simplify
+        folds it to a false literal and only one `scf.if` remains."""
+
+        @pl.program
+        class AutoTiledSplitK:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 512], pl.FP16],
+                b: pl.Tensor[[512, 128], pl.FP16],
+                output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 512], target_memory=pl.MemorySpace.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [512, 128], target_memory=pl.MemorySpace.Mat)
+                out_tile = pl.tile.matmul(a_mat, b_mat)
+                return pl.store(out_tile, [0, 0], output)
+
+        mlir = _generate_default_mlir(AutoTiledSplitK)
+        # `== 1`, not `<= 1`: the seeding branch must survive, so emitting no branch
+        # at all fails here instead of passing vacuously.
+        assert mlir.count("scf.if") == 1, mlir
+        assert mlir.count("pto.tmatmul ") == 1, "exactly one replica initialises the accumulator\n" + mlir
+        assert mlir.count("pto.tmatmul.acc") == 2, mlir
+
 
 class TestGroupedOperandsCarryPredicate:
     """A grouped GEMM keeps its group axis and still gets the predicate.

@@ -66,7 +66,7 @@ Implemented by `TransformSimplify` in `src/ir/transforms/simplify_pass.cpp` in f
 1. **Multi-assign collection** — `MultiAssignCollector` walks the function body and records every scalar `Var` assigned more than once. These are excluded from analyzer binding so a stale value cannot be used past a later reassignment. A `Var` assigned exactly once — even inside a loop body or branch — is safe to bind: `SimplifyMutator` scopes every binding to the region the assignment lives in (see phase 2), unbinding it on region exit. Under SSA every `Var` is single-assigned, so nothing is collected.
 2. **`SimplifyMutator` traversal** — extends `arith::IRMutatorWithAnalyzer`. The analyzer carries a constraint stack (loop-var bounds, if-branch conditions, scalar bindings). Folding happens at the leaves rather than only at top-level expressions because the analyzer's top-level `Simplify` does not recurse into non-arithmetic containers (`Call`, `MakeTuple`):
    - `VarPtr` / `IterArgPtr`: substitute via the var-remap table, then run through the analyzer. Loop-carried uses are leaves: only the loop header rebuilds their type and initial value. Revisiting a carry's MemRef offset at a use site can otherwise create a fresh, undefined variable, especially across separately scoped branches.
-   - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node.
+   - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node. An `INDEX` `loop_var OP constant` comparison that the loop's static range decides becomes a `ConstBool` — see [Provable comparison in an operand](#provable-comparison-in-an-operand).
    - `CallPtr`: refresh the result `type_` so a Call whose shape arguments folded ends up structurally equal to a freshly parsed Call.
    - `AssignStmt`: for a scalar LHS `Var` not in `multi_assigned_`, register the simplified RHS with the analyzer. A `ConstInt`/`ConstFloat`/`ConstBool` RHS is bound fully (the literal is substituted into later uses), at both function-body top level and inside nested regions. A symbolic RHS contributes only a `ConstIntBound`, so dead branch guards fold without the scalar being inlined. Every binding is logged so the enclosing region's visitor can unbind it on exit. This does not bind a loop-carried value to its initial value or assume that different branch results agree.
    - `ForStmt`: simplify every carry's initial value in the enclosing scope. If any header value or type changes, create and register the whole carry group before rebuilding its types, so an allocated offset or slot index can reference a later scalar carry. Unchanged headers retain their original identities. Then visit the body using the complete remap; if both `start_` and `stop_` fold to `ConstInt` with `stop > start`, bind the loop var to that range while visiting the body and unbind on exit; scalars bound inside the body are unbound after the visit; rebuild `return_vars_` after the body so folds discovered inside are visible in return types. Pure single-trip and zero-trip loops are also collapsed in-place — see "Control-flow folding" below.
@@ -119,6 +119,20 @@ Statements the index has never seen answer "does not escape", keeping the substi
 For an escaping `return_vars[i]`, `LiftBodyToReturnVars` emits `AssignStmt(return_vars[i], yielded_value[i])` at the fold site instead of recording the remap. The assignment stays *inside* the region being lifted — the yielded value may name body-local `Var`s, so it cannot be hoisted past the loop, and in leak-mode semantics the last iteration writing last is exactly what a post-loop read expects.
 
 Nothing escapes in SSA form: a value defined inside a region is never referenced outside it, and every use is dominated by its definition. Since the pipeline runs Simplify only after `ConvertToSSA`, the materializing path never fires there — it exists for callers that run Simplify directly on pre-SSA IR, where the alias-assignment concern above does not apply because SSA conversion still runs afterwards.
+
+### Provable comparison in an operand
+
+Fold A decides `IfStmt` conditions, but a comparison passed as an operand — a call argument such as `tile.matmul_acc`'s `init_cond`, or an assignment value — only gets expression rewriting, which cannot use loop-variable ranges to reach a literal. `VisitBinaryExpr_` therefore decides the **static-bound case** and replaces it with a `ConstBool` — the node the analyzer's own constant folding produces, which Fold A also recognizes:
+
+```python
+# Before (after LowerPipelineLoops replicates a stage=2 split-K loop, ko in [0, 512);
+# the rewriter has already turned ko + 128 == 0 into ko == -128)
+acc = pl.tile.matmul_acc(acc, a, b, init_cond=ko == -128)
+# After Simplify
+acc = pl.tile.matmul_acc(acc, a, b, init_cond=False)
+```
+
+A comparison is decided only when it is `loop_var OP constant` (either order, `OP` one of `==`, `!=`, `<`, `<=`, `>`, `>=`), where `loop_var` is an `INDEX` loop variable of an enclosing loop with constant `INDEX` `start`/`stop` and no other definition in the function, and the constant is an `INDEX` literal. The decision compares the loop's header range `[start, stop - 1]`, which contains every value the variable takes, with the constant: no arithmetic and no analyzer bound is involved. Everything else is left exactly as written, because the analyzer's bounds are unsound at the int64 edges and under narrow-dtype wrap; a missed fold is always safe, a wrong literal is a miscompile.
 
 The two folds compose in a single pass: when Fold B substitutes `loop_var → 0` in a body, predicates like `if loop_var == 0` reduce to `if 0 == 0` → `ConstBool(true)`, which Fold A then collapses without a second Simplify run.
 

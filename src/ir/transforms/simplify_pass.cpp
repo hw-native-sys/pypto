@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -26,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/ir_mutator_with_analyzer.h"
@@ -75,16 +77,45 @@ class MultiAssignCollector : public IRVisitor {
   }
 
   std::unordered_set<const Var*> multi_assigned;
+  /// Vars with more than one definition site of any kind (parameter, AssignStmt,
+  /// For/If/While binders). FoldProvableComparison never trusts such a loop
+  /// variable to stay within its header range.
+  std::unordered_set<const Var*> redefined;
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!seen_.insert(op->var_.get()).second) {
       multi_assigned.insert(op->var_.get());
     }
+    Define(op->var_.get());
     IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    Define(op->loop_var_.get());
+    for (const auto& v : op->iter_args_) Define(v.get());
+    for (const auto& v : op->return_vars_) Define(v.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    for (const auto& v : op->return_vars_) Define(v.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& v : op->iter_args_) Define(v.get());
+    for (const auto& v : op->return_vars_) Define(v.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+  /// Also called for each function parameter before the body is visited.
+  void Define(const Var* var) {
+    if (!defined_.insert(var).second) redefined.insert(var);
   }
 
  private:
   std::unordered_set<const Var*> seen_;
+  std::unordered_set<const Var*> defined_;
 };
 
 /// Answers, for each control-flow statement Fold A / Fold B may collapse,
@@ -524,9 +555,11 @@ class UnreachableBodyRemapper : public IRMutator {
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
   SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned,
-                  ReturnVarEscapeIndex* escapes, bool constants_only)
+                  std::unordered_set<const Var*> redefined, ReturnVarEscapeIndex* escapes,
+                  bool constants_only)
       : IRMutatorWithAnalyzer(analyzer),
         multi_assigned_(std::move(multi_assigned)),
+        redefined_(std::move(redefined)),
         escapes_(escapes),
         constants_only_(constants_only) {}
 
@@ -590,7 +623,82 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// (Call, MakeTuple), so an Add buried inside a shape arg would otherwise
   /// reach downstream with patterns like `K + 0` un-folded.
   ExprPtr VisitBinaryExpr_(const BinaryExprPtr& op) override {
-    return SimplifyValue(IRMutator::VisitBinaryExpr_(op));
+    return FoldProvableComparison(SimplifyValue(IRMutator::VisitBinaryExpr_(op)));
+  }
+
+  /// Replace `loop_var OP constant` with a literal when the loop's static range
+  /// decides it. IfStmt conditions already fold through Fold A, but a predicate
+  /// passed as a call argument (e.g. the `tile.matmul_acc` init_cond that
+  /// pipeline replication produces, `ko + 128 == 0`, which the rewriter turns
+  /// into `ko == -128`) only got expression rewriting.
+  ///
+  /// Deliberately limited to the static-bound case, because the analyzer's bounds
+  /// are unsound at the int64 edges and under narrow-dtype wrap, and a missed fold
+  /// is always safe while a wrong literal is a miscompile:
+  ///   - the operand is a loop variable in static_loop_ranges_ (INDEX, constant
+  ///     INDEX bounds, no other definition), compared against an INDEX constant
+  ///     (a narrower literal can hold an out-of-range value that wraps);
+  ///   - the decision compares the header range [start, stop - 1], which holds
+  ///     every value the variable takes, with the constant -- never the analyzer's
+  ///     bound, which an enclosing `if` can tighten from a wrapping operand.
+  ExprPtr FoldProvableComparison(const ExprPtr& expr) {
+    if (constants_only_) return expr;
+    auto cmp = As<BinaryExpr>(expr);
+    // A comparison built through the bindings may carry a non-BOOL dtype; a
+    // ConstBool would not type-check where such a value is used.
+    if (!cmp || GetScalarDtype(expr) != DataType::BOOL) return expr;
+    // Normalize to `var OP constant`; a constant on the left mirrors the order.
+    VarPtr var = AsVarLike(cmp->left_);
+    auto constant = As<ConstInt>(cmp->right_);
+    bool mirrored = false;
+    if (!var || !constant) {
+      var = AsVarLike(cmp->right_);
+      constant = As<ConstInt>(cmp->left_);
+      mirrored = true;
+    }
+    if (!var || !constant || constant->dtype() != DataType::INDEX) return expr;
+    auto range = static_loop_ranges_.find(var.get());
+    if (range == static_loop_ranges_.end()) return expr;
+
+    const int64_t lo = range->second.first;
+    const int64_t hi = range->second.second;
+    const int64_t c = constant->value_;
+
+    // With the constant on the left, `c < v` is `v > c`: swap the ordering kinds.
+    bool lt = As<Lt>(expr) != nullptr;
+    bool le = As<Le>(expr) != nullptr;
+    bool gt = As<Gt>(expr) != nullptr;
+    bool ge = As<Ge>(expr) != nullptr;
+    if (mirrored) {
+      std::swap(lt, gt);
+      std::swap(le, ge);
+    }
+    // `always`: every value in [lo, hi] satisfies `var OP c`; `never`: none does.
+    // Neither means the range admits both outcomes, and the comparison stays.
+    bool always = false;
+    bool never = false;
+    if (As<Eq>(expr)) {
+      always = lo == c && hi == c;
+      never = c < lo || c > hi;
+    } else if (As<Ne>(expr)) {
+      always = c < lo || c > hi;
+      never = lo == c && hi == c;
+    } else if (lt) {
+      always = hi < c;
+      never = lo >= c;
+    } else if (le) {
+      always = hi <= c;
+      never = lo > c;
+    } else if (gt) {
+      always = lo > c;
+      never = hi <= c;
+    } else if (ge) {
+      always = lo >= c;
+      never = hi < c;
+    }
+    if (always) return std::make_shared<ConstBool>(true, expr->span_);
+    if (never) return std::make_shared<ConstBool>(false, expr->span_);
+    return expr;
   }
 
   ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op) override {
@@ -730,9 +838,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         // The pre-pass indexes original Var identities. Carry its exclusion to
         // fresh definitions so cloning cannot make a reassigned scalar bindable.
         std::vector<const Var*> cloned_multi_assigned;
+        std::vector<const Var*> cloned_redefined;
         for (const auto& [original, fresh] : cloned.var_map) {
           if (multi_assigned_.count(original) && multi_assigned_.insert(fresh.get()).second) {
             cloned_multi_assigned.push_back(fresh.get());
+          }
+          if (redefined_.count(original) && redefined_.insert(fresh.get()).second) {
+            cloned_redefined.push_back(fresh.get());
           }
         }
 
@@ -763,6 +875,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
           unrolled_body = VisitStmt(cloned.cloned_body);
         }
         for (const auto* var : cloned_multi_assigned) multi_assigned_.erase(var);
+        for (const auto* var : cloned_redefined) redefined_.erase(var);
 
         var_remap_ = std::move(baseline_remap);
         return LiftBodyToReturnVars(unrolled_body, op->return_vars_, op.get());
@@ -770,6 +883,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     }
 
     bool bound = start_ci && stop_ci && stop_ci->value_ > start_ci->value_;
+    // See FoldProvableComparison for why each condition is required.
+    const bool static_loop_var =
+        bound && start_ci->dtype() == DataType::INDEX && stop_ci->dtype() == DataType::INDEX &&
+        GetScalarDtype(op->loop_var_) == DataType::INDEX && redefined_.count(op->loop_var_.get()) == 0 &&
+        static_loop_ranges_
+            .emplace(op->loop_var_.get(), std::make_pair(start_ci->value_, stop_ci->value_ - 1))
+            .second;
     if (bound) {
       analyzer_->Bind(op->loop_var_, start_ci->value_, stop_ci->value_);
     }
@@ -790,6 +910,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     if (bound) {
       analyzer_->Unbind(op->loop_var_);
     }
+    if (static_loop_var) static_loop_ranges_.erase(op->loop_var_.get());
 
     // Discard body-internal remaps — the For is being rebuilt, so the body's
     // SSA scope is preserved and outside code shouldn't see its private vars.
@@ -1495,6 +1616,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   std::unordered_set<const Var*> multi_assigned_;
+  /// See MultiAssignCollector::redefined.
+  std::unordered_set<const Var*> redefined_;
+  /// Trusted enclosing loop variables mapped to their header range [start, stop - 1]
+  /// (a step > 1 only skips values inside it). See FoldProvableComparison.
+  std::unordered_map<const Var*, std::pair<int64_t, int64_t>> static_loop_ranges_;
 
   // Owning keys keep source MemRefs alive across type rewrites and temporary
   // control-flow clones; a recycled raw pointer must never hit this cache.
@@ -1544,13 +1670,15 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
 FunctionPtr TransformSimplify(const FunctionPtr& func, bool constants_only) {
   MultiAssignCollector collector(func->params_);
+  for (const auto& param : func->params_) collector.Define(param.get());
   collector.VisitStmt(func->body_);
 
   ReturnVarEscapeIndex escapes;
   if (!constants_only) escapes.Index(func->body_);
 
   auto analyzer = std::make_shared<arith::Analyzer>();
-  SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned), &escapes, constants_only);
+  SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned), std::move(collector.redefined),
+                          &escapes, constants_only);
   auto new_body = mutator.RemapFinalizedWindows(mutator.VisitStmt(func->body_));
 
   // Final step: drop every dead yielded slot — IfStmt phi return_vars and
