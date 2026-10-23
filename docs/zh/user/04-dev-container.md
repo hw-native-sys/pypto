@@ -487,8 +487,9 @@ PR 不发布镜像，也不获取 SWR 凭据。
 
 首期仅启用 `arm-a2a3`，使用 CANN 9.2.0，以及 `self-hosted`、`linux`、`ARM64`、`npu-xp` 标签。
 预检还要求 runner 名称为 `227-npu-a2a3-XP-1`。如果标签池扩大，应给这台服务器添加专用标签，
-并更新 `runners`，避免调度到其他服务器。runner 需要 Python 3.10+、Git、Docker/buildx、
+并更新 `runners`，避免调度到其他服务器。runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker/buildx、
 Ascend Docker Runtime，以及支持 `--find`/`--kill` 的 `task-submit`；不使用宿主机的 PyPTO 安装。
+宿主机维护命令会显式进入该工具链环境，不依赖可能较旧的系统 `python3`。
 
 首次发布前，在仓库设置中配置：
 

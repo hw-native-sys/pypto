@@ -545,8 +545,9 @@ The initial configuration enables only `arm-a2a3`, using CANN 9.2.0 and the
 `self-hosted`, `linux`, `ARM64`, `npu-xp` labels. A preflight check additionally
 requires runner `227-npu-a2a3-XP-1`. If the label pool grows, assign that host a
 dedicated label and update `runners` to avoid scheduling on a different host.
-The runner needs Python 3.10+, Git, Docker/buildx, Ascend Docker Runtime and
+The runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker/buildx, Ascend Docker Runtime and
 `task-submit` with `--find`/`--kill` support. No host PyPTO installation is used.
+Host maintenance commands enter that bundle explicitly; the system `python3` may be older.
 
 Configure these repository settings before the first publishing run:
 

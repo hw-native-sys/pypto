@@ -94,10 +94,16 @@ jobs:
           echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
       - name: Build native image from frozen revisions
         run: |
+          pypto-toolchain verify --require python=3.10
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
           source .claude/skills/testing/load-env.sh
-          python3 docker/ci/maintain.py build --image "$IMAGE_NAME" --directory "$IMAGE_STATE"
+          python3.10 docker/ci/maintain.py build --image "$IMAGE_NAME" --directory "$IMAGE_STATE"
       - name: Validate doctor, single-card decode and two-card all-reduce
-        run: python3 docker/ci/maintain.py validate --directory "$IMAGE_STATE"
+        run: |
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          python3.10 docker/ci/maintain.py validate --directory "$IMAGE_STATE"
       - name: Publish validated image to SWR
         if: >-
           github.event_name != 'pull_request' &&
@@ -106,10 +112,16 @@ jobs:
         env:
           SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
           SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-        run: python3 docker/ci/maintain.py publish --directory "$IMAGE_STATE"
+        run: |
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          python3.10 docker/ci/maintain.py publish --directory "$IMAGE_STATE"
       - name: Clean up this run's containers and queued tasks
         if: always() && steps.prepare.outcome == 'success'
-        run: python3 docker/ci/maintain.py cleanup --directory "$IMAGE_STATE"
+        run: |
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          python3.10 docker/ci/maintain.py cleanup --directory "$IMAGE_STATE"
       - name: Remove isolated credentials
         if: always() && steps.prepare.outcome == 'success'
         run: |
