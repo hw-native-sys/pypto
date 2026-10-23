@@ -3224,6 +3224,15 @@ class _PersistentOrch:
         raise RuntimeError("run finalization abandoned")
 
     def get_or_allocate_domain(self, **kwargs):
+        # Match Simpler's physical-size constraints so lifecycle tests cannot
+        # reach reset/reuse assertions with domains the real runtime rejects.
+        if kwargs["window_size"] % 64:
+            raise ValueError("domain window_size must be a multiple of 64 bytes")
+        for buffer in kwargs["buffers"]:
+            if buffer.nbytes % 64:
+                raise ValueError(
+                    f"domain buffer {buffer.name!r}: nbytes={buffer.nbytes} must be a multiple of 64 bytes"
+                )
         self.reuse_calls.append(kwargs)
         assert kwargs["retain_after_run"] is True
         resources = self.worker._building_run_resources
@@ -3358,9 +3367,9 @@ class TestPersistentDistributedWorker:
 
         m["worker"].submit.side_effect = worker_submit
         seen_handles: list[Any] = []
-        window_size = (1 << 20) + 17
+        window_size = (1 << 20) + 64
         m["load_entry"].return_value = (
-            _persistent_entry(window_size, seen_handles, buffer_nbytes=(1 << 20, 17)),
+            _persistent_entry(window_size, seen_handles, buffer_nbytes=(1 << 20, 64)),
             None,
         )
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -3391,8 +3400,8 @@ class TestPersistentDistributedWorker:
         assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == [
             (0, 1 << 20),
             (1, 1 << 20),
-            (0, 17),
-            (1, 17),
+            (0, 64),
+            (1, 64),
         ]
         assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
         assert [src for _dst, src, _payload in orch.copy_calls] == [
@@ -3481,7 +3490,7 @@ class TestPersistentDistributedWorker:
         orch = _PersistentOrch(m["worker"])
         m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
         m["load_entry"].return_value = (
-            _persistent_entry(64, [], buffer_nbytes=(4,)),
+            _persistent_entry(128, [], buffer_nbytes=(64,)),
             None,
         )
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -3699,7 +3708,7 @@ class TestPersistentDistributedWorker:
                 name="comm_d0",
                 workers=[*range(world_size)],
                 window_size=64,
-                buffers=[SimpleNamespace(name="signal", dtype="opaque", count=4, nbytes=4)],
+                buffers=[SimpleNamespace(name="signal", dtype="opaque", count=64, nbytes=64)],
             ):
                 raise RuntimeError("persistent dispatch failed")
 
