@@ -131,7 +131,8 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
-| `quant_mx` | `pl.` (T/t) | Ascend950 MXFP8 block-32 dynamic quantization to FP8E4M3FN data plus FP8E8M0 scales (`group_axis` = PTOAS `grpAxis`). Tensor calls materialize GM data and MX-layout scales; tile calls stay on-chip. MXFP4 quant is out of scope. A direct tensor quant→matmul chain may use data+scale V2C transport (see [types](../language/00-types.md)) |
+| `quant_mx` | `pl.` (T/t) | Ascend950 block-32 dynamic quantization to FP8E4M3FN or packed `fp4e2m1x2` data plus FP8E8M0 scales. FP4 requires FP16/BF16 input; axis1 returns `[M,K/2]`, axis0 transposes `[N,K]` to `[K,N/2]`. `quant_scale_alg="ocp"` is the default; `"nv"` supports FP4 axis0. Tensor calls materialize GM data and MX-layout scales; tile calls stay on-chip. FP8 results can feed `matmul_mx`; native FP4 matmul is blocked by PTOAS v0.67 geometry (see [types](../language/00-types.md)). |
+| `quant_mx_raw` | `pl.tile.` (t) | Direct Ascend950 TQUANT with explicit max/scaling workspaces. Returns native FP4E2M1X2 or INT8 data and raw UINT8 exponent codes, without blocked MX scale packing. Axis1 accepts any positive row count and K divisible by 32 (64 for native FP4); source valid rows may be smaller than physical rows. Axis0 consumes source orientation directly and groups 32 valid rows; `interleave=True` interleaves exponent pairs for FP16/BF16 with rows divisible by 64. |
 | `tmov_x2zz` | `pl.` (t) | Ascend950 exponent X-to-ZZ layout conversion (UINT8). Workspace `tmp` is write-only; axis1 needs `dst_rows`/`dst_cols` for ZZ `[M,G]` over flat TQUANT exp. Typically used via `quant_mx` lowering rather than directly |
 
 ## Linear algebra

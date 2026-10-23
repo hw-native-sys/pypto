@@ -762,8 +762,9 @@ def quant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
 ) -> tuple[Tensor, Tensor]:
-    """Quantize a 2D tensor to MXFP8 data and its packed FP8E8M0 scale.
+    """Quantize a 2D tensor to MXFP8/MXFP4 data and its packed FP8E8M0 scale.
 
     ``group_axis=1`` produces A-oriented ``[M, K]`` data and an
     ``MX_A_ZZ`` scale tensor ``[M, K/32]``. ``group_axis=0`` accepts B input
@@ -775,6 +776,8 @@ def quant_mx(
         group_axis: Quantization group axis. Use ``1`` for A/LHS data and ``0``
             for B/RHS data.
         dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``.
+            ``FP4E2M1X2`` requires FP16/BF16 input and halves the output's last dimension.
+        quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
 
     Returns:
         A pair ``(data, scale)``. ``data`` is the quantized MX tensor and
@@ -788,7 +791,9 @@ def quant_mx(
             ``group_axis`` is not supported, or ``dtype`` is not a supported MX
             data dtype.
     """
-    call_expr = _ir_ops.quant_mx(src.unwrap(), group_axis=group_axis, dtype=dtype)
+    call_expr = _ir_ops.quant_mx(
+        src.unwrap(), group_axis=group_axis, dtype=dtype, quant_scale_alg=quant_scale_alg
+    )
     span = call_expr.span
     return (
         Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),

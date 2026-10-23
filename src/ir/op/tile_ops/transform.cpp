@@ -485,7 +485,7 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   CHECK(axis1 != axis2) << "tile.transpose: axis1 and axis2 must be different, but got axis1=" << axis1
                         << ", axis2=" << axis2;
   CHECK_SPAN(!input_type->dtype_.IsPackedFp4(), args[0]->span_)
-      << "tile.transpose does not support FP4E2M1X2/FP4E1M2X2; PTOAS ttrans has no f4E2M1x2 lowering";
+      << "tile.transpose does not support FP4E2M1X2/FP4E1M2X2; PTOAS ttrans has no packed FP4 lowering";
 
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
@@ -686,6 +686,30 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
          "Acc->Mat FIXPIPE downcast to bf16/f16, or an explicit pre_quant scale), but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
+  if (source_type->dtype_.IsPackedFp4()) {
+    const auto src_view = tile_view_semantics::GetEffectiveTileView(*source_type);
+    const auto dst_view = tile_view_semantics::GetEffectiveTileView(*target_type);
+    const bool source_vec =
+        !source_type->memory_space_.has_value() || source_type->memory_space_ == MemorySpace::Vec;
+    const bool target_vec_or_mat = !target_type->memory_space_.has_value() ||
+                                   target_type->memory_space_ == MemorySpace::Vec ||
+                                   target_type->memory_space_ == MemorySpace::Mat;
+    CHECK_SPAN(source_vec && target_vec_or_mat && src_view.blayout == TileLayout::col_major &&
+                   src_view.slayout == TileLayout::row_major && dst_view.blayout == TileLayout::col_major &&
+                   dst_view.slayout == TileLayout::row_major && src_view.fractal == dst_view.fractal,
+               args[0]->span_)
+        << "tile.assemble: native packed FP4 insertion requires matching NZ layouts from Vec to Vec/Mat; "
+           "the native ND insert uses incorrect packed-byte strides. For ND data, alias to UINT8, "
+           "assemble the byte carriers, then alias back using PYPTO or DSA_RP memory planning";
+    const auto offset_tuple = As<MakeTuple>(args[2]);
+    CHECK_SPAN(offset_tuple->elements_.size() == 2, args[2]->span_)
+        << "tile.assemble: packed FP4 insertion requires two offsets";
+    const auto packed_offset = As<ConstInt>(offset_tuple->elements_[0]);
+    CHECK_SPAN(packed_offset && packed_offset->value_ == 0, args[2]->span_)
+        << "tile.assemble: PTOAS v0.67 packed FP4 insertion requires zero offset on the packed axis; "
+           "its native offset conversion disagrees with carrier dimensions";
+  }
+
   // The result holds what the target already held plus what was just written.
   // ``pto.tinsert`` copies the whole source subview rather than consulting its
   // valid extent, so the *physical* source is what has to fit inside the target.
@@ -842,11 +866,30 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   // hardcoded layouts mirror the L0A/L0B formats the hardware imposes on
   // TEXTRACT outputs (and differ from `tile.move`'s TMOV-side L0 formats).
   if (target == MemorySpace::Left) {
-    tile_view.blayout = TileLayout::row_major;
+    tile_view.blayout = src_type->dtype_.IsPackedFp4() ? TileLayout::col_major : TileLayout::row_major;
     tile_view.slayout = TileLayout::row_major;
   } else if (target == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  }
+
+  if (src_type->dtype_.IsPackedFp4()) {
+    const auto src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+    const bool source_vec =
+        !src_type->memory_space_.has_value() || src_type->memory_space_ == MemorySpace::Vec;
+    CHECK_SPAN(!source_vec || target != MemorySpace::Vec, args[0]->span_)
+        << "tile.extract: native packed FP4 Vec-to-Vec extraction uses incorrect packed-byte strides; "
+           "alias to INT8, extract byte carriers, then alias back using PYPTO or DSA_RP memory planning";
+    CHECK_SPAN(
+        src_view.blayout == tile_view.blayout && (!source_vec || src_view.slayout == tile_view.slayout),
+        args[0]->span_)
+        << "tile.extract: PTOAS v0.67 cannot change the packed FP4 packing axis or convert Vec layout; "
+           "load or convert the source to the destination layout first";
+    const size_t packed_axis = src_view.blayout == TileLayout::col_major ? 0 : 1;
+    const auto packed_offset = As<ConstInt>(args[packed_axis + 1]);
+    CHECK_SPAN(packed_offset && packed_offset->value_ == 0, args[packed_axis + 1]->span_)
+        << "tile.extract: PTOAS v0.67 packed FP4 extraction requires zero offset on the packed axis; "
+           "its native offset conversion disagrees with carrier dimensions";
   }
 
   // A partial Mat->L0A/L0B extract is a compact boundary transfer, not a

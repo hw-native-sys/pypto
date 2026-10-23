@@ -25,6 +25,11 @@ def _tile(name, shape, dtype, *, valid_shape=None, view=None):
     return ir.Var(name, ir.TileType(shape, dtype, tile_view=view), ir.Span.unknown())
 
 
+def _const_int(expr: ir.Expr) -> int:
+    assert isinstance(expr, ir.ConstInt)
+    return expr.value
+
+
 def _shape_values(tile_type):
     return tuple(dim.value for dim in tile_type.shape)
 
@@ -35,6 +40,8 @@ class TestQuantMxTypes:
         [
             (1, pl.FP8E4M3FN, (16, 64), (16, 64), (16, 2)),
             (0, pl.FP8E4M3FN, (32, 64), (64, 32), (2, 32)),
+            (1, pl.FP4E2M1X2, (16, 64), (16, 32), (16, 2)),
+            (0, pl.FP4E2M1X2, (64, 64), (64, 32), (2, 64)),
         ],
     )
     def test_public_result_types(self, group_axis, dtype, src_shape, quant_shape, scale_shape):
@@ -95,11 +102,104 @@ class TestQuantMxTypes:
         with pytest.raises(ValueError, match="group_axis must be 0 or 1"):
             pl.quant_mx(src, group_axis=2)
 
-    @pytest.mark.parametrize("dtype", [pl.FP8E5M2, pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("dtype", [pl.FP8E5M2, pl.FP4E1M2X2])
     def test_public_rejects_unsupported_dtype(self, dtype):
         src = pl.Tile(expr=_tile("src", (16, 64), pl.FP16))
-        with pytest.raises(ValueError, match="supports only FP8E4M3FN"):
+        with pytest.raises(ValueError, match="requires dtype FP8E4M3FN or FP4E2M1X2"):
             pl.quant_mx(src, group_axis=1, dtype=dtype)
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "shape", "axis", "algorithm", "message"),
+        [
+            (pl.FP32, (16, 64), 1, "ocp", "requires FP16 or BF16 source"),
+            (pl.FP16, (32, 64), 0, "ocp", "N divisible by 64"),
+            (pl.BF16, (16, 64), 1, "nv", "axis1 FP16/BF16 NV"),
+            (pl.BF16, (64, 64), 0, "invalid", "quant_scale_alg 'ocp' or 'nv'"),
+        ],
+    )
+    def test_fp4_rejects_unsupported_source_or_algorithm(self, source_dtype, shape, axis, algorithm, message):
+        with pytest.raises(ValueError, match=message):
+            ir.op.tile.tquant_mx(
+                _tile("src", shape, source_dtype),
+                group_axis=axis,
+                dtype=pl.FP4E2M1X2,
+                quant_scale_alg=algorithm,
+            )
+
+    def test_fp4_raw_keeps_native_carrier_type(self):
+        # Raw FP4 TQUANT writes native byte carriers; FP8's INT8 alias is inapplicable.
+        call = ir.op.tile.tquant_mx_raw(
+            _tile("src", (64, 64), pl.BF16),
+            _tile("max", (2, 64), pl.BF16),
+            _tile("scaling", (2, 64), pl.BF16),
+            group_axis=0,
+            dtype=pl.FP4E2M1X2,
+            quant_scale_alg="nv",
+        )
+        assert isinstance(call.type, ir.TupleType)
+        dst, exp = call.type.types
+        assert isinstance(dst, ir.TileType) and dst.dtype == pl.FP4E2M1X2
+        assert _shape_values(dst) == (64, 32)
+        assert _shape_values(exp) == (2, 64)
+
+    @pytest.mark.parametrize("rows", [1, 3])
+    def test_fp4_raw_axis1_accepts_small_rows(self, rows):
+        quant, exp = pl.tile.quant_mx_raw(
+            pl.Tile(expr=_tile("src", (4, 64), pl.BF16, valid_shape=[rows, 64])),
+            pl.Tile(expr=_tile("max", (1, 16), pl.BF16, valid_shape=[1, rows * 2])),
+            pl.Tile(expr=_tile("scaling", (1, 128), pl.BF16, valid_shape=[1, rows * 2])),
+            group_axis=1,
+            dtype=pl.FP4E2M1X2,
+        )
+        quant_type = quant.unwrap().type
+        assert isinstance(quant_type, ir.TileType)
+        assert quant_type.tile_view is not None
+        assert _shape_values(quant_type) == (4, 32)
+        assert tuple(_const_int(dim) for dim in quant_type.tile_view.valid_shape) == (rows, 32)
+        exp_type = exp.unwrap().type
+        assert isinstance(exp_type, ir.TileType) and exp_type.tile_view is not None
+        assert _shape_values(exp_type) == (1, 32)
+        assert tuple(_const_int(dim) for dim in exp_type.tile_view.valid_shape) == (1, rows * 2)
+
+    def test_fp4_raw_axis0_preserves_padded_row_stride(self):
+        call = ir.op.tile.tquant_mx_raw(
+            _tile("src", (64, 64), pl.BF16, valid_shape=[32, 32]),
+            _tile("max", (1, 64), pl.BF16, valid_shape=[1, 32]),
+            _tile("scaling", (1, 64), pl.BF16, valid_shape=[1, 32]),
+            group_axis=0,
+            dtype=pl.FP4E2M1X2,
+        )
+        assert isinstance(call.type, ir.TupleType)
+        quant, exp = call.type.types
+        assert isinstance(quant, ir.TileType) and quant.tile_view is not None
+        assert isinstance(exp, ir.TileType) and exp.tile_view is not None
+        assert _shape_values(quant) == (64, 32)
+        assert tuple(_const_int(dim) for dim in quant.tile_view.valid_shape) == (32, 16)
+        assert _shape_values(exp) == (1, 64)
+        assert tuple(_const_int(dim) for dim in exp.tile_view.valid_shape) == (1, 32)
+
+    def test_fp4_raw_interleaved_exponent_shape(self):
+        call = ir.op.tile.tquant_mx_raw(
+            _tile("src", (128, 64), pl.BF16),
+            _tile("max", (4, 64), pl.BF16),
+            _tile("scaling", (4, 64), pl.BF16),
+            group_axis=0,
+            dtype=pl.FP4E2M1X2,
+            interleave=True,
+        )
+        assert isinstance(call.type, ir.TupleType)
+        assert _shape_values(call.type.types[1]) == (2, 128)
+
+    def test_fp4_raw_interleave_rejects_one_row_group(self):
+        with pytest.raises(ValueError, match="physical and valid rows divisible by 64"):
+            ir.op.tile.tquant_mx_raw(
+                _tile("src", (32, 64), pl.BF16),
+                _tile("max", (1, 64), pl.BF16),
+                _tile("scaling", (1, 64), pl.BF16),
+                group_axis=0,
+                dtype=pl.FP4E2M1X2,
+                interleave=True,
+            )
 
     @pytest.mark.parametrize(
         ("shape", "dtype", "group_axis", "message"),
@@ -164,6 +264,18 @@ class TestQuantMxTypes:
 
 
 class TestTensorQuantMxTypes:
+    @pytest.mark.parametrize(
+        ("axis", "quant_shape", "scale_shape"), [(1, (64, 64), (64, 4)), (0, (128, 32), (4, 64))]
+    )
+    def test_fp4_tensor_carrier_shapes(self, axis, quant_shape, scale_shape):
+        src = ir.Var("src", ir.TensorType([64, 128], pl.BF16), ir.Span.unknown())
+        call = ir.op.tensor.quant_mx(src, group_axis=axis, dtype=pl.FP4E2M1X2)
+        assert isinstance(call.type, ir.TupleType)
+        quant, scale = call.type.types
+        assert isinstance(quant, ir.TensorType) and quant.dtype == pl.FP4E2M1X2
+        assert _shape_values(quant) == quant_shape
+        assert _shape_values(scale) == scale_shape
+
     @pytest.mark.parametrize(
         ("group_axis", "src_shape", "quant_shape", "scale_shape", "layout"),
         [

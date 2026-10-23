@@ -38,6 +38,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -143,6 +144,26 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   INTERNAL_CHECK_SPAN(fixpipe_insert || !has_epilogue, op->span_)
       << "Internal error: tile.assemble carries a FIXPIPE epilogue (pre_quant / pre_relu) but does not "
          "lower to pto.tinsert; the epilogue would be dropped";
+
+  if (source_tile_type->dtype_.IsPackedFp4()) {
+    // The type deducer admits native FP4 insertion only for matching NZ views.
+    // Its dedicated TINSERT path converts logical columns into carrier bytes;
+    // generic TMOV and the ND insert path do not, including preservation copies.
+    auto emit_insert = [&](const std::string& input, const std::string& input_type, const std::string& row,
+                           const std::string& col) {
+      codegen.Emit("pto.tinsert ins(" + input + ", " + row + ", " + col + " : " + input_type +
+                   ", index, index) outs(" + dst + " : " + dst_type + ")");
+    };
+    if (target != dst) {
+      CHECK_SPAN(target_tile_type->memory_space_ == ir::MemorySpace::Vec, op->span_)
+          << "tile.assemble: packed FP4 Mat insertion requires the result to reuse the Mat target; "
+             "a preservation copy from Mat is unsupported";
+      const std::string zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+      emit_insert(target, codegen.GetExprTypeAnnotation(op->args_[0]), zero, zero);
+    }
+    emit_insert(src, src_type, row_off, col_off);
+    return "";
+  }
 
   // Self-copy: the source *is* the destination window. `tile.slice` lowers to a
   // `pto.subview` and registers its (base, row, col) SSAs, so when the source
@@ -1109,7 +1130,20 @@ static StaticValidTileView EmitStaticValidTileView(codegen::PTOCodegen& codegen,
       << "Internal error: grouped MX operand must carry static valid dimensions";
   const std::string view = codegen.NewNamedTemp(name_hint);
   codegen.RegisterTileBufType(view, static_type, tile_type);
-  codegen.Emit(view + " = pto.treshape " + source + " : " + source_type + " -> " + static_type);
+  if (tile_type->dtype_.IsPackedFp4()) {
+    // PTOAS cannot treshape a custom packed FP4 type. Quantization's fresh
+    // destination can instead carry static valid extents at its planned UB
+    // address, preserving both the packed carrier shape and allocation.
+    const auto memref = ir::GetDefinedMemRef(tile_type);
+    const auto offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr;
+    CHECK_SPAN(codegen.EmitTileAddr() && offset, arg->span_)
+        << "MXFP4 quantization requires a static PYPTO or DSA_RP memory allocation; "
+           "PTOAS does not support packed FP4 treshape";
+    const std::string address = codegen.GetOrEmitConstant(offset->value_, DataType::INT64);
+    codegen.Emit(view + " = pto.alloc_tile addr = " + address + " : " + static_type);
+  } else {
+    codegen.Emit(view + " = pto.treshape " + source + " : " + source_type + " -> " + static_type);
+  }
   return {view, static_type};
 }
 
@@ -1127,9 +1161,8 @@ static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBas
       << "tile.tquant_mx_raw requires src, max, and scaling workspaces, but got " << op->args_.size();
 
   const DataType dtype = op->GetKwarg<DataType>("dtype", DataType::FP8E4M3FN);
-  INTERNAL_CHECK_SPAN(dtype == DataType::FP8E4M3FN, op->span_)
-      << "Internal error: tile.tquant_mx_raw reached codegen with unsupported dtype " << dtype.ToString()
-      << "; this PR only supports MXFP8 (FP8E4M3FN)";
+  INTERNAL_CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP4E2M1X2, op->span_)
+      << "Internal error: tile.tquant_mx_raw reached codegen with unsupported dtype " << dtype.ToString();
 
   const auto outs = codegen.PrepareTupleOutputs(op);
 
@@ -1147,8 +1180,14 @@ static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBas
       << "Internal error: tile.tquant_mx_raw group_axis must be 0 or 1";
   oss << ") outs(" << dst_view.ssa << ", " << scale_view.ssa << ", " << max_view.ssa << ", "
       << scaling_view.ssa << " : " << dst_view.type << ", " << scale_view.type << ", " << max_view.type
-      << ", " << scaling_view.type << ") {quant_type = #pto<quant_type MXFP8"
-      << ">, grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
+      << ", " << scaling_view.type << ") {quant_type = #pto<quant_type "
+      << (dtype == DataType::FP4E2M1X2 ? "MXFP4_E2M1" : "MXFP8") << ">, grpAxis = #pto<mx_group_axis axis"
+      << group_axis << ">";
+  if (op->GetKwarg<std::string>("quant_scale_alg", "ocp") == "nv") {
+    oss << ", quantScaleAlg = #pto<quant_scale_alg nv>";
+  }
+  if (op->GetKwarg<bool>("interleave", false)) oss << ", interleave = true";
+  oss << "}";
   codegen.Emit(oss.str());
   return "";
 }

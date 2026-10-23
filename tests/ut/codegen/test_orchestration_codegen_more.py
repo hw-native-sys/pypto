@@ -250,16 +250,23 @@ int main() {{
                     return pl.transpose(data, axis1=0, axis2=1)
 
     @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-    def test_fp4_view_rejects_layout_flip_across_packed_axis(self, dtype):
-        """The existing ND-only packed carrier contract rejects layout flips."""
+    def test_fp4_view_layout_flip_is_rejected_in_orchestration(self, dtype):
+        """A carrier layout flip requires the in-core PTO descriptor contract."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
 
         ib = IRBuilder()
         with ib.function("orch_fp4_view", type=ir.FunctionType.Orchestration) as f:
             data = f.param("data", ir.TensorType([8, 16], dtype))
-            with pytest.raises(ValueError, match="supports ND layout only"):
-                ib.let("data_dn", tensor_ops.view(data, layout=ir.TensorLayout.DN))
+            data_dn = ib.let("data_dn", tensor_ops.view(data, layout=ir.TensorLayout.DN))
+            f.return_type(data_dn.type)
+            ib.return_stmt(data_dn)
+        program = ir.Program([f.get_result()], "test_fp4_view_layout_flip", ir.Span.unknown())
+
+        normalized = _run_through_frontend_normalization(program)
+        ir.assert_structural_equal(normalized, program)
+        with pytest.raises(ValueError, match="tensor.view cannot move the packed FP4 last axis"):
+            _generate_orch_code(normalized)
 
     def test_dynamic_gm_pipe_buffer_alloc_follows_its_size_local(self):
         """A dynamically-sized injected GM pipe buffer must not be hoisted above

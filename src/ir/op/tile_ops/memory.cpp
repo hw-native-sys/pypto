@@ -21,6 +21,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,7 +39,6 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -96,6 +96,41 @@ void ValidateIntScalarTupleElements(const MakeTuplePtr& tuple, const std::string
         << op_name << " " << role << " tuple element " << i << " must have integer dtype, but got "
         << scalar_type->dtype_.ToString();
   }
+}
+
+// A packed tile counts byte carriers along BLayout's contiguous axis. Changing
+// that axis must preserve logical rows/columns, not the raw carrier shape:
+// row-major [M,K/2] becomes column-major [M/2,K]. PTOAS expands only the
+// destination's packing axis when declaring the ISA tile.
+void RetargetPackedFp4Geometry(DataType dtype, TileLayout source_layout, TileLayout target_layout,
+                               std::vector<ExprPtr>& shape, TileView& view, const Span& span,
+                               const std::string& op_name) {
+  if (!dtype.IsPackedFp4() || source_layout == target_layout) return;
+  CHECK_SPAN(shape.size() >= 2, span)
+      << op_name << ": changing a packed FP4 packing axis requires at least two dimensions";
+  const size_t old_axis = source_layout == TileLayout::col_major ? shape.size() - 2 : shape.size() - 1;
+  const size_t new_axis = target_layout == TileLayout::col_major ? shape.size() - 2 : shape.size() - 1;
+  auto convert = [&](std::vector<ExprPtr>& dims) {
+    if (dims.empty()) return;
+    auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+    auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    CHECK_SPAN(DimensionsEqual(MakeFloorMod(dims[new_axis], two, span), zero), span)
+        << op_name << ": packed FP4 layout conversion requires an even extent on the new packing axis";
+    if (auto extent = As<ConstInt>(dims[new_axis])) {
+      dims[new_axis] = std::make_shared<ConstInt>(extent->value_ / 2, extent->dtype(), span);
+    } else {
+      dims[new_axis] = MakeFloorDiv(dims[new_axis], two, span);
+    }
+    if (auto extent = As<ConstInt>(dims[old_axis])) {
+      CHECK_SPAN(extent->value_ <= std::numeric_limits<int64_t>::max() / 2, span)
+          << op_name << ": packed FP4 layout conversion extent overflows int64";
+      dims[old_axis] = std::make_shared<ConstInt>(extent->value_ * 2, extent->dtype(), span);
+    } else {
+      dims[old_axis] = MakeMul(dims[old_axis], two, span);
+    }
+  };
+  convert(shape);
+  convert(view.valid_shape);
 }
 
 }  // namespace
@@ -189,12 +224,6 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       target_memory_opt = AnyCast<MemorySpace>(v, "target_memory");
       break;
     }
-  }
-  if (tensor_type->dtype_.IsPackedFp4() && target_memory_opt.has_value()) {
-    CHECK_SPAN(!IsCubeMemorySpace(*target_memory_opt), args[0]->span_)
-        << "The operator " << op_name
-        << " cannot load FP4E2M1X2/FP4E1M2X2 into cube memory (Mat/Left/Right/Acc/Bias/scale); "
-           "load to Vec, cast to FP8, then move into cube";
   }
   const bool is_mx_load =
       tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
@@ -330,7 +359,12 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     // FP32 carrier. Routing both through one helper is what keeps them from
     // drifting again.
   } else {
-    tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(shapes_tuple->elements_);
+    // FP4 pairs are packed along the declared GM contiguous axis. A carrier
+    // width of one is still two logical values and must not trigger the
+    // ordinary column-vector heuristic. DN explicitly packs the row axis.
+    tile_view.blayout = tensor_type->dtype_.IsPackedFp4()
+                            ? (source_is_dn ? TileLayout::col_major : TileLayout::row_major)
+                            : tile_view_semantics::InferImplicitTileLayoutFromShape(shapes_tuple->elements_);
   }
 
   // Build tile shape from shapes tuple (always in source-tensor coordinates).
@@ -376,6 +410,9 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   CHECK(cache == static_cast<int>(CachePolicy::kDefault) || cache == static_cast<int>(CachePolicy::kBypass))
       << "The operator " << op_name
       << " cache kwarg must be CachePolicy.DEFAULT or CachePolicy.BYPASS, but got int " << cache;
+
+  RetargetPackedFp4Geometry(tensor_type->dtype_, source_is_dn ? TileLayout::col_major : TileLayout::row_major,
+                            tile_view.blayout, tile_shape, tile_view, args[0]->span_, op_name);
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
   // When target_memory is specified, write it into memory_space_ so the constructed
@@ -586,11 +623,6 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 
   // Extract MemorySpace
   MemorySpace space = GetKwarg<MemorySpace>(kwargs, "target_memory");
-  CHECK_SPAN(!tile_type->dtype_.IsPackedFp4() || !IsCubeMemorySpace(space), args[0]->span_)
-      << "The operator " << op_name
-      << " cannot move FP4E2M1X2/FP4E1M2X2 into cube memory (Mat/Left/Right/Acc/Bias/scale); "
-         "cast to FP8 on Vec first";
-
   const auto& input_shape = tile_type->shape_;
 
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
@@ -701,6 +733,41 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     }
   }
 
+  // Vec-to-Mat TMOV copies storage without converting its layout.
+  const bool source_is_vec =
+      !tile_type->memory_space_.has_value() || tile_type->memory_space_ == MemorySpace::Vec;
+  // The native ND-to-NZ kernel explicitly converts FP4 logical columns to
+  // packed-byte strides. The generic Vec copy and ND-to-ZN kernel do not:
+  // they address byte-sized FP4 carriers with logical element counts.
+  const bool is_packed_nd_to_nz =
+      source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box &&
+      tile_view.blayout == TileLayout::col_major && tile_view.slayout == TileLayout::row_major;
+  CHECK_SPAN(!out_dtype.IsPackedFp4() || !source_is_vec || space != MemorySpace::Vec || is_packed_nd_to_nz,
+             args[0]->span_)
+      << op_name
+      << ": native packed FP4 Vec-to-Vec moves support only ND-to-NZ layout conversion; "
+         "the other PTO-ISA move paths address byte carriers using logical FP4 extents. "
+         "Use a UINT8 carrier alias for a byte-preserving copy";
+  CHECK_SPAN(!out_dtype.IsPackedFp4() || !source_is_vec || space != MemorySpace::Mat ||
+                 (source_view.blayout == tile_view.blayout && source_view.slayout == tile_view.slayout &&
+                  source_view.fractal == tile_view.fractal),
+             args[0]->span_)
+      << op_name
+      << ": packed FP4 Vec-to-Mat moves require matching source and destination layouts; "
+         "the native move copies storage without ND-to-NZ conversion. Load directly to Mat or "
+         "convert the Vec layout before staging";
+  // PTOAS validates Mat-source moves against raw carrier dimensions. A
+  // packing-axis change would need different raw dimensions for the same
+  // logical tile, which that path cannot currently express safely.
+  CHECK_SPAN(!out_dtype.IsPackedFp4() || tile_type->GetMemorySpace() != MemorySpace::Mat ||
+                 source_view.blayout == tile_view.blayout,
+             args[0]->span_)
+      << op_name
+      << ": PTOAS v0.67 cannot change the packed FP4 axis of a Mat-source move; "
+         "load the Mat operand with the consumer's packing axis";
+  RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
+                            args[0]->span_, op_name);
+
   // Stamp memory_space_ for every destination so the view is canonicalized once,
   // against the space it is actually a view of (same contract as tile.load).
   return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view, space);
@@ -766,13 +833,6 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name
       << " does not support target_memory=LeftScale/RightScale; create the scale tile with tile.load "
          "to Mat followed by tile.move";
-  if (dtype.IsPackedFp4() && target_memory_opt.has_value()) {
-    CHECK_SPAN(!IsCubeMemorySpace(*target_memory_opt), args[0]->span_)
-        << "The operator " << op_name
-        << " cannot create an FP4E2M1X2/FP4E1M2X2 tile on cube memory (Mat/Left/Right/Acc/Bias/scale); "
-           "create on Vec, cast to FP8, then move into cube";
-  }
-
   TileView tile_view;
   // `transpose=true` requests the transposed Mat (ZN) fractal layout
   // (blayout=row_major, slayout=col_major) — the layout a matmul B-operand

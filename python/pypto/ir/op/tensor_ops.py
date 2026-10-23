@@ -457,9 +457,10 @@ def quant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
-    """Quantize a 2D GM tensor into MXFP8 data and an MX scale tensor.
+    """Quantize a 2D GM tensor into MXFP8/MXFP4 data and an MX scale tensor.
 
     Args:
         src: Source tensor expression. Must be a static-rank 2D FP16, BF16, or
@@ -468,6 +469,8 @@ def quant_mx(
             and an ``MX_A_ZZ`` scale tensor; ``0`` produces B-oriented data
             and an ``MX_B_NN`` scale tensor.
         dtype: Quantized data dtype. Defaults to ``FP8E4M3FN``.
+            ``FP4E2M1X2`` packs two values per output byte.
+        quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
@@ -481,9 +484,10 @@ def quant_mx(
             data dtype.
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call(
-        "tensor.quant_mx", [src], {"group_axis": group_axis, "dtype": dtype}, actual_span
-    )
+    kwargs: dict[str, Any] = {"group_axis": group_axis, "dtype": dtype}
+    if quant_scale_alg != "ocp":
+        kwargs["quant_scale_alg"] = quant_scale_alg
+    return _ir_core.create_op_call("tensor.quant_mx", [src], kwargs, actual_span)
 
 
 def matmul_mx(

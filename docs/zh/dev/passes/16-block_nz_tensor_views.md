@@ -339,10 +339,9 @@ NZ 实参到达 orchestration 入口时同样带着*逻辑* shape：调用方就
 reshape，元素与顺序都不变），这样由它派生的每个 `Tensor::view` 都是按同一个 rank
 去做 clamp 的。
 
-Sub-byte dtypes (`INT4`, `UINT4`, `HF4`, and `BOOL`) remain outside this
-lowering's supported scope. Packed FP4 x2 types have byte-sized carrier elements;
-their type definition does not enable NZ execution. The existing packed layout
-restrictions are documented in [FP4](../fp4.md).
+亚字节类型（`INT4`、`UINT4`、`HF4` 和 `BOOL`）仍不在此降低过程的支持范围内。
+打包 FP4 x2 类型的载体元素占用一个字节；仅定义该类型并不会启用 NZ 执行。
+现有打包布局限制见 [FP4](../fp4.md)。
 
 对齐类诊断是面向用户的（`CHECK_SPAN` → `ValueError`），位于 `BlockNzShape`。
 到了下游，*未分块*的 NZ view 属于 pass 顺序不变量（`INTERNAL_CHECK_SPAN`），由

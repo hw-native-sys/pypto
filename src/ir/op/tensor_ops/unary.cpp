@@ -31,7 +31,9 @@
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 namespace pypto {
@@ -245,13 +247,48 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
                        "to match the pl.cast / tensor_ops.cast default.";
 
   const Span& span = args[0]->span_;
-  auto shape = AdjustFp4E2M1x2CastLastDim(tensor_type->shape_, tensor_type->dtype_, target_dtype, span);
-  auto valid_shape =
-      AdjustFp4E2M1x2CastLastDim(GetValidShape(tensor_type), tensor_type->dtype_, target_dtype, span);
-  if (!IsFp4PackedCastGeometryChange(tensor_type->dtype_, target_dtype)) {
+  ValidatePackedFp4CastMode(target_dtype, GetRequiredKwarg<int>(kwargs, "mode", "cast"), span);
+  const bool packed_cast = tensor_type->dtype_.IsPackedFp4() || target_dtype.IsPackedFp4();
+  const auto source_view = tensor_type->tensor_view_.value_or(TensorView{});
+  const auto source_layout = source_view.layout;
+  CHECK_SPAN(!packed_cast || source_layout == TensorLayout::ND || source_layout == TensorLayout::DN, span)
+      << "cast involving packed FP4 requires ND or DN storage; boxed FP4 TCVT is unsupported";
+  const bool packed_dn_cast = packed_cast && source_layout == TensorLayout::DN;
+  if (packed_dn_cast) {
+    const bool static_2d =
+        tensor_type->shape_.size() == 2 &&
+        std::all_of(tensor_type->shape_.begin(), tensor_type->shape_.end(), [](const ExprPtr& extent) {
+          auto value = As<ConstInt>(extent);
+          return value && value->value_ > 0;
+        });
+    CHECK_SPAN(static_2d && tile_view_semantics::ShapeExprListsEquivalent(GetValidShape(tensor_type),
+                                                                          tensor_type->shape_),
+               span)
+        << "packed FP4 DN cast requires a full static 2D valid shape; partial or padded DN casts are "
+           "unsupported";
+    CHECK_SPAN((tensor_type->dtype_.IsPackedFp4() || tensor_type->dtype_ == DataType::BF16) &&
+                   (target_dtype.IsPackedFp4() || target_dtype == DataType::BF16),
+               span)
+        << "packed FP4 DN cast supports only BF16 and packed FP4 endpoints; use ND storage for wider cast "
+           "chains";
+    const auto& stride = source_view.stride;
+    const std::vector<ExprPtr> expected_stride = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                                                  tensor_type->shape_[0]};
+    CHECK_SPAN(stride.empty() || tile_view_semantics::ShapeExprListsEquivalent(stride, expected_stride), span)
+        << "packed FP4 DN cast requires canonical contiguous column-major strides";
+  }
+  auto adjust_shape = [&](std::vector<ExprPtr> dims) {
+    if (packed_dn_cast) std::swap(dims[0], dims[1]);
+    dims = AdjustPackedFp4CastLastDim(std::move(dims), tensor_type->dtype_, target_dtype, span);
+    if (packed_dn_cast) std::swap(dims[0], dims[1]);
+    return dims;
+  };
+  auto shape = adjust_shape(tensor_type->shape_);
+  auto valid_shape = adjust_shape(GetValidShape(tensor_type));
+  if (!packed_dn_cast && !IsFp4PackedCastGeometryChange(tensor_type->dtype_, target_dtype)) {
     return MakeFreshTensorType(std::move(shape), target_dtype, std::move(valid_shape));
   }
-  // Packed FP4E2M1X2 ↔ a wider type: last dim expands/contracts 2:1 and the
+  // Packed FP4 ↔ a wider type: last dim expands/contracts 2:1 and the
   // result is a fresh dense tensor whose strides are rebuilt from the destination
   // shape (not scaled from a possibly non-contiguous source pitch).
   TensorView view;
@@ -262,7 +299,10 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
     view.layout = tensor_type->tensor_view_->layout;
   }
   view.stride =
-      AdjustFp4E2M1x2CastStrides(std::move(src_stride), shape, tensor_type->dtype_, target_dtype, span);
+      AdjustPackedFp4CastStrides(std::move(src_stride), shape, tensor_type->dtype_, target_dtype, span);
+  if (packed_dn_cast) {
+    view.stride = {std::make_shared<ConstInt>(1, DataType::INDEX, span), shape[0]};
+  }
   return std::make_shared<TensorType>(std::move(shape), target_dtype, std::nullopt,
                                       std::make_optional(std::move(view)));
 }

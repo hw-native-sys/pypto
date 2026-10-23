@@ -34,6 +34,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -173,19 +174,67 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
       << " equals input dtype; same-dtype cast is not a valid operation. "
       << "Remove the cast or use a different target_type.";
 
-  // Packed FP4E2M1X2 ↔ a wider
-  // type is a 2:1 last-axis conversion (bf16[M,K] ↔ f4x2[M,K/2]): shape,
+  // Packed FP4 ↔ a wider type is a 2:1 last-axis conversion
+  // (bf16[M,K] ↔ f4x2[M,K/2]): shape,
   // valid_shape, and ND stride all follow that change.
   const Span& span = args[0]->span_;
-  auto shape = AdjustFp4E2M1x2CastLastDim(tile_type->shape_, tile_type->dtype_, target_dtype, span);
+  ValidatePackedFp4CastMode(target_dtype, GetRequiredKwarg<int>(kwargs, "mode", "cast"), span);
   const auto src_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+  const bool packed_cast = tile_type->dtype_.IsPackedFp4() || target_dtype.IsPackedFp4();
+  const bool packed_dn_cast = packed_cast && src_view.blayout == TileLayout::col_major;
+  CHECK_SPAN(!packed_cast || src_view.slayout == TileLayout::none_box, span)
+      << "cast involving packed FP4 requires none_box storage; native FP4 TCVT does not convert boxed "
+         "layouts";
+  if (packed_dn_cast) {
+    // The native DN path is correct only when static-valid descriptors select
+    // the contiguous conversion. Dynamic-valid or partial DN tiles misaddress
+    // the row-strided implementation; codegen supplies static-valid aliases.
+    const bool static_2d =
+        tile_type->shape_.size() == 2 &&
+        std::all_of(tile_type->shape_.begin(), tile_type->shape_.end(), [](const ExprPtr& extent) {
+          auto value = As<ConstInt>(extent);
+          return value && value->value_ > 0;
+        });
+    CHECK_SPAN(
+        static_2d && tile_view_semantics::ShapeExprListsEquivalent(src_view.valid_shape, tile_type->shape_),
+        span)
+        << "packed FP4 DN cast requires a full static 2D valid shape; partial or padded DN casts are "
+           "unsupported";
+    CHECK_SPAN((tile_type->dtype_.IsPackedFp4() || tile_type->dtype_ == DataType::BF16) &&
+                   (target_dtype.IsPackedFp4() || target_dtype == DataType::BF16),
+               span)
+        << "packed FP4 DN cast supports only BF16 and packed FP4 endpoints; use ND storage for wider cast "
+           "chains";
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+    const std::vector<ExprPtr> expected_stride = {one, tile_type->shape_[0]};
+    CHECK_SPAN(src_view.stride.empty() ||
+                   tile_view_semantics::ShapeExprListsEquivalent(src_view.stride, expected_stride),
+               span)
+        << "packed FP4 DN cast requires canonical contiguous column-major strides";
+    auto offset = As<ConstInt>(src_view.start_offset);
+    CHECK_SPAN(!src_view.start_offset || (offset && offset->value_ == 0), span)
+        << "packed FP4 DN cast requires zero tile start_offset";
+  }
+  auto adjust_shape = [&](std::vector<ExprPtr> dims) {
+    if (packed_dn_cast) std::swap(dims[0], dims[1]);
+    dims = AdjustPackedFp4CastLastDim(std::move(dims), tile_type->dtype_, target_dtype, span);
+    if (packed_dn_cast) std::swap(dims[0], dims[1]);
+    return dims;
+  };
+  auto shape = adjust_shape(tile_type->shape_);
   TileView tile_view;
-  tile_view.valid_shape =
-      AdjustFp4E2M1x2CastLastDim(GetValidShape(tile_type), tile_type->dtype_, target_dtype, span);
+  tile_view.valid_shape = adjust_shape(GetValidShape(tile_type));
   tile_view.stride =
-      AdjustFp4E2M1x2CastStrides(src_view.stride, shape, tile_type->dtype_, target_dtype, span);
+      AdjustPackedFp4CastStrides(src_view.stride, shape, tile_type->dtype_, target_dtype, span);
+  if (packed_dn_cast) {
+    tile_view.stride = {std::make_shared<ConstInt>(1, DataType::INDEX, span), shape[0]};
+  }
   InheritTileViewLayout(tile_view, tile_type);
-  return std::make_shared<TileType>(std::move(shape), target_dtype, std::nullopt, tile_view);
+  // Dense DN casts execute in Vec; recording that placement now keeps memory
+  // inference from canonicalizing the BF16 intermediate back to row-major.
+  const std::optional<MemorySpace> memory =
+      packed_dn_cast ? std::make_optional(MemorySpace::Vec) : std::nullopt;
+  return std::make_shared<TileType>(std::move(shape), target_dtype, std::nullopt, tile_view, memory);
 }
 
 // ============================================================================

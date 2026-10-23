@@ -141,24 +141,31 @@ ExprPtr LowerTileTQuantMxRule(const CallPtr& call, const std::vector<ExprPtr>& a
   INTERNAL_CHECK_SPAN(public_types && public_types->types_.size() == 2, span)
       << "Internal error: tile.tquant_mx must return exactly two tile types";
   auto public_dst_type = As<TileType>(public_types->types_[0]);
-  INTERNAL_CHECK_SPAN(public_dst_type && public_dst_type->dtype_ == DataType::FP8E4M3FN, span)
-      << "Internal error: tile.tquant_mx public destination must be FP8E4M3FN";
+  INTERNAL_CHECK_SPAN(public_dst_type && (public_dst_type->dtype_ == DataType::FP8E4M3FN ||
+                                          public_dst_type->dtype_ == DataType::FP4E2M1X2),
+                      span)
+      << "Internal error: tile.tquant_mx public destination has an unsupported MX dtype";
 
   // Value-returning TQUANT (gather_compare-style): Bind the TupleType result,
   // then project dst/exp so InitMemRef + ResolveTupleResultElements see real
   // TupleGetItem consumers. max/scaling remain write-only workspace inputs.
   DataType dtype = call->GetKwarg<DataType>("dtype", DataType::FP8E4M3FN);
-  auto raw_tuple = b.Bind("tq_raw",
-                          reg.Create("tile.tquant_mx_raw", {src, max_tile, scaling_tile},
-                                     {{"dtype", dtype}, {"group_axis", group_axis}}, span),
-                          span);
+  const std::string algorithm = call->GetKwarg<std::string>("quant_scale_alg", "ocp");
+  std::vector<std::pair<std::string, std::any>> quant_kwargs = {{"dtype", dtype}, {"group_axis", group_axis}};
+  if (algorithm != "ocp") quant_kwargs.emplace_back("quant_scale_alg", algorithm);
+  auto raw_tuple = b.Bind(
+      "tq_raw", reg.Create("tile.tquant_mx_raw", {src, max_tile, scaling_tile}, quant_kwargs, span), span);
   auto raw_dst = b.Bind("tq_dst", std::make_shared<TupleGetItemExpr>(raw_tuple, 0, span), span);
   auto raw_exp = b.Bind("tq_exp", std::make_shared<TupleGetItemExpr>(raw_tuple, 1, span), span);
 
   // MXFP8 uses PTOAS's raw INT8 destination and exposes a zero-copy FP8 alias.
-  ExprPtr dst_tile =
-      b.Bind("tq_quant",
-             reg.Create("tile.reinterpret_view", {raw_dst}, {{"dtype", DataType::FP8E4M3FN}}, span), span);
+  // MXFP4 already has the native packed destination type and carrier shape;
+  // no byte reinterpretation or second packing step is needed.
+  ExprPtr dst_tile = raw_dst;
+  if (dtype == DataType::FP8E4M3FN) {
+    dst_tile =
+        b.Bind("tq_quant", reg.Create("tile.reinterpret_view", {raw_dst}, {{"dtype", dtype}}, span), span);
+  }
 
   // Axis1 X-to-ZZ tmp: 64 + ceil(rows/16)*cols bytes. Axis0 (TMovDnTo2Zz): ISA
   // still requires a Vec tmp operand; use one 32-byte Vec pad unit.

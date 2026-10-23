@@ -481,7 +481,8 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
     if (!param || !args[actual_index]) continue;
     auto expected = std::dynamic_pointer_cast<const ShapedType>(param->GetType());
     auto actual = std::dynamic_pointer_cast<const ShapedType>(args[actual_index]->GetType());
-    if (!expected || !actual || !expected->dtype_.IsPackedFp4() || !actual->dtype_.IsPackedFp4() ||
+    // UINT8/INT8 storage still needs an explicit alias at a typed call boundary.
+    if (!expected || !actual || (!expected->dtype_.IsPackedFp4() && !actual->dtype_.IsPackedFp4()) ||
         expected->dtype_ == actual->dtype_) {
       continue;
     }
@@ -489,7 +490,8 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
     msg << "Dtype mismatch at argument " << actual_index << " of call to '" << callee->name_
         << "': parameter '" << param->name_hint_ << "' expects " << expected->dtype_.ToString()
         << " but the argument is " << actual->dtype_.ToString()
-        << "; packed FP4 formats must match; use an explicit numerical cast";
+        << "; packed FP4 formats must match; use an explicit numerical cast, "
+           "or reinterpret_view for supported byte aliases";
     RecordError(typecheck::ErrorType::DTYPE_MISMATCH, msg.str(), span);
   }
 }

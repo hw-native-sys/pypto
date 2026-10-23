@@ -1991,11 +1991,14 @@ def tquant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
     """MX block-32 dynamic quantization returning quantized data and scale."""
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
+    if quant_scale_alg != "ocp":
+        kwargs["quant_scale_alg"] = quant_scale_alg
     return _ir_core.create_op_call("tile.tquant_mx", [src], kwargs, actual_span)
 
 
@@ -2006,6 +2009,8 @@ def tquant_mx_raw(
     *,
     dtype: DataType = DataType.FP8E4M3FN,
     group_axis: int = 1,
+    quant_scale_alg: str = "ocp",
+    interleave: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Build the compiler-internal value-returning raw MX quantization Call.
@@ -2014,10 +2019,15 @@ def tquant_mx_raw(
     are write-only per-group workspaces (same role as ``gather_compare``'s tmp).
     """
     actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "group_axis": group_axis}
+    if quant_scale_alg != "ocp":
+        kwargs["quant_scale_alg"] = quant_scale_alg
+    if interleave:
+        kwargs["interleave"] = True
     return _ir_core.create_op_call(
         "tile.tquant_mx_raw",
         [src, max_scratch, scaling_scratch],
-        {"dtype": dtype, "group_axis": group_axis},
+        kwargs,
         actual_span,
     )
 
@@ -3152,7 +3162,7 @@ def reinterpret_view(
 ) -> Call:
     """Reinterpret a tile over the same bytes with a different dtype.
 
-    FP4E2M1X2 <-> UINT8/INT8 is a same-shape byte alias for dense
+    Either packed FP4 format <-> UINT8/INT8 is a same-shape byte alias for dense
     address-backed 2D row-major Vec tiles with static UB offsets. Reshape
     the byte view separately. A5 codegen requires PYPTO / DSA_RP planning.
 
