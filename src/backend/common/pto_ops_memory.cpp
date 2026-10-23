@@ -40,6 +40,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/nz_store_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -227,6 +228,16 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   auto tensor_type = AsTensorTypeLike(output_tensor->GetType());
   INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "tile.store output_tensor must have TensorType";
+
+  if (tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::NZ) {
+    // Later M/N tiling can split a store after NZ blocking. Recheck the final
+    // partition here so such a split cannot silently use the wrong FIXPIPE
+    // destination stride. Emission itself uses the ordinary rank-N path below.
+    const auto* handler = codegen.GetBackendHandler();
+    const auto valid =
+        ir::nz_store_utils::CheckSourceAndAttrs(op, handler && handler->SupportsAccToNzGmStore());
+    ir::nz_store_utils::CheckBlockedPartition(op, valid);
+  }
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tensor_view = codegen.GetOrCreateTensorView(output_tensor);

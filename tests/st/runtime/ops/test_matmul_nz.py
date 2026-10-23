@@ -7,8 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime tests for an ND x NZ matmul: an ND activation against a GM weight
-annotated ``pl.NZ``.
+"""Runtime tests for NZ matmul operand loads and FP32 Acc writeback.
 
 ``pl.NZ`` is an *assertion about the bytes already in GM* — that they are in
 pto-isa's NZ fractal order — not a request to convert anything. So the host has
@@ -19,6 +18,13 @@ description the backend needs.
 
 What this guards is that the weight's ``TLOAD`` is NZ->NZ rather than ND->NZ,
 so no online fractal conversion runs on the weight load.
+
+The writeback cases additionally exercise Acc->NZ on A2/A3. Their FP32 output
+uses C0=8, independently of the FP16 operand's C0=16. Nonzero column windows
+and independent SPMD batch panels leave sentinel regions around every write;
+the comparison checks the entire allocation's physical bytes, including those
+untouched guards. Each store covers the parent matrix's complete row axis,
+as required by the currently supported PTO-ISA NZ store stride contract.
 
 Four kernels cover the three coordinate axes the pass has to map, because a
 whole-tensor load leaves every offset zero and so exercises none of them:
@@ -48,6 +54,10 @@ M, K, N = 64, 256, 128
 N_TILE = N // 2
 K_TILE = K // 2
 LAYERS, LAYER = 3, 2
+STORE_M, STORE_K, STORE_N = 64, 64, 16
+STORE_COLUMNS = 64
+STORE_PANELS = 2
+STORE_GUARDED_PANELS = STORE_PANELS + 2
 
 # One 32-byte C0 line and a 16-row fractal are the two constants that define
 # pto-isa's NZ blocking; `c0` is the number of *elements* in that line, so it
@@ -231,6 +241,73 @@ def nz_matmul_layer_sliced(
     return out
 
 
+@pl.jit.incore
+def _nz_store_acc_kernel(
+    x: pl.Tensor[[STORE_M, STORE_K], pl.FP16],
+    w: pl.Tensor[[STORE_K, STORE_N], pl.FP16],
+    out: pl.Out[pl.Tensor[[STORE_M, STORE_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, STORE_N], pl.FP32, pl.NZ]:
+    xt = pl.load(x, [0, 0], [STORE_M, STORE_K], target_memory=pl.Mem.Mat)
+    wt = pl.load(w, [0, 0], [STORE_K, STORE_N], target_memory=pl.Mem.Mat)
+    return pl.store(pl.matmul(xt, wt), [0, 0], out)
+
+
+@pl.jit
+def nz_store_acc(
+    x: pl.Tensor[[STORE_M, STORE_K], pl.FP16],
+    w: pl.Tensor[[STORE_K, STORE_N], pl.FP16],
+    out: pl.Out[pl.Tensor[[STORE_M, STORE_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, STORE_N], pl.FP32, pl.NZ]:
+    return _nz_store_acc_kernel(x, w, out)
+
+
+@pl.jit.incore
+def _nz_store_column_panels_kernel(
+    x: pl.Tensor[[STORE_M, STORE_K], pl.FP16],
+    w: pl.Tensor[[STORE_K, 2 * STORE_N], pl.FP16],
+    out: pl.InOut[pl.Tensor[[STORE_M, STORE_COLUMNS], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, STORE_COLUMNS], pl.FP32, pl.NZ]:
+    """Write two disjoint windows, separated and surrounded by guard columns.
+
+    Eight is one FP32 C0 line: starting there catches a store that uses the
+    FP16 operand's C0=16 instead of the destination's declared byte format.
+    Each write is still 16 columns wide, as required by Acc NZ writeback.
+    """
+    xt = pl.load(x, [0, 0], [STORE_M, STORE_K], target_memory=pl.Mem.Mat)
+    lo = pl.load(w, [0, 0], [STORE_K, STORE_N], target_memory=pl.Mem.Mat)
+    hi = pl.load(w, [0, STORE_N], [STORE_K, STORE_N], target_memory=pl.Mem.Mat)
+    out = pl.store(pl.matmul(xt, lo), [0, 8], out)
+    return pl.store(pl.matmul(xt, hi), [0, 40], out)
+
+
+@pl.jit
+def nz_store_column_panels(
+    x: pl.Tensor[[STORE_M, STORE_K], pl.FP16],
+    w: pl.Tensor[[STORE_K, 2 * STORE_N], pl.FP16],
+    out: pl.InOut[pl.Tensor[[STORE_M, STORE_COLUMNS], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, STORE_COLUMNS], pl.FP32, pl.NZ]:
+    return _nz_store_column_panels_kernel(x, w, out)
+
+
+@pl.jit
+def nz_store_batch_panels(
+    x: pl.Tensor[[STORE_PANELS * STORE_M, STORE_K], pl.FP16],
+    w: pl.Tensor[[STORE_K, STORE_N], pl.FP16],
+    out: pl.InOut[pl.Tensor[[STORE_GUARDED_PANELS, STORE_M, STORE_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_GUARDED_PANELS, STORE_M, STORE_N], pl.FP32, pl.NZ]:
+    """Each SPMD lane owns a whole matrix; the leading/trailing panels guard it.
+
+    Distinct input rows give the lanes distinct results, so dropping the batch
+    offset cannot accidentally pass. A single store must carry a batch extent
+    of one rather than folding multiple matrices into Acc rows or columns.
+    """
+    for panel in pl.spmd(STORE_PANELS, name_hint="nz_store_panel"):
+        xt = pl.load(x, [panel * STORE_M, 0], [STORE_M, STORE_K], target_memory=pl.Mem.Mat)
+        wt = pl.load(w, [0, 0], [STORE_K, STORE_N], target_memory=pl.Mem.Mat)
+        pl.store(pl.matmul(xt, wt), [panel + 1, 0, 0], out)
+    return out
+
+
 # ============================================================================
 # Cases
 # ============================================================================
@@ -288,7 +365,88 @@ def _nz_cases():
         )
 
 
-def test_pack_places_each_element_at_its_blocked_offset():
+def _nz_store_inputs(rows: int, cols: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Nonzero integer products are exact FP32 values, including their sign."""
+    generator = torch.Generator().manual_seed(3036)
+    x = torch.randint(1, 5, (rows, STORE_K), generator=generator).to(torch.float16)
+    w = torch.randint(-4, 0, (STORE_K, cols), generator=generator).to(torch.float16)
+    return x, w
+
+
+def _nz_store_full_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    return _pack_nz(tensors["x"].float() @ tensors["w"].float())
+
+
+def _nz_store_columns_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    logical = _unpack_nz(tensors["out"]).clone()
+    product = tensors["x"].float() @ tensors["w"].float()
+    logical[:, 8:24] = product[:, :STORE_N]
+    logical[:, 40:56] = product[:, STORE_N:]
+    return _pack_nz(logical)
+
+
+def _nz_store_batches_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    packed = tensors["out"].clone()
+    for panel in range(STORE_PANELS):
+        x = tensors["x"][panel * STORE_M : (panel + 1) * STORE_M].float()
+        packed[panel + 1] = _pack_nz(x @ tensors["w"].float())
+    return packed
+
+
+def _assert_nz_store_bytes_equal(actual: dict[str, torch.Tensor], expected: dict[str, torch.Tensor]) -> None:
+    """Check every FP32 bit, including all untouched guard columns/panels."""
+    assert actual.keys() == expected.keys()
+    for name, got in actual.items():
+        reference = expected[name]
+        assert got.shape == reference.shape, name
+        assert got.dtype == reference.dtype == torch.float32, name
+        assert torch.equal(got.contiguous().view(torch.int32), reference.contiguous().view(torch.int32)), (
+            f"{name}: NZ payload or an untouched guard differs at the byte level"
+        )
+
+
+def _nz_store_cases():
+    x, w = _nz_store_inputs(STORE_M, STORE_N)
+    yield st.case(
+        nz_store_acc,
+        x,
+        w,
+        torch.zeros((STORE_M, STORE_N), dtype=torch.float32),
+        name="matmul_nz_store_acc_64x16",
+        golden=_nz_store_full_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+    x, w = _nz_store_inputs(STORE_M, 2 * STORE_N)
+    # Position-dependent sentinels catch shifts as well as unintended writes.
+    logical = torch.arange(STORE_M * STORE_COLUMNS, dtype=torch.float32).reshape(STORE_M, STORE_COLUMNS)
+    yield st.case(
+        nz_store_column_panels,
+        x,
+        w,
+        _pack_nz(logical + 1_000_000),
+        name="matmul_nz_store_nonzero_column_panels",
+        golden=_nz_store_columns_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+    x, w = _nz_store_inputs(STORE_PANELS * STORE_M, STORE_N)
+    logical = torch.arange(STORE_GUARDED_PANELS * STORE_M * STORE_N, dtype=torch.float32).reshape(
+        STORE_GUARDED_PANELS, STORE_M, STORE_N
+    )
+    yield st.case(
+        nz_store_batch_panels,
+        x,
+        w,
+        torch.stack([_pack_nz(panel) for panel in logical + 1_000_000]),
+        name="matmul_nz_store_spmd_guarded_batch_panels",
+        golden=_nz_store_batches_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+
+@pytest.mark.parametrize("dtype, expected_c0", [(torch.int16, 16), (torch.float32, 8)])
+def test_pack_places_each_element_at_its_blocked_offset(dtype, expected_c0):
     """The host packer is this test's own premise, so pin it independently.
 
     A roundtrip alone would accept any self-inverse permutation (a plain
@@ -297,11 +455,11 @@ def test_pack_places_each_element_at_its_blocked_offset():
     ``j*(R*c0) + i*(16*c0) + ii*c0 + jj``.
     """
     rows, cols = 64, 128
-    # int16 shares FP16's 2-byte width, hence its c0, and indexes every element
-    # of this shape exactly — which FP16 itself cannot do past 2048.
-    logical = torch.arange(rows * cols, dtype=torch.int16).reshape(rows, cols)
+    # int16 pins the FP16 operand format; FP32 pins the Acc store's C0=8.
+    # Both represent every element index exactly (unlike FP16 past 2048).
+    logical = torch.arange(rows * cols, dtype=dtype).reshape(rows, cols)
     c0 = _c0_elems(logical.dtype)
-    assert c0 == 16
+    assert c0 == expected_c0
 
     flat = _pack_nz(logical).reshape(-1)
     for r, c in ((0, 0), (0, c0), (1, 0), (17, 33), (rows - 1, cols - 1)):
@@ -316,6 +474,13 @@ def test_pack_places_each_element_at_its_blocked_offset():
 @st.cases(*_nz_cases())
 def test_matmul_nz(case_run):
     """An NZ weight is consumed from its fractal layout with no conversion."""
+    case_run.assert_passed()
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(*_nz_store_cases())
+def test_matmul_nz_store(case_run):
+    """FP32 Acc writes native C0=8 NZ bytes and preserves all guard regions."""
     case_run.assert_passed()
 
 

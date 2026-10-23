@@ -3,10 +3,11 @@
 ## 概述
 
 `BlockNzTensorViews` 把*逻辑* `pl.NZ` 张量改写成 pto-isa `Layout::NZ`
-GlobalTensor 所要求的*分块*形式，并同步改写读取它的 `tile.load`。
+GlobalTensor 所要求的*分块*形式，并同步改写读取它的 `tile.load` 或受支持的写入操作 `tile.store`。
 
-`pl.Tensor[[R, C], dtype, pl.NZ]`（或 `[[B, R, C], ...]`）标注是一条**关于 GM 中现有字节的断言**：
-这些字节已经按 PTO 原生 NZ 分形序存放。它**不是**"请帮我转换"的请求。DSL 层保持
+`pl.Tensor[[R, C], dtype, pl.NZ]`（或 `[[B, R, C], ...]`）标注是一条 **GM 字节序声明**：
+读取方要求字节已按 PTO 原生 NZ 分形序存放，受支持的 Acc 写回则产生这种字节序。
+添加标注不会转换现有字节。DSL 层保持
 逻辑 shape 和逻辑切片不变，本 pass 负责补上后端需要的物理描述。
 
 收益是 matmul B 操作数的 `TLOAD` 从 ND→NZ 变成 NZ→NZ，去掉了每次权重载入时的
@@ -62,7 +63,7 @@ batch 具化为 `1`。PTOAS 直接校验这个 arity——rank-4 的 view 会被
 三条约束确定了这个位置：
 
 - **在 `ConvertTensorToTileOps` / `LowerCompositeOps` 之后**——阶段 2 要改写的
-  `tile.load` 必须已经存在。
+  `tile.load` 和 `tile.store` 必须已经存在。
 - **在 `FlattenTileNdTo2D` 之后**——目标 tile 必须已经是逻辑 2-D 操作数。对仍是
   ND 秩的 tile 做分块，会产生类型标注与参数秩无法同时打印的 `tile.load`，破坏
   printer 往返。
@@ -94,7 +95,7 @@ w: pl.Tensor[[256, 512], pl.INT8, pl.NZ]
 w: pl.Tensor[[1, 16, 16, 16, 32], pl.INT8, pl.NZ]
 ```
 
-**阶段 2 —— 改写消费它的 `tile.load`。**
+**阶段 2 —— 改写受支持的 load 和 store。**
 
 ```text
 # before （从 [E, N, K] 权重中切出 w[1:2, 256:512, 512:1024]）
@@ -105,6 +106,66 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
     pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
 ```
+
+### Accumulator 写回
+
+在 A2/A3 上，`pl.store(acc, offsets, out)` 可以把有效区域完整、静态二维的 FP32
+Acc tile 直接写入 FP32 `pl.NZ` GM。逻辑 tile 和数学值保持不变；FP32 NZ 的
+`c0 = 8`，Acc tile 保留自己的片上布局。编译器不会插入额外的 GM 布局转换 kernel。
+
+对于 `64 x 16` tile 和逻辑 `[64, 16]` 目标，store 的 offsets 变为
+`[0, 0, 0, 0, 0]`，第四个 IR 参数变为显式分区 shape `[1, 2, 4, 16, 8]`。
+现有的 rank-N store emitter 使用该 shape，不能从 Acc tile 重新推导出 rank-2
+GM 分区。描述符表示为：
+
+```cpp
+using NzShape = pto::Shape<1, 2, 4, 16, 8>;
+using NzStride = pto::Stride<1024, 512, 128, 8, 1>;
+pto::GlobalTensor<float, NzShape, NzStride, pto::Layout::NZ> dst(
+    output_address, NzShape(), NzStride());
+pto::TSTORE(dst, accumulator);
+```
+
+store call 的返回值仍是目标 tensor 的别名。重建 call 时保留 kwargs 和 attrs，
+包括 `st_phase=Final`；GM 坐标的变化不能改变 tile 类型或 unit-flag 行为。
+
+写回的支持范围比读取更窄：
+
+| 条件 | Store 行为 |
+| ---- | ---------- |
+| 后端与 dtype | 仅 A2/A3、FP32 Acc 写 FP32 GM |
+| Tile shape 与有效区域 | 静态、正数、二维、全部有效；行列均为 16 的倍数 |
+| 硬件 extent 限制 | 行数最多 65535、列数最多 4095；结合对齐后实际最大为 65520 和 4080 |
+| 目标行窗口 | 覆盖父 tensor 的整个行轴，行偏移为 0 |
+| 前导轴 | 每条 store 只写一个 panel；允许非零 batch 偏移 |
+| 列偏移 | 非负，且可证明是 `c0 = 8` 的倍数 |
+| 对齐或符号未知 | 拒绝；复用现有 offset 事实，不假设坐标有效 |
+| Atomic、`pre_quant`、`pre_relu` 或 dtype 转换 | 拒绝 |
+| A5、Vec/Mat 源、动态或部分有效 tile | 拒绝 |
+
+整行限制用于防护 A2/A3 pto-isa 的 `TStoreAccNz2nz` 实现限制。它从分区高度计算
+目标列块的间距，而没有使用父 tensor 的 stride：
+
+```cpp
+uint32_t dstStride = gShape2 * gShape3 * c0Size >> SHIFT_BLOCK_BYTE;
+// gStride1 is not used by this path.
+```
+
+例如，把 `64 x 16` 写入 `[128, 32]` 父 tensor，列块之间应相隔 1024 个 FP32
+元素，该实现却使用 512。仅保证行偏移对齐，不能让这次写回正确。在底层 stride
+处理支持行子窗口之前，这类写回会被拒绝，避免静默误写。这里没有单列块例外：
+即使 FP32 的 C0=8，Acc store 的有效列数仍必须是 16 的倍数。
+
+独立 panel 应沿前导 batch 轴堆叠（`[PANELS, R, C]`），不要沿行轴堆叠
+（`[PANELS * R, C]`），并且每次只写一个 panel。分块分区的 batch extent 为 1，
+batch offset 定位目标 panel。A2/A3 的 Acc store 会把更大的 batch extent
+并入列数，而不会按父 tensor 的 batch stride 遍历独立 panel。
+
+这里补齐的是受支持的硬件能力，不保证性能收益。[issue #3036] 报告的组合 CSA
+候选在实测工作负载中发生回退；该实验同时改变了数据流和 AIV 读取方式，因此
+不能由此单独推断 NZ store 本身的成本。
+
+[issue #3036]: https://github.com/hw-native-sys/pypto/issues/3036
 
 ### 符号形式的末尾 offset
 
@@ -212,7 +273,7 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 
 ## 范围与拒绝项
 
-里程碑 1 的范围是刻意收窄的。范围之外一律报错并指明修复方式——NZ 张量绝不能被
+NZ load 与 Acc store 的范围都有明确边界。范围之外一律报错并指明修复方式——NZ 张量绝不能被
 静默地错误寻址。
 
 | 条件 | 结果 |
@@ -229,15 +290,16 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | 逻辑 rank > 3 | 分块时把所有前导轴折叠进 batch 槽位（见下） |
 | 逻辑 rank < 2 | 拒绝——末尾两维是分形平面 |
 | rank > 3 且前导维为动态 | 拒绝——折叠需要静态 extent 相乘 |
-| `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
+| `tile.load` 的 `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tensor.slice` 只收窄前导轴 | 与其后的 load 一样分块（见下） |
 | `tensor.slice` 在末尾 `[R, C]` 平面上开窗 | 拒绝——该窗口不连续 |
 | `tensor.reshape` 把整块张量展平成 `[N]` | 原样保留——见[展平 NZ 张量](#展平-nz-张量) |
 | `tensor.reshape` 成其它形状 | 拒绝——它重新解释了分块形式无法承载的坐标 |
-| `tile.load` / `tensor.slice` / 整块展平之外的消费者 | 拒绝——此处 NZ 是只读的 |
-| 显式 stride 或部分 `valid_shape` | 拒绝 |
-| 动态 `valid_shape[-2]` 可证明是 16 的倍数（不规则的最后一个 tile） | 分块——行 fractal 数变为 `FloorDiv(rows, 16)` |
-| 动态 `valid_shape[-2]` 可能止于 fractal 内部 | 拒绝——不完整的 fractal 没有分块形式 |
+| 写入 NZ 目标的 `tile.store` | 在 [Accumulator 写回](#accumulator-写回) 的范围内支持 |
+| 受支持的 load、store、slice 或整块展平之外的消费者 | 拒绝——不支持的 NZ 坐标不能原样透传 |
+| 显式 tensor stride 或部分 tensor `valid_shape` | 拒绝 |
+| `tile.load` 的动态 `valid_shape[-2]` 可证明是 16 的倍数（不规则的最后一个 tile） | 分块——行 fractal 数变为 `FloorDiv(rows, 16)` |
+| `tile.load` 的动态 `valid_shape[-2]` 可能止于 fractal 内部 | 拒绝——不完整的 fractal 没有分块形式 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
 | 多列块 load 的 GM 行间隔超过 65535 个 block | 拒绝——**临时**，见 [GM 行间隔：一道临时防护](#gm-行间隔一道临时防护) |
