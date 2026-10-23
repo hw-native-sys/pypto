@@ -71,6 +71,7 @@
  */
 
 #include <any>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -78,6 +79,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -96,6 +99,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -256,9 +260,14 @@ struct BuiltinKernelSpec {
         spec.param_names[i], CanonicalParamType(spec.param_distributed[i], call->args_[i], call->span_),
         call->span_));
   }
+  // The builtin kernel addresses every operand as dense row-major from its view
+  // origin. The type deducer rejects statically provable violations; this attr
+  // asks orchestration codegen for the runtime half (RFC #2521 O1 criterion 7):
+  // a contiguity check on each operand before the submit.
   std::vector<std::pair<std::string, std::any>> attrs = {
       {kAttrBuiltinTemplateDir, spec.template_dir},
       {kAttrBuiltinTemplateVars, spec.template_vars},
+      {kAttrRequireContiguousOperands, true},
   };
   // Window-as-result: the kernel returns `target`, matching the public op's
   // result so the call site stays a plain rebind.
@@ -275,9 +284,81 @@ struct BuiltinKernelSpec {
                                     std::nullopt, std::nullopt, std::move(attrs));
 }
 
+/// Every value that can flow into each Var of an orchestration body: AssignStmt
+/// values, a loop-carried value's initial and yielded values, and the yielded
+/// values bound to If/For/While return vars. Lets an operand be traced back to
+/// the definitions that fix its runtime layout. One walk; lookups are hash-map hits.
+class ValueSourceIndex : public IRVisitor {
+ public:
+  std::unordered_map<const Var*, std::vector<ExprPtr>> sources;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    sources[op->var_.get()].push_back(op->value_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    AddYields(op->return_vars_, op->then_body_);
+    if (op->else_body_.has_value()) AddYields(op->return_vars_, *op->else_body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    AddLoop(op->iter_args_, op->return_vars_, op->body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    AddLoop(op->iter_args_, op->return_vars_, op->body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  template <typename VarPtrT>
+  void AddYields(const std::vector<VarPtrT>& vars, const StmtPtr& body) {
+    if (vars.empty()) return;
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    INTERNAL_CHECK(yield && yield->value_.size() == vars.size())
+        << "Internal error: a control-flow body binding " << vars.size()
+        << " values must end in a matching yield";
+    for (size_t i = 0; i < vars.size(); ++i) sources[vars[i].get()].push_back(yield->value_[i]);
+  }
+
+  void AddLoop(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars,
+               const StmtPtr& body) {
+    for (const auto& iter_arg : iter_args) sources[iter_arg.get()].push_back(iter_arg->initValue_);
+    AddYields(iter_args, body);
+    AddYields(return_vars, body);
+  }
+};
+
+/// True when `slice` keeps a row-major parent row-major: static shapes, and every
+/// dimension after the first taken whole from offset 0. Only the leading
+/// dimension may be narrowed, which moves the view origin but keeps the packed
+/// strides. A `drop_dims` slice is not proven.
+[[nodiscard]] bool SliceKeepsRowMajor(const CallPtr& slice) {
+  if (slice->args_.size() < 3 || slice->args_.size() > 4) return false;
+  auto parent = AsTensorTypeLike(slice->args_[0]->GetType());
+  auto shape = As<MakeTuple>(slice->args_[1]);
+  auto offset = As<MakeTuple>(slice->args_[2]);
+  if (!parent || !shape || !offset || shape->elements_.size() != parent->shape_.size() ||
+      offset->elements_.size() != parent->shape_.size()) {
+    return false;
+  }
+  for (size_t i = 1; i < parent->shape_.size(); ++i) {
+    auto parent_dim = As<ConstInt>(parent->shape_[i]);
+    auto dim = As<ConstInt>(shape->elements_[i]);
+    auto off = As<ConstInt>(offset->elements_[i]);
+    if (!parent_dim || !dim || !off || dim->value_ != parent_dim->value_ || off->value_ != 0) return false;
+  }
+  return true;
+}
+
 class LowerL2TensorCollectivesMutator : public IRMutator {
  public:
-  explicit LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels) : kernels_(kernels) {}
+  LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels,
+                                  const ValueSourceIndex* sources)
+      : kernels_(kernels), sources_(sources) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -355,6 +436,12 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     CHECK_SPAN(requested_blocks >= 1 && requested_blocks <= std::numeric_limits<int32_t>::max(), call->span_)
         << "CHIP pld.tensor.all_to_all_v: core_num must be in [1, " << std::numeric_limits<int32_t>::max()
         << "], got " << requested_blocks;
+
+    static constexpr std::array<const char*, 5> kOperandRoles = {"input", "target", "signal", "send_counts",
+                                                                 "recv_counts"};
+    for (size_t i = 0; i < kOperandRoles.size(); ++i) {
+      CheckOperandIsRowMajor(call->args_[i], kOperandRoles[i], call->span_);
+    }
 
     auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
     INTERNAL_CHECK_SPAN(target_type, call->span_)
@@ -464,7 +551,57 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
                                   call->args_[1]->GetType(), call->span_);
   }
 
+  /// Require an operand to be row-major by construction, decided at compile time.
+  ///
+  /// The kernel reads every operand as dense row-major from its view origin.
+  /// Orchestration codegen also checks `is_contiguous` before the submit, but
+  /// that verdict is per rank and cannot be agreed across ranks: a rank that
+  /// rejects skips only its own launch, and its peers block in the kernel's
+  /// ExchangeBarrier (a hang, not a rejection). A view built in this body can
+  /// differ per rank, e.g. a `[R, C]` slice of a `[R, width]` tensor with a
+  /// per-rank runtime `width` is packed only where `width == C`. Deciding here
+  /// makes the verdict identical on every rank.
+  ///
+  /// The operand is traced through every value that can reach it. Params,
+  /// fresh `tensor.create` allocations and kernel results are row-major:
+  /// host-supplied tensors are packed at argument packing, and windows are
+  /// allocated row-major. `tensor.reshape` and an ND `tensor.view` keep their
+  /// input's layout, so the trace continues through them (a DN view is already
+  /// rejected by the type deducer). A `tensor.slice` is accepted only when
+  /// SliceKeepsRowMajor proves it; `tensor.transpose` and an unproven slice are
+  /// rejected.
+  void CheckOperandIsRowMajor(const ExprPtr& operand, const char* role, const Span& span) const {
+    std::vector<ExprPtr> pending{operand};
+    std::unordered_set<const Expr*> seen;
+    while (!pending.empty()) {
+      ExprPtr value = pending.back();
+      pending.pop_back();
+      if (!seen.insert(value.get()).second) continue;
+      if (auto var = AsVarLike(value)) {
+        auto it = sources_->sources.find(var.get());
+        if (it != sources_->sources.end()) {
+          pending.insert(pending.end(), it->second.begin(), it->second.end());
+        }
+        continue;
+      }
+      auto call = As<Call>(value);
+      if (!call) continue;
+      if (IsOp(call->op_, "tensor.reshape") || IsOp(call->op_, "tensor.view") ||
+          (IsOp(call->op_, "tensor.slice") && SliceKeepsRowMajor(call))) {
+        pending.push_back(call->args_[0]);
+        continue;
+      }
+      CHECK_SPAN(!IsOp(call->op_, "tensor.slice") && !IsOp(call->op_, "tensor.transpose"), span)
+          << "CHIP pld.tensor.all_to_all_v: " << role << " is derived from " << call->op_->name_
+          << ", which is not provably row-major. This rail's kernel reads every operand as dense row-major, "
+             "and a runtime contiguity verdict is per rank: a one-sided rejection would hang the peers in "
+             "the kernel's barrier. Pass a window-bound or freshly created operand, or a slice that narrows "
+             "only the leading dimension of a statically shaped tensor";
+    }
+  }
+
   std::map<std::string, FunctionPtr>* kernels_;
+  const ValueSourceIndex* sources_;
 };
 
 /// Guard the pass' own postcondition: no managed collective survives in an
@@ -526,7 +663,9 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
       new_functions[gvar] = func;
       continue;
     }
-    LowerL2TensorCollectivesMutator mutator(&kernels);
+    ValueSourceIndex sources;
+    sources.VisitStmt(func->body_);
+    LowerL2TensorCollectivesMutator mutator(&kernels, &sources);
     auto new_func = mutator.VisitFunction(func);
     new_functions[gvar] = new_func;
     if (new_func.get() != func.get()) modified = true;

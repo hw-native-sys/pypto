@@ -303,5 +303,53 @@ def test_host_rail_still_emits_its_builtin_chip_dispatch(tmp_path):
     assert _variant_of("fp32") in next_levels, next_levels
 
 
+_OPERANDS = ("input", "target", "signal", "send_counts", "recv_counts")
+
+
+@pytest.mark.parametrize("core_num, signal_stride", [(1, 1), (2, 2)])
+def test_chip_rail_checks_operand_contiguity_before_the_submit(tmp_path, core_num, signal_stride):
+    """RFC #2521 O1 criterion 7: a strided runtime operand never reaches the kernel.
+
+    The builtin kernel addresses every operand as dense row-major from its view
+    origin, and the type deducer can only reject views it can see at compile
+    time. The orchestration therefore checks each operand's runtime
+    ``is_contiguous`` flag ahead of the collective's submit, latching
+    ``SIMPLER_ERROR_INVALID_ARGS`` (which also turns the submit into a no-op).
+    The checks must sit *before* the submit, cover all five operands, and be
+    chained so only the first violation is reported; the launch spec must not
+    change where they go.
+    """
+    chip = _compile(
+        _build_chip_rail_program(core_num=core_num, signal_stride=signal_stride),
+        tmp_path,
+        f"chip_contig_{core_num}",
+    )
+    source = _chip_orchestration_sources(chip.output_dir)
+
+    checks = re.findall(r"(if|\} else if) \(!(\w+)\.is_contiguous\) \{", source)
+    assert [keyword for keyword, _ in checks] == ["if"] + ["} else if"] * 4, source
+    for operand in _OPERANDS:
+        assert (
+            f'rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, "__builtin_all_to_all_v__fp32: {operand} '
+            'must be a contiguous row-major view");'
+        ) in source, source
+    assert source.index(".is_contiguous") < source.index("rt_submit_aiv_task"), source
+
+
+def test_ordinary_chip_tasks_get_no_contiguity_check(tmp_path):
+    """Only the builtin kernel opts in; an ordinary InCore task is emitted as before.
+
+    The HOST rail's ``touch_orch`` dispatches a plain DSL kernel over the same
+    five windows. Its orchestration must carry no operand checks — the attribute,
+    not the operand types, is what decides.
+    """
+    host = _compile(_build_host_rail_program(), tmp_path, "host_no_contig")
+    sources = sorted((host.output_dir / "next_levels" / "touch_orch").rglob("*.cpp"))
+    orchestration = [s for s in sources if "orchestration" in s.parts]
+    assert orchestration, f"expected touch_orch's orchestration source under {host.output_dir}"
+    for path in orchestration:
+        assert "is_contiguous" not in path.read_text(), path
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

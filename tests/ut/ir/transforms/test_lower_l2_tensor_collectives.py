@@ -23,6 +23,7 @@ public collective.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
 from pypto.pypto_core import ir, passes
 
 SIZE = 64
@@ -155,6 +156,20 @@ def test_synthesized_kernel_carries_builtin_template_attrs():
     # them (asserted end-to-end in the ST).
     template_vars = dict(item.split("=", 1) for item in attrs["builtin_template_vars"].split(","))
     assert template_vars == {"dtype_cpp": "float"}
+
+
+def test_synthesized_kernel_requires_contiguous_operands():
+    """The kernel opts in to the runtime contiguity check (RFC #2521 O1 criterion 7).
+
+    The builtin kernel reads every operand as dense row-major; this attribute is
+    what makes orchestration codegen check each operand's runtime
+    ``is_contiguous`` flag before the submit.
+    """
+    result = passes.lower_l2_tensor_collectives()(_build_program())
+
+    kernel = _get_func(result, _KERNEL_NAME)
+    assert kernel is not None
+    assert dict(kernel.attrs)[REQUIRE_CONTIGUOUS_OPERANDS_ATTR] is True
 
 
 def test_synthesized_kernel_returns_its_target_parameter():
@@ -326,6 +341,172 @@ def test_plain_tensor_send_counts_is_rejected():
 
     with pytest.raises(ValueError, match="send_counts must be a DistributedTensor"):
         passes.lower_l2_tensor_collectives()(PlainCounts)
+
+
+_NOT_ROW_MAJOR = "input is derived from tensor.{op}, which is not provably row-major"
+
+
+def test_slice_of_a_runtime_shaped_tensor_is_rejected():
+    """The per-rank divergence case: `[R, C]` of `[R, width]` is packed only where
+    `width == C`, and `width` is per-rank runtime data. A runtime verdict could differ
+    across ranks and hang the peers in the kernel's barrier, so it is rejected here."""
+
+    @pl.program
+    class DynamicSlice:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            width: pl.Scalar[pl.INDEX],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([TOTAL, width], dtype=pl.FP32)
+            x = pl.slice(tmp, [TOTAL, SIZE], [0, 0])
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(op="slice")):
+        passes.lower_l2_tensor_collectives()(DynamicSlice)
+
+
+def test_static_strided_slice_is_rejected():
+    """`[8, 64]` of `[8, 128]` keeps the parent's 128-element row stride. The type
+    deducer cannot see it (a slice's type carries no strides), so it is caught here."""
+
+    @pl.program
+    class StridedSlice:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([TOTAL, 2 * SIZE], dtype=pl.FP32)
+            x = pl.slice(tmp, [TOTAL, SIZE], [0, 0])
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(op="slice")):
+        passes.lower_l2_tensor_collectives()(StridedSlice)
+
+
+def test_leading_dimension_slice_is_accepted():
+    """Narrowing only the leading dimension of a static tensor moves the view origin
+    but keeps packed strides, so it is provably row-major and lowers."""
+
+    @pl.program
+    class RowSlice:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([2 * TOTAL, SIZE], dtype=pl.FP32)
+            x = pl.slice(tmp, [TOTAL, SIZE], [TOTAL, 0])
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    result = passes.lower_l2_tensor_collectives()(RowSlice)
+    pipeline = _get_func(result, "chip_pipeline")
+    assert pipeline is not None
+    assert _KERNEL_NAME in _callee_names(pipeline)
+
+
+def test_transpose_behind_a_reshape_is_rejected():
+    """A direct transpose has a non-ND type the deducer rejects; reshaping it yields a
+    plain ND type with no stride information, so only the trace can catch it."""
+
+    @pl.program
+    class Transposed:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([SIZE, TOTAL], dtype=pl.FP32)
+            t = pl.transpose(tmp, 0, 1)
+            x = pl.reshape(t, [TOTAL, SIZE])
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(op="transpose")):
+        passes.lower_l2_tensor_collectives()(Transposed)
+
+
+def test_strided_slice_behind_a_view_is_rejected():
+    """An ND `tensor.view` keeps its input's layout, so the trace looks through it."""
+
+    @pl.program
+    class ViewedSlice:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([TOTAL, 2 * SIZE], dtype=pl.FP32)
+            s = pl.slice(tmp, [TOTAL, SIZE], [0, 0])
+            x = pl.tensor.view(s, shape=[TOTAL, SIZE])
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(op="slice")):
+        passes.lower_l2_tensor_collectives()(ViewedSlice)
+
+
+def test_strided_slice_yielded_by_an_if_is_rejected():
+    """An `if` result is traced through the value each branch yields."""
+
+    @pl.program
+    class BranchSlice:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            flag: pl.Scalar[pl.INDEX],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([TOTAL, 2 * SIZE], dtype=pl.FP32)
+            if flag > 0:
+                x = pl.yield_(pl.slice(tmp, [TOTAL, SIZE], [0, 0]))
+            else:
+                x = pl.yield_(pl.create_tensor([TOTAL, SIZE], dtype=pl.FP32))
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(op="slice")):
+        passes.lower_l2_tensor_collectives()(BranchSlice)
+
+
+def test_strided_slice_carried_by_a_loop_is_rejected():
+    """A loop-carried operand is traced through its initial and yielded values."""
+
+    @pl.program
+    class CarriedSlice:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            tmp = pl.create_tensor([TOTAL, 2 * SIZE], dtype=pl.FP32)
+            s = pl.slice(tmp, [TOTAL, SIZE], [0, 0])
+            for _, (c,) in pl.range(2, init_values=(s,)):
+                x = pl.yield_(c)
+            return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(op="slice")):
+        passes.lower_l2_tensor_collectives()(CarriedSlice)
 
 
 def test_collective_in_a_graph_body_is_lowered():

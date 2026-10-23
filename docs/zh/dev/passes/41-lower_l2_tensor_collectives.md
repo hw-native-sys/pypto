@@ -67,7 +67,7 @@ data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
 | 参数 | `input, target, signal, send_counts, recv_counts` —— 规范化类型，**不是**调用点的类型：`input` / `send_counts` 声明为普通 `Tensor`，其余三个为 `DistributedTensor` |
 | 方向 | `In, InOut, InOut, In, InOut` |
 | 函数体 | `return target` —— 单条 `ReturnStmt`，永不参与代码生成 |
-| Attrs | `builtin_template_dir`、`builtin_template_vars` |
+| Attrs | `builtin_template_dir`、`builtin_template_vars`、`require_contiguous_operands` |
 
 每个 variant 只合成一个函数，被该 variant 的所有调用点共享。
 
@@ -165,7 +165,7 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 - **运行期 `core_num`**。仅接受编译期 `core_num`。运行期值需要在生成的 orchestration 中计算 `B`，并做
   运行期 `S >= B` 检查，而 orchestration 目前没有抛出该致命错误的途径。HOST 通路因其 entry 运行在
   host 上而接受运行期值。
-- **操作数校验是静态的，且别名只覆盖了一部分**。`pld.tensor.all_to_all_v` 的类型
+- **除连续性外，操作数校验是静态的，且别名只覆盖了一部分**。`pld.tensor.all_to_all_v` 的类型
   推导只拒绝仅凭操作数类型即可证明的违规：非 ND 布局、与紧凑步长不符的 stride
   向量、比 shape 更窄的 `valid_shape`，以及 `input` 与 `target` 是**同一个表达式**。
   它**不会**拒绝同一块 allocation 上的两个不同 `pld.window()` 视图 —— 类型推导在
@@ -175,9 +175,19 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   `LowerHostTensorCollectives` 能在同一个 `host_orch` 函数体内把每个操作数溯源回
   其 `WindowBuffer`，并对五个操作数运行 `CheckPairwiseDistinctWindows`。本通路
   —— 与 InCore composite 通路一样 —— 看到的操作数是外层 pipeline 的参数，没有这样
-  的溯源能力，因此在这里「窗口两两互不相同」是调用方的义务。此外，在提交 AIV task
-  前也没有运行期复检 —— 需要复检的项（signal stride `>= B`）改由 lowering 阶段静
-  态校验：`S` 与折叠出的 `B` 都是编译期常量。
+  的溯源能力，因此在这里「窗口两两互不相同」是调用方的义务。**连续性在本 pass 中于编译期判定，
+  并保留运行期兜底**。类型推导看不到切片的步长（切片类型不携带 stride），而运行期判定是按
+  rank 独立做出的：若只抑制某一个 rank 的提交而其对端仍然启动，对端会阻塞在 kernel 的
+  `ExchangeBarrier` 上（表现为挂死，而非拒绝）。因此本 pass 会沿着所有可能到达操作数的值
+  （`reshape`、ND `view`、循环携带值以及 `if`/`for`/`while` 的结果）追溯每个操作数，并拒绝
+  由 `tensor.transpose`、或由无法证明为行主序的 `tensor.slice` 派生的操作数。仅收窄静态形状
+  tensor 首维的切片会被接受；参数、窗口、`tensor.create` 与 kernel 结果均为行主序。合成的
+  kernel 仍带有 `require_contiguous_operands`，orchestration codegen 会在提交之前为每个
+  tensor 操作数生成一条 `is_contiguous` 检查，并在第一个违规处锁存
+  `SIMPLER_ERROR_INVALID_ARGS`；经过编译期检查后，它只会看到由 host 提供、并已在参数打包时
+  保证为行主序的操作数。另一项需要运行期形式的检查
+  （signal stride `>= B`）仍由 lowering 阶段静态校验：`S` 与折叠出的 `B` 都是编译
+  期常量。
 - **rank 数**。kernel 读取 `CommContext::rankNum`，因此当显式设备子集小于 context
   的 rank 数时，其行为与传入 comm domain `domain_size` 的 HOST 通路不同。
 - **「同属一个通信域」是未经检查的前置条件**。kernel 通过单个 `CommContext`
