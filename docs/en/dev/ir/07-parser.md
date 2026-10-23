@@ -8,6 +8,35 @@ The IR parser converts Python DSL code to PyPTO IR using decorators (`@pl.functi
 
 See [IR Builder](06-builder.md) for manual IR construction and [Python IR Syntax](../language/00-python_syntax.md) for full syntax.
 
+## Implementation Structure
+
+`ASTParser` remains the entry point for function parsing, statement/expression dispatch,
+and variable binding. It composes specialized parsers rather than inheriting parsing mixins.
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `control_flow_parser.py` | Loops, conditionals, yields, break and continue |
+| `scope_parser.py` | Scope directives, SPMD and split-AIV expansion through shared scope emission |
+| `call_parser.py` | Kernel, external and inline calls; submit result binding |
+| `op_parser.py` | Operator calls, distributed operations and buffer metadata |
+| `subscript_parser.py` | Tensor/tile indexing, slicing and subscript assignment |
+| `attr_parser.py` | Function and call attribute parsing |
+| `dispatch_semantics.py` | TaskId producers, dependencies and dispatch predicates |
+| `source_comments.py` | Comment attachment and block-boundary handling |
+| `region_context.py` | Active scope, split and manual-region state |
+| `parser_state.py` | Shared services, recursive callbacks and state contracts |
+| `syntax_helpers.py`, `type_semantics.py` | Shared syntax recognition and type/shape helpers |
+
+Components receive explicit dependencies and a small set of recursive callbacks; they do
+not retain the entire `ASTParser`. Shared services keep one builder, scope manager,
+evaluator, type resolver and source tracker per parser. In particular, inline expansion
+changes the existing evaluator and source tracker temporarily, so indexing, operators and
+nested statements all observe the same closure and source coordinates.
+
+Function metadata, control-flow state and inline state have separate owners. Program-wide
+buffer metadata retains the identity supplied by the decorator. TaskId producer and binding
+generation tracking share one `DispatchSemantics` instance across calls and scopes.
+
 ## Usage
 
 ### Basic Function
