@@ -1024,6 +1024,12 @@ def _execute_dfx_passes(
         dfx: The DFX toggles the caller requested.
         platform: Target execution platform (used only to detect ``*sim``).
     """
+    from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+    # The graph-capture child has independent mode state. Claim in the parent
+    # before either pass can execute, so kernel ownership cannot be bypassed
+    # by capture or acquired concurrently while the child is running.
+    claim_program_mode()
     if not dfx.enable_chip_swimlane or platform.endswith("sim"):
         run_pass(dfx)
         return

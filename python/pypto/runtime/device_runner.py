@@ -870,6 +870,9 @@ def _execute_on_device(  # pyright: ignore[reportUnusedFunction]  # noqa: PLR091
             return
         # The one-shot path opens its own device context, so it takes the same
         # lock ChipWorker.init() does -- see _device_init_lock's rationale.
+        from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+        claim_program_mode()
         with _device_init_lock:
             worker = Worker(
                 level=level,

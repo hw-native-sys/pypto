@@ -1613,6 +1613,12 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
             )
         host_args.append(arg)
 
+    from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+    # Reject a kernel-mode process before setup can change caller storage or
+    # remove diagnostics from an earlier run.
+    claim_program_mode()
+
     dc = compiled._distributed_config
     output_dir = compiled.output_dir
 
@@ -2054,6 +2060,9 @@ class DistributedWorker(Worker):
                 prewarm_cc = _make_call_config(
                     primary._distributed_config, config, dfx_base=_run_directory(primary) / "dfx_outputs"
                 )
+            from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+            claim_program_mode()
             self._w.init(prewarm_config=prewarm_cc)
 
             # ``Worker.init()`` eagerly starts the chip/sub-worker hierarchy, so

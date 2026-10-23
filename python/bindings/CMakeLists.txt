@@ -88,3 +88,8 @@ endif()
 
 # Generate dSYM on macOS for libbacktrace debug symbols
 pypto_add_apple_dsymutil(${LIBRARY_NAME})
+
+option(PYPTO_BUILD_TORCH_NPU "Build optional torch_npu lifecycle adapter" OFF)
+if(PYPTO_BUILD_TORCH_NPU)
+    add_subdirectory(torch)
+endif()

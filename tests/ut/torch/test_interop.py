@@ -369,7 +369,7 @@ def test_import_does_not_require_npu_or_simpler(run_without_optional_runtime):
 import pypto
 import pypto.torch
 import pypto.torch.interop
-assert pypto.torch.__all__ == []
+assert pypto.torch.__all__ == ["init"]
 """
     result = run_without_optional_runtime(source)
     assert result.returncode == 0, result.stderr

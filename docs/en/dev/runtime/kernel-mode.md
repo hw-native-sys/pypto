@@ -86,8 +86,103 @@ for borrowed device storage. Scalar values and types will use the public
 `TaskArgs` typed scalar interface, leaving ABI encoding to Simpler.
 `ScalarArgument` retains the validated value and dtype without encoding it.
 
-Runtime capability checks will be integrated into the first Torch kernel runtime
-initialization. This stage adds no Worker initialization, registration or launch.
+Runtime capability checks run at explicit Torch kernel initialization. The lifecycle
+layer supports Worker initialization and callable registration; JIT submission
+and the public registration/DFX APIs remain separate migration steps.
+
+## Process initialization and lifecycle
+
+The internal `runtime/kernel` package groups code by ownership:
+
+- `session.py`: configuration, runtime capability checks and `_BorrowedWorkerSession`,
+  which binds lifecycle operations on a public `simpler.Worker` to the Torch context.
+- `context.py`: process state, concurrent registration reuse and pending-ticket cleanup.
+- `owner.py`: the lifecycle owner thread.
+- `callable.py`: shared artifact identity and context-bound registration records.
+- `pending.py`: callback result publication and per-call resource retention.
+
+The session is a lifecycle adapter, not a separate execution engine. Simpler owns
+callable registration and execution; the process manager owns admission and caches.
+
+`pypto.torch.init()` explicitly borrows the current torch_npu device context. It
+supports onboard `a2a3` with `tensormap_and_ringbuffer` or `host_build_graph`.
+An explicit `device` must equal the framework's current device; initialization
+never selects a device. Graph capture raises `NotImplementedError` before a
+process mode is claimed. Shared `CallConfig.validate()` checks native ring-size
+constraints during preflight. Invalid configuration, missing capabilities and stale
+runtime identity also fail during preflight. Internal/runtime exceptions retain
+their original types.
+
+The configuration includes AICPU threads, swimlane/dep-gen settings, output
+directory, ring task-window/heap/dependency-pool sizing and an optional
+`workspace_budget_bytes`. Ring scalars broadcast to four scope-depth rings.
+Diagnostics require an output directory; this step reserves the configuration,
+while public DFX windows are a later step. The workspace budget follows the
+public Worker's minimum of 1024 bytes and excludes borrowed tensor storage.
+
+The runtime submodule follows upstream's Simpler pin
+`d8f997fabd1b6988b69a94feef61ab669dda0eea`. The existing `check_runtime_pin`
+policy remains authoritative for the installed native binding, including its
+missing-identity and explicit-skip rules. A separate availability check requires
+public borrowed init, caller-stream submit, Buffer/TaskArgs, RunHandle and
+`flush_diagnostics` interfaces. It never consults the obsolete kernel supported
+bit or private Worker slots. Interface checks and UT do not establish device
+execution correctness.
+
+One manager owns a Worker and a nonzero context-generation token per process.
+Its states are UNINITIALIZED, INITIALIZING, READY, FAILED, CLOSING and CLOSED.
+Identical configuration is idempotent; conflicts and recursive initialization
+fail. Concurrent initialization shares one result. Native initialization failure
+retains the Worker and the process mode for cleanup. Closing is terminal: it does
+not permit switching to program execution. Program mode is claimed before
+runner execution (including DFX dependency-capture subprocesses), and at direct
+Worker initialization, not at import, compilation or metadata loading.
+One-shot distributed execution claims program mode before changing host tensor
+storage to shared memory or clearing prior dispatch diagnostics. A child
+forked after kernel initialization must use a fresh spawned process; an untouched
+manager is replaced once in the single-threaded at-fork child callback, including
+its inherited locks, before concurrent first use.
+The mode gate is also reset in an at-fork child callback when the parent was
+unclaimed or in PROGRAM mode. Competing PROGRAM/KERNEL claims in that child
+share one lock: one mode wins and the other raises before native Worker
+initialization. An inherited KERNEL claim is never reset.
+
+The lifecycle owner thread binds the borrowed RTS context before public
+`Worker(level=2).init(prewarm_config=..., borrowed_context_generation=...)`,
+`Worker.register(callable)` and `Worker.close()`. Simpler owns runtime binaries,
+slots and native cleanup. Registration loads `CompiledArtifact` through its
+existing shared loader, requires KERNEL capability and matching platform/runtime,
+and retains its opaque `CallableHandle`. The existing `ArtifactKey` keys cached registrations; private products use object
+identity because their directories can be overwritten. No new digest is defined.
+Concurrent preparations share success or failure. Busy
+registry and capacity errors propagate without drains, waits or eviction.
+
+Pending tickets retain the registration and per-call owners before enqueue. A
+future callback adapter publishes its `RunHandle` to the ticket without taking
+manager locks. Ordinary admission only polls completed tickets. An unpublished
+callback is incomplete; a true `RunHandle.done` still requires `wait()` to retire
+native resources before borrowed sources are released. Explicit drain/shutdown
+may synchronize the framework queue, then retire runs and release sources before
+closing the Worker. A failed callback, retirement or source release retains the
+ticket and Worker; cleanup does not assume device quiescence.
+
+The optional `_torch_npu` extension supplies only lifecycle/context and NZ
+storage queries in this step. Build it with `-DPYPTO_BUILD_TORCH_NPU=ON` using
+matching Torch, torch_npu and CANN headers/libraries. The configure-time C++11
+ABI check also runs when `PYTHONOPTIMIZE` is enabled. It links no Simpler C++
+implementation or separate kernel ABI. The default core build does not require
+these optional dependencies. Shutdown wraps the verified framework teardown
+hooks (torch_npu `2.6.0.post2` and `2.10.0.post2`, allowing build suffixes), closing
+PyPTO before framework teardown. Unsafe cleanup retains a native lifetime anchor
+through process exit rather than running destructors after context destruction.
+In a forked child, shutdown anchors the inherited state before framework teardown
+without acquiring inherited locks or closing the parent's Worker.
+
+Direct `@pl.jit` calls still enter program execution. Consequently, invoking
+one after `pypto.torch.init()` is rejected by the process mode gate in this
+intermediate migration stage. Initialization is independently testable; the
+JIT-to-callback-to-`Worker.submit` connection belongs to the next step. No
+public `compile_kernel`, shutdown, registration or DFX function is added here.
 
 ## Call metadata and ownership
 
@@ -214,14 +309,14 @@ execution, autograd and the final compiler integration remain later work.
 
 ## Optional dependencies and scope
 
-`import pypto.torch` exports no execution API. Importing it or its `interop`
+`import pypto.torch` exports `init`; it does not expose kernel submission. Importing it or its `interop`
 or `registration` module does not request torch_npu, Simpler or a native launch
 extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
 This foundation covers shared compilation, metadata and cache loading, Python
-call-frame ownership, and internal schema/Fake helpers.
+call-frame ownership, internal schema/Fake helpers, and process initialization.
 It does not claim kernel launch, taskQueue ordering, allocator safety, eager
 numerical execution or ACLGraph support. Those need the native adapter and
 runtime integration before a public entry-point switch.
