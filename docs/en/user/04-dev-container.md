@@ -535,9 +535,13 @@ mounts that file read-only at its original path too, preserving the machine's jo
 [`docker/images.json`](../../../docker/images.json) is the maintenance entrypoint.
 The `Maintain Development Images` workflow runs daily at 19:37 UTC (03:37 Beijing),
 on changes to `docker/`, toolchain pins, build constraints or its workflow on `main`,
-and through **Run workflow**. PRs touching those paths first run configuration and
-offline script tests on GitHub-hosted runners, then build the image and validate
-doctor, single-card decode and two-card all-reduce on the configured NPU runner.
+and through **Run workflow**. PRs touching those paths run configuration and
+offline script tests on GitHub-hosted runners. Only PRs whose source repository is
+`hw-native-sys/pypto` or the explicitly trusted fork `luohuan19/pypto` also build
+the image and validate doctor, single-card decode and two-card all-reduce on the
+configured NPU runner. All other forks skip that job. The allowlist lives in the
+workflow's `image.if` condition; adding a repository grants its code execution on
+the persistent host and requires a maintainer trust review.
 PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
 Manual runs validate without publishing by default; publication also requires `main`.
 
@@ -545,9 +549,11 @@ The initial configuration enables only `arm-a2a3`, using CANN 9.2.0 and the
 `self-hosted`, `linux`, `ARM64`, `npu-xp` labels. A preflight check additionally
 requires runner `227-npu-a2a3-XP-1`. If the label pool grows, assign that host a
 dedicated label and update `runners` to avoid scheduling on a different host.
-The runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker/buildx, Ascend Docker Runtime and
+The runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker, Ascend Docker Runtime and
 `task-submit` with `--find`/`--kill` support. No host PyPTO installation is used.
 Host maintenance commands enter that bundle explicitly; the system `python3` may be older.
+The workflow installs Buildx v0.35.0 in its isolated Docker configuration and uses
+the host's default Docker builder, preserving the shared build cache.
 
 Configure these repository settings before the first publishing run:
 
@@ -562,6 +568,7 @@ an `always()` step. The temporary login token must never be committed.
 The workflow sets `PYPTO_DOCKER_PROXY=http://127.0.0.1:7892` to use the CI runner's
 local proxy; no GitHub Actions proxy variable is required. The proxy is passed to
 Git and Docker build arguments, not baked into the image environment.
+Buildx installation and GitHub artifact uploads also use this proxy.
 For manual script invocation, set the `PYPTO_DOCKER_PROXY` environment variable
 to a proxy reachable from that machine. The initial configuration sets
 `proxy_required: true`, so a missing environment variable fails preflight.
@@ -609,7 +616,9 @@ two-card reservation runs pypto-lib's all-reduce example. Physical cards come fr
 Driver metadata is mounted read-only from the host. Both models must exit zero
 and produce `[RUN] PASS`; missing PASS, timeouts and test failures prevent
 publication. `task_timeout_seconds` bounds the total wait for queueing and execution;
-`task_max_seconds` independently caps device execution. Cleanup steps remove
+`task_max_seconds` independently caps device execution. The total timeout must
+exceed the execution cap; the initial limits allow 3600 seconds total and 1800
+seconds of device execution for each case. Cleanup steps remove
 only this run's containers/tasks, without pruning shared caches.
 
 After validation, the exact tested image ID is pushed to a temporary

@@ -20,7 +20,7 @@
       "proxy_required": true,
       "patch": "cann92-a2a3-aicpu-class-memaccess",
       "validation_platform": "a2a3",
-      "task_timeout_seconds": 1200,
+      "task_timeout_seconds": 3600,
       "task_max_seconds": 1800,
       "decode": "/workspace/pypto-lib/models/qwen3_14b/decode_fwd.py",
       "allreduce": "/workspace/pypto-lib/examples/advanced/allreduce.py",

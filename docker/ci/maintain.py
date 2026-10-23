@@ -111,6 +111,8 @@ def validate_image(name: str, image: dict[str, Any]) -> None:
     for key in ("build_jobs", "task_timeout_seconds", "task_max_seconds"):
         if type(image[key]) is not int or image[key] <= 0:
             raise ValueError(f"{name}.{key} must be a positive integer")
+    if image["task_timeout_seconds"] <= image["task_max_seconds"]:
+        raise ValueError(f"{name}.task_timeout_seconds must exceed task_max_seconds to allow queueing")
     for key in ("cann_repository", "cann_tag", "tag", "driver_version"):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]*", image[key]):
             raise ValueError(f"Invalid {name}.{key}")
@@ -152,6 +154,8 @@ def preflight(name: str, image: dict[str, Any]) -> None:
     for executable in ("docker", "git", "task-submit"):
         if shutil.which(executable) is None:
             raise ValueError(f"Required command is missing: {executable}")
+    # CLI plugins can disappear when the job selects a fresh DOCKER_CONFIG.
+    run(["docker", "buildx", "version"])
     # The host driver metadata is evidence, not a caller-supplied version claim.
     driver_file = Path("/usr/local/Ascend/driver/version.info")
     driver = re.search(r"^Version=(.+)$", driver_file.read_text(), re.MULTILINE)
