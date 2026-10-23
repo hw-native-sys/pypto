@@ -9428,5 +9428,97 @@ class TestB03TriAndGatherOps:
             )
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_move_preserves_logical_shape_across_packing_axes(dtype):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TileType([32, 64], dtype, None, None, ir.MemorySpace.Vec), span)
+    with pytest.raises(ValueError, match="require matching source and destination layouts"):
+        tile.move(source, target_memory=ir.MemorySpace.Mat)
+    boxed = tile.move(
+        source,
+        target_memory=ir.MemorySpace.Vec,
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+    )
+    assert isinstance(boxed.type, ir.TileType)
+    assert [_const_int(dim) for dim in boxed.type.shape] == [16, 128]
+    moved = tile.move(boxed, target_memory=ir.MemorySpace.Mat)
+    assert isinstance(moved.type, ir.TileType)
+    assert [_const_int(dim) for dim in moved.type.shape] == [16, 128]
+    assert moved.type.tile_view is None or moved.type.tile_view.blayout == ir.TileLayout.col_major
+    # PTOAS still compares raw Mat-source shapes, so a second packing-axis
+    # change cannot be expressed without its shape verifier being fixed.
+    with pytest.raises(ValueError, match="cannot change the packed FP4 axis"):
+        tile.move(moved, target_memory=ir.MemorySpace.Right)
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_mat_load_preserves_gm_window_and_converts_tile_geometry(dtype):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([64, 128], dtype), span)
+    loaded = tile.load(source, [32, 32], [32, 64], valid_shape=[16, 32], target_memory=ir.MemorySpace.Mat)
+    assert isinstance(loaded.type, ir.TileType)
+    assert [_const_int(dim) for dim in loaded.type.shape] == [16, 128]
+    assert loaded.type.tile_view is not None
+    assert [_const_int(dim) for dim in loaded.type.tile_view.valid_shape] == [8, 64]
+    # The source partition remains in ND carrier coordinates.
+    assert isinstance(loaded.args[2], ir.MakeTuple)
+    assert [_const_int(dim) for dim in loaded.args[2].elements] == [32, 64]
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize("layout_pair", ["nd_to_nd", "nd_to_zn", "nz_to_nz"])
+def test_packed_fp4_vec_moves_reject_native_byte_stride_mismatch(dtype, layout_pair):
+    span = ir.Span.unknown()
+    source_nz = layout_pair == "nz_to_nz"
+    source_layout = ir.TileView(
+        blayout=ir.TileLayout.col_major if source_nz else ir.TileLayout.row_major,
+        slayout=ir.TileLayout.row_major if source_nz else ir.TileLayout.none_box,
+    )
+    source = ir.Var(
+        "source",
+        ir.TileType([16, 128] if source_nz else [32, 64], dtype, None, source_layout, ir.MemorySpace.Vec),
+        span,
+    )
+    dst_blayout = ir.TileLayout.col_major if source_nz else ir.TileLayout.row_major
+    dst_slayout = (
+        ir.TileLayout.col_major
+        if layout_pair == "nd_to_zn"
+        else ir.TileLayout.row_major
+        if source_nz
+        else ir.TileLayout.none_box
+    )
+    with pytest.raises(ValueError, match="Vec-to-Vec moves support only ND-to-NZ"):
+        tile.move(source, target_memory=ir.MemorySpace.Vec, blayout=dst_blayout, slayout=dst_slayout)
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_extract_and_assemble_native_boundaries(dtype):
+    span = ir.Span.unknown()
+    nd = ir.Var("nd", ir.TileType([32, 64], dtype, None, None, ir.MemorySpace.Vec), span)
+    with pytest.raises(ValueError, match="Vec-to-Vec extraction uses incorrect packed-byte strides"):
+        tile.extract(nd, 0, 0, [16, 32], target_memory=ir.MemorySpace.Vec)
+    with pytest.raises(ValueError, match="native packed FP4 insertion requires matching NZ layouts"):
+        tile.assemble(nd, nd, [0, 0])
+
+    nz = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major)
+    boxed = ir.Var("boxed", ir.TileType([16, 128], dtype, None, nz, ir.MemorySpace.Vec), span)
+    target = ir.Var("target", ir.TileType([32, 256], dtype, None, nz, ir.MemorySpace.Vec), span)
+    assembled = tile.assemble(target, boxed, [0, 64])
+    assert _tile_result_shape(assembled) == [32, 256]
+    with pytest.raises(ValueError, match="insertion requires zero offset on the packed axis"):
+        tile.assemble(target, boxed, [1, 64])
+
+    mat = ir.Var("mat", ir.TileType([32, 128], dtype, None, nz, ir.MemorySpace.Mat), span)
+    extracted = tile.extract(mat, 0, 64, [16, 64], target_memory=ir.MemorySpace.Left)
+    assert _tile_result_shape(extracted) == [16, 64]
+    assert isinstance(extracted.type, ir.TileType)
+    assert extracted.type.get_effective_tile_view().blayout == ir.TileLayout.col_major
+    with pytest.raises(ValueError, match="extraction requires zero offset on the packed axis"):
+        tile.extract(mat, 1, 64, [16, 64], target_memory=ir.MemorySpace.Left)
+    with pytest.raises(ValueError, match="cannot change the packed FP4 packing axis"):
+        tile.extract(mat, 0, 0, [16, 64], target_memory=ir.MemorySpace.Right)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

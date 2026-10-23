@@ -983,22 +983,25 @@ inline TypePtr MakeFreshTensorType(std::vector<ExprPtr> shape, DataType dtype,
                                       std::make_optional(std::move(view)));
 }
 
-/// Packed FP4E2M1X2 ↔ a wider element type is a 2:1 last-axis conversion.
+/// Packed FP4 ↔ a wider element type is a 2:1 last-axis conversion.
 inline bool IsFp4PackedCastGeometryChange(DataType src, DataType dst) {
   return (src.IsPackedFp4() && !dst.IsPackedFp4()) || (!src.IsPackedFp4() && dst.IsPackedFp4());
 }
 
-/// Distinct packed formats require numerical conversion, not an equal-size relabel.
-inline void RejectPackedFp4InternalCast(DataType src, DataType dst, const Span& span) {
-  CHECK_SPAN(!(src.IsPackedFp4() && dst.IsPackedFp4()), span)
-      << "cast between FP4E2M1X2 and FP4E1M2X2 is not yet supported (see docs/en/dev/fp4.md)";
+/// The A5 FP4 narrowing instruction implements the five ordinary rounding modes.
+/// ODD has no FP4 encoding; the ISA fallback would silently round to nearest-even.
+inline void ValidatePackedFp4CastMode(DataType target_dtype, int mode, const Span& span) {
+  constexpr int kCastModeOdd = 6;
+  CHECK_SPAN(!target_dtype.IsPackedFp4() || mode != kCastModeOdd, span)
+      << "cast to packed FP4 does not support mode=odd; use rint, round, floor, ceil, or trunc";
 }
 
-/// Scale last-axis extents for casts between packed FP4E2M1X2 and a wider element type.
-/// Wider → packed requires a static positive even last dim (dynamic rejected).
-inline std::vector<ExprPtr> AdjustFp4E2M1x2CastLastDim(std::vector<ExprPtr> dims, DataType src, DataType dst,
+/// Scale last-axis extents for casts between either packed FP4 carrier format and a
+/// wider element type.
+/// Packing requires complete pairs: static positive even extents or a symbolic
+/// extent whose divisibility by two is provable (for example 2 * valid_cols).
+inline std::vector<ExprPtr> AdjustPackedFp4CastLastDim(std::vector<ExprPtr> dims, DataType src, DataType dst,
                                                        const Span& span) {
-  RejectPackedFp4InternalCast(src, dst, span);
   if (dims.empty()) return dims;
   if (src.IsPackedFp4() && !dst.IsPackedFp4()) {
     if (auto extent = As<ConstInt>(dims.back())) {
@@ -1009,11 +1012,15 @@ inline std::vector<ExprPtr> AdjustFp4E2M1x2CastLastDim(std::vector<ExprPtr> dims
   } else if (!src.IsPackedFp4() && dst.IsPackedFp4()) {
     if (auto extent = As<ConstInt>(dims.back())) {
       CHECK_SPAN(extent->value_ > 0 && extent->value_ % 2 == 0, span)
-          << "cast to FP4E2M1X2 requires a positive even last dimension, got " << extent->value_;
+          << "cast to packed FP4 requires a positive even last dimension, got " << extent->value_;
       dims.back() = std::make_shared<ConstInt>(extent->value_ / 2, DataType::INDEX, span);
     } else {
-      CHECK_SPAN(false, span) << "cast to FP4E2M1X2 requires a static positive even last dimension "
-                                 "(dynamic last axes are not supported; see docs/en/dev/fp4.md)";
+      const auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+      const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+      CHECK_SPAN(DimensionsEqual(MakeFloorMod(dims.back(), two, span), zero), span)
+          << "cast to packed FP4 requires a static positive even last dimension or a provably even "
+             "dynamic extent; express complete pairs as 2 * carrier_count";
+      dims.back() = MakeFloorDiv(dims.back(), two, span);
     }
   }
   return dims;
@@ -1037,14 +1044,16 @@ inline std::vector<ExprPtr> RowMajorStridesFromShape(const std::vector<ExprPtr>&
   return strides;
 }
 
-/// Packed FP4E2M1X2 ↔ wider-type casts allocate a fresh dense result. Rebuild
+/// Packed FP4 ↔ wider-type casts allocate a fresh dense result. Rebuild
 /// contiguous row-major strides from @p dst_shape; never scale source strides
 /// (a non-contiguous source would otherwise produce a wrong pitch, e.g. [64,1]
 /// unpacking to [128,1] instead of [64,1]).
-inline std::vector<ExprPtr> AdjustFp4E2M1x2CastStrides(std::vector<ExprPtr> src_strides,
+inline std::vector<ExprPtr> AdjustPackedFp4CastStrides(std::vector<ExprPtr> src_strides,
                                                        const std::vector<ExprPtr>& dst_shape, DataType src,
                                                        DataType dst, const Span& span) {
-  if (!IsFp4PackedCastGeometryChange(src, dst)) return src_strides;
+  if (!IsFp4PackedCastGeometryChange(src, dst) && !(src.IsPackedFp4() && dst.IsPackedFp4())) {
+    return src_strides;
+  }
   return RowMajorStridesFromShape(dst_shape, span);
 }
 

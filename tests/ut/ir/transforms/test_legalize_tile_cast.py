@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir, passes
+from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.language.parser.diagnostics import InvalidOperationError
 
@@ -82,8 +82,9 @@ def test_a5_int32_to_fp16_becomes_fp32_bridge():
     assert pairs == [("int32", "fp32"), ("fp32", "fp16")], pairs
 
 
-def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
-    """Hand-written FP4E2M1X2→BF16 is a native hop; last axis expands 2:1."""
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_a5_packed_fp4_to_bf16_cast_is_silent_and_expands_last_dim(capfd, dtype):
+    """Packed FP4→BF16 is a native hop; last axis expands 2:1."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -91,7 +92,7 @@ def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            x: pl.Tensor[[16, 32], dtype],
             out: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
         ) -> pl.Tensor[[16, 64], pl.BF16]:
             t = pl.load(x, [0, 0], [16, 32])
@@ -105,7 +106,7 @@ def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
         after = _run(Before, BackendType.Ascend950)
     finally:
         set_log_level(prev)
-    assert _cast_pairs(after) == [("fp4e2m1x2", "bfloat16")]
+    assert _cast_pairs(after) == [(str(dtype), "bfloat16")]
     err = capfd.readouterr().err
     assert "LegalizeTileCast" not in err
     assert "FP4→BF16→FP32→FP8" not in err
@@ -150,8 +151,59 @@ def test_a5_uint8_ub_alias_to_bf16_stays_one_native_cast():
     assert _cast_pairs(after) == [("fp4e2m1x2", "bfloat16")]
 
 
-def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
-    """Packed E2M1→FP8 is legalized with a warning about the three-hop bridge."""
+@pytest.mark.parametrize("source", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+@pytest.mark.parametrize("target", [pl.FP16, pl.FP32, pl.INT8, pl.UINT8, pl.INT16, pl.INT32, pl.INT64])
+def test_a5_packed_fp4_decodes_through_lossless_float_bridges(source, target):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[4, 32], source], out: pl.Out[pl.Tensor[[4, 64], target]]):
+            packed = pl.load(x, [0, 0], [4, 32])
+            decoded = pl.cast(packed, target)
+            return pl.store(decoded, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+    pairs = _cast_pairs(after)
+    assert pairs[0] == (str(source), "bfloat16")
+    assert pairs[-1][1] == str(target)
+    # All intermediate floating-point formats represent every FP4 code exactly.
+    assert all(dst in ("bfloat16", "fp16", "fp32") for _, dst in pairs[:-1])
+
+
+@pytest.mark.parametrize("target", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+@pytest.mark.parametrize("source", [pl.FP16, pl.FP32, pl.INT16, pl.INT32])
+def test_a5_packed_fp4_encoding_rejects_lossy_bf16_bridges(source, target):
+    # For rint, E1M2 0.1251 and E2M1 0.2501 first round to BF16 midpoints,
+    # then round down to zero, although a direct FP4 conversion rounds up.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[4, 64], source]):
+            values = pl.load(x, [0, 0], [4, 64])
+            _encoded = pl.cast(values, target, mode="rint")
+
+    with pytest.raises(ValueError, match="no lossless cast path.*BF16 intermediate can double-round"):
+        _run(Before, BackendType.Ascend950)
+
+
+@pytest.mark.parametrize("target", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+@pytest.mark.parametrize("source", [pl.FP8E4M3FN, pl.FP8E5M2, pl.HF8, pl.INT8, pl.UINT8])
+def test_a5_packed_fp4_encoding_keeps_lossless_bf16_bridges(source, target):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[4, 64], source]):
+            values = pl.load(x, [0, 0], [4, 64])
+            _encoded = pl.cast(values, target, mode="rint")
+
+    pairs = _cast_pairs(_run(Before, BackendType.Ascend950))
+    assert pairs[0][0] == str(source)
+    assert pairs[-1] == ("bfloat16", str(target))
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
+    """Packed FP4→FP8 is legalized with a warning about the three-hop bridge."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -159,7 +211,7 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            x: pl.Tensor[[16, 32], dtype],
             out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
         ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
             t = pl.load(x, [0, 0], [16, 32])
@@ -174,7 +226,7 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
     finally:
         set_log_level(prev)
     assert _cast_pairs(after) == [
-        ("fp4e2m1x2", "bfloat16"),
+        (str(dtype), "bfloat16"),
         ("bfloat16", "fp32"),
         ("fp32", "fp8e4m3fn"),
     ]
@@ -184,15 +236,16 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
     assert "LUT" in err
 
 
-def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
-    """Hand-written FP4E2M1X2→FP8 legalization expands the last axis 2:1."""
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_a5_packed_fp4_cast_expands_last_dim_valid_shape(dtype):
+    """Packed FP4→FP8 legalization expands the last axis 2:1."""
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            x: pl.Tensor[[16, 32], dtype],
             out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
         ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
             t = pl.load(x, [0, 0], [16, 32], valid_shape=[8, 24])
@@ -202,7 +255,7 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     after = _run(Before, BackendType.Ascend950)
 
     assert _cast_pairs(after) == [
-        ("fp4e2m1x2", "bfloat16"),
+        (str(dtype), "bfloat16"),
         ("bfloat16", "fp32"),
         ("fp32", "fp8e4m3fn"),
     ]
@@ -255,25 +308,82 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     assert all(stride == [64, 1] for stride in strides.strides)
 
 
-@pytest.mark.parametrize(
-    ("source_dtype", "target_dtype"),
-    [(pl.FP4E2M1X2, pl.FP4E1M2X2), (pl.FP4E1M2X2, pl.FP4E2M1X2)],
-)
-def test_packed_fp4_format_cast_is_rejected(source_dtype, target_dtype):
-    """Equal byte geometry must not silently relabel distinct packed formats."""
-    with pytest.raises(InvalidOperationError, match="cast between FP4E2M1X2 and FP4E1M2X2"):
+@pytest.mark.parametrize("source,target", [(pl.fp4e2m1x2, pl.fp4e1m2x2), (pl.fp4e1m2x2, pl.fp4e2m1x2)])
+def test_a5_packed_format_conversion_uses_bf16_without_changing_carrier_shape(source, target):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[16, 32], source], out: pl.Out[pl.Tensor[[16, 32], target]]):
+            value = pl.load(x, [0, 0], [16, 32])
+            result = pl.cast(value, target)
+            return pl.store(result, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [(str(source), "bfloat16"), ("bfloat16", str(target))]
+
+    # Store type checking also establishes that the final width remains 32 carriers.
+    class Shapes(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.cast_shapes = []
+
+        def visit_call(self, op):
+            if op.op.name == _TILE_CAST:
+                tile_type = op.type
+                assert isinstance(tile_type, ir.TileType)
+                shape = []
+                for extent in tile_type.shape:
+                    assert isinstance(extent, ir.ConstInt)
+                    shape.append(extent.value)
+                self.cast_shapes.append(shape)
+            super().visit_call(op)
+
+    shapes = Shapes()
+    shapes.visit_program(after)
+    assert shapes.cast_shapes == [[16, 64], [16, 32]]
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+@pytest.mark.parametrize("decode", [False, True])
+def test_packed_fp4_cast_rejects_boxed_storage(dtype, decode):
+    source_dtype = dtype if decode else pl.BF16
+    target_dtype = pl.BF16 if decode else dtype
+    span = ir.Span.unknown()
+    view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.row_major)
+    source = ir.Var("source", ir.TileType([32, 64], source_dtype, None, view), span)
+    with pytest.raises(ValueError, match="requires none_box storage"):
+        ir.op.tile.cast(source, target_dtype)
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_packed_fp4_cast_accepts_even_dynamic_valid_shape(dtype):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 32], dtype]],
+            n: pl.Scalar[pl.INDEX],
+        ):
+            value = pl.load(x, [0, 0], [16, 64], valid_shape=[16, n * 2])
+            result = pl.cast(value, dtype)
+            return pl.store(result, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [("bfloat16", str(dtype))]
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_packed_fp4_cast_rejects_unsupported_odd_rounding(dtype):
+    with pytest.raises(InvalidOperationError, match="does not support mode=odd"):
 
         @pl.program
         class Bad:
             @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                x: pl.Tensor[[16, 32], source_dtype],
-                out: pl.Out[pl.Tensor[[16, 32], target_dtype]],
-            ) -> pl.Tensor[[16, 32], target_dtype]:
-                t = pl.load(x, [0, 0], [16, 32])
-                c = pl.cast(t, target_dtype)
-                return pl.store(c, [0, 0], out)
+            def kernel(self, x: pl.Tensor[[16, 64], pl.BF16]):
+                value = pl.load(x, [0, 0], [16, 64])
+                return pl.cast(value, dtype, mode="odd")
 
 
 def test_cast_to_packed_fp4_rejects_dynamic_last_dim():
@@ -609,6 +719,148 @@ def test_legalized_chain_keeps_a_caller_supplied_tmp_on_the_final_hop():
     collector = _ArityCollector()
     collector.visit_program(after)
     assert collector.arities == [1, 2]
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+@pytest.mark.parametrize("decode", [False, True])
+@pytest.mark.parametrize("tile_cast", [False, True])
+def test_packed_fp4_cast_dn_scales_row_axis_and_preserves_layout(dtype, decode, tile_cast):
+    source_dtype = dtype if decode else pl.BF16
+    target_dtype = pl.BF16 if decode else dtype
+    span = ir.Span.unknown()
+    rows = 32 if decode else 64
+    expected_rows = 64 if decode else 32
+    shape = [ir.ConstInt(value, pl.INDEX, span) for value in (rows, 32)]
+    if tile_cast:
+        view = ir.TileView(blayout=ir.TileLayout.col_major)
+        source = ir.Var("source", ir.TileType(shape, source_dtype, None, view), span)
+        result = ir.op.tile.cast(source, target_dtype).type
+        assert isinstance(result, ir.TileType)
+        result_view = result.get_effective_tile_view()
+        assert result_view.blayout == ir.TileLayout.col_major
+    else:
+        stride = [ir.ConstInt(value, pl.INDEX, span) for value in (1, rows)]
+        tensor_view = ir.TensorView(stride, ir.TensorLayout.DN)
+        source = ir.Var("source", ir.TensorType(shape, source_dtype, None, tensor_view), span)
+        result = ir.op.tensor.cast(source, target_dtype).type
+        assert isinstance(result, ir.TensorType)
+        result_view = result.tensor_view
+        assert result_view is not None
+        assert result_view.layout == ir.TensorLayout.DN
+    for value, expected in zip(result.shape, (expected_rows, 32), strict=True):
+        assert isinstance(value, ir.ConstInt)
+        assert value.value == expected
+    for value, expected in zip(result_view.stride, (1, expected_rows), strict=True):
+        assert isinstance(value, ir.ConstInt)
+        assert value.value == expected
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+@pytest.mark.parametrize("valid", [[32, 32], [64, 16]])
+@pytest.mark.parametrize("tile_cast", [False, True])
+def test_packed_fp4_cast_dn_rejects_partial_or_padded_extent(dtype, valid, tile_cast):
+    span = ir.Span.unknown()
+    if tile_cast:
+        view = ir.TileView(valid_shape=valid, blayout=ir.TileLayout.col_major)
+        source = ir.Var("source", ir.TileType([64, 32], pl.BF16, None, view), span)
+        with pytest.raises(ValueError, match="requires a full static 2D valid shape"):
+            ir.op.tile.cast(source, dtype)
+    else:
+        view = ir.TensorView([1, 64], ir.TensorLayout.DN, valid_shape=valid)
+        source = ir.Var("source", ir.TensorType([64, 32], pl.BF16, None, view), span)
+        with pytest.raises(ValueError, match="requires a full static 2D valid shape"):
+            ir.op.tensor.cast(source, dtype)
+
+
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype):
+    span = ir.Span.unknown()
+    strided = ir.TileView(stride=[1, 64], blayout=ir.TileLayout.col_major)
+    source = ir.Var("source", ir.TileType([32, 32], dtype, None, strided), span)
+    with pytest.raises(ValueError, match="requires canonical contiguous column-major strides"):
+        ir.op.tile.cast(source, pl.BF16)
+    dense = ir.TileView(blayout=ir.TileLayout.col_major)
+    source = ir.Var("source", ir.TileType([32, 32], dtype, None, dense), span)
+    with pytest.raises(ValueError, match="supports only BF16 and packed FP4 endpoints"):
+        ir.op.tile.cast(source, pl.FP32)
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize("loop_kind", ["for", "while"])
+def test_legalize_packed_dn_cast_preserves_loop_backedge(dtype, loop_kind):
+    """Already-packed DN casts keep their row-packed strides and carried storage."""
+    span = ir.Span.unknown()
+    source_view = ir.TileView(
+        valid_shape=[64, 4], stride=[1, 64], blayout=ir.TileLayout.col_major, start_offset=None
+    )
+    source_type = ir.TileType([64, 4], DataType.BF16, None, source_view, ir.MemorySpace.Vec)
+    source = ir.Var("source", source_type, span)
+    cast = ir.create_op_call("tile.cast", [source], {"target_type": dtype, "mode": 1}, span)
+    cast_type = cast.type
+    assert isinstance(cast_type, ir.TileType)
+    assert cast_type.tile_view is not None
+    assert [dim.value for dim in cast_type.shape if isinstance(dim, ir.ConstInt)] == [32, 4]
+    assert [dim.value for dim in cast_type.tile_view.stride if isinstance(dim, ir.ConstInt)] == [1, 32]
+
+    storage = ir.MemRef("carried_storage", span)
+    carry_type = ir.TileType([32, 4], dtype, storage, cast_type.tile_view, ir.MemorySpace.Vec)
+    seed = ir.Var("seed", cast_type, span)
+    argument = ir.IterArg("carried", carry_type, seed, span)
+    alias = ir.Var("alias", carry_type, span)
+    converted = ir.Var("converted", cast_type, span)
+    result = ir.Var("result", carry_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(alias, argument, span),
+            ir.AssignStmt(converted, cast, span),
+            ir.YieldStmt([converted], span),
+        ],
+        span,
+    )
+    if loop_kind == "for":
+        loop = ir.ForStmt(
+            ir.Var("i", ir.ScalarType(DataType.INDEX), span),
+            ir.ConstInt(0, pl.INDEX, span),
+            ir.ConstInt(2, pl.INDEX, span),
+            ir.ConstInt(1, pl.INDEX, span),
+            [argument],
+            body,
+            [result],
+            span,
+        )
+    else:
+        loop = ir.WhileStmt(ir.ConstBool(False, span), [argument], body, [result], span)
+    program = ir.Program(
+        [
+            ir.Function(
+                "main",
+                [seed, source],
+                [carry_type],
+                ir.SeqStmts([loop, ir.ReturnStmt([result], span)], span),
+                span,
+                ir.FunctionType.Opaque,
+            )
+        ],
+        "packed_dn_loop",
+        span,
+    )
+    # Text loop headers cannot spell declaration-only carried storage; retain
+    # property verification and inspect storage/alias identity directly below.
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        packed = _run(program, BackendType.Ascend950)
+    ir.assert_structural_equal(packed, program)
+    ir.verify_structural_bindings(packed)
+    function = next(iter(packed.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    packed_loop = function.body.stmts[0]
+    assert isinstance(packed_loop, (ir.ForStmt, ir.WhileStmt))
+    binder = packed_loop.iter_args[0]
+    assert isinstance(binder.type, ir.TileType)
+    assert binder.type.memref is storage
+    assert isinstance(packed_loop.body, ir.SeqStmts)
+    binding = packed_loop.body.stmts[0]
+    assert isinstance(binding, ir.AssignStmt)
+    assert binding.value is binder
 
 
 if __name__ == "__main__":

@@ -67,6 +67,7 @@ __all__ = [
     "relu",
     "cast",
     "quant_mx",
+    "quant_mx_raw",
     "tmov_x2zz",
     "matmul",
     "batch_matmul",
@@ -1428,8 +1429,9 @@ def quant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
 ) -> tuple[Tile, Tile]:
-    """MXFP8 block-32 dynamic quantization with PTOAS ``grpAxis`` selection.
+    """MXFP8/MXFP4 block-32 dynamic quantization with PTOAS ``grpAxis`` selection.
 
     ``group_axis`` is required and must be ``0`` or ``1`` (same meaning as
     PTOAS ``#pto<mx_group_axis axis*>``). Axis 1 is the A-side ``[M, K]`` path;
@@ -1437,15 +1439,16 @@ def quant_mx(
     ``[K, N]`` before quantization). GM ``TensorLayout.MX_*`` is only for
     tensor / ``tensor.view`` annotations, not this tile op.
 
-    This release supports **MXFP8 only** (``dtype=FP8E4M3FN``). MXFP4 is out of
-    scope for this PR.
+    ``dtype=FP4E2M1X2`` requires FP16/BF16 input and packs pairs into bytes;
+    the output's last dimension is halved. FP4 axis 0 requires ``N%64==0`` for the 32-byte carrier stride.
 
     Args:
         src: Source tile (FP16/FP32/BF16, 2D).
             ``group_axis=1``: ``[M, K]`` with ``M%16==0``, ``K%64==0``.
             ``group_axis=0``: ``[N, K]`` with ``N%32==0``, ``K%64==0``.
         group_axis: PTOAS grouping axis — ``1`` (A-side) or ``0`` (B-side).
-        dtype: Must be ``FP8E4M3FN`` (default).
+        dtype: ``FP8E4M3FN`` (default) or ``FP4E2M1X2``.
+        quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
 
     Returns:
         ``group_axis=1``: ``(quant[M,K], scale[M,K/32])`` row/row ZZ scale.
@@ -1459,9 +1462,52 @@ def quant_mx(
     """
     if group_axis not in (0, 1):
         raise ValueError(f"pl.quant_mx group_axis must be 0 or 1, but got {group_axis!r}")
-    if dtype != DataType.FP8E4M3FN:
-        raise ValueError(f"pl.quant_mx supports only FP8E4M3FN (MXFP8), but got {dtype}")
-    call_expr = _ir_ops.tquant_mx(src.unwrap(), dtype=dtype, group_axis=group_axis)
+    call_expr = _ir_ops.tquant_mx(
+        src.unwrap(), dtype=dtype, group_axis=group_axis, quant_scale_alg=quant_scale_alg
+    )
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def quant_mx_raw(
+    src: Tile,
+    max_workspace: Tile,
+    scaling_workspace: Tile,
+    *,
+    group_axis: int,
+    dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
+    interleave: bool = False,
+) -> tuple[Tile, Tile]:
+    """Quantize in source orientation and return unpacked UINT8 exponent codes.
+
+    This tile primitive exposes PTOAS TQUANT without MX scale-layout conversion.
+    Axis1 accepts any positive row count and a valid column count divisible by
+    32 (64 for native FP4); physical columns must equal valid columns. Axis0 groups 32 valid rows.
+    FP4 output halves physical and valid columns; native FP4 additionally
+    requires physical columns divisible by 64 (32 carrier bytes). Partial valid rows are allowed.
+
+    Both workspaces use the source dtype. Axis0 workspaces have valid shape
+    ``[valid_rows/32, valid_cols]`` and the same physical column stride as src.
+    Axis1 may use flat valid shape ``[1, valid_rows*valid_cols/32]``; FP16/BF16
+    OCP scaling capacity must round this group count up to 128 elements.
+    Workspaces are write-only. FP4E2M1X2 returns native carriers; MXFP8 returns
+    INT8 carrier bytes. Exponents are flat on axis1 and grouped on axis0.
+    ``interleave=True`` interleaves adjacent axis0 exponent groups along columns;
+    FP16/BF16 physical and valid source rows must then be divisible by 64.
+    """
+    call_expr = _ir_ops.tquant_mx_raw(
+        src.unwrap(),
+        max_workspace.unwrap(),
+        scaling_workspace.unwrap(),
+        dtype=dtype,
+        group_axis=group_axis,
+        quant_scale_alg=quant_scale_alg,
+        interleave=interleave,
+    )
     span = call_expr.span
     return (
         Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
@@ -2474,10 +2520,10 @@ def reinterpret_view(
 ) -> Tile:
     """Reinterpret a tile over the same bytes with a different dtype.
 
-    FP4E2M1X2 <-> UINT8/INT8 preserves the carrier shape and requires a
+    Either packed FP4 format <-> UINT8/INT8 preserves the carrier shape and requires a
     dense address-backed 2D row-major Vec tile with a static UB offset.
     Reshape the byte view separately before aliasing back. On A5, PYPTO
-    and DSA_RP support these aliases; PTOAS 0.65 planning is unsupported.
+    and DSA_RP support these aliases; PTOAS v0.67 planning is unsupported.
 
     Args:
         data: Input tile.

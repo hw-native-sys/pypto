@@ -105,8 +105,8 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.FP16` | 16 | IEEE 半精度 |
 | `pl.BF16` | 16 | Brain float |
 | `pl.FP32` | 32 | IEEE 单精度 |
-| `pl.fp4e2m1x2` / `pl.FP4E2M1X2` | 8 | Packed pair of E2M1 values; shapes count byte carriers |
-| `pl.fp4e1m2x2` / `pl.FP4E1M2X2` | 8 | Packed pair of E1M2 values; shapes count byte carriers |
+| `pl.fp4e2m1x2` / `pl.FP4E2M1X2` | 8 | 每字节打包两个 E2M1 值；shape 按字节载体计数 |
+| `pl.fp4e1m2x2` / `pl.FP4E1M2X2` | 8 | 每字节打包两个 E1M2 值；shape 按字节载体计数 |
 | `pl.FP8E4M3FN` / `pl.FP8E5M2` | 8 | MXFP8 数据格式 |
 | `pl.FP8E8M0` | 8 | MX 块缩放指数 |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | 海思浮点格式 |
@@ -119,24 +119,27 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
 
-`pl.fp4e2m1x2` and `pl.fp4e1m2x2` are distinct packed floating-point formats,
-with uppercase aliases `pl.FP4E2M1X2` and `pl.FP4E1M2X2`. Each element occupies
-one byte and contains two FP4 values. Shapes, `valid_shape`, strides, and
-offsets count these carriers throughout IR, JIT specialization, runtime calls,
-and serialized argument metadata; there is no implicit dimension scaling.
-The old `pl.FP4`, `DataType.FP4`, and `DT_FP4` names are removed.
+`pl.fp4e2m1x2` 与 `pl.fp4e1m2x2` 是两种不同的打包浮点格式，大写别名分别为
+`pl.FP4E2M1X2` 和 `pl.FP4E1M2X2`。每个元素占用一个字节，包含两个 FP4 值。
+在 IR、JIT 特化、运行时调用和序列化参数元数据中，shape、`valid_shape`、步长和
+偏移均按字节载体（byte carrier）计数，不会隐式缩放维度。
+旧的 `pl.FP4`、`DataType.FP4` 和 `DT_FP4` 名称已移除。
 
-Explicit packed annotations accept `torch.uint8`. E2M1 also accepts
-`torch.float4_e2m1fn_x2` with its physical shape unchanged; E1M2 uses UINT8
-because Torch has no matching native dtype. Unannotated UINT8 remains UINT8.
-Function calls reject E2M1/E1M2 format mismatches instead of reinterpreting
-one format as the other.
+显式打包注解接受 `torch.uint8`。E2M1 还接受 `torch.float4_e2m1fn_x2`，物理 shape
+保持不变；E1M2 使用 UINT8，因为 Torch 没有对应的原生 dtype。未标注的 UINT8 仍为 UINT8。
+在 PyPTO 内部，调用或 submit 的实参与形参任一方为打包 FP4 时，双方 dtype 必须相同。
+受支持的 UINT8/INT8 字节别名需要显式使用 `reinterpret_view`，被调用函数的注解不能创建隐式别名。
 
-This change establishes the two carrier types and preserves existing E2M1
-operator support. E1M2 numerical casts, additional transfer layouts, and MXFP4
-quantization are deferred. Ascend910/A2A3 execution remains unsupported for
-both packed formats. See [FP4](../../dev/fp4.md) for the existing E2M1 cast and
-alias paths and their layout restrictions.
+在 Ascend950 上，两种行主序打包格式均可与 BF16 相互转换：`[4,32]` 载体解码为
+`[4,64]` 个数值。E2M1↔E1M2 经 BF16 转换，载体 shape 保持不变。打包要求源维度为
+偶数，也接受可证明为偶数的动态 `valid_shape`，例如 `2 * n`。支持 `rint`、`round`、
+`floor`、`ceil` 和 `trunc`，拒绝 `odd`。隐式编码链要求经过 BF16 后仍保留原值；
+若需要中间舍入，应显式转换为 BF16。
+
+支持 ND/DN 载体搬运和 ND 填充。DN 转换要求完整静态连续的二维 BF16/打包类型端点，
+以及 PYPTO/DSA_RP 静态地址。`pl.quant_mx(..., dtype=pl.fp4e2m1x2)` 支持 FP16/BF16
+输入；E1M2 量化和原生打包 FP4 矩阵乘仍不支持。两种格式均不支持 Ascend910/A2A3 执行。
+布局、别名与内存规划器限制见 [FP4](../../dev/fp4.md)。
 
 ### 标量绑定的类型注解
 
@@ -208,13 +211,16 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 只要给了 `stride`、`valid_shape`、`pad` 三者之一，`layout=` 就是必填的。`pl.TensorLayout` 是这些布局常量所属的枚举 —— `pl.ND` 就是 `pl.TensorLayout.ND`。
 
-剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS v0.60 负责物理打包）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。The existing packed-input path is E2M1x2 lhs × FP8 rhs: explicitly cast the lhs with `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`; A5 legalizes it through E2M1x2→BF16→FP32→FP8E4M3FN. 原生 FP4×FP4 与反向 FP8×FP4 均不支持。独立 `pl.quant_mx`（本版本仅 MXFP8，以 `group_axis` 对齐 PTOAS `grpAxis`）已开放；在 Ascend950 上可与 `pl.matmul_mx` 共用一个 InCore mixed task，生成的 data 与 scale 直接经 V2C 传递，scale 会生成 Vec→Mat→scale memory 路径。
+剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS v0.60 负责物理打包）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。两种打包 FP4 格式均可在显式调用 `pl.cast(fp4_tile, pl.FP8E4M3FN)` 后作为左操作数；A5 在 `matmul_mx` 前经 BF16 和 FP32 对其合法化。 原生 FP4×FP4 与反向 FP8×FP4 均不支持。`pl.quant_mx` 支持 MXFP8 和原生 E2M1 MXFP4，`group_axis` 对齐 PTOAS `grpAxis`。FP8 结果可在同一个混合 InCore 任务中经 V2C 供 `matmul_mx` 使用，包括生成的 Vec→Mat→scale memory 路径。
 
-`pl.quant_mx(tensor, group_axis=1)` 返回 GM A data `[M,K]` 和
-`MX_A_ZZ[M,K/32]` scale tensor。`group_axis=0` 接受 `[N,K]`，返回 Cube 定向的
-`[K,N]` data 和 `MX_B_NN[K/32,N]` scale。两组 tensor 是 tensor
-`pl.matmul_mx` 的必需输入；该接口仅支持 2-D 并返回 FP32，暂不包含 tensor MX
-累加、bias、transpose flag、batch、dynamic shape 或 FP4。
+使用默认 FP8 dtype 时，tensor 量化在 axis1 返回 `[M,K]` 数据与 `MX_A_ZZ[M,K/32]`
+缩放因子；axis0 输入 `[N,K]` 时，返回 `[K,N]` 数据与 `MX_B_NN[K/32,N]` 缩放因子。
+选择 `dtype=pl.fp4e2m1x2` 会将数据的最后一个维度减半，缩放因子不变。FP4 要求输入为
+FP16/BF16、区域完全有效、`K%64==0`、axis1 的 `M%16==0` 及 axis0 的 `N%64==0`。
+默认采用 OCP；FP16/BF16 的 NV 仅支持 axis0。不支持 E1M2 量化。
+打包输出需要 PYPTO/DSA_RP 静态分配。`pl.tile.quant_mx_raw` 提供原始 UINT8 指数和显式工作区。
+只有 FP8 数据与缩放因子对可供 tensor `pl.matmul_mx` 使用；该接口仅支持二维并返回 FP32，
+仍不支持 tensor MX 累加、bias、transpose 标志、批处理、动态 shape 或原生打包 FP4 矩阵操作数。
 
 ### 动态 shape
 

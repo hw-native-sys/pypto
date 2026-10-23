@@ -98,6 +98,30 @@ class SplitRegionFinder : public IRVisitor {
   void VisitStmt_(const SplitAivScopeStmtPtr&) override { found = true; }
 };
 
+// Native Vec-to-Mat transfers run on AIV. Automatic expansion binds Mat
+// handles on AIC, loses Vec operands of insert/extract, and stages moves via a
+// generic NZ-to-NZ copy that uses incorrect FP4 byte strides. Explicit AIV
+// kernels retain both handles and use the supported native transfer directly.
+class PackedFp4CrossCoreTransferValidator : public IRVisitor {
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    const bool insert = IsOp(call, "tile.assemble");
+    if ((insert && call->args_.size() >= 2) ||
+        ((IsOp(call, "tile.move") || IsOp(call, "tile.extract")) && !call->args_.empty())) {
+      auto target = As<TileType>(insert ? call->args_[0]->GetType() : call->GetType());
+      auto source = As<TileType>(call->args_[insert ? 1 : 0]->GetType());
+      CHECK_SPAN(!target || !source || !source->dtype_.IsPackedFp4() ||
+                     source->GetMemorySpace() != MemorySpace::Vec ||
+                     target->GetMemorySpace() != MemorySpace::Mat,
+                 call->span_)
+          << "Packed FP4 Vec-to-Mat transfer in a generic InCore function is unsupported "
+             "by mixed-core expansion; use an explicit FunctionType.AIV function to keep both tile "
+             "handles on the vector core";
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+};
+
 // Shallow-copy only the statement receiving an erased wrapper's comments.
 // Descendants and variable identities stay shared; input metadata stays intact.
 class StatementCommentPrepender : public IRMutator {
@@ -3131,6 +3155,9 @@ Pass ExpandMixedKernel() {
         new_functions.push_back(func);
         continue;
       }
+
+      PackedFp4CrossCoreTransferValidator packed_transfer_validator;
+      packed_transfer_validator.VisitStmt(func->body_);
 
       SplitRegionConsumer consumer;
       SplitRegionFinder finder;

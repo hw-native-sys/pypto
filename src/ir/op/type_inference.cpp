@@ -1641,8 +1641,11 @@ const std::vector<ExprPtr>& GetEffectiveTileValidShape(const TileType& type) {
 }
 
 void CheckCallPackedFp4Format(DataType expected, DataType actual, const std::string& context) {
-  CHECK(!(expected.IsPackedFp4() && actual.IsPackedFp4()) || expected == actual)
-      << context << ": packed FP4 formats must match; use an explicit numerical cast";
+  // Typed calls cannot create a byte alias just by changing the callee annotation.
+  CHECK(!(expected.IsPackedFp4() || actual.IsPackedFp4()) || expected == actual)
+      << context << ": packed FP4 formats must match; expected " << expected.ToString() << " but got "
+      << actual.ToString()
+      << "; use an explicit numerical cast, or reinterpret_view for supported byte aliases";
 }
 
 void CollectCallTypeBindings(const TypePtr& pattern, const TypePtr& value, const std::string& context,

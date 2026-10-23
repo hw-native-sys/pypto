@@ -1392,8 +1392,8 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // — see test_tensor_expand_clone[broadcast_dim=2] where input
     // ``[B, N, 1]`` is loaded into a ColMajor tile and PTOAS TLoad enforces
     // ``tile.BLayout == tensor.Layout``).
-    // Packed FP4 x2 last-axis units are carriers, not logical column-vector
-    // width 1 — ND-only; reject non-ND annotations and the [M,1] DN force.
+    // Packed FP4 dimensions count byte carriers. Preserve the declared ND/DN
+    // layout instead of interpreting a one-carrier width as a logical vector.
     bool is_column_vector = false;
     if (rank >= 2) {
       auto last_dim = As<ir::ConstInt>(tensor_type->shape_.back());
@@ -1405,17 +1405,6 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     ir::TensorLayout layout = ir::TensorLayout::ND;
     if (tensor_type->tensor_view_.has_value()) {
       layout = tensor_type->tensor_view_->layout;
-    }
-    if (tensor_type->dtype_.IsPackedFp4()) {
-      CHECK_SPAN(layout == ir::TensorLayout::ND, param->span_)
-          << DataTypeToString(tensor_type->dtype_)
-          << " supports ND layout only; non-ND layouts and layout conversions "
-             "are not supported (see docs/en/dev/fp4.md)";
-      CHECK_SPAN(!is_column_vector, param->span_)
-          << DataTypeToString(tensor_type->dtype_)
-          << " tensors with last carrier dimension 1 are not supported: "
-             "the ordinary [M,1] column-vector path forces a DN layout conversion "
-             "invalid for packed x2 carriers (see docs/en/dev/fp4.md)";
     }
     const bool force_column_vector_dn =
         is_column_vector && !IsMxTensorLayout(layout) && !tensor_type->dtype_.IsPackedFp4();

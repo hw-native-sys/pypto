@@ -19,6 +19,7 @@ from pathlib import Path
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import backend
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import (
@@ -285,6 +286,100 @@ class TestFp4DependencyContracts:
             _resolve_dep_call_metadata(
                 dep, caller, {"src": TensorMeta(shape=(16, 32), dtype=caller_dtype)}, {}, {}
             )
+
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    @pytest.mark.parametrize("dependency_kind", ["incore", "inline"])
+    def test_fp4_dep_compiles_full_decoded_width(self, monkeypatch, tmp_path, dtype, dependency_kind):
+        """Decoding 32 carriers produces 64 values without changing the caller ABI."""
+        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
+
+        @jit.incore
+        def incore_decode(
+            src: pl.Tensor[[16, 32], dtype],
+            dst: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+        ):
+            tile = pl.load(src, [0, 0], [16, 32])
+            decoded = pl.cast(tile, pl.BF16)
+            pl.store(decoded, [0, 0], dst)
+            return dst
+
+        @jit.inline
+        def inline_decode(
+            src: pl.Tensor[[16, 32], dtype],
+            dst: pl.Tensor[[16, 64], pl.BF16],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(src, [0, 0], [16, 32])
+                decoded = pl.cast(tile, pl.BF16)
+                pl.store(decoded, [0, 0], dst)
+            return dst
+
+        decode = inline_decode if dependency_kind == "inline" else incore_decode
+
+        @jit
+        def entry(src: pl.Tensor, dst: pl.Out[pl.Tensor]):
+            decode(src, dst)
+            return dst
+
+        # Seed the same metadata the torch boundary produces. This keeps the
+        # compile regression active even when Torch lacks its optional FP4 dtype.
+        backend.reset_for_testing()
+        compiled = entry._compile(
+            {
+                "src": TensorMeta(shape=(16, 32), dtype=dtype),
+                "dst": TensorMeta(shape=(16, 64), dtype=DataType.BF16),
+            },
+            {},
+            {},
+            {},
+            pl,
+            backend_type=backend.BackendType.Ascend950,
+            output_dir=str(tmp_path / "compiled"),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        assert compiled.program is not None
+        # CompiledProgram retains the pre-pass input. Inspect an independently
+        # lowered program as well, under the default verification instruments.
+        parsed = entry._compile_to_program(
+            {
+                "src": TensorMeta(shape=(16, 32), dtype=dtype),
+                "dst": TensorMeta(shape=(16, 64), dtype=DataType.BF16),
+            },
+            {},
+            {},
+            {},
+            pl,
+        )
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(parsed)
+        entry_func = lowered.get_function("entry")
+        assert entry_func is not None
+        entry_type = entry_func.params[0].type
+        assert isinstance(entry_type, ir.TensorType)
+
+        def static_shape(shaped_type: ir.ShapedType) -> list[int]:
+            result = []
+            for dim in shaped_type.shape:
+                assert isinstance(dim, ir.ConstInt)
+                result.append(dim.value)
+            return result
+
+        assert entry_type.dtype == dtype
+        assert static_shape(entry_type) == [16, 32]
+        decoded_shapes: list[list[int]] = []
+
+        class Casts(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                result_type = op.type
+                if (
+                    op.op.name == ir.get_op("tile.cast").name
+                    and isinstance(result_type, ir.TileType)
+                    and result_type.dtype == DataType.BF16
+                ):
+                    decoded_shapes.append(static_shape(result_type))
+                super().visit_call(op)
+
+        Casts().visit_program(lowered)
+        assert decoded_shapes == [[16, 64]]
 
 
 # ---------------------------------------------------------------------------

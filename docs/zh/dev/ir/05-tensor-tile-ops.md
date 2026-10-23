@@ -65,7 +65,7 @@ Flat tile 可以携带显式步长（stride），但必须与完整物理 shape 
 Ascend950 上的 FP4E2M1X2 ↔ UINT8/INT8 alias 保持 carrier shape 和字节数不变。
 InCore tensor 和 tile 均下降为连续、带地址的二维 row-major Vec 存储，要求静态
 UB offset，使用 PYPTO 或 DSA_RP 内存规划器。PTOAS 规划器和编排层 tensor alias
-暂不支持；需要变形时先单独 reshape 字节视图，再转换回 packed alias。契约与用法示例见 [FP4 UB 解码](../fp4.md#decode-a-uint8-carrier-through-a-ub-alias-ascend950)。
+暂不支持；需要变形时先单独 reshape 字节视图，再转换回 packed alias。契约与用法示例见 [FP4 UB 解码](../fp4.md#通过-ub-别名解码-uint8-载体ascend950)。
 
 **示例：**
 
@@ -101,7 +101,7 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
-| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 13](../passes/14-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。在 mixed task 内，结果可直接经 V2C 供 `matmul_mx` 使用。MXFP4 quant 暂缓。 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950 block-32 量化，返回 `{quant, FP8E8M0 scale}`。`dtype` 为 FP8E4M3FN 或 FP4E2M1X2（后者输入仅 FP16/BF16）。axis1 将 `[M,K]` 转为 FP4 `[M,K/2]`；axis0 将 `[N,K]` 转为 `[K,N/2]`。scale 仍为 `[M,K/32]` / `[K/32,N]`。要求完整有效区域、`K % 64 == 0`、axis1 `M % 16 == 0`、axis0 `N % 32 == 0`；FP4 axis0 因 ISA carrier 行跨度还要求 `N % 64 == 0`。默认 `quant_scale_alg="ocp"`；FP16/BF16 的 NV 仅支持 axis0。Packed FP4 使用 PYPTO 或 DSA_RP 内存规划器。[Pass 13](../passes/14-lower_composite_ops.md) 生成 TQUANT 和指数 X-to-ZZ TMOV。仅 FP8 结果可供 `matmul_mx` 使用。 `pl.tile.quant_mx_raw` 暴露原生 TQUANT 和 UINT8 指数，无上述 scale 分块对齐限制：axis1 允许任意正 M 和 K%32（原生 FP4 K%64）；支持静态部分有效区域（axis1 物理列须等于有效列）。 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |

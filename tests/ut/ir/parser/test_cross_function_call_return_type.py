@@ -233,12 +233,25 @@ def test_symbolic_fp4_return_metadata_preserves_carrier_units(
 
 
 @pytest.mark.parametrize("type_class", [ir.TensorType, ir.TileType])
-@pytest.mark.parametrize("formal_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize(
+    "formal_dtype,actual_dtype",
+    [
+        (DataType.FP4E2M1X2, DataType.FP4E1M2X2),
+        (DataType.FP4E1M2X2, DataType.FP4E2M1X2),
+        (DataType.FP4E2M1X2, DataType.UINT8),
+        (DataType.FP4E1M2X2, DataType.UINT8),
+        (DataType.FP4E2M1X2, DataType.INT8),
+        (DataType.FP4E1M2X2, DataType.INT8),
+        (DataType.UINT8, DataType.FP4E2M1X2),
+        (DataType.UINT8, DataType.FP4E1M2X2),
+        (DataType.INT8, DataType.FP4E2M1X2),
+        (DataType.INT8, DataType.FP4E1M2X2),
+    ],
+)
 @pytest.mark.parametrize("has_return", [False, True])
-def test_packed_fp4_calls_reject_format_relabeling(type_class, formal_dtype, has_return):
-    """Identical carrier shapes do not make the two numerical formats interchangeable."""
+def test_packed_fp4_calls_reject_format_relabeling(type_class, formal_dtype, actual_dtype, has_return):
+    """Equal byte sizes do not permit implicit FP4 format changes or byte aliases."""
     span = ir.Span.unknown()
-    actual_dtype = DataType.FP4E1M2X2 if formal_dtype == DataType.FP4E2M1X2 else DataType.FP4E2M1X2
     formal_type = type_class([16, 32], formal_dtype)
     formal = ir.Var("formal", formal_type, span)
     actual = ir.Var("actual", type_class([16, 32], actual_dtype), span)
@@ -247,6 +260,11 @@ def test_packed_fp4_calls_reject_format_relabeling(type_class, formal_dtype, has
         ir.deduce_call_return_type([formal], [actual], returns)
     matched = ir.Var("matched", formal_type, span)
     assert ir.deduce_call_return_type([formal], [matched], returns) == returns
+    if formal_dtype in (DataType.UINT8, DataType.INT8) or actual_dtype in (DataType.UINT8, DataType.INT8):
+        # An explicit alias changes the argument's IR dtype before the call.
+        ops = ir.op.tensor if type_class is ir.TensorType else ir.op.tile
+        alias = ops.reinterpret_view(actual, formal_dtype)
+        assert ir.deduce_call_return_type([formal], [alias], returns) == returns
 
 
 @pytest.mark.parametrize(
@@ -257,7 +275,8 @@ def test_packed_fp4_calls_reject_format_relabeling(type_class, formal_dtype, has
         "_tid = pl.spmd_submit(self.sink, x, core_num=1)",
     ],
 )
-def test_void_packed_fp4_dispatch_checks_format_before_lowering(dispatch):
+@pytest.mark.parametrize("actual_dtype", ["FP4E2M1X2", "UINT8", "INT8"])
+def test_void_packed_fp4_dispatch_checks_format_before_lowering(dispatch, actual_dtype):
     """Void dispatches validate formats even when runtime-allocated outputs are omitted."""
     source = f"""
 @pl.program
@@ -268,7 +287,7 @@ class P:
         return
 
     @pl.function(type=pl.FunctionType.Orchestration)
-    def caller(self, x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+    def caller(self, x: pl.Tensor[[16, 32], pl.{actual_dtype}],
                out: pl.Out[pl.Tensor[[16, 32], pl.FP4E1M2X2]]):
         with pl.manual_scope():
             {dispatch}
@@ -276,7 +295,7 @@ class P:
 """
     with pytest.raises(ParserError, match="packed FP4 formats must match"):
         pl.parse_program(source)
-    assert isinstance(pl.parse_program(source.replace("pl.FP4E2M1X2", "pl.FP4E1M2X2")), ir.Program)
+    assert isinstance(pl.parse_program(source.replace(f"pl.{actual_dtype}", "pl.FP4E1M2X2")), ir.Program)
 
 
 def test_explicit_return_annotation_still_roundtrips():

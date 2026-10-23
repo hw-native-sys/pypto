@@ -398,6 +398,17 @@ bool UsesDefaultTileInputs(const CallPtr& call) {
            IsOp(call, "tensor.gather_row"));
 }
 
+/// A dense BF16 DN -> packed FP4 cast needs a column-major Vec tile. Ordinary
+/// BF16 GM loads intentionally produce the default Vec layout, so this one
+/// consumer instead loads the identical ND storage and transposes its metadata.
+bool NeedsPackedFp4DnCastLoad(const CallPtr& call, size_t index) {
+  if (index != 0 || !IsOp(call, "tensor.cast") || call->args_.empty()) return false;
+  auto source = AsTensorTypeLike(call->args_[0]->GetType());
+  auto result = AsTensorTypeLike(call->GetType());
+  return source && result && source->dtype_ == DataType::BF16 && result->dtype_.IsPackedFp4() &&
+         source->tensor_view_.has_value() && source->tensor_view_->layout == TensorLayout::DN;
+}
+
 /**
  * @brief Visitor that collects tensor-typed variables used directly by converted ops.
  *
@@ -462,7 +473,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Other args (e.g. matmul_acc's acc, which has no input_req) still need Phase-1 loads
       // so they reach the converter as TileType.
       for (size_t i = 0; i < call->args_.size(); ++i) {
-        if (conv_entry->input_reqs.count(i)) continue;
+        if (conv_entry->input_reqs.count(i) || NeedsPackedFp4DnCastLoad(call, i)) continue;
         const auto& arg = call->args_[i];
         // ``AsTensorTypeLike`` also collects ``DistributedTensorType`` params: inside
         // an InCore scope a window is this rank's local GM, so an op with no
@@ -1213,7 +1224,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
     }
 
     // Auto-bridge: load TensorType args to the memory space required by input_reqs
-    auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
+    auto [bridged_args, bridge_stmts] =
+        BridgeInputSpaces(call, entry->input_reqs, NeedsPackedFp4DnCastLoad(As<Call>(op->value_), 0));
 
     // Run the converter with bridged args
     auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_, conversion_context_);
@@ -1260,7 +1272,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
     const auto* entry = conv_registry_.Lookup(call->op_->name_);
     if (!entry) return maybe_update();
 
-    auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
+    auto [bridged_args, bridge_stmts] =
+        BridgeInputSpaces(call, entry->input_reqs, NeedsPackedFp4DnCastLoad(As<Call>(op->expr_), 0));
     auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_, conversion_context_);
 
     std::vector<StmtPtr> stmts;
@@ -1516,12 +1529,62 @@ class TensorToTileMutator : public TypePropagatingMutator {
     return SeqStmts::Flatten(std::move(stmts), op->span_);
   }
 
+  /// Restore a DN cast's value layout after an earlier producer materialized it
+  /// as an ordinary row-major BF16 tile. A slice is already a value snapshot:
+  /// reloading its GM source here could observe intervening writes, and changing
+  /// the shared tile would alter other consumers. Transpose into fresh storage,
+  /// then reinterpret that transposed matrix as the original column-major one.
+  ExprPtr PreparePackedFp4DnCastTile(const ExprPtr& source, const Span& span, std::vector<StmtPtr>& stmts) {
+    auto type = As<TileType>(source->GetType());
+    INTERNAL_CHECK_SPAN(type && type->dtype_ == DataType::BF16, span)
+        << "Internal error: packed FP4 DN cast preparation requires a BF16 tile";
+    const auto view = tile_view_semantics::GetEffectiveTileView(*type);
+    if (view.blayout == TileLayout::col_major) return source;
+
+    const bool static_2d = type->shape_.size() == 2 &&
+                           std::all_of(type->shape_.begin(), type->shape_.end(), [](const ExprPtr& extent) {
+                             auto value = As<ConstInt>(extent);
+                             return value && value->value_ > 0;
+                           });
+    // tile.transpose allocates a full-valid result, so check before it can erase
+    // partial/padded validity. The native DN cast only accepts dense rectangles.
+    CHECK_SPAN(static_2d && view.slayout == TileLayout::none_box &&
+                   tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, type->shape_),
+               span)
+        << "packed FP4 DN cast requires a full static 2D valid shape in unboxed storage; partial or "
+           "padded DN casts are unsupported";
+    const std::vector<ExprPtr> expected_stride = {type->shape_[1],
+                                                  std::make_shared<ConstInt>(1, DataType::INDEX, span)};
+    CHECK_SPAN(
+        view.stride.empty() || tile_view_semantics::ShapeExprListsEquivalent(view.stride, expected_stride),
+        span)
+        << "packed FP4 DN cast preparation requires a contiguous row-major source tile";
+
+    auto transpose = op_registry_.Create("tile.transpose",
+                                         {source, std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                                          std::make_shared<ConstInt>(1, DataType::INDEX, span)},
+                                         {}, span);
+    auto transposed = std::make_shared<Var>("fp4_dn_transposed", transpose->GetType(), span);
+    stmts.push_back(std::make_shared<AssignStmt>(transposed, transpose, span));
+    auto column_view = op_registry_.Create("tile.transpose_view", {transposed}, {}, span);
+    auto column_tile = std::make_shared<Var>("fp4_dn_values", column_view->GetType(), span);
+    stmts.push_back(std::make_shared<AssignStmt>(column_tile, column_view, span));
+    return column_tile;
+  }
+
   /// Auto-bridge TensorType args to the memory space required by input_reqs.
   /// Returns the (possibly modified) args and any load statements to prepend.
   std::pair<std::vector<ExprPtr>, std::vector<StmtPtr>> BridgeInputSpaces(
-      const CallPtr& call, const std::unordered_map<size_t, InputSpaceReq>& input_reqs) {
+      const CallPtr& call, const std::unordered_map<size_t, InputSpaceReq>& input_reqs,
+      bool preserve_packed_fp4_dn) {
     auto args = call->args_;
     std::vector<StmtPtr> stmts;
+    // Preserve the tensor call's layout intent from before VisitExpr remapped
+    // its producer. The rewritten operand may already be a row-major TileType,
+    // which the tensor-only GM bridge below cannot recognize as a DN cast.
+    if (preserve_packed_fp4_dn && As<TileType>(args[0]->GetType())) {
+      args[0] = PreparePackedFp4DnCastTile(args[0], call->span_, stmts);
+    }
 
     // The default requirements are the same ones used to select read-only
     // entry loads. Apply them only to this call's operands. GM memory ops keep
@@ -1530,6 +1593,32 @@ class TensorToTileMutator : public TypePropagatingMutator {
       std::unordered_map<const Expr*, ExprPtr> loaded_args;
       for (size_t i = 0; i < args.size(); ++i) {
         if (input_reqs.count(i) || !AsTensorTypeLike(args[i]->GetType())) continue;
+        if (NeedsPackedFp4DnCastLoad(call, i)) {
+          auto source_type = AsTensorTypeLike(args[i]->GetType());
+          auto shape = source_type->shape_;
+          INTERNAL_CHECK_SPAN(shape.size() == 2, call->span_)
+              << "Internal error: dense packed FP4 DN cast must be two-dimensional";
+          std::swap(shape[0], shape[1]);
+          auto storage_view =
+              op_registry_.Create("tensor.view", {args[i], MakeShapeTuple(shape, call->span_)},
+                                  {{"layout", TensorLayout::ND}}, call->span_);
+          auto storage = std::make_shared<Var>("fp4_dn_storage", storage_view->GetType(), call->span_);
+          stmts.push_back(std::make_shared<AssignStmt>(storage, storage_view, call->span_));
+          auto extent = MakeShapeTuple(shape, call->span_);
+          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
+          AppendCachePolicyKwarg(args[i], cache_policies_, &load_kwargs);
+          auto load =
+              op_registry_.Create("tile.load", {storage, MakeZeroOffsets(2, call->span_), extent, extent},
+                                  load_kwargs, call->span_);
+          auto loaded = std::make_shared<Var>("fp4_dn_loaded", load->GetType(), call->span_);
+          stmts.push_back(std::make_shared<AssignStmt>(loaded, load, call->span_));
+          RecordPackedTile(loaded, load);
+          auto transpose = op_registry_.Create("tile.transpose_view", {loaded}, {}, call->span_);
+          auto column_tile = std::make_shared<Var>("fp4_dn_values", transpose->GetType(), call->span_);
+          stmts.push_back(std::make_shared<AssignStmt>(column_tile, transpose, call->span_));
+          args[i] = std::move(column_tile);
+          continue;
+        }
         auto [it, inserted] = loaded_args.try_emplace(args[i].get());
         if (inserted) it->second = LoadTensorOperand(args[i], call->span_, stmts);
         args[i] = it->second;

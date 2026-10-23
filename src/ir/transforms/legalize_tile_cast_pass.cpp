@@ -166,6 +166,18 @@ int EdgePreferenceCost(DataType from, DataType to) {
   return 2;
 }
 
+// All of these source formats fit exactly in BF16, which is the only native
+// FP4 encoding source. Larger floats/integers can double-round through BF16;
+// they must make that intermediate conversion explicit in the source program.
+bool HasLosslessFp4EncodingBridge(DataType src) {
+  return src.IsPackedFp4() || src == DataType::BF16 || src == DataType::FP8E4M3FN ||
+         src == DataType::FP8E5M2 || src == DataType::HF8 || (src.IsInt() && src.GetBit() <= 8);
+}
+
+bool IsFp4FloatBridge(DataType dtype) {
+  return dtype == DataType::BF16 || dtype == DataType::FP16 || dtype == DataType::FP32;
+}
+
 // BFS shortest path; returns the sequence of intermediate/final target types
 // (excluding `from`). Empty vector means already native? No — caller checks
 // native first. Empty here means unreachable.
@@ -174,6 +186,7 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
   if (IsNativeCast(adj, from, to)) {
     return {to};
   }
+  if (to.IsPackedFp4() && !HasLosslessFp4EncodingBridge(from)) return {};
 
   // State: dtype code → (parent code, edge-to dtype, path_len, path_pref_cost)
   struct NodeInfo {
@@ -206,9 +219,15 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
     }
 
     for (const DataType& nxt : neigh) {
+      if (to.IsPackedFp4() && nxt != to && !IsFp4FloatBridge(nxt)) continue;
       // Intermediates must preserve everything the destination can represent;
       // the destination itself is always admissible.
-      if (nxt != to && NarrowsRelativeTo(nxt, to)) continue;
+      // FP4 has a much smaller value set than wider destinations: its native
+      // BF16 decode, and subsequent FP16/FP32 bridges, preserve every source
+      // value exactly. Rejecting BF16 merely because FP32 has more precision
+      // would make an otherwise lossless FP4 -> BF16 -> FP32 cast unreachable.
+      const bool exact_fp4_decode = from.IsPackedFp4() && IsFp4FloatBridge(nxt);
+      if (nxt != to && !exact_fp4_decode && NarrowsRelativeTo(nxt, to)) continue;
       const int edge_cost = EdgePreferenceCost(cur_info.via, nxt);
       const int new_dist = cur_info.dist + 1;
       const int new_pref = cur_info.pref + edge_cost;
@@ -245,7 +264,7 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
 bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
 
 /// Packed FP4 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
-void MaybeWarnFp4FamilyToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
+void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
   if (!diags || !src.IsPackedFp4() || !IsFp8DataCastTarget(dst)) return;
   diags->emplace_back(DiagnosticSeverity::Warning, "LegalizeTileCast", 0,
                       "cast from " + src.ToString() + " to " + dst.ToString() +
@@ -275,13 +294,17 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    MaybeWarnFp4FamilyToFp8(src, dst, op->span_, diags_);
+    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
 
     if (IsNativeCast(adj_, src, dst)) {
       return IRMutator::VisitStmt_(op);
     }
 
     std::vector<DataType> chain = FindCastChain(adj_, src, dst);
+    CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)
+        << "LegalizeTileCast: no lossless cast path from " << src.ToString() << " to " << dst.ToString()
+        << "; the required BF16 intermediate can double-round. Cast to BF16 explicitly before FP4 "
+           "to request that two-step conversion";
     CHECK_SPAN(!chain.empty(), op->span_)
         << "LegalizeTileCast: no native cast path from " << src.ToString() << " to " << dst.ToString()
         << " for arch " << arch_name_ << "; pto.tcvt does not support this conversion";

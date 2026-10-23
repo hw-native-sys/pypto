@@ -619,10 +619,28 @@ def test_device_dispatch_layout_direction_for_call_and_submit(submit, caller_lay
 
 @pytest.mark.parametrize("type_class", [ir.TensorType, ir.TileType])
 @pytest.mark.parametrize("submit", [False, True])
-@pytest.mark.parametrize("actual_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-def test_void_call_checks_packed_fp4_formats_without_inline_functions(type_class, submit, actual_dtype):
-    """Hand-built calls and submits must not reinterpret one packed format as the other."""
-    formal = ir.Var("formal", type_class([16, 32], DataType.FP4E2M1X2), _SPAN)
+@pytest.mark.parametrize(
+    "formal_dtype,actual_dtype",
+    [
+        (DataType.FP4E2M1X2, DataType.FP4E2M1X2),
+        (DataType.FP4E1M2X2, DataType.FP4E1M2X2),
+        (DataType.FP4E2M1X2, DataType.FP4E1M2X2),
+        (DataType.FP4E1M2X2, DataType.FP4E2M1X2),
+        (DataType.FP4E2M1X2, DataType.UINT8),
+        (DataType.FP4E1M2X2, DataType.UINT8),
+        (DataType.FP4E2M1X2, DataType.INT8),
+        (DataType.FP4E1M2X2, DataType.INT8),
+        (DataType.UINT8, DataType.FP4E2M1X2),
+        (DataType.UINT8, DataType.FP4E1M2X2),
+        (DataType.INT8, DataType.FP4E2M1X2),
+        (DataType.INT8, DataType.FP4E1M2X2),
+    ],
+)
+def test_void_call_checks_packed_fp4_formats_without_inline_functions(
+    type_class, submit, formal_dtype, actual_dtype
+):
+    """Hand-built dispatches cannot silently alias bytes as either packed format."""
+    formal = ir.Var("formal", type_class([16, 32], formal_dtype), _SPAN)
     actual = ir.Var("actual", type_class([16, 32], actual_dtype), _SPAN)
     callee = ir.Function("sink", [formal], [], ir.ReturnStmt([], _SPAN), _SPAN)
     if submit:
@@ -633,7 +651,7 @@ def test_void_call_checks_packed_fp4_formats_without_inline_functions(type_class
         call = ir.Call(ir.GlobalVar("sink"), [actual], ir.TupleType([]), _SPAN)
     caller = ir.Function("caller", [actual], [], ir.EvalStmt(call, _SPAN), _SPAN)
     diagnostics = _layout_diagnostics(ir.Program([callee, caller], "PackedFormats", _SPAN))
-    if actual_dtype == DataType.FP4E2M1X2:
+    if actual_dtype == formal_dtype:
         assert diagnostics == []
     else:
         assert len(diagnostics) == 1
@@ -642,7 +660,7 @@ def test_void_call_checks_packed_fp4_formats_without_inline_functions(type_class
 
 
 @pytest.mark.parametrize("direction", [ir.ParamDirection.Out, ir.ParamDirection.InOut])
-@pytest.mark.parametrize("actual_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize("actual_dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2, DataType.UINT8])
 def test_submit_packed_format_checks_skip_omitted_outputs_before_commctx(direction, actual_dtype):
     """An omitted output cannot steal a required input or the trailing context argument."""
     e2_type = ir.TensorType([16, 32], DataType.FP4E2M1X2)

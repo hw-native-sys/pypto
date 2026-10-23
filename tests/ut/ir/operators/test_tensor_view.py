@@ -81,11 +81,16 @@ def test_bare_nd_to_dn_flips_trailing_dims():
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-def test_packed_fp4_rejects_layout_conversion(dtype):
-    """Packed FP4 retains the existing ND-only layout boundary."""
+def test_packed_fp4_layout_view_preserves_byte_carriers(dtype):
     src = _tensor_var([8, 16], dtype=dtype)
-    with pytest.raises(ValueError, match=r"supports ND layout only"):
-        ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+    call = ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == dtype
+    assert _values_of(call.type.shape) == [16, 8]
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.DN
+    assert _values_of(view.stride) == [1, 16]
 
 
 def test_dn_packed_to_nd_flips_back():

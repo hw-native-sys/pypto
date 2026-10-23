@@ -122,7 +122,8 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
-| `quant_mx` | `pl.` (T/t) | Ascend950 MXFP8 block-32 动态量化，生成 FP8E4M3FN 数据及 FP8E8M0 scale（`group_axis` 对齐 PTOAS `grpAxis`）。Tensor 调用物化 GM data 和 MX layout scale，tile 调用保留在片上；本版本不含 MXFP4 quant。直接的 tensor quant→matmul 链可使用 data+scale 的 V2C 传输（见 [类型](../language/00-types.md)） |
+| `quant_mx` | `pl.` (T/t) | Ascend950 block-32 动态量化，生成 FP8E4M3FN 或 packed `fp4e2m1x2` 数据及 FP8E8M0 scale。FP4 输入须为 FP16/BF16；axis1 返回 `[M,K/2]`，axis0 将 `[N,K]` 转置为 `[K,N/2]`。`quant_scale_alg="ocp"` 为默认值；`"nv"` 支持 FP4 axis0。Tensor 调用物化 GM 数据和 MX layout scale，tile 调用保留在片上。FP8 结果可供 `matmul_mx` 使用；原生 FP4 矩阵乘受 PTOAS v0.67 几何问题限制（见 [类型](../language/00-types.md)）。 |
+| `quant_mx_raw` | `pl.tile.` (t) | 直接使用 Ascend950 TQUANT，显式提供 max/scaling 工作区。返回原生 FP4E2M1X2 或 INT8 数据及原始 UINT8 指数，不进行 MX scale 分块打包。axis1 允许任意正行数和 32 的倍数 K（原生 FP4 为 64 的倍数）；源有效行数可小于物理行数。axis0 直接使用源朝向，每 32 个有效行分组；FP16/BF16 行数为 64 的倍数时，可用 `interleave=True` 交错相邻指数对。 |
 | `tmov_x2zz` | `pl.` (t) | Ascend950 指数 X-to-ZZ 布局转换（UINT8）。`tmp` 为只写 workspace；axis1 需 `dst_rows`/`dst_cols` 指定 ZZ `[M,G]`（相对 TQUANT 扁平 exp）。通常由 `quant_mx` 降级使用，而非直接调用 |
 
 ## 线性代数
