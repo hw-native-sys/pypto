@@ -2769,5 +2769,69 @@ def test_all_to_all_v_rejects_partial_valid_shape_target():
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
+def _make_indexed_all_to_all_v_args(span: ir.Span) -> list[ir.Expr]:
+    args = _make_all_to_all_v_args(span)
+    # Nmax deliberately differs from P*C: indices address the original input.
+    args[0] = _make_tensor_var("inp", [13, _AAV_SIZE], DataType.FP32, span)
+    args.insert(5, _make_tensor_var("index", [_AAV_NR, _AAV_MAX_RECV], DataType.INT32, span))
+    return args
+
+
+def test_indexed_all_to_all_v_accepts_original_input_capacity():
+    span = ir.Span.unknown()
+    args = _make_indexed_all_to_all_v_args(span)
+    call = ir.create_op_call("pld.tensor.indexed_all_to_all_v", args, {}, span)
+    assert isinstance(call.type, ir.DistributedTensorType)
+    assert call.type is args[1].type
+    assert ir.get_op_argument_count("pld.tensor.indexed_all_to_all_v") == 7
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        ([_AAV_NR * _AAV_MAX_RECV], DataType.INT32),
+        ([_AAV_NR, _AAV_MAX_RECV], DataType.INT64),
+        ([_AAV_NR + 1, _AAV_MAX_RECV], DataType.INT32),
+        ([_AAV_NR, _AAV_MAX_RECV + 1], DataType.INT32),
+    ],
+)
+def test_indexed_all_to_all_v_rejects_invalid_index(shape, dtype):
+    span = ir.Span.unknown()
+    args = _make_indexed_all_to_all_v_args(span)
+    args[5] = _make_tensor_var("index", shape, dtype, span)
+    with pytest.raises(ValueError, match="index must"):
+        ir.create_op_call("pld.tensor.indexed_all_to_all_v", args, {}, span)
+
+
+def test_indexed_all_to_all_v_accepts_extra_local_copy_aivs():
+    span = ir.Span.unknown()
+    args = _make_indexed_all_to_all_v_args(span)
+    args[-1] = ir.ConstInt(_AAV_NR + 1, DataType.INDEX, span)
+    call = ir.create_op_call("pld.tensor.indexed_all_to_all_v", args, {}, span)
+    assert call.args[-1] is args[-1]
+
+
+def test_indexed_all_to_all_v_wrapper_preserves_index_and_defaults_core_num():
+    span = ir.Span.unknown()
+    args = _make_indexed_all_to_all_v_args(span)[:-1]
+    call = dist_tensor_ops.indexed_all_to_all_v(*args, span=span)
+    assert call.args[5] is args[5]
+    assert isinstance(call.args[6], ir.ConstInt)
+    assert call.args[6].value == 1
+    with pytest.raises(TypeError, match="got bool"):
+        dist_tensor_ops.indexed_all_to_all_v(*args, core_num=True, span=span)
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_indexed_all_to_all_v_accepts_local_receive_counts(local):
+    span = ir.Span.unknown()
+    args = _make_indexed_all_to_all_v_args(span)
+    if local:
+        args[4] = _make_tensor_var("recv", [_AAV_NR, 1], DataType.INT32, span)
+    call = ir.create_op_call("pld.tensor.indexed_all_to_all_v", args, {}, span)
+    assert call.args[4] is args[4]
+    assert call.type is args[1].type
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1521,7 +1521,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool sort32_kw_tmp = IsOp(op, "tile.sort32") && op->args_.size() == 3;
   // pld.tensor.all_to_all_v carries its requested block limit as a keyword-only
   // 6th operand; printing it positionally would re-parse as too many arguments.
-  const bool a2av_kw_core_num = IsOp(op, "pld.tensor.all_to_all_v") && op->args_.size() == 6;
+  const bool a2av_kw_core_num = (IsOp(op, "pld.tensor.all_to_all_v") && op->args_.size() == 6) ||
+                                (IsOp(op, "pld.tensor.indexed_all_to_all_v") && op->args_.size() == 7);
   const bool mgather = IsOp(op, "tile.mgather");
   const int mgather_coalesce = mgather ? op->GetKwarg<int>("coalesce", 0) : 0;
   const bool mgather_kw_scratch = mgather && mgather_coalesce == 1 && op->args_.size() >= 3;
@@ -1535,7 +1536,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (ci_kw_tmp && i == 2) continue;
     if (cast_kw_tmp && i == 1) continue;
     if (sort32_kw_tmp && i == 2) continue;
-    if (a2av_kw_core_num && i == 5) continue;
+    if (a2av_kw_core_num && i + 1 == op->args_.size()) continue;
     if (mgather && i >= 2) continue;
     if (i > 0) stream_ << ", ";
 
@@ -1582,7 +1583,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   }
   if (a2av_kw_core_num) {
     stream_ << ", core_num=";
-    VisitExpr(op->args_[5]);
+    VisitExpr(op->args_.back());
     need_comma = true;
   }
   if (mgather_kw_scratch) {

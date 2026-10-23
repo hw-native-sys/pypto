@@ -236,3 +236,16 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   wire golden; and the structural assertions that no builtin chip dispatch is
   emitted, that the builtin kernel is rendered into the pipeline's own
   sub-build, and that the HOST rail renders a byte-identical kernel source.
+
+## Indexed A5 URMA variant
+
+`pld.tensor.indexed_all_to_all_v(input, target, signal, send_counts,
+recv_counts, index, core_num=L)` uses the managed L2 task pipeline and its own
+kernel template. Six tensor operands precede CommContext at slot 6. Input,
+index and recv_counts may be local tensors; send_counts must be a window.
+`L` is a positive compile-time exact launch width. All AIVs share local copies
+between remote submission and CQ waits; AIVs beyond P only help local copies.
+Only A5 URMA PER_PEER transport is supported, with one writer per destination.
+Callers must order exchanges sharing queues; reusing the same InOut signal
+creates that dependency even when payload windows differ. HOST and InCore
+calls are unsupported. See the [user contract](../../user/distributed/20-all_to_all.md#indexed-alltoallv-on-a5-urma).

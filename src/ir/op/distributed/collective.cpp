@@ -625,8 +625,9 @@ void CheckAllToAllVCoreNumType(const ExprPtr& core_num, const char* op_name) {
   }
 }
 
-TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
+TypePtr DeduceTensorAllToAllVTypeImpl(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                      bool indexed) {
   // core_num is the 6th *operand*, never a kwarg. The op used to declare it as
   // `.set_attr<int>("core_num")`; a caller passing it that way would be silently
   // ignored here while lowering read the operand, and the printer would emit
@@ -639,9 +640,9 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
                                 "argument; pass it as the 6th positional operand "
                                 "(int | Scalar[INDEX])";
   }
-  CHECK(args.size() == 6) << "pld.tensor.all_to_all_v requires 6 args "
-                             "(input, target, signal, send_counts, recv_counts, core_num), but got "
-                          << args.size();
+  CHECK(args.size() == (indexed ? 7 : 6))
+      << (indexed ? "indexed_all_to_all_v requires 7 operands, got " : "all_to_all_v requires 6 args, got ")
+      << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.all_to_all_v positional argument #" << i << " must not be null";
   }
@@ -657,7 +658,7 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   // The InCore composite rail requires a compile-time core_num == 1;
   // LowerCompositeOps enforces that, so this deducer only rejects a
   // statically-provable non-positive value no rail could ever honour.
-  CheckAllToAllVCoreNumType(args[5], "pld.tensor.all_to_all_v");
+  CheckAllToAllVCoreNumType(args.back(), "pld.tensor.all_to_all_v");
 
   // input: flattened send buffer [NR*MAX_RECV, SIZE] — Tensor or DistributedTensor
   // (same Tensor-like contract as symmetric all_to_all / send_counts).
@@ -677,8 +678,10 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << " dims";
   // Dim 0 (NR*MAX_RECV): must agree when both are static; dim 1 (SIZE) is a
   // literal, so use a strict structural check (same pattern as symmetric all_to_all).
-  CheckDimAgreesIfStatic(target_type->shape_[0], input_type->shape_[0], "pld.tensor.all_to_all_v", "target",
-                         "input");
+  if (!indexed) {
+    CheckDimAgreesIfStatic(target_type->shape_[0], input_type->shape_[0], "pld.tensor.all_to_all_v", "target",
+                           "input");
+  }
   CHECK(AreExprsEqual(target_type->shape_[1], input_type->shape_[1]))
       << "pld.tensor.all_to_all_v target SIZE must equal input SIZE";
   CHECK(target_type->dtype_ == input_type->dtype_)
@@ -752,6 +755,28 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << "pld.tensor.all_to_all_v signal dim 0 (" << signal_dim0->value_ << ") must divide target dim 0 ("
       << target_dim0->value_ << ")";
 
+  if (indexed) {
+    CheckSupportedAllToAllVBuiltinVariant(input_type->dtype_, "indexed_all_to_all_v");
+    auto index_type = AsTensorTypeLike(args[5]->GetType());
+    CHECK(index_type && index_type->dtype_ == DataType::INT32 && index_type->shape_.size() == 2)
+        << "indexed_all_to_all_v index must be INT32 [P, C]";
+    auto p = As<ConstInt>(index_type->shape_[0]);
+    auto c = As<ConstInt>(index_type->shape_[1]);
+    auto n = As<ConstInt>(input_type->shape_[0]);
+    auto h = As<ConstInt>(input_type->shape_[1]);
+    CHECK(p && c && p->value_ == signal_dim0->value_ && c->value_ > 0 && c->value_ <= INT32_MAX &&
+          c->value_ == target_dim0->value_ / signal_dim0->value_)
+        << "indexed_all_to_all_v index must have static shape [P, target.rows / P], C in [1, INT32_MAX]";
+    CHECK(n && n->value_ > 0 && n->value_ <= INT32_MAX && h && h->value_ > 0 &&
+          h->value_ <= static_cast<int64_t>(UINT32_MAX / input_type->dtype_.GetByte()))
+        << "indexed_all_to_all_v requires static positive input [Nmax, H], Nmax <= INT32_MAX and row bytes "
+           "<= UINT32_MAX";
+    CheckStaticContiguousPayload(index_type, "index");
+    for (size_t i = 0; i < 5; ++i) {
+      CHECK(args[5].get() != args[i].get()) << "indexed_all_to_all_v index must not alias another operand";
+    }
+  }
+
   // send_counts: per-destination row counts, read at runtime by the lowering
   // (``tensor.read``) and used for two distinct things — it sizes the TPUT
   // transfer extent (so only the payload crosses the wire, not the full
@@ -790,9 +815,13 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   // count with AtomicAdd into every peer's recv_counts[my_rank, 0]. A second
   // barrier completes the exchange. Using atomics for both phases prevents
   // cache-line write-back from clobbering adjacent count or signal cells.
-  auto recv_type = As<DistributedTensorType>(args[4]->GetType());
-  CHECK(recv_type) << "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got "
-                   << args[4]->GetType()->TypeName();
+  // The indexed L2 kernel only writes receive counts locally, so it can
+  // accept an ordinary Tensor.
+  auto recv_type = AsTensorTypeLike(args[4]->GetType());
+  CHECK(recv_type && (indexed || As<DistributedTensorType>(args[4]->GetType())))
+      << (indexed ? "indexed_all_to_all_v recv_counts must be a Tensor or DistributedTensor, got "
+                  : "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got ")
+      << args[4]->GetType()->TypeName();
   CHECK(recv_type->dtype_ == DataType::INT32)
       << "pld.tensor.all_to_all_v recv_counts must have INT32 element type, got dtype "
       << recv_type->dtype_.ToString();
@@ -818,6 +847,16 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
 
   // Window-as-result: return target
   return target_type;
+}
+
+TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  return DeduceTensorAllToAllVTypeImpl(args, kwargs, false);
+}
+
+TypePtr DeduceIndexedAllToAllVType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  return DeduceTensorAllToAllVTypeImpl(args, kwargs, true);
 }
 
 }  // namespace
@@ -1424,6 +1463,23 @@ REGISTER_OP("builtin.tensor.all_to_all_v")
     .set_arg_effect(2, ArgEffect::ReadWrite)
     .set_arg_effect(4, ArgEffect::Write)
     .f_deduce_type(DeduceBuiltinTensorAllToAllVType);
+
+REGISTER_OP("pld.tensor.indexed_all_to_all_v")
+    .set_description("A5 URMA indexed row exchange, L2 only; valid counts and indices required.")
+    .set_op_category("DistributedOp")
+    .add_argument("input", "Original packed rows [Nmax,H]")
+    .add_argument("target", "Receive window [P*C,H], partitioned by source")
+    .add_argument("signal", "INT32 barrier window [P,S], zero-initialize once")
+    .add_argument("send_counts", "INT32 window [P] or [P,1], counts in [0,C]")
+    .add_argument("recv_counts", "INT32 local receive counts [P,1]")
+    .add_argument("index", "Local INT32 [P,C], valid prefixes select input rows")
+    .add_argument("core_num", "Requested positive AIV count; AIVs beyond P help self copies")
+    .set_template_dir(":pypto.runtime.builtins.collectives.indexed_all_to_all_v")
+    .no_memory_spec()
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_arg_effect(2, ArgEffect::ReadWrite)
+    .set_arg_effect(4, ArgEffect::Write)
+    .f_deduce_type(DeduceIndexedAllToAllVType);
 
 }  // namespace ir
 }  // namespace pypto

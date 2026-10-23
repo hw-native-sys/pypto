@@ -73,7 +73,8 @@ namespace {
 // also returns `target` in-place (args_[1]) — same aliasing discipline as
 // IsTensorAllToAll above.
 [[nodiscard]] bool IsTensorAllToAllV(const CallPtr& call) {
-  return call && call->op_ && IsOp(call, "pld.tensor.all_to_all_v");
+  return call && call->op_ &&
+         (IsOp(call, "pld.tensor.all_to_all_v") || IsOp(call, "pld.tensor.indexed_all_to_all_v"));
 }
 
 /// Device coverage descriptor inferred from a dispatch ``device=`` expression.
@@ -369,6 +370,8 @@ class DispatchAnalyzer : public IRVisitor {
 
   void AnalyzeCollective(const CallPtr& op) {
     if (!op || !op->op_) return;
+    CHECK_SPAN(!IsOp(op, "pld.tensor.indexed_all_to_all_v"), op->span_)
+        << "indexed_all_to_all_v supports only L2 orchestration on A5 URMA; HOST is unsupported";
 
     if (IsOp(op, "pld.tensor.allreduce") || IsOp(op, "pld.tensor.broadcast") ||
         IsOp(op, "pld.tensor.reduce_scatter")) {
@@ -660,7 +663,8 @@ class DefiningCallRetyper : public IRMutator {
       cur = AsVarLike(call->args_[1]);
       continue;
     }
-    if (call && IsOp(call, "pld.tensor.all_to_all_v") && call->args_.size() > 1) {
+    if (call && (IsOp(call, "pld.tensor.all_to_all_v") || IsOp(call, "pld.tensor.indexed_all_to_all_v")) &&
+        call->args_.size() > 1) {
       cur = AsVarLike(call->args_[1]);
       continue;
     }

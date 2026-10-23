@@ -808,6 +808,10 @@ def lower_l2_tensor_collectives() -> Pass:
 
     Runs before :func:`derive_call_directions` so the emitted call
     gets its argument directions and task edges derived like any kernel call.
+    ``pld.tensor.indexed_all_to_all_v`` also lowers on this rail (A5 URMA only),
+    with six tensor operands and a positive compile-time core_num. All AIVs
+    share local copies between remote submission and CQ waits without sharing
+    remote queues.
     ``pld.tensor.all_to_all_v`` accepts a compile-time ``core_num``: the admitted
     block count ``B = CalAllToAllVBlocks(P, L)`` is folded and ``B`` blocks are
     launched; a runtime ``core_num`` is rejected.

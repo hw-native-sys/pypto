@@ -46,6 +46,12 @@ def _unwrap_distributed_tensors(
 ) -> tuple[Expr, Expr, Expr]: ...
 
 
+@overload
+def _unwrap_distributed_tensors(
+    op_name: str, *, target: Any, signal: Any, send_counts: Any
+) -> tuple[Expr, Expr, Expr]: ...
+
+
 def _unwrap_distributed_tensors(op_name: str, **named: Any) -> tuple[Expr, ...]:
     """Unwrap and validate DistributedTensor positional args for a ``pld.*`` op.
 
