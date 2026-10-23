@@ -62,9 +62,13 @@ program = passes.materialize_semantic_aliases()(program)
    已激活的数据观测，普通访问
    索引仍保留全部转发使用。只有别名、分支/循环结果或后续迭代实际消费该值时，
    工作队列才激活相应源的观测。常量 For 边界若证明零次迭代，则禁用循环体结果边；
-   若证明至多一次迭代，则禁用回边；未知边界保守处理。因此，非空循环
+   若证明至多一次迭代，则禁用回边。已知零次 For 或条件恒假的 While，其循环体的
+   普通数据观测也被排除。至多一次的 For 不建立重复读取区间，但外层可重复循环
+   仍会保护其真实读取。注册为仅写的参数不观测旧数据，读取、读写、计算参数及
+   引用属性的观测仍保留。未知边界及条件保守处理。因此，非空循环
    转发且被消费的结果仍受保护，而未使用的 Acc carry 不会错误阻止重定向，进而
-   要求不受支持的 Acc-to-Acc 复制。若循环体仅将所有 carry 原样 yield，Buffer IR
+   要求不受支持的 Acc-to-Acc 复制。对于已知零次循环，或循环体仅将所有 carry
+   原样 yield 的循环，Buffer IR
    也不为其创建私有循环输入存储，因为这种绑定不会覆盖 initializer。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内

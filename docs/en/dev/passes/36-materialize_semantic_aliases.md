@@ -77,10 +77,17 @@ its own fresh MemRef. This pass closes that gap:
    retain all forwarding uses. Only when an alias, branch/loop result, or later
    iteration actually consumes the value does the worklist activate its source
    observations. Constant For bounds disable body-result edges for zero trips
-   and backedge edges for at most one trip; unknown bounds remain conservative. This also preserves
+   and backedge edges for at most one trip. Ordinary body observations are also
+   excluded for proven zero-trip For loops and constant-false While conditions.
+   A For with at most one iteration contributes no recurrence interval, though
+   enclosing repeating loops still protect its actual reads. Registered
+   write-only operands do not observe old payloads; reads, read-modify-writes,
+   computed arguments and reference attributes retain their observations.
+   Unknown bounds and conditions remain conservative. This also preserves
    consumed forwarding results of nonempty loops, without making unused Acc
    carries falsely block retargeting and require an unsupported Acc-to-Acc copy.
-   Buffer IR also avoids private loop-input storage when the complete body only
+   Buffer IR also avoids private loop-input storage for proven zero-trip loops
+   and when the complete body only
    yields every carry unchanged: this binding cannot overwrite its initializer.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and

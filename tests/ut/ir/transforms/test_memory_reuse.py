@@ -5238,7 +5238,9 @@ class Before:
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
 
-    @pytest.mark.parametrize("first_loop", ["for", "while", "alias", "view"])
+    @pytest.mark.parametrize(
+        "first_loop", ["for", "while", "alias", "view", "dead_for", "dead_while", "dead_while_result"]
+    )
     @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
     def test_unused_forwarded_accumulator_allows_retarget(self, first_loop, buffer_ir):
         """Forwarding an unused Acc carry must not require an unsupported Acc copy."""
@@ -5251,10 +5253,31 @@ class Before:
             "                _unused, _steps = pl.yield_(carry, step + 1)\n"
         )
         carry_seed = "seed"
+        other_seed = ""
         if first_loop in {"alias", "view"}:
             value = "seed" if first_loop == "alias" else "pl.tile.reshape(seed, [16, 64])"
             forwarding = f"            alias = {value}\n"
             carry_seed = "alias"
+        if first_loop == "dead_for":
+            forwarding = (
+                "            for _dead in pl.range(0, 1, -1):\n"
+                "                _unreachable_store = pl.tile.store(seed, [0, 0], out)\n"
+            )
+        elif first_loop == "dead_while":
+            forwarding = (
+                "            for (step,) in pl.while_(init_values=(0,)):\n"
+                "                pl.cond(False)\n"
+                "                _unreachable_store = pl.tile.store(seed, [0, 0], out)\n"
+                "                _unused_step = pl.yield_(step + 1)\n"
+            )
+        elif first_loop == "dead_while_result":
+            other_seed = "        other = pl.tile.matmul(sa, sb)\n"
+            forwarding = (
+                "            for carry, step in pl.while_(init_values=(other, 0)):\n"
+                "                pl.cond(False)\n"
+                "                first_result, _unused_step = pl.yield_(seed, step + 1)\n"
+                "            _first_used = pl.tile.store(first_result, [0, 0], out)\n"
+            )
         before = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -5266,7 +5289,7 @@ class Before:
         sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
         sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
         seed = pl.tile.matmul(sa, sb)
-        for (wave,) in pl.while_(init_values=(0,)):
+{other_seed}        for (wave,) in pl.while_(init_values=(0,)):
             pl.cond(wave < 2)
 {forwarding}            for _second, (_carry,) in pl.range(2, init_values=({carry_seed},)):
                 replacement = pl.tile.matmul(sa, sb)
@@ -5321,6 +5344,41 @@ class Before:
             assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+
+    @pytest.mark.parametrize("effect", ["write", "read", "read_write"])
+    def test_operand_effect_controls_old_payload_observation(self, effect):
+        """Scratch writes discard old contents; reads and read-modify-writes retain them."""
+        operation = {
+            "write": "pl.tile.sels(mask, src, seed, -1.0)",
+            "read": "pl.tile.add(seed, src)",
+            "read_write": "pl.tile.assemble(seed, src, [0, 0])",
+        }[effect]
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, pool: pl.Tensor[[16, 16], pl.FP32],
+               out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        seed = pl.tile.load(pool, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+        src = pl.tile.load(pool, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+        mask = pl.tile.cmps(src, 0.0, cmp_type=4)
+        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < 2)
+            observed = {operation}
+            _observed = pl.tile.store(observed, [0, 0], out)
+            for _inner, (_carry,) in pl.range(2, init_values=(seed,)):
+                replacement = pl.tile.load(pool, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                result = pl.yield_(replacement)
+            _used = pl.tile.store(result, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        if effect == "write":
+            assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+        else:
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
 
     def test_nested_carry_chain_preserves_intermediate_version(self):
         """An inner carry restarts from the outer carry on every intervening While entry."""
@@ -5401,7 +5459,10 @@ class Before:
     @pytest.mark.parametrize("read_carry", [False, True], ids=["unused_binding", "observed_carry"])
     @pytest.mark.parametrize("seed_scope", ["outside", "inside"])
     @pytest.mark.parametrize("alias_kind", ["identity", "view"])
-    def test_nested_for_carry_observes_initializer_version(self, read_carry, seed_scope, alias_kind):
+    @pytest.mark.parametrize("nested_trips", [1, 2])
+    def test_nested_for_carry_observes_initializer_version(
+        self, read_carry, seed_scope, alias_kind, nested_trips
+    ):
         """An observed carry needs the original seed on every enclosing While entry."""
         seed = "        seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Vec)\n"
         outside = seed if seed_scope == "outside" else ""
@@ -5421,7 +5482,7 @@ class Before:
 {outside}        for (wave,) in pl.while_(init_values=(0,)):
             pl.cond(wave < waves)
 {inside}            alias = {alias}
-            for _i, (carry,) in pl.range(2, init_values=(alias,)):
+            for _i, (carry,) in pl.range({nested_trips}, init_values=(alias,)):
                 replacement = {producer}
                 result = pl.yield_(replacement)
             _used = pl.tile.store(result, [0, 0], out)
@@ -5669,6 +5730,41 @@ class TestWhileAccumulatorAliasSafety:
         for name in ("fresh", "accumulated", "viewed"):
             assert _same_base_address(refs["initial"], refs[name]), after.as_python()
         _assert_if_phi_arms_write_the_phi_buffer(after)
+
+    @pytest.mark.parametrize("bounds", ["1", "2", "1, 0, -1", "0, 1, -1"])
+    def test_accumulator_phi_observation_requires_backedge(self, bounds):
+        """A read before an If repeats only when the surrounding For has a backedge."""
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[16, 64], pl.BF16], rhs: pl.Tensor[[64, 64], pl.BF16],
+               cond: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+        initial = pl.tile.matmul(sa, sb)
+        for _wave in pl.range({bounds}):
+            _old_used = pl.tile.store(initial, [0, 0], out)
+            if cond < 1:
+                fresh = pl.tile.matmul(sa, sb)
+                merged = pl.yield_(fresh)
+            else:
+                accumulated = pl.tile.matmul_acc(initial, sa, sb)
+                merged = pl.yield_(accumulated)
+            viewed = pl.tile.reshape(merged, [16, 64])
+            _used = pl.tile.store(viewed, [0, 0], out)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"initial", "fresh"})
+        if bounds == "2":
+            assert not ir.MemRef.may_alias(refs["initial"], refs["fresh"]), after.as_python()
+        else:
+            assert _same_base_address(refs["initial"], refs["fresh"]), after.as_python()
+            _assert_if_phi_arms_write_the_phi_buffer(after)
 
     @pytest.mark.parametrize("nested_for", [False, True], ids=["direct_phi", "for_carry_phi"])
     @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])

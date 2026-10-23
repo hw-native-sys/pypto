@@ -261,6 +261,24 @@ struct VarDef {
   size_t order = 0;       // lexical statement order of the definition
 };
 
+// Known bounds exclude dead bodies and loops without a backedge. Unknown
+// conditions remain conservative; widen arithmetic before advancing a For.
+bool LoopMayExecute(const StmtPtr& statement, bool after_first) {
+  if (auto loop = As<ForStmt>(statement)) {
+    const auto start = As<ConstInt>(loop->start_);
+    const auto stop = As<ConstInt>(loop->stop_);
+    const auto step = As<ConstInt>(loop->step_);
+    if (!start || !stop || !step || step->value_ == 0) return true;
+    const __int128 current =
+        static_cast<__int128>(start->value_) + (after_first ? static_cast<__int128>(step->value_) : 0);
+    return step->value_ > 0 ? current < stop->value_ : current > stop->value_;
+  }
+  if (auto loop = As<WhileStmt>(statement)) {
+    if (auto condition = As<ConstBool>(loop->condition_)) return condition->value_;
+  }
+  return true;
+}
+
 /// Walks the IR once to build definitions, lexical statement intervals and
 /// per-statement VarLike accesses. Definitions keep only their nearest loop;
 /// no per-definition ancestor-chain copies are required.
@@ -320,7 +338,7 @@ class DefMapVisitor : public IRVisitor {
     // Keep shape/offset operands as ordinary reads; defer only the source.
     if (As<TileType>(op->var_->GetType())) {
       if (auto source = AsVarLike(op->value_)) {
-        binding_reads[op->var_].emplace_back(op.get(), source);
+        if (payload_reachable_) binding_reads[op->var_].emplace_back(op.get(), source);
         reading_initializer_ = true;
         VisitExpr(op->value_);
         reading_initializer_ = false;
@@ -332,7 +350,7 @@ class DefMapVisitor : public IRVisitor {
               ExecutionMemoryAccessEvidence::NoAccess &&
           !call->args_.empty()) {
         if (auto source = AsVarLike(call->args_[0])) {
-          binding_reads[op->var_].emplace_back(op.get(), source);
+          if (payload_reachable_) binding_reads[op->var_].emplace_back(op.get(), source);
           reading_initializer_ = true;
           VisitExpr(call->args_[0]);
           reading_initializer_ = false;
@@ -380,9 +398,33 @@ class DefMapVisitor : public IRVisitor {
     RegisterLoopBindings(op, VarDef::kForReturn, op);
     for_stack_.push_back(op);
     binding_stack_.push_back(op);
+    const bool saved_reachable = payload_reachable_;
+    payload_reachable_ = payload_reachable_ && LoopMayExecute(op, false);
     VisitStmt(op->body_);
+    payload_reachable_ = saved_reachable;
     binding_stack_.pop_back();
     for_stack_.pop_back();
+  }
+
+  void VisitExpr_(const CallPtr& call) override {
+    auto& registry = OpRegistry::GetInstance();
+    const auto* entry =
+        call->op_ && registry.IsRegistered(call->op_->name_) ? &registry.GetEntry(call->op_->name_) : nullptr;
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      const bool saved_binding = reading_initializer_;
+      // A write-only destination does not consume its previous payload. Still
+      // traverse computed operands: evaluating their subexpressions can read.
+      if (entry && entry->GetIRStage() == OpIRStage::Functional &&
+          !ArgEffectReads(entry->GetArgEffect(i, call->kwargs_)) && AsVarLike(call->args_[i])) {
+        reading_initializer_ = true;
+      }
+      VisitExpr(call->args_[i]);
+      reading_initializer_ = saved_binding;
+    }
+    for (const auto& [key, value] : call->attrs_) {
+      (void)key;
+      ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+    }
   }
 
   void VisitExpr_(const IterArgPtr& argument) override {
@@ -399,7 +441,10 @@ class DefMapVisitor : public IRVisitor {
     VisitExpr(loop->condition_);
     reading_condition_ = false;
     binding_stack_.push_back(loop);
+    const bool saved_reachable = payload_reachable_;
+    payload_reachable_ = payload_reachable_ && LoopMayExecute(loop, false);
     VisitStmt(loop->body_);
+    payload_reachable_ = saved_reachable;
     binding_stack_.pop_back();
   }
 
@@ -411,7 +456,9 @@ class DefMapVisitor : public IRVisitor {
       reading_initializer_ = source != nullptr && !binding_stack_.empty();
       VisitExpr(op->value_[i]);
       reading_initializer_ = false;
-      if (!source || binding_stack_.empty()) continue;
+      // Body reachability was established on entry; only a possible backedge
+      // needs a separate check when registering the next carry binding.
+      if (!payload_reachable_ || !source || binding_stack_.empty()) continue;
       auto bind = [&](const auto& owner) {
         if (i < owner->return_vars_.size()) {
           binding_reads[owner->return_vars_[i]].emplace_back(op.get(), source);
@@ -419,7 +466,7 @@ class DefMapVisitor : public IRVisitor {
       };
       auto bind_loop = [&](const auto& loop) {
         bind(loop);
-        if (i < loop->iter_args_.size()) {
+        if (LoopMayExecute(loop, true) && i < loop->iter_args_.size()) {
           binding_reads[loop->iter_args_[i]].emplace_back(op.get(), source);
         }
       };
@@ -427,12 +474,7 @@ class DefMapVisitor : public IRVisitor {
       if (auto branch = As<IfStmt>(owner)) {
         bind(branch);
       } else if (auto loop = As<ForStmt>(owner)) {
-        // A zero-trip loop cannot return a body yield, and a one-trip loop
-        // cannot consume it on a backedge. Unknown bounds retain both edges.
-        if (ForMayExecute(loop, false)) bind(loop);
-        if (ForMayExecute(loop, true) && i < loop->iter_args_.size()) {
-          binding_reads[loop->iter_args_[i]].emplace_back(op.get(), source);
-        }
+        bind_loop(loop);
       } else if (auto loop = As<WhileStmt>(owner)) {
         bind_loop(loop);
       }
@@ -446,23 +488,16 @@ class DefMapVisitor : public IRVisitor {
 
   void VisitVarLike_(const VarPtr& op) override {
     if (current_stmt_) reads[current_stmt_.get()].insert(op);
-    if (reading_condition_) condition_reads[current_stmt_.get()].insert(op);
-    if (!reading_initializer_ && current_stmt_) observation_reads[current_stmt_.get()].insert(op);
+    if (payload_reachable_ && reading_condition_ && !reading_initializer_) {
+      condition_reads[current_stmt_.get()].insert(op);
+    }
+    if (payload_reachable_ && !reading_initializer_ && current_stmt_) {
+      observation_reads[current_stmt_.get()].insert(op);
+    }
     IRVisitor::VisitVarLike_(op);
   }
 
  private:
-  static bool ForMayExecute(const ForStmtPtr& loop, bool after_first) {
-    const auto start = As<ConstInt>(loop->start_);
-    const auto stop = As<ConstInt>(loop->stop_);
-    const auto step = As<ConstInt>(loop->step_);
-    if (!start || !stop || !step || step->value_ == 0) return true;
-    // Widen before addition so extreme signed bounds/steps cannot overflow.
-    const __int128 current =
-        static_cast<__int128>(start->value_) + (after_first ? static_cast<__int128>(step->value_) : 0);
-    return step->value_ > 0 ? current < stop->value_ : current > stop->value_;
-  }
-
   template <typename LoopPtr>
   void VisitLoopInitializers(const LoopPtr& loop) {
     for (const auto& argument : loop->iter_args_) {
@@ -502,6 +537,7 @@ class DefMapVisitor : public IRVisitor {
   }
 
   StmtPtr current_stmt_;
+  bool payload_reachable_ = true;
   bool reading_condition_ = false;
   bool reading_initializer_ = false;
   std::vector<ForStmtPtr> for_stack_;
@@ -909,20 +945,24 @@ class LoopInputIsolation : public IRVisitor {
       definitions_[argument.get()] = current_;
     }
     // Initializers execute once at entry, outside this loop's recurrence.
-    loop_stack_.emplace_back(positions_.at(loop.get()), loop.get());
+    const bool repeats = LoopMayExecute(loop, true);
+    if (repeats) loop_stack_.emplace_back(positions_.at(loop.get()), loop.get());
     if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) {
       // Separate condition reads from initializer reads at the loop header.
       current_ = ++order_;
       VisitExpr(loop->condition_);
     }
     VisitStmt(loop->body_);
-    loop_stack_.pop_back();
+    if (repeats) loop_stack_.pop_back();
     loop_ends_[loop.get()] = order_;
     for (const auto& result : loop->return_vars_) definitions_[result.get()] = ++order_;
   }
 
   template <typename LoopPtr>
   void PlanLoop(const LoopPtr& loop) {
+    // A loop that cannot enter returns its initializer without modifying it.
+    // Even independently observed inputs need no private copy on that path.
+    if (!LoopMayExecute(loop, false)) return;
     auto body = loop->body_;
     if (auto sequence = As<SeqStmts>(body); sequence && sequence->stmts_.size() == 1) {
       body = sequence->stmts_[0];
@@ -1502,7 +1542,9 @@ class TopDownRetargeter {
       // A loop's own initializer is evaluated outside its recurrence. Its
       // header reads therefore see only loops with strictly earlier headers.
       while (next_loop < loops.size() && stmt_order_.at(loops[next_loop].get()) < position) {
-        const auto* loop = loops[next_loop++].get();
+        const auto& current_loop = loops[next_loop++];
+        if (!LoopMayExecute(current_loop, true)) continue;
+        const auto* loop = current_loop.get();
         const size_t begin = stmt_order_.at(loop);
         while (!loop_stack.empty() && loop_stack.back().second <= begin) loop_stack.pop_back();
         loop_stack.emplace_back(begin, stmt_end_order_.at(loop) + 1);
