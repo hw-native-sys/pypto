@@ -332,14 +332,15 @@ def validate(directory: Path) -> None:
             raise ValueError(f"{case} reported [RUN] FAIL")
         if not re.search(r"^\s*\[RUN\] PASS\b", clean, re.MULTILINE):
             raise ValueError(f"{case} exited without a [RUN] PASS result")
-    manifest = run(["docker", "run", "--rm", state["image_id"], "-c", "cat /opt/pypto/dist-manifest"])
+    # Read data without activating the shell: CANN can set PS1 even for bash -c,
+    # causing the development banner to precede the manifest and JSON record.
+    read_file = ["docker", "run", "--rm", "--entrypoint", "/bin/cat", state["image_id"]]
+    manifest = run(read_file + ["/opt/pypto/dist-manifest"])
     (directory / "dist-manifest.txt").write_text(manifest + "\n")
     entries = dict(line.split(maxsplit=1) for line in manifest.splitlines())
     if entries["pypto"] != state["pypto"] or entries["pypto-lib"] != state["pypto_lib"]:
         raise ValueError("Image source manifest differs from the requested revisions")
-    build_record = json.loads(
-        run(["docker", "run", "--rm", state["image_id"], "-c", "cat /opt/pypto/dist-state.json"])
-    )
+    build_record = json.loads(run(read_file + ["/opt/pypto/dist-state.json"]))
     if build_record["pypto"] != state["pypto"] or build_record["runtime"] != entries["runtime"]:
         raise ValueError("Image patch/build record differs from the source manifest")
     save(directory / "dist-state.json", build_record)
