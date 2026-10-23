@@ -542,6 +542,13 @@ the image and validate doctor, single-card decode and two-card all-reduce on the
 configured NPU runner. All other forks skip that job. The allowlist lives in the
 workflow's `image.if` condition; adding a repository grants its code execution on
 the persistent host and requires a maintainer trust review.
+Because PRs can edit workflow YAML, this allowlist alone is not a security boundary.
+Before enabling shared-runner PR builds, an administrator must configure **Settings
+→ Actions → General → Require approval for all external contributors** and ensure
+that maintainers approve only trusted sources and reviewed code, including workflow
+changes. This repository-wide policy affects all external PR workflows; pending
+approval also prevents their configuration checks from running. It does not isolate
+approved code. See [GitHub's fork workflow approval settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories).
 PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
 Manual runs validate without publishing by default; publication also requires `main`.
 

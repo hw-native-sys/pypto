@@ -485,6 +485,11 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡 all-reduce 验证；其他 fork 跳过该 job。
 允许名单位于 workflow 的 `image.if` 条件中；新增仓库意味着允许其代码在持久化宿主机上执行，
 必须由维护者审核其可信性。
+PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用共享 runner 的 PR 构建前，
+管理员必须在 **Settings → Actions → General** 中设置 **Require approval for all external contributors**，
+并确保维护者只批准可信来源和经过审查的代码，包括 workflow 修改。这是仓库级策略，会影响所有外部 PR workflow；
+等待批准时，配置检查也不会运行。该设置不会隔离已经批准执行的代码。
+参见 [GitHub fork workflow 审批设置](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories)。
 PR 不发布镜像，也不获取 SWR 凭据。
 硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
 
