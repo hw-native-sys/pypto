@@ -29,7 +29,9 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from pypto.pypto_core.passes import MemoryPlanner
 
 
 class TestTensorMatmul2dBy3d(PTOTestCase):
@@ -306,8 +308,9 @@ class TestTensorBatchMatmul3dBy3dBTrans(PTOTestCase):
         *,
         platform: str | None = None,
         config=None,
+        memory_planner: MemoryPlanner | None = None,
     ):
-        super().__init__(config, platform=platform)
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
         # fp32 K-split matmul: the device reduces K in a different order than the
         # single-pass torch golden -> ~K*eps_fp32 drift (~1.5e-5 at K=128), above the
         # 1e-5 default for near-zero (cancellation) elements. Observed CI flake
@@ -322,7 +325,9 @@ class TestTensorBatchMatmul3dBy3dBTrans(PTOTestCase):
         self.N = n
 
     def get_name(self) -> str:
-        return f"tensor_batch_matmul_3d_by_3d_btrans_{self.B}x{self.M}x{self.K}x{self.N}"
+        planner = self.get_memory_planner()
+        suffix = f"_{planner.name.lower()}" if planner is not None else ""
+        return f"tensor_batch_matmul_3d_by_3d_btrans_{self.B}x{self.M}x{self.K}x{self.N}{suffix}"
 
     def define_tensors(self) -> list[TensorSpec]:
         B, M, K, N = self.B, self.M, self.K, self.N
@@ -485,11 +490,23 @@ class TestTensorBatchMatmulOperations:
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("b,m,k,n", [(4, 64, 128, 512)])
-    def test_tensor_batch_matmul_3d_btrans_not_fit(self, test_runner, platform, b, m, k, n):
-        """Large b_trans batch_matmul whose whole lhs+rhs exceed L1 -> the capacity gate
-        falls back to a PER-BATCH load of each operand (+ per-batch transpose_view),
-        instead of the whole-load + slice path. Verifies the !fit path end-to-end."""
-        result = test_runner.run(TestTensorBatchMatmul3dBy3dBTrans(b=b, m=m, k=k, n=n, platform=platform))
+    @pytest.mark.parametrize(
+        "planner",
+        [
+            pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, id="dsa-rp"),
+            pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
+        ],
+    )
+    def test_tensor_batch_matmul_3d_btrans_not_fit(self, test_runner, platform, b, m, k, n, planner):
+        """Issue #2872: per-batch loads and L0B blocking must work for every planner.
+
+        Whole lhs+rhs exceed L1, so the capacity gate selects per-batch loads.
+        AutoTile must then split the 256 KiB RHS into legal 64 KiB L0B panels.
+        """
+        result = test_runner.run(
+            TestTensorBatchMatmul3dBy3dBTrans(b=b, m=m, k=k, n=n, platform=platform, memory_planner=planner)
+        )
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
@@ -505,6 +522,67 @@ class TestTensorBatchMatmulOperations:
         """Chained ``pl.matmul`` + ``pl.matmul_acc`` on (2D, 3D) inputs."""
         result = test_runner.run(TestTensorMatmulAcc2dBy3d(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
+
+
+def _offset_batch_matmul_case(batch_shape: list[int], m: int, k: int, n: int, planner: MemoryPlanner):
+    """Check ND placement and untouched output guards with exact integer products."""
+    a_shape = batch_shape + [m, k]
+    b_shape = batch_shape + [n, k]
+    output_shape = [b + 2 for b in batch_shape] + [m + 32, n + 64]
+    offsets = [1] * len(batch_shape) + [16, 32]
+
+    @pl.jit.incore
+    def body(
+        a: pl.Tensor[a_shape, pl.FP32],
+        b: pl.Tensor[b_shape, pl.FP32],
+        c: pl.InOut[pl.Tensor[output_shape, pl.FP32]],
+    ) -> pl.Tensor[output_shape, pl.FP32]:
+        product = pl.matmul(a, b, b_trans=True, out_dtype=pl.FP32)
+        return pl.assemble(c, product, offset=offsets)
+
+    @pl.jit
+    def kernel(
+        a: pl.Tensor[a_shape, pl.FP32],
+        b: pl.Tensor[b_shape, pl.FP32],
+        c: pl.InOut[pl.Tensor[output_shape, pl.FP32]],
+    ) -> pl.Tensor[output_shape, pl.FP32]:
+        return body(a, b, c)
+
+    generator = torch.Generator().manual_seed(2872)
+    a = torch.randint(-3, 4, a_shape, generator=generator).float()
+    b = torch.randint(-3, 4, b_shape, generator=generator).float()
+    c = torch.full(output_shape, -12345.0)
+    window = tuple(slice(1, size + 1) for size in batch_shape) + (slice(16, m + 16), slice(32, n + 32))
+
+    def golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+        expected = tensors["c"].clone()
+        expected[window] = torch.matmul(tensors["a"], tensors["b"].transpose(-2, -1))
+        return expected
+
+    label = "x".join(str(size) for size in batch_shape + [m, k, n])
+    return st.case(
+        kernel,
+        a,
+        b,
+        c,
+        name=f"batch_matmul_nd_offsets_{label}_{planner.name.lower()}",
+        golden=golden,
+        memory_planner=planner,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@st.cases(
+    *(
+        _offset_batch_matmul_case(batch_shape, m, k, n, planner)
+        for batch_shape, m, k, n in (([4], 64, 128, 512), ([2, 2], 80, 128, 544), ([2], 256, 256, 256))
+        for planner in (MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS)
+    )
+)
+def test_batch_matmul_nd_offsets(case_run):
+    """M/N tiling must preserve all batch axes, matrix offsets and guard regions."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

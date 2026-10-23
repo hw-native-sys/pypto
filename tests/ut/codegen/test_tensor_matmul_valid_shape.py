@@ -9,9 +9,13 @@
 
 """Explicitly boxed tensor.matmul retains valid M/N through the full compiler."""
 
+import re
+
 import pypto.language as pl
 import pytest
+from pypto import ir
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.pypto_core import passes
 from pypto.runtime import RunConfig
 
 
@@ -115,6 +119,73 @@ def test_tensor_matmul_else_first_carry_compiles(tmp_path, ascend_backend, physi
     pto = "\n".join(file.read_text() for file in files)
     assert "pto.tmatmul.acc" in pto
     assert "!pto.partition_tensor_view<17x24xf32>" in pto
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("buffer_ir", [False, True], ids=["buffer-disabled", "buffer-enabled"])
+@pytest.mark.parametrize("batch_shape", [[], [4]], ids=["matrix", "batch"])
+def test_transposed_matmul_l0b_capacity(tmp_path, ascend_backend, planner, buffer_ir, batch_shape):
+    """Check L0B capacity and prove the selected IR path for 2D and batch stores."""
+    a_shape = [*batch_shape, 64, 128]
+    b_shape = [*batch_shape, 512, 128]
+    out_shape = [*batch_shape, 64, 512]
+    offsets = [0] * len(out_shape)
+    selected = []
+    lowered_stages = []
+
+    def capture_selection(transform, program):
+        if transform.get_name() == "SelectBufferIRFunctions":
+            selected.extend(
+                function.attrs["buffer_ir_selected"]
+                for function in program.functions.values()
+                if ir.is_incore_type(function.func_type)
+            )
+        if transform.get_name() == "LowerTileToBuffer":
+            lowered_stages.extend(
+                function.ir_stage
+                for function in program.functions.values()
+                if ir.is_incore_type(function.func_type)
+            )
+
+    @pl.jit
+    def batch_transposed(
+        a: pl.Tensor[a_shape, pl.FP32],
+        b: pl.Tensor[b_shape, pl.FP32],
+        out: pl.Out[pl.Tensor[out_shape, pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            result = pl.matmul(a, b, b_trans=True, out_dtype=pl.FP32)
+            out = pl.assemble(out, result, offsets)
+        return out
+
+    instrument = passes.CallbackInstrument(after_pass=capture_selection)
+    with passes.PassContext([instrument], memory_planner=planner, enable_buffer_ir=buffer_ir):
+        batch_transposed.compile(
+            config=RunConfig(codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path))
+        )
+    pto_files = list(tmp_path.rglob("*.pto"))
+    assert pto_files
+    pto = "\n".join(file.read_text() for file in pto_files)
+    # Rank-3 parameters are ineligible for Buffer IR even when it is enabled.
+    # The 2D case must actually select Buffer IR to provide lowering coverage.
+    assert selected == ([not batch_shape] if buffer_ir else []), selected
+    expected_stage = ir.FunctionIRStage.Functional if batch_shape else ir.FunctionIRStage.Buffer
+    assert lowered_stages == ([expected_stage] if buffer_ir else []), lowered_stages
+    right_shapes = re.findall(r"loc=right, dtype=f32, rows=(\d+), cols=(\d+)", pto)
+    assert right_shapes, pto
+    # One oversized buffer cannot be repaired by allocator lifetime packing.
+    assert all(int(rows) * int(cols) * 4 <= 65536 for rows, cols in right_shapes), right_shapes
+    if batch_shape and planner == passes.MemoryPlanner.PTOAS:
+        # PTOAS retains automatic dbC and selects the supported M/N path.
+        # PYPTO and DSA_RP disable automatic dbC and select full-output K tiling.
+        assert "!pto.partition_tensor_view<1x32x128xf32>" in pto, pto
+        assert "!pto.partition_tensor_view<1x64x512xf32>" not in pto, pto
+    elif batch_shape:
+        assert "!pto.partition_tensor_view<1x64x512xf32>" in pto, pto
+    if find_ptoas_binary() is not None:
+        assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
 if __name__ == "__main__":

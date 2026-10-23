@@ -1828,13 +1828,28 @@ class TestAutoTileMatmulL0MNTiling:
         assert printed.count("pl.tile.matmul_bias(") == 2
         _assert_ssa_valid(After, "test_matmul_bias_m_only_tiling_reuses_bias_resident_source")
 
-    def test_mn_tiling_rewrites_to_subtile_grid(self):
+    @pytest.mark.parametrize("batch_offsets", [None, [], [1], [1, 2]])
+    def test_mn_tiling_rewrites_to_subtile_grid(self, batch_offsets):
         """512×512 @ 512 FP32 on Ascend950 (L0c = 256 KB): the [512, 512] FP32
         output is 1 MB > L0c, so ChooseL0Tile picks m = n = 256, k = 32.  The
         pass unrolls the output into a 2×2 grid of [256, 256] Acc sub-tiles —
         each an independent 16-trip pipelined K-loop — and stores each straight
         to ``out[mi:, ni:]``, chaining the output tensor through the four
         stores (out → out_t0 → out_t1 → out_t2 → out_t3)."""
+
+        # Explicit partition windows cover 2D, rank-3 and rank-4 stores.
+        # Nonzero matrix/batch offsets pin the destination mapping and the SSA
+        # chain, while the original three-argument store remains a baseline.
+        prefix = batch_offsets or []
+        explicit = batch_offsets is not None
+        output_shape = [i + 1 for i in prefix] + ([544, 576] if explicit else [512, 512])
+        row_base, col_base = (16, 32) if explicit else (0, 0)
+        offsets = prefix + [row_base, col_base]
+        offsets_m = prefix + [row_base + 256, col_base]
+        offsets_n = prefix + [row_base, col_base + 256]
+        offsets_mn = prefix + [row_base + 256, col_base + 256]
+        full_window = [1] * len(prefix) + [512, 512] if explicit else None
+        sub_window = [1] * len(prefix) + [256, 256] if explicit else None
 
         @pl.program
         class Before:
@@ -1843,8 +1858,8 @@ class TestAutoTileMatmulL0MNTiling:
                 self,
                 lhs: pl.Tensor[[512, 512], pl.FP32],
                 rhs: pl.Tensor[[512, 512], pl.FP32],
-                out: pl.Out[pl.Tensor[[512, 512], pl.FP32]],
-            ) -> pl.Tensor[[512, 512], pl.FP32]:
+                out: pl.Out[pl.Tensor[output_shape, pl.FP32]],
+            ) -> pl.Tensor[output_shape, pl.FP32]:
                 lhs_mat: pl.Tile[[512, 512], pl.FP32, pl.Mem.Mat] = pl.tile.load(
                     lhs, [0, 0], [512, 512], target_memory=pl.Mem.Mat
                 )
@@ -1852,7 +1867,7 @@ class TestAutoTileMatmulL0MNTiling:
                     rhs, [0, 0], [512, 512], target_memory=pl.Mem.Mat
                 )
                 c: pl.Tile[[512, 512], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
-                out = pl.store(c, [0, 0], out)
+                out = pl.tile.store(c, offsets, out, shapes=full_window)
                 return out
 
         @pl.program
@@ -1862,8 +1877,8 @@ class TestAutoTileMatmulL0MNTiling:
                 self,
                 lhs: pl.Tensor[[512, 512], pl.FP32],
                 rhs: pl.Tensor[[512, 512], pl.FP32],
-                out: pl.Out[pl.Tensor[[512, 512], pl.FP32]],
-            ) -> pl.Tensor[[512, 512], pl.FP32]:
+                out: pl.Out[pl.Tensor[output_shape, pl.FP32]],
+            ) -> pl.Tensor[output_shape, pl.FP32]:
                 lhs_mat: pl.Tile[[512, 512], pl.FP32, pl.Mem.Mat] = pl.tile.load(
                     lhs, [0, 0], [512, 512], target_memory=pl.Mem.Mat
                 )
@@ -1885,7 +1900,7 @@ class TestAutoTileMatmulL0MNTiling:
                         c0_iter, a0, b0, ko0 == 0
                     )
                     c0: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
-                out_t0: pl.Tensor[[512, 512], pl.FP32] = pl.store(c0, [0, 0], out)
+                out_t0: pl.Tensor[output_shape, pl.FP32] = pl.tile.store(c0, offsets, out, shapes=sub_window)
                 # Sub-tile (mi=256, ni=0).
                 c1_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
                     [256, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc
@@ -1901,7 +1916,9 @@ class TestAutoTileMatmulL0MNTiling:
                         c1_iter, a1, b1, ko1 == 0
                     )
                     c1: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
-                out_t1: pl.Tensor[[512, 512], pl.FP32] = pl.store(c1, [256, 0], out_t0)
+                out_t1: pl.Tensor[output_shape, pl.FP32] = pl.tile.store(
+                    c1, offsets_m, out_t0, shapes=sub_window
+                )
                 # Sub-tile (mi=0, ni=256).
                 c2_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
                     [256, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc
@@ -1917,7 +1934,9 @@ class TestAutoTileMatmulL0MNTiling:
                         c2_iter, a2, b2, ko2 == 0
                     )
                     c2: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c2_acc)
-                out_t2: pl.Tensor[[512, 512], pl.FP32] = pl.store(c2, [0, 256], out_t1)
+                out_t2: pl.Tensor[output_shape, pl.FP32] = pl.tile.store(
+                    c2, offsets_n, out_t1, shapes=sub_window
+                )
                 # Sub-tile (mi=256, ni=256).
                 c3_init: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.tile.create(
                     [256, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc
@@ -1933,7 +1952,9 @@ class TestAutoTileMatmulL0MNTiling:
                         c3_iter, a3, b3, ko3 == 0
                     )
                     c3: pl.Tile[[256, 256], pl.FP32, pl.Mem.Acc] = pl.yield_(c3_acc)
-                out_t3: pl.Tensor[[512, 512], pl.FP32] = pl.store(c3, [256, 256], out_t2)
+                out_t3: pl.Tensor[output_shape, pl.FP32] = pl.tile.store(
+                    c3, offsets_mn, out_t2, shapes=sub_window
+                )
                 return out_t3
 
         After = passes.auto_tile_matmul_l0()(Before)
@@ -4242,6 +4263,161 @@ def test_existing_l0_pipeline_preserves_explicit_buffering_policy(planner, legac
     assert collector.memberships
     assert all(member == explicit_dbc for member in collector.memberships)
     _assert_ssa_valid(lowered, "explicit_l0_pipeline_policy")
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("m,n", [(64, 256), (512, 256), (64, 512)])
+def test_unwindowable_mat_bias_uses_legal_k_only_fallback(planner, ascend_backend, m, n, capfd):
+    """A Mat bias parameter can be reused whole, but cannot be reloaded by N window."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[m, 256], pl.BF16, pl.Mem.Mat],
+            rhs: pl.Tile[[256, n], pl.BF16, pl.Mem.Mat],
+            bias: pl.Tile[[1, n], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[m, n], pl.FP32, pl.Mem.Acc]:
+            result = pl.tile.matmul_bias(lhs, rhs, bias)
+            return result
+
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(Before)
+    diagnostics = capfd.readouterr().err
+    if (m, n) != (64, 256):
+        # Splitting K cannot repair an oversized full output or Bias vector.
+        ir.assert_structural_equal(after, Before)
+        assert "PH-AT-011" in diagnostics or "PH-AT-006" in diagnostics
+        return
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat],
+            rhs: pl.Tile[[256, 256], pl.BF16, pl.Mem.Mat],
+            bias: pl.Tile[[1, 256], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[64, 256], pl.FP32, pl.Mem.Acc]:
+            bias_l0 = pl.tile.move(bias, target_memory=pl.Mem.Bias)
+            first_left = pl.tile.extract(lhs, 0, 0, shape=[64, 64], target_memory=pl.Mem.Left)
+            first_right = pl.tile.extract(rhs, 0, 0, shape=[64, 256], target_memory=pl.Mem.Right)
+            seed = pl.tile.matmul_bias(first_left, first_right, bias_l0)
+            for ko, (acc,) in pl.pipeline(64, 256, 64, init_values=(seed,), stage=2):
+                left = pl.tile.extract(lhs, 0, ko, shape=[64, 64], target_memory=pl.Mem.Left)
+                right = pl.tile.extract(rhs, ko, 0, shape=[64, 256], target_memory=pl.Mem.Right)
+                updated = pl.tile.matmul_acc(acc, left, right)
+                result = pl.yield_(updated)
+            return result
+
+    ir.assert_structural_equal(after, Expected)
+    printed = ir.python_print(after)
+    assert "PH-AT-011" not in diagnostics
+    assert printed.count("pl.tile.matmul_bias(") == 1
+    assert "pl.tile.matmul_acc(" in printed
+    assert printed.count("pl.tile.move(bias, target_memory=pl.Mem.Bias)") == 1
+    assert "pl.tile.load(" not in printed
+    assert "pl.tile.extract(bias" not in printed
+    _assert_ssa_valid(after, "unwindowable_mat_bias_k_only_fallback")
+
+    torch = pytest.importorskip("torch")
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    # Small integers make all products and sums exactly representable, catching
+    # missing K blocks and repeated bias without floating-point tolerances.
+    generator = torch.Generator().manual_seed(2872)
+    lhs = torch.randint(-2, 3, (m, 256), generator=generator).to(torch.bfloat16)
+    rhs = torch.randint(-2, 3, (256, n), generator=generator).to(torch.bfloat16)
+    bias = torch.randint(1, 5, (1, n), generator=generator).float()
+    ns: dict = {}
+    exec(torch_codegen(after), ns)  # noqa: S102 -- execute the generated reference
+    actual = ns["kernel"](lhs, rhs, bias)
+    torch.testing.assert_close(actual, lhs.float() @ rhs.float() + bias, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_unfoldable_output_uses_k_only_fallback(planner, ascend_backend):
+    """Preserve the whole result when no consumer can place a selected M/N grid."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[64, 512], pl.FP32, pl.Mem.Acc]:
+            result = pl.tile.matmul(lhs, rhs)
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat],
+        ) -> pl.Tile[[64, 512], pl.FP32, pl.Mem.Acc]:
+            seed = pl.tile.create([64, 512], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for ko, (acc,) in pl.pipeline(0, 128, 16, init_values=(seed,), stage=2):
+                left = pl.tile.extract(lhs, 0, ko, shape=[64, 16], target_memory=pl.Mem.Left)
+                right = pl.tile.extract(rhs, ko, 0, shape=[16, 512], target_memory=pl.Mem.Right)
+                updated = pl.tile.matmul_acc(acc, left, right, init_cond=(ko == 0))
+                result = pl.yield_(updated)
+            return result
+
+    with passes.PassContext([], memory_planner=planner):
+        After = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("window", [None, [2, 32, 512], [1, 32, 512]])
+def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
+    """Do not interpret collapsed batch rows or clipped windows as matrix axes."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[128, 17])],
+            out: pl.Out[pl.Tensor[[2, 64, 512], pl.FP32]],
+        ) -> pl.Tensor[[2, 64, 512], pl.FP32]:
+            result = pl.tile.matmul(lhs, rhs)
+            out = pl.tile.store(result, [0, 0, 0], out, shapes=window)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            rhs: pl.Tile[[128, 512], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[128, 17])],
+            out: pl.Out[pl.Tensor[[2, 64, 512], pl.FP32]],
+        ) -> pl.Tensor[[2, 64, 512], pl.FP32]:
+            storage = pl.tile.create([64, 512], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            seed = pl.tile.set_validshape(storage, 64, 17)
+            for ko, (acc,) in pl.pipeline(0, 128, 16, init_values=(seed,), stage=2):
+                left = pl.tile.extract(lhs, 0, ko, shape=[64, 16], target_memory=pl.Mem.Left)
+                right = pl.tile.extract(rhs, ko, 0, shape=[16, 512], target_memory=pl.Mem.Right)
+                updated = pl.tile.matmul_acc(acc, left, right, init_cond=(ko == 0))
+                result = pl.yield_(updated)
+            out = pl.tile.store(result, [0, 0, 0], out, shapes=window)
+            return out
+
+    with passes.PassContext([], memory_planner=planner):
+        After = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":
