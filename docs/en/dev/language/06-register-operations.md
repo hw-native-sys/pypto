@@ -6,6 +6,11 @@ function; after `ExpandMixedKernel`, a surviving region must be in an AIV
 function. An explicitly configured non-A5 target is rejected. Without a selected
 target, target validation is deferred until compilation selects one.
 
+An explicit InCore scope in an Opaque, Orchestration, or Graph function also
+provides a device context before outlining, including when a graph scope is an
+ancestor. RegScope directly in orchestration code remains invalid. Orchestration
+scopes inside RegScope remain forbidden; existing InCore scope rules are unchanged.
+
 ```python
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(
@@ -57,7 +62,8 @@ Comparison predicates are `"eq"`, `"ne"`, `"lt"`, `"le"`, `"gt"`, `"ge"`.
 The common dtype set is FP16/BF16/FP32 and signed/unsigned 8/16/32-bit integers.
 `mul` excludes 8-bit integers; `div` accepts FP16/FP32 only; `compare` accepts
 FP16/FP32/INT32/UINT32; `select` excludes BF16. Existing Scalar SSA values must
-match the requested generator dtype; Python literals can be typed explicitly.
+match the requested generator dtype. DSL literals are normalized to that dtype;
+raw IR and Builder literals must already have the requested dtype.
 
 Conversion pairs are FP16→FP32, FP32→FP16, FP32→INT32, INT32→FP32,
 INT8→FP16, INT8→INT16, INT16→INT32, UINT8→UINT16, UINT16→UINT32 and
@@ -98,3 +104,8 @@ and `ib.emit_reg_store(name, tile, value, offset=0, mask=None)`. C++ exposes
 schema deduction as the DSL; completing a function validates region ownership.
 `RegScopeValid` also validates manually constructed functions through the normal
 property verifier. Final AIV placement is checked by `MixedKernelExpanded`.
+
+The Python text syntax accepts no scope metadata. Printing a manually constructed
+RegScope with a nonempty `name_hint` or `attrs` raises an error rather than losing
+those fields; binary serialization preserves them. Empty scopes print as a `pass`
+block.

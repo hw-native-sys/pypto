@@ -9,6 +9,8 @@
 
 """Register regions construct canonical IR and enforce ownership."""
 
+import inspect
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -120,6 +122,35 @@ def test_same_name_store_binding_can_escape_as_tile():
 
     restored = pl.parse(python_print(kernel, format=False))
     ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
+def test_builder_reg_scope_span_points_to_with_callsite():
+    builder = ir.IRBuilder()
+    with builder.function("kernel", type=ir.FunctionType.InCore) as function:
+        with_line = inspect.stack()[0].lineno + 1
+        with builder.reg_scope():
+            pass
+    scope = function.get_result().body
+    assert scope.span.filename.endswith("test_reg_ops.py")
+    assert scope.span.begin_line == with_line
+
+
+@pytest.mark.parametrize("op_name", ["broadcast", "index_gen"])
+@pytest.mark.parametrize("dtype,value", [(pl.INT32, 2), (pl.FP32, 1.5)])
+def test_raw_generator_literal_roundtrip(op_name, dtype, value):
+    # Builder-created literals must keep their type through the DSL printer.
+    span = ir.Span.unknown()
+    literal = ir.ConstInt(value, dtype, span) if isinstance(value, int) else ir.ConstFloat(value, dtype, span)
+    builder = ir.IRBuilder()
+    with builder.function("kernel", type=ir.FunctionType.InCore) as function:
+        with builder.reg_scope():
+            kwargs = {"lanes": 64, "dtype": dtype}
+            if op_name == "index_gen":
+                kwargs["order"] = "ascending"
+            builder.emit_reg("value", f"reg.{op_name}", [literal], kwargs)
+    original = function.get_result()
+    restored = pl.parse(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
 
 
 if __name__ == "__main__":

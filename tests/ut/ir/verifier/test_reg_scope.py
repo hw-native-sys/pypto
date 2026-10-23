@@ -68,6 +68,55 @@ def test_invalid_function_context(kind):
     assert any("context" in d.message for d in verify(region(definition(register())), kind))
 
 
+@pytest.mark.parametrize(
+    "kind", [ir.FunctionType.Opaque, ir.FunctionType.Orchestration, ir.FunctionType.Graph]
+)
+@pytest.mark.parametrize("graph_ancestor", [False, True])
+def test_explicit_incore_register_region_survives_outlining(kind, graph_ancestor):
+    # The device boundary is already supported by outlining for these owners;
+    # RegScope validation must not impose a narrower owner whitelist.
+    body = ir.InCoreScopeStmt(body=region(definition(register())), span=SPAN)
+    if graph_ancestor:
+        body = ir.GraphScopeStmt("graph", body=sequence(body, ir.EvalStmt(integer(0), SPAN)), span=SPAN)
+    assert verify(body, kind) == []
+    # A nonempty following-use set avoids the outliner's existing conservative
+    # fallback of exporting all scope definitions when no live-out is known.
+    anchor = scalar("anchor")
+    function = ir.Function("kernel", [anchor], [], sequence(body, ir.EvalStmt(anchor, SPAN)), SPAN, type=kind)
+    program = ir.Program([function], "RegTest", SPAN)
+    outlined = passes.outline_incore_scopes()(program)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.RegScopeValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
+    kernels = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(kernels) == 1
+    assert isinstance(kernels[0].body, ir.RegScopeStmt)
+
+
+def test_incore_context_is_restored_after_device_boundary():
+    device = ir.InCoreScopeStmt(body=region(definition(register("device"))), span=SPAN)
+    # A legal device region must not authorize a following orchestration region.
+    body = sequence(device, region(definition(register("outside"))))
+    diagnostics = verify(body, ir.FunctionType.Orchestration)
+    assert len(diagnostics) == 1
+    assert "context" in diagnostics[0].message
+
+
+def test_orchestration_block_is_restored_after_device_boundary():
+    device = ir.InCoreScopeStmt(body=region(definition(register("device"))), span=SPAN)
+    body = ir.GraphScopeStmt(
+        "graph", body=sequence(device, region(definition(register("outside")))), span=SPAN
+    )
+    diagnostics = verify(body, ir.FunctionType.Opaque)
+    assert len(diagnostics) == 1
+    assert "context" in diagnostics[0].message
+
+
+def test_graph_inside_register_region_remains_illegal():
+    body = region(ir.GraphScopeStmt("graph", body=sequence(), span=SPAN))
+    assert any("Orchestration scopes cannot appear" in d.message for d in verify(body))
+
+
 def test_final_placement_requires_aiv():
     body = region(definition(register()))
     assert verify(body, ir.FunctionType.AIV, final=True) == []

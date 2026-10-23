@@ -24,7 +24,7 @@ from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
 from .type import _merge_annotation_metadata
-from .utils import _normalize_expr
+from .utils import _get_span_or_capture, _normalize_expr
 
 
 class IRBuilder:
@@ -56,7 +56,10 @@ class IRBuilder:
     @contextmanager
     def reg_scope(self, span: ir.Span | None = None) -> Iterator[None]:
         """Build a register region with implicit captures and no yields."""
-        with self.scope(ir.ScopeKind.Reg, span):
+        # The generator starts in contextlib.__enter__, one frame beyond the
+        # usual wrapper caller. Skip that frame to retain the user's with line.
+        begin_span = _get_span_or_capture(span, frame_offset=2)
+        with self.scope(ir.ScopeKind.Reg, begin_span):
             yield
 
     def emit_reg(

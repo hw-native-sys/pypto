@@ -2494,9 +2494,15 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const RegScopeStmtPtr& op) {
+  CHECK_SPAN(op->name_hint_.empty() && op->attrs_.empty(), op->span_)
+      << "RegScope Python printing cannot preserve name_hint or attrs";
   stream_ << "with " << prefix_ << ".reg_scope():\n";
   IncreaseIndent();
-  PrintStmtBlock(op->body_);
+  if (auto seq = As<SeqStmts>(op->body_); seq && seq->stmts_.empty()) {
+    stream_ << GetIndent() << "pass";
+  } else {
+    PrintStmtBlock(op->body_);
+  }
   DecreaseIndent();
 }
 

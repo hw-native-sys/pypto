@@ -3559,14 +3559,21 @@ class IRBuilder:
     def __init__(self) -> None:
         """Create an IR builder."""
 
-    def begin_reg_scope(self, span: Span) -> None: ...
-    def end_reg_scope(self, span: Span) -> Stmt: ...
+    def begin_reg_scope(self, span: Span) -> None:
+        """Begin an implicit-capture register region."""
+
+    def end_reg_scope(self, span: Span) -> Stmt:
+        """End a register region and return the built RegScopeStmt."""
+
     def emit_reg(
         self, name: str, op_name: str, args: Sequence[Expr], kwargs: dict[str, Any], span: Span
-    ) -> Var: ...
+    ) -> Var:
+        """Infer, validate and assign a register operation inside the open RegScope."""
+
     def emit_reg_store(
         self, name: str, tile: Expr, offset: Expr, value: Expr, mask: Expr | None, span: Span
-    ) -> Var: ...
+    ) -> Var:
+        """Assign a register store's Tile alias result."""
 
     # Function building
     def begin_function(
