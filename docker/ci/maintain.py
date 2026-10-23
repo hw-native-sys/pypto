@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "docker/images.json"
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+GITHUB_REPOSITORY_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 PATCH = "cann92-a2a3-aicpu-class-memaccess"
 
 
@@ -82,7 +83,7 @@ def load_config(path: Path = CONFIG) -> dict[str, Any]:
         if not re.fullmatch(r"[a-z0-9][a-z0-9./:-]*", config[key]):
             raise ValueError(f"Invalid {key}: {config[key]!r}")
     for source in config["sources"].values():
-        if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source["repository"]):
+        if not GITHUB_REPOSITORY_URL.fullmatch(source["repository"]):
             raise ValueError("Source repositories must be public GitHub HTTPS URLs")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", source["ref"]):
             raise ValueError(f"Invalid source ref: {source['ref']!r}")
@@ -165,8 +166,13 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         (directory / filename).unlink(missing_ok=True)
     recipe_sha = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"])
     sources = config["sources"]
-    # On main, the recipe and its PyPTO helpers must come from the same event
-    # snapshot, including push builds of the change that introduced this job.
+    # Keep the recipe and PyPTO helpers on the same event snapshot. PR jobs
+    # check out the exact head commit, which may exist only in the fork.
+    pypto_repository = sources["pypto"]["repository"]
+    if sources["pypto"]["ref"] == "main" and os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        pypto_repository = os.environ.get("PYPTO_PR_REPOSITORY", "")
+        if not GITHUB_REPOSITORY_URL.fullmatch(pypto_repository):
+            raise ValueError("PR builds require PYPTO_PR_REPOSITORY to be a public GitHub HTTPS URL")
     pypto_sha = recipe_sha if sources["pypto"]["ref"] == "main" else resolve_ref(**sources["pypto"])
     lib_sha = resolve_ref(**sources["pypto_lib"])
     base = image["cann_repository"]
@@ -205,6 +211,7 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         "rolling": f"{repository}:{image['tag']}",
         "previous": f"{repository}:{image['tag']}-previous",
         "pypto": pypto_sha,
+        "pypto_repository": pypto_repository,
         "pypto_lib": lib_sha,
         "recipe": recipe_sha,
         "base": base,
@@ -219,7 +226,7 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         "CANN_TAG": image["cann_tag"],
         "PYPTO_REF": pypto_sha,
         "PYPTO_LIB_REF": lib_sha,
-        "PYPTO_REPO": sources["pypto"]["repository"],
+        "PYPTO_REPO": pypto_repository,
         "PYPTO_LIB_REPO": sources["pypto_lib"]["repository"],
         "DIST_BUILD_JOBS": str(jobs),
         "DIST_PATCH": image["patch"],

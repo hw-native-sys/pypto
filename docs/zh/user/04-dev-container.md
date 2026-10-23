@@ -480,7 +480,9 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 [`docker/images.json`](../../../docker/images.json) 是镜像维护入口。
 `Maintain Development Images` workflow 每天在 UTC 19:37（北京时间 03:37）运行；
 `main` 上的 `docker/`、工具链版本、构建约束或该 workflow 变化时也会触发，
-还可通过 **Run workflow** 手动运行。PR 仅在 GitHub 托管 runner 上运行配置检查和离线脚本测试。
+还可通过 **Run workflow** 手动运行。修改上述路径的 PR 先在 GitHub 托管 runner 上运行配置检查和
+离线脚本测试，再在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡 all-reduce 验证。
+PR 不发布镜像，也不获取 SWR 凭据。
 硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
 
 首期仅启用 `arm-a2a3`，使用 CANN 9.2.0，以及 `self-hosted`、`linux`、`ARM64`、`npu-xp` 标签。
@@ -513,7 +515,9 @@ SWR 认证与 manifest 操作直接连接，不使用代理。登录和推送子
 升级 CANN 时，应一起修改 tag、digest、驱动要求和发布标签。
 
 每次构建前冻结 PyPTO 和 pypto-lib 的提交。PyPTO 的 `ref: main` 使用 workflow checkout 的提交，
-保证 Docker 配方与辅助脚本属于同一次事件快照。其他 ref 和 pypto-lib ref 解析为完整提交 SHA。
+保证 Docker 配方与辅助脚本属于同一次事件快照。PR 使用准确的 head 提交，从 PR 来源仓库
+（包括 fork）克隆，不使用临时合并提交。显式指定的 PyPTO ref 仍使用配置中的来源仓库。
+其他 ref 和 pypto-lib ref 解析为完整提交 SHA。
 runtime 始终跟随 PyPTO 的 gitlink；PTO-ISA 跟随该 runtime 的 `pto_isa.pin`；
 PTOAS 跟随所选 PyPTO 的工具链版本。使用这些 SHA 使源码构建缓存失效，而不是传入可变的 `main`。
 编译并发同时受 `build_jobs` 和资源限制加载器约束。

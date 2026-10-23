@@ -105,16 +105,23 @@ def test_annotated_tag_resolves_to_commit(ci: ModuleType, monkeypatch: pytest.Mo
     assert queries == ["refs/heads/release", "refs/tags/release^{}"]
 
 
+@pytest.mark.parametrize(
+    "event,pypto_ref", [("push", "main"), ("pull_request", "main"), ("pull_request", "4" * 40)]
+)
 def test_build_freezes_refs_and_base_digest(
-    ci: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ci: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: str, pypto_ref: str
 ) -> None:
     config = ci.load_config()
+    config["sources"]["pypto"]["ref"] = pypto_ref
     config["images"]["arm-a2a3"]["cann_digest"] = "sha256:" + "3" * 64
     monkeypatch.setattr(ci.platform, "machine", lambda: "aarch64")
     monkeypatch.setattr(ci.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.delenv("RUNNER_NAME", raising=False)
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    fork_repository = "https://github.com/contributor/pypto.git"
+    monkeypatch.setenv("PYPTO_PR_REPOSITORY", fork_repository)
     monkeypatch.setenv("PYPTO_BUILD_JOBS", "1")
     monkeypatch.setenv("PYPTO_DOCKER_PROXY", "http://proxy.example:7892")
     original_read = Path.read_text
@@ -144,14 +151,45 @@ def test_build_freezes_refs_and_base_digest(
     ci.save(tmp_path / "validated.json", {"stale": True})
     ci.build(config, "arm-a2a3", tmp_path)
     build = next(argv for argv in calls if argv[1:3] == ["buildx", "build"])
-    assert f"PYPTO_REF={recipe}" in build
+    expected_sha = recipe if pypto_ref == "main" else pypto_ref
+    expected_repository = (
+        fork_repository
+        if event == "pull_request" and pypto_ref == "main"
+        else config["sources"]["pypto"]["repository"]
+    )
+    assert f"PYPTO_REF={expected_sha}" in build
+    assert f"PYPTO_REPO={expected_repository}" in build
     assert f"PYPTO_LIB_REF={library}" in build
     assert f"CANN_IMAGE={base}" in build
     assert "DIST_BUILD_JOBS=1" in build
     assert "HTTP_PROXY=http://proxy.example:7892" in build
     assert "--load" in build and "--push" not in build
     assert not (tmp_path / "validated.json").exists()
-    assert json.loads((tmp_path / "state.json").read_text())["base"] == base
+    record = json.loads((tmp_path / "state.json").read_text())
+    assert record["base"] == base
+    assert record["pypto"] == expected_sha
+    assert record["pypto_repository"] == expected_repository
+
+
+@pytest.mark.parametrize("repository", [None, "file:///tmp/pypto", "https://github.com@other.example/repo"])
+def test_pr_build_rejects_missing_or_invalid_repository_before_network(
+    ci: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repository: str | None
+) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.delenv("PYPTO_PR_REPOSITORY", raising=False)
+    if repository is not None:
+        monkeypatch.setenv("PYPTO_PR_REPOSITORY", repository)
+    monkeypatch.setattr(ci, "preflight", lambda *args: None)
+    calls = []
+
+    def command(argv: list[str], **kwargs: object) -> str:
+        calls.append(argv)
+        return "1" * 40
+
+    monkeypatch.setattr(ci, "run", command)
+    with pytest.raises(ValueError, match="PYPTO_PR_REPOSITORY"):
+        ci.build(ci.load_config(), "arm-a2a3", tmp_path)
+    assert calls == [["git", "-C", str(ci.ROOT), "rev-parse", "HEAD"]]
 
 
 @pytest.mark.parametrize("case,devices", [("decode", "5"), ("allreduce", "5,7")])

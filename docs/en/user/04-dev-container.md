@@ -535,8 +535,10 @@ mounts that file read-only at its original path too, preserving the machine's jo
 [`docker/images.json`](../../../docker/images.json) is the maintenance entrypoint.
 The `Maintain Development Images` workflow runs daily at 19:37 UTC (03:37 Beijing),
 on changes to `docker/`, toolchain pins, build constraints or its workflow on `main`,
-and through **Run workflow**. PRs run only configuration and offline script tests on
-GitHub-hosted runners. Hardware builds run only in `hw-native-sys/pypto`.
+and through **Run workflow**. PRs touching those paths first run configuration and
+offline script tests on GitHub-hosted runners, then build the image and validate
+doctor, single-card decode and two-card all-reduce on the configured NPU runner.
+PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
 Manual runs validate without publishing by default; publication also requires `main`.
 
 The initial configuration enables only `arm-a2a3`, using CANN 9.2.0 and the
@@ -579,7 +581,10 @@ expectation and published tag together.
 
 Each run freezes the PyPTO and pypto-lib revisions before building. With PyPTO
 `ref: main`, it uses the workflow checkout's commit so the Docker recipe and helper
-scripts belong to the same event snapshot. Other refs and pypto-lib refs resolve
+scripts belong to the same event snapshot. For PRs, this is the exact PR head commit
+cloned from its source repository, including forks, rather than a temporary merge
+commit. Explicitly configured PyPTO refs keep their configured source repository.
+Other refs and pypto-lib refs resolve
 to full commit IDs. Runtime always follows PyPTO's gitlink; PTO-ISA follows that
 runtime's `pto_isa.pin`, and PTOAS follows the selected PyPTO toolchain pin.
 Build cache invalidation uses these SHAs instead of a mutable `main` argument.
