@@ -653,5 +653,58 @@ class TestAccumulatorMembership:
         )
 
 
+def _seed_predicates_after_simplify(start: int, stop: int, step: int) -> list[str]:
+    """Lower a stage=2 `pl.pipeline` whose body seeds an accumulator with `init_cond=(i == 0)`,
+    run `Simplify`, and return the printed `init_cond=` spelling of each replicated seed site.
+
+    The accumulator is carried through `init_values=` / `pl.yield_` because the input must
+    already be SSA, and the operands are sliced outside the loop so the loop variable
+    appears only in the predicate.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(strict_ssa=True)
+        def main(
+            self,
+            x: pl.Tensor[[16, 64], pl.BF16],
+            w: pl.Tensor[[2, 64, 64], pl.BF16],
+            out: pl.Out[pl.Tensor[[1, 16, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+            seed = pl.tensor.create([1, 16, 64], pl.FP32)
+            a_fixed = pl.tensor.slice(x, [16, 64], [0, 0])
+            w_fixed = pl.tensor.slice(w, [1, 64, 64], [0, 0, 0])
+            for i, (acc,) in pl.pipeline(start, stop, step, stage=2, init_values=(seed,)):
+                nxt = pl.matmul_acc(acc, a_fixed, w_fixed, b_trans=True, init_cond=(i == 0))
+                r = pl.yield_(nxt)
+            return pl.tensor.assemble(out, r, [0, 0, 0])
+
+    lowered = passes.lower_pipeline_loops()(Before)
+    lines = ir.python_print(passes.simplify()(lowered)).splitlines()
+    return [ln.strip() for ln in lines if "init_cond=" in ln]
+
+
+class TestReplicaSeedPredicateFoldsInSimplify:
+    """Replication rewrites replica 1's seed test `i == 0` into `i + step == 0`. Simplify
+    must fold it to `False` when the loop range makes zero unreachable, and keep it when
+    zero is reachable. Replica 0 always keeps its runtime test: it seeds the accumulator.
+    """
+
+    def test_unreachable_zero_folds_the_replica_predicate(self):
+        # start=0, step=2: replica 1 indexes {2, 6, 10}, never zero.
+        predicates = _seed_predicates_after_simplify(0, 12, 2)
+        assert len(predicates) == 2, f"stage=2 must replicate the seed site twice: {predicates}"
+        assert re.search(r"init_cond=i == 0\b", predicates[0]), predicates[0]
+        assert re.search(r"init_cond=False\b", predicates[1]), predicates[1]
+
+    def test_reachable_zero_keeps_the_replica_predicate(self):
+        # start=-2, step=2: replica 1 indexes {0, 4}. Folding would make the first K
+        # block accumulate onto an uninitialised accumulator instead of overwriting it.
+        predicates = _seed_predicates_after_simplify(-2, 6, 2)
+        assert len(predicates) == 2, f"stage=2 must replicate the seed site twice: {predicates}"
+        assert re.search(r"init_cond=i == 0\b", predicates[0]), predicates[0]
+        assert re.search(r"init_cond=i == -2\b", predicates[1]), predicates[1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

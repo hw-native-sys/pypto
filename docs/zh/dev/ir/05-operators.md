@@ -287,17 +287,17 @@ ISA 将该语义承载为 MAD 指令 Xt 寄存器的第 63 位（`cmatrixInit`�
 init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(0)`），两个分
 支写入同一缓冲区，`scf.if` 不产生返回值 —— Acc tile 上不会生成 phi。
 
-「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
-`False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
-`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
-复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
-这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
+字面量谓词一律是 `ConstBool`，无论是用户写的 `init_cond=True`/`False`，还是由 pass
+判定得到的 —— 例如 [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
+复制 K-loop 后生成的 `ko == 0`。emitter 同样接受 BOOL 类型的 `ConstInt`，即直接通过
+绑定构建 IR 时的写法。两者都会直接选定一个分支；若 emitter 两者都不折叠，每个 K
 block 都会发出双倍 MAD。
 
 因此该折叠取决于 trip count，并非普遍成立：在 `16x512x64` 下流水循环被完全消除，
-最终 PTO 中没有 `scf.if`；而在 `16x2048x64` 下副本索引仍是符号量（`ko`、
-`ko + 256`），会残留两个 `scf.if`。这不是回退 —— 它所替换的剥离式 `IfStmt` 在这些
-形状下同样产生两个分支。
+最终 PTO 中没有 `scf.if`；而在 `16x2048x64` 下主循环保留，副本索引为 `ko` 与
+`ko + 256`。[`Simplify`](../passes/05-simplify.md#操作数中的可证明比较) 依据循环的静态
+范围判定副本 1 的谓词（`ko == -256`）恒为假，并将其折叠为 `ConstBool`；副本 0 的
+`ko == 0` 是真正的运行期测试（它负责初始化累加器），因此恰好保留一个 `scf.if`。
 
 编译器自己也使用它所推荐的写法：`AutoTileMatmulL0` 对普通 `tile.matmul` 的 K-loop
 直接*生成*带谓词的形式，因此 `tile.create` 种子、循环携带值与循环的 `return_var`
