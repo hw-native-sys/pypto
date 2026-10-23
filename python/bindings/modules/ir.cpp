@@ -414,7 +414,8 @@ void BindIR(nb::module_& m) {
       .value("VecReg", RegKind::VecReg, "Vector register holding non-BOOL lanes")
       .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes");
   auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
-  reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape"), nb::arg("dtype"),
+  // The lane count must be an integer, not text coerced by older nanobind releases.
+  reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape").noconvert(), nb::arg("dtype"),
                      nb::arg("kind"), "Create a register descriptor with a positive logical lane count");
   BindFields<RegType>(reg_type_class);
   reg_type_class.def_prop_ro("lanes", &RegType::GetLanes, "Logical lane count (alias of shape)");

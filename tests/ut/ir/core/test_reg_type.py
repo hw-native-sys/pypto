@@ -40,8 +40,9 @@ def test_reg_type_rejects_nonpositive_lanes(shape):
         ir.RegType(shape, DataType.FP32, ir.RegKind.VecReg)
 
 
-@pytest.mark.parametrize("shape", [[64], 1.5, "64"])
+@pytest.mark.parametrize("shape", [[64], 1.5, "64", b"64"])
 def test_reg_type_rejects_noninteger_shape(shape):
+    # Text and bytes must not become lane counts through nanobind integer coercion.
     with pytest.raises(TypeError):
         ir.RegType(shape, DataType.FP32, ir.RegKind.VecReg)
 
