@@ -259,9 +259,15 @@ def test_successful_validation_records_exact_source_and_patch(
     def command(argv: list[str], log: Path | None = None) -> str:
         if argv[0] == "task-submit":
             return "\x1b[32m[RUN] PASS\x1b[0m\n"
+        # The real image's Bash activation prints a banner when CANN sets PS1.
+        # Metadata must remain parseable even with that default entrypoint.
+        banner = "PyPTO dev environment\n" if "--entrypoint" not in argv else ""
         if argv[-1].endswith("dist-state.json"):
-            return json.dumps(build_record)
-        return f"pypto {state['pypto']}\npypto-lib {state['pypto_lib']}\nruntime {build_record['runtime']}\n"
+            return banner + json.dumps(build_record)
+        return (
+            f"{banner}pypto {state['pypto']}\npypto-lib {state['pypto_lib']}\n"
+            f"runtime {build_record['runtime']}\n"
+        )
 
     monkeypatch.setattr(ci, "run", command)
     ci.validate(tmp_path)
