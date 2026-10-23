@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "registry": "swr.cn-east-3.myhuaweicloud.com",
+  "repository": "cloud-pypto/pypto-dev",
+  "sources": {
+    "pypto": {"repository": "https://github.com/hw-native-sys/pypto.git", "ref": "main"},
+    "pypto_lib": {"repository": "https://github.com/hw-native-sys/pypto-lib.git", "ref": "main"}
+  },
+  "images": {
+    "arm-a2a3": {
+      "enabled": true,
+      "platform": "linux/arm64",
+      "runners": ["self-hosted", "linux", "ARM64", "npu-xp"],
+      "runner_name": "227-npu-a2a3-XP-1",
+      "cann_repository": "quay.io/ascend/cann",
+      "cann_tag": "9.2.0-a3-ubuntu22.04-py3.11-devel",
+      "cann_digest": "sha256:a8469218d483247b62bfa80f8c3ee0475fa373d26b35388446b11d87fa286487",
+      "driver_version": "26.0.rc1",
+      "build_jobs": 2,
+      "proxy_required": true,
+      "patch": "cann92-a2a3-aicpu-class-memaccess",
+      "validation_platform": "a2a3",
+      "task_timeout_seconds": 1200,
+      "task_max_seconds": 1800,
+      "decode": "/workspace/pypto-lib/models/qwen3_14b/decode_fwd.py",
+      "allreduce": "/workspace/pypto-lib/examples/advanced/allreduce.py",
+      "tag": "arm-a2a3-cann9.2-dist"
+    }
+  }
+}

@@ -1838,6 +1838,29 @@ def test_doctor_warns_when_runtime_hides_driver_version(healthy_doctor: dict[str
     assert "verify the supported CANN/driver pair on the host" in result.stdout
 
 
+@pytest.mark.parametrize("driver,valid", [("26.0.rc1", True), ("25.6.rc1.b108", False)])
+def test_doctor_cann92_uses_mounted_host_metadata(
+    healthy_doctor: dict[str, str], tmp_path: Path, driver: str, valid: bool
+) -> None:
+    env = healthy_doctor
+    (Path(env["ASCEND_HOME_PATH"]) / "compiler/version.info").write_text("Version=9.2.0\n")
+    host_metadata = tmp_path / "host-version.info"
+    host_metadata.write_text(f"Version={driver}\n")
+    env["PYPTO_DRIVER_VERSION_FILE"] = str(host_metadata)
+    result = run(SCRIPTS / "pypto-doctor", env)
+    assert (result.returncode == 0) == valid, result.stdout + result.stderr
+    assert ("image validation configuration" in result.stdout) == valid
+
+
+def test_doctor_strict_rejects_incomplete_image(healthy_doctor: dict[str, str]) -> None:
+    # The diagnostic's default mode warns about missing developer checkouts.
+    # Publication must fail even if these warnings would normally exit zero.
+    result = run(SCRIPTS / "pypto-doctor", healthy_doctor, "--strict")
+    assert result.returncode != 0
+    assert "no pypto-lib" in result.stdout
+    assert "environment looks good" not in result.stdout
+
+
 @pytest.mark.parametrize("failure", ["missing", "startup", "import", "probe"])
 def test_doctor_rejects_unexecutable_acl_probe(healthy_doctor: dict[str, str], failure: str) -> None:
     env = healthy_doctor
