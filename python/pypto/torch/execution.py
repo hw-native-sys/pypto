@@ -37,8 +37,9 @@ def init(  # noqa: PLR0913
 
     Ring sizing accepts a positive scalar or four per-depth values. Diagnostics
     require ``output_dir``. The optional workspace budget is in bytes and is
-    passed to the public Worker. Graph capture is unsupported. This stage exposes
-    initialization only; direct JIT calls retain their program execution path.
+    passed to the public Worker. Graph capture is unsupported. Direct JIT calls
+    use this initialized Worker and the current Torch stream; compile() retains
+    explicit program semantics.
     """
     from pypto.runtime.kernel import session  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415

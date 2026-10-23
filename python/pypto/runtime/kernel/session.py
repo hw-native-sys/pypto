@@ -24,6 +24,7 @@ from typing import Any
 
 from pypto.runtime.runtime_pin import check_runtime_pin
 
+from .arguments import SourcePool
 from .owner import _OwnerThread
 
 
@@ -150,6 +151,7 @@ class _BorrowedWorkerSession:
     def __init__(self, config: KernelConfig, state: Any) -> None:
         from pypto.torch.shutdown import install_shutdown  # noqa: PLC0415
 
+        self.sources = SourcePool()
         self._api = require_runtime()
         self._native = install_shutdown(state)
         self._context = self._native.borrow_context(config.device_id)
@@ -208,6 +210,7 @@ class _BorrowedWorkerSession:
     def close(self) -> None:
         def finalize() -> None:
             self._native.bind_context(self._context)
+            self.sources.close()
             if self.worker is not None:
                 self.worker.close()
 

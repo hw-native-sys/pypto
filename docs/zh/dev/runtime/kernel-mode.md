@@ -1,7 +1,8 @@
-# Kernel mode 集成基础
+# Torch eager kernel 执行
 
-内部 torch 适配器为后续 kernel executor 描述借用的 NPU 参数，不新增公开 kernel
-执行入口。已有 JIT、编译 program 和 Worker 调用共用下述参数契约。
+直接调用 `@pl.jit` 函数时，必须先完成 `pypto.torch.init()`，随后在当前 Torch NPU
+stream 上执行 eager kernel。显式 `op.compile()` 保留 program 语义。两条路径共用
+specialization、编译、产物存储及下述参数契约。
 
 ## 公共签名与 L2 ABI
 
@@ -29,8 +30,8 @@
 `_compile_artifact()` 只接受单芯片单入口，始终返回 `CompiledArtifact`。
 公开 `compile()` 负责单程序、多入口和分布式包装，以及无法提取规范 lowered 签名时
 的 program 兼容回退。
-公开 `compile()` 显式请求 PROGRAM；目前 KERNEL 由内部编译测试直接请求，Torch
-提交层尚未接入此路径。不新增公开 `compile_kernel()`。`contract` 选择 PROGRAM/KERNEL
+公开 `compile()` 显式请求 PROGRAM，直接 JIT 调用请求 KERNEL。公共缓存 key、manifest
+能力及恢复消费者均携带该契约，防止复用不兼容的产物。不新增公开 `compile_kernel()`。`contract` 选择 PROGRAM/KERNEL
 调用规则，`execution_mode` 独立选择目标平台的 SIM/ONBOARD。
 kernel 要求单芯片、单入口、显式提供 Out/InOut buffer，
 且 Tensor 返回必须别名到外部参数。现有 C++ 返回血缘分析从原始 IR 生成有序别名，
@@ -60,13 +61,13 @@ prebuilt 校验和阶段晋级完全复用。加载串行化并在 assembly 成�
 handle、stream、输入 Tensor 和运行资源不进入公共产物。
 
 program 提交构造无地址的 `TaskArgs`，由 Simpler 解析为 `ChipStorageTaskArgs`。
-后续 Torch adapter 也通过公开 Worker 接口提交 `TaskArgs`，使用 `Buffer.wrap`
+Torch adapter 通过公开 Worker 接口提交 `TaskArgs`，使用 `Buffer.wrap`
 和 Simpler Tensor 视图描述借用的设备存储。Scalar 的值和类型通过公开 `TaskArgs`
 typed scalar 接口传入，由 Simpler 完成 ABI 编码。
 `ScalarArgument` 仅保留校验后的值和 dtype，不执行编码。
 
 Runtime 能力检查在显式 Torch kernel 初始化时执行。生命周期层支持 Worker 初始化和
-callable 注册；JIT 提交、公开算子注册和 DFX API 留待后续迁移。
+callable 注册及 eager 提交；公开算子注册和 DFX 窗口留待后续迁移。
 
 ## 进程初始化与生命周期
 
@@ -78,6 +79,7 @@ callable 注册；JIT 提交、公开算子注册和 DFX API 留待后续迁移�
 - `owner.py`：生命周期 owner 线程。
 - `callable.py`：共享 artifact 身份及绑定上下文的注册记录。
 - `pending.py`：callback 结果发布及单次调用的资源保留。
+- `arguments.py`：会话拥有的 storage 注册及单次 TaskArgs 租用。
 
 session 是生命周期适配层，不是独立执行引擎。Simpler 负责 callable 注册和执行，
 进程管理器负责调用准入和缓存。
@@ -120,14 +122,14 @@ Simpler 管理 runtime binaries、slot 和 native 清理。注册复用 `Compile
 不定义新散列。并发 prepare 共享成功或失败；registry busy 和容量
 错误原样传播，不新增 drain、wait 或自动淘汰。
 
-pending ticket 在入队前持有 registration 和每次调用的资源。后续 callback adapter
+pending ticket 在入队前持有 registration 和每次调用的资源。callback adapter
 向 ticket 发布 RunHandle，无需获取管理器锁。普通调用只轮询完成的 ticket；尚未执行的
 callback 视为未完成。`RunHandle.done` 为真后仍调用 `wait()` 完成 native 退休清理，
 随后才释放借用 source。显式 drain/shutdown 可同步框架队列，按 run 退休、source 释放、
 Worker 关闭的顺序清理。callback、退休或 source 释放失败均保留 ticket 和 Worker，
 不假定设备已静止。
 
-可选 `_torch_npu` 扩展本阶段只提供生命周期/context 和 NZ storage 查询。用匹配的
+可选 `_torch_npu` 扩展提供生命周期/context、NZ storage 查询、allocator 保护及 Torch 队列桥接。用匹配的
 Torch、torch_npu、CANN 头文件及库，通过 `-DPYPTO_BUILD_TORCH_NPU=ON` 构建；
 它不链接 Simpler C++ 实现或独立 kernel ABI。默认 core 构建不要求这些可选依赖。
 即使启用 `PYTHONOPTIMIZE`，配置阶段仍会执行 C++11 ABI 检查。
@@ -136,10 +138,51 @@ Torch、torch_npu、CANN 头文件及库，通过 `-DPYPTO_BUILD_TORCH_NPU=ON` �
 直至进程退出，避免 context 销毁后运行析构。
 fork 子进程在框架拆除前通过 native anchor 保留继承的状态，不获取继承的锁，也不关闭父进程的 Worker。
 
-直接 `@pl.jit` 调用仍进入 program 路径。因此，本迁移中间阶段在 `pypto.torch.init()`
-之后直接调用 JIT 会被模式互斥检查拒绝。初始化可独立验证；JIT → callback →
-`Worker.submit` 的接通属于下一项。本阶段不新增公开 `compile_kernel`、shutdown、
-算子注册或 DFX 函数。
+## 直接 JIT 调用
+
+```python
+import pypto.torch
+from pypto.runtime import CompileOptions, ExecutionMode
+
+pypto.torch.init()
+# x and out are real NPU tensors; every Out/InOut buffer is supplied.
+result = op(x, out, config=CompileOptions(execution_mode=ExecutionMode.ONBOARD))
+```
+
+初始化必须先于参数绑定和编译成功完成。省略 `config` 时按初始化目标选择 onboard 编译。
+直接调用拒绝 `RunConfig`、不同目标及分布式配置；执行配置属于初始化。
+使用 HBG 时，当前 `PassContext` 必须选择 `RuntimeKind.HOST_BUILD_GRAPH`，
+与 `init(runtime="host_build_graph")` 一致。`op.compile(..., config=run_config)`
+和 `op.warmup(...)` 保留 program 语义，不要求 kernel 初始化；同一进程内 program
+与 kernel 执行仍互斥。
+
+首次 eager 调用完成 specialization、逻辑签名校验、公共 passes/codegen、产物加载及
+assembly、callable 注册。后续调用复用兼容产物和 handle，runtime Scalar 改变不重编译。
+返回值为调用方 Tensor 的别名，允许重复别名，不分配业务输出。即使已 eager 预热，
+capture/replay 也在编译或注册前抛出 `NotImplementedError`。
+
+storage 按基址和完整容量通过 `Buffer.wrap(..., location=worker.device_location)`
+注册。Tensor view 保留字节 offset 和 stride；原生 NZ 使用经过校验的物理 blocked
+维度。同一 storage 的 view 和重叠 pending 调用共享会话 source，每次调用持有租用
+直到 run 退休；最后一个租用释放时才关闭 source。Tensor 使用 INPUT/OUTPUT_EXISTING/
+INOUT 和显式 NONE transfer，Scalar 通过带类型的 ctypes 值传给公开
+`TaskArgs.add_scalar`，不隐式执行 H2D。
+
+`RunOpApiV2` 入队前，pending ticket 已持有参数、配置、Worker 和 callable。
+native bridge 记录 allocator stream 并捕获实际 RTS stream/context；callback 获取
+GIL 后调用公开 Python `Worker.submit(..., caller_stream=...)`，再发布 RunHandle。
+不使用同步 `Worker.run`、私有 native submit 或 slot API。native 队列状态不拥有
+Python 引用；pending owners 和 callback closure 仅在退休成功后、持有 GIL 时释放。
+
+外层 JIT 返回、callback 提交返回、设备完成是三个不同阶段。普通 enqueue 和未完成
+ticket 轮询不会 drain、synchronize 或等待 callback/run。已完成的 run 仍需 `wait()`
+退休后才释放 source；显式 shutdown 可以同步队列并等待 run。Simpler submit 自身
+可能等待容量或前驱。提交或退休失败、完成状态未知时保留所有者。
+
+UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/恢复及二进制校验，
+仅模拟外部编译器输出和 native/framework 边界。UT 不证明可选 adapter 真实编译、
+实际 taskQueue/GIL/锁行为、allocator 安全或 NPU 数值正确性；本迁移阶段未通过
+ST 或设备测试验证这些性质。
 
 ## 调用元数据与所有权
 
@@ -158,7 +201,7 @@ fork 子进程在框架拆除前通过 native anchor 保留继承的状态，不
 | `stream` | 本次 torch_npu 当前 stream 对象，由 frame 保持引用。 |
 | `return_tensors` | 经校验的返回别名选择的原始调用方对象。 |
 
-Tensor/Scalar 的排列不定义 native ABI 布局。后续 native 参数编码需同时消费这些值
+Tensor/Scalar 的排列不定义 native ABI 布局。native 参数编码同时消费这些值
 和经过校验的产物 metadata。地址、Scalar 实际值和 stream 属于每次调用状态，
 不进入编译 key 或持久 metadata。
 
@@ -178,6 +221,7 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
   边界明确报错，不进行复制或格式转换。
 - 显式 `layout="NZ"` 且 `platform="a2a3"` 时允许只读 FP16/BF16/INT8 的原生
   format 29 输入；物理维度必须对应完整、无 padding、零 storage offset 的 NZ 矩阵。
+  声明 NZ 的参数拒绝 base-format storage，适配器不转换布局。
   物理描述符查询按需加载可选 native adapter；UT 仅替换该查询边界。
   签名校验直接比较逻辑 Torch shape 与逻辑 `ParamInfo`；物理查询独立校验
   blocked 维度和字节容量。

@@ -45,14 +45,15 @@ Public API
 
 JITFunction.__call__ flow
 -------------------------
-1. Capture namespaces and refresh deps when referenced JIT bindings change.
-2. Classify args: tensor vs scalar.
+1. Require successful Torch kernel initialization and reject graph capture.
+2. Capture namespaces, refresh dependencies and classify tensor/scalar arguments.
 3. Extract TensorMeta from torch.Tensor arguments.
 4. Scan entry + dep ASTs for bind_dynamic declarations.
 5. Resolve compile options; bypass caching for diagnostics or explicit output requests.
 6. Build CacheKey including referenced constants (dynamic dims → None in shape tuple).
-7. Cache hit  → execute cached CompiledProgram on device → return result.
-8. Cache miss → specialize (entry + deps) → pl.parse() → ir.compile() → cache → execute → return.
+7. Cache hit → validate the shared KERNEL artifact and current call frame.
+8. Cache miss → specialize → parse → shared compilation → cache KERNEL artifact.
+9. Reuse/register the callable and enqueue Worker.submit on the Torch stream.
 """
 
 import ast
@@ -67,6 +68,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from pypto._artifact_contract import ArtifactExecutionMode
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._environment import explicit_env_request
 from pypto._external_source import external_source_digest
@@ -285,7 +287,13 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
 
         kwargs = CompileOptions().as_compile_kwargs()
     else:
-        kwargs = run_config.compile_kwargs()
+        from pypto.runtime import CompileOptions  # noqa: PLC0415
+
+        kwargs = (
+            run_config.as_compile_kwargs()
+            if isinstance(run_config, CompileOptions)
+            else run_config.compile_kwargs()
+        )
     kwargs["dump_passes"] = coerce_dump_level(kwargs["dump_passes"])
     kwargs["emit_source_loc"] = emit_source_loc_default()
     outer = _validate_pass_context_conflicts(
@@ -1112,6 +1120,10 @@ class JITFunction:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         allow_signature_mode: bool = False,
+        *,
+        _contract: ArtifactExecutionMode | None = None,
+        _preflight: Callable[[_ir.Program, list[Any]], None] | None = None,
+        _lookup_only: bool = False,
     ) -> tuple[Any, list[Any], Any | None]:
         """Look up or build a specialized CompiledProgram.
 
@@ -1141,6 +1153,10 @@ class JITFunction:
             specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
         ]
 
+        def preflight(parsed: _ir.Program) -> None:
+            if _preflight is not None:
+                _preflight(parsed, ordered_args)
+
         def build(**overrides: Any) -> Any:
             record_stats(generation_builds=1)
             with time_stage("build_ns"):
@@ -1151,9 +1167,19 @@ class JITFunction:
                     specialization.per_func_dyn,
                     pl,
                     **(compile_kwargs | overrides),
+                    **(
+                        {
+                            "_contract": _contract,
+                            "_preflight": preflight,
+                        }
+                        if _contract is not None
+                        else {}
+                    ),
                 )
 
         if bypass_cache:
+            if _lookup_only:
+                raise RuntimeError("Kernel capture cannot request recompilation; prepare outside capture")
             record_stats(forced_rebuilds=1)
             return build(), ordered_args, run_config
 
@@ -1187,10 +1213,19 @@ class JITFunction:
             runtime=_resolve_runtime(),
         )
 
+        if _contract is not None:
+            # Consumer identity extends the common key, not a separate kernel cache.
+            key = key._replace(compile_opts=(*(key.compile_opts or ()), ("contract", _contract.value)))
+
         with self._cache_lock:
             if cache_config.enabled:
                 from ._persistent import resolve_persistent  # noqa: PLC0415
 
+                consumer_options: dict[str, Any] = {}
+                if _contract is not None:
+                    consumer_options["contract"] = _contract
+                if _lookup_only:
+                    consumer_options["lookup_only"] = True
                 compiled = resolve_persistent(
                     self,
                     key,
@@ -1200,11 +1235,14 @@ class JITFunction:
                     platform=target_platform,
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
                     distributed=self._func_type == "host",
+                    **consumer_options,
                 )
             elif key in self._cache:
                 record_stats(object_hits=1)
                 compiled = self._cache[key]
             else:
+                if _lookup_only:
+                    raise RuntimeError("Kernel specialization is not prepared; call it outside capture first")
                 compiled = self._cache[key] = build()
         return compiled, ordered_args, run_config
 
@@ -1255,49 +1293,23 @@ class JITFunction:
         return _persistent_dynamic_digest(state.persistent_source_hash, tuple(values))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Specialize, compile (or serve from cache), and execute on device.
+        """Compile and enqueue on the current Torch NPU stream after pypto.torch.init.
 
-        A compatible compiled object is reused in process. When persistent
-        caching is enabled, a disk hit restores generated code or complete
-        binaries; a miss specializes into ``@pl.program`` and runs passes and
-        codegen. Execution publishes missing binaries automatically. Diagnostic
-        and explicit output requests bypass lookup and insertion on every call.
-
-        The compiled kernel is then executed on the NPU device with the given
-        torch tensor arguments (Triton-like API).
-
-        A ``config=RunConfig(...)`` keyword argument is consumed here rather
-        than passed to the decorated function: its compile-side fields
-        (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
-        ``ir.compile()`` via ``RunConfig.compile_kwargs``, and its
-        runtime fields drive on-device execution.  ``strategy`` also takes
-        part in the cache key so artifacts compiled under different strategy
-        values never share a cache entry.
-
-        Args:
-            *args: Positional arguments matching the decorated function's params.
-            **kwargs: Keyword arguments.  A ``config`` keyword, if present, is
-                a ``RunConfig`` and is consumed by
-                the JIT machinery (not forwarded to the decorated function).
-
-        Returns:
-            ``None`` for in-place calls (output tensors modified on device),
-            or ``torch.Tensor`` / ``tuple[torch.Tensor, ...]`` for return-style
-            calls. Per-run on-device timing is no longer surfaced as an
-            attribute — read it from the runtime's ``[STRACE]`` log markers
-            (simpler PR #1177).
+        Every Out/InOut buffer must be supplied. Returns aliases of caller tensors
+        without waiting for the queued callback or device work. Optional ``config``
+        is a CompileOptions; process initialization owns execution settings.
+        Use ``op.compile(...)(...)`` for explicit program execution.
         """
-        compiled, ordered_args, run_config = self._resolve_compiled(args, kwargs)
-        if run_config is not None:
-            return compiled(*ordered_args, config=run_config)
-        return compiled(*ordered_args)
+        from ._kernel import invoke_jit  # noqa: PLC0415
+
+        return invoke_jit(self, args, kwargs)
 
     def compile(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize + compile for the shape/dtype combination implied by *args*,
         and return the underlying ``CompiledProgram``.
 
-        Same specialization / cache pipeline as ``__call__``, minus the
-        on-device dispatch. Use this when you want to drive execution through
+        Shares specialization and cache infrastructure with ``__call__``, but
+        requests the PROGRAM contract and uses a separate cache entry. Use this to drive execution through
         the runtime worker API directly:
 
         - ``pypto.runtime.ChipWorker.run`` / ``register``
@@ -1307,12 +1319,12 @@ class JITFunction:
 
         ``config=RunConfig(...)`` is still consumed (and its compile-side
         knobs forwarded to ``ir.compile()``) so the returned
-        ``CompiledProgram`` honours the same options as a direct
-        ``kernel(*args, config=...)`` call. Runtime-side fields on the
+        ``CompiledProgram`` honours its compilation options. Direct kernel
+        calls instead accept ``CompileOptions`` and require Torch initialization. Runtime-side fields on the
         ``RunConfig`` (``device_id``, DFX flags, ...) do not apply here —
         they affect dispatch, not the compiled artefact.
 
-        Subsequent calls (either ``__call__`` or [`compile`][pypto.language.JITFunction.compile]) with the
+        Subsequent [`compile`][pypto.language.JITFunction.compile] calls with the
         same specialization and compatible cache policy return the same
         ``CompiledProgram`` instance. With persistence enabled, a disk-restored
         object has ``program is None``; disable persistence when IR is required.
@@ -1595,6 +1607,8 @@ class JITFunction:
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
+        contract = ir_compile_kwargs.pop("_contract", None)
+        preflight = ir_compile_kwargs.pop("_preflight", None)
         contexts = self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts)
@@ -1602,9 +1616,17 @@ class JITFunction:
         rename_map = specializer.rename_map
         try:
             parsed = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
+            if preflight is not None:
+                preflight(parsed)
             skip_ptoas = not _ptoas_available()
             if ir_compile_kwargs.get("output_dir") is None:
                 ir_compile_kwargs["output_dir"] = make_default_output_dir(parsed.name)
+            if contract is not None:
+                from pypto.ir.compile import _compile_artifact  # noqa: PLC0415
+
+                return _compile_artifact(
+                    parsed, contract=contract, skip_ptoas=skip_ptoas, **ir_compile_kwargs
+                )
             return ir_compile(parsed, skip_ptoas=skip_ptoas, **ir_compile_kwargs)
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)

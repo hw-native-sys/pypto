@@ -385,3 +385,207 @@ def kernel_env(monkeypatch, tmp_path):
         worker_cls=FakeWorker,
         artifact=artifact,
     )
+
+
+@pytest.fixture
+def eager_env(monkeypatch):
+    """Real initialization/session/admission with public runtime and Torch queue fakes."""
+    import threading  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+    from pypto.runtime import _execution_mode  # noqa: PLC0415
+    from pypto.runtime.kernel import arguments, context, session  # noqa: PLC0415
+    from pypto.torch import init, interop, launch, shutdown  # noqa: PLC0415
+
+    env = SimpleNamespace(
+        events=[],
+        queue=[],
+        runs=[],
+        buffers=[],
+        workers=[],
+        bridges=[],
+        capture=False,
+        queued=True,
+        stream_id=7,
+        rts_stream=12345,
+        device=0,
+        context=321,
+        submit_error=None,
+        register_error=None,
+        enqueue_error=None,
+    )
+
+    class NPUTensor(torch.Tensor):
+        def __getattribute__(self, name):
+            # Keep real CPU storage operations; only the device label is fake.
+            if name == "device":
+                return SimpleNamespace(type="npu", index=0)
+            return super().__getattribute__(name)
+
+    env.tensor = lambda shape=(16, 16), dtype=torch.float32: torch.empty(shape, dtype=dtype).as_subclass(
+        NPUTensor
+    )
+
+    def stream():
+        return SimpleNamespace(stream_id=env.stream_id, device=SimpleNamespace(type="npu", index=env.device))
+
+    framework = SimpleNamespace(
+        __version__="2.6.0.post2",
+        npu=SimpleNamespace(current_device=lambda: env.device, current_stream=lambda device: stream()),
+        get_npu_format=lambda tensor: 2,
+        _C=SimpleNamespace(_npu_shutdown=lambda: None, _npu_shutdown_synchronize=lambda: None),
+    )
+
+    class CallConfig:
+        def __init__(self):
+            self.runtime_env = SimpleNamespace()
+
+        def validate(self):
+            pass
+
+    class RunHandle:
+        def __init__(self):
+            self.complete = False
+            self.retired = False
+            self.wait_error = None
+
+        @property
+        def done(self):
+            return self.complete
+
+        def wait(self):
+            env.events.append("wait")
+            if self.wait_error:
+                raise self.wait_error
+            self.complete = self.retired = True
+
+    class Worker:
+        device_location = property(lambda self: self.location)
+
+        def __init__(self, **options):
+            self.location = object()
+            self.options = options
+            env.workers.append(self)
+
+        def init(self, prewarm_config=None, *, borrowed_context_generation=None):
+            env.events.append("init")
+
+        def register(self, callable_):
+            env.events.append("register")
+            if env.register_error:
+                raise env.register_error
+            return object()
+
+        def unregister(self, handle):
+            pytest.fail("no eviction")
+
+        def submit(self, target, args=None, config=None, *, caller_stream=None):
+            env.events.append(("submit", target, args, config, caller_stream, threading.get_ident()))
+            if env.submit_error:
+                raise env.submit_error
+            run = RunHandle()
+            env.runs.append(run)
+            return run
+
+        def flush_diagnostics(self):
+            pytest.fail("no implicit DFX flush")
+
+        def close(self):
+            env.events.append("close")
+
+    class Buffer:
+        def __init__(self, address, nbytes, location):
+            self.address, self.nbytes, self.location = address, nbytes, location
+            self.closed = False
+            self.close_error = None
+            env.buffers.append(self)
+
+        @classmethod
+        def wrap(cls, *, address, nbytes, location):
+            assert not any(
+                not b.closed and b.address < address + nbytes and address < b.address + b.nbytes
+                for b in env.buffers
+            ), "overlapping live Buffer.wrap"
+            return cls(address, nbytes, location)
+
+        def close(self):
+            env.events.append("source.close")
+            if self.close_error:
+                raise self.close_error
+            self.closed = True
+
+    class TaskArgs:
+        def __init__(self):
+            self.tensors, self.scalars = [], []
+
+        def add_tensor(self, tensor, tag, *, transfer):
+            assert not self.scalars and transfer == "NONE"
+            self.tensors.append((tensor, tag))
+
+        def add_scalar(self, scalar):
+            self.scalars.append(scalar)
+
+    api = SimpleNamespace(
+        Worker=Worker,
+        CallConfig=CallConfig,
+        RunHandle=RunHandle,
+        Buffer=Buffer,
+        TaskArgs=TaskArgs,
+        Tensor=lambda buffer, **kw: SimpleNamespace(buffer=buffer, **kw),
+        TensorArgType=SimpleNamespace(INPUT="IN", OUTPUT_EXISTING="OUT", INOUT="INOUT"),
+        TensorTransfer=SimpleNamespace(NONE="NONE"),
+    )
+
+    def run_queue():
+        while env.queue:
+            env.queue.pop(0)()
+
+    class QueueTicket:
+        def __init__(self, tensors, stream_id, device):
+            self.tensors, self.stream_id, self.rts_stream = tensors, stream_id, env.rts_stream
+            env.bridges.append(self)
+
+        def enqueue(self, callback):
+            env.events.append("recordStream")
+            if env.enqueue_error:
+                raise env.enqueue_error
+            if env.queued:
+                env.queue.append(lambda: callback(self.rts_stream))
+            else:
+                callback(self.rts_stream)
+
+        def synchronize(self):
+            env.events.append("synchronize")
+            run_queue()
+
+        def release(self):
+            env.events.append("native.release")
+            self.tensors = []
+
+    native = SimpleNamespace(
+        prepare=QueueTicket,
+        check_call=lambda stream, device: env.capture,
+        borrow_context=lambda device: env.context,
+        bind_context=lambda context: None,
+        framework_alive=lambda: True,
+        retain_until_exit=lambda owner: None,
+    )
+    for module in ("simpler", "simpler.task_interface", "simpler.worker"):
+        monkeypatch.setitem(sys.modules, module, api)
+    monkeypatch.setattr(session, "check_runtime_pin", lambda: None)
+    monkeypatch.setattr(arguments, "check_runtime_pin", lambda: None)
+    monkeypatch.setattr(arguments, "_tensor_dtype", str)
+    for module in (interop, shutdown):
+        monkeypatch.setattr(module, "_load_torch_npu", lambda: framework)
+    for module in (launch, shutdown):
+        monkeypatch.setattr(module, "_load_native", lambda: native)
+    monkeypatch.setattr(_execution_mode, "_gate", _execution_mode._ModeGate())
+    env.state = context._ProcessKernelState()
+    monkeypatch.setattr(context, "_process", SimpleNamespace(state=env.state))
+    env.init, env.run_queue, env.api, env.native, env.framework = init, run_queue, api, native, framework
+    yield env
+    # Tests of unknown completion intentionally retain owners in production.
+    # Drop only the fake state and stop its thread, without pretending it closed.
+    owner = env.state._worker
+    if owner is not None:
+        owner._owner.stop()

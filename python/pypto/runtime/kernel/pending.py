@@ -19,7 +19,7 @@ from .callable import KernelRegistration
 class PendingTicket:
     """Retain resources before enqueue and retire them only after RunHandle.wait.
 
-    The future queue adapter calls publish/fail from its callback. Those methods
+    The queue adapter calls publish/fail from its callback. Those methods
     never acquire process admission or lifecycle locks, so close can await the
     callback without preventing it from publishing. ``release`` closes borrowed
     sources after run retirement and must support retry after a partial failure.
@@ -35,10 +35,11 @@ class PendingTicket:
         owners: tuple[Any, ...],
     ) -> None:
         self.registration = registration
-        self._enqueue = enqueue
-        self._synchronize = synchronize
-        self._release = release
+        self._enqueue: Callable[[PendingTicket], None] | None = enqueue
+        self._synchronize: Callable[[], None] | None = synchronize
+        self._release: Callable[[], None] | None = release
         self._owners = owners
+        self._callback: Any = None
         self._published = threading.Event()
         self._publish_lock = threading.Lock()
         self._retire_lock = threading.Lock()
@@ -51,7 +52,12 @@ class PendingTicket:
         if self._enqueued:
             raise RuntimeError("Kernel ticket can only be enqueued once")
         self._enqueued = True
+        assert self._enqueue is not None
         self._enqueue(self)
+
+    def retain_callback(self, callback: Any) -> None:
+        """Own the Python callback before the native queue borrows its pointer."""
+        self._callback = callback
 
     def publish(self, run: Any) -> None:
         with self._publish_lock:
@@ -87,14 +93,22 @@ class PendingTicket:
             if self._retired:
                 return
             self._run.wait()  # done alone does not retire native run resources.
+            assert self._release is not None
             self._release()
             self._owners = ()
+            self._callback = None
+            # Closures also own frames/arguments. Drop them under the GIL only
+            # after successful retirement; failures keep all owners retryable.
+            self._enqueue = None
+            self._synchronize = None
+            self._release = None
             self._retired = True
 
     def wait(self) -> None:
         if not self._published.is_set():
             # Explicit shutdown/drain may flush the framework host queue.
             # Ordinary admission only calls done and never synchronizes.
+            assert self._synchronize is not None
             self._synchronize()
             if not self._published.is_set():
                 raise RuntimeError("Kernel callback did not publish a RunHandle; owners retained")
