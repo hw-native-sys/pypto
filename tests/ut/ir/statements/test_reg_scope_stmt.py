@@ -135,7 +135,21 @@ def test_simplify_preserves_reg_scope_when_eliminating_dead_values(dead_body):
 
 
 def test_reg_scope_text_printing_does_not_erase_boundary():
-    assert "with pl.reg_scope():" in python_print(_scope(), format=False)
+    scope = _scope()
+    printable = ir.RegScopeStmt("", scope.body, scope.span)
+    assert "with pl.reg_scope():" in python_print(printable, format=False)
+
+
+def test_reg_scope_empty_body_prints_parseable_pass():
+    span = ir.Span("reg_scope.py", 2, 1, 2, 8)
+    scope = ir.RegScopeStmt("", ir.SeqStmts([], span), span)
+    printed = python_print(scope, format=False)
+    assert printed == "with pl.reg_scope():\n    pass"
+
+
+def test_reg_scope_metadata_is_rejected_in_python_printer():
+    with pytest.raises(ValueError, match="name_hint or attrs"):
+        python_print(_scope(), format=False)
 
 
 def test_reg_scope_rejects_unknown_serialized_node_kind():

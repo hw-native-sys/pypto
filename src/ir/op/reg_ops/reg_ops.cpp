@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -19,9 +19,15 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/memref.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 namespace {
@@ -94,9 +100,9 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
     if (!v.stride.empty()) {
       CHECK(v.stride.size() == t->shape_.size()) << "View stride rank mismatch";
       int64_t stride = 1;
-      for (size_t i = t->shape_.size(); i-- > 0;) {
-        CHECK(Constant(v.stride[i], "stride") == stride) << "View must be contiguous";
-        stride *= Constant(t->shape_[i], "shape");
+      for (size_t i = t->shape_.size(); i > 0; --i) {
+        CHECK(Constant(v.stride[i - 1], "stride") == stride) << "View must be contiguous";
+        stride *= Constant(t->shape_[i - 1], "shape");
       }
     }
     if (auto start = As<ConstInt>(v.start_offset)) CHECK(start->value_ >= 0) << "Negative View offset";
@@ -139,10 +145,10 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
 void Scalar(const ExprPtr& e, DataType dtype) {
   auto scalar = As<ScalarType>(e->GetType());
   CHECK(scalar) << "Expected scalar base/value";
-  // Literals may be normalized to the destination dtype, but SSA values must
-  // never silently change signedness or precision.
-  CHECK(As<ConstInt>(e) || As<ConstFloat>(e) || scalar->dtype_ == dtype)
-      << "Scalar dtype must match register dtype";
+  // DSL literals are normalized to the requested dtype before construction.
+  // Raw IR construction must obey the same contract so printing and reparsing
+  // cannot change the operand type or reject an otherwise accepted literal.
+  CHECK(scalar->dtype_ == dtype) << "Scalar dtype must match register dtype";
 }
 
 TypePtr Binary(const Args& a, const Kwargs& k, const std::string& name) {
@@ -274,10 +280,11 @@ static bool RegisterGenerators() {
         .set_attr<int>("lanes")
         .no_arg_writes();
     std::string op(name);
-    if (op == "full_mask")
+    if (op == "full_mask") {
       e.no_argument();
-    else
+    } else {
       e.add_argument("value", "Scalar input");
+    }
     if (op == "broadcast" || op == "index_gen") e.set_attr<DataType>("dtype");
     if (op == "index_gen") e.set_attr<std::string>("order");
     e.f_deduce_type([op](const Args& a, const Kwargs& k) -> TypePtr {
@@ -295,8 +302,9 @@ static bool RegisterGenerators() {
         auto active = Constant(a[0], "active_lanes");
         CHECK(active >= 0 && active <= n) << "active_lanes must be in [0, lanes]";
       }
-      if (op == "index_gen")
+      if (op == "index_gen") {
         CHECK(GetStringKwarg(k, "order", "ascending") == "ascending") << "P0 order must be ascending";
+      }
       return std::make_shared<RegType>(n, dtype, mask ? RegKind::MaskReg : RegKind::VecReg);
     });
   }
@@ -366,7 +374,7 @@ static bool RegisterMaskLogic() {
 static const bool masks_registered = RegisterMaskLogic();
 
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
-  CHECK(call && (call->op_->name_ == "reg.load" || call->op_->name_ == "reg.store"))
+  CHECK(call && call->op_ && (call->op_->name_ == "reg.load" || call->op_->name_ == "reg.store"))
       << "Memory effect requires reg.load/store";
   // This query is public and can receive a manually created Call. Validate
   // operand arity and types before indexing, even if its result type is forged.
@@ -374,8 +382,10 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
       OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
   bool load = call->op_->name_ == "reg.load";
   auto tile = As<TileType>(call->args_[0]->GetType());
-  int64_t lanes =
-      load ? As<RegType>(validated->GetType())->shape_ : As<RegType>(call->args_[2]->GetType())->shape_;
+  auto validated_reg = As<RegType>(load ? validated->GetType() : call->args_[2]->GetType());
+  INTERNAL_CHECK_SPAN(validated_reg, call->span_)
+      << "Register memory effect validation produced a non-register result";
+  int64_t lanes = validated_reg->shape_;
   RegMemoryEffect result{call->args_[0],
                          tile->memref_ ? (*tile->memref_)->base_ : nullptr,
                          load ? ArgEffect::Read : ArgEffect::Write,
@@ -389,10 +399,11 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
     int64_t start = base_const ? base_const->value_ : 0;
     if (tile->memref_) {
       auto bytes = As<ConstInt>((*tile->memref_)->byte_offset_);
-      int64_t element_bytes = tile->dtype_.GetByte();
+      int64_t element_bytes = static_cast<int64_t>(tile->dtype_.GetByte());
       if (!bytes || bytes->value_ < 0 || bytes->value_ % element_bytes != 0 ||
-          start > std::numeric_limits<int64_t>::max() - bytes->value_ / element_bytes)
+          start > std::numeric_limits<int64_t>::max() - bytes->value_ / element_bytes) {
         return result;
+      }
       start += bytes->value_ / element_bytes;
     }
     if (start >= 0 && offset->value_ >= 0 && start <= std::numeric_limits<int64_t>::max() - offset->value_ &&

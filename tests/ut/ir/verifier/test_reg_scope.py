@@ -68,6 +68,84 @@ def test_invalid_function_context(kind):
     assert any("context" in d.message for d in verify(region(definition(register())), kind))
 
 
+@pytest.mark.parametrize(
+    "kind", [ir.FunctionType.Opaque, ir.FunctionType.Orchestration, ir.FunctionType.Graph]
+)
+@pytest.mark.parametrize("graph_ancestor", [False, True])
+@pytest.mark.parametrize("tuple_depth", [0, 1, 2])
+def test_explicit_incore_register_region_survives_outlining(kind, graph_ancestor, tuple_depth):
+    # The device boundary is already supported by outlining for these owners;
+    # RegScope validation must not impose a narrower owner whitelist.
+    value = register()
+    stmts = [definition(value)]
+    for depth in range(tuple_depth):
+        packed = ir.Var(f"packed_{depth}", ir.TupleType([value.type]), SPAN)
+        stmts.append(ir.AssignStmt(packed, ir.MakeTuple([value], SPAN), SPAN))
+        value = packed
+    local_body = stmts[0] if len(stmts) == 1 else sequence(*stmts)
+    body = ir.InCoreScopeStmt(body=region(local_body), span=SPAN)
+    if graph_ancestor:
+        body = ir.GraphScopeStmt("graph", body=sequence(body, ir.EvalStmt(integer(0), SPAN)), span=SPAN)
+    assert verify(body, kind) == []
+    # Keep the scope terminal while retaining a second statement so the
+    # outliner must use its fallback output analysis. Reg locals must not be
+    # exported merely because no following variable use exists.
+    function = ir.Function("kernel", [], [], sequence(body, ir.EvalStmt(integer(0), SPAN)), SPAN, type=kind)
+    program = ir.Program([function], "RegTest", SPAN)
+    outlined = passes.outline_incore_scopes()(program)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.RegScopeValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
+    kernels = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(kernels) == 1
+    assert isinstance(kernels[0].body, ir.RegScopeStmt)
+
+
+def test_terminal_register_region_preserves_tile_output():
+    # A store's Tile alias is a legal output even though its Reg operand must
+    # remain local to the outlined RegScope.
+    tile_type = ir.TileType([64], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+    tile = ir.Var("tile", tile_type, SPAN)
+    value = ir.Var("value", ir.RegType(64, DataType.FP32, ir.RegKind.VecReg), SPAN)
+    out = ir.Var("out", tile_type, SPAN)
+    load = ir.create_op_call("reg.load", [tile, integer(0)], {"lanes": 64}, SPAN)
+    store = ir.create_op_call("reg.store", [tile, integer(0), value], {}, SPAN)
+    local_body = region(sequence(ir.AssignStmt(value, load, SPAN), ir.AssignStmt(out, store, SPAN)))
+    body = sequence(ir.InCoreScopeStmt(body=local_body, span=SPAN), ir.EvalStmt(integer(0), SPAN))
+    function = ir.Function("kernel", [tile], [], body, SPAN, type=ir.FunctionType.Orchestration)
+    outlined = passes.outline_incore_scopes()(ir.Program([function], "RegTest", SPAN))
+    kernel = next(f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore)
+    assert len(kernel.return_types) == 1
+    assert isinstance(kernel.return_types[0], ir.TileType)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.RegScopeValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
+
+
+def test_incore_context_is_restored_after_device_boundary():
+    device = ir.InCoreScopeStmt(body=region(definition(register("device"))), span=SPAN)
+    # A legal device region must not authorize a following orchestration region.
+    body = sequence(device, region(definition(register("outside"))))
+    diagnostics = verify(body, ir.FunctionType.Orchestration)
+    assert len(diagnostics) == 1
+    assert "context" in diagnostics[0].message
+
+
+def test_orchestration_block_is_restored_after_device_boundary():
+    device = ir.InCoreScopeStmt(body=region(definition(register("device"))), span=SPAN)
+    body = ir.GraphScopeStmt(
+        "graph", body=sequence(device, region(definition(register("outside")))), span=SPAN
+    )
+    diagnostics = verify(body, ir.FunctionType.Opaque)
+    assert len(diagnostics) == 1
+    assert "context" in diagnostics[0].message
+
+
+def test_graph_inside_register_region_remains_illegal():
+    body = region(ir.GraphScopeStmt("graph", body=sequence(), span=SPAN))
+    assert any("Orchestration scopes cannot appear" in d.message for d in verify(body))
+
+
 def test_final_placement_requires_aiv():
     body = region(definition(register()))
     assert verify(body, ir.FunctionType.AIV, final=True) == []

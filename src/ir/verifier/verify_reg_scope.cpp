@@ -14,12 +14,19 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -42,8 +49,9 @@ class RegionChecker : public IRVisitor {
       if (ContainsRegionValue(p->GetType(), false)) Error("Reg cannot cross a function boundary", p->span_);
     }
     for (const auto& t : function_->return_types_) {
-      if (ContainsRegionValue(t, false))
+      if (ContainsRegionValue(t, false)) {
         Error("Reg cannot cross a function return boundary", function_->span_);
+      }
     }
     collecting_ = true;
     VisitStmt(function_->body_);
@@ -55,13 +63,16 @@ class RegionChecker : public IRVisitor {
   void VisitStmt_(const RegScopeStmtPtr& op) override {
     if (collecting_) {
       if (region_) Error("RegScope cannot nest", op->span_);
-      if (!incore_ || blocked_ || function_->func_type_ == FunctionType::AIC)
+      if (!incore_ || blocked_ || function_->func_type_ == FunctionType::AIC) {
         Error("RegScope requires an InCore/AIV context", op->span_);
-      if (final_ && function_->func_type_ != FunctionType::AIV)
+      }
+      if (final_ && function_->func_type_ != FunctionType::AIV) {
         Error("RegScope final placement requires AIV after ExpandMixedKernel", op->span_);
+      }
       if (backend::BackendConfig::IsConfigured() &&
-          backend::BackendConfig::GetBackendType() != backend::BackendType::Ascend950)
+          backend::BackendConfig::GetBackendType() != backend::BackendType::Ascend950) {
         Error("RegScope requires an A5 (Ascend950) target", op->span_);
+      }
     }
     auto previous = region_;
     region_ = op.get();
@@ -70,12 +81,20 @@ class RegionChecker : public IRVisitor {
   }
   void VisitStmt_(const InCoreScopeStmtPtr& op) override {
     bool prev = incore_;
+    bool previous_blocked = blocked_;
     // Wrapper Group/Spmd functions cannot contain RegScope directly. An
     // explicit InCore scope still establishes a legal pre-outlining context.
-    incore_ = function_->func_type_ == FunctionType::Opaque ||
+    // Match the existing outliner's orchestration-like owners: this is a
+    // device boundary even while its containing function still orchestrates.
+    incore_ = IsOrchestrationLike(function_->func_type_) || function_->func_type_ == FunctionType::Opaque ||
               function_->func_type_ == FunctionType::Inline ||
               function_->func_type_ == FunctionType::InCore || function_->func_type_ == FunctionType::AIV;
+    // An orchestration ancestor is outside this device region. Scopes opened
+    // inside it still set blocked_ through Block(); restore the outer state
+    // afterward so sibling orchestration code cannot inherit device access.
+    blocked_ = false;
     IRVisitor::VisitStmt_(op);
+    blocked_ = previous_blocked;
     incore_ = prev;
   }
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override { Block(op); }
@@ -86,18 +105,21 @@ class RegionChecker : public IRVisitor {
       auto type = op->var_->GetType();
       if (ContainsRegionValue(type, true)) {
         auto [it, inserted] = owners_.emplace(op->var_.get(), region_);
-        if (!inserted && it->second != region_)
+        if (!inserted && it->second != region_) {
           Error("Reg/local Scalar assignment escapes RegScope ownership", op->span_);
+        }
       }
     }
     if (!collecting_ && (As<RegType>(op->var_->GetType()) || As<RegType>(op->value_->GetType())) &&
-        !structural_equal(op->var_->GetType(), op->value_->GetType()))
+        !structural_equal(op->var_->GetType(), op->value_->GetType())) {
       Error("Register assignment dtype/kind/lane mismatch", op->span_);
+    }
     if (collecting_ && region_ && As<TileType>(op->var_->GetType())) {
       auto call = As<Call>(op->value_);
-      if (!call || call->op_->name_ != "reg.store")
+      if (!call || call->op_->name_ != "reg.store") {
         Error("RegScope Tile inputs must originate outside the region; only reg.store returns Tile",
               op->span_);
+      }
     }
     // LHS is a definition, not a use. Only inspect the RHS here.
     VisitExpr(op->value_);
@@ -105,13 +127,16 @@ class RegionChecker : public IRVisitor {
   void VisitVarLike_(const VarPtr& op) override {
     if (collecting_) return;
     auto found = owners_.find(op.get());
-    if (found != owners_.end() && found->second && found->second != region_)
+    if (found != owners_.end() && found->second && found->second != region_) {
       Error("Reg/local Scalar cannot escape its RegScope", op->span_);
-    if (storing_container_ && found != owners_.end() && found->second && found->second == region_)
+    }
+    if (storing_container_ && found != owners_.end() && found->second && found->second == region_) {
       Error("Reg/local Scalar cannot escape through an external container", op->span_);
+    }
     if (ContainsRegionValue(op->GetType(), false) &&
-        (found == owners_.end() || !region_ || found->second != region_))
+        (found == owners_.end() || !region_ || found->second != region_)) {
       Error("Reg must be defined and used within the same RegScope", op->span_);
+    }
   }
   void VisitExpr_(const CallPtr& op) override {
     if (!collecting_ && op->op_->name_.rfind("reg.", 0) == 0) {
@@ -121,8 +146,9 @@ class RegionChecker : public IRVisitor {
       try {
         auto inferred =
             OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_)->GetType();
-        if (!structural_equal(inferred, op->GetType()))
+        if (!structural_equal(inferred, op->GetType())) {
           Error("Register call result type mismatch", op->span_);
+        }
       } catch (const pypto::Error& error) {
         Error(error.what(), op->span_);
       }
@@ -133,8 +159,9 @@ class RegionChecker : public IRVisitor {
     storing_container_ = previous;
   }
   void VisitStmt_(const EvalStmtPtr& op) override {
-    if (auto call = As<Call>(op->expr_); call && call->op_->name_.rfind("reg.", 0) == 0)
+    if (auto call = As<Call>(op->expr_); call && call->op_->name_.rfind("reg.", 0) == 0) {
       Error("Register calls require AssignStmt; bare store is not allowed", op->span_);
+    }
     IRVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -235,11 +262,13 @@ void VerifyRegScopes(const FunctionPtr& function, std::vector<Diagnostic>& diagn
 void CheckRegScopes(const FunctionPtr& function) {
   std::vector<Diagnostic> diagnostics;
   VerifyRegScopes(function, diagnostics);
-  if (!diagnostics.empty()) CHECK_SPAN(false, diagnostics.front().span) << diagnostics.front().message;
+  if (!diagnostics.empty()) {
+    CHECK_SPAN(false, diagnostics.front().span) << diagnostics.front().message;
+  }
 }
 class RegScopePropertyVerifier : public PropertyVerifier {
  public:
-  std::string GetName() const override { return "RegScopeValid"; }
+  [[nodiscard]] std::string GetName() const override { return "RegScopeValid"; }
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gv, function] : program->functions_) VerifyRegScopes(function, diagnostics);

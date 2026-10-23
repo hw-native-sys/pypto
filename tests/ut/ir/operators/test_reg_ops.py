@@ -19,6 +19,10 @@ def integer(value):
     return ir.ConstInt(value, DataType.INDEX, SPAN)
 
 
+def typed_integer(value, dtype):
+    return ir.ConstInt(value, dtype, SPAN)
+
+
 def vec(lanes=64, dtype=DataType.FP32):
     return ir.Var("v", ir.RegType(lanes, dtype, ir.RegKind.VecReg), SPAN)
 
@@ -82,11 +86,32 @@ def test_mask_compare_select_convert_and_generators():
         reg_type(call("convert", [vec()], dtype=DataType.FP16, rounding="R", saturate=False)).dtype
         == DataType.FP16
     )
-    assert reg_type(call("broadcast", [integer(2)], lanes=64, dtype=DataType.INT32)).lanes == 64
     assert (
-        reg_type(call("index_gen", [integer(0)], lanes=64, dtype=DataType.INT32, order="ascending")).lanes
+        reg_type(call("broadcast", [typed_integer(2, DataType.INT32)], lanes=64, dtype=DataType.INT32)).lanes
         == 64
     )
+    assert (
+        reg_type(
+            call(
+                "index_gen",
+                [typed_integer(0, DataType.INT32)],
+                lanes=64,
+                dtype=DataType.INT32,
+                order="ascending",
+            )
+        ).lanes
+        == 64
+    )
+    with pytest.raises(ValueError, match="dtype"):
+        call("broadcast", [integer(2)], lanes=64, dtype=DataType.INT32)
+    with pytest.raises(ValueError, match="dtype"):
+        call(
+            "index_gen",
+            [ir.ConstFloat(0.5, DataType.FP32, SPAN)],
+            lanes=64,
+            dtype=DataType.INT32,
+            order="ascending",
+        )
     with pytest.raises(ValueError, match="active_lanes"):
         call("active_mask", [integer(65)], lanes=64)
     with pytest.raises(ValueError, match="predicate"):

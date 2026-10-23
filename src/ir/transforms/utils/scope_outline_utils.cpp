@@ -820,6 +820,28 @@ class UpwardExposedUseCollector : public IRVisitor {
   std::vector<const Var*> journal_;  ///< insertion order, for branch rollback
 };
 
+/// Reg values are confined to their RegScope and can never be outlined as
+/// function outputs. Recognize tuples containing a register recursively so the
+/// fallback cannot export an indirect register value either.
+bool ContainsRegValue(const TypePtr& type, std::unordered_map<const Type*, bool>& cache) {
+  if (auto found = cache.find(type.get()); found != cache.end()) {
+    return found->second;
+  }
+  bool result = As<RegType>(type) != nullptr;
+  if (auto tuple = As<TupleType>(type); tuple && !result) {
+    for (const auto& element : tuple->types_) {
+      if (ContainsRegValue(element, cache)) {
+        result = true;
+        break;
+      }
+    }
+  }
+  // Shared tuple types form a DAG; cache false results too so repeated
+  // children and variables cannot cause exponential rescanning.
+  cache.emplace(type.get(), result);
+  return result;
+}
+
 }  // namespace
 
 ScopeOutliner::ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
@@ -896,12 +918,14 @@ std::unordered_set<const Var*> ScopeOutliner::ComputeFallbackUsedAfter(const Sco
   if (!inside_nested_scope_body_) {
     var_collectors::VarDefUseCollector def_collector;
     def_collector.VisitStmt(scope->body_);
-    // Scalars and tuple unpacking temporaries are not runtime outputs. The
-    // latter already expose their tensor projections as separate definitions;
-    // exporting both would produce a nested tuple at a terminal SPMD boundary.
+    // Scalars, tuple unpacking temporaries, and Reg values are not runtime
+    // outputs. Tuple projections already expose their tensor definitions;
+    // exporting the tuple too would create a nested terminal SPMD output.
     // Actual live-out uses are handled by the explicit tail-use analysis.
+    std::unordered_map<const Type*, bool> reg_types;
     for (const Var* var : def_collector.var_defs) {
-      if (As<ScalarType>(var->GetType()) || As<TupleType>(var->GetType())) continue;
+      if (As<ScalarType>(var->GetType()) || As<TupleType>(var->GetType()) ||
+          ContainsRegValue(var->GetType(), reg_types)) continue;
       used_after.insert(var);
     }
   }

@@ -329,8 +329,9 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
   bool inside = false;
   for (const auto& context : context_stack_) {
     if (context->GetType() == BuildContext::Type::SCOPE &&
-        static_cast<ScopeContext*>(context.get())->GetScopeKind() == ScopeKind::Reg)
+        static_cast<ScopeContext*>(context.get())->GetScopeKind() == ScopeKind::Reg) {
       inside = true;
+    }
   }
   CHECK_SPAN(inside, span) << "EmitReg requires RegScope";
   auto call = OpRegistry::GetInstance().Create(op_name, args, kwargs, span);

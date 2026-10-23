@@ -4,6 +4,10 @@
 前端允许尚未特化的 InCore 函数；`ExpandMixedKernel` 后保留的区域必须属于 AIV
 函数。显式配置非 A5 目标时拒绝；尚未选择目标时，目标检查延迟到编译配置阶段。
 
+Opaque、Orchestration 或 Graph 函数中的显式 InCore 作用域在 outlining 前也提供
+设备上下文，包括 graph 作用域作为祖先的情况。直接位于调度代码中的 RegScope
+仍不合法，RegScope 内也禁止包含调度作用域；已有 InCore 作用域规则保持不变。
+
 ```python
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(
@@ -50,7 +54,7 @@ lane 数必须是静态正整数。Vec 输入的 dtype、signedness 和 lane 数
 通用 dtype 集合为 FP16/BF16/FP32，以及有符号和无符号 8/16/32 位整数。
 `mul` 不支持 8 位整数；`div` 仅支持 FP16/FP32；`compare` 支持
 FP16/FP32/INT32/UINT32；`select` 不支持 BF16。已有 Scalar SSA 的 dtype 必须匹配
-生成器要求；Python 字面量可以按目标 dtype 构造。
+生成器要求。DSL 字面量按目标 dtype 归一化；原始 IR 和 Builder 字面量必须已具有目标 dtype。
 
 转换白名单：FP16→FP32、FP32→FP16、FP32→INT32、INT32→FP32、INT8→FP16、
 INT8→INT16、INT16→INT32、UINT8→UINT16、UINT16→UINT32、INT32→INT8。
@@ -85,3 +89,6 @@ C++ 提供 `BeginRegScope`、`EmitReg`、`EmitRegStore`、`EndRegScope`。
 两者与 DSL 共享 schema 推导，完成函数时检查区域归属。
 `RegScopeValid` 属性通过标准 verifier 覆盖手工 IR；
 `MixedKernelExpanded` 检查最终 AIV placement。
+
+Python 文本语法不接受区域元数据。打印带非空 `name_hint` 或 `attrs` 的手工 RegScope
+会报错，避免静默丢失字段；二进制序列化保留这些字段。空区域打印为 `pass` 块。
