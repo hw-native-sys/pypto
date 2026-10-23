@@ -1545,6 +1545,210 @@ class TestFlattenTileNdTo2DCallRemapping:
                 assert call.attrs["dependency"] is new_pitch
 
     @pytest.mark.parametrize(
+        "case",
+        [
+            "matmul",
+            "single_acc",
+            "single_vec",
+            "multi_vec",
+            "multi_acc",
+            "acc_chain",
+            "cast",
+            "bound_store",
+            "load",
+            "create",
+            "full",
+            "exp",
+            "transpose_2d",
+            "transpose_nd",
+            "constant",
+        ],
+    )
+    def test_owned_result_binding_reaches_actual_allocation(self, case: str):
+        """Bindings belong on owning results, then propagate through InitMemRef aliases."""
+        span = ir.Span.unknown()
+        single = case in ("matmul", "single_acc", "single_vec", "bound_store", "transpose_2d", "constant")
+        batch = 1 if single else 2
+        shape = [16, 16] if case in ("matmul", "transpose_2d") else [batch, 16, 16]
+        memory = (
+            ir.MemorySpace.Acc
+            if case in ("matmul", "single_acc", "multi_acc", "acc_chain", "bound_store", "constant")
+            else ir.MemorySpace.Vec
+        )
+        dtype = DataType.FP16 if case == "cast" else DataType.FP32
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            lhs = function.param("lhs", ir.TensorType(shape, DataType.BF16))
+            rhs = function.param("rhs", ir.TensorType(shape, DataType.BF16))
+            data = function.param("data", ir.TensorType(shape, DataType.FP32))
+            output = function.param("output", ir.TensorType(shape, dtype))
+            metadata = function.param("metadata", ir.TensorType([1], DataType.INT32))
+            function.return_type(output.type)
+            loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
+            value = ib.let("value", tile_ops.read(loaded, [0]))
+            pitch = ib.let("pitch", ir.cast(value, DataType.INDEX, span))
+            slot = ib.let("slot", ir.mod(pitch, ir.ConstInt(2, DataType.INDEX, span), span))
+            index = ir.ConstInt(0, DataType.INDEX, span) if case == "constant" else slot
+            pool = ir.MemRef("pinned_result", span, slots=2)
+            binding = ir.MemRef(pool.base_, 0, 0, span, is_pinned=True, slots=2, slot=index)
+            offsets = [0] * len(shape)
+            left = ib.let("left", tile_ops.load(lhs, offsets, shape, target_memory=ir.MemorySpace.Mat))
+            right = ib.let("right", tile_ops.load(rhs, offsets, shape, target_memory=ir.MemorySpace.Mat))
+            if case == "load":
+                call = tile_ops.load(data, offsets, shape, target_memory=ir.MemorySpace.Vec)
+            elif case == "create":
+                call = tile_ops.create(shape, dtype, target_memory=memory)
+            elif case == "full":
+                call = tile_ops.full(shape, dtype, 1.0)
+            elif case in ("exp", "transpose_2d", "transpose_nd"):
+                local = ib.let("local", tile_ops.load(data, offsets, shape, target_memory=ir.MemorySpace.Vec))
+                call = (
+                    tile_ops.exp(local)
+                    if case == "exp"
+                    else tile_ops.transpose(local, len(shape) - 2, len(shape) - 1)
+                )
+            else:
+                call = (
+                    tile_ops.matmul(left, right) if case == "matmul" else tile_ops.batch_matmul(left, right)
+                )
+            native = cast(ir.TileType, call.type)
+            view = native.tile_view if memory == ir.MemorySpace.Acc else ir.TileView(valid_shape=shape)
+            rhs_type = ir.TileType(shape, dtype, tile_view=view, memory_space=memory)
+            call = ir.Call(call.op, list(call.args), call.kwargs, call.attrs, rhs_type, span)
+            product = ir.Var("product", ir.TileType(shape, dtype, binding, view, memory), span)
+            ib.assign(product, call)
+            result = product
+            if case == "acc_chain":
+                result = ib.let("accumulated", tile_ops.batch_matmul_acc(product, left, right))
+            if case != "bound_store":
+                ib.let("separator", ir.ConstInt(0, DataType.INDEX, span))
+            stored = ib.let("stored", tile_ops.store(result, offsets, output))
+            ib.return_stmt(stored)
+        Before = ir.Program([function.get_result()], "owned_result_binding", span)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        owners: list[ir.AssignStmt] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+                if isinstance(op.var.type, ir.TileType) and op.var.type.memref is not None:
+                    if op.var.type.memref.is_pinned_:
+                        owners.append(op)
+                super().visit_assign_stmt(op)
+
+        function = After.get_function("kernel")
+        assert function is not None
+        Collector().visit_stmt(function.body)
+        assert len(owners) == 1
+        owner = owners[0]
+        owner_type = cast(ir.TileType, owner.var.type)
+        assert owner_type.memory_space == memory
+        assert owner_type.memref is not None
+        assert owner_type.memref.base_ is binding.base_
+        assert owner_type.memref.slot_count_ == 2
+        assert owner_type.memref.slot_index_ is (
+            index if case == "constant" else self._definitions(After)["slot"].var
+        )
+        assert owner.var.name_hint == "product"
+        owner_call = cast(ir.Call, owner.value)
+        expected_owner = (
+            "tile.matmul"
+            if case in ("matmul", "single_acc", "bound_store", "constant")
+            else call.op.name
+            if case in ("load", "full", "exp", "transpose_2d")
+            else "tile.create"
+        )
+        assert owner_call.op.name == expected_owner
+        if case in ("multi_acc", "acc_chain"):
+            assert _const_int_values(owner_type.shape) == [16, 32]
+
+        Initialized = passes.init_mem_ref()(passes.infer_tile_memory_space()(After))
+        initialized_owners: list[ir.AssignStmt] = []
+
+        class OwnerCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+                if (
+                    op.var.name_hint == "product"
+                    and isinstance(op.value, ir.Call)
+                    and op.value.op.name == expected_owner
+                ):
+                    initialized_owners.append(op)
+                super().visit_assign_stmt(op)
+
+        function = Initialized.get_function("kernel")
+        assert function is not None
+        OwnerCollector().visit_stmt(function.body)
+        assert len(initialized_owners) == 1
+        resolved_type = cast(ir.TileType, initialized_owners[0].var.type)
+        resolved = resolved_type.memref
+        assert resolved is not None
+        assert resolved_type.memory_space == memory
+        assert resolved.base_.name_hint == "pinned_result"
+        assert resolved.slot_count_ == 2
+        if case != "constant":
+            assert resolved.slot_index_ is self._definitions(Initialized)["slot"].var
+        definitions = self._definitions(Initialized)
+        final = definitions["product"].var
+        assert cast(ir.TileType, final.type).memref is resolved
+
+    @pytest.mark.parametrize("dependency", ["product", "product_list", "operand_alias", "later_use"])
+    def test_fusion_requires_exclusive_argument_use(self, dependency: str):
+        """A full result or a peeled operand named outside its argument must remain defined."""
+        span = ir.Span.unknown()
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+            lhs = function.param("lhs", ir.TensorType([2, 16, 16], DataType.BF16))
+            rhs = function.param("rhs", ir.TensorType([2, 16, 16], DataType.BF16))
+            output = function.param("output", ir.TensorType([2, 16, 16], DataType.FP32))
+            function.return_type(output.type)
+            left = ib.let(
+                "left", tile_ops.load(lhs, [0, 0, 0], [2, 16, 16], target_memory=ir.MemorySpace.Mat)
+            )
+            right = ib.let(
+                "right", tile_ops.load(rhs, [0, 0, 0], [2, 16, 16], target_memory=ir.MemorySpace.Mat)
+            )
+            if dependency == "operand_alias":
+                left = ib.let("left_alias", tile_ops.reshape(left, [2, 16, 16]))
+            product = ib.let("product", tile_ops.batch_matmul(left, right))
+            store = tile_ops.store(product, [0, 0, 0], output)
+            attrs = (
+                {"dump_vars": [product]}
+                if dependency == "product_list"
+                else {"dependency": left if dependency == "operand_alias" else product}
+            )
+            if dependency == "later_use":
+                attrs = {}
+            tagged = ir.Call(store.op, list(store.args), store.kwargs, attrs, store.type, span)
+            stored = ib.let("stored", tagged)
+            if dependency == "later_use":
+                ib.let("later", tile_ops.exp(product))
+            ib.return_stmt(stored)
+        Before = ir.Program([function.get_result()], "exclusive_fusion_use", span)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        definitions = self._definitions(After)
+        stores: list[ir.Call] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == _OP_TILE_STORE:
+                    stores.append(op)
+                super().visit_call(op)
+
+        function = After.get_function("kernel")
+        assert function is not None
+        Collector().visit_stmt(function.body)
+        assert len(stores) == (2 if dependency == "operand_alias" else 1)
+        if dependency == "operand_alias":
+            assert all(store.attrs["dependency"] is definitions["left_alias"].var for store in stores)
+        elif dependency == "product_list":
+            assert stores[0].attrs["dump_vars"][0] is definitions["product"].var
+        elif dependency == "product":
+            assert stores[0].attrs["dependency"] is definitions["product"].var
+        else:
+            assert cast(ir.Call, definitions["later"].value).args[0] is definitions["product"].var
+        Initialized = passes.init_mem_ref()(passes.infer_tile_memory_space()(After))
+        assert "__FREE_VAR" not in str(Initialized)
+
+    @pytest.mark.parametrize(
         "producer,lhs_only,slot_kind",
         [
             # Exercise all slot forms and both binding locations once on the

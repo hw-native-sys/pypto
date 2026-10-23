@@ -718,14 +718,13 @@ class TileMemorySpaceMutator : public IRMutator {
     };
 
     for (const auto& [key, value] : op->attrs_) {
-      if (key == kAttrManualDepEdges || key == kAttrCompilerManualDepEdges ||
-          key == kAttrArgDirOverrideVars || key == kAttrDumpVars) {
+      if (key == kAttrDumpVars) {
         if (const auto* vars = std::any_cast<std::vector<VarPtr>>(&value)) {
           std::vector<VarPtr> remapped_vars;
           bool attr_changed = false;
           remapped_vars.reserve(vars->size());
           for (const auto& var : *vars) {
-            if (key == kAttrDumpVars && var) {
+            if (var) {
               auto replacements = arg_replacements.find(var.get());
               if (replacements != arg_replacements.end() &&
                   (replacements->second.size() != 1 || replacements->second.front().get() != var.get())) {
@@ -745,16 +744,15 @@ class TileMemorySpaceMutator : public IRMutator {
             continue;
           }
         }
-      } else if (key == kAttrDevice) {
-        if (const auto* device = std::any_cast<ExprPtr>(&value); device && *device) {
-          auto remapped = IRMutator::VisitExpr(*device);
-          INTERNAL_CHECK_SPAN(remapped, op->span_) << "Call device attribute mutated to null";
-          if (remapped.get() != device->get()) {
-            changed = true;
-            new_attrs.emplace_back(key, std::any(std::move(remapped)));
-            continue;
-          }
-        }
+      }
+      // Attributes contain live IR references regardless of their name. Keep
+      // dump_vars' operand-move expansion above, then remap every supported
+      // expression-valued attribute using the same rules as IRMutator.
+      auto remapped = MapAttrExprs(value, [&](const ExprPtr& expr) { return IRMutator::VisitExpr(expr); });
+      if (remapped) {
+        changed = true;
+        new_attrs.emplace_back(key, std::move(*remapped));
+        continue;
       }
       new_attrs.emplace_back(key, value);
     }

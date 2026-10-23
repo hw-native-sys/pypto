@@ -27,6 +27,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -557,7 +558,9 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
 
   // Detect direct-store fusion opportunity.
   auto direct_store =
-      acc_plan != nullptr ? DirectStoreInfo{} : DetectDirectStore(stmts, stmt_index, assign->var_);
+      acc_plan != nullptr || GetTypeMemRef(assign->var_->GetType()) || ctx.UseCount(assign->var_.get()) != 1
+          ? DirectStoreInfo{}
+          : DetectDirectStore(stmts, stmt_index, assign->var_);
 
   // Fast path: batch_count == 1, non-fused, and no dtype cast required. The
   // result tile is exactly what a single tile.matmul produces (2D, Acc). Skip
@@ -588,9 +591,13 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
         call, op_registry.Create("tile.matmul", {lhs_page.var, rhs_page.var}, span), ctx);
     auto matmul_type = As<TileType>(matmul->GetType());
     bool needs_cast = matmul_type && matmul_type->dtype_ != orig_result_type->dtype_;
-    if (!needs_cast) {
+    auto bound_type = As<TileType>(assign->var_->GetType());
+    const bool needs_staging = bound_type && bound_type->memref_ && bound_type->memory_space_ &&
+                               matmul_type && bound_type->memory_space_ != matmul_type->memory_space_;
+    if (!needs_cast && !needs_staging) {
       out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
       out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
+      matmul = WithRemappedResultAllocation(matmul, assign, ctx);
       auto matmul_var = std::make_shared<Var>(assign->var_->name_hint_, matmul->GetType(), span);
       out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, assign->span_));
       out.output_var = matmul_var;
@@ -627,7 +634,8 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
         {"dtype", acc_plan->dtype},
         {"target_memory", MemorySpace::Acc},
     };
-    auto create_acc = op_registry.Create("tile.create", {packed_shape}, packed_kw, span);
+    auto create_acc = WithRemappedResultAllocation(
+        op_registry.Create("tile.create", {packed_shape}, packed_kw, span), assign, ctx);
     VarPtr current_acc = std::make_shared<Var>(assign->var_->name_hint_, create_acc->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(current_acc, create_acc, assign->span_));
 
@@ -685,7 +693,8 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
         {"dtype", orig_result_type->dtype_},
         {"target_memory", MemorySpace::Vec},
     };
-    auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
+    auto create_out = WithRemappedResultAllocation(
+        op_registry.Create("tile.create", {out_shape}, create_kw, span), assign, ctx);
     out_var = std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, assign->span_));
   }

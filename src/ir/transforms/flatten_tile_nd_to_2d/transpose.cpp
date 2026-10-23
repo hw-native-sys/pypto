@@ -133,10 +133,9 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
   auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
   // This allocation is the original transpose result, not a scratch buffer.
   // Keep its declared storage and remap runtime slots before assembling pages.
-  auto output_type = WithRemappedAllocation(create_out->GetType(), assign->var_->GetType(), ctx);
-  create_out = std::make_shared<Call>(create_out->op_, create_out->args_, create_out->kwargs_,
-                                      create_out->attrs_, output_type, create_out->span_);
-  VarPtr out_var = std::make_shared<Var>(assign->var_->name_hint_, output_type, assign->var_->span_);
+  create_out = WithRemappedResultAllocation(create_out, assign, ctx);
+  VarPtr out_var =
+      std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), assign->var_->span_);
   out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, assign->span_));
 
   // A2/A3 TTrans.hpp: BLOCK_BYTE_SIZE, Y_ELEM_B8, Y_ELEM_OTHER, and the

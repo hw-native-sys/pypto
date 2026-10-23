@@ -95,6 +95,15 @@ struct FlattenContext {
   /// Shared, immutable column-packing decision (see `BuildAccPackingMap`). Held
   /// by pointer so the per-block context copies stay O(1).
   AccPackingMapPtr acc_packing;
+  /// Whole-function USE counts, including attrs and type expressions. Shared
+  /// across nested blocks so elision never scans the function per candidate.
+  std::shared_ptr<const std::unordered_map<const Var*, size_t>> use_counts;
+
+  [[nodiscard]] size_t UseCount(const Var* var) const {
+    if (!use_counts) return 0;
+    auto it = use_counts->find(var);
+    return it == use_counts->end() ? 0 : it->second;
+  }
 
   void Insert(const VarPtr& old_var, const VarPtr& new_var) { var_map[old_var.get()] = new_var; }
   void Erase(const VarPtr& var) { var_map.erase(var.get()); }
@@ -120,6 +129,11 @@ CallPtr WithRemappedCallAttrs(const CallPtr& original, const CallPtr& rewritten,
 /// registering a new definition, including outputs of decomposed operations.
 TypePtr WithRemappedAllocation(const TypePtr& value_type, const TypePtr& original_type,
                                const FlattenContext& ctx);
+
+/// Bind the allocation-owning replacement, never an inherited writeback or
+/// unrelated scratch. Keep inferred geometry and preserve declared placement.
+CallPtr WithRemappedResultAllocation(const CallPtr& value, const AssignStmtPtr& original,
+                                     const FlattenContext& ctx);
 
 bool IsNdTile(const TileTypePtr& tile_type);
 int64_t GetStaticDim(const ExprPtr& expr, const std::string& context);

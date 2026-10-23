@@ -317,8 +317,8 @@ shapes; FP32/INT32 elements; 16-aligned window height and parent width; and a
 packed allocation that fits L0C after the target's physical row alignment.
 Runtime alignment proofs currently cover power-of-two window heights. Each
 assemble must write a `matmul_acc` result back to the same window it read.
-Explicit MemRefs and consumers requiring the whole logical accumulator in a
-different layout are rejected with a diagnostic rather than silently repacked.
+Explicit MemRefs on existing row windows and consumers requiring the whole logical
+accumulator in a different layout are rejected with a diagnostic rather than silently repacked.
 
 ## Example
 
@@ -456,6 +456,19 @@ A carry is left exactly as it is when the two readings of its buffer cannot disa
 single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
 rows — or when the narrowed extent is only computed inside the loop body, where the
 re-declared seed could not name it.
+
+Result bindings follow storage ownership through one-to-many rewrites. A single-page
+batched matmul carries its binding on the actual matmul; a multi-page result carries
+it on the full output allocation. Explicit Vec placement requires staging, while a
+bound multi-page Acc result uses the accumulator packing analysis. Scratch pages
+remain independent, and writebacks inherit the destination storage in `InitMemRef`.
+The same owning-result helper covers loads, allocations, and transposes; generic
+operations retain the shared type-reference remapping path.
+
+Direct-store fusion and operand peeling require exclusive use across the whole
+function, including expression-valued attributes and type metadata. A bound result
+is always materialized. An attribute that still needs the full result therefore
+prevents fusion rather than referring to an eliminated definition.
 
 ## Implementation
 

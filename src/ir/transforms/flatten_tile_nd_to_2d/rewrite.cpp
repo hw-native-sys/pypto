@@ -27,15 +27,19 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/rewrite_internal.h"
@@ -70,6 +74,48 @@ TypePtr WithRemappedAllocation(const TypePtr& value_type, const TypePtr& origina
                                const FlattenContext& ctx) {
   return RemapTypeReferences(WithCarriedMemRef(value_type, original_type), ctx);
 }
+
+CallPtr WithRemappedResultAllocation(const CallPtr& value, const AssignStmtPtr& original,
+                                     const FlattenContext& ctx) {
+  INTERNAL_CHECK_SPAN(!op_predicates::OutputInheritsSourceBuffer(value->op_->name_), original->span_)
+      << "An inherited result must obtain its allocation from its input in InitMemRef";
+  auto old_tile = As<TileType>(original->var_->GetType());
+  auto new_tile = As<TileType>(value->GetType());
+  if (old_tile && old_tile->memref_ && old_tile->memory_space_ && new_tile && new_tile->memory_space_) {
+    CHECK_SPAN(old_tile->memory_space_ == new_tile->memory_space_, original->span_)
+        << "FlattenTileNdTo2D cannot move explicitly bound result '" << original->var_->name_hint_
+        << "' from " << MemorySpaceToString(*old_tile->memory_space_) << " to "
+        << MemorySpaceToString(*new_tile->memory_space_);
+  }
+  auto type = WithRemappedAllocation(value->GetType(), original->var_->GetType(), ctx);
+  if (type == value->GetType()) return value;
+  return std::make_shared<Call>(value->op_, value->args_, value->kwargs_, value->attrs_, type, value->span_);
+}
+
+/// Count real uses once, following the IR visitor's attr rules and all type
+/// expression fields. Definitions are excluded; shared types are walked once.
+class VarUseCounter : public IRVisitor {
+ public:
+  std::unordered_map<const Var*, size_t> counts;
+
+  void VisitExpr(const ExprPtr& expr) override {
+    VisitType(expr->GetType());
+    IRVisitor::VisitExpr(expr);
+  }
+
+ protected:
+  void VisitVarLike_(const VarPtr& var) override { ++counts[var.get()]; }
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    VisitType(stmt->var_->GetType());
+    VisitExpr(stmt->value_);
+  }
+
+ private:
+  void VisitType(const TypePtr& type) {
+    if (type && visited_types_.insert(type.get()).second) var_collectors::VisitTypeExprFields(*this, type);
+  }
+  std::unordered_set<const Type*> visited_types_;
+};
 
 bool IsNaturalNzMatLoad(const TileTypePtr& result_tile, bool assume_mat = false) {
   if (!result_tile) return false;
@@ -150,11 +196,8 @@ VarPtr EmitFlattenedTileAlloc(const CallPtr& call, const AssignStmtPtr& assign,
     create_kwargs.emplace_back("target_memory", MemorySpace::Acc);
   }
   auto deduced = op_registry.Create(op_name, new_args, create_kwargs, span);
-  auto created_type = WithRemappedAllocation(deduced->GetType(), assign->var_->GetType(), ctx);
-  CallPtr new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
-                                            created_type, deduced->span_);
-  new_call = WithRemappedCallAttrs(call, new_call, ctx);
-  auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, created_type, assign->var_->span_);
+  auto new_call = WithRemappedCallAttrs(call, WithRemappedResultAllocation(deduced, assign, ctx), ctx);
+  auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
   return flat_var;
 }
@@ -385,158 +428,26 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
   // them per batch and the dead whole chain is dropped during rewriting below.
   std::unordered_set<const Var*> not_fit_drop_vars;
   {
-    std::unordered_map<const Var*, int> use_count;
-    std::vector<const Var*> batch_matmul_operands;  // ordered to avoid nondeterministic iteration
-
-    // Helper: recursively count all Var references within an expression.
-    std::function<void(const ExprPtr&)> CountVarRefs = [&](const ExprPtr& expr) {
-      if (!expr) return;
-      if (auto v = As<Var>(expr)) {
-        use_count[v.get()]++;
-        return;
-      }
-      if (auto tup = As<MakeTuple>(expr)) {
-        for (const auto& e : tup->elements_) CountVarRefs(e);
-        return;
-      }
-      if (auto call = As<Call>(expr)) {
-        for (const auto& a : call->args_) CountVarRefs(a);
-        return;
-      }
-    };
-
-    for (const auto& s : stmts) {
-      // AssignStmt: count call args; mark batch_matmul[_acc] operands separately.
-      // For tile.batch_matmul_acc, only lhs (arg 1) and rhs (arg 2) are Mat
-      // operand chains — the acc operand (arg 0) is in Acc memory and never goes
-      // through tile.load(target_memory=Mat).
-      if (auto a = As<AssignStmt>(s)) {
-        if (auto c = As<Call>(a->value_)) {
-          const std::string& cname = c->op_->name_;
-          bool is_batch_mm = (cname == "tile.batch_matmul");
-          bool is_batch_mm_acc = (cname == "tile.batch_matmul_acc");
-          for (size_t arg_i = 0; arg_i < c->args_.size(); ++arg_i) {
-            const auto& arg = c->args_[arg_i];
-            if (auto v = As<Var>(arg)) {
-              use_count[v.get()]++;
-              const bool eligible = is_batch_mm || (is_batch_mm_acc && (arg_i == 1 || arg_i == 2));
-              if (eligible) {
-                batch_matmul_operands.push_back(v.get());
-              }
-            }
-          }
-        } else {
-          // Non-call assignment (e.g. plain Var alias): count all Var refs.
-          CountVarRefs(a->value_);
+    std::vector<const Var*> batch_matmul_operands;
+    std::unordered_map<const Var*, size_t> eligible_uses;
+    for (const auto& stmt : stmts) {
+      auto assign = As<AssignStmt>(stmt);
+      auto call = assign ? As<Call>(assign->value_) : nullptr;
+      const bool is_matmul = IsOp(call, "tile.batch_matmul");
+      const bool is_acc = IsOp(call, "tile.batch_matmul_acc");
+      if (!is_matmul && !is_acc) continue;
+      for (size_t i = is_acc ? 1 : 0; i < (is_acc ? 3 : call->args_.size()); ++i) {
+        if (auto operand = AsVarLike(call->args_[i])) {
+          batch_matmul_operands.push_back(operand.get());
+          ++eligible_uses[operand.get()];
         }
-        continue;
-      }
-      // ReturnStmt / YieldStmt: count all returned/yielded Var refs.
-      if (auto ret = As<ReturnStmt>(s)) {
-        for (const auto& v : ret->value_) CountVarRefs(v);
-        continue;
-      }
-      if (auto yield = As<YieldStmt>(s)) {
-        for (const auto& v : yield->value_) CountVarRefs(v);
-        continue;
-      }
-      // EvalStmt: count Var refs in the expression.
-      if (auto eval = As<EvalStmt>(s)) {
-        CountVarRefs(eval->expr_);
-        continue;
-      }
-      // IfStmt: count condition Var refs.
-      if (auto if_stmt = As<IfStmt>(s)) {
-        CountVarRefs(if_stmt->condition_);
-        continue;
-      }
-      // ForStmt: count start/stop/step and iter_arg init Var refs.
-      if (auto for_stmt = As<ForStmt>(s)) {
-        CountVarRefs(for_stmt->start_);
-        CountVarRefs(for_stmt->stop_);
-        CountVarRefs(for_stmt->step_);
-        for (const auto& ia : for_stmt->iter_args_) CountVarRefs(ia->initValue_);
-        continue;
-      }
-      // WhileStmt: count condition and iter_arg init Var refs.
-      if (auto while_stmt = As<WhileStmt>(s)) {
-        CountVarRefs(while_stmt->condition_);
-        for (const auto& ia : while_stmt->iter_args_) CountVarRefs(ia->initValue_);
-        continue;
       }
     }
-    // The per-statement scan above counts only TOP-LEVEL uses (for an
-    // IfStmt/ForStmt/WhileStmt it counts the condition / loop bounds / iter_arg
-    // inits, but NOT uses inside the nested body). Separately count EVERY use of
-    // each Var, recursing into nested IfStmt/ForStmt/WhileStmt/ScopeStmt bodies.
-    // A batch_matmul operand load that is also consumed inside a nested block
-    // must NOT be skipped: dropping its definition would leave the nested use
-    // referencing an undefined Var after the nested block is rewritten.
-    std::unordered_map<const Var*, int> total_counts;
-    std::function<void(const ExprPtr&)> CountTotalExprRefs = [&](const ExprPtr& expr) {
-      if (!expr) return;
-      if (auto v = As<Var>(expr)) {
-        total_counts[v.get()]++;
-        return;
-      }
-      if (auto tup = As<MakeTuple>(expr)) {
-        for (const auto& e : tup->elements_) CountTotalExprRefs(e);
-        return;
-      }
-      if (auto call = As<Call>(expr)) {
-        for (const auto& a : call->args_) CountTotalExprRefs(a);
-        return;
-      }
-    };
-    std::function<void(const StmtPtr&)> CountTotalStmtRefs = [&](const StmtPtr& s) {
-      if (!s) return;
-      if (auto seq = As<SeqStmts>(s)) {
-        for (const auto& inner : seq->stmts_) CountTotalStmtRefs(inner);
-      } else if (auto scope = As<ScopeStmt>(s)) {
-        CountTotalStmtRefs(scope->body_);
-      } else if (auto if_stmt = As<IfStmt>(s)) {
-        CountTotalExprRefs(if_stmt->condition_);
-        CountTotalStmtRefs(if_stmt->then_body_);
-        if (if_stmt->else_body_.has_value()) CountTotalStmtRefs(*if_stmt->else_body_);
-      } else if (auto for_stmt = As<ForStmt>(s)) {
-        CountTotalExprRefs(for_stmt->start_);
-        CountTotalExprRefs(for_stmt->stop_);
-        CountTotalExprRefs(for_stmt->step_);
-        for (const auto& ia : for_stmt->iter_args_) CountTotalExprRefs(ia->initValue_);
-        CountTotalStmtRefs(for_stmt->body_);
-      } else if (auto while_stmt = As<WhileStmt>(s)) {
-        CountTotalExprRefs(while_stmt->condition_);
-        for (const auto& ia : while_stmt->iter_args_) CountTotalExprRefs(ia->initValue_);
-        CountTotalStmtRefs(while_stmt->body_);
-      } else if (auto a = As<AssignStmt>(s)) {
-        CountTotalExprRefs(a->value_);
-      } else if (auto ret = As<ReturnStmt>(s)) {
-        for (const auto& v : ret->value_) CountTotalExprRefs(v);
-      } else if (auto yield = As<YieldStmt>(s)) {
-        for (const auto& v : yield->value_) CountTotalExprRefs(v);
-      } else if (auto eval = As<EvalStmt>(s)) {
-        CountTotalExprRefs(eval->expr_);
-      }
-    };
-    for (const auto& s : stmts) CountTotalStmtRefs(s);
-
-    // Collect operands whose EVERY use is a (top-level) batch_matmul operand.
-    // Two conditions: all top-level uses are batch_matmul operands
-    // (batch_matmul_operand_uses == use_count) AND the Var has no nested uses
-    // (use_count == total_counts). Comparing against the total use count —
-    // rather than requiring use_count == 1 — covers the shared-operand case:
-    // e.g. a SwiGLU FFN where the activation X is the common LHS of both the
-    // gate (X@W1) and up (X@W3) matmuls (use_count > 1). Treating a shared
-    // operand as batch_matmul-only is safe: in the fit path it is sliced (not
-    // dropped); in the !fit path it is dropped only when EVERY consuming matmul
-    // is !fit (see the capacity gate below).
-    std::unordered_map<const Var*, int> batch_matmul_operand_uses;
-    for (const auto* v : batch_matmul_operands) batch_matmul_operand_uses[v]++;
-    std::unordered_set<const Var*> seen;
-    for (const auto* v : batch_matmul_operands) {
-      if (seen.insert(v).second && batch_matmul_operand_uses[v] == use_count[v] &&
-          use_count[v] == total_counts[v]) {
-        batch_matmul_only_vars.insert(v);
+    // Attr/type/nested uses must keep the original definition alive, just like
+    // ordinary arguments. Explicitly bound owners must not be peeled away.
+    for (const auto* var : batch_matmul_operands) {
+      if (eligible_uses[var] == ctx.UseCount(var) && !GetTypeMemRef(var->GetType())) {
+        batch_matmul_only_vars.insert(var);
       }
     }
 
@@ -544,7 +455,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // dead `tile.reshape` (and any further-upstream `tile.load`) are also
     // skipped during rewriting. Without this, the orphan reshape would emit a
     // rank>2 tile that violates the post-pass `TileOps2D` property. Require the
-    // input to have exactly one use across the WHOLE block (total_counts) so a
+    // input to have exactly one use across the WHOLE function so a
     // load also consumed inside a nested body is never peeled away.
     // Also walk back through a single-use tile.transpose_view so its underlying
     // whole tile.load joins the chain (needed so the !fit path can drop the dead
@@ -561,7 +472,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       if (!is_view && !IsSafePeelableBatchMatmulReshape(chain_call)) continue;
       auto input_var = As<Var>(chain_call->args_[0]);
       if (!input_var) continue;
-      if (total_counts[input_var.get()] != 1) continue;
+      if (ctx.UseCount(input_var.get()) != 1 || GetTypeMemRef(input_var->GetType())) continue;
       if (batch_matmul_only_vars.insert(input_var.get()).second) {
         reshape_worklist.push_back(input_var.get());
       }
@@ -1046,19 +957,19 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         }
         CallPtr flat_call = std::make_shared<Call>(call->op_, sub_args, flat_kwargs, call->attrs_,
                                                    flat_tile_type, call->span_);
-        flat_call = WithRemappedCallAttrs(call, flat_call, ctx);
-        auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);
+        flat_call = WithRemappedCallAttrs(call, WithRemappedResultAllocation(flat_call, assign, ctx), ctx);
+        auto flat_var =
+            std::make_shared<Var>(assign->var_->name_hint_, flat_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, flat_call, assign->span_));
         ctx.Insert(assign->var_, flat_var);
         continue;
       }
       // ≤2D tile.load: honor any pending var_map substitutions
       auto deduced_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
-      auto loaded_type = WithRemappedAllocation(deduced_call->GetType(), assign->var_->GetType(), ctx);
-      CallPtr new_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
-                                                call->attrs_, loaded_type, deduced_call->span_);
-      new_call = WithRemappedCallAttrs(call, new_call, ctx);
-      auto new_var = std::make_shared<Var>(assign->var_->name_hint_, loaded_type, assign->var_->span_);
+      auto new_call =
+          WithRemappedCallAttrs(call, WithRemappedResultAllocation(deduced_call, assign, ctx), ctx);
+      auto new_var =
+          std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
       ctx.Insert(assign->var_, new_var);
       continue;
@@ -1237,8 +1148,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto t_call =
             op_registry.Create("tile.transpose", {in, call->args_[1], call->args_[2], scratch_var}, span);
         t_call = WithRemappedCallAttrs(call, t_call, ctx);
-        auto output_type = WithRemappedAllocation(t_call->GetType(), assign->var_->GetType(), ctx);
-        auto t_var = std::make_shared<Var>(assign->var_->name_hint_, output_type, assign->var_->span_);
+        t_call = WithRemappedResultAllocation(t_call, assign, ctx);
+        auto t_var = std::make_shared<Var>(assign->var_->name_hint_, t_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(t_var, t_call, assign->span_));
         ctx.Insert(assign->var_, t_var);
         continue;
@@ -1331,6 +1242,10 @@ FunctionPtr Rewrite(const FunctionPtr& func) {
   // nothing block-local can tell the `tile.create` to allocate [M, B*N]. Shared
   // by pointer because FlattenContext is copied once per nested block.
   ctx.acc_packing = rewrite_internal::BuildAccPackingMap(func);
+  rewrite_internal::VarUseCounter use_counter;
+  use_counter.VisitFunction(func);
+  ctx.use_counts =
+      std::make_shared<const std::unordered_map<const Var*, size_t>>(std::move(use_counter.counts));
 
   auto body_stmts = FlattenToStmts(func->body_);
   auto new_stmts = rewrite_internal::TransformBody(body_stmts, ctx, op_registry);
