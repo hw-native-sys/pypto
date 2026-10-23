@@ -11,9 +11,11 @@
 
 #include <algorithm>
 #include <any>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -35,6 +37,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -868,12 +871,13 @@ const CallPtr& GetUniqueV2CInitialize(const PipeFunctionIndex& index, int pipe_i
 }
 
 CallPtr ResolveBufferDefinition(const PipeFunctionFacts& facts, const ExprPtr& buffer, const Span& span,
-                                const std::string& expected_op) {
+                                const std::string& expected_op,
+                                const std::string& context = "MX V2C initialize_pipe v2c buffer") {
   auto var = AsVarLike(buffer);
-  CHECK_SPAN(var, span) << "MX V2C initialize_pipe requires an SSA v2c buffer";
+  CHECK_SPAN(var, span) << context << " requires an SSA buffer";
   auto it = facts.definitions.find(var.get());
   CHECK_SPAN(it != facts.definitions.end() && IsOp(it->second, expected_op), span)
-      << "MX V2C initialize_pipe v2c buffer must come from " << expected_op;
+      << context << " must come from " << expected_op;
   return it->second;
 }
 
@@ -1314,12 +1318,13 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
 struct GmSyncPush {
   CoreSide producer_side;
   ExprPtr push_tile;
+  bool fence_gm_phase = false;
 };
 
 struct GmSyncPop {
   CoreSide consumer_side;
-  TypePtr pop_tile_type;
-  std::string token_name;
+  VarPtr token_var;
+  bool fence_gm_phase = false;
 };
 
 /// Resolve a tensor SSA Var to its origin (the parameter / create result it
@@ -1328,16 +1333,116 @@ struct GmSyncPop {
 /// the loaded version and the stored version may differ; resolving to a common
 /// origin lets us match them.
 const Var* ResolveTensorOrigin(const Var* var,
-                               const std::unordered_map<const Var*, const Var*>& store_result_to_dest) {
+                               std::unordered_map<const Var*, const Var*>& store_result_to_dest) {
   std::unordered_set<const Var*> seen;
+  std::vector<const Var*> path;
   while (var) {
     auto it = store_result_to_dest.find(var);
     if (it == store_result_to_dest.end()) break;
     if (!seen.insert(var).second) break;  // guard against cycles
+    path.push_back(var);
     var = it->second;
+  }
+  // Many partition stores form a long SSA chain. Compress it once rather than
+  // walking every prefix for every access (quadratic in the number of stores).
+  for (const Var* entry : path) {
+    if (entry != var) store_result_to_dest[entry] = var;
   }
   return var;
 }
+
+// Allocation-preserving SSA constraints form cycles through loop yields. Solve
+// each strongly connected component as one induction: every incoming allocation
+// must agree before any member is linked to it. Conflicting/rebound components
+// stay symbolic, while unconditional store-result aliases remain valid.
+// Iterative Tarjan visits each node/edge once (no fixed-point rescans or deep
+// recursive SSA walks); origin lookups use the path-compressed map above.
+class GmTensorOriginGraph {
+ public:
+  void Add(const Var* result, std::initializer_list<const Var*> inputs) {
+    const size_t node = Intern(result);
+    for (const Var* input : inputs) {
+      const size_t dependency = Intern(input);
+      inputs_[node].push_back(dependency);
+    }
+  }
+
+  void Resolve(std::unordered_map<const Var*, const Var*>& origins) const {
+    const size_t unvisited = vars_.size();
+    std::vector<size_t> index(vars_.size(), unvisited);
+    std::vector<size_t> lowlink(vars_.size());
+    std::vector<size_t> component_id(vars_.size(), unvisited);
+    std::vector<size_t> pending;
+    std::vector<std::pair<size_t, size_t>> frames;
+    size_t next_index = 0;
+    auto enter = [&](size_t node) {
+      index[node] = lowlink[node] = next_index++;
+      pending.push_back(node);
+      frames.emplace_back(node, 0);
+    };
+    for (size_t root = 0; root < vars_.size(); ++root) {
+      if (index[root] != unvisited) continue;
+      enter(root);
+      while (!frames.empty()) {
+        const size_t node = frames.back().first;
+        if (frames.back().second < inputs_[node].size()) {
+          const size_t dependency = inputs_[node][frames.back().second++];
+          if (index[dependency] == unvisited) {
+            enter(dependency);
+          } else if (component_id[dependency] == unvisited) {
+            lowlink[node] = std::min(lowlink[node], index[dependency]);
+          }
+          continue;
+        }
+        if (lowlink[node] == index[node]) {
+          std::vector<size_t> component;
+          while (true) {
+            const size_t member = pending.back();
+            pending.pop_back();
+            component_id[member] = node;
+            component.push_back(member);
+            if (member == node) break;
+          }
+          // Dependencies outside this component have already been solved.
+          // No incoming origin means no proof, rather than a self-justifying
+          // cycle. More than one origin means a possible allocation change.
+          const Var* candidate = nullptr;
+          bool agrees = true;
+          for (size_t member : component) {
+            for (size_t dependency : inputs_[member]) {
+              if (component_id[dependency] == node) continue;
+              const Var* origin = ResolveTensorOrigin(vars_[dependency], origins);
+              if (candidate && candidate != origin) agrees = false;
+              candidate = origin;
+            }
+          }
+          if (candidate && agrees) {
+            for (size_t member : component) origins[vars_[member]] = candidate;
+          }
+        }
+        frames.pop_back();
+        if (!frames.empty()) {
+          const size_t parent = frames.back().first;
+          lowlink[parent] = std::min(lowlink[parent], lowlink[node]);
+        }
+      }
+    }
+  }
+
+ private:
+  size_t Intern(const Var* var) {
+    auto [it, inserted] = indices_.emplace(var, vars_.size());
+    if (inserted) {
+      vars_.push_back(var);
+      inputs_.emplace_back();
+    }
+    return it->second;
+  }
+
+  std::unordered_map<const Var*, size_t> indices_;
+  std::vector<const Var*> vars_;
+  std::vector<std::vector<size_t>> inputs_;
+};
 
 /// Detect GM-mediated cross-lane store/load pairs and populate the sync maps.
 ///
@@ -1350,39 +1455,199 @@ const Var* ResolveTensorOrigin(const Var* var,
 /// compound that encloses the load. Either way the tpush and tpop execute the
 /// same number of times (the store body's trip count), so the ring buffer cannot
 /// deadlock. Pairs split across sibling/disjoint bodies are left untouched.
+/// Multiple stores are supported only as one top-level write phase preceding
+/// all vector reads, with no overlapping cross-core communication. Unsupported
+/// multi-store dependencies fail with a task-separation diagnostic (#2745).
 void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
                              const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+                             const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                              std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
                              std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
   // Pass 1: build tensor origin chains from tile.store results.
   std::unordered_map<const Var*, const Var*> store_result_to_dest;
+  // Retain store-only roots to identify dependencies newly exposed by carry
+  // and branch tracing, including single-store dependencies. They need the
+  // same FIFO safety checks as a newly supported multi-store phase.
+  std::unordered_map<const Var*, const Var*> store_chain_origins;
+  GmTensorOriginGraph origin_graph;
+  // The lifetime finalizer only preserves a single canonical pop across a
+  // control-flow result. A branch choosing distinct pops (or a zero-trip carry)
+  // can lose that identity and free live slots. Track possible aliases instead
+  // of equal origins, then reject new GM tokens when any FIFO tile escapes.
+  // Each edge and variable is visited once, including cyclic loop carries.
+  std::unordered_map<const Var*, std::vector<const Var*>> fifo_alias_users;
+  std::unordered_set<const Var*> fifo_return_vars;
+  std::vector<const Var*> fifo_sources;
+  auto record_fifo_alias = [&](const VarPtr& result, ExprPtr source) {
+    if (!result || !As<TileType>(result->GetType())) return;
+    while (auto call = As<Call>(source)) {
+      if (!call->op_ || call->args_.empty() || !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        return;
+      }
+      source = call->args_[0];
+    }
+    if (auto var = AsVarLike(source)) fifo_alias_users[var.get()].push_back(result.get());
+  };
+  // Both the carry and the loop result can denote the initial allocation on a
+  // zero-trip loop or the yielded allocation later. Record both alternatives;
+  // the graph solver proves the cyclic induction without speculative aliases.
+  auto record_carries = [&](const auto& loop) {
+    auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+    if (!yield) return;
+    const size_t count = std::min(loop->iter_args_.size(), yield->value_.size());
+    for (size_t i = 0; i < count; ++i) {
+      const auto& arg = loop->iter_args_[i];
+      record_fifo_alias(arg, arg->initValue_);
+      record_fifo_alias(arg, yield->value_[i]);
+      if (i < loop->return_vars_.size()) {
+        const auto& result = loop->return_vars_[i];
+        record_fifo_alias(result, arg->initValue_);
+        record_fifo_alias(result, yield->value_[i]);
+        fifo_return_vars.insert(result.get());
+      }
+      auto init = AsVarLike(arg->initValue_);
+      auto value = AsVarLike(yield->value_[i]);
+      if (!init || !value || !AsTensorTypeLike(arg->GetType())) continue;
+      origin_graph.Add(arg.get(), {init.get(), value.get()});
+      if (i < loop->return_vars_.size()) {
+        origin_graph.Add(loop->return_vars_[i].get(), {init.get(), value.get()});
+      }
+      // Preserve local proofs even inside a larger rebound component: an
+      // inner identity loop can still alias its symbolic outer carry, although
+      // that outer carry has no invariant allocation across outer iterations.
+      const Var* initial_origin = ResolveTensorOrigin(init.get(), store_result_to_dest);
+      const Var* yielded_origin = ResolveTensorOrigin(value.get(), store_result_to_dest);
+      if (yielded_origin == arg.get() || yielded_origin == initial_origin) {
+        store_result_to_dest[arg.get()] = initial_origin;
+        if (i < loop->return_vars_.size()) {
+          store_result_to_dest[loop->return_vars_[i].get()] = initial_origin;
+        }
+      }
+    }
+  };
   std::function<void(const std::vector<StmtPtr>&)> build_origins = [&](const std::vector<StmtPtr>& ss) {
     for (const auto& stmt : ss) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+        record_fifo_alias(assign->var_, assign->value_);
+        auto boundary = boundary_moves.find(stmt.get());
+        if ((boundary != boundary_moves.end() && boundary->second.direction == CVDirection::CUBE_TO_VECTOR) ||
+            (IsOp(call, "tile.tpop_from_aic") && call->GetKwarg<int>("id", 0) == 0)) {
+          fifo_sources.push_back(assign->var_.get());
+        }
         if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             store_result_to_dest[assign->var_.get()] = dest.get();
+            store_chain_origins[assign->var_.get()] = dest.get();
+            origin_graph.Add(assign->var_.get(), {dest.get()});
           }
+        } else if (auto source = AsVarLike(assign->value_);
+                   source && AsTensorTypeLike(assign->var_->GetType())) {
+          store_result_to_dest[assign->var_.get()] = source.get();
+          origin_graph.Add(assign->var_.get(), {source.get()});
         }
       }
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         build_origins(FlattenBody(for_stmt->body_));
+        record_carries(for_stmt);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         build_origins(FlattenBody(if_stmt->then_body_));
         if (if_stmt->else_body_.has_value()) build_origins(FlattenBody(*if_stmt->else_body_));
+        auto then_yield = transform_utils::GetLastYieldStmt(if_stmt->then_body_);
+        auto else_yield = if_stmt->else_body_.has_value()
+                              ? transform_utils::GetLastYieldStmt(*if_stmt->else_body_)
+                              : nullptr;
+        if (then_yield && else_yield) {
+          const size_t count =
+              std::min({if_stmt->return_vars_.size(), then_yield->value_.size(), else_yield->value_.size()});
+          for (size_t i = 0; i < count; ++i) {
+            const auto& result = if_stmt->return_vars_[i];
+            record_fifo_alias(result, then_yield->value_[i]);
+            record_fifo_alias(result, else_yield->value_[i]);
+            fifo_return_vars.insert(result.get());
+            if (!AsTensorTypeLike(result->GetType())) continue;
+            auto lhs = AsVarLike(then_yield->value_[i]);
+            auto rhs = AsVarLike(else_yield->value_[i]);
+            if (!lhs || !rhs) continue;
+            origin_graph.Add(if_stmt->return_vars_[i].get(), {lhs.get(), rhs.get()});
+            const Var* origin = ResolveTensorOrigin(lhs.get(), store_result_to_dest);
+            if (origin == ResolveTensorOrigin(rhs.get(), store_result_to_dest)) {
+              store_result_to_dest[if_stmt->return_vars_[i].get()] = origin;
+            }
+          }
+        }
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         build_origins(FlattenBody(while_stmt->body_));
+        record_carries(while_stmt);
       }
     }
   };
   build_origins(stmts);
+  origin_graph.Resolve(store_result_to_dest);
+  bool has_c2v_control_flow_alias = false;
+  std::unordered_set<const Var*> visited_fifo_aliases;
+  for (size_t i = 0; i < fifo_sources.size(); ++i) {
+    const Var* source = fifo_sources[i];
+    if (!visited_fifo_aliases.insert(source).second) continue;
+    if (fifo_return_vars.count(source)) {
+      has_c2v_control_flow_alias = true;
+      break;
+    }
+    auto users = fifo_alias_users.find(source);
+    if (users != fifo_alias_users.end()) {
+      fifo_sources.insert(fifo_sources.end(), users->second.begin(), users->second.end());
+    }
+  }
+
+  // Preserve authored event schedules (e.g. paged-attention GM ring buffers).
+  // A reverse walk finds a release after each store; a forward walk finds an
+  // acquire before each load. State is inherited by nested bodies but never
+  // escapes them, so a conditional event cannot protect an outside access.
+  // Only FIX -> MTE2, AIC -> AIV events with a static matching ID qualify.
+  // Keep every covering ID: an unrelated nearer event must not hide a common
+  // release/acquire. Cross-core user IDs are bounded to [0, 13] by sync_set/wait,
+  // so a fixed-size set keeps indexing and intersections linear in IR size.
+  using EventSet = std::bitset<14>;
+  std::unordered_map<const Stmt*, EventSet> explicit_releases;
+  std::unordered_map<const Stmt*, EventSet> explicit_acquires;
+  std::function<void(const std::vector<StmtPtr>&, EventSet, bool)> index_events;
+  index_events = [&](const std::vector<StmtPtr>& ss, EventSet events, bool release) {
+    for (size_t n = 0; n < ss.size(); ++n) {
+      const auto& stmt = ss[release ? ss.size() - 1 - n : n];
+      CallPtr call;
+      if (auto assign = As<AssignStmt>(stmt)) call = As<Call>(assign->value_);
+      if (auto eval = As<EvalStmt>(stmt)) call = As<Call>(eval->expr_);
+      if (call && IsOp(call, release ? "system.sync_set" : "system.sync_wait") &&
+          call->GetKwarg<std::string>("core_type", "") == (release ? "aic" : "aiv") &&
+          call->GetKwarg<int>("pipe", -1) == static_cast<int>(release ? PipeType::FIX : PipeType::MTE2) &&
+          (!release || call->GetKwarg<int>("ffts_mode", -1) == 2)) {
+        int id = call->GetKwarg<int>("event_id", -1);
+        if (call->args_.size() == 1) {
+          auto literal = As<ConstInt>(call->args_[0]);
+          id = literal ? static_cast<int>(literal->value_) : -1;
+        }
+        if (id >= 0 && static_cast<size_t>(id) < events.size()) events.set(id);
+      }
+      (release ? explicit_releases : explicit_acquires)[stmt.get()] = events;
+      if (auto loop = As<ForStmt>(stmt)) {
+        index_events(FlattenBody(loop->body_), events, release);
+      } else if (auto loop = As<WhileStmt>(stmt)) {
+        index_events(FlattenBody(loop->body_), events, release);
+      } else if (auto branch = As<IfStmt>(stmt)) {
+        index_events(FlattenBody(branch->then_body_), events, release);
+        if (branch->else_body_) index_events(FlattenBody(*branch->else_body_), events, release);
+      }
+    }
+  };
+  index_events(stmts, {}, true);
+  index_events(stmts, {}, false);
 
   // Pass 2: collect cross-lane store/load records, tagged with a structural
   // body id and a program-order index.
   struct AccessRec {
     const Stmt* stmt;
     const Var* origin;
+    const Var* store_chain_origin;
     CoreSide side;
     CallPtr call;
     int body_id;
@@ -1392,13 +1657,58 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   std::vector<AccessRec> loads;
   size_t order_counter = 0;
   int next_body_id = 1;  // 0 == function top level
+  std::unordered_map<const Stmt*, size_t> statement_order;
+  std::vector<size_t> communication_order;
+  // Generated GM tokens use the default C2V FIFO. A push before the GM write
+  // phase can still be pending at its pop even with no communication inside
+  // the phase. Conversely, a pop may precede its producer push in source order:
+  // the split lanes execute independently. A signed balance tracks unmatched
+  // endpoints in either direction; only zero permits inserting a new FIFO token.
+  int64_t manual_c2v_balance = 0;
+  bool has_nested_manual_c2v = false;
+  bool has_nested_c2v_boundary = false;
+  std::unordered_set<const Stmt*> unmatched_manual_c2v_at_stmt;
   // body_id -> (enclosing compound stmt, parent body_id). Lets a consumer load
   // nested under the producer store's body be fenced by hoisting the tpop to the
   // loop/branch that sits in the store's body (see the C2V pairing below).
   std::unordered_map<int, std::pair<const Stmt*, int>> body_info;
+  std::unordered_map<int, const Stmt*> top_level_encloser;
   std::function<void(const std::vector<StmtPtr>&, int)> collect = [&](const std::vector<StmtPtr>& ss,
                                                                       int body_id) {
     for (const auto& stmt : ss) {
+      const size_t order = order_counter++;
+      statement_order.emplace(stmt.get(), order);
+      if (manual_c2v_balance != 0) unmatched_manual_c2v_at_stmt.insert(stmt.get());
+      CallPtr stmt_call;
+      if (auto assign = As<AssignStmt>(stmt)) stmt_call = As<Call>(assign->value_);
+      if (auto eval = As<EvalStmt>(stmt)) stmt_call = As<Call>(eval->expr_);
+      auto boundary = boundary_moves.find(stmt.get());
+      if (body_id != 0 && boundary != boundary_moves.end() &&
+          boundary->second.direction == CVDirection::CUBE_TO_VECTOR) {
+        // A generated pop can escape a branch/loop through its return vars.
+        // The current finalizer frees before the yield, so finalized lexical
+        // tfrees cannot prove that its slot contents are dead outside the body.
+        // Until that lifetime crosses yields, forbid adding a competing token.
+        has_nested_c2v_boundary = true;
+      }
+      if (boundary != boundary_moves.end() || op_predicates::IsTPush(stmt_call) ||
+          op_predicates::IsTPop(stmt_call) || IsOp(stmt_call, "system.sync_set") ||
+          IsOp(stmt_call, "system.sync_wait")) {
+        communication_order.push_back(order);
+      }
+      const bool manual_c2v_push = IsOp(stmt_call, "tile.tpush_to_aiv");
+      const bool manual_c2v_pop = IsOp(stmt_call, "tile.tpop_from_aic");
+      if ((manual_c2v_push || manual_c2v_pop) && stmt_call->GetKwarg<int>("id", 0) == 0) {
+        if (body_id != 0) {
+          // Branch/loop multiplicities cannot be inferred from lexical counts.
+          // Keep these manual schedules unsupported alongside a newly detected fence.
+          has_nested_manual_c2v = true;
+        } else if (manual_c2v_push) {
+          ++manual_c2v_balance;
+        } else {
+          --manual_c2v_balance;
+        }
+      }
       auto aff_it = stmt_map.find(stmt.get());
       CoreAffinity aff = (aff_it != stmt_map.end()) ? aff_it->second : CoreAffinity::SHARED;
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -1407,33 +1717,39 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
         if (single_lane && IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
-            stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest), side, call,
-                              body_id, order_counter++});
+            stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest),
+                              ResolveTensorOrigin(dest.get(), store_chain_origins), side, call, body_id,
+                              order});
           }
         } else if (single_lane && IsOp(call, "tile.load") && !call->args_.empty()) {
           if (auto src = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
-            loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), store_result_to_dest), side, call,
-                             body_id, order_counter++});
+            loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), store_result_to_dest),
+                             ResolveTensorOrigin(src.get(), store_chain_origins), side, call, body_id,
+                             order});
           }
         }
       }
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         int child = next_body_id++;
         body_info[child] = {stmt.get(), body_id};
+        top_level_encloser[child] = body_id == 0 ? stmt.get() : top_level_encloser.at(body_id);
         collect(FlattenBody(for_stmt->body_), child);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         int then_id = next_body_id++;
         body_info[then_id] = {stmt.get(), body_id};
+        top_level_encloser[then_id] = body_id == 0 ? stmt.get() : top_level_encloser.at(body_id);
         collect(FlattenBody(if_stmt->then_body_), then_id);
         if (if_stmt->else_body_.has_value()) {
           int else_id = next_body_id++;
           body_info[else_id] = {stmt.get(), body_id};
+          top_level_encloser[else_id] = top_level_encloser.at(then_id);
           collect(FlattenBody(*if_stmt->else_body_), else_id);
         }
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         int child = next_body_id++;
         body_info[child] = {stmt.get(), body_id};
+        top_level_encloser[child] = body_id == 0 ? stmt.get() : top_level_encloser.at(body_id);
         collect(FlattenBody(while_stmt->body_), child);
       }
     }
@@ -1448,19 +1764,33 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   // yields pointer-order traversal and unstable downstream assignments).
   std::unordered_map<const Var*, std::vector<const AccessRec*>> stores_by_origin;
   std::unordered_map<const Var*, std::vector<const AccessRec*>> loads_by_origin;
+  std::unordered_map<const Var*, size_t> store_chain_counts;
+  std::unordered_set<const Var*> cube_store_chains;
   std::vector<const Var*> ordered_origins;
   std::unordered_set<const Var*> seen_origins;
   for (const auto& store : stores) {
     if (!store.origin) continue;
     if (seen_origins.insert(store.origin).second) ordered_origins.push_back(store.origin);
     stores_by_origin[store.origin].push_back(&store);
+    ++store_chain_counts[store.store_chain_origin];
+    if (store.side == CoreSide::AIC) cube_store_chains.insert(store.store_chain_origin);
   }
+  // A branch/carry can merge several formerly independent store-only groups.
+  // Retain their existing dependencies even when the merged group has multiple
+  // stores: matching event IDs can describe different dynamic occurrences.
+  // Index the legacy groups once, rather than comparing every store and load.
+  std::unordered_set<const Var*> origins_with_store_chain_dependency;
   for (const auto& load : loads) {
     if (load.origin) loads_by_origin[load.origin].push_back(&load);
+    if (load.side == CoreSide::AIV && cube_store_chains.count(load.store_chain_origin) &&
+        store_chain_counts.at(load.store_chain_origin) == 1) {
+      origins_with_store_chain_dependency.insert(load.origin);
+    }
   }
 
   // Is `anc` equal to, or an ancestor body of, `desc`?
   auto is_ancestor_body = [&](int anc, int desc) -> bool {
+    if (anc == 0) return true;
     int cur = desc;
     std::unordered_set<int> guard;
     while (cur != anc) {
@@ -1475,6 +1805,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   // consumer fence can be hoisted before it. Returns nullptr if `desc` is not
   // nested under `anc`.
   auto enclosing_stmt_in_body = [&](int anc, int desc) -> const Stmt* {
+    if (anc == 0 && desc != 0) return top_level_encloser.at(desc);
     int cur = desc;
     std::unordered_set<int> guard;
     while (true) {
@@ -1486,10 +1817,54 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     }
   };
 
+  struct FenceInterval {
+    size_t push_order;
+    size_t pop_order;
+    bool requires_fifo_checks;
+    const AccessRec* store;
+  };
+  std::vector<FenceInterval> fence_intervals;
   for (const Var* origin : ordered_origins) {
     const auto& origin_stores = stores_by_origin.at(origin);
-    if (origin_stores.size() != 1) continue;  // require a unique producer store
-    const AccessRec& store = *origin_stores.front();
+    const bool multiple_stores = origin_stores.size() > 1;
+    // A top-level, write-then-read phase needs just the final producer's
+    // notification. Never issue one token per partition against one loop wait.
+    const AccessRec& store = *origin_stores.back();
+    auto loads_it = loads_by_origin.find(origin);
+    if (loads_it == loads_by_origin.end()) continue;
+    const bool has_vector_load = std::any_of(loads_it->second.begin(), loads_it->second.end(),
+                                             [](const auto* load) { return load->side == CoreSide::AIV; });
+    const bool has_cube_store = std::any_of(origin_stores.begin(), origin_stores.end(),
+                                            [](const auto* write) { return write->side == CoreSide::AIC; });
+    // The authored-protocol exemption only applies when no store-only group
+    // already required a fence. Merged groups still need a legal write phase;
+    // reject interleaving rather than silently erase an established dependency.
+    if (has_cube_store && has_vector_load && !origins_with_store_chain_dependency.count(origin)) {
+      EventSet authored_events;
+      authored_events.set();
+      for (const auto* write : origin_stores) {
+        if (write->side == CoreSide::AIC) authored_events &= explicit_releases.at(write->stmt);
+      }
+      for (const auto* load : loads_it->second) {
+        if (load->side == CoreSide::AIV) authored_events &= explicit_acquires.at(load->stmt);
+      }
+      // The author owns the event counts and ring-buffer reuse protocol. Do not
+      // inject FIFO tokens or impose the automatic top-level-phase restriction
+      // when every relevant access is covered by that existing protocol.
+      if (authored_events.any()) continue;
+    }
+    if (multiple_stores && has_cube_store && has_vector_load) {
+      const bool top_level_writes =
+          std::all_of(origin_stores.begin(), origin_stores.end(),
+                      [](const auto* write) { return write->side == CoreSide::AIC && write->body_id == 0; });
+      const bool reads_follow_writes = std::all_of(
+          loads_it->second.begin(), loads_it->second.end(),
+          [&](const auto* load) { return load->side != CoreSide::AIV || load->order > store.order; });
+      CHECK_SPAN(top_level_writes && reads_follow_writes, store.stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' with multiple stores requires a top-level write phase before all vector reads; "
+             "split producer and consumer into tasks with deps=[producer]";
+    }
 
     // Restrict to the cube-store -> vector-load (C2V) direction. The producer
     // store is on AIC, the consumer load on AIV: the AIC tpush sends the source
@@ -1503,8 +1878,6 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     if (store.side != CoreSide::AIC) continue;
 
     const AccessRec* chosen = nullptr;
-    auto loads_it = loads_by_origin.find(origin);
-    if (loads_it == loads_by_origin.end()) continue;
     for (const AccessRec* load : loads_it->second) {
       if (load->side != CoreSide::AIV) continue;  // C2V only: consumer on the vector lane
       // The consumer load must share the store's body (a 1:1 fence) or be nested
@@ -1528,6 +1901,33 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
       if (pop_stmt == nullptr) continue;  // defensive: not actually nested under the store
     }
 
+    const size_t pop_order = statement_order.at(pop_stmt);
+    const bool requires_fifo_checks =
+        multiple_stores || store.store_chain_origin != chosen->store_chain_origin;
+    if (requires_fifo_checks) {
+      CHECK_SPAN(!has_c2v_control_flow_alias, store.stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' cannot add a fence alongside C2V tiles returned through control flow; "
+             "consume earlier tiles before the branch/loop or split tasks with deps=[producer]";
+      CHECK_SPAN(!has_nested_c2v_boundary, store.stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' cannot add a fence alongside nested C2V boundary transfers; "
+             "split producer and consumer into tasks with deps=[producer]";
+      CHECK_SPAN(!has_nested_manual_c2v && !unmatched_manual_c2v_at_stmt.count(store.stmt), store.stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' overlaps an outstanding or nested explicit C2V handshake; "
+             "split producer and consumer into tasks with deps=[producer]";
+      // A token must not overtake an existing boundary transfer in the same
+      // FIFO, or introduce a cycle through an explicit cross-core wait.
+      auto communication =
+          std::upper_bound(communication_order.begin(), communication_order.end(), store.order);
+      CHECK_SPAN(communication == communication_order.end() || *communication >= pop_order,
+                 chosen->stmt->span_)
+          << "GM tensor '" << origin->name_hint_
+          << "' crosses other core communication; "
+             "split producer and consumer into tasks with deps=[producer]";
+    }
+
     auto src_tile_type = std::dynamic_pointer_cast<const TileType>(store.call->args_[0]->GetType());
     if (!src_tile_type) continue;  // need a TileType for cross-core slot sizing
 
@@ -1537,10 +1937,36 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
                                                     std::nullopt, std::nullopt, consumer_mem);
     std::string token_name = origin->name_hint_ + "_gm_sync";
 
-    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
+    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0], requires_fifo_checks};
     // A vector per stmt: several GM dependencies can hoist to the same enclosing
     // stmt (e.g. two scratch loads in one outer loop) — each needs its own fence.
-    gm_sync_pops[pop_stmt].push_back(GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)});
+    gm_sync_pops[pop_stmt].push_back(
+        GmSyncPop{consumer_side, std::make_shared<Var>(token_name, pop_tile_type, pop_stmt->span_),
+                  requires_fifo_checks});
+    fence_intervals.push_back({store.order, pop_order, requires_fifo_checks, &store});
+  }
+
+  // Other GM fences are also transfers on the shared FIFO. Initially support
+  // disjoint phases: overlapping intervals can reverse the pop order or mix
+  // a one-shot fence with a repeated one. Sort once, then sweep in O(N log N).
+  std::sort(fence_intervals.begin(), fence_intervals.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.push_order < rhs.push_order; });
+  size_t last_pop = 0;
+  size_t last_checked_pop = 0;
+  bool has_previous = false;
+  bool has_checked_fence = false;
+  for (const auto& fence : fence_intervals) {
+    CHECK_SPAN((!has_checked_fence || fence.push_order > last_checked_pop) &&
+                   (!fence.requires_fifo_checks || !has_previous || fence.push_order > last_pop),
+               fence.store->stmt->span_)
+        << "GM dependency overlaps another GM handshake; "
+           "split producer and consumer into tasks with deps=[producer]";
+    last_pop = std::max(last_pop, fence.pop_order);
+    has_previous = true;
+    if (fence.requires_fifo_checks) {
+      last_checked_pop = std::max(last_checked_pop, fence.pop_order);
+      has_checked_fence = true;
+    }
   }
 }
 
@@ -1758,9 +2184,15 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     if (auto pop_it = gm_sync_pops.find(stmt.get()); pop_it != gm_sync_pops.end()) {
       for (const auto& info : pop_it->second) {
         if (side != info.consumer_side) continue;
-        auto pop_var = std::make_shared<Var>(info.token_name, info.pop_tile_type, stmt->span_);
+        const auto& pop_var = info.token_var;
         result.push_back(std::make_shared<AssignStmt>(
-            pop_var, CreateTpop(pop_op, info.pop_tile_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
+            pop_var, CreateTpop(pop_op, pop_var->GetType(), stmt->span_, /*kwargs=*/{}), stmt->span_));
+        if (info.fence_gm_phase) {
+          // A5 C2V-UB tokens wait on PIPE_V, while the following GM loads use
+          // MTE2. Drain the wait before allowing any load pipe to proceed.
+          result.push_back(std::make_shared<EvalStmt>(
+              OpRegistry::GetInstance().Create("system.bar_all", {}, {}, stmt->span_), stmt->span_));
+        }
       }
     }
 
@@ -1770,6 +2202,12 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       // after the store that writes the shared GM tensor.
       if (auto push_it = gm_sync_pushes.find(stmt.get());
           push_it != gm_sync_pushes.end() && side == push_it->second.producer_side) {
+        if (push_it->second.fence_gm_phase) {
+          // The token's payload is incidental: all preceding GM writes must
+          // complete before the notification, including earlier partitions.
+          result.push_back(std::make_shared<EvalStmt>(
+              OpRegistry::GetInstance().Create("system.bar_all", {}, {}, stmt->span_), stmt->span_));
+        }
         result.push_back(std::make_shared<EvalStmt>(
             CreateTpush(push_op, push_it->second.push_tile, stmt->span_), stmt->span_));
       }
@@ -2052,7 +2490,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
   std::map<const Stmt*, std::vector<GmSyncPop>> gm_sync_pops;
-  CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
+  CollectGmCrossLaneSyncs(stmts, stmt_map, boundary_moves, gm_sync_pushes, gm_sync_pops);
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;
@@ -2109,6 +2547,130 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap);
+
+  // Automatic pipe setup checks retained capacity after finalizing lifetimes.
+  // Authored setup bypasses that check, and its capacity is not inferred here.
+  // Conservatively forbid a newly generated GM wait while an earlier default
+  // C2V slot is still retained. Use final tfrees so views, carries, FIFO-prefix
+  // release order, and boundary-generated pops follow the normal lifetime rules.
+  cross_core_pipe::CrossCorePipeMetadata authored_setup;
+  cross_core_pipe::CollectCrossCorePipeMetadata(aic_final, authored_setup);
+  cross_core_pipe::CollectCrossCorePipeMetadata(aiv_final, authored_setup);
+  if (authored_setup.HasAnySetup()) {
+    std::unordered_set<const Var*> phase_tokens;
+    int64_t required_slot_size = 0;
+    for (const auto& [stmt, pops] : gm_sync_pops) {
+      for (const auto& pop : pops) {
+        if (!pop.fence_gm_phase) continue;
+        phase_tokens.insert(pop.token_var.get());
+        auto size = cross_core_pipe::TryGetTileSlotSizeBytes(pop.token_var->GetType());
+        CHECK_SPAN(size.has_value(), pop.token_var->span_)
+            << "GM synchronization with authored pipe setup requires a statically sized token";
+        required_slot_size = std::max(required_slot_size, *size);
+      }
+    }
+    if (!phase_tokens.empty()) {
+      // Any authored setup suppresses automatic setup, even a different pipe
+      // ID or direction. Require a matching default C2V contract on both lanes
+      // before their first transfer; never emit a token onto an unbound FIFO.
+      auto default_config = [&](const std::vector<StmtPtr>& body,
+                                CoreSide side) -> std::optional<std::tuple<int, int, int, std::string>> {
+        CallPtr initializer;
+        PipeFunctionFacts facts;
+        for (const auto& stmt : body) {
+          cross_core_pipe::CrossCorePipeMetadata metadata;
+          cross_core_pipe::CollectCrossCorePipeMetadata({stmt}, metadata);
+          if (metadata.HasCrossCoreOps()) break;
+          // Only dominating definitions can bind this endpoint. Resolve SSA
+          // aliases while indexing the prefix, before the first transfer.
+          if (auto assign = As<AssignStmt>(stmt)) {
+            if (auto call = As<Call>(assign->value_)) {
+              facts.definitions[assign->var_.get()] = call;
+            } else if (auto source = AsVarLike(assign->value_)) {
+              auto it = facts.definitions.find(source.get());
+              if (it != facts.definitions.end()) facts.definitions[assign->var_.get()] = it->second;
+            }
+          }
+          auto eval = As<EvalStmt>(stmt);
+          auto call = eval ? As<Call>(eval->expr_) : nullptr;
+          if (IsOp(call,
+                   side == CoreSide::AIC ? "system.aic_initialize_pipe" : "system.aiv_initialize_pipe") &&
+              call->GetKwarg<int>("id", 0) == 0) {
+            initializer = call;
+          }
+        }
+        if (!initializer) return std::nullopt;
+        const int direction = initializer->GetKwarg<int>("dir_mask", 0);
+        const int size = initializer->GetKwarg<int>("slot_size", 0);
+        const int depth =
+            initializer->GetKwarg<int>("slot_num", cross_core_pipe::GetPtoasImplicitSlotNum(direction));
+        const int local_depth = initializer->GetKwarg<int>("local_slot_num", depth);
+        if (!(direction & 1) || size < required_slot_size || depth <= 0 || local_depth <= 0 ||
+            local_depth > depth) {
+          return std::nullopt;
+        }
+        CHECK_SPAN(initializer->args_.size() == 2, initializer->span_)
+            << "GM C2V pipe initializer requires c2v and v2c buffer arguments";
+        // C2V is operand zero on both lanes. Equal sizes/depths do not prove
+        // that the producer import and consumer reserve refer to the same ring.
+        auto buffer = ResolveBufferDefinition(
+            facts, initializer->args_[0], initializer->span_,
+            side == CoreSide::AIC ? "system.import_peer_buffer" : "system.reserve_buffer",
+            "GM C2V pipe buffer");
+        const auto name = buffer->GetKwarg<std::string>("name", "");
+        CHECK_SPAN(!name.empty() && (side != CoreSide::AIC ||
+                                     buffer->GetKwarg<std::string>("peer_func", "") == func->name_ + "_aiv"),
+                   buffer->span_)
+            << "GM C2V pipe import must name the matching consumer reserve in " << func->name_ << "_aiv";
+        if (side == CoreSide::AIV) {
+          // The declared slot geometry does not allocate memory. The consumer
+          // reserve must cover every local slot, including one retained while
+          // the producer advances. Widen before multiplying int attributes.
+          const int64_t required_bytes = static_cast<int64_t>(size) * local_depth;
+          const int reserved_bytes = buffer->GetKwarg<int>("size", 0);
+          CHECK_SPAN(reserved_bytes >= required_bytes, buffer->span_)
+              << "GM C2V pipe reserve requires at least " << required_bytes
+              << " bytes (slot_size * local_slot_num), got " << reserved_bytes;
+        }
+        return std::make_tuple(size, depth, local_depth, name);
+      };
+      auto producer_config = default_config(aic_final, CoreSide::AIC);
+      auto consumer_config = default_config(aiv_final, CoreSide::AIV);
+      CHECK_SPAN(producer_config && consumer_config && producer_config == consumer_config, func->span_)
+          << "GM synchronization requires matching default C2V pipe initializers and buffers with sufficient "
+             "slot size; "
+             "configure both lanes for pipe id=0 or use automatic pipe setup";
+    }
+    std::function<void(const std::vector<StmtPtr>&, size_t)> check_retained;
+    check_retained = [&](const std::vector<StmtPtr>& body, size_t retained) {
+      for (const auto& stmt : body) {
+        if (auto assign = As<AssignStmt>(stmt)) {
+          auto call = As<Call>(assign->value_);
+          if (IsOp(call, "tile.tpop_from_aic") && call->GetKwarg<int>("id", 0) == 0) {
+            CHECK_SPAN(!phase_tokens.count(assign->var_.get()) || retained == 0, stmt->span_)
+                << "GM synchronization overlaps retained C2V slots in an authored pipe; "
+                   "consume earlier tiles before the GM phase or split tasks with deps=[producer]";
+            ++retained;
+          }
+        } else if (auto eval = As<EvalStmt>(stmt)) {
+          auto call = As<Call>(eval->expr_);
+          if (IsOp(call, "system.tfree_to_aic") && call->GetKwarg<int>("id", 0) == 0 && retained > 0) {
+            --retained;
+          }
+        }
+        // Conditional/nested frees cannot prove release in the parent body.
+        if (auto loop = As<ForStmt>(stmt)) {
+          check_retained(FlattenBody(loop->body_), retained);
+        } else if (auto loop = As<WhileStmt>(stmt)) {
+          check_retained(FlattenBody(loop->body_), retained);
+        } else if (auto branch = As<IfStmt>(stmt)) {
+          check_retained(FlattenBody(branch->then_body_), retained);
+          if (branch->else_body_) check_retained(FlattenBody(*branch->else_body_), retained);
+        }
+      }
+    };
+    if (!phase_tokens.empty()) check_retained(aiv_final, 0);
+  }
 
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
