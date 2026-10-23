@@ -104,6 +104,9 @@ class Registry:
     def delete_tag(self, tag: str) -> None:
         if self.get(tag) is None:
             return
+        # OCI tag deletion (also verified on this SWR endpoint) returns 202:
+        # https://github.com/opencontainers/distribution-spec/blob/main/spec.md#deleting-tags
+        # Do not fall back to digest deletion: retained tags share the manifest.
         status, _, _ = self.request("DELETE", tag)
         if status != 202 or self.get(tag) is not None:
             raise RuntimeError(f"SWR did not remove temporary tag {tag}")

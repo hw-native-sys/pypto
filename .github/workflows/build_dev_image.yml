@@ -56,8 +56,8 @@ jobs:
 
   image:
     needs: config
-    # Never execute PR code or expose publication secrets on the shared host.
-    if: github.event_name != 'pull_request' && github.repository == 'hw-native-sys/pypto'
+    # PRs build and validate; only main can reach the publishing step.
+    if: github.repository == 'hw-native-sys/pypto'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
@@ -73,10 +73,13 @@ jobs:
     env:
       IMAGE_NAME: ${{ matrix.name }}
       PYPTO_DOCKER_PROXY: http://127.0.0.1:7892
+      PYPTO_PR_REPOSITORY: ${{ github.event.pull_request.head.repo.clone_url }}
     steps:
       - uses: actions/checkout@v4
         with:
           path: image-checkout
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Prepare isolated Docker credentials directory
         id: prepare
@@ -97,6 +100,7 @@ jobs:
         run: python3 docker/ci/maintain.py validate --directory "$IMAGE_STATE"
       - name: Publish validated image to SWR
         if: >-
+          github.event_name != 'pull_request' &&
           github.ref == 'refs/heads/main' &&
           (github.event_name != 'workflow_dispatch' || inputs.publish)
         env:
