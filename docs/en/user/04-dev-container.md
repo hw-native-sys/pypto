@@ -604,6 +604,11 @@ to full commit IDs. Runtime always follows PyPTO's gitlink; PTO-ISA follows that
 runtime's `pto_isa.pin`, and PTOAS follows the selected PyPTO toolchain pin.
 Build cache invalidation uses these SHAs instead of a mutable `main` argument.
 Compilation is capped by both `build_jobs` and the resource-limit loader.
+CI selects simpler's `build_package_<validation_platform>` and `build_package_sim`
+targets: the `arm-a2a3` image prebuilds A2/A3 onboard and both CPU simulators, without
+compiling A5 onboard binaries. `DIST_RUNTIME_TARGETS` stores this selection as
+`PYPTO_RUNTIME_BUILD_TARGETS` for later `pypto-build` calls; an empty value uses
+simpler's default targets. The override applies only to the runtime wheel build.
 Selected PyPTO refs must provide `pypto-doctor --strict`; validation rejects older
 helpers that would silently ignore the strict option.
 

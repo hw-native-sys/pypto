@@ -206,6 +206,9 @@ ARG PYPTO_LIB_REF=main
 # repo's own rule is that the job count is stated rather than inferred.
 ARG DIST_BUILD_JOBS=2
 ARG DIST_PATCH=
+ARG DIST_RUNTIME_TARGETS=
+# Keep the same runtime selection when developers rebuild inside this image.
+ENV PYPTO_RUNTIME_BUILD_TARGETS=${DIST_RUNTIME_TARGETS}
 
 # The recipe owns its compatibility patch and build record. Keep these separate
 # from helpers refreshed from PYPTO_REF, so setup cannot replace the record.

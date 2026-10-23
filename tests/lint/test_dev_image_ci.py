@@ -164,6 +164,7 @@ def test_build_freezes_refs_and_base_digest(
     assert f"PYPTO_LIB_REF={library}" in build
     assert f"CANN_IMAGE={base}" in build
     assert "DIST_BUILD_JOBS=1" in build
+    assert "DIST_RUNTIME_TARGETS=build_package_a2a3;build_package_sim" in build
     assert "HTTP_PROXY=http://proxy.example:7892" in build
     assert "--load" in build and "--push" not in build
     assert not (tmp_path / "validated.json").exists()
