@@ -532,6 +532,10 @@ SWR 认证与 manifest 操作直接连接，不使用代理。登录和推送子
 runtime 始终跟随 PyPTO 的 gitlink；PTO-ISA 跟随该 runtime 的 `pto_isa.pin`；
 PTOAS 跟随所选 PyPTO 的工具链版本。使用这些 SHA 使源码构建缓存失效，而不是传入可变的 `main`。
 编译并发同时受 `build_jobs` 和资源限制加载器约束。
+CI 选择 simpler 的 `build_package_<validation_platform>` 和 `build_package_sim` 目标：
+`arm-a2a3` 镜像预编译 A2/A3 上板 runtime 和两种 CPU 模拟器，不编译 A5 上板二进制。
+`DIST_RUNTIME_TARGETS` 将该选择保存为 `PYPTO_RUNTIME_BUILD_TARGETS`，供后续 `pypto-build`
+继续使用；空值使用 simpler 的默认目标。该选项只影响 runtime wheel 的构建。
 所选 PyPTO ref 必须提供 `pypto-doctor --strict`；验证会拒绝那些静默忽略严格选项的旧辅助脚本。
 
 `cann92-a2a3-aicpu-class-memaccess` 补丁只增加 CANN 9.2 的 GNU 编译器所需的 onboard AICPU 警告豁免。

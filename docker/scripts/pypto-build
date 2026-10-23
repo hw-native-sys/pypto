@@ -189,12 +189,17 @@ if ! $pypto_only; then
     # Source edits and submodule advances need not change pyproject.toml, which
     # uv uses to invalidate directory wheels. Always rebuild/reinstall simpler;
     # its native CMake build and ccache still provide incremental compilation.
+    # Scope target selection to simpler; other packages retain their defaults.
+    runtime_options=()
+    if [ -n "${PYPTO_RUNTIME_BUILD_TARGETS:-}" ]; then
+        runtime_options=(--config-setting "build.targets=$PYPTO_RUNTIME_BUILD_TARGETS")
+    fi
     if [ -n "${PYPTO_RUNTIME_WHEEL_DIR:-}" ]; then
         uv build --wheel --python "$PYPTO_HOME/venv/bin/python" --no-build-isolation \
-            --no-cache --out-dir "$PYPTO_RUNTIME_WHEEL_DIR" ./runtime
+            --no-cache --out-dir "$PYPTO_RUNTIME_WHEEL_DIR" "${runtime_options[@]}" ./runtime
     else
         uv pip install --python "$PYPTO_HOME/venv/bin/python" --no-build-isolation \
-            --no-cache --reinstall-package simpler ./runtime
+            --no-cache --reinstall-package simpler "${runtime_options[@]}" ./runtime
         python -c 'import simpler.task_interface; print("simpler ok")'
     fi
 fi

@@ -234,6 +234,7 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         "PYPTO_LIB_REPO": sources["pypto_lib"]["repository"],
         "DIST_BUILD_JOBS": str(jobs),
         "DIST_PATCH": image["patch"],
+        "DIST_RUNTIME_TARGETS": f"build_package_{image['validation_platform']};build_package_sim",
     }
     proxy = os.environ.get("PYPTO_DOCKER_PROXY", "")
     if proxy:
