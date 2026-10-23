@@ -2346,13 +2346,13 @@ class TopDownRetargeter {
     if (!target || !def.definition_stmt) return false;
     auto component = memref_component_.find(target.get());
     if (component == memref_component_.end()) return false;
-    // Preserve the legacy destructive contract inside a carry's own ForStmt.
-    // Only an enclosing loop can add the independent next-entry observation
-    // that this guard protects before For-carry producer retargeting.
-    const size_t recurrence_begin = def.nearest_for ? stmt_order_.at(def.nearest_for.get()) : def.order;
+    // Include every recurrence interval spanning this producer, including its
+    // own For: a handle defined before that For can observe the old seed on
+    // the next iteration. Reads of the advancing carry itself already exclude
+    // its own loop when the recurrence index compares logical definitions.
     auto recurring = recurring_physical_read_index_.find(component->second);
-    if (recurrence_begin != 0 && recurring != recurring_physical_read_index_.end() &&
-        recurring->second.HasAfter(0, recurrence_begin - 1, def.order)) {
+    if (recurring != recurring_physical_read_index_.end() &&
+        recurring->second.HasAfter(0, def.order, def.order)) {
       return false;
     }
     auto accesses = physical_access_index_.find(component->second);

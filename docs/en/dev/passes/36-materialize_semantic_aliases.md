@@ -56,7 +56,9 @@ its own fresh MemRef. This pass closes that gap:
    carries from the existing retargeting and liveness checks. Before changing a
    producer's destination, check independent reads of the target's physical
    window that can recur through an enclosing loop, including reads outside the
-   inner For's lexical lifetime. Binding a loop initializer to a carry is not
+   inner For's lexical lifetime. This includes the same For's backedge when a
+   body read names the original pre-loop initializer; reads through the advancing
+   carry itself are excluded by its loop-header definition. Binding a loop initializer to a carry is not
    itself an independent data observation. For an actually observed For/While
    carry, record its initializer's payload read at the binding header. A worklist
    propagates these entry observations through nested carry bindings, preserving
@@ -89,6 +91,9 @@ its own fresh MemRef. This pass closes that gap:
    Buffer IR also avoids private loop-input storage for proven zero-trip loops
    and when the complete body only
    yields every carry unchanged: this binding cannot overwrite its initializer.
+   Zero-trip body canonicalization applies only to Tile carry boundaries;
+   Tensor/DistributedTensor-only loops retain their descriptor writebacks and
+   body structure, handled by tensor boundary normalization.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.

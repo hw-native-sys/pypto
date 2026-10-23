@@ -5380,6 +5380,41 @@ class Before:
         else:
             assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
 
+    @pytest.mark.parametrize("trips", [1, 2])
+    @pytest.mark.parametrize("read_handle", ["seed", "carry", "view"])
+    def test_for_backedge_preserves_original_seed(self, trips, read_handle):
+        """A seed defined inside While is still old across the nested For backedge."""
+        observation = "pl.tile.reshape(seed, [16, 64])" if read_handle == "view" else read_handle
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[16, 64], pl.BF16], rhs: pl.Tensor[[64, 64], pl.BF16],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < 2)
+            seed = pl.tile.matmul(sa, sb)
+            for _inner, (carry,) in pl.range({trips}, init_values=(seed,)):
+                observed = {observation}
+                _old_used = pl.tile.store(observed, [0, 0], out)
+                replacement = pl.tile.matmul(sa, sb)
+                result = pl.yield_(replacement)
+            _used = pl.tile.store(result, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        if trips > 1 and read_handle != "carry":
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+        else:
+            assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+            _assert_carry_yield_lands_in_its_buffer(after)
+
     def test_nested_carry_chain_preserves_intermediate_version(self):
         """An inner carry restarts from the outer carry on every intervening While entry."""
 

@@ -48,7 +48,9 @@ program = passes.materialize_semantic_aliases()(program)
    yield，然后应用收集到的类型改写。遍历会进入 `WhileStmt` 的循环体，因此外层
    标量 while 不会使嵌套 For carry 绕过既有的重定向及活跃性检查。改变 producer 的
    目标之前，还会检查通过外层循环可重复的目标物理窗口独立读取，包括内层 For 的
-   词法生命周期之外的读取。仅把 initializer 绑定为 carry 不算独立的数据观测。
+   词法生命周期之外的读取。若循环体通过原始 initializer 句柄读取旧值，同一个 For
+   自身的回边也必须保护该读取；通过随迭代推进的 carry 读取时，则由其 header 定义
+   排除自身回边。仅把 initializer 绑定为 carry 不算独立的数据观测。
    对于实际被读取的 For/While carry，在绑定 header 记录 initializer 的数据读取，
    并通过工作队列沿嵌套 carry 绑定传播这些入口观测，保护间隔循环中的中间逻辑版本。
    循环体读取仍保留 carry 当前的定义：自身回边推进该值，并非重读原始 seed。
@@ -70,6 +72,8 @@ program = passes.materialize_semantic_aliases()(program)
    要求不受支持的 Acc-to-Acc 复制。对于已知零次循环，或循环体仅将所有 carry
    原样 yield 的循环，Buffer IR
    也不为其创建私有循环输入存储，因为这种绑定不会覆盖 initializer。
+   零次循环体规范化仅用于 Tile carry 边界；仅包含 Tensor/DistributedTensor 的循环
+   保留描述符写回和循环体结构，由 tensor 边界规范化负责处理。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
