@@ -242,6 +242,10 @@ class PassManager:
             # MaterializeTensorStrides fills empty stride slots on every
             # TensorView with packed canonical strides (RFC #1300 §2.4).
             passes.materialize_tensor_strides,
+            # Mat current/next references rotate between distinct live windows.
+            # Carry scalar slot selectors before fixed-buffer legalization can
+            # mistake that reference change for an unsupported Mat-to-Mat copy.
+            passes.lower_mat_value_rotation,
             passes.init_mem_ref,
             # MaterializeSemanticAliases forces loop-carried / in-place buffers to
             # share one MemRef (semantics-required aliasing). It always runs; only

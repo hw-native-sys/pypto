@@ -274,6 +274,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/skew_cross_core_pipeline_pass.cpp
     src/ir/transforms/lower_pipeline_loops_pass.cpp
     src/ir/transforms/lower_pipeline_to_slots_pass.cpp
+    src/ir/transforms/lower_mat_value_rotation_pass.cpp
     src/ir/transforms/canonicalize_io_order_pass.cpp
     src/ir/transforms/structural_comparison.cpp
     src/ir/transforms/utils/call_shape_binding.cpp

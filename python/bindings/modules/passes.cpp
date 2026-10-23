@@ -406,6 +406,9 @@ void BindPass(nb::module_& m) {
              "Initializes MemRef for all variables in functions.\n"
              "Sets memory space to UB by default, or DDR for tile.load/tile.store operands.");
 
+  passes.def("lower_mat_value_rotation", &pass::LowerMatValueRotation,
+             "Lower Mat loop/if value rotation to scalar selectors over isolated buffer slots");
+
   passes.def("materialize_semantic_aliases", &pass::MaterializeSemanticAliases,
              "Create the semantic must-alias materialization pass\n\n"
              "Propagates loop-carried iter_arg/initValue MemRefs down the yield/producer chain so\n"

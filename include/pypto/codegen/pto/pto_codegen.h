@@ -1038,6 +1038,13 @@ class PTOCodegen : public CodegenBase {
    */
   bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf, const ir::Span& span);
 
+  /// Select a descriptor from statically addressed Mat banks. Keeping the bank
+  /// handles visible lets PTOAS track both the load and the previous iteration's
+  /// read; a fresh allocation at a runtime address loses that alias provenance.
+  bool TryEmitAddressedSlotSelect(const ir::VarPtr& tile_var,
+                                  const std::shared_ptr<const ir::TileType>& tile_type,
+                                  const std::string& tile_buf);
+
   /**
    * @brief Emit the `pto.alloc_multi_tile` declarations in the function head.
    */
@@ -1122,6 +1129,12 @@ class PTOCodegen : public CodegenBase {
 
     std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
+    /// Complete pinned allocation capacities, including every slot. A member
+    /// MemRef only describes one window, so its extent is not the slot stride.
+    std::map<const ir::Var*, uint64_t> pinned_alloc_sizes;
+    /// Physical arena/window signature -> head-declared constant-address banks.
+    /// Selections are emitted at each use, inside the scalar selector's scope.
+    std::map<std::string, std::vector<std::string>> addressed_slot_banks;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
     /// PTOAS memory-planner mode only (no addr baked): full-MemRef-identity key
     /// (base+offset+size) -> canonical tile_buf SSA. Variables that resolve to
@@ -1232,6 +1245,8 @@ class PTOCodegen : public CodegenBase {
 
       memref_to_var_name.clear();
       tile_var_allocs.clear();
+      pinned_alloc_sizes.clear();
+      addressed_slot_banks.clear();
       emitted_tile_alloc_vars.clear();
       memref_identity_to_mlir.clear();
       memref_identity_type.clear();

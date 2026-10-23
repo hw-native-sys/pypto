@@ -1,6 +1,52 @@
-# InitMemRef Pass
+# LowerMatValueRotation and InitMemRef
 
 Materializes compiler-owned PTO level3 scratch, initializes MemRef for all variables, and creates alloc operations with unallocated addresses.
+
+## Mat value rotation before storage initialization
+
+`LowerMatValueRotation` runs immediately before `InitMemRef`. A Mat value carried
+by a loop can mean a reference to a freshly prefetched panel, rather than an
+instruction to copy that panel into the original allocation. Mat-to-Mat copying
+is not supported by PTO, and merging the current and next panels into one window
+would overwrite data before it is consumed.
+
+For load-backed Mat carries with matching static descriptors, the pass represents
+the changing reference as a scalar slot index. It reserves distinct slots in one
+allocation, places the initial load and subsequent loads in those slots, and
+turns Mat branch results and loop carries into scalar results and carries. A
+branch that keeps the current panel keeps its index; no load or data copy is
+needed for that branch. The initial index also makes zero-trip loops retain the
+initial value, while the final index identifies the right panel after odd or
+even trip counts. Independent Mat streams have independent allocations.
+Loops that consume the old panel before loading its replacement keep their
+existing one-bank lowering.
+
+The ordinary current/next case needs two panels of storage. If the original
+panel is independently observed after the loop, its slot must be protected and
+two separate working slots are needed. Multiple possible fresh producers also
+need separate slots when they can be live together; the pass does not erase
+those lifetimes to force a two-slot result. User-declared allocations and
+unsupported producer/descriptor relationships retain their original semantics.
+The initial panel is also protected when an enclosing loop re-enters the
+rotation without loading a fresh initial value. A rotating value that escapes
+into an unrelated region carry requires a joint lifetime plan and is not
+rewritten independently.
+The transformation runs for `PYPTO` and `DSA_RP`; PTOAS-owned multi-buffer region
+planning keeps its existing path.
+
+With an addressed memory planner, PTO emission declares each Mat bank at a
+constant address and uses `arith.select` to select its descriptor. PTOAS can then
+follow the selection to every possible storage root. Its inserted synchronization
+orders both MTE2-to-MTE1 data readiness and MTE1-to-MTE2 reuse of a bank in later
+iterations. A fresh `alloc_tile` at a runtime address would lose that provenance.
+This selects descriptors only; it does not copy Mat contents. Conservatively
+merging the banks' possible aliases can reduce overlap, so successful compilation
+does not by itself establish a performance gain.
+
+This normalization uses existing MemRef slot semantics. The normal whole-kernel
+Buffer IR capability check keeps slotted kernels on the Tile path; other kernels
+continue through their selected representation. In custom pipelines, schedule
+`passes.lower_mat_value_rotation()` before `passes.init_mem_ref()`.
 
 ## Overview
 
@@ -26,12 +72,14 @@ Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace
 
 | C++ | Python | Level |
 | --- | ------ | ----- |
+| `pass::LowerMatValueRotation()` | `passes.lower_mat_value_rotation()` | Function-level |
 | `pass::InitMemRef()` | `passes.init_mem_ref()` | Function-level |
 
 **Factory function**:
 
 ```cpp
 Pass InitMemRef();
+Pass LowerMatValueRotation();
 ```
 
 **Python usage**:
@@ -73,6 +121,11 @@ The same normalization covers ordinary arguments of other ops and expressions em
 in types, including a declared allocation's slot index. A constant slot index thus
 produces a constant slot byte offset. Bindings are scoped to their defining region;
 runtime inputs, loop-carried values, and unresolved branch results remain dynamic.
+Before resolving a pinned slot declaration, the pass substitutes its index with
+the current SSA bindings. Both the resolved byte offset and the retained slot
+index therefore refer to the rebuilt scalar loop argument. Loads into declared
+slotted storage remain observable writes even when their SSA result is unused;
+dead-code elimination must preserve them for later reads of the selected slot.
 This constant-only normalization is internal to `InitMemRef`, so direct callers and
 custom pipelines receive the same behavior without first scheduling a separate
 `Simplify` pass. Preserving control-flow and carry structure avoids changing the storage

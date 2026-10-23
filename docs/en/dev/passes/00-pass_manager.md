@@ -140,6 +140,7 @@ struct PassProperties {
 | LowerPipelineLoops | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | — |
 | CanonicalizeIOOrder | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, PipelineResolved | — |
 | MaterializeTensorStrides | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, TensorViewCanonical | — |
+| LowerMatValueRotation | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, NormalizedStmtStructure | — |
 | InitMemRef | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred | HasMemRefs, NormalizedStmtStructure | SSAForm |
 | MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, NormalizedStmtStructure | NormalizedStmtStructure | — |
 | MemoryReuse | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, NormalizedStmtStructure | NormalizedStmtStructure | — |
@@ -507,7 +508,7 @@ The PTO-oriented tile stage of `Default` is:
 19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
 20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
 21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
-22. `InitMemRef`
+22. [`LowerMatValueRotation` / `InitMemRef`](35-init_memref.md)
 23. [`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
 24. `MemoryReuse`
 25. `AllocateMemoryAddr`

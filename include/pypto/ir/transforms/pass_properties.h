@@ -402,6 +402,11 @@ inline const PassProperties kSplitVectorKernelProperties{
 
 // -- Memory / codegen passes --------------------------------------------------
 
+inline const PassProperties kLowerMatValueRotationProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure}};
+
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred},

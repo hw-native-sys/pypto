@@ -139,6 +139,7 @@ struct PassProperties {
 | LowerPipelineLoops | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | — |
 | CanonicalizeIOOrder | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, PipelineResolved | — |
 | MaterializeTensorStrides | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, TensorViewCanonical | — |
+| LowerMatValueRotation | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, NormalizedStmtStructure | — |
 | InitMemRef | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred | HasMemRefs, NormalizedStmtStructure | SSAForm |
 | MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, NormalizedStmtStructure | NormalizedStmtStructure | — |
 | MemoryReuse | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, NormalizedStmtStructure | NormalizedStmtStructure | — |
@@ -503,7 +504,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
 20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
 21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
-22. `InitMemRef`
+22. [`LowerMatValueRotation` / `InitMemRef`](35-init_memref.md)
 23. [`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
 24. `MemoryReuse`
 25. `AllocateMemoryAddr`

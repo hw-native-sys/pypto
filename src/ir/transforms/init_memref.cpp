@@ -419,10 +419,21 @@ class InitMemRefMutator : public IRMutator {
 
   /// The MemRef a user binding asks for, sized to the slot it selects.
   /// Returns nullopt when `type` carries no binding.
-  std::optional<MemRefPtr> UserBoundMemRef(const TypePtr& type) const {
+  std::optional<MemRefPtr> UserBoundMemRef(const TypePtr& type) {
     if (declared_allocs_.empty()) return std::nullopt;
     auto binding = GetDeclaredAlloc(type);
     if (!binding) return std::nullopt;
+    // Loop carries are rebuilt before their body is visited. Resolve selector
+    // references while this is still a pinned declaration: once is_pinned_
+    // clears, geometry and allocation identity must stay stable. Otherwise a
+    // scalar-carried slot would retain the old IterArg in both its byte offset
+    // and slot_index_, outside the loop's rebuilt SSA bindings.
+    bool changed = false;
+    const auto remapped_binding = RemapPinnedMemRefExprs(
+        std::make_optional(binding), [this](const ExprPtr& expr) { return VisitExpr(expr); }, changed);
+    INTERNAL_CHECK_SPAN(remapped_binding.has_value(), binding->span_)
+        << "Internal error: resolving a declared slot must preserve its MemRef";
+    binding = *remapped_binding;
     auto it = declared_allocs_.find(binding->base_.get());
     if (it == declared_allocs_.end()) return std::nullopt;
     // Every bound tile gets the SAME base Ptr — that shared identity is what

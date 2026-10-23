@@ -63,7 +63,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 32 | [LowerPipelineLoops](32-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
 | 33 | [CanonicalizeIOOrder](33-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |
 | 34 | [MaterializeTensorStrides](34-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |
-| 35 | [InitMemRef](35-init_memref.md) | 初始化 MemRef 并创建地址未分配的 alloc 操作 |
+| 35 | [LowerMatValueRotation / InitMemRef](35-init_memref.md) | 将 Mat 引用轮转为标量槽位选择，再初始化 MemRef 和分配 |
 | 36 | [SelectBufferIRFunctions / MaterializeSemanticAliases](36-materialize_semantic_aliases.md) | 强制语义要求同一分配的缓冲区真正共用一块（循环携带、原地更新） |
 | 37 | [MemoryReuse](37-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc；`memory_planner=DSA_RP` 或 `PTOAS` 时跳过 |
 | 38 | [AllocateMemoryAddr](38-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址；`memory_planner=PTOAS` 时跳过 |

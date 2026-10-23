@@ -39,6 +39,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -1325,13 +1326,25 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     std::map<const ir::Var*, const ir::Var*>& var_to_memref;    ///< tile var → base_ Ptr
     std::map<const ir::Var*, std::string>& memref_to_var_name;  ///< base_ Ptr → var name
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
+    std::map<const ir::Var*, uint64_t>& pinned_alloc_sizes;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
                     std::map<const ir::Var*, std::string>& reverse_mapping,
-                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs)
-        : var_to_memref(mapping), memref_to_var_name(reverse_mapping), tile_var_allocs(allocs) {}
+                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
+                    std::map<const ir::Var*, uint64_t>& pinned_sizes)
+        : var_to_memref(mapping),
+          memref_to_var_name(reverse_mapping),
+          tile_var_allocs(allocs),
+          pinned_alloc_sizes(pinned_sizes) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
+      if (const auto base = ir::GetPinnedAllocBase(op)) {
+        const auto call = As<ir::Call>(op->value_);
+        const auto capacity = call->args_.size() >= 2 ? As<ir::ConstInt>(call->args_[1]) : nullptr;
+        if (capacity && capacity->value_ > 0) {
+          pinned_alloc_sizes.emplace(base.get(), static_cast<uint64_t>(capacity->value_));
+        }
+      }
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
         const auto memref = ir::GetDefinedMemRef(tile_type);
         const ir::Var* base_ptr = memref->base_.get();
@@ -1345,7 +1358,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     }
   };
 
-  VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs);
+  VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs,
+                         fs_.pinned_alloc_sizes);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -1885,6 +1899,95 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
   }
 }
 
+bool PTOCodegen::TryEmitAddressedSlotSelect(const ir::VarPtr& tile_var,
+                                            const std::shared_ptr<const ir::TileType>& tile_type,
+                                            const std::string& tile_buf) {
+  const auto memref = ir::GetDefinedMemRef(tile_type);
+  const auto slot_index = memref ? memref->slot_index_ : std::nullopt;
+  if (!emit_tile_addr_ || tile_type->GetMemorySpace() != ir::MemorySpace::Mat || !memref ||
+      memref->slot_count_ <= 1 || !slot_index || !*slot_index) {
+    return false;
+  }
+  const auto& index = *slot_index;
+  const auto capacity = fs_.pinned_alloc_sizes.find(memref->base_.get());
+  const auto valid = StaticValidExtents(tile_type);
+  if (capacity == fs_.pinned_alloc_sizes.end() || !valid || capacity->second % memref->slot_count_ != 0) {
+    return false;
+  }
+  const uint64_t stride = capacity->second / memref->slot_count_;
+  if (stride == 0 || stride > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return false;
+
+  // AllocateMemoryAddr rebases the resolved slot expression onto the arena.
+  // Recover that constant origin algebraically, rather than interpreting the
+  // member's size as a stride (a view can cover only part of a slot).
+  const auto scalar = As<ir::ScalarType>(index->GetType());
+  if (!scalar || (!scalar->dtype_.IsSignedInt() && scalar->dtype_ != DataType::INDEX)) return false;
+  const auto stride_expr =
+      std::make_shared<ir::ConstInt>(static_cast<int64_t>(stride), DataType::INDEX, tile_var->span_);
+  const auto displacement = std::make_shared<ir::Mul>(index, stride_expr, DataType::INDEX, tile_var->span_);
+  ir::arith::Analyzer analyzer;
+  const auto origin = As<ir::ConstInt>(analyzer.Simplify(
+      std::make_shared<ir::Sub>(memref->byte_offset_, displacement, DataType::INDEX, tile_var->span_)));
+  if (!origin || origin->value_ < 0 ||
+      capacity->second > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - origin->value_)) {
+    return false;
+  }
+  const std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+  std::ostringstream key;
+  key << static_cast<const void*>(memref->base_.get()) << '|' << origin->value_ << '|' << type_str << '|'
+      << valid->first << '|' << valid->second;
+  auto [banks_it, fresh] = fs_.addressed_slot_banks.try_emplace(key.str());
+  auto& banks = banks_it->second;
+  if (fresh) {
+    banks.reserve(memref->slot_count_);
+    for (uint64_t slot = 0; slot < memref->slot_count_; ++slot) {
+      const int64_t address = origin->value_ + static_cast<int64_t>(slot * stride);
+      const auto static_memref =
+          std::make_shared<ir::MemRef>(memref->base_, address, memref->size_, memref->span_);
+      const auto static_type = As<ir::TileType>(ir::CloneTypeWithMemRef(tile_type, static_memref));
+      const auto fields = ComputeAllocTileFields(static_type);
+      const auto bank = AllocNewTileBuf(fields.type_str, memref->base_->name_hint_ + "_bank", fields.addr_ssa,
+                                        fields.valid_row_ssa, fields.valid_col_ssa);
+      RegisterTileBufType(bank, fields.type_str, static_type);
+      banks.push_back(bank);
+    }
+  }
+
+  if (const auto constant = As<ir::ConstInt>(index)) {
+    INTERNAL_CHECK_SPAN(constant->value_ >= 0 && static_cast<uint64_t>(constant->value_) < banks.size(),
+                        tile_var->span_)
+        << "Internal error: resolved Mat slot index is outside its allocation";
+    const auto& bank = banks[static_cast<size_t>(constant->value_)];
+    BindVarToMlir(tile_var, bank);
+    if (auto first = fs_.memref_to_mlir.find(memref->base_.get());
+        first != fs_.memref_to_mlir.end() && first->second == tile_buf) {
+      first->second = bank;
+    }
+    return true;
+  }
+
+  const std::string index_ssa = GetExprAsCode(index);
+  const std::string index_type = GetTypeString(scalar->dtype_);
+  std::string selected = banks.back();
+  // An arith.select of descriptors preserves the union of their storage roots
+  // in PTOAS's sync analysis. In particular, MTE1 reads must finish before a
+  // later MTE2 load can overwrite either candidate bank. Dynamic-address
+  // alloc_tile/TASSIGN alone does not provide that dependency. The slot index
+  // obeys the same [0, slot_count) contract as a declared MemRef subscript.
+  for (size_t remaining = banks.size() - 1; remaining > 0; --remaining) {
+    const size_t slot = remaining - 1;
+    const std::string slot_ssa = GetOrEmitConstant(static_cast<int64_t>(slot), scalar->dtype_);
+    const std::string condition = NewTemp();
+    Emit(condition + " = arith.cmpi eq, " + index_ssa + ", " + slot_ssa + " : " + index_type);
+    const std::string result = slot == 0 ? tile_buf : NewTemp();
+    Emit(result + " = arith.select " + condition + ", " + banks[slot] + ", " + selected + " : " + type_str);
+    selected = result;
+  }
+  RegisterTileBufType(tile_buf, type_str, tile_type);
+  RegisterMutableTileName(tile_buf);
+  return true;
+}
+
 void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
                                      const std::shared_ptr<const ir::TileType>& tile_type) {
   auto var_key = GetVarKey(tile_var);
@@ -1913,6 +2016,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   if (TryEmitMultiTileGet(ir::GetDefinedMemRef(tile_type), tile_buf, tile_var->span_)) {
     return;
   }
+  if (TryEmitAddressedSlotSelect(tile_var, tile_type, tile_buf)) return;
 
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
 

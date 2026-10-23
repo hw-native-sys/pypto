@@ -388,6 +388,9 @@ class PassPipeline:
 def init_mem_ref() -> Pass:
     """Create an init memref pass."""
 
+def lower_mat_value_rotation() -> Pass:
+    """Lower Mat loop/if value rotation to scalar selectors over isolated slots, before InitMemRef."""
+
 def materialize_semantic_aliases() -> Pass:
     """Create the semantic must-alias materialization pass (loop-carry / in-place)."""
 
@@ -1165,6 +1168,7 @@ __all__ = [
     "l0_tile_chooser",
     "skew_cross_core_pipeline",
     "lower_pipeline_loops",
+    "lower_mat_value_rotation",
     "canonicalize_io_order",
 ]
 

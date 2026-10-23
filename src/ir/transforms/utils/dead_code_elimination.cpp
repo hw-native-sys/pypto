@@ -96,6 +96,16 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) value = assign->value_;
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) value = eval->expr_;
   if (value && As<Submit>(value)) return true;
+  if (auto assign = As<AssignStmt>(stmt); assign && IsOp(As<Call>(value), "tile.load")) {
+    auto tile = As<TileType>(assign->var_->GetType());
+    auto storage = tile && tile->memref_ ? *tile->memref_ : nullptr;
+    // A load into a declared slot writes observable shared storage. Another
+    // Tile can read that slot without consuming this load's SSA result (for
+    // example a selector carried from the preceding loop iteration). Keep the
+    // write after InitMemRef clears is_pinned_ as well: slot_count_ survives
+    // allocation and describes the same explicit storage contract.
+    if (storage && (storage->is_pinned_ || storage->slot_count_ > 1)) return true;
+  }
   return side_effect_ops.count(GetStmtOpName(stmt)) > 0;
 }
 

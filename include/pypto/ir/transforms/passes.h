@@ -150,6 +150,16 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
 Pass InitMemRef();
 
 /**
+ * @brief Lower Mat prefetch value rotation to scalar selectors over isolated slots.
+ *
+ * Recognizes sequential loop carries whose value is selected from fresh Mat
+ * loads and the unchanged carry. Replaces Tile loop/if results with INDEX slot
+ * selectors and materializes each read at its selected slot. Runs before
+ * InitMemRef so every planner accounts for the complete bank allocation.
+ */
+Pass LowerMatValueRotation();
+
+/**
  * @brief Create the semantic must-alias materialization pass
  *
  * Propagates each loop-carried iter_arg/initValue MemRef down the yield/producer

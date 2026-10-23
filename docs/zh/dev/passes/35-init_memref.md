@@ -1,6 +1,38 @@
-# InitMemRef Pass
+# LowerMatValueRotation 与 InitMemRef
 
 物化编译器负责的 PTO level3 scratch，为所有变量初始化内存引用 (MemRef)，并创建地址未分配的 alloc 操作。
+
+## 存储初始化前的 Mat 值轮转
+
+`LowerMatValueRotation` 紧接在 `InitMemRef` 之前运行。循环携带的 Mat 值可能表示
+“下一轮改读刚预取的面板”，而非“把整块面板复制回初始分配”。PTO 不支持 Mat→Mat
+复制；将 current 与 next 强行放进同一个窗口，又会在当前数据被消费之前覆盖它。
+
+对于由 load 产生、静态描述符一致的 Mat 携带值，此 Pass 用标量槽位下标表示变化的引用。
+它在一块分配中保留互不重叠的槽位，将初始 load 和后续 load 放进相应槽位，并把 Mat
+分支结果与循环携带值转换为标量结果与携带值。保持当前面板的分支只需保持下标，
+无需加载或复制数据。初始下标保证零轮循环保留初值，最终下标则保证奇数轮和偶数轮
+结束后都能找到正确面板。独立的 Mat 数据流使用独立分配。
+先消费旧面板、再加载替代面板的循环保留原有单 bank 下降方式。
+
+普通 current/next 场景需要两块面板的存储。若循环结束后还独立观察原始面板，则必须
+保护它的槽位，并另留两个工作槽位。多个可能同时存活的新值生产者也需要独立槽位；
+Pass 不会为强凑双槽而抹去真实活跃区间。用户声明的分配以及不受支持的生产者或
+描述符关系保留原有语义。
+若外层循环再次进入轮转、但没有重新加载初值，也必须保护初始面板。轮转值若逃逸到
+不相关区域的携带值，则需要联合规划活跃区间，不能单独改写。
+此转换用于 `PYPTO` 与 `DSA_RP`；由 PTOAS 负责规划的多缓冲区域仍走原有路径。
+
+使用带地址的内存规划器时，PTO 生成器为每个 Mat bank 声明常量地址，再通过
+`arith.select` 选择描述符。PTOAS 因而能沿选择追踪到每一个可能的存储来源，其插入的
+同步同时保护 MTE2→MTE1 的数据就绪依赖，以及后续迭代覆盖 bank 前的 MTE1→MTE2
+依赖。直接在运行时地址创建新的 `alloc_tile` 会丢失这种来源关系。这里选择的只是
+描述符，不会复制 Mat 内容。保守合并候选 bank 的别名可能减少重叠，因此编译成功
+本身不能证明性能收益。
+
+此规范化沿用现有 MemRef 槽位语义。默认的整核 Buffer IR 能力检查会使带槽位的核继续
+走 Tile 路径，其他核仍使用其选定表示。自定义 pipeline 应在 `passes.init_mem_ref()`
+之前调度 `passes.lower_mat_value_rotation()`。
 
 ## 概述
 
@@ -26,12 +58,14 @@
 
 | C++ | Python | 级别 |
 | --- | ------ | ---- |
+| `pass::LowerMatValueRotation()` | `passes.lower_mat_value_rotation()` | 函数级 |
 | `pass::InitMemRef()` | `passes.init_mem_ref()` | 函数级 |
 
 **工厂函数**：
 
 ```cpp
 Pass InitMemRef();
+Pass LowerMatValueRotation();
 ```
 
 **Python 用法**：
@@ -89,6 +123,10 @@ program_with_memrefs = init_pass(program)
 
 本 pass 会**消费**掉这个声明：它产出的 MemRef 是一个携带推导大小的普通 MemRef，标志位已清除。
 此后由分配点的 `pinned=True` kwarg 标记该分配归作者所有。
+
+解析 pinned 槽位声明之前，Pass 先按当前 SSA 绑定替换下标表达式。因此解析后的字节偏移
+与保留的槽位下标都会引用重新构建的标量循环参数。写入已声明槽位的 load 即使没有
+SSA 结果消费者，也仍是可观察的存储写入；死代码删除必须保留它，供后续选中该槽位时读取。
 
 槽位信息是例外——`slot_count_` 与 `slot_index_` 会保留在解析后的 MemRef 上。把下标折算进
 `byte_offset_` 回答的是槽位**落在哪里**，并不改变"这是某块 N 槽分配的第 k 个槽位"这一事实；

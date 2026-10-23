@@ -68,7 +68,7 @@ Keep the English and Chinese documentation synchronized.
 | 32 | [LowerPipelineLoops](32-lower_pipeline_loops.md) | Replicates `pl.pipeline(N, stage=F)` bodies `F` times to enable ping-pong buffering |
 | 33 | [CanonicalizeIOOrder](33-canonicalize_io_order.md) | Reorders pipeline-body statements along the scalar → load → compute → store ladder |
 | 34 | [MaterializeTensorStrides](34-materialize_tensor_strides.md) | Fills in the packed canonical stride for every tensor view that carries none |
-| 35 | [InitMemRef](35-init_memref.md) | Initializes MemRefs and creates alloc operations with unallocated addresses |
+| 35 | [LowerMatValueRotation / InitMemRef](35-init_memref.md) | Lowers Mat references to scalar slot selectors, then initializes MemRefs and allocations |
 | 36 | [SelectBufferIRFunctions / MaterializeSemanticAliases](36-materialize_semantic_aliases.md) | Forces buffers that program semantics require to be one allocation (loop-carry, in-place) |
 | 37 | [MemoryReuse](37-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs; skipped with `memory_planner=DSA_RP` or `PTOAS` |
 | 38 | [AllocateMemoryAddr](38-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations; skipped with `memory_planner=PTOAS` |

@@ -193,9 +193,15 @@ than Vec / Mat / Acc, a runtime valid shape, or a slot carried out of an `if` or
 phi. Those are errors naming the shape, not silent fallbacks, because a fallback would
 undo the separation you declared.
 
-The default PyPTO planner is unaffected: it bakes addresses and keeps the `alloc_tile`
-form. A region at `--pto-level=level3` needs an explicit base `addr`, which codegen does
-not emit yet; ptoas itself has supported that form since 0.55
+The addressed planners bake addresses into `alloc_tile`. For Mat slots with static
+valid extents and a proven constant arena origin, codegen declares the banks at constant
+addresses and selects their descriptors with `arith.select`. This preserves every possible
+backing bank in native dependency analysis, including read completion before a later
+prefetch overwrites a bank. Slot indices must select a slot in `[0, N)`; the caller owns
+that runtime condition. Other slot forms keep their existing address lowering.
+
+A region at `--pto-level=level3` needs an explicit base `addr`, which codegen does not emit
+yet; ptoas itself has supported that form since 0.55
 ([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106), closed).
 
 A declared name lives in its own namespace — it never resolves to a Python variable that
