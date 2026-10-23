@@ -95,4 +95,4 @@ inline expansion, diagnostics and parser component integration.
 
 ## Documentation
 
-See [`docs/en/dev/ir/07-parser.md`](../../../../../docs/en/dev/ir/07-parser.md) for complete documentation.
+See [`docs/en/dev/ir/07-parser.md`](../../../../docs/en/dev/ir/07-parser.md) for complete documentation.
