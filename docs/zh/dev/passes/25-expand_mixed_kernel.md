@@ -32,6 +32,14 @@ active lane 共用同一份 `CoreTaskArgs` payload。因此，两个已编译 ke
 或 `Submit`，使其转发完整参数列表。未使用的参数仍是合法的 wrapper 参数；克隆后的
 函数体依旧只引用原调用实际使用的值。
 
+归一化还会使用与内联展开相同的类型绑定规则，将成员形参类型中的动态维度绑定到
+改写后的 Group 实参。绑定同时应用于局部别名、循环携带值、表达式类型和声明的返回
+类型。例如，成员的工作区 `Tensor[[8, N]]` 接收 Group 的工作区
+`Tensor[[8, t + 32]]` 时，克隆后的函数体必须始终使用 `t + 32`，不能在类型中残留
+未绑定的成员局部符号 `N`。替换只应用一次，以保留调用者尺寸表达式的原始含义。
+扩展参数后的 `Call`/`Submit` 结果及接收结果的别名也使用归一化后的成员返回类型，
+并保留 Submit 末尾的 TaskId。
+
 本 Pass 首先保存 producer 每个返回位置及其所属函数中的 SSA 表达式、类型和可选
 输出形参绑定。`GroupOutputBindings` 沿 consumer 实参的 SSA 别名和 tuple 投影，
 确定它对应哪个 producer 调用的哪个输出，再解析调用点实际传入的存储，将其绑定到
@@ -59,6 +67,8 @@ Pass 会拒绝该 Group，并要求两个声明使用相同签名。
 归一化发生在 `InjectGMPipeBuffer` 之前，因此后端注入的 `__gm_pipe_buffer` 会追加到
 已经一致的两个成员签名末尾。该过程不需要 `sync_start`：AIC 与 AIV 是同一个 mixed
 task 的 subslot，而 `sync_start` 控制的是多 block SPMD 启动准入。
+当 Group 经由外层 `Spmd` wrapper 调用时，编排代码生成会沿完整缓冲区别名链追溯到
+wrapper 形参，再排列共享参数 payload。
 
 ## 不可切分的转置：已前移，不在本 pass
 

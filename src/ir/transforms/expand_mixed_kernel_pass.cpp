@@ -44,6 +44,8 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/call_shape_binding.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
@@ -51,6 +53,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/deferred_wait_contract.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -60,6 +63,7 @@
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -2782,12 +2786,6 @@ class GroupAbiArgSubstituter : public IRMutator {
     }
   }
 
-  explicit GroupAbiArgSubstituter(const std::unordered_map<const Var*, ExprPtr>& substitutions) {
-    for (const auto& [var, value] : substitutions) var_remap_.emplace(var, value);
-  }
-
-  TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
-
  protected:
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
     if (auto it = var_remap_.find(op.get()); it != var_remap_.end()) {
@@ -2820,9 +2818,10 @@ FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo
   std::unordered_set<const Var*> parameter_set;
   for (const auto& param : adapter_params) parameter_set.insert(param.get());
 
-  // Bind every original member parameter to the corresponding Group call-site
-  // expression, rewritten onto the adapter's fresh canonical parameters.
-  std::unordered_map<const Var*, ExprPtr> member_to_adapter;
+  // Resolve all actuals onto the fresh canonical parameters before inferring
+  // type bindings, so their dimensions cannot capture the original Group ABI.
+  std::vector<ExprPtr> adapter_args;
+  adapter_args.reserve(callee->params_.size());
   for (size_t i = 0; i < callee->params_.size(); ++i) {
     auto argument = substitute_arg.VisitExpr(call->args_[i]);
     var_collectors::VarDefUseCollector uses;
@@ -2841,18 +2840,28 @@ FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo
                                      << "' argument " << i << ": Group-local value '" << var->name_hint_
                                      << "' has no output or parameter binding";
     }
-    member_to_adapter.emplace(callee->params_[i].get(), std::move(argument));
+    adapter_args.push_back(std::move(argument));
+  }
+  // Parameter substitution alone leaves member-local dimensions in aliases,
+  // loop state, and return types. Seed DeepClone with the same type bindings
+  // used by inline expansion, then give explicit parameter values precedence
+  // when a scalar parameter also appears in shaped type metadata.
+  auto member_to_adapter = DeduceCallTypeBindings(callee->params_, adapter_args);
+  for (size_t i = 0; i < callee->params_.size(); ++i) {
+    member_to_adapter[callee->params_[i].get()] = adapter_args[i];
   }
   auto cloned = DeepClone(callee->body_, member_to_adapter);
   StmtPtr adapter_body = cloned.cloned_body;
   if (!peer_renames.empty()) {
     adapter_body = PeerFuncRewriter(peer_renames).VisitStmt(adapter_body);
   }
-  GroupAbiArgSubstituter substitute_member(member_to_adapter);
+  // Match DeepClone's one-step seed substitution: actual extent expressions
+  // belong to the caller, so N -> N + 32 must not expand N a second time.
+  CallShapeInstantiation substitute_member(member_to_adapter);
   std::vector<TypePtr> return_types;
   return_types.reserve(callee->return_types_.size());
   for (const auto& type : callee->return_types_) {
-    return_types.push_back(substitute_member.RemapType(type));
+    return_types.push_back(substitute_member.InstantiateType(type));
   }
 
   return std::make_shared<Function>(adapter_name, std::move(adapter_params), group->param_directions_,
@@ -2863,38 +2872,85 @@ FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo
 
 class GroupMemberCallRewriter : public IRMutator {
  public:
-  GroupMemberCallRewriter(std::unordered_map<std::string, std::string> callee_renames,
+  GroupMemberCallRewriter(std::unordered_map<std::string, FunctionPtr> callees,
                           std::vector<VarPtr> canonical_args, GroupAbiArgIndices canonical_arg_indices)
-      : callee_renames_(std::move(callee_renames)),
+      : callees_(std::move(callees)),
         canonical_args_(std::move(canonical_args)),
         canonical_arg_indices_(std::move(canonical_arg_indices)) {}
 
+  static void ValidateMemberAttrs(const WrapperCallInfo& member,
+                                  const GroupAbiArgIndices& canonical_arg_indices) {
+    const auto& call = member.inner_call;
+    RemapPositionalAttrs(call->attrs_, call->args_, call->op_, call->span_, canonical_arg_indices);
+  }
+
  protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto updated = As<AssignStmt>(IRMutator::VisitStmt_(op));
+    if (updated->value_.get() == op->value_.get() || !As<Var>(updated->var_)) return updated;
+    auto type = WithCarriedMemRef(GetAuthoritativeAssignmentType(updated->var_->GetType(), updated->value_),
+                                  updated->var_->GetType());
+    if (structural_equal(type, updated->var_->GetType())) return updated;
+    // A rewritten call can refine its result extent. Retype its SSA receiver
+    // and subsequent aliases/projections as well as the expression itself.
+    auto fresh = std::make_shared<Var>(updated->var_->name_hint_, type, updated->var_->span_);
+    var_remap_[op->var_.get()] = fresh;
+    auto result = MutableCopy(updated);
+    result->var_ = std::move(fresh);
+    return result;
+  }
+
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto gv = As<GlobalVar>(op->op_);
-    auto it = gv ? callee_renames_.find(gv->name_) : callee_renames_.end();
-    if (it == callee_renames_.end()) return IRMutator::VisitExpr_(op);
+    auto it = gv ? callees_.find(gv->name_) : callees_.end();
+    if (it == callees_.end()) return IRMutator::VisitExpr_(op);
     std::vector<ExprPtr> args(canonical_args_.begin(), canonical_args_.end());
-    return std::make_shared<Call>(std::make_shared<GlobalVar>(it->second), std::move(args), op->kwargs_,
-                                  RemapPositionalAttrs(op->attrs_, op->args_, op->op_, op->span_),
-                                  op->GetType(), op->span_);
+    auto type = InstantiateResultType(it->second, op->GetType(), false);
+    return std::make_shared<Call>(
+        std::make_shared<GlobalVar>(it->second->name_), std::move(args), op->kwargs_,
+        RemapPositionalAttrs(op->attrs_, op->args_, op->op_, op->span_, canonical_arg_indices_), type,
+        op->span_);
   }
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override {
     auto gv = As<GlobalVar>(op->op_);
-    auto it = gv ? callee_renames_.find(gv->name_) : callee_renames_.end();
-    if (it == callee_renames_.end()) return IRMutator::VisitExpr_(op);
+    auto it = gv ? callees_.find(gv->name_) : callees_.end();
+    if (it == callees_.end()) return IRMutator::VisitExpr_(op);
     std::vector<ExprPtr> args(canonical_args_.begin(), canonical_args_.end());
+    auto type = InstantiateResultType(it->second, op->GetType(), true);
     return std::make_shared<Submit>(
-        std::make_shared<GlobalVar>(it->second), std::move(args), op->deps_, op->kwargs_,
-        RemapPositionalAttrs(op->attrs_, op->args_, op->op_, op->span_), op->GetType(), op->span_,
-        op->core_num_, op->sync_start_, op->allow_early_resolve_, op->predicate_);
+        std::make_shared<GlobalVar>(it->second->name_), std::move(args), op->deps_, op->kwargs_,
+        RemapPositionalAttrs(op->attrs_, op->args_, op->op_, op->span_, canonical_arg_indices_), type,
+        op->span_, op->core_num_, op->sync_start_, op->allow_early_resolve_, op->predicate_);
   }
 
  private:
-  std::vector<std::pair<std::string, std::any>> RemapPositionalAttrs(
+  TypePtr InstantiateResultType(const FunctionPtr& callee, const TypePtr& original, bool submit) const {
+    // Preserve the existing void/legacy inferred-return contract when there is
+    // no declared result. A nonempty result must follow the normalized callee,
+    // rather than retain a type inferred from the member's old signature.
+    if (callee->return_types_.empty()) return original;
+    CallShapeMap bindings;
+    for (size_t i = 0; i < canonical_args_.size(); ++i) {
+      bindings.emplace(callee->params_[i].get(), canonical_args_[i]);
+    }
+    CallShapeInstantiation instantiate(std::move(bindings));
+    std::vector<TypePtr> types;
+    for (const auto& type : callee->return_types_) types.push_back(instantiate.InstantiateType(type));
+    if (!submit && types.size() == 1) return types.front();
+    if (submit) {
+      auto tuple = As<TupleType>(original);
+      INTERNAL_CHECK_SPAN(tuple && tuple->types_.size() == types.size() + 1, callee->span_)
+          << "Internal error: Group member Submit result must retain its trailing TaskId";
+      types.push_back(tuple->types_.back());
+    }
+    return std::make_shared<TupleType>(std::move(types));
+  }
+
+  static std::vector<std::pair<std::string, std::any>> RemapPositionalAttrs(
       const std::vector<std::pair<std::string, std::any>>& source_attrs,
-      const std::vector<ExprPtr>& source_args, const OpPtr& source_op, const Span& source_span) const {
+      const std::vector<ExprPtr>& source_args, const OpPtr& source_op, const Span& source_span,
+      const GroupAbiArgIndices& canonical_arg_indices) {
     std::vector<std::pair<std::string, std::any>> attrs;
     attrs.reserve(source_attrs.size());
     for (const auto& [key, value] : source_attrs) {
@@ -2918,8 +2974,8 @@ class GroupMemberCallRewriter : public IRMutator {
             << "Internal error: " << kAttrArgDirectionOverrides << " index " << old_index
             << " is out of range for Group member call to '" << source_op->name_ << "'";
         const auto& old_arg = source_args[static_cast<size_t>(old_index)];
-        auto canonical_it = canonical_arg_indices_.find(old_arg.get());
-        CHECK_SPAN(canonical_it != canonical_arg_indices_.end(), source_span)
+        auto canonical_it = canonical_arg_indices.find(old_arg.get());
+        CHECK_SPAN(canonical_it != canonical_arg_indices.end(), source_span)
             << "Cannot map pl.no_dep argument " << old_index << " of Group member '" << source_op->name_
             << "' to a canonical Group parameter";
         remapped_indices.push_back(canonical_it->second);
@@ -2929,7 +2985,7 @@ class GroupMemberCallRewriter : public IRMutator {
     return attrs;
   }
 
-  std::unordered_map<std::string, std::string> callee_renames_;
+  std::unordered_map<std::string, FunctionPtr> callees_;
   std::vector<VarPtr> canonical_args_;
   GroupAbiArgIndices canonical_arg_indices_;
 };
@@ -3012,16 +3068,21 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
     // explicit Out parameters; missing carriers are diagnosed before cloning.
     GroupOutputBindings output_bindings(group, program, output_summaries);
     auto canonical_arg_indices = BuildGroupAbiArgIndices(group, aic, aiv, program, output_bindings);
-    std::unordered_map<std::string, std::string> callee_renames = {{aic.inner_callee->name_, aic_name},
-                                                                   {aiv.inner_callee->name_, aiv_name}};
-    auto mutable_group = MutableCopy(group);
-    mutable_group->body_ =
-        GroupMemberCallRewriter(std::move(callee_renames), group->params_, canonical_arg_indices)
-            .VisitStmt(group->body_);
+    // Keep call-site metadata diagnostics ahead of body cloning: an invalid
+    // no_dep argument must name its canonical-parameter binding failure before
+    // a member adapter can report the same value as a missing output carrier.
+    GroupMemberCallRewriter::ValidateMemberAttrs(aic, canonical_arg_indices);
+    GroupMemberCallRewriter::ValidateMemberAttrs(aiv, canonical_arg_indices);
     auto normalized_aic =
         BuildGroupAbiAdapter(group, aic, aic_name, peer_renames, canonical_arg_indices, output_bindings);
     auto normalized_aiv =
         BuildGroupAbiAdapter(group, aiv, aiv_name, peer_renames, canonical_arg_indices, output_bindings);
+    // Normalize member signatures before rebuilding their call result types.
+    std::unordered_map<std::string, FunctionPtr> callees = {{aic.inner_callee->name_, normalized_aic},
+                                                            {aiv.inner_callee->name_, normalized_aiv}};
+    auto mutable_group = MutableCopy(group);
+    mutable_group->body_ = GroupMemberCallRewriter(std::move(callees), group->params_, canonical_arg_indices)
+                               .VisitStmt(group->body_);
     if (needs_dual_aiv_dispatch) normalized_aiv = WithDualAivDispatch(normalized_aiv);
     if (exclusive_pair) {
       replacements[aic_name] = normalized_aic;

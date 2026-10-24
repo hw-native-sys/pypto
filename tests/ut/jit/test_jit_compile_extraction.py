@@ -779,6 +779,98 @@ def test_nz_whole_tensor_flatten_compiles_with_explicit_incore_helper():
     assert "pto.tstore" in source
 
 
+@pytest.mark.parametrize("clustered", [False, True], ids=["separate", "clustered"])
+def test_group_rebinds_dynamic_internal_workspace_extents(clustered, tmp_path):
+    """Issue #3138: a mixed Group must bind local and loop-carried workspace types."""
+    caller_extent = pl.dynamic("MIX_CALLER_T")
+    member_extent = pl.dynamic("MIX_MEMBER_N")
+    group_extent = pl.dynamic("MIX_GROUP_M")
+
+    @jit.incore
+    def cube(
+        left: pl.Tensor[[16, 16], pl.BF16],
+        right: pl.Tensor[[16, 16], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ):
+        a = pl.load(left, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        b = pl.load(right, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        value = pl.matmul(a, b, out_dtype=pl.FP32)
+        pl.store(value, [0, 0], out)
+        return out
+
+    @jit.incore
+    def vector(
+        work: pl.InOut[pl.Tensor[[8, member_extent], pl.FP32]],
+        out: pl.Out[pl.Tensor[[2, 16], pl.FP32]],
+    ):
+        pl.func_attr({"split_aiv": True})
+        lane = pl.tile.get_subblock_idx()
+        saved = work
+        for part in pl.range(2):
+            value = pl.full([1, 16], dtype=pl.FP32, value=1.0)
+            work[lane : lane + 1, part * 16 : part * 16 + 16] = value
+        first = pl.read(work, [lane, 0])
+        pl.write(out, [lane, 0], first)
+        return saved, out
+
+    @jit.inline(auto_scope=False)
+    def mixed_group(
+        work: pl.Tensor[[8, group_extent], pl.FP32],
+        left: pl.Tensor[[16, 16], pl.BF16],
+        right: pl.Tensor[[16, 16], pl.BF16],
+        cube_out: pl.Tensor[[16, 16], pl.FP32],
+        vec_out: pl.Tensor[[2, 16], pl.FP32],
+    ):
+        with pl.cluster(name_hint="mixed_extent"):
+            cube_out = cube(left, right, cube_out)
+            work, vec_out = vector(work, vec_out)
+        return work, cube_out, vec_out
+
+    @jit
+    def clustered_entry(
+        size: pl.Tensor[[caller_extent], pl.INT32],
+        left: pl.Tensor[[16, 16], pl.BF16],
+        right: pl.Tensor[[16, 16], pl.BF16],
+        cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        vec_out: pl.Out[pl.Tensor[[2, 16], pl.FP32]],
+    ):
+        t = pl.tensor.dim(size, 0)
+        work = pl.create_tensor([8, t + 32], dtype=pl.FP32)
+        work, cube_out, vec_out = mixed_group(work, left, right, cube_out, vec_out)
+
+    @jit
+    def separate_entry(
+        size: pl.Tensor[[caller_extent], pl.INT32],
+        left: pl.Tensor[[16, 16], pl.BF16],
+        right: pl.Tensor[[16, 16], pl.BF16],
+        cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        vec_out: pl.Out[pl.Tensor[[2, 16], pl.FP32]],
+    ):
+        t = pl.tensor.dim(size, 0)
+        work = pl.create_tensor([8, t + 32], dtype=pl.FP32)
+        with pl.spmd(1):
+            cube_out = cube(left, right, cube_out)
+        with pl.spmd(1):
+            work, vec_out = vector(work, vec_out)
+
+    # Both paths use the same incore helpers and workspace. The mixed path
+    # used to leave MIX_GROUP_M in the vector alias/loop types after replacing
+    # the parameter's physical extent, failing later during PTO emission.
+    entry = clustered_entry if clustered else separate_entry
+    compiled = entry.compile(
+        config=RunConfig(
+            backend_type=BackendType.Ascend910,
+            execution_mode=ExecutionMode.ONBOARD,
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            save_kernels_dir=str(tmp_path / "compiled"),
+        )
+    )
+    assert isinstance(compiled, CompiledProgram)
+    # Full source generation, rather than lower(), exercises the failing
+    # symbol materialization without requiring PTOAS or an NPU.
+    assert list(Path(compiled.output_dir).rglob("*.pto"))
+
+
 @pytest.mark.parametrize("source_layout", [pl.ND, pl.NZ])
 def test_reshape_nd_result_is_not_overridden_by_helper_layout(source_layout):
     """Known reshape metadata takes precedence over the helper's declared layout."""

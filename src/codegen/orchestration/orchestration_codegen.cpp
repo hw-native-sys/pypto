@@ -2402,8 +2402,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///
   /// ``bridge_call`` is the Group call inside the Spmd-wrapper body
   /// (``FindFirstInnerCall(spmd_func).inner_call``); its args are positionally
-  /// 1:1 with the Group's params and reference the Spmd-wrapper params (or
-  /// constants). ``bridge_func`` is the Spmd wrapper, whose params are
+  /// 1:1 with the Group's params and reference the Spmd-wrapper params,
+  /// complete-parameter SSA aliases, or constants. ``bridge_func`` is the Spmd wrapper, whose params are
   /// positionally 1:1 with ``outer_call->args_``. An empty ``bridge_func``
   /// means "no bridge" (plain-Spmd / direct-Group): ``wrapper_func`` IS the
   /// function ``outer_call`` invokes, and the legacy 1-hop lookup is correct.
@@ -2450,19 +2450,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << ". DeriveCallDirections must run before orchestration codegen.";
 
     // Second hop for the Spmd-wrapped Group case (see WrapperBridge): map each
-    // Spmd-wrapper param Var to its position, which is positionally 1:1 with
-    // ``outer_call->args_`` (because ``outer_call`` invokes the Spmd wrapper).
+    // Group actual to its Spmd-wrapper parameter position, which is
+    // positionally 1:1 with ``outer_call->args_``. Inline argument handles may
+    // leave SSA alias chains in this wrapper; require complete-parameter
+    // lineage so a view or a fresh allocation cannot forward the wrong tensor.
     const bool has_bridge = (bridge.bridge_func != nullptr);
-    std::unordered_map<const Var*, size_t> outer_param_to_arg_idx;
+    const std::vector<std::optional<size_t>>* bridge_param_indices = nullptr;
     if (has_bridge) {
       // A non-null bridge_func always pairs with a non-null bridge_call (the
       // Group call inside it); guard here so resolve_outer_arg can safely read
       // bridge.bridge_call->span_ below.
       INTERNAL_CHECK(bridge.bridge_call != nullptr)
           << "Internal error: WrapperBridge has a non-null bridge_func but a null bridge_call.";
-      for (size_t i = 0; i < bridge.bridge_func->params_.size(); ++i) {
-        outer_param_to_arg_idx[bridge.bridge_func->params_[i].get()] = i;
+      auto [it, inserted] = wrapper_bridge_param_indices_cache_.try_emplace(bridge.bridge_func.get());
+      if (inserted) {
+        it->second = return_lineage::TraceExprsToParamIndices(
+            bridge.bridge_call->args_, bridge.bridge_func->body_, bridge.bridge_func->params_, program_);
       }
+      bridge_param_indices = &it->second;
     }
 
     // Resolve a ``wrapper_func`` (Group/Spmd) param position to the concrete
@@ -2477,7 +2482,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // With bridge (Spmd-wrapped Group): ``wrapper_idx`` is a Group param index.
     // The Group call inside the Spmd wrapper (``bridge.bridge_call``) passes one
     // expr per Group param at the same position; that expr is a Spmd-wrapper
-    // param (resolved to its outer arg) or a constant.
+    // param or a complete-parameter SSA alias (resolved to its outer arg), or
+    // a constant.
     constexpr size_t kNoDir = static_cast<size_t>(-1);
     auto resolve_outer_arg = [&](size_t wrapper_idx, size_t* dir_idx) -> ExprPtr {
       if (!has_bridge) {
@@ -2496,16 +2502,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
         *dir_idx = kNoDir;  // constant in the Spmd-wrapper body -> emit inline
         return bridge_arg;
       }
-      auto oit = outer_param_to_arg_idx.find(bridge_var.get());
-      INTERNAL_CHECK_SPAN(oit != outer_param_to_arg_idx.end(), bridge.bridge_call->span_)
+      const auto& outer_idx = (*bridge_param_indices)[wrapper_idx];
+      INTERNAL_CHECK_SPAN(outer_idx.has_value(), bridge.bridge_call->span_)
           << "Internal error: Spmd-wrapper arg for Group '" << wrapper_func->name_ << "' param "
           << wrapper_idx << " does not map to any Spmd-wrapper parameter (deduped/aliased arg tracking "
           << "is inconsistent).";
-      INTERNAL_CHECK_SPAN(oit->second < outer_call->args_.size(), outer_call->span_)
-          << "Internal error: outer arg index " << oit->second << " out of range ("
-          << outer_call->args_.size() << " args).";
-      *dir_idx = oit->second;
-      return outer_call->args_[oit->second];
+      INTERNAL_CHECK_SPAN(*outer_idx < outer_call->args_.size(), outer_call->span_)
+          << "Internal error: outer arg index " << *outer_idx << " out of range (" << outer_call->args_.size()
+          << " args).";
+      *dir_idx = *outer_idx;
+      return outer_call->args_[*outer_idx];
     };
 
     // Per-call selective dump rides on the outer Call's ``kAttrDumpVars``
@@ -3709,8 +3715,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // The Group is dispatched THROUGH this Spmd wrapper: ``call`` invokes
       // ``spmd_func``, not the Group. Pass the Group call inside the wrapper
       // (``info.inner_call``) as the bridge: its args are positionally 1:1 with
-      // the Group's params, and each arg references a ``spmd_func`` param (or a
-      // constant) — so BuildWrapperReorderedParams can map Group params ->
+      // the Group's params, and each arg references a ``spmd_func`` param,
+      // complete-parameter alias, or constant — so BuildWrapperReorderedParams can map Group params ->
       // Spmd-wrapper params -> outer args even when an aliased-arg dedup shrank
       // the wrapper's param count below the Group's.
       GenerateGroupCallCode(call, info.inner_callee, spmd_func, capture_plain_task_id,
@@ -4783,6 +4789,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// from re-walking the same callee body and stays within the O(N log N) pass
   /// budget.
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_param_indices_cache_;
+  /// The program and each wrapper's first inner call are immutable during
+  /// emission. Key by the owning function: Submit lookups create transient Call
+  /// views. Repeated dispatches then share one batch lineage/body index.
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> wrapper_bridge_param_indices_cache_;
 };
 
 /// Collect, in deterministic order, the Graph functions this entry launches.

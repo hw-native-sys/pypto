@@ -634,6 +634,253 @@ def test_hand_written_group_rebinds_shared_inout_results(reuse_members):
             ir.assert_structural_equal(retained, original)
 
 
+@pytest.mark.parametrize("reuse_members", [False, True])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_hand_written_group_rebinds_dynamic_member_types(reuse_members, use_submit):
+    """The widened ABI must specialize aliases, both loop kinds, and returns (#3138)."""
+    member_cols = pl.dynamic("MEMBER_COLS")
+    group_cols = pl.dynamic("GROUP_COLS")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(self, marker: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return marker
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self, work: pl.InOut[pl.Tensor[[8, member_cols], pl.FP32]]
+        ) -> pl.Tensor[[8, member_cols], pl.FP32]:
+            saved = work
+            for _part, (carry,) in pl.range(2, init_values=(saved,)):
+                updated = carry
+                for_result = pl.yield_(updated)
+            for carry, count in pl.while_(init_values=(for_result, 0)):
+                pl.cond(count < 2)
+                updated = carry
+                while_result, _count = pl.yield_(updated, count + 1)
+            return while_result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, group_cols + 32], pl.FP32]],
+        ) -> pl.Tensor[[8, group_cols + 32], pl.FP32]:
+            _marker = self.cube_side(marker)
+            work = self.vec_side(work)
+            return work
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, group_cols + 32], pl.FP32]],
+        ) -> pl.Tensor[[8, group_cols + 32], pl.FP32]:
+            _marker, _cube_tid = pl.submit(self.cube_side, marker)
+            work, _vec_tid = pl.submit(self.vec_side, work)
+            return work
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, member_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, member_cols], pl.FP32]:
+            _marker = self.cube_side(marker)
+            return self.vec_side(work)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, group_cols + 32], pl.FP32]],
+        ) -> pl.Tensor[[8, group_cols + 32], pl.FP32]:
+            saved = work
+            for _part, (carry,) in pl.range(2, init_values=(saved,)):
+                updated = carry
+                for_result = pl.yield_(updated)
+            for carry, count in pl.while_(init_values=(for_result, 0)):
+                pl.cond(count < 2)
+                updated = carry
+                while_result, _count = pl.yield_(updated, count + 1)
+            return while_result
+
+    group_name = "mixed_submit" if use_submit else "mixed_call"
+    retained_names = {"cube_side", "vec_side", group_name}
+    if reuse_members:
+        retained_names.add("main")
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in retained_names], Before.name, Before.span
+    )
+    prepared = passes.infer_tile_memory_space()(passes.convert_to_ssa()(before))
+    expected = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected)).get_function("vec_side")
+    after = passes.expand_mixed_kernel()(prepared)
+    adapter_name = f"{group_name}_aiv_adapter" if reuse_members else "vec_side"
+    adapter = after.get_function(adapter_name)
+    assert adapter is not None and expected is not None
+    ir.assert_structural_equal(adapter, expected)
+
+    group = after.get_function(group_name)
+    assert group is not None
+    launches = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, (ir.Call, ir.Submit))
+    ]
+    assert len(launches) == 2
+    assert all(isinstance(launch, ir.Submit if use_submit else ir.Call) for launch in launches)
+    assert all(list(launch.args) == list(group.params) for launch in launches)
+    if reuse_members:
+        # Specializing this Group must not change separately dispatched members.
+        for name in ("cube_side", "vec_side"):
+            retained = after.get_function(name)
+            original = prepared.get_function(name)
+            assert retained is not None and original is not None
+            ir.assert_structural_equal(retained, original)
+
+
+@pytest.mark.parametrize("use_submit", [False, True])
+@pytest.mark.parametrize("shared_symbol", [False, True], ids=["static-extent", "caller-owned-symbol"])
+def test_hand_written_group_substitutes_member_extents_once(shared_symbol, use_submit):
+    """Caller-owned expressions stay intact when they contain the formal symbol."""
+    member_cols = pl.dynamic("MEMBER_COLS")
+    actual_cols = member_cols + 32 if shared_symbol else 64
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(self, marker: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return marker
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self, work: pl.InOut[pl.Tensor[[8, member_cols], pl.FP32]]
+        ) -> pl.Tensor[[8, member_cols], pl.FP32]:
+            saved = work
+            return saved
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, actual_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, actual_cols], pl.FP32]:
+            _marker = self.cube_side(marker)
+            result = self.vec_side(work)
+            alias = result
+            return alias
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, actual_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, actual_cols], pl.FP32]:
+            _marker, _cube_tid = pl.submit(self.cube_side, marker)
+            result, _vec_tid = pl.submit(self.vec_side, work)
+            alias = result
+            return alias
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, actual_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, actual_cols], pl.FP32]:
+            saved = work
+            return saved
+
+    group_name = "mixed_submit" if use_submit else "mixed_call"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in {"cube_side", "vec_side", group_name}],
+        Before.name,
+        Before.span,
+    )
+    after = _run_pipeline(before)
+    expected = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    member = after.get_function("vec_side")
+    expected_member = expected.get_function("vec_side")
+    assert member is not None and expected_member is not None
+    ir.assert_structural_equal(member, expected_member)
+    # The Group's receiver, Submit projections, and aliases must agree with
+    # the corrected adapter return type, not retain a recursively expanded size.
+    group = after.get_function(group_name)
+    assert group is not None
+    statements = ir.flatten_to_stmts(group.body)
+    for statement in statements:
+        if isinstance(statement, ir.AssignStmt):
+            ir.assert_structural_equal(statement.var.type, statement.value.type)
+    assert isinstance(statements[-1], ir.ReturnStmt)
+    ir.assert_structural_equal(statements[-1].value[0].type, expected_member.return_types[0])
+
+
+def test_hand_written_group_rebinds_scalar_parameter_used_as_extent():
+    """A scalar used in type fields and values must name one canonical parameter."""
+    cols = pl.dynamic("cols")
+    width = pl.dynamic("width")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(self, marker: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return marker
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            cols: pl.Scalar[pl.INDEX],
+            work: pl.InOut[pl.Tensor[[8, cols], pl.FP32]],
+        ):
+            saved = work
+            _next_col = cols + 1
+            return saved
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            width: pl.Scalar[pl.INDEX],
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, width], pl.FP32]],
+        ):
+            _marker = self.cube_side(marker)
+            work = self.vec_side(width, work)
+            return work
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            width: pl.Scalar[pl.INDEX],
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, width], pl.FP32]],
+        ):
+            saved = work
+            _next_col = width + 1
+            return saved
+
+    after = _run_pipeline(Before)
+    expected = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    member = after.get_function("vec_side")
+    expected_member = expected.get_function("vec_side")
+    assert member is not None and expected_member is not None
+    ir.assert_structural_equal(member, expected_member)
+    # Structural equality alone also permits renamed binders. Pin this exact
+    # identity because codegen looks up the scalar by its parameter Var.
+    work_type = member.params[2].type
+    saved = ir.flatten_to_stmts(member.body)[0]
+    assert isinstance(saved, ir.AssignStmt)
+    saved_type = saved.var.type
+    assert isinstance(work_type, ir.TensorType) and isinstance(saved_type, ir.TensorType)
+    assert work_type.shape[1] is member.params[0]
+    assert saved_type.shape[1] is member.params[0]
+
+
 @pytest.mark.parametrize("use_submit", [False, True])
 def test_hand_written_group_rebinds_tuple_writeback_no_dep(use_submit):
     """Swapped tuple writebacks retain buffer identity and no_dep's canonical position (#3014)."""

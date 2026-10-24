@@ -34,6 +34,16 @@ members to that Group signature and rewrites both inner `Call` or `Submit` nodes
 to forward the complete list. Unused parameters remain valid wrapper arguments;
 each cloned body still references only the values from its original call.
 
+Normalization also binds dynamic dimensions in each member's parameter types
+to the rewritten Group arguments, using the same type-binding rules as inline
+expansion. The bindings apply to local aliases, loop-carried values, expression
+types, and declared return types. For example, a member workspace `Tensor[[8, N]]`
+passed a Group workspace `Tensor[[8, t + 32]]` retains `t + 32` throughout its
+cloned body; an unbound member-local `N` must not survive in a type. Replacements
+are applied once so caller-owned extent expressions keep their original meaning.
+The widened `Call`/`Submit` results and their receiving aliases use the normalized
+member return types, including Submit's trailing TaskId.
+
 The pass first records every producer return position, its callee-scoped SSA
 expression, type, and optional output-parameter binding. `GroupOutputBindings`
 then follows the consumer's SSA aliases and tuple projections to a particular
@@ -71,6 +81,9 @@ This normalization happens before `InjectGMPipeBuffer`, so a backend-injected
 `__gm_pipe_buffer` parameter is appended to the already-identical member
 signatures. It does not require `sync_start`: AIC and AIV are subslots of one
 mixed task, while `sync_start` controls multi-block SPMD launch admission.
+When the Group is called through an enclosing `Spmd` wrapper, orchestration
+codegen traces complete-buffer alias chains back to the wrapper parameters
+before ordering the shared argument payload.
 
 ## Unsplittable transpose: checked earlier, not here
 
