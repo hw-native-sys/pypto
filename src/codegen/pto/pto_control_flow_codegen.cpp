@@ -26,6 +26,8 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -313,9 +315,34 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // Prepare before entering either branch: a phi destination view must
         // dominate branch writes as well as reads after this scf.if. Branch
         // producers and the synthetic tmov below share this exact target.
-        ret_name = PrepareTileDestination(return_var, ret_name, "if result").name;
+        ret_name = PrepareTileDestination(return_var, ret_name, "if result", true).name;
+        bool restore_valid_shape = has_dynamic_valid_shape;
+        if (!emit_tile_addr_) {
+          const auto actual = fs_.ssa_to_tile_type.find(ret_name);
+          INTERNAL_CHECK_SPAN(actual != fs_.ssa_to_tile_type.end(), return_var->span_)
+              << "Internal error: missing tile descriptor for if destination " << ret_name;
+          const auto actual_view = ir::tile_view_semantics::GetEffectiveTileView(*actual->second);
+          const auto result_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+          bool same_valid_shape = actual_view.valid_shape.size() == result_view.valid_shape.size();
+          for (size_t dim = 0; same_valid_shape && dim < result_view.valid_shape.size(); ++dim) {
+            same_valid_shape =
+                ir::structural_equal(actual_view.valid_shape[dim], result_view.valid_shape[dim]);
+          }
+          if (!same_valid_shape || actual_view.pad != result_view.pad) {
+            CHECK_SPAN(!tile_type->dtype_.IsPackedFp4(), return_var->span_)
+                << "FP4E2M1X2 if-result metadata aliases require PYPTO or DSA_RP addressed memory; "
+                   "PTOAS does not support packed-FP4 tile treshape";
+            // Physical storage reuse does not transfer logical validity/padding.
+            // Keep r's metadata independent from the canonical allocation and
+            // every older alias, even when both dynamic types print as '?'.
+            ret_name = EnsureTileView(
+                ret_name, GetSSATileBufType(ret_name), tile_type, "if_result_view",
+                std::make_pair(logical_fields.valid_row_ssa, logical_fields.valid_col_ssa), true);
+            restore_valid_shape = true;
+          }
+        }
         BindVarToMlir(return_var, ret_name);
-        if (has_dynamic_valid_shape) {
+        if (restore_valid_shape) {
           deferred_tile_valid_shapes.emplace_back(ret_name, std::move(logical_fields));
         }
       } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
@@ -447,8 +474,15 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           // YieldFixupMutator (skipped under PTOAS) the post-if read would
           // otherwise see an uninitialised phi buffer.
           auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
+          auto full_span_origin = [&](const std::string& name) -> const std::string& {
+            const auto view = fs_.tile_view_names.find(name);
+            return view == fs_.tile_view_names.end() ? name : view->second;
+          };
+          // Different metadata handles over one full-span reshape origin
+          // already contain the same bytes. Subviews retain distinct origins,
+          // so a window of a larger allocation still needs its real transfer.
           if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
-              branch_yields[i] != phi_it->second) {
+              full_span_origin(branch_yields[i]) != full_span_origin(phi_it->second)) {
             const std::string& phi = phi_it->second;
             // Annotate each operand with the type its own SSA value was defined
             // with. They can differ: a `pto.treshape` view carries static valid

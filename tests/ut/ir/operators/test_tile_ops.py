@@ -8465,10 +8465,10 @@ class TestWriteValidRegionUnion:
             tile.assemble(target, source, [20, 0])
 
     def test_assemble_validates_the_physical_source_subview(self):
-        """``pto.tinsert`` copies the whole subview, so all of it must fit.
+        """The tile insertion bounds contract requires the whole subview to fit.
 
         The tensor.assemble counterpart accepts this same write, because a tensor
-        transfer moves only the source's valid region.
+        insertion bounds require only the source's valid region to fit.
         """
         span = ir.Span.unknown()
         target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
@@ -8484,7 +8484,7 @@ class TestWriteValidRegionUnion:
         target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
         source = self._partial_tile([48, 128], [8, 128], name="src")
 
-        with pytest.raises(ValueError, match="copies the whole source subview"):
+        with pytest.raises(ValueError, match="whole source subview must fit"):
             tile.assemble(target, source, [56, 0])
 
     def test_assemble_keeps_the_target_layout_while_narrowing(self):

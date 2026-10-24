@@ -14,7 +14,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -595,6 +594,10 @@ class InitMemRefMutator : public IRMutator {
       auto memory_space = ResolveTileMemorySpace(var_expr->GetType(), /*default_to_ddr=*/true);
       // A declared allocation wins over a fresh one: the whole point is
       // that this tile lands in the buffer the kernel author named.
+      // If results follow this same path instead of inheriting either yield's
+      // address. Their own layout sizes an unplaced storage request; common
+      // control-flow planning must resolve it before capacity or placement is
+      // computed, so a request does not require an additional physical buffer.
       auto memref = UserBoundMemRef(var_expr->GetType());
       if (!memref.has_value()) memref = CreateMemRef(shaped_type, var, memory_space);
       new_type = CloneTypeWithMemRefAndRemapExprs(
@@ -833,7 +836,7 @@ class InitMemRefMutator : public IRMutator {
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Manual traversal of ForStmt fields to ensure correct MemRef assignment:
     // - iter_args inherit MemRef from initValue (via ProcessIterArg)
-    // - return_vars share MemRef with corresponding yield values
+    // - return_vars share their corresponding iter_arg's storage
 
     // Step 1: Visit loop bounds and loop_var
     auto new_loop_var_expr = VisitExpr(op->loop_var_);
@@ -891,78 +894,35 @@ class InitMemRefMutator : public IRMutator {
     new_for->body_ = new_body;
     new_for->return_vars_ = new_return_vars;
 
-    // Patch return_vars so each shares its iter_arg's MemRef (inherited from initValue).
-    // This establishes the invariant that initValue/iter_arg/return_var all share the
-    // same MemRef buffer — the loop accumulator lives in one place for the whole loop.
-    // Any yield-vs-buffer mismatch is the concern of downstream passes.
-    if (new_for->iter_args_.empty() || new_for->return_vars_.empty()) {
-      return new_for;
-    }
-
-    auto get_iter_arg_var = [&](size_t i) -> VarPtr {
-      if (i >= new_for->iter_args_.size()) return nullptr;
-      return std::static_pointer_cast<const Var>(new_for->iter_args_[i]);
-    };
-    auto [patched, changed] =
-        PatchReturnVarsFromYield(new_for->return_vars_, op->return_vars_, get_iter_arg_var);
-
-    if (!changed) return new_for;
-
-    new_for->return_vars_ = std::move(patched);
-    return new_for;
+    return PatchLoopReturnVars(new_for, op->return_vars_);
   }
 
-  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    auto result = IRMutator::VisitStmt_(op);
-    auto new_if = As<IfStmt>(result);
-    if (!new_if || new_if->return_vars_.empty()) return result;
-
-    auto then_yield = FindYieldStmt(new_if->then_body_);
-    auto else_yield = new_if->else_body_.has_value() ? FindYieldStmt(new_if->else_body_.value()) : nullptr;
-    if (!then_yield && !else_yield) return result;
-
-    auto get_yield_var = [&](size_t i) -> VarPtr {
-      VarPtr var = nullptr;
-      if (then_yield && i < then_yield->value_.size()) var = As<Var>(then_yield->value_[i]);
-      if (!var && else_yield && i < else_yield->value_.size()) var = As<Var>(else_yield->value_[i]);
-      return var;
-    };
-    auto [patched, changed] = PatchReturnVarsFromYield(new_if->return_vars_, op->return_vars_, get_yield_var);
-
-    if (!changed) return result;
-
-    auto patched_if = MutableCopy(new_if);
-    patched_if->return_vars_ = std::move(patched);
-    return patched_if;
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    // The default traversal binds IterArgs before visiting the condition/body.
+    auto result = As<WhileStmt>(IRMutator::VisitStmt_(op));
+    INTERNAL_CHECK_SPAN(result, op->span_) << "Internal error: WhileStmt visit must yield a WhileStmt";
+    return PatchLoopReturnVars(MutableCopy(result), op->return_vars_);
   }
 
  private:
-  // Shared logic for ForStmt/IfStmt: patch each return_var to share its yield value's MemRef.
-  // get_yield_var(i) resolves the yield variable for the i-th return_var.
-  using YieldVarResolver = std::function<VarPtr(size_t)>;
-  std::pair<std::vector<VarPtr>, bool> PatchReturnVarsFromYield(const std::vector<VarPtr>& new_return_vars,
-                                                                const std::vector<VarPtr>& old_return_vars,
-                                                                const YieldVarResolver& get_yield_var) {
-    bool changed = false;
-    std::vector<VarPtr> patched;
-    patched.reserve(new_return_vars.size());
-
-    for (size_t i = 0; i < new_return_vars.size(); ++i) {
-      auto yield_var = get_yield_var(i);
-      auto yield_tile = yield_var ? GetTileTypeWithMemRef(yield_var->GetType()) : nullptr;
-      if (As<TileType>(new_return_vars[i]->GetType()) && yield_tile) {
-        auto new_type = CloneTypeWithMemRef(new_return_vars[i]->GetType(), yield_tile->memref_,
-                                            yield_tile->GetMemorySpace());
-        auto new_rv =
-            std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+  template <typename LoopNode>
+  StmtPtr PatchLoopReturnVars(const std::shared_ptr<LoopNode>& loop,
+                              const std::vector<VarPtr>& old_return_vars) {
+    // For and While results denote entry storage even for zero iterations.
+    // A yielded producer supplies data; downstream reconciliation moves it into
+    // this carry rather than changing the result's allocation or view window.
+    for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
+      const auto& result = loop->return_vars_[i];
+      const auto source_tile = GetTileTypeWithMemRef(loop->iter_args_[i]->GetType());
+      if (As<TileType>(result->GetType()) && source_tile) {
+        auto new_type =
+            CloneTypeWithMemRef(result->GetType(), source_tile->memref_, source_tile->GetMemorySpace());
+        auto new_rv = std::make_shared<Var>(result->name_hint_, new_type, result->span_);
         var_map_[old_return_vars[i]] = new_rv;
-        patched.push_back(new_rv);
-        changed = true;
-      } else {
-        patched.push_back(new_return_vars[i]);
+        loop->return_vars_[i] = std::move(new_rv);
       }
     }
-    return {std::move(patched), changed};
+    return loop;
   }
 
   std::map<VarPtr, VarPtr> var_map_;

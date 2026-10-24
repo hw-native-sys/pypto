@@ -874,8 +874,11 @@ class SSAConverter {
       VarPtr tv = then_ver.count(key) ? then_ver.at(key) : before.at(key);
       VarPtr ev = else_ver.count(key) ? else_ver.at(key) : before.at(key);
       int pv = NextVersion(key);
-      auto phi =
-          std::make_shared<Var>(BuildAutoNamedVersion(key->name_hint_, "phi", pv), tv->GetType(), op->span_);
+      // The inferred join has its own storage request. Keep the selected
+      // value's descriptor without copying a branch's allocation constraint;
+      // explicitly declared return vars below retain their own bindings.
+      auto phi = std::make_shared<Var>(BuildAutoNamedVersion(key->name_hint_, "phi", pv),
+                                       CloneTypeWithoutMemRef(tv->GetType()), op->span_);
       return_vars.push_back(phi);
       then_yields.push_back(tv);
       else_yields.push_back(ev);

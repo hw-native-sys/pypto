@@ -21,10 +21,12 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir {
@@ -68,6 +70,9 @@ class BufferViewAnalysis : public IRVisitor {
   void VisitVarLike_(const VarPtr&) override {}
   void VisitExpr_(const IterArgPtr&) override {}
 
+  void VisitStmt_(const ForStmtPtr& loop) override { VisitLoop(loop); }
+  void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
+
   void VisitStmt_(const AssignStmtPtr& assign) override {
     if (!As<TileType>(assign->var_->GetType())) return;
     auto view = Get(assign->var_);
@@ -103,6 +108,42 @@ class BufferViewAnalysis : public IRVisitor {
   }
 
  private:
+  void BindStorage(const VarPtr& binding, const ExprPtr& source) {
+    const auto target = As<TileType>(binding->GetType());
+    const auto input = source ? As<TileType>(source->GetType()) : nullptr;
+    if (!target || !input) return;
+    auto view = Get(source);
+    bool same_storage = !target->memref_ && !input->memref_;
+    if (target->memref_ && input->memref_ && *target->memref_ && *input->memref_) {
+      same_storage = MemRef::SameAllocation(*target->memref_, *input->memref_);
+    }
+    if (!same_storage || !structural_equal(target, input)) {
+      if (view.window) {
+        // Before carry reconciliation, a different binding does not prove
+        // which physical root or pitch survives. Keep selection conservative
+        // without giving a transfer stale source coordinates.
+        view.root = nullptr;
+        view.row_bytes = std::nullopt;
+        view.offsets = std::nullopt;
+      } else {
+        view = Get(binding);
+      }
+    }
+    views_.insert_or_assign(binding.get(), view);
+  }
+
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& loop) {
+    // Carries denote their entry storage even for zero iterations. Cache each
+    // binding before the body; nested initializers then use a bounded lookup.
+    for (const auto& argument : loop->iter_args_) BindStorage(argument, argument->initValue_);
+    VisitStmt(loop->body_);
+    for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
+      // A yielded producer supplies data, not the carry's physical row pitch.
+      BindStorage(loop->return_vars_[i], loop->iter_args_[i]);
+    }
+  }
+
   static std::optional<int64_t> PhysicalRowBytes(const TileTypePtr& tile) {
     if (!tile || tile->shape_.size() != 2) return std::nullopt;
     const auto cols = As<ConstInt>(tile->shape_[1]);

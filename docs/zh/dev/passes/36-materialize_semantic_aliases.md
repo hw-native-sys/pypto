@@ -1,28 +1,21 @@
 # MaterializeSemanticAliases Pass
 
-将**语义要求**必须是同一块分配的 buffer 归一到同一个 MemRef —— 通过把每个循环
-carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来实现。
+在任何内存规划器运行前，建立语义存储关系，并为每个 tile 类型的 `IfStmt` 结果
+统一规划一次目标存储。
 
 ## 概述
 
-内存规划区分两种 buffer 共享：
+循环 carry 和注册的原地结果要求共享存储。if 结果则从两条输入边选择一个 SSA 值；
+这种选择不表示两个源必须互为别名。本 pass 解析这些关系并物化必要的边传输，
+机会性的生命周期复用仍由内存规划器负责。
 
-- **强制别名（语义要求）：** 循环累加器、或原地算子的结果**必须**落在同一块
-  buffer——写"下一个"值必须更新 carried buffer，否则循环无法累加。这是正确性,
-  不是优化。
-- **机会别名（可选）：** 生命周期不冲突的两块独立 buffer *可以*共享存储以省内存,
-  属于优化。
+在 [`InitMemRef`](35-init_memref.md) 之后运行，三种规划器消费相同的规范控制流存储：
 
-本 pass 只处理**强制别名**。它从 [`MemoryReuse`](37-memory_reuse.md) 中拆出
-（原来是那个 pass 的 "Step 0"），以便机会性的生命周期复用可以被独立跳过：
+- `PYPTO` 随后运行 [`MemoryReuse`](37-memory_reuse.md)。
+- `DSA_RP` 在 [`AllocateMemoryAddr`](38-allocate_memory_addr.md) 中放置这些分配身份。
+- `PTOAS` 将生命周期复用和地址分配交给 ptoas。
 
-- `MemoryPlanner.DSA_RP` 保留独立分配身份，交给进程内 DSA-RP 求解器放置。
-- `MemoryPlanner.PTOAS` 把生命周期复用和地址分配交给 ptoas。
-
-**使用时机**：在 [`InitMemRef`](35-init_memref.md)（创建 MemRef）之后、所选内存
-规划器之前运行。它总是运行。`PYPTO` 随后运行
-[`MemoryReuse`](37-memory_reuse.md)；`DSA_RP` 在
-[`AllocateMemoryAddr`](38-allocate_memory_addr.md) 中消费这些分配身份。
+本 pass 跳过编排类函数，包括 graph body。
 
 ## API
 
@@ -38,169 +31,165 @@ program = passes.materialize_semantic_aliases()(program)
 
 ## 算法
 
-`InitMemRef` 已经让循环 carried 的 `iter_arg` 和 `return_var` 与 `initValue`
-（累加器 buffer）共享同一 MemRef，但 yield 值的*生产者* —— 例如计算 `acc_next`
-的 `tile.add` —— 仍被分配了自己的新 MemRef。本 pass 补上这个缺口：
+1. **先收集强制存储约束。** For/While carry 使用 initializer 的存储，也覆盖零次迭代。
+   在选择 if 目标前，保留注册的写回契约，并收集兼容的累加器延续目标。
+   受保护的合并可以把局部 `matmul` seed 重定向到延续的 `matmul_acc` 缓冲区；
+   不能默认用 Acc→Acc 复制来实现该关系。所有规划器共用循环入口隔离和作用域内的
+   `RetypeApplier` For/While 绑定改写。`In` 参数保护调用方的旧值；`InOut`/`Out` 参数则在函数内
+   存在独立旧值观察时，按该观察判断是否需要隔离。
+   隔离分析先索引实际的 native、注册及 workspace 写入与潜在 yield 回写。
+   独立可变 carry 槽位的窗口重叠时必须隔离；其他情况下，只有迭代可能写窗口时，
+   旧值观察才要求复制。无重叠的纯只读 For/While 透传（含 SSA 别名及同源 if 结果）
+   保留原窗口，不额外要求 Mat/Acc 复制。
+   旧读、循环重现和只读调用方查询均保留实际及推导的字节窗口和流水线槽位。
+   不相交字节或已证明不同槽位的读取不会要求入口隔离。按定义时间激活旧值句柄，
+   可达旧读须在同一索引子集中满足两种分支顺序的边界，不能把互斥路径上不同读取的
+   位置拼成一次实际不存在的观察。
+   入口隔离与 if 结果可变性复用同一份冻结的 native/注册写入和潜在回边传输证明；
+   进入循环本身不算数据写入。后继真实写入沿强制存储别名穿过只读循环返回值回传，
+   实际隔离复制会截断该链。旧值读取与生命周期仍保留不同的逻辑值版本。
+   将更新后的 carry 结果写回原位置切片，只有有效 shape 覆盖完整物理 shape 时，
+   才能证明不再需要该槽位的旧字节。Vec 插入否则只写有效元素；直接重定向完整物理块
+   producer 会破坏应保留的无效区域。还需证明字节/槽位、布局和坐标均相符，
+   才对该结果所属槽位排除这次“保留其他字节”的旧读。部分有效结果及独立旧行、旧整块观察
+   仍保留普通旧值保护。
+2. **逐槽记录 if 结果及输入边。** pass 内的 `IfInfo` 保存所属 `IfStmt`、结果槽位、
+   结果 SSA 变量，以及 then/else 的源变量。Tile 结果必须有两条合法 yield。
+   `IterArg` 源保留自身身份，不能替换为 initializer。外层输入边可以引用内层结果，
+   无需展开内层的两个候选。结果身份不依赖变量名或 MemRef 地址。
+3. **统一规划一次目标。** `InitMemRef` 给未绑定的结果建立独立、尚未放置的请求，
+   按结果自身的物理布局及对齐要求定容。推断结果类型保留 shape、dtype 和 view
+   元数据，不继承源 MemRef；显式结果绑定仍是约束。对每个 if，先保留所有槽位的
+   强制目标及合法的公共输入窗口，再为其余槽位尝试可选的输入存储借用或独立请求。
+   yield 同时传值，因此槽位顺序不能影响另一个槽位已有的公共窗口。
+   循环/Acc 强制目标引用实际 SSA storage owner，使用时读取其当前窗口；外层结果更换目标后，
+   byte offset、extent 和流水线槽位随 owner 保留，显式固定绑定仍保持固定。
+   owner 元数据与 producer 改写共同执行事务回滚和有界 replay。
+   借用必须保护旧值观察、循环回边、算子 no-alias、流水线分离和受保护存储。
+   另一分支既可直接写入借用目标，也可通过受支持的边传输写入；
+   producer 重定向不是借用的必要条件。
+   两条输入窗口相同时，也可以保留已有的可变延续关系，但必须保护独立旧值观察及只读调用方输入。
+   不能仅因窗口可写就另建目标；可选的重复结果共享仍要求只读。
+   流水线成员关系禁止借用或迁移另一分配，但不禁止保留精确相同的字节/槽位窗口；
+   workspace 及 load/tpop 硬件风险仍禁止新建可变延续。前序槽位重定向 producer 后，
+   后序结果的两条输入可能变为共同窗口，此时重新调用同一套安全判断。
+   每个已确定且仍存活的目标在选择下一结果前，发布到增量字节/槽位索引。
+   可变候选不能覆盖任何活跃 peer，只读候选也不能覆盖可变 peer；已有首选目标、
+   等价共享及输入借用均使用同一判断，返回位置对调也一样。无法兼容的强制目标明确拒绝。
+   未来覆盖检查同时使用两种分支顺序，各自记录末次读取及已证明的末次写回边界，
+   只有两种顺序都可能覆盖时才拒绝共享。
+4. **应用计划。** 规划期间冻结 IR 快照并记录待应用改写；统一应用选定的结果和
+   producer 目标，再闭合必需别名。符合条件的分支内 producer 家族可直接写入目标。
+   嵌套目标传递必须证明窗口完整、大小相同且内存空间一致。不同结果槽位仍是不同
+   逻辑值，即使它们的源或窗口相同。full/short 描述保留各自元数据；单条边的要求
+   不能改变另一个源值的 shape 或有效范围。
+5. **物化并验证 if 边传输。** 每个分支直接提供对应结果槽位，或通过合法传输写入目标。
+   并行 yield 在冲突写入前保护所有源值，必要时使用显式 scratch。
+   只有源窗口、目标窗口和描述均等价时才可共用传输；不同值写入同一受约束字节
+   会被拒绝。循环 carry 保持独立的目标槽位。
+   强制结果目标可以在分支旧值读取结束后通过边复制填充，但合并点之后不能还有旧目标观察。
+   否则结果保持独立，直到外层边界再写回。
+   内存空间不支持合法同空间传输时，仍必须直接重定向 producer。
+6. **在生命周期装箱前完成 if 规划。** 闭合别名，验证能够物化的输入边，移除未使用的请求和分配，
+   然后丢弃规划快照。后续装箱可以重定位分配组并闭合其别名，
+   但不能重新推断结果类别或改选某个分支作为目标。
+   Legacy `PYPTO` 仍在装箱之后、地址分配之前调度循环复制，使用已建立的 carry 目标。
 
-1. **自顶向下重定向**（`TopDownRetargeter`）：对每个 `ForStmt`，取每个 `iter_arg`
-   的规范 MemRef 作为目标，推送到 yield 值及其 producer 链上（跟随原地
-   `output-reuses-input` 算子与 view 输入）。`IfStmt` 的返回值被推送到两个分支的
-   yield，然后应用收集到的类型改写。
-2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
-   in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
-   loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
-   seed、phi result、alias 和嵌套 loop carry 重定向到 reused input 的规范 `Acc`
-   allocation。accumulator loop 和 sibling seed 都必须位于各自分支内，而且 target
-   在 seed 分支剩余部分必须已 dead。无论 continuation 是直接的
-   `tile.matmul_acc` 还是分支内 loop，它复用的 input 及所有 bare/metadata alias 在
-   `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
-   路径上，重定向后的 producer 会覆盖仍可观察的值。
-3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
-   alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
-   让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护
-   所有必需的别名关系，而不是孤立修正某个 producer。单次前向遍历会把每个修正后的
-   结果替换到下游使用中，因此写回结果后接 `transpose_view`、`reshape` 或 `slice`
-   时，整条链始终使用正确的存储，无需不动点迭代。这样可在任何 memory planner
-   观察 lifetime 或 PTOAS 发射 tile handle 之前消除 lowering 引入的类型漂移。
+独立请求不意味着新增物理缓冲区：可以保留公共窗口，让 producer 直接写目标，
+并在容量计算前移除未使用请求。只有独立存活的值或硬件限制阻止共享时，
+才需要单独的目标存储。
 
-这些规则覆盖带 MemRef 的 shaped result，包括 tile 和 tensor 写回。裸 SSA 重命名
-直接跟随 source 的完整类型，不复制数据；调用结果重定型保留结果的 shape、dtype、
-view/distribution 元数据。显式 `output_reuses_input` 契约优先于首输入继承。
-首输入 buffer 别名判定要求同时满足 `OutputMemoryInheritsInput()` 和
-`IsInplaceSafe()`；只继承 memory space 并不意味着共享 buffer。
-写回结果继承当前写回输入的完整 MemRef
-窗口。首输入别名保留结果的窗口大小，使用当前输入的 allocation、字节偏移，加上
-由操作计算的 view 相对偏移构造窗口；相对偏移只应用一次，同时继承输入的流水线
-slot 身份；tile 结果还会跟随输入的 memory space。从操作重新计算相对偏移，
-而不是在陈旧的绝对偏移上累加，使归一化保持幂等，并能处理同一 allocation 内部
-的窗口变化与跨 allocation 变化。Buffer 别名是一种存储契约：`tile.assemble`
-虽然会写数据，结果也必须跟随第一个输入。真正搬运数据、不能原地执行的
-`tile.transpose` 和独立的 `tile.extract` 结果保持自己的存储。
+目标选择对结果槽位进行三次固定遍历。快照与索引化的控制流分析采用映射/索引查找，
+工作量和存储均为 O(N log N)。不可变的存储访问索引查询字节窗口及流水线槽位，时间包络只保守报告
+可能重叠。旧值查询先只激活定义早于 if 的句柄，再检查两种分支顺序中都位于 if 后的读取，
+因此排除外层另一条互斥分支。循环回边为下一轮仍需使用的外部值保留虚拟读取。
+读取按实际窗口记录；仅存在一个覆盖整块分配的闲置句柄，不能把两个独立窗口的观察合并。
+已搬移的值使用单调的字节/槽位观察索引，以固定宽度稀疏区间树支持增量记录，
+不会退化为按分配基址合并，也不扫描先前结果。公开 IR 上不附加持久规划表。
 
-在 legacy Tile 和 Buffer IR 两种模式下，`TensorType`/`DistributedTensorType`
-的 For/While 参数和返回值都是当前 initializer 的可变 view。归一化会对齐它们的
-存储，同时保留各边界结果的 shape、view 元数据和分布式窗口身份，也涵盖零次
-迭代路径。独立产生的 yield tensor 保留自己的存储。Tile carry 仍使用单独的
-规范缓冲区及 yield 修复规则；yield tile 需要写入 carry 缓冲区时会插入显式传输。
+## 别名和视图契约
 
-yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始集合，并沿裸别名、
-写回结果和首输入别名传播未决状态，也会经过 tensor 循环参数和返回值继续传播。
-所有依赖它的调用都不会被锚定到临时窗口。
-控制流边界确定后，后续归一化遍历再修复整条链。Buffer IR 在索引旧值观测之前，
-以及隔离循环入口之后，也使用这一延迟形式，因为分支存储尚未确定；边界确定后的
-归一化无需延迟处理集合。yield 修复前后的归一化遍历见
-[MemoryReuse 算法步骤 6](37-memory_reuse.md#算法)。
+裸 SSA 别名跟随源。注册的 `output_reuses_input` 结果跟随指定写回操作数。
+注册的首输入 buffer 别名跟随该输入的分配、偏移和流水线槽位，只加一次算子相对
+视图偏移，并保留结果自身的窗口大小。仅继承内存空间不是 buffer 别名契约：
+还必须满足 `IsInplaceSafe()`。独立的 `tile.extract` 和非原地 `tile.transpose`
+结果保留自己的存储。
 
-本 pass 跳过 orchestration 类函数，包括 graph body。其他函数即使 `Compute`
-没有返回重定向改写，仍会执行别名归一化，独立修复已有的类型漂移。
+调用结果重定型保留 shape、dtype、view 和分布式元数据。
+`TensorType`/`DistributedTensorType` 循环边界跟随 initializer 窗口，
+不重定向独立产生的 yield tensor。纯元数据视图不读取首操作数的数据，
+但仍遍历其他参数及注册的副作用。`tile.assemble` 等写入型别名即使共享存储，
+也产生新的逻辑值版本。
+目标计划尚未解析时，归一化不能把依赖结果的写回锚定到临时请求上。
 
-## 与 codegen 的关系
+源窗口的物理 root、行跨度和偏移独立于其逻辑 tile shape 及值版本。
+投影窗口沿部分视图、if 结果及循环传播，保留字节偏移和流水线槽位。
+已知 GM 写入保留实际窗口，也覆盖与 typed DDR Tile 的别名。未知 GM/标量存储不会变成未知片上写入，
+未知指针副作用仍保持保守。
+受支持的窄 Vec 窗口传输
+使用 `tile.extract` 从 root 写入选定目标；密集源继续使用普通 move。
+运行期 slice 坐标在定义点只计算一次。For/While 的窗口来源沿入口存储传播到
+carry 和结果，也覆盖零次迭代。无法证明的绑定只保守保留窗口标记，
+不虚构源坐标。
 
-### 分阶段启用的 Buffer IR 流水线
+透明的 `SplitAivScopeStmt` 和 `RuntimeScopeStmt` 包装内，传输紧邻自身尾部 yield。
+嵌套控制流的 yield 属于其自身的结果记录。
 
-`PassContext(enable_buffer_ir=True)` 启用 Buffer IR 迁移中的存储合法化部分。
-该选项默认 true；先由 `SelectBufferIRFunctions` 选择整个 kernel，
-仅对选中函数启用 Buffer 特有存储改写。C++ 访问器为 `GetEnableBufferIR()`，Python 访问器为
-`get_enable_buffer_ir()`。编译、IR dump 和 profiling 保留当前选项，所有内存
-规划器的 JIT 缓存键都会区分该选项的值。
+## 与代码生成的关系
 
-启用后，`MaterializeSemanticAliases` 会在 `PYPTO`、`DSA_RP` 或 `PTOAS`
-规划内存之前建立显式分支目标：
+### 公共规划器边界
 
-1. 如果两个分支已经 yield 同一物理窗口，则保留该窗口。
-2. 否则，为结果分配独立的规范目标（canonical destination）。从分支外传入并
-   yield 的输入保持原存储，因此 `IfStmt` 之后仍存活的输入不会被分支写回覆盖。
-3. 如果分支内的直接 producer 输出存储没有别名、没有固定分配，且注册的算子
-   契约允许，则将 producer 重定向到新目标。View 和必须与输入共享存储的算子
-   保留原来的存储关系。
-4. 在其余分支的 yield 前插入显式 `tile.move`，并移除 producer 重定向后不再
-   使用的分配。分支复制和已有的 For carry 修复会在三种规划器之前执行；
-   `PYPTO` 在复用后修复新增的不一致，同时保留已声明的 phi 目标。
+Legacy Tile 和已选中的 Buffer kernel 都经过同一套 if 目标规划。
+`PassContext(enable_buffer_ir=True)` 还启用完整 kernel 选择和 Buffer 专属存储合法化；
+不受支持的 kernel 保持 Tile IR。编译、IR dump、profiling 和 JIT 缓存键保留该选项。
 
-分支规划会在同一次前向遍历中，在相邻 phi 的存储选择之间传播必需别名，使后续
-phi 看到当前窗口，而不是已废弃的窗口。For/While carry 在访问循环体之前跟随
-当前 initializer，循环结果在访问之后跟随这些规范 carry，涵盖零次迭代路径。
-存储句柄计数随计划中的分配变化及回滚同步更新，使可选的 producer 重定向保持保守。
+每种规划器都收到公共计划及已知存储的已物化 if 边义务。没有 MemRef 的 legacy
+opaque tile 源仍记录其输入 SSA 边，但将 lowering 延迟到已有句柄/代码生成路径，
+不虚构源坐标或复制。已选中的 Buffer 函数则明确拒绝无法物化的输入。
+`MemoryReuse` 不重复选择已解析的结果，代码生成也不为这些结果另选分配。
+若合法放置使完整 root 的同描述复制窗口完全相同，可以移除复制；
+保留的复制仍要求窗口分离。调用方拥有或显式声明的固定存储继续保留地址验证要求。
 
-支持透明作用域 `SplitAivScopeStmt` 和 `RuntimeScopeStmt` 中的末尾 yield。
-传输保留在同一作用域内，紧邻 yield 之前；嵌套控制流区域的 yield 不会被替换。
+### 类型句柄
 
-例如，`if flag: yield a; else: yield b` 的 `a` 和 `b` 在分支后仍然存活时，
-会新增一个结果分配，并在两个分支各复制一次。两个独立的分支内逐元素 producer
-则可以直接写入同一个结果分配，无需复制。PTOAS 因此收到显式分支传输，不需要
-由 codegen 再选择目标或补充复制。
+物理窗口包含分配身份、字节偏移、范围及流水线槽位元数据。只有 base 相同，
+不能证明两个兄弟窗口相同。PTOAS 保留
+[#3029](https://github.com/hw-native-sys/pypto/pull/3029) 的同窗口别名和精确类型、
+支配句柄规则：句柄必须符合所需 SSA 描述，并支配使用点。
+不能仅因地址相同就让分支内句柄逃逸到合并点之后。
+因此，同一物理窗口上的不同逻辑描述可能仍需各自的类型句柄。
+结果的 validity 和 padding 属于自己的句柄，即使不同动态有效范围打印为相同类型。
+在 if 边界初始化其元数据视图，不改 canonical allocation 的元数据。
+完整 reshape 别名已携带相同字节，无需恒等传输；subview 保留独立来源。
 
-新增的分支分析采用固定次数的 IR 遍历和索引查找，时间复杂度为 O(N log N)，
-空间复杂度为 O(N)，不在 IR 上附加持久化别名表。累加器分支仍使用已有的受保护
-合并逻辑；剩余分歧 `Acc` 分支会报错，因为不支持 Acc 到 Acc 的复制。
-下文介绍循环输入隔离、并行传输、While carry 及复用后的存储验证。这些步骤
-建立规范的存储边界；完整的初始化验证和异步生命周期验证仍由独立工作完成。
+`DSA_RP` 消费符号分配身份；`PTOAS` 模式下，代码生成不写入物理地址，
+交由 ptoas `PlanMemory` 处理。参见
+[PTO Codegen — 谁负责规划内存](../codegen/00-pto_codegen.md)。
 
-### 默认流水线
+## 示例
 
-PTO codegen 把解析到*同一*物理 MemRef window（`base` + `byte_offset` + `size` +
-pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此本 pass 之后,
-循环累加器会发出原地的
-`pto.tadd ins(%acc, %t) outs(%acc)`，而不是写到独立的 `%acc_next`。
-`memory_planner=DSA_RP` 会把每个所得分配身份变成一个 DSA buffer；
-`memory_planner=PTOAS` 则让 codegen 不带物理地址发射该身份，交给 ptoas
-`PlanMemory`。
-参见 [PTO 代码生成 — 由谁规划内存](../codegen/00-pto_codegen.md)。
+```python
+if flag:
+    r = pl.yield_(a)
+else:
+    r = pl.yield_(b)
+use(r)
+use(a)
+```
 
-## 说明
+分支后对 `a` 的观察可能禁止把其存储选为结果目标。应选择独立存储或其他已证明安全
+的目标，在两条输入边写入它，避免覆盖旧 `a`。若两边是独立的分支内 producer，
+它们可直接写入同一目标而无需复制。
 
-- view / 部分 view 保留各自的 `byte_offset`/`size` 元数据。在 `DSA_RP` 下，共享
-  同一 `base` 的所有成员属于同一个物理分配；规划器整体移动该分配，并在回写时保留
-  每个成员的相对偏移。仅共享 `base` 不足以建立 must-alias 关系：互不相交的 byte
-  window 和不同 pipeline slot 会保持独立，直到 producer 被安全地重定向到精确的
-  canonical window。
-- 在默认（`PYPTO`）流水线里,本 pass 加上 `MemoryReuse` 组合起来等于原来单个
-  `MemoryReuse` pass 的行为。
-- `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
-  建立的强制别名关系。
-- 在 legacy `PTOAS` 路径中，若两个分支 yield 同一 tile 字节窗口（allocation、
-  offset、size、slot 数量及索引相同），且两个 yield 与合并结果具有相同且已确定的
-  存储空间（MemorySpace），合并结果保留该窗口，无需复制。语义别名会跟随修正后的
-  结果，同时保留各自的类型及视图元数据。已注册的视图把相对字节偏移重新关联到
-  修正后的输入，保留自身窗口大小并继承输入的流水线 slot 身份；后续完整窗口写回
-  结果继续跟随该视图。复用具有多种类型别名的 codegen 句柄时，还必须满足实际声明的 SSA 类型
-  匹配、两个 yield 的窗口及当前绑定一致，以及句柄定义支配（dominance）当前 if。
-  若先前的合并选择了新的支配句柄，后续合并使用两个 yield 当前共同绑定的句柄，
-  即使身份映射仍指向此前被拒绝的兄弟分支句柄。
-  不同分支窗口沿用原有处理。
-- accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
-  legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的
-  carry/phi mismatch。
-- 新的 matmul accumulator 推荐使用单个
-  `tile.matmul_acc(..., init_cond=...)`。为兼容已有手写 kernel，peeled
-  `matmul`/`matmul_acc` 分支仍受支持，并由本 pass 规范化。
+## 注意事项
 
-开发阶段的流水线在共享及复用后存储协调完成后、地址分配之前运行 `VerifyTileStorage`。
-符号存储一致性及独立的实际地址重叠检查见[存储属性约束](99-verifier.md#tile-存储属性)。
-
-### 显式循环与分支传输
-
-开启 `enable_buffer_ir=True` 时，共享协调首先隔离仍会被独立观察的循环输入。
-入口复制、yield 传输和快照生成前均检查目标是否支持对应的移动；
-不支持的 Mat、Left、Right、Acc 同空间传输会给出早期诊断。
-通过原始输入或元数据别名进行的数据读取可能需要入口复制；复制在 `ForStmt` 或
-`WhileStmt` 之前执行，保留零次迭代的语义。初始 carry 窗口重叠时，会创建独立
-存储。只建立元数据视图不算数据读取。只有在读取句柄的逻辑定义之后进入的外层循环，才可能跨迭代重复观察同一值。
-通过循环区间索引保护此类读取，包括内层循环之前和兄弟分支中的读取。
-每次外层迭代重新生成的 seed 不会仅因本次迭代中较早的读取而触发隔离；
-直接别名和元数据视图继承 seed 的定义位置。循环区域之外的读取不会在其内部重复。
-前向观察仍使用两种分支顺序排除互斥的兄弟分支。分析不逐层遍历祖先，保持 O(N log N)。
-
-在重定向生产者之前，For 和 While 的初始值、iter_arg、结果及结果视图会对齐。
-分支和循环 yield 使用同一个并行传输调度器：先保存所有可能与目标重叠的源，
-再写入目标。交换、循环依赖、fanout 和源的部分重叠都通过 O(N log N) 的索引
-查询处理；scratch 分配在地址规划前就已显式存在。复用后的协调再次使用相同
-调度算法，地址分配阶段不能新增 scratch 或传输。
-
-如果所需的同空间复制无法实现，会提前报错。例如，不能通过 Acc 到 Acc 的复制
-保留仍然活跃的 Acc 输入。兼容 carry 仍可使用已有的带条件检查的累加器生产者
-合并。无法判定的视图地址和同时重叠的目标窗口必须在最终 Buffer lowering 前
-解决。未选中 kernel 和显式 Off 模式保持原有 Tile 行为。
-
-默认 Buffer 路径在存储合法化前选择完整支持的 kernel，详见
-[整函数选择](55-lower_tile_to_buffer.md#默认整函数选择)。
+- 循环入口复制在循环前执行，保持零次迭代语义。旧值观察及回边索引区分外层循环的
+  下一次迭代与当前迭代重新创建的 seed。
+- 先解析强制 producer/carry 约束，再判断复制合法性。局部新 Acc producer 可直接
+  写目标；剩余的 Acc→Acc 传输在实际需要它的边界处报不支持。
+- 新累加器代码优先使用 `tile.matmul_acc(..., init_cond=...)`；现有 peeled
+  `matmul`/`matmul_acc` 写法仍保留受保护的支持。
+- 地址放置不能添加未规划的 scratch 或边传输。符号边闭包与已分配地址重叠是
+  不同检查；参见[存储属性契约](99-verifier.md#tile-storage-properties)。
+- Buffer rollout 在 lowering 前选择完整支持的 kernel；参见
+  [完整 kernel 选择](55-lower_tile_to_buffer.md#default-whole-kernel-selection)。

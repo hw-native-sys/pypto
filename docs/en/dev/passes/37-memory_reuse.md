@@ -21,8 +21,9 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 [`AllocateMemoryAddr`](38-allocate_memory_addr.md). `MemoryPlanner.DSA_RP`
 skips it so independent buffers remain visible to the DSA-RP solver;
 `MemoryPlanner.PTOAS` skips it because ptoas owns lifetime reuse.
-Semantics-required loop-carry and in-place aliases are already materialized by
-`MaterializeSemanticAliases` in all three modes.
+Semantic loop/in-place aliases and materializable if-edge obligations are
+already established by `MaterializeSemanticAliases` in all three modes;
+legacy opaque inputs retain the existing handle/codegen path.
 
 ## Planner boundary
 
@@ -56,73 +57,92 @@ program_optimized = reuse_pass(program)
 
 ## Algorithm
 
-1. **Lifetime Analysis**: Walk the full IR tree (including nested control flow bodies) to compute variable lifetimes via def-use analysis. Variables defined outside a loop but used inside have their lifetime extended to the end of the loop (loop-aware extension)
-2. **Interference Check**: Identify variables with overlapping lifetimes
+1. **Lifetime Analysis**: Consume the common control-flow storage established by
+   `MaterializeSemanticAliases`; do not select if destinations again. Result `r`
+   is a logical definition at the merge. Each arm reads its own yield operand on
+   its incoming edge; a later read of `r` keeps the result live rather than
+   independently extending both sources. Required aliases retain their allocation
+   groups and relative windows. Loop carries and values needed again on a
+   backedge remain live through the loop boundary.
+
+   The temporary requests created by `InitMemRef` have already been resolved
+   through the common per-slot `IfInfo` plan. Mandatory loop/Acc constraints,
+   producer retargeting and materializable if-edge transfers precede packing for
+   every planner. Legacy opaque sources retain their handle/codegen path. An
+   unused result request does not contribute to peak capacity.
+2. **Interference Check**: Summarize each allocation group in both then-first
+   and else-first lexical order. Each interval starts at the earliest logical
+   definition and ends at the latest read across all required aliases, including
+   loop recurrence. If the group intervals are disjoint in either order, their
+   storage can be shared, subject to the remaining guards. Touching is allowed.
+   Every executable path respects both orderings, so this is conservative:
+   different reads in nested sibling branches can make both interval hulls
+   overlap and prevent otherwise legal reuse.
+   The second numbering is always part of the analysis, not a packing retry or
+   a capacity-dependent rule; no phi-family exemptions are needed. The added
+   numbering and summaries take O(N log N) time and O(N) storage. Each root-pair
+   lifetime check is O(1), with no alias-member pair scan. The existing packing
+   search remains O(KM²) for M allocation groups and K packing attempts; this
+   does not make the entire pass O(N log N).
 3. **MemRef Sharing** (global first-fit-decreasing packing, `IdentifyReuseOpportunities`): Within each memory space, intervals are packed **largest-first**; every later interval joins the first existing buffer all of whose members it can share with (non-overlapping lifetime + hazard/no-alias safe — see `can_share`). A buffer's allocated size is fixed by its first (largest) member, so admitting a smaller member afterwards costs nothing — and a *later, larger* interval can now host an *earlier, smaller* one. (The previous definition-order greedy had a one-directional size gate `source.size >= target.size`, so two lifetime-disjoint tiles whose small one was defined first were never coalesced.) The representative each member is rebased onto is the buffer's largest member; its `tile.alloc` dominates the whole function because InitMemRef hoists every alloc to the function-body head, so a representative defined after some of its members is safe. Because the packer no longer runs in program order, every pairwise gate (hazard, no-alias) is checked in both directions.
 
-   **Capacity-overflow subrange fallback (PYPTO only).** The pass first computes the legacy whole-buffer packing above and keeps it byte-for-byte when its exact allocator footprint fits the backend capacity. Only when that footprint overflows does it retry packing smaller roots into aligned subranges of an existing largest-member arena. For example, after a dead 64 KiB root has reserved `[0, 65536)`, two later 32 KiB roots that are live together may occupy `[0, 32768)` and `[32768, 65536)`. The 64 KiB lifetime must not overlap either smaller root; the two smaller roots must occupy disjoint byte ranges because they interfere. The retry selects the lowest aligned gap not blocked by a member that cannot share bytes with the candidate. It never grows an arena, so two 32 KiB arenas do not become a new 64 KiB arena; the 64 KiB representative must already exist. If subdivision still does not fit, the existing pipeline-depth shed and legacy fallback run unchanged.
+   Whole-root `tile.move` copies can be coalesced when source and destination
+   have the same tile descriptor apart from the MemRef, equal extents and
+   matching slot metadata. This includes incoming-edge copies and ordinary
+   transfers. If placement makes their windows identical, remove the assignment
+   and substitute its SSA source into later uses before codegen; hardware never
+   executes an in-place `TMOV` for these coalesced copies. Copies involving fixed
+   caller-owned or declared storage are retained so address restrictions remain
+   validated.
+   A retained copy needs disjoint windows. Subrange packing conservatively
+   separates these source/destination pairs to prevent partial overlap. Other
+   no-alias, pipeline, target-hazard and declared-allocation constraints still
+   apply. Incoming Tile-parameter allocations remain fixed: body-local aliases
+   and results cannot move their storage or add new occupants.
+
+   **Capacity-overflow subrange fallback (PYPTO only).** The pass first computes the whole-buffer packing above and keeps it byte-for-byte when its exact allocator footprint fits the backend capacity. Only when that footprint overflows does it retry packing smaller roots into aligned subranges of an existing largest-member arena. For example, after a dead 64 KiB root has reserved `[0, 65536)`, two later 32 KiB roots that are live together may occupy `[0, 32768)` and `[32768, 65536)`. The 64 KiB lifetime must not overlap either smaller root; the two smaller roots must occupy disjoint byte ranges because they interfere. The retry selects the lowest aligned gap not blocked by a member that cannot share bytes with the candidate. It never grows an arena, so two 32 KiB arenas do not become a new 64 KiB arena; the 64 KiB representative must already exist. If subdivision still does not fit, the existing pipeline-depth shed and legacy fallback run unchanged.
 
    Subdivision moves a complete root allocation; it never packs into holes outside an alias/view's accessed window. The candidate and arena roots must therefore have constant, non-negative allocation offsets. A symbolic offset is supported only on a direct internal `tile.slice`, whose runtime address PTO reconstructs from the translated source tile and the slice operands. If a memory space contains another dynamic-offset member, such as a reshape, reinterpret, or transpose view of that slice, subdivision is disabled for the complete space so compacting unrelated roots cannot turn a legacy overflow into wrong code. Constant member offsets are still checked to be non-negative and in bounds; supported symbolic slices keep the exact relative expression `arena_offset + placement + (member_offset - root_offset)`. A dynamic root offset remains ineligible, and pinned/declared allocations remain closed. Lifetime interference, pipeline separation, target hazards, and op no-alias rules still call `can_share`; if any such rule prevents byte overlap, the two root address intervals must be disjoint. `AllocateMemoryAddr` sizes the physical slot from the arena root's complete allocation capacity; every constant subrange was already checked to stay within that capacity. A pure dynamic `tile.slice` MemRef then retains the legacy bare-base address because PTO lowers its actual window as `pto.subview` of the already placed source tile using the slice operands. Downstream reshape folding compares base plus offset and tile signature, while PTO DPS aliasing also compares the extent. Sibling root subranges therefore cannot be mistaken for the same tile merely because their base pointers match.
-4. **Loop-carry re-alignment** (`AlignLoopCarriesToInitMutator`): Sharing (step 3) only retypes `AssignStmt`-defined vars (producers/init); loop-carried `iter_arg`/`return_var` nodes are excluded from the lifetime/sharing maps and keep their original MemRef. This step walks `ForStmt`s **top-down** and retypes each loop's `iter_arg`/`return_var` to its (now-reused) `initValue` MemRef, seeding `var_remap_` before recursing so a nested loop observes the corrected outer `iter_arg` as its init. Without it, a reused **nested pipelined `matmul_acc`** accumulator splits across two Acc buffers and step 7 emits invalid `acc→acc tile.move` ops that ptoas rejects on Ascend 910B ([#1352](https://github.com/hw-native-sys/pypto/issues/1352))
-5. **Accumulator if-phi coalescing** (`TopDownRetargeter::CoalesceAccumulatorIfPhis`): `LowerPipelineLoops` peels a stage-2 K-loop into `if`-phis whose live branch is an in-place `matmul_acc` (on the accumulator buffer) and whose dead `if k==0` branch is a fresh `matmul` seed on a *different* Acc buffer. Left alone, step 7 would try to reconcile them with an `acc→acc tile.move` — a second co-live L0C buffer (overflow) that ptoas also rejects (no legal Acc→Acc `tmov`). This step identifies the in-place-accumulator branch by its `reuses_input` producer and retargets the *other* branch's seed onto the accumulator buffer, so both branches share it and no move is emitted (matching `mad_acc`'s shared-`%dst` semantics). Scoped to `Acc`; the retarget is **mandatory** (a declined retarget is an `INTERNAL_CHECK`, never a move — no legal Acc→Acc move exists). It bypasses the *global* dead-at-assign liveness check (which would false-decline on the legitimate post-if phi consumer), but only after verifying the two preconditions branch exclusivity actually needs: (a) the seed producer is a `Call` lexically **inside** the branch (a pre-if value yielded through the branch runs unconditionally and would clobber the accumulator the sibling in-place branch reads), and (b) a **branch-scoped** `IsTargetDeadAtAssign` (bounded to stop at the enclosing `if`) finds no same-branch tail read of the accumulator buffer. When either fails, the phi remains uncoalesced and step 7 fails loudly rather than manufacturing unsupported Acc→Acc IR
-
-   **Direction of travel (long horizon).** The shape this step repairs is the *hand-peeled* split-K idiom. `tile.matmul_acc(acc, lhs, rhs, init_cond=(k == 0))` expresses the same reduction on one buffer and needs no repair, and [`AutoTileMatmulL0`](19-auto_tile_matmul_l0.md) now generates that form (head-peeling the bias K-loop, which has no `init_cond` operand), so no compiler-generated IR reaches this step any more. It is kept for the peels in author source — pypto-lib alone has 95 of them — and retiring it would need that migration to land first. Prefer `init_cond` in new code; do not expect this step to disappear soon
-6. **Semantic alias buffer normalization** (`NormalizeIdentityCopyBuffersMutator`,
-   runs on **both sides** of step 7): retargeting can leave a result's declared
-   MemRef stale even after its operand was substituted. Normalize all required
-   alias relationships in one forward walk, substituting repaired results into
-   downstream uses:
+4. **Relocate complete storage groups**: Apply the packing offsets to producers,
+   if results and required aliases while preserving relative windows and pipeline
+   slots. For/While arguments and returns follow their relocated initializer
+   storage, including nested and zero-trip loops. This changes physical placement,
+   not logical result identity or the incoming source relation.
+5. **Close semantic aliases** (`NormalizeIdentityCopyBuffersMutator`): A forward
+   walk propagates current storage to downstream uses:
 
    | Alias category | Required result storage |
    | -------------- | ----------------------- |
    | Bare SSA alias `x = y` | Current source's exact MemRef window |
    | Registered `output_reuses_input` result | Exact window of the registered writeback input |
-   | Registered first-input buffer-aliasing operation | Current first input's allocation, offset, and slot identity, plus the operation-relative offset; retain the result extent |
-   | Tensor/DistributedTensor For/While arguments and returns | Current initializer's exact window, including on zero-trip loops |
+   | Registered first-input buffer alias | Current input allocation/offset/slot plus the operation-relative offset; retain result extent |
+   | Tensor/DistributedTensor For/While boundaries | Current initializer's exact window, including zero-trip loops |
 
-   These rules apply to shaped results with MemRefs, including tile and tensor
-   writebacks. Bare SSA renames follow the complete source type without copying
-   data. Call-result retyping preserves the result's shape, dtype,
-   view/distribution metadata, and follows the current input's memory space for
-   tile results. An explicit writeback contract takes precedence over first-input
-   inheritance. The first-input buffer-alias predicate requires both
-   `OutputMemoryInheritsInput()` and `IsInplaceSafe()`; memory-space inheritance
-   alone does not establish a buffer alias.
-   `ReanchorAliasingOutput` handles the call categories through their registered
-   contracts, including writing operations such as `assemble`; it does not
-   classify all buffer aliases as metadata-only views. Real non-in-place
-   `tile.transpose` and independent `tile.extract` results are excluded.
-
-   Tensor loop-boundary repair runs in both legacy Tile and Buffer IR modes,
-   preserving boundary shape, view metadata, and distributed-window identity.
-   Independent yielded tensors are not retargeted. Tile carries retain their
-   separate canonical-buffer alignment and yield transfers in step 7.
-
-   Relative view offsets are recomputed from the operation and added to the
-   current input offset once. Compare the complete physical window, including
-   extent and pipeline-slot metadata: the base can remain unchanged while its
-   window or slot changes. Apply the same window rule when `RetypeApplier`
-   follows planned input rewrites. The forward substitutions repair arbitrary
-   alias chains without fixed-point iteration and make normalization idempotent.
-
-   The **before** walk makes carry aliases such as `lag2 = lag1` visible to step
-   7's parallel writeback ordering. This pre-yield-fixup form seeds unresolved
-   `IfStmt` results and propagates their status through bare aliases and both
-   call categories and tensor loop boundaries, even if an intermediate
-   result already has the same MemRef. Calls depending on an unresolved phi are
-   not anchored to its provisional window. Otherwise a later phi could choose a
-   producer's temporary buffer as its canonical destination, leaving that buffer
-   unwritten when the producer is re-anchored after fixup. The **after** walk
-   repairs all aliases once step 7 has selected canonical phi storage. Either
-   walk is a no-op when no mismatch exists.
-7. **Yield fixup**: Fix MemRef mismatches in control flow return variables. Acc→Acc copies are not legal, so a residual mismatched Acc carry is an internal error rather than a `tile.move`:
-   - **ForStmt**: Ensure all 4 loop-carry variables (initValue, iter_arg, yield value, return_var) share the same MemRef. Inserts `tile.move` before yield if MemRefs differ. `pl.yield_` rebinds every carry **simultaneously**, but the copies realizing it run in sequence, so they are ordered against each other rather than emitted in iter_arg order: a copy that reads a byte range another copy writes runs first. Without that ordering a shift register collapses — for `lag2 = lag1; lag1 = v`, writing lag1's buffer first makes lag2 read the *new* lag1 and the loop carries `lag2 == lag1` ([#2481](https://github.com/hw-native-sys/pypto/issues/2481)). A swap (`cur, prev = prev, cur`) has no valid order at all, so one member is copied into a fresh scratch buffer ahead of both writebacks and its own writeback reads the scratch; that allocation is hoisted onto the function-body head like every other. Carries whose buffers *overlap* — most often two carries seeded from one tile, which makes them one buffer — cannot be saved by any order and are rejected here with a `CHECK`, where the carries still have names
-   - **IfStmt**: Patch return_vars to the canonical (then-branch) MemRef, and give any arm whose yield value lives on a different buffer a `tile.move` into that buffer, so every path through the `if` writes the phi. An arm's yield value may be the enclosing loop's `IterArg` — `if cond: acc = f(acc)` leaves a bare `yield acc_iter` on the other arm — so arms are matched with `AsVarLike`, not `As<Var>`: `IterArg` carries its own `ObjectKind`, and skipping it left the phi buffer unwritten on that path while the return_var was still patched onto the sibling arm's buffer, feeding the loop carry stale data ([#2481](https://github.com/hw-native-sys/pypto/issues/2481))
-8. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
+   Call-result retyping preserves shape, dtype, view and distribution metadata.
+   An explicit writeback contract takes precedence over first-input inheritance;
+   the latter also requires `IsInplaceSafe()`. Recompute view-relative offsets
+   from the operation and add them once. Independent `tile.extract` and
+   non-in-place `tile.transpose` results retain their own storage. Forward
+   substitutions close alias chains without fixed-point iteration.
+6. **Validate control-flow storage**: The common plan already selected the
+   result classes and materialized known if-edge obligations before packing.
+   Check that both if edges and loop bindings still agree with their relocated
+   destinations. Do not derive another destination from then/else storage.
+   Legacy `PYPTO` still schedules loop copies and scratch after packing, using
+   the established carry targets and finishing before address assignment.
+   This does not rerun the if-result plan. A retained copy must remain legal
+   for its source/destination windows and descriptors. Accumulator constraints
+   are settled before packing rather than repaired with an Acc-to-Acc copy.
+7. **Remove redundant allocs**: Collect the MemRefs still referenced by tile
+   values and remove unused `tile.alloc` statements.
 
 **Reuse conditions**:
 
-- Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
+- Disjoint conservative intervals in at least one sibling order. In straight-line code,
+  `prev.last_use <= curr.def` permits sharing: inputs are consumed before outputs
+  are written at the same statement. Checking both orders also permits an
+  else-only old-value read and a then-only replacement to share storage when
+  their intervals separate in the reverse order.
 - Same memory space
 - A buffer is sized to its **largest** member; because packing is largest-first, every member admitted later is no larger than the representative, so no explicit byte-size check is needed (and the reuse direction is no longer constrained to "earlier-and-larger only")
 - Subrange placement is attempted only after an exact known-capacity overflow. A candidate must fit wholly inside the existing representative's capacity at an address accepted by the backend alignment policy; every simultaneously live or otherwise non-shareable member blocks its complete byte range.
@@ -179,7 +199,7 @@ allocation out of the packer's hands. InitMemRef materializes it as a `tile.allo
 closed: a pinned interval opens its own slot in the first-fit pack and that slot is
 skipped when placing every later candidate. (Isolation is a per-slot flag inside the
 packing loop rather than another `can_share` gate — `can_share` is the innermost step
-of an O(M²) pack that re-runs per shed step, so the check is resolved once per interval
+of the quadratic root-pair packing loop that re-runs per shed step, so the check is resolved once per interval
 instead of once per pair.) Concretely:
 
 - Tiles the author bound to **different** buffers are never coalesced, however
@@ -199,8 +219,9 @@ still needs. The check is per slot, not per allocation: two tiles on *different*
 only tiles landing on one slot can corrupt each other. A runtime slot index (`l0c[i % 2]`)
 has no static slot to attribute a tile to, so the check is skipped there — the rotation is
 the author's to get right — while isolation from every other allocation still holds. This pass owns the check because it is where lifetimes are computed
-(`ComputeLifetimes`); the rule matches the packer's own `var_overlap`, so *touching* is
-allowed (one tile's last read may be the statement that produces the next member).
+(`AnalyzeAllocationLifetimes`). Declared-slot validation uses conservative intervals;
+as in straight-line packing, *touching* is allowed (one tile's last read may be the
+statement that produces the next member).
 Tiles that land on the allocation by inheritance rather than by binding — views, in-place
 results, bare SSA aliases — are excluded: they are the same data as their source, so
 overlapping with it is expected.
@@ -297,7 +318,7 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.muls(tile_a, 0.0)
 
 ### Overlapping Lifetimes (No Reuse)
 
-When a variable is still alive **after** another variable's definition (last_use > def), their lifetimes truly overlap and they cannot share memory:
+In straight-line code, when a variable is still alive **after** another variable's definition (last_use > def), their lifetimes overlap and they cannot share memory:
 
 ```python
 # SeqStmts [
@@ -319,13 +340,11 @@ Pass MemoryReuse();
 
 **Implementation**: `src/ir/transforms/memory_reuse_pass.cpp`
 
-- `LifetimeAnalyzer` walks the full IR tree to compute variable lifetimes (including nested control flow)
-- `ComputeLifetimes` builds MemRef sharing groups and lifetime intervals
+- `LifetimeAnalyzer` records logical definitions, incoming-edge uses and loop recurrence, including `IfStmt` results
+- `AnalyzeAllocationLifetimes` builds MemRef sharing groups and conservative allocation intervals in both sibling orders
 - `IdentifyReuseOpportunities` finds reuse candidates, retries with aligned subrange placement on a known-capacity overflow, and records each member's placement offset
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
-- `TopDownRetargeter::CoalesceAccumulatorIfPhis` coalesces peeled loop-carried accumulator `if`-phis by retargeting the dead-branch seed onto the in-place accumulator buffer, so `YieldFixupMutator` never emits an illegal `acc→acc tile.move` (see Algorithm step 5)
-- `YieldFixupMutator` fixes ForStmt/IfStmt yield/return_var MemRef mismatches after reuse (inserts `tile.move` when legal; rejects residual Acc→Acc mismatches)
-- `NormalizeIdentityCopyBuffersMutator` maintains bare SSA, registered writeback-result, and first-input buffer aliases after retargeting; `ReanchorAliasingOutput` follows current input windows through downstream call chains (see Algorithm step 6)
+- `NormalizeIdentityCopyBuffersMutator` maintains bare SSA, registered writeback-result, and first-input buffer aliases after retargeting; `ReanchorAliasingOutput` follows current input windows through downstream call chains (see Algorithm step 5)
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
 - `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from `SeqStmts`
 
@@ -354,3 +373,4 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - Tests semantic alias chains after writeback retargeting, including view offsets, same-allocation window changes, pipeline slots, unresolved if-phis, and normalization idempotence
 - Tests redundant alloc statement removal
 - Tests control flow lifetime analysis (nested IfStmt in ForStmt, branch variable sharing)
+- Tests conditional reset and gather-chain reuse, with independent observers, loop backedges and post-merge consumers preserved

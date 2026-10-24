@@ -1669,10 +1669,14 @@ class Expected:
                         )
                         if cond:
                             then_view = view
-                            selected = pl.yield_(then_view)
+                            selected: pl.Tensor[[1, 8], pl.FP32, pl.MemRef("mem", carry * 32, 32)] = (
+                                pl.yield_(then_view)
+                            )
                         else:
                             else_view = view
-                            selected = pl.yield_(else_view)
+                            selected: pl.Tensor[[1, 8], pl.FP32, pl.MemRef("mem", carry * 32, 32)] = (
+                                pl.yield_(else_view)
+                            )
                         pl.tensor.write(selected, [0, 0], pl.const(1.0, pl.FP32))
                         next_value: pl.Scalar[pl.INDEX] = carry + 1
                         _result = pl.yield_(next_value)
@@ -1706,14 +1710,17 @@ class Expected:
         for body in (branch.then_body, branch.else_body):
             yielded = next(stmt for stmt in ir.flatten_to_stmts(body) if isinstance(stmt, ir.YieldStmt))
             yielded_type = yielded.value[0].type
-            assert isinstance(yielded_type, ir.TensorType)
-            assert yielded_type.memref is memref
+            assert isinstance(yielded_type, ir.TensorType) and yielded_type.memref is not None
+            assert yielded_type.memref.base_.same_as(memref.base_)
+            ir.assert_structural_equal(yielded_type.memref, memref)
 
         write = next(stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt))
         assert isinstance(write, ir.Call)
         assert write.args[0].same_as(result), "the consumer must reference the rebuilt phi definition"
         write_type = write.type
-        assert isinstance(write_type, ir.TensorType) and write_type.memref is memref
+        assert isinstance(write_type, ir.TensorType) and write_type.memref is not None
+        assert write_type.memref.base_.same_as(memref.base_)
+        ir.assert_structural_equal(write_type.memref, memref)
 
         properties = passes.IRPropertySet()
         properties.insert(passes.IRProperty.SSAForm)

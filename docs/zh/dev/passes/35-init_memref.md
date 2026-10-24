@@ -53,7 +53,8 @@ program_with_memrefs = init_pass(program)
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
-   - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
+   - **ForStmt/WhileStmt return_vars**：与对应入口 carry 共享 MemRef，也覆盖零次循环
+   - **IfStmt return_vars**：按自身布局建立独立、尚未放置的请求，目标存储由后续公共计划选择
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
 6. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 7. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
@@ -245,23 +246,26 @@ PTO 由该 `rows` 推导块列步长，因此只有当窗口保留父张量的�
   PTO 为其设定 `rowStride = innerCols`、`colStride = rows`，与累加器具有同样形态的分块结构。
   它们的切片偏移存在同样的潜在不匹配，此处刻意不作改动；对其建模属于另一项工作。
 
-## ForStmt 循环携带变量
+## ForStmt/WhileStmt 循环携带变量
 
-ForStmt 有四个循环携带相关变量，遵循特定的 MemRef 共享规则：
+ForStmt 和 WhileStmt 有四个循环携带角色，遵循特定的 MemRef 共享规则：
 
 | 角色 | 描述 | MemRef 来源 |
 | ---- | ---- | ----------- |
 | initValue | 首次迭代前的初始值 | 来自产生该值的操作 |
 | iter_arg | 循环体内变量 | 继承自 initValue |
 | yield value | 每次迭代结束时产出的值 | 来自产生该值的操作（独立分配） |
-| return_var | 循环结束后接收最终 yield 值 | 继承自 yield value |
+| return_var | 循环结束后的 carry 存储 | 继承自 iter_arg，也覆盖零次循环退出 |
 
 **共享组**：
 
-- 组 A：initValue + iter_arg（共享同一 MemRef）
-- 组 B：yield value + return_var（共享同一 MemRef）
+- 入口存储：initValue + iter_arg + return_var 共享同一 MemRef。
+- yield producer 仍可能使用独立存储。
 
-组 A 和组 B 可能有不同的 MemRef。yield 与 iter_arg 之间的 MemRef 不一致由后续的 MemoryReuse 解决（必要时插入 `tile.move`）。
+后续语义规划将 producer 重定向，或插入合法传输写入 carry。If 结果采用不同契约：
+其未放置请求不继承 then/else 地址。推断结果类型不携带源 MemRef，显式结果绑定仍是
+权威约束。[MaterializeSemanticAliases](36-materialize_semantic_aliases.md) 中的公共计划
+在容量规划前解析这些请求，因此请求本身不意味着新增物理缓冲区。
 
 ## 实现
 
@@ -277,7 +281,7 @@ Pass InitMemRef();
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
 - `MaterializePtoLevel3ScratchMutator` 在所有 tile shape/cast 重写之后、MemRef 收集之前，仅插入缺失的编译器可选 scratch（`tile.ci`、窄化 `tile.cast`、必要的 `tile.sort32`）；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
-  - 处理 view 操作、复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）、tile 别名（`a = b`）以及 ForStmt/IfStmt yield 值的 MemRef 共享
+  - 处理 view/写回别名、裸 tile 别名、For/While 入口存储和独立的 If 结果请求
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef
 - `CreateAllocStatement` / `InsertAllocsIntoBody` 创建并插入 alloc 操作
 
@@ -297,4 +301,4 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - 测试按 planner/target 门控的 `tile.ci`、窄化 `tile.cast` 与 `tile.sort32` scratch 物化
 - 测试 tile.store 结果与输出参数共享 MemRef
 - 测试累加操作（matmul_acc）与累加器输入共享 MemRef
-- 测试 ForStmt 循环携带变量的 MemRef 关系（initValue/iter_arg 共享，yield/return_var 共享）
+- 测试 For/While 的入口/carry/结果存储及独立 If 结果请求

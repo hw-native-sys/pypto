@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from pypto.ir.printer import python_print
+from pypto.ir.type import _merge_annotation_metadata  # noqa: PLC2701
 from pypto.pypto_core import DataType, ir
 
 from .attr_parser import AttrParser
@@ -31,6 +32,7 @@ from .type_resolver import (
     _const_int_value,  # noqa: PLC2701
     _is_dump_call,  # noqa: PLC2701
 )
+from .type_semantics import type_bindings_match, types_match
 
 VALID_ITERATORS = {"range", "parallel", "unroll", "pipeline", "while_", "spmd", "split_aiv"}
 
@@ -821,15 +823,22 @@ class ControlFlowParser:
             with self.yield_tracking_scope():
                 # Scan for yield variable names (without executing)
                 then_yield_vars = self.scan_for_yields(stmt.body)
+                yield_annotations = {
+                    name: [annotation] for name, annotation in then_yield_vars if annotation is not None
+                }
 
                 # Also scan else branch to handle yields in both branches
                 if stmt.orelse:
                     else_yield_vars = self.scan_for_yields(stmt.orelse)
-                    # Merge with then branch yields (then branch takes precedence for type)
+                    # Either arm can constrain the shared result. Keep both
+                    # annotations for validation after their branches are parsed.
                     then_names = {name for name, _ in then_yield_vars}
                     for name, annotation in else_yield_vars:
                         if name not in then_names:
                             then_yield_vars.append((name, annotation))
+                            then_names.add(name)
+                        if annotation is not None:
+                            yield_annotations.setdefault(name, []).append(annotation)
 
                 # Determine if we should leak variables (no explicit yields)
                 should_leak = not bool(then_yield_vars)
@@ -852,14 +861,33 @@ class ControlFlowParser:
 
                 # Declare return vars AFTER parsing branches so captured yield types
                 # are available for unannotated yields (fixes issue #233 / #234)
-                for var_name, annotation in then_yield_vars:
-                    if annotation is not None:
-                        var_type = self.resolve_yield_var_type(annotation)
+                for var_name, _ in then_yield_vars:
+                    annotations = yield_annotations.get(var_name, [])
+                    if annotations:
+                        var_type = self.resolve_yield_var_type(annotations[0])
+                        for annotation in annotations[1:]:
+                            other_type = self.resolve_yield_var_type(annotation)
+                            merged_type = _merge_annotation_metadata(var_type, other_type)
+                            other_merged = _merge_annotation_metadata(other_type, var_type)
+                            if not types_match(merged_type, other_merged) or not type_bindings_match(
+                                var_type, other_type
+                            ):
+                                raise ParserTypeError(
+                                    f"If result '{var_name}' has incompatible branch annotations: "
+                                    f"{python_print(var_type)} versus {python_print(other_type)}",
+                                    span=self.services.span_tracker.get_span(annotation),
+                                    hint="Use matching result types and allocation bindings, "
+                                    "or annotate only one arm",
+                                )
+                            var_type = merged_type
                     elif (
                         self.flow.current_yield_types is not None
                         and var_name in self.flow.current_yield_types
                     ):
-                        var_type = self.flow.current_yield_types[var_name]
+                        # An inferred result takes the value's descriptor, not
+                        # its source allocation. Explicit annotations above
+                        # retain their binding; loop inference is independent.
+                        var_type = ir._without_type_memref(self.flow.current_yield_types[var_name])
                     else:
                         var_type = self.resolve_yield_var_type(None)
                     if_builder.return_var(var_name, var_type)

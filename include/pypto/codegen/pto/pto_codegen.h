@@ -462,15 +462,21 @@ class PTOCodegen : public CodegenBase {
   /// Resolve a preselected storage handle to the result variable's own physical
   /// shape/configuration. The returned name and annotation always describe the
   /// same SSA definition; this does not allocate or change the storage mapping.
+  /// Control-flow bindings can defer dynamic validity to their shared lexical
+  /// initialization; ordinary producers initialize a dynamic view immediately.
   [[nodiscard]] TupleOutput PrepareTileDestination(const ir::VarPtr& var, const std::string& storage,
-                                                   const std::string& op_name);
+                                                   const std::string& op_name,
+                                                   bool defer_valid_shape = false);
 
   /// Define a typed, zero-copy view of an existing SSA. Backend view helpers
   /// delegate here so all views register their definition and physical type.
+  /// A control-flow caller may defer mutable validity initialization to its
+  /// lexical binding point; it must emit that initialization before any use.
   std::string EnsureTileView(
       const std::string& source, const std::string& source_type,
       const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,
-      std::optional<std::pair<std::string, std::string>> mutable_valid_shape = std::nullopt);
+      std::optional<std::pair<std::string, std::string>> mutable_valid_shape = std::nullopt,
+      bool defer_valid_shape = false);
 
   /**
    * @brief Resolve and allocate every DPS destination of a multi-output call
@@ -1136,10 +1142,11 @@ class PTOCodegen : public CodegenBase {
     /// a `[1, N]` row-major op result and its `[N, 1]` col-major reshape view,
     /// which occupy the same bytes. Their shared handle carries exactly one type
     /// (differently-typed reads become `pto.treshape` views of it), so it must
-    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle` only
-    /// accepts these identities for a dominating tile handle shared by both
-    /// branch yields in the result's known memory space, whose declared type
-    /// matches the requested type.
+    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle`
+    /// requires both branch yields to occupy that complete window and known
+    /// memory space. An existing dominating allocation can supply a typed view;
+    /// otherwise an already shared, dominating yield handle must match the
+    /// requested type.
     std::set<std::string> memref_identity_mixed_types;
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).

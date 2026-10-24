@@ -67,9 +67,13 @@ struct AllocationConstraintAnalysis {
 
 /**
  * @brief Collect allocation correctness facts without making a placement decision.
+ *
+ * Coalescible transfers may become exact SSA identities; the caller must remove
+ * those operations after placement and keep retained transfers disjoint.
  */
 [[nodiscard]] AllocationConstraintAnalysis AnalyzeAllocationConstraints(
-    const FunctionPtr& func, const LifetimeAnalysisResult& lifetimes, const char* consumer);
+    const FunctionPtr& func, const LifetimeAnalysisResult& lifetimes, const char* consumer,
+    const std::set<const Var*>& coalescible_transfers = {});
 
 }  // namespace ir
 }  // namespace pypto
