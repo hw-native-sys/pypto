@@ -178,7 +178,7 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 *不同*槽位的两个 tile 本来就应该同时存活（这正是 ping-pong 的用途），只有落在同一槽位的 tile
 才会互相破坏。下标是运行期表达式时（`l0c[i % 2]`）没有静态的槽位归属可比，该检查被跳过——轮转
 的正确性由作者负责——而与其他分配之间的隔离依然成立。该检查由本 pass 负责，因为这里才有生命周期信息
-（`ComputeLifetimes`）；判据与 packer 自己的 `var_overlap` 一致，因此**首尾相接是允许的**
+（`AnalyzeAllocationLifetimes`）；判据与 packer 自己的 `var_overlap` 一致，因此**首尾相接是允许的**
 （一个 tile 的最后一次读，可以正是产出下一个成员的那条语句）。通过继承而非绑定落到该 buffer
 上的 tile——view、原地结果、裸 SSA 别名——被排除在外：它们与源 tile 是同一份数据，重叠是预期
 行为。
@@ -297,8 +297,20 @@ Pass MemoryReuse();
 
 **实现文件**：`src/ir/transforms/memory_reuse_pass.cpp`
 
+**内部模块**（`src/ir/transforms/memory_reuse/`）：
+
+- `semantic_aliases.cpp` 负责语义必需别名（must-alias）的重定向及各规划器对应的执行流程。
+- `lifetime_analysis.cpp` 实现公开的分配生命周期分析重载。
+- `allocation_constraints.cpp` 收集硬件与禁止别名约束，为两种规划器验证声明式分配。
+- `packing.cpp` 选择放置位置并应用物理 MemRef 共享。
+- `yield_fixup.cpp` 修复控制流存储边界、规范化恒等别名并清理失效分配。
+- `storage.cpp` / `storage.h` 共享物理窗口判定、存储搬移和小型访问器辅助类。
+- `internal.h` 声明内部阶段接口；入口文件保留 pass 注册及 MemoryReuse 阶段顺序。
+
+**关键算法**：
+
 - `LifetimeAnalyzer` 遍历完整 IR 树计算变量生命周期（包括嵌套控制流）
-- `ComputeLifetimes` 构建 MemRef 共享组和生命周期区间
+- `AnalyzeAllocationLifetimes` 构建 MemRef 共享组和生命周期区间
 - `IdentifyReuseOpportunities` 查找复用候选，在已知容量溢出时重试对齐子区间放置，并记录每个成员的 placement offset
 - `ApplyMemRefSharing` 通过 `MemRefSharingMutator` 更新 MemRef 指针
 - `TopDownRetargeter::CoalesceAccumulatorIfPhis` 通过把失效分支的 seed 重定向到就地累加器缓冲区，合并被剥离的循环携带累加器 `if`-phi，使 `YieldFixupMutator` 不再产生非法的 `acc→acc tile.move`（见算法步骤 5）
