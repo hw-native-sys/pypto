@@ -416,6 +416,10 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
               << tracked_split_dim
               << ", but tile.aic_gather reassembles a 2D tile along dim 0 or dim 1 only. Cross to "
               << "the cube side before the op that moved the split axis there.";
+          // Aligned results can retain more capacity than their lane interval.
+          // The current gather type rule doubles capacity, so diagnose this
+          // unsupported reassembly before constructing a contradictory tile.
+          split_axis::CheckAlignedGatherSource(src, *tracked_info, call->span_);
           // The gather carries the authored MODE for the axis it re-joins (dim 0
           // -> UP_DOWN, dim 1 -> LEFT_RIGHT); its transport code (always an even
           // one — the V->C direction has no odd form) is derived downstream by

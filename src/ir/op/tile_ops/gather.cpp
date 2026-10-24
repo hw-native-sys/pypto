@@ -22,6 +22,7 @@
 
 #include <any>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -361,14 +362,13 @@ REGISTER_OP("tile.gather_mask")
 //
 // Output: TupleType{ TileType_dst, TileType_cdst } (2 outputs)
 //   dst  shape  = [rows, out_cols], dtype = INT32 (gathered indices)
-//   cdst shape  = [1, rows], dtype = count_dtype (per-row match count)
+//   cdst shape  = [1, aligned_rows], dtype = count_dtype (per-row match count)
 //
-// `cdst` is kept 2D (`[1, rows]`) so that the rows-many counts are
-// physically contiguous (row_major + cols * sizeof(count_dtype) % 32 == 0),
-// which is required by the PTOAS pto.tgather verifier and the PTO TileConfig
-// 32-byte alignment static_assert. The compare-form ISA writes
-// `cdstPtr + i` for i in [0, srcValidRow), and the [1, rows] row_major
-// layout provides exactly that contiguity.
+// `cdst` is one row so the ISA's `cdstPtr + i` writes for
+// i in [0, srcValidRow) are contiguous. Its physical columns round the source
+// row capacity up to a whole 32-byte count row, while valid_shape keeps the
+// true source valid rows. Both the PTOAS verifier and PTO TileConfig require
+// this row-major physical alignment, including for a single valid count.
 //
 // The DPS buffers backing dst/cdst are allocated by the downstream
 // init_memref / memory_reuse passes from the deduced TupleType, so this
@@ -435,28 +435,53 @@ static TypePtr DeduceTileGatherCompareType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires count_dtype to be INT32 or UINT32, but got "
       << count_dtype.ToString();
 
-  // Deduce dst/cdst tile types from src.shape[0] (rows) + attrs.
+  // Physical rows size the allocation; only valid rows produce output data.
+  // Keeping both in the deduced tuple makes memory planning and codegen agree
+  // without exposing aligned padding as additional logical counts.
   const ExprPtr& rows_expr = src_type->shape_[0];
+  const auto src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+  const ExprPtr& valid_rows = src_view.valid_shape[0];
+  constexpr int64_t kVecRowBytes = 32;
+  const int64_t count_bytes = static_cast<int64_t>(count_dtype.GetByte());
+  // Validate the storage-width contract before either division or remainder.
+  // Dtype identity alone does not establish a nonzero GetByte() for analysis.
+  INTERNAL_CHECK_SPAN(count_bytes > 0 && count_bytes <= kVecRowBytes && kVecRowBytes % count_bytes == 0,
+                      args[0]->span_)
+      << "Internal error: gather count element width must be a positive divisor of " << kVecRowBytes
+      << " bytes, got " << count_bytes;
+  const int64_t counts_per_block = kVecRowBytes / count_bytes;
+  ExprPtr count_cols;
+  if (auto rows = As<ConstInt>(rows_expr)) {
+    CHECK_SPAN(rows->value_ > 0, args[0]->span_)
+        << "The operator " << op_name << " requires positive source rows, but got " << rows->value_;
+    // Remainder-based rounding avoids overflowing rows + alignment - 1.
+    const int64_t padding = (counts_per_block - rows->value_ % counts_per_block) % counts_per_block;
+    CHECK_SPAN(rows->value_ <= std::numeric_limits<int64_t>::max() - padding, args[0]->span_)
+        << "The operator " << op_name << " count capacity alignment would overflow int64 for " << rows->value_
+        << " source rows";
+    count_cols = std::make_shared<ConstInt>(rows->value_ + padding, DataType::INDEX, rows_expr->span_);
+  } else {
+    // Preserve symbolic type deduction without adding alignment - 1 to a
+    // potentially large row expression. Allocation still needs static capacity.
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, rows_expr->span_);
+    auto block = std::make_shared<ConstInt>(counts_per_block, DataType::INDEX, rows_expr->span_);
+    count_cols = MakeMul(MakeAdd(MakeFloorDiv(MakeSub(rows_expr, one), block), one), block);
+  }
   auto out_cols_expr = std::make_shared<ConstInt>(out_cols, DataType::INDEX, Span::unknown());
 
   TileView dst_view;
-  dst_view.valid_shape = {rows_expr, out_cols_expr};
+  dst_view.valid_shape = {valid_rows, out_cols_expr};
   InheritTileViewLayout(dst_view, src_type);
   std::vector<ExprPtr> dst_shape = {rows_expr, out_cols_expr};
   auto dst_type = std::make_shared<TileType>(dst_shape, DataType::INT32, std::nullopt, dst_view);
 
-  // cdst is shaped as [1, rows] (one count per src-row, laid out as a single
-  // row of `rows` int32s) — required by the PTOAS pto.tgather verifier
-  // (cdst must use row_major blayout) AND the PTO TileConfig 32-byte
-  // alignment static_assert (row_major + cols*sizeof(int) % 32 == 0).
-  // The compare-form ISA writes `cdstPtr + i` for i in [0, srcValidRow),
-  // so the rows-many counts must be physically contiguous, which the
-  // [1, rows] row_major layout provides.
+  // Counts stay one contiguous row, with spare capacity rather than spare
+  // valid entries. Scalar reads retain offset i; stores use valid_shape.
   auto one_expr = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
   TileView cdst_view;
-  cdst_view.valid_shape = {one_expr, rows_expr};
+  cdst_view.valid_shape = {one_expr, valid_rows};
   cdst_view.blayout = TileLayout::row_major;
-  std::vector<ExprPtr> cdst_shape = {one_expr, rows_expr};
+  std::vector<ExprPtr> cdst_shape = {one_expr, count_cols};
   auto cdst_type = std::make_shared<TileType>(cdst_shape, count_dtype, std::nullopt, cdst_view);
 
   std::vector<TypePtr> elements{dst_type, cdst_type};

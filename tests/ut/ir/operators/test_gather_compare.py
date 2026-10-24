@@ -71,18 +71,18 @@ def _tuple_elements(call) -> list[_ir.ShapedType]:
     return elements
 
 
-def _build_program(cmp_mode: str | int = "eq", offset=0, src_dtype=pl.FP32, count_dtype=pl.INT32):
+def _build_program(cmp_mode: str | int = "eq", offset=0, src_dtype=pl.FP32, count_dtype=pl.INT32, rows=32):
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
-            src: pl.Tensor[[32, 64], src_dtype],
+            src: pl.Tensor[[rows, 64], src_dtype],
             kvalue: pl.Scalar[src_dtype],
-            out_dst: pl.Tensor[[32, 8], pl.INT32],
-            out_cdst: pl.Tensor[[1, 32], count_dtype],
+            out_dst: pl.Tensor[[rows, 8], pl.INT32],
+            out_cdst: pl.Tensor[[1, rows], count_dtype],
         ):
-            s: pl.Tile[[32, 64], src_dtype] = pl.load(src, [0, 0], [32, 64])
+            s: pl.Tile[[rows, 64], src_dtype] = pl.load(src, [0, 0], [rows, 64])
             tmp: pl.Tile[[32, 64], pl.UINT8] = pl.tile.create([32, 64], pl.UINT8)
             d, c = pl.tile.gather_compare(
                 s, kvalue, tmp, cmp_mode=cmp_mode, offset=offset, out_cols=8, count_dtype=count_dtype
@@ -115,6 +115,85 @@ class TestTileGatherCompareTypes:
         dst, cdst = _tuple_elements(call)
         assert dst.dtype == pl.INT32, "dst indices stay INT32 regardless of count_dtype"
         assert cdst.dtype == pl.UINT32
+
+    @pytest.mark.parametrize("rows", [1, 2, 7, 8, 9, 16])
+    @pytest.mark.parametrize("count_dtype", [pl.INT32, pl.UINT32])
+    def test_count_capacity_is_aligned_without_padding_valid_counts(self, rows, count_dtype):
+        """The tuple result owns its storage; an oversized store target cannot fix it."""
+        call = _find_call(_build_program(rows=rows, count_dtype=count_dtype), "tile.gather_compare")
+        dst, counts = _tuple_elements(call)
+        assert isinstance(counts, _ir.TileType)
+        assert _static_shape(dst) == [rows, 8]
+        # Eight 32-bit slots fill the smallest legal 32-byte UB row. Aligned
+        # source row counts retain their capacity instead of gaining a block.
+        assert _static_shape(counts) == [1, ((rows + 7) // 8) * 8]
+        assert counts.dtype == count_dtype
+        assert counts.memory_space == _ir.MemorySpace.Vec
+        view = counts.tile_view
+        if rows % 8:
+            # A padded tile must carry an explicit logical extent. A fully
+            # valid row-major tile may canonicalize to the implicit view.
+            assert view is not None
+        if view is not None:
+            assert view.blayout == _ir.TileLayout.row_major
+        valid_shape = counts.shape if view is None else view.valid_shape
+        assert len(valid_shape) == 2
+        for dim, expected in zip(valid_shape, [1, rows]):
+            assert isinstance(dim, _ir.ConstInt)
+            assert dim.value == expected
+
+    @pytest.mark.parametrize("dynamic_valid", [False, True])
+    @pytest.mark.parametrize("count_dtype", [pl.INT32, pl.UINT32])
+    def test_partial_source_rows_remain_the_valid_count_extent(self, dynamic_valid, count_dtype):
+        """Physical capacity sizes storage; only source valid rows produce counts."""
+        span = _ir.Span.unknown()
+        valid_rows = (
+            _ir.Var("valid_rows", _ir.ScalarType(pl.INDEX), span)
+            if dynamic_valid
+            else _ir.ConstInt(7, pl.INDEX, span)
+        )
+        source = _ir.Var(
+            "source",
+            _ir.TileType([9, 64], pl.FP32, tile_view=_ir.TileView(valid_shape=[valid_rows, 64])),
+            span,
+        )
+        workspace = _ir.Var("workspace", _ir.TileType([1, 512], pl.UINT8), span)
+        call = _ir.create_op_call(
+            "tile.gather_compare",
+            [source, _ir.ConstFloat(0.5, pl.FP32, span), workspace],
+            {"cmp_mode": 4, "out_cols": 64, "count_dtype": count_dtype},
+            span,
+        )
+        dst, counts = _tuple_elements(call)
+        assert isinstance(dst, _ir.TileType)
+        assert isinstance(counts, _ir.TileType)
+        assert _static_shape(dst) == [9, 64]
+        assert _static_shape(counts) == [1, 16]
+        assert dst.tile_view is not None and counts.tile_view is not None
+        # Preserve the dynamic extent itself through the tuple type instead of
+        # replacing it with the physical source rows or the aligned capacity.
+        assert dst.tile_view.valid_shape[0].same_as(valid_rows)
+        assert counts.tile_view.valid_shape[1].same_as(valid_rows)
+        projected = _ir.TupleGetItemExpr(call, 1, span)
+        assert isinstance(projected.type, _ir.TileType)
+        assert projected.type.tile_view is not None
+        assert projected.type.tile_view.valid_shape[1].same_as(valid_rows)
+
+    @pytest.mark.parametrize(
+        ("rows", "error"), [(0, "positive"), (-1, "positive"), ((1 << 63) - 1, "overflow")]
+    )
+    def test_invalid_count_capacity_is_rejected_before_allocation(self, rows, error):
+        """Rounding an invalid/overflowing capacity must not create an unsafe tile."""
+        span = _ir.Span.unknown()
+        source = _ir.Var("source", _ir.TileType([rows, 64], pl.FP32), span)
+        workspace = _ir.Var("workspace", _ir.TileType([1, 512], pl.UINT8), span)
+        with pytest.raises(ValueError, match=error):
+            _ir.create_op_call(
+                "tile.gather_compare",
+                [source, _ir.ConstFloat(0.5, pl.FP32, span), workspace],
+                {"cmp_mode": 4, "out_cols": 64},
+                span,
+            )
 
     def test_destinations_are_not_arguments(self):
         """The op takes three inputs; dst and cdst reach the caller as results.

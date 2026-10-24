@@ -3268,8 +3268,10 @@ def gather_compare(
 
     Returns:
         ``(dst, cdst)`` where ``dst`` is a Tile ``[rows, out_cols]`` of INT32
-        gathered indices and ``cdst`` is a Tile ``[1, rows]`` of ``count_dtype``
-        per-row match counts.
+        gathered indices and ``cdst`` holds ``count_dtype`` per-row match counts.
+        Its physical shape is ``[1, aligned_rows]``, with columns rounded up to
+        eight INT32/UINT32 elements for 32-byte alignment. Its valid shape stays
+        ``[1, src_valid_rows]``; stores write only those valid counts.
     """
     kv_expr = kvalue.unwrap() if isinstance(kvalue, Scalar) else _normalize_expr(kvalue)
     call_expr = _ir_ops.gather_compare(

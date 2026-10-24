@@ -143,6 +143,16 @@ The DSL wrapper returns one `TupleGetItemExpr` per output over the *same* call;
 `_unwrap_result` in `python/pypto/language/parser/_dsl_invoker.py` recognizes
 that shape generically and hands the parser back the bare `Call` to rebind.
 
+Each result's type must describe both its physical capacity and its valid region
+**before** memory planning. For `tile.gather_compare`, the per-row count output is
+one contiguous row of INT32/UINT32 values. Its physical shape is
+`[1, ceil_div(src_rows, 8) * 8]` to meet the 32-byte Vec row alignment; its valid
+shape is `[1, src_valid_rows]`. For example, nine source rows need a `[1, 16]`
+count tile with only nine valid entries. `tile.read(count, [0, i])` keeps the same
+element offsets, and `tile.store` uses the valid region rather than writing the
+padding. The tensor-level count shape remains `[1, rows]`: extra Vec capacity
+does not add logical counts or enlarge the caller's tensor.
+
 ## Codegen
 
 A multi-output op's `Call` does not carry its destinations in `args_` — the

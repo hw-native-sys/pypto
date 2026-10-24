@@ -797,18 +797,24 @@ the trailing `Substitute` rewrites the argument even where nothing is halved:
 
 ### Tuple results — one split axis per element
 
-`tile.gather_compare` returns `Tuple[dst[rows, out_cols], cdst[1, rows]]`. Under a
-row split those two elements do **not** move along the same axis: `dst` halves on
-dim 0, while `cdst` — a single contiguous row of per-row counts — halves on dim 1.
-There is no single result axis to follow, so the generic path cannot express it.
+`tile.gather_compare` returns indices `[rows, out_cols]` and counts with physical
+capacity `[1, ceil_div(rows, 8) * 8]` and valid extent `[1, valid_rows]`. A row split
+partitions indices along dim 0 and counts along dim 1. The count capacity may stay
+unchanged or round up: splitting nine rows needs two eight-element count tiles.
 
 The mapping is **discovered, not declared**: re-deduce the call from the arguments the
 halved node will carry, and read which axis of each element moved. A new tuple-returning
-operator needs no registration, and the mapping cannot go stale the way per-operator
-metadata did (gh#2612). Re-deduction supplies only the *axis*; `HalveTileShape` still
-halves, so odd extents localize per lane as usual.
+operator needs no registration. When storage alignment hides the physical split,
+match each result's full and per-lane valid extents to the partitioned input.
+Keep the deduced capacity and track the logical partition stride independently;
+for nine rows that stride is five, even though each count tile has capacity eight.
 
-Every element must halve on exactly one axis. An element that comes back **unchanged**
+Tuple-derived positional data must also agree on localized non-broadcast valid
+extents; loop and branch carries retain the complete lane type. Automatic
+Vec-to-Cube reassembly rejects an explicit aligned partition whose logical
+stride differs from lane capacity until capacity-aware gather typing is supported.
+
+Every element must partition on exactly one axis. An element whose capacity and valid region stay **unchanged**
 is the dangerous case, not the harmless one — the operator produced a full-width output
 from an operand each lane owns only half of, so neither lane holds the whole answer while
 the shape still looks right. That is what correctly rejects a LEFT_RIGHT

@@ -114,6 +114,13 @@ PTO codegen          PrepareTupleOutputs(op) 从 `<var> = _tuple_tmp[i]` 绑定�
 
 DSL 包装器为每个输出返回一个指向*同一个* call 的 `TupleGetItemExpr`；`python/pypto/language/parser/_dsl_invoker.py` 中的 `_unwrap_result` 通用地识别这一形状，并把裸 `Call` 交还给解析器重新绑定。
 
+每个结果的类型都必须在内存规划之前描述物理容量与有效区域 (valid region)。
+`tile.gather_compare` 的逐行计数输出是连续的一行 INT32/UINT32，其物理形状为
+`[1, ceil_div(src_rows, 8) * 8]`，以满足 Vec 行宽的 32 字节对齐；有效形状为
+`[1, src_valid_rows]`。例如，九行输入需要 `[1, 16]` 的计数 Tile，但只有九个有效元素。
+`tile.read(count, [0, i])` 的元素偏移保持不变，`tile.store` 按有效区域写出，不会写出填充。
+Tensor 层的计数形状仍为 `[1, rows]`：增加 Vec 物理容量不会增加逻辑计数或扩大调用方的 Tensor。
+
 ## 代码生成
 
 多输出算子的 `Call` 不在 `args_` 里携带它的目的地——解析器把它们放进了单独的 `AssignStmt`——所以 emitter 需要去查：

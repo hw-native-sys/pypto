@@ -246,11 +246,12 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim);
  *
  * Once a tile var has been partitioned along the split axis, downstream ops
  * (e.g. ``tile.store``, loop ``iter_args``/``return_vars``) need its halved
- * extent to re-localize their split-dim offsets. ``half_dim_size`` is that
- * extent (a ``ConstInt`` for static dims, a ``floordiv`` expression otherwise)
- * — the tile's PHYSICAL half. How far apart the two lanes' data sits is the
- * partition stride instead (see ResolveLaneStride), which equals this half
- * unless the body was rebalanced onto a ragged boundary's valid region.
+ * capacity and logical partition stride separately. ``half_dim_size`` is the
+ * per-lane PHYSICAL capacity (normally the old extent's ceil half, but aligned
+ * operator outputs may round it up). ``partition_stride`` overrides the
+ * default distance between lane intervals when alignment makes that distance
+ * differ from capacity. A body rebalanced onto valid data supplies its shared
+ * stride separately (see ResolveLaneStride).
  */
 struct TileInfo {
   ExprPtr half_dim_size;
@@ -258,7 +259,25 @@ struct TileInfo {
   // dim, but a reshape can migrate the split axis to another dimension (e.g. the
   // rms_norm [N,1]<->[1,N] column reshape), so each tracked tile carries its own.
   int split_dim = 0;
+  // Aligned result capacity can stay unchanged (or round up) while its logical
+  // lane interval shrinks. Keep that interval's stride separate from capacity.
+  ExprPtr partition_stride = nullptr;
+  // Authoritative per-lane type, including localized validity. Producers and
+  // aliases retain it so a missing type cannot conceal a carry mismatch.
+  TypePtr lane_type = nullptr;
+  // A tuple binding has no single axis. Its entry stores these per-element
+  // facts, and only projection lookups expose them as individual tile facts.
+  std::shared_ptr<const std::vector<TileInfo>> tuple_elements = nullptr;
+  // Deduced tuple data and its consumers must preserve the localized valid
+  // region even when physical capacity halves exactly. Keep this contract
+  // separate from legacy positional scratch whose validity is op-defined.
+  bool requires_valid_region_match = false;
 };
+
+/// Reject automatic Vec-to-Cube reassembly when an explicitly aligned
+/// partition's logical stride differs from its actual per-lane capacity.
+/// Ordinary body-wide lane rebalancing keeps its existing boundary rules.
+void CheckAlignedGatherSource(const ExprPtr& source, const TileInfo& info, const Span& span);
 
 /// Admission facts for a lowered data-parallel body. Broadcast roots remain
 /// neutral: allowing a replicated producer does not prove its consumers split.
