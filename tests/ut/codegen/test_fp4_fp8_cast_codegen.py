@@ -135,13 +135,33 @@ def fp4_rhs_cast_with_store(
     return c, d
 
 
-def _compile(kernel, output: Path, *, planner=passes.MemoryPlanner.PYPTO) -> str:
+@pl.jit
+def fp4_full_256_rhs_cast_push(
+    a: pl.Tensor[[48, 256], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[48, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[256, 128], pl.FP4E2M1X2],
+    b_scale: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+    c: pl.Out[pl.Tensor[[48, 256], pl.FP32]],
+):
+    # The authored B cast is 256x256. Eligibility is checked after UP_DOWN
+    # splitting, when each AIV owns the proven full 128x256 output.
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="fp4_full_256_rhs_cast_push_tile"):
+        lhs = pl.load(a, [0, 0], [48, 256])
+        lhs_scale = pl.load(a_scale, [0, 0], [48, 8])
+        rhs = pl.cast(pl.load(b, [0, 0], [256, 128]), pl.FP8E4M3FN)
+        rhs_scale = pl.load(b_scale, [0, 0], [8, 256])
+        c = pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], c)
+    return c
+
+
+def _compile(kernel, output: Path, *, planner=passes.MemoryPlanner.PYPTO, nz_row_plus_one=False) -> str:
     context = passes.PassContext.current()
     assert context is not None, "The UT fixture supplies pass verification instruments"
     with passes.PassContext(
         context.get_instruments(),
         verification_level=context.get_verification_level(),
         memory_planner=planner,
+        enable_fp4_nz_row_plus_one=nz_row_plus_one,
     ):
         kernel.compile(
             config=RunConfig(
@@ -400,6 +420,27 @@ def test_explicit_packed_fp4_fp8_addresses_require_disjoint_windows(fused, overl
             codegen.PTOCodegen().generate(program, emit_tile_addr=True)
     else:
         assert "pto.tcvt" in codegen.PTOCodegen().generate(program, emit_tile_addr=True)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_row_plus_one_actual_dsl_split_keeps_padded_tpush_and_compact_fifo(tmp_path, planner, enabled):
+    pto = _compile(fp4_full_256_rhs_cast_push, tmp_path, planner=planner, nz_row_plus_one=enabled)
+    cast = _direct_cast(pto)
+    assert "rows=128, cols=256" in cast
+    dst = cast.split("outs(", 1)[1]
+    assert (", compact=2" in dst) is enabled
+    pushes = [
+        line
+        for line in pto.splitlines()
+        if "pto.tpush_to_aic" in line and "dtype=f8E4M3FN" in line and "rows=128, cols=256" in line
+    ]
+    assert len(pushes) == 1, pto
+    assert (", compact=2" in pushes[0]) is enabled
+    assert re.search(r"slot_size\s*=\s*65536\b", pto)
+    mat_lines = [line for line in pto.splitlines() if "loc=mat" in line]
+    assert mat_lines and all(", compact=2" not in line for line in mat_lines)
+    assert "rows=129" not in pto
 
 
 if __name__ == "__main__":

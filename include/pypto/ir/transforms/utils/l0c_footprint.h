@@ -24,6 +24,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/storage_size.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir::utils {
@@ -59,7 +60,8 @@ inline std::optional<uint64_t> L0cPhysicalBytes(int64_t m, int64_t n, uint64_t e
 
 /// Static physical allocation bytes for a shaped value in ``space``.
 ///
-/// Non-L0C spaces use their logical element count. L0C aligns the logical M
+/// Ordinary non-L0C spaces use their logical element count. RowPlusOne Vec
+/// NZ reserves the extra physical panel rows. L0C aligns the logical M
 /// dimension (the penultimate dimension; leading dimensions are batch axes)
 /// according to the active backend. Dynamic/non-positive shapes and overflow
 /// return nullopt.
@@ -72,6 +74,16 @@ inline std::optional<uint64_t> StaticPhysicalAllocationBytes(const ShapedTypePtr
     auto value = As<ConstInt>(dim);
     if (!value || value->value_ <= 0) return std::nullopt;
     extents.push_back(static_cast<uint64_t>(value->value_));
+  }
+
+  if (auto tile = As<TileType>(type);
+      tile && tile->tile_view_ && tile->tile_view_->compact == CompactMode::row_plus_one) {
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    if (space != MemorySpace::Vec || extents.size() != 2 || type->dtype_ != DataType::FP8E4M3FN ||
+        view.blayout != TileLayout::col_major || view.slayout != TileLayout::row_major || view.fractal != 512)
+      return std::nullopt;
+    // Preserve logical Rows/Cols for TPUSH; only the allocation gains padding.
+    return storage_size::RowPlusOneNZStorageBytes(extents[0], extents[1], type->dtype_);
   }
 
   if (space == MemorySpace::Acc) {

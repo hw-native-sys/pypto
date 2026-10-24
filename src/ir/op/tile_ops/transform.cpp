@@ -17,6 +17,7 @@
  * slice, reshape and transpose operations.
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -1154,7 +1155,7 @@ TypePtr DeduceTileCastToNZType(const std::vector<ExprPtr>& args,
   // This internal op has no scratch/layout override surface. Validate mode
   // here as the ordinary cast deducer only checks its presence.
   for (const auto& [key, value] : kwargs) {
-    CHECK(key == "target_type" || key == "mode" || key == "saturation_mode")
+    CHECK(key == "target_type" || key == "mode" || key == "saturation_mode" || key == "compact")
         << "tile.cast_to_nz does not support kwarg '" << key << "'";
     if (key == "mode") {
       const int mode = AnyCast<int>(value, "tile.cast_to_nz mode");
@@ -1195,24 +1196,43 @@ TypePtr DeduceTileCastToNZType(const std::vector<ExprPtr>& args,
     CHECK(valid_rows->value_ >= 0 && valid_rows->value_ <= rows->value_)
         << "tile.cast_to_nz valid rows exceed physical bounds";
   }
+  const auto compact = static_cast<CompactMode>(GetKwargOr<int>(kwargs, "compact", 0));
+  CHECK(compact == CompactMode::null || compact == CompactMode::row_plus_one)
+      << "tile.cast_to_nz compact must be null or row_plus_one";
+  if (compact == CompactMode::row_plus_one) {
+    auto valid_rows = As<ConstInt>(valid[0]);
+    CHECK(rows->value_ == 128 && logical_cols == 256 && valid_rows && valid_rows->value_ == 128 &&
+          valid_cols->value_ == cols->value_)
+        << "tile.cast_to_nz row_plus_one currently requires full 128x256 output";
+  }
+  auto cast_kwargs = kwargs;
+  cast_kwargs.erase(std::remove_if(cast_kwargs.begin(), cast_kwargs.end(),
+                                   [](const auto& item) { return item.first == "compact"; }),
+                    cast_kwargs.end());
   auto& registry = OpRegistry::GetInstance();
-  auto cast = registry.Create("tile.cast", args, kwargs, args[0]->span_);
+  auto cast = registry.Create("tile.cast", args, cast_kwargs, args[0]->span_);
   CHECK(As<TileType>(cast->GetType())->dtype_ == DataType::FP8E4M3FN)
       << "tile.cast_to_nz requires exact FP8E4M3FN target_type";
-  return registry
-      .Create("tile.move", {cast},
-              {{"target_memory", MemorySpace::Vec},
-               {"blayout", TileLayout::col_major},
-               {"slayout", TileLayout::row_major}},
-              args[0]->span_)
-      ->GetType();
+  auto result = As<TileType>(registry
+                                 .Create("tile.move", {cast},
+                                         {{"target_memory", MemorySpace::Vec},
+                                          {"blayout", TileLayout::col_major},
+                                          {"slayout", TileLayout::row_major}},
+                                         args[0]->span_)
+                                 ->GetType());
+  if (compact == CompactMode::null) return result;
+  auto result_view = tile_view_semantics::GetEffectiveTileView(*result);
+  result_view.compact = compact;
+  return std::make_shared<TileType>(result->shape_, result->dtype_, result->memref_, result_view,
+                                    result->memory_space_);
 }
 
 REGISTER_OP("tile.cast_to_nz")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
-    .set_description("Internal native FP4 E2M1 to FP8 E4M3FN conversion into fresh standard NZ storage")
+    .set_description("Internal native FP4 E2M1 to FP8 E4M3FN conversion into fresh NZ storage")
     .add_argument("tile", "ND FP4E2M1X2 byte-carrier source")
+    .set_attr<int>("compact")
     .set_attr<DataType>("target_type")
     .set_attr<int>("mode")
     .set_attr<int>("saturation_mode")

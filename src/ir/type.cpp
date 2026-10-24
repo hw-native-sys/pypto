@@ -117,6 +117,28 @@ void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::
   }
 }
 
+// RowPlusOne is a physical Vec NZ layout, not a generic compaction flag.
+// Validate it at the public type boundary so explicit descriptors cannot enter
+// an allocator with a dense shape or an unsupported multi-buffer slot stride.
+void ValidateRowPlusOneTileStorage(const TileType& tile) {
+  if (!tile.tile_view_ || tile.tile_view_->compact != CompactMode::row_plus_one) return;
+  const auto view = tile_view_semantics::GetEffectiveTileView(tile);
+  CHECK(tile.memory_space_ == MemorySpace::Vec && tile.dtype_ == DataType::FP8E4M3FN &&
+        tile.shape_.size() == 2 && view.blayout == TileLayout::col_major &&
+        view.slayout == TileLayout::row_major && view.fractal == 512 && view.stride.empty() &&
+        !view.start_offset)
+      << "row_plus_one requires standard FP8 Vec NZ storage without explicit strides/start_offset";
+  auto rows = As<ConstInt>(tile.shape_[0]);
+  auto cols = As<ConstInt>(tile.shape_[1]);
+  CHECK(rows && cols && rows->value_ > 0 && rows->value_ % 16 == 0 && cols->value_ > 0 &&
+        cols->value_ % 32 == 0)
+      << "row_plus_one requires static positive physical rows divisible by 16 and columns divisible by 32";
+  CHECK(rows->value_ < 0xFFFF && rows->value_ + 1 <= 0x7FFFFFFF / cols->value_)
+      << "row_plus_one padded panel stride/byte offsets exceed supported bounds";
+  CHECK(!tile.memref_ || !*tile.memref_ || (*tile.memref_)->slot_count_ == 1)
+      << "row_plus_one does not support multi-buffer slots; use independent Tile allocations";
+}
+
 }  // namespace
 
 bool operator==(const TileView& lhs, const TileView& rhs) {
@@ -255,6 +277,8 @@ std::string CompactModeToString(CompactMode mode) {
       return "null";
     case CompactMode::normal:
       return "normal";
+    case CompactMode::row_plus_one:
+      return "row_plus_one";
     default:
       throw TypeError("Unknown CompactMode value: " + std::to_string(static_cast<int>(mode)));
   }
@@ -265,6 +289,8 @@ CompactMode StringToCompactMode(const std::string& str) {
     return CompactMode::null;
   } else if (str == "normal") {
     return CompactMode::normal;
+  } else if (str == "row_plus_one") {
+    return CompactMode::row_plus_one;
   }
   throw TypeError("Unknown CompactMode string: " + str);
 }
@@ -323,8 +349,14 @@ BufferType::BufferType(std::vector<int64_t> shape, DataType dtype, MemorySpace m
   CHECK(fractal_ > 0) << "BufferType fractal size in bytes must be positive";
   CHECK(pad_ == PadValue::null || pad_ == PadValue::zero || pad_ == PadValue::max || pad_ == PadValue::min)
       << "BufferType pad must be null, zero, max, or min";
-  CHECK(compact_ == CompactMode::null || compact_ == CompactMode::normal)
-      << "BufferType compact mode must be null or normal";
+  CHECK(compact_ == CompactMode::null || compact_ == CompactMode::normal ||
+        compact_ == CompactMode::row_plus_one)
+      << "BufferType compact mode must be null, normal, or row_plus_one";
+  // Buffer IR's allocation/view recipes currently use dense byte counts and
+  // its multi-buffer descriptors use product(shape) as slot stride. Keep this
+  // mode on Tile IR until both recipes can preserve its padded capacity.
+  CHECK(compact_ != CompactMode::row_plus_one)
+      << "BufferType row_plus_one is not supported; use Tile IR with independent padded NZ allocations";
 }
 
 MultiBufferType::MultiBufferType(BufferTypePtr element_type, int64_t slot_count)
@@ -417,6 +449,7 @@ TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optio
       tile_view_(std::move(tile_view)),
       memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
   CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
+  ValidateRowPlusOneTileStorage(*this);
 }
 
 TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
@@ -425,6 +458,7 @@ TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<Mem
       tile_view_(std::move(tile_view)),
       memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
   CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
+  ValidateRowPlusOneTileStorage(*this);
 }
 
 std::optional<MemorySpace> TileType::GetMemorySpace() const { return memory_space_; }

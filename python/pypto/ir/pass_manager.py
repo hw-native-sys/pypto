@@ -578,6 +578,8 @@ class PassManager:
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
+        nz_pad = ctx.get_enable_fp4_nz_row_plus_one() if ctx else False
+        mx_ping_pong = ctx.get_enable_mx_l0_ping_pong() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -593,6 +595,8 @@ class PassManager:
             dbc_flag,
             runtime,
             buffer_ir,
+            nz_pad,
+            mx_ping_pong,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -631,6 +635,8 @@ class PassManager:
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
+        nz_pad = ctx.get_enable_fp4_nz_row_plus_one() if ctx else False
+        mx_ping_pong = ctx.get_enable_mx_l0_ping_pong() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
@@ -647,6 +653,8 @@ class PassManager:
             dbc_flag,
             runtime,
             buffer_ir,
+            nz_pad,
+            mx_ping_pong,
         ):
             try:
                 return self._pipeline.run(input_ir)

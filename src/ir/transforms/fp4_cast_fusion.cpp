@@ -30,6 +30,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -130,6 +131,68 @@ class NZFusionRewriter : public IRMutator {
   std::unordered_set<const Stmt*> removed_;
 };
 
+// A padded output is selected only when its sole read is the standard V->C
+// consumer, which strips the extra NZ row. Store/arithmetic/view consumers and
+// loop-carried values conservatively keep ordinary NZ. SyntacticUseAnalysis
+// includes Submit args/deps; the push collector intentionally recognizes plain
+// intrinsics only, never turns an asynchronous Submit into a Call.
+class PushSourceCollector : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> sources;
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    if (IsOp(op, "tile.tpush_to_aic") && !op->args_.empty()) {
+      if (auto source = AsVarLike(op->args_[0])) sources.insert(source.get());
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
+class PaddedNZRewriter : public IRMutator {
+ public:
+  explicit PaddedNZRewriter(const FunctionPtr& function) {
+    SyntacticUseAnalysis analysis;
+    analysis.VisitStmt(function->body_);
+    PushSourceCollector pushes;
+    pushes.VisitStmt(function->body_);
+    auto& registry = OpRegistry::GetInstance();
+    for (const auto& [var, assignment] : analysis.definitions) {
+      auto cast = As<Call>(assignment->value_);
+      auto reads = analysis.read_counts.find(var);
+      if (!IsOp(cast, "tile.cast_to_nz") || !pushes.sources.count(var) ||
+          reads == analysis.read_counts.end() || reads->second != 1 || !IsFreshTile(var->GetType()))
+        continue;
+      auto tile = As<TileType>(cast->GetType());
+      if (!tile || tile_view_semantics::GetEffectiveTileView(*tile).compact != CompactMode::null) continue;
+      auto kwargs = cast->kwargs_;
+      kwargs.emplace_back("compact", static_cast<int>(CompactMode::row_plus_one));
+      CallPtr padded;
+      try {
+        // The registered contract checks full 128x256 physical AND valid
+        // geometry. No runtime-tail assertion or silent shape widening.
+        padded = registry.Create("tile.cast_to_nz", cast->args_, kwargs, cast->span_);
+      } catch (const ValueError&) {
+        continue;
+      } catch (const TypeError&) {
+        continue;
+      }
+      calls_.emplace(cast.get(), transform_utils::PreserveCallAttrs(cast, padded));
+      var_remap_.emplace(var, std::make_shared<Var>(assignment->var_->name_hint_, padded->GetType(),
+                                                    assignment->var_->span_));
+    }
+  }
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto replacement = calls_.find(op.get());
+    return replacement == calls_.end() ? IRMutator::VisitExpr_(op) : replacement->second;
+  }
+
+ private:
+  std::unordered_map<const Call*, CallPtr> calls_;
+};
+
 }  // namespace
 
 FunctionPtr FuseFp4CastToNZ(const FunctionPtr& func) {
@@ -140,7 +203,10 @@ FunctionPtr FuseFp4CastToNZ(const FunctionPtr& func) {
   SyntacticUseAnalysis analysis;
   analysis.VisitStmt(func->body_);
   NZFusionRewriter rewriter(analysis);
-  return rewriter.VisitFunction(func);
+  auto fused = rewriter.VisitFunction(func);
+  if (!ctx || !ctx->GetEnableFp4NZRowPlusOne()) return fused;
+  PaddedNZRewriter padded(fused);
+  return padded.VisitFunction(fused);
 }
 
 }  // namespace ir
