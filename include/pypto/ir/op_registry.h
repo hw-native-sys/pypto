@@ -367,6 +367,25 @@ struct OpLaneInvariantArgSpec {
   std::map<size_t, LaneInvariantArg> args;
 };
 
+/// Register schemas describe the future emitter without claiming backend support.
+struct RegOpSpec {
+  std::string emitter;
+  bool requires_reg_scope = true;
+};
+
+/// Element coordinates are absolute within the root MemRef when one is known.
+/// Missing endpoints mean a conservative unknown interval, never no access.
+struct RegMemoryEffect {
+  ExprPtr target;
+  VarPtr root;
+  ArgEffect access;
+  std::optional<int64_t> begin;
+  std::optional<int64_t> end;
+  ExprPtr mask;
+};
+
+RegMemoryEffect GetRegMemoryEffect(const CallPtr& call);
+
 /**
  * @brief Type-erased operator registration entry
  *
@@ -389,6 +408,14 @@ struct OpLaneInvariantArgSpec {
  */
 class OpRegistryEntry {
  public:
+  OpRegistryEntry& set_reg_op(std::string emitter) {
+    CHECK(!reg_spec_.has_value()) << "Register schema is already set";
+    reg_spec_ = RegOpSpec{std::move(emitter), true};
+    set_core_affinity(core_affinity::CoreAffinity::VECTOR);
+    return *this;
+  }
+  [[nodiscard]] const std::optional<RegOpSpec>& GetRegSpec() const { return reg_spec_; }
+
   /**
    * @brief Get the operator instance
    *
@@ -1108,6 +1135,8 @@ class OpRegistryEntry {
   [[nodiscard]] const std::optional<std::string>& GetTemplateDir() const { return template_dir_; }
 
  private:
+  std::optional<RegOpSpec> reg_spec_;
+
   void EnsureMemorySpec() {
     if (!memory_spec_.has_value()) {
       memory_spec_ = OpMemorySpaceSpec{};

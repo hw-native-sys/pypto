@@ -819,3 +819,8 @@ a5 或不提供 SDMA provider 的 runtime 上，启用该能力的 worker 会在
 ## 参考
 
 核心定义位于 `include/pypto/core/common.h` 和 `include/pypto/ir/`；注册表与类型推断实现在 `src/ir/`，算子实现按类别位于 `src/ir/op/{tensor_ops,tile_ops,sync_ops}/`。
+
+## 寄存器操作
+
+`reg.*` P0 schema 使用 `RegOp` 类别、显式参数效应及寄存器区域要求。
+dtype、内存、转换和归属契约见[寄存器操作](../language/06-register-operations.md)。

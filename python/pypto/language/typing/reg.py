@@ -7,11 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Static register annotations; register operations are introduced separately."""
+"""Static register annotations and runtime wrappers for logical Reg values."""
 
 from typing import cast
 
-from pypto.pypto_core import DataType
+from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import RegKind, RegType
 
 
@@ -31,3 +31,12 @@ class Reg:
         if not isinstance(dtype, DataType) or not isinstance(kind, RegKind):
             raise TypeError("Reg requires a DataType and a RegKind")
         return RegType(shape, dtype, kind)
+
+    def __init__(self, expr: object) -> None:
+        if not isinstance(expr, ir.Expr) or not isinstance(expr.type, RegType):
+            raise TypeError("Reg requires an expression with RegType")
+        self._expr = expr
+
+    def unwrap(self) -> ir.Expr:
+        """Return the underlying register expression."""
+        return self._expr

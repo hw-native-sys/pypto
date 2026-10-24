@@ -15,3 +15,6 @@ The Python DSL as the compiler sees it.
 
 - [IR Parser](../ir/07-parser.md) — how this syntax becomes IR.
 - [Language Guide](../../user/language/index.md) — the same language from a user's perspective.
+
+- [Register operations](06-register-operations.md): P0 schemas, implicit captures,
+  region ownership and Builder construction (VF backend emission requires PR3).

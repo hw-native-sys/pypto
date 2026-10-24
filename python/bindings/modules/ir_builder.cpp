@@ -110,6 +110,23 @@ void BindIRBuilder(nb::module_& m) {
           "    RuntimeError: If not inside a function context\n"
           "    ValueError: If a key is already present (attrs are unique-keyed)")
 
+      .def("begin_reg_scope", &IRBuilder::BeginRegScope, nb::arg("span"),
+           "Begin an implicit-capture register region")
+      .def("end_reg_scope", &IRBuilder::EndRegScope, nb::arg("span"), "End a register region")
+      .def(
+          "emit_reg",
+          [](IRBuilder& self, const std::string& name, const std::string& op_name,
+             const std::vector<ExprPtr>& args, const nb::dict& kwargs,
+             const Span& span) { return self.EmitReg(name, op_name, args, ConvertKwargsDict(kwargs), span); },
+          nb::arg("name"), nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+          "Infer, validate and assign a register operation inside the open RegScope.\n\n"
+          "Returns:\n"
+          "    Var: Variable bound to the operation result\n\n"
+          "Raises:\n"
+          "    ValueError: If op_name is not a reg.* operation or no RegScope is open")
+      .def("emit_reg_store", &IRBuilder::EmitRegStore, nb::arg("name"), nb::arg("tile"), nb::arg("offset"),
+           nb::arg("value"), nb::arg("mask").none(), nb::arg("span"),
+           "Assign a register store's Tile alias result")
       .def("end_function", &IRBuilder::EndFunction, nb::arg("end_span"),
            "End building a function.\n\n"
            "Finalizes the function and returns it.\n\n"

@@ -73,7 +73,9 @@ def test_flatten_call_expr_keeps_nested_calls_inside_reg_scope():
     outer = ir.Call(ir.Op("outer"), [inner], scalar, span)
     result = ir.Var("result", scalar, span)
     scope = ir.RegScopeStmt("vf", ir.AssignStmt(result, outer, span), span, ["keep"], {"tag": "local"})
-    program = ir.Program([ir.Function("main", [], [], scope, span)], "test", span)
+    program = ir.Program(
+        [ir.Function("main", [], [], scope, span, type=ir.FunctionType.InCore)], "test", span
+    )
     with passes.PassContext([]):
         after = passes.flatten_call_expr()(program)
     body = next(iter(after.functions.values())).body
@@ -113,7 +115,9 @@ def test_simplify_preserves_reg_scope_when_eliminating_dead_values(dead_body):
             span,
         )
     scope = ir.RegScopeStmt("vf", body, span, ["keep"], {"tag": "local"})
-    program = ir.Program([ir.Function("main", [condition], [], scope, span)], "test", span)
+    program = ir.Program(
+        [ir.Function("main", [condition], [], scope, span, type=ir.FunctionType.InCore)], "test", span
+    )
     with passes.PassContext([]):
         after = passes.simplify()(program)
     result = next(iter(after.functions.values())).body
@@ -131,7 +135,20 @@ def test_simplify_preserves_reg_scope_when_eliminating_dead_values(dead_body):
 
 
 def test_reg_scope_text_printing_does_not_erase_boundary():
-    with pytest.raises(ValueError, match="RegScopeStmt.*not supported"):
+    scope = _scope()
+    printable = ir.RegScopeStmt("", scope.body, scope.span)
+    assert "with pl.reg_scope():" in python_print(printable, format=False)
+
+
+def test_reg_scope_empty_body_prints_parseable_pass():
+    span = ir.Span("reg_scope.py", 2, 1, 2, 8)
+    scope = ir.RegScopeStmt("", ir.SeqStmts([], span), span)
+    printed = python_print(scope, format=False)
+    assert printed == "with pl.reg_scope():\n    pass"
+
+
+def test_reg_scope_metadata_is_rejected_in_python_printer():
+    with pytest.raises(ValueError, match="name_hint or attrs"):
         python_print(_scope(), format=False)
 
 
@@ -146,7 +163,7 @@ def test_reg_scope_builder_context_preserves_body_and_attrs():
     builder = ir.IRBuilder()
     span = ir.Span.unknown()
     value = ir.ConstInt(7, DataType.INT32, span)
-    with builder.function("kernel", span=span) as function:
+    with builder.function("kernel", span=span, type=ir.FunctionType.InCore) as function:
         with builder.scope(ir.ScopeKind.Reg, span=span, name_hint="vf", attrs=[("tag", "local")]) as region:
             builder.emit(ir.EvalStmt(value, span))
     scope = region.get_result()
