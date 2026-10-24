@@ -941,9 +941,21 @@ def test_row_plus_one_storage_reserves_all_panels_and_roundtrips():
         after = passes.materialize_semantic_aliases()(after)
         after = passes.memory_reuse()(after)
         after = passes.allocate_memory_addr()(after)
+    destinations = []
+
+    class CollectDestination(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op == ir.get_op("tile.cast_to_nz"):
+                # Allocation belongs to the bound SSA variable, not the
+                # operation's independently inferred result type.
+                assert op.var.type.tile_view.compact == ir.CompactMode.row_plus_one
+                destinations.append(op.var.type.memref)
+            super().visit_assign_stmt(op)
+
+    CollectDestination().visit_program(after)
     (converted,) = _calls(after, "tile.cast_to_nz")
     src = converted.args[0].type.memref
-    dst = converted.type.memref
+    (dst,) = destinations
     assert src is not None and dst is not None
     assert (src.size_, dst.size_) == (16384, 33024)
     assert (
@@ -990,7 +1002,8 @@ def test_row_plus_one_public_tile_rejects_multi_slot_memref():
         slayout=ir.TileLayout.row_major,
         compact=ir.CompactMode.row_plus_one,
     )
-    memory = ir.MemRef("padded_slots", 0, 33024, slots=2, slot=_const(0))
+    base = ir.Var("padded_slots", ir.PtrType(), SPAN)
+    memory = ir.MemRef(base, 0, 33024, slots=2, slot=_const(0))
     with pytest.raises(ValueError, match="independent Tile allocations"):
         ir.TileType([128, 256], DataType.FP8E4M3FN, memory, view, ir.MemorySpace.Vec)
 

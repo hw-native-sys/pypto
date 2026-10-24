@@ -143,33 +143,40 @@ BF16/FP32 中转并发出警告。A2/A3 packed 执行、公开字节别名的内
 - [Operators / MX](ir/05-operators.md) — existing MXFP8 matrix paths
 
 
-## Opt-in padded NZ and MX L0 scheduling
+## 可选的 NZ 错位写与 MX L0 双缓冲
 
-The per-compilation options `enable_fp4_nz_row_plus_one` and
-`enable_mx_l0_ping_pong` default to false and are independent. Pass them to
-`ir.compile(...)`, or wrap a JIT invocation in
+每次编译可独立设置 `enable_fp4_nz_row_plus_one` 和
+`enable_mx_l0_ping_pong`，两者默认均为 false。可以直接传给
+`ir.compile(...)`，也可以用
 `passes.PassContext([], enable_fp4_nz_row_plus_one=True,
-enable_mx_l0_ping_pong=True)`. Nested dump/profiling contexts inherit both;
-JIT cache keys distinguish all four combinations. The emitted
-`compiler_options.json` records resolved requested options, not a claim that
-every operation was eligible.
+enable_mx_l0_ping_pong=True)` 包裹 JIT 调用。嵌套的转储和性能分析
+上下文会继承选项；JIT 缓存键区分四种组合。`compiler_options.json`
+记录实际请求的选项，不代表每个算子都满足优化条件。
 
-Padded NZ selection runs after vector splitting and final cross-core adapters.
-It applies only to A5 native E2M1x2-to-E4M3FN conversion with a full per-AIV
-`128x256` output and exactly one `tpush_to_aic` consumer. Other shapes,
-partial or dynamic valid extents, and additional consumers retain ordinary NZ.
-The logical tile remains `128x256`; `CompactMode.row_plus_one` reserves
-`129*256 = 33024` UB bytes. The producer, aliases and TPUSH retain this mode;
-TINSERT removes each extra panel row into the ordinary `256x256` L1/FIFO
-payload. Input carriers, numerical conversion, scales and FIFO size do not
-change.
+NZ 错位写选择在向量切分和跨核适配完成后进行，仅覆盖 A5 原生
+E2M1x2 到 E4M3FN 转换，且要求每个 AIV 的输出完整为
+`128x256`、唯一消费者为 `tpush_to_aic`。其他形状、部分或动态
+有效范围以及多消费者情形继续使用普通 NZ。逻辑形状保持
+`128x256`；`CompactMode.row_plus_one` 分配
+`129*256 = 33024` 字节 UB。生产者、别名和 TPUSH 保留该模式，
+TINSERT 在写入普通 `256x256` L1/FIFO 载荷时去除面板间的空行。
+输入载体、数值转换、scale 和 FIFO 大小均不变。
 
-The option requires PTOAS direct-convert RowPlusOne verification and an ISA
-TCVT implementation with padded storage sizing. It is disabled by default
-while runtime dependency pins are brought forward. The independent MX option
-requests supported K128 L0 ping/pong lowering; it does not change NZ eligibility.
+该选项依赖 PTOAS 对直接转换 RowPlusOne 的校验，以及 ISA TCVT
+对错位存储容量的支持。在运行时依赖版本更新前默认关闭。
+独立的 MX 选项请求受支持的 K128 L0 双缓冲，不改变 NZ 选择条件。
 
-Explicit RowPlusOne Tile descriptors validate static positive physical rows
-divisible by 16, columns divisible by 32, and padded offset bounds.
-Buffer IR and multi-buffer slot descriptors currently reject this mode;
-use independent Tile allocations. Automatic A5 kernels remain on Tile IR.
+MX 双缓冲适用于完整的 A5 M48/M64、N256、K256 FP8/E8M0
+矩阵运算，且四个 L0 搬运结果必须由对应矩阵运算独占。
+保留 K256 Mat/FIFO 源，将每次矩阵运算拆成按 K 顺序执行的两次
+K128 运算，维持原来的 FP32 累加顺序。两个独立固定的 L0B 槽各占
+32768 字节；L0A 槽按实际 M*128 字节分配。每个 scale 句柄的地址
+由对应数据地址右移四位得到。两个 B 子块均完成拷贝后才释放生产者
+FIFO。用户显式绑定的存储、不支持的形状以及 PTOAS 内存规划模式
+保留原来的降低路径；该回退不影响独立的 NZ 错位写选项。
+使用 PyPTO 内存规划时，仍由 PTOAS 执行校验、同步分析和 C++ 生成。
+
+显式 RowPlusOne Tile 描述符要求物理形状为静态正数，行数为 16 的
+倍数、列数为 32 的倍数，且错位地址不越界。Buffer IR 和多槽缓冲区
+描述符当前拒绝该模式；应使用独立 Tile 分配。自动生成的 A5 内核
+继续使用 Tile IR。

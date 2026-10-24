@@ -182,12 +182,7 @@ class MxL0PingPongLowerer : public IRMutator {
     }
   }
 
-  StmtPtr Rewrite(const StmtPtr& body) {
-    auto rewritten = VisitStmt(body);
-    if (reservations_.empty()) return rewritten;
-    reservations_.push_back(rewritten);
-    return SeqStmts::Flatten(std::move(reservations_), body->span_);
-  }
+  StmtPtr Rewrite(const StmtPtr& body) { return VisitStmt(body); }
 
  protected:
   StmtPtr VisitStmt_(const SeqStmtsPtr& seq) override {
@@ -288,34 +283,25 @@ class MxL0PingPongLowerer : public IRMutator {
     if (base) return base;
     base = std::make_shared<Var>("mx_l0_operand" + std::to_string(operand) + "_slot" + std::to_string(slot),
                                  GetPtrType(), span);
-    if (operand == 0) {
-      // A and B deliberately reserve equal 32KiB halves. M48/M64 only use a
-      // prefix of A, but keeping the proven 0/32768 address geometry also
-      // separates the paired scale regions (data >> 4) by a full 2048 bytes.
-      // This is an ordinary declared allocation, sized and capacity-checked by
-      // InitMemRef/AllocateMemoryAddr, rather than a hardcoded physical address.
-      auto create = OpRegistry::GetInstance().Create(
-          "tile.create", {Shape(256, 128, span)},
-          {{"dtype", DataType::FP8E4M3FN}, {"target_memory", MemorySpace::Left}}, span);
-      auto type = As<TileType>(create->GetType());
-      auto binding = std::make_shared<MemRef>(base, 0, 0, span, /*is_pinned=*/true);
-      auto reserve_type = std::make_shared<TileType>(type->shape_, type->dtype_, binding, type->tile_view_,
-                                                     MemorySpace::Left);
-      auto reserve = std::make_shared<Var>(base->name_hint_ + "_capacity", reserve_type, span);
-      reservations_.push_back(std::make_shared<AssignStmt>(reserve, create, span));
-    }
+    // Each live extract declares its own physical capacity: M*128 bytes for
+    // A and 32768 for B. Scale bindings derive from the allocated data address,
+    // so A does not need an otherwise unused oversized tile.create reservation.
     return base;
   }
 
   std::unordered_map<const AssignStmt*, MxL0Plan> plans_;
   std::unordered_set<const Stmt*> dropped_;
   std::array<std::array<VarPtr, 2>, 4> bases_{};
-  std::vector<StmtPtr> reservations_;
 };
 
 StmtPtr LowerMxL0PingPong(const FunctionPtr& function) {
   const auto* context = PassContext::Current();
   if (!context || !context->GetEnableMxL0PingPong()) return function->body_;
+  // The fixed-slot proof relies on PyPTO/DSA-RP preserving these independent
+  // pinned allocations. PTOAS currently rejects single-slot declarations and
+  // has no low-precision Left/Right/Scaling multi-tile region representation.
+  // Keep its existing MX lowering instead of generating unsupported storage.
+  if (context->GetMemoryPlanner() == MemoryPlanner::PtoAS) return function->body_;
   const auto* handler = context->GetBackendHandler();
   if (!handler || handler->GetPtoTargetArch() != "a5") return function->body_;
   MxL0Facts facts;
@@ -329,7 +315,7 @@ StmtPtr LowerMxL0PingPong(const FunctionPtr& function) {
     }
   }
   if (plans.empty()) return function->body_;
-  // Two full halves occupy L0A/L0B. A function with other L0 consumers must
+  // Two B halves fill L0B. A function with other L0 consumers must
   // keep its old allocation plan, including explicit user-bound operands.
   for (const auto* var : facts.l0_vars) {
     if (!staged.count(var)) return function->body_;

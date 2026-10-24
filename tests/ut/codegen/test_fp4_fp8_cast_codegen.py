@@ -145,7 +145,11 @@ def fp4_full_256_rhs_cast_push(
 ):
     # The authored B cast is 256x256. Eligibility is checked after UP_DOWN
     # splitting, when each AIV owns the proven full 128x256 output.
-    with pl.at(level=pl.Level.CORE_GROUP, name_hint="fp4_full_256_rhs_cast_push_tile"):
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+        name_hint="fp4_full_256_rhs_cast_push_tile",
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=4)],
+    ):
         lhs = pl.load(a, [0, 0], [48, 256])
         lhs_scale = pl.load(a_scale, [0, 0], [48, 8])
         rhs = pl.cast(pl.load(b, [0, 0], [256, 128]), pl.FP8E4M3FN)

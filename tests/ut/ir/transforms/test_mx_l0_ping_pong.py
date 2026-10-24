@@ -13,6 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 @pytest.fixture(autouse=True)
@@ -52,12 +53,53 @@ def _program(rows=64, k=256, n=256, with_loop=False):
     return Before
 
 
-def _run(program, enabled):
-    with passes.PassContext(enable_mx_l0_ping_pong=enabled):
+def _run(program, enabled, planner=passes.MemoryPlanner.PYPTO):
+    with passes.PassContext([], enable_mx_l0_ping_pong=enabled, memory_planner=planner):
         program = passes.convert_to_ssa()(program)
         program = passes.simplify()(program)
         program = passes.infer_tile_memory_space()(program)
         return passes.insert_mx_scale_addr()(program)
+
+
+def _mixed_program(rows):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[rows, 256], pl.FP8E4M3FN],
+            a_s: pl.Tensor[[rows, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            b: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+            b_s: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+            out: pl.Out[pl.Tensor[[rows, 256], pl.FP32]],
+        ) -> pl.Tensor[[rows, 256], pl.FP32]:
+            ub = pl.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Vec)
+            tb = pl.move(
+                ub,
+                target_memory=pl.Mem.Mat,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            ta = pl.load(a, [0, 0], [rows, 256], target_memory=pl.Mem.Mat)
+            tas = pl.load(a_s, [0, 0], [rows, 8], target_memory=pl.Mem.Mat)
+            tbs = pl.load(b_s, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+            c = pl.matmul_mx(ta, tas, tb, tbs)
+            return pl.store(c, [0, 0], out)
+
+    return Before
+
+
+def _run_to_allocate(program, planner):
+    # Exercise the real mixed-kernel split and its DCE before sizing storage.
+    # A capacity-only tile.create used to disappear on precisely this path.
+    with passes.PassContext([], enable_mx_l0_ping_pong=True, memory_planner=planner):
+        manager = PassManager(OptimizationStrategy.Default)
+        stop = manager.pass_names.index("AllocateMemoryAddr")
+        for pass_obj in manager.passes[: stop + 1]:
+            pipeline = passes.PassPipeline()
+            pipeline.add_pass(pass_obj)
+            program = pipeline.run(program)
+        return program
 
 
 def _assignments(program):
@@ -159,7 +201,7 @@ def test_head_and_stage2_loop_share_exact_slot_identities():
 
 def test_stage2_lowering_keeps_each_shared_slot_consumer_before_next_write():
     after = _run(_program(with_loop=True), True)
-    with passes.PassContext(enable_mx_l0_ping_pong=True):
+    with passes.PassContext([], enable_mx_l0_ping_pong=True):
         after = passes.lower_pipeline_loops()(after)
         after = passes.canonicalize_io_order()(after)
     # After clone expansion, the actual serialized statement order must never
@@ -207,19 +249,53 @@ def test_slot_ownership_and_scheduling_marker_survive_ir_roundtrip():
     assert extracts[0].var.type.memref.base_.unique_id != extracts[4].var.type.memref.base_.unique_id
 
 
-def test_init_memref_reserves_two_32k_halves_even_for_m48():
-    with passes.PassContext(enable_mx_l0_ping_pong=True):
-        after = _run(_program(rows=48, with_loop=True), True)
-        after = passes.init_mem_ref()(after)
-    extracts = _named(after, "tile.extract")
-    # The otherwise unused A capacity declarations must survive until InitMemRef
-    # sizes each allocation. A's M48 prefix cannot shrink the declared halves.
+@pytest.mark.parametrize("rows", [48, 64])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_full_mixed_pipeline_keeps_natural_a_and_32k_b_halves(rows, planner):
+    after = _run_to_allocate(_mixed_program(rows), planner)
+    assert any(func.func_type == pl.FunctionType.AIC for func in after.functions.values())
+    assert any(func.func_type == pl.FunctionType.AIV for func in after.functions.values())
+    extracts = [
+        stmt
+        for stmt in _named(after, "tile.extract")
+        if stmt.var.type.memory_space in (pl.Mem.Left, pl.Mem.LeftScale, pl.Mem.Right, pl.Mem.RightScale)
+    ]
+    assert len(extracts) == 8
+    assert len(_mx_ops(after)) == 2
+    assert not _named(after, "tile.create")
+    expected_sizes = {
+        pl.Mem.Left: rows * 128,
+        pl.Mem.LeftScale: rows * 4,
+        pl.Mem.Right: 32768,
+        pl.Mem.RightScale: 1024,
+    }
+    by_space = {}
     for stmt in extracts:
-        if stmt.var.type.memory_space in (pl.Mem.Left, pl.Mem.Right):
-            assert stmt.var.type.memref.size_ == 32768
-    capacities = _named(after, "tile.create")
-    assert len(capacities) == 2
-    assert all(_shape(stmt.var) == [256, 128] for stmt in capacities)
+        space = stmt.var.type.memory_space
+        memref = stmt.var.type.memref
+        assert memref.size_ == expected_sizes[space]
+        assert isinstance(memref.byte_offset_, ir.ConstInt)
+        by_space.setdefault(space, []).append((memref.byte_offset_.value, memref.size_))
+    for regions in by_space.values():
+        assert len(regions) == 2
+        regions.sort()
+        assert regions[0][0] + regions[0][1] <= regions[1][0]
+    assert {addr for addr, _size in by_space[pl.Mem.Right]} == {0, 32768}
+    # PTOAS binds the MX scale address from the actual data handle, rather than
+    # the provisional scale allocation. Natural A slots therefore need their
+    # own data>>4 check; only B's second scale slot is necessarily at 2048.
+    for data_space, scale_size in [(pl.Mem.Left, rows * 4), (pl.Mem.Right, 1024)]:
+        scale_ranges = sorted((addr >> 4, scale_size) for addr, _size in by_space[data_space])
+        assert scale_ranges[0][0] + scale_size <= scale_ranges[1][0]
+        assert scale_ranges[1][0] + scale_size <= 4096
+
+
+@pytest.mark.parametrize("rows", [48, 64])
+def test_ptoas_planner_preserves_original_lowering(rows):
+    before = _program(rows=rows, with_loop=True)
+    after = _run(before, True, passes.MemoryPlanner.PTOAS)
+    ir.assert_structural_equal(_run(before, False, passes.MemoryPlanner.PTOAS), after)
+    assert not _named(after, "tile.extract")
 
 
 @pytest.mark.parametrize("rows,k,n", [(32, 256, 256), (64, 128, 256), (64, 256, 128)])
