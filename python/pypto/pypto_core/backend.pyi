@@ -12,6 +12,7 @@
 from typing import ClassVar, overload
 
 from pypto import ir
+from pypto.pypto_core.sync import ResourceCatalog
 
 class BackendType:
     """Backend type for passes and codegen."""
@@ -126,6 +127,9 @@ class BackendHandler:
     def get_recommended_innermost_dim_bytes(self) -> int: ...
     def get_capacity_bytes(self, memory_space: ir.MemorySpace) -> int:
         """Return one SoC memory component's byte capacity, or 0 for an unmodeled space."""
+        ...
+    def get_sync_resource_catalog(self) -> ResourceCatalog:
+        """Borrow this backend's immutable resource catalog without changing the active backend."""
         ...
     def supports_mat_to_bias_move(self, source_dtype: ir.DataType, bias_dtype: ir.DataType) -> bool: ...
     def get_l0_fractal_alignment(self) -> int: ...

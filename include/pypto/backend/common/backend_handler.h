@@ -22,6 +22,11 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
+
+namespace sync {
+class ResourceCatalog;
+}  // namespace sync
+
 namespace backend {
 
 class Backend;
@@ -143,6 +148,15 @@ class BackendHandler {
    * Used by PTOCodegen when emitting `module attributes {pto.target_arch = ...}`.
    */
   [[nodiscard]] virtual std::string GetPtoTargetArch() const = 0;
+
+  /**
+   * @brief Borrow this backend's immutable synchronization resource catalog.
+   *
+   * Concrete backends define pool capacities and reservation policy. The catalog
+   * lives for the process lifetime; querying it neither changes the active
+   * backend nor allocates IDs or reads an installed toolchain.
+   */
+  [[nodiscard]] virtual const sync::ResourceCatalog& GetSyncResourceCatalog() const = 0;
 
   /**
    * @brief Method name used on `launch_spec` to set the per-task logical block count.

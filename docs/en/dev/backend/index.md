@@ -10,6 +10,7 @@ means adding a handler, not editing passes.
 | Page | What it covers |
 | ---- | -------------- |
 | [BackendHandler: principled backend dispatch](00-backend_handler.md) | The virtual interface, how passes query it, and what adding a new backend requires |
+| [Synchronization hardware resources](01-sync_resources.md) | Resource domain queries, ID ranges, and compiler reservation policy |
 
 ## Registered operator inventory
 

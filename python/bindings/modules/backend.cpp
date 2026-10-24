@@ -38,6 +38,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
+#include "pypto/sync/resource_catalog.h"
 
 namespace nb = nanobind;
 
@@ -179,6 +180,9 @@ void BindBackend(nb::module_& m) {
            "Recommended minimum innermost-dim size, in bytes, for tile ops touching GM")
       .def("get_capacity_bytes", &BackendHandler::GetCapacityBytes, nb::arg("memory_space"),
            "Capacity of one memory component in the owning SoC, in bytes; 0 for an unmodeled space")
+      .def("get_sync_resource_catalog", &BackendHandler::GetSyncResourceCatalog, nb::rv_policy::reference,
+           "Borrow this backend's process-lifetime synchronization resource catalog without changing "
+           "the active backend")
       .def("supports_mat_to_bias_move", &BackendHandler::SupportsMatToBiasMove, nb::arg("source_dtype"),
            nb::arg("bias_dtype"), "Whether the backend supports this Mat-to-Bias tile.move dtype pair")
       .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,

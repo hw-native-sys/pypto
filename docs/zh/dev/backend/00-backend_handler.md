@@ -49,6 +49,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | 方法 | 用途 | Ascend910 | Ascend950 |
 | ---- | ---- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
+| `GetSyncResourceCatalog()` | 该后端持有的不可变[同步资源信息](01-sync_resources.md) | A2/A3 资源池 | A5 资源池 |
 | `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置逻辑 block 数量的运行时 API 名 | `"set_block_num"` | `"set_block_num"` |
 | `GetDefaultSimPlatform()` | 默认仿真平台名 | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` |
@@ -126,7 +127,8 @@ L0A、L0B、L0C、Bias、L1 分别使用 `MemorySpace::Left`、`Right`、`Acc`�
 3. 让 `Backend<Arch>::GetHandler()` 返回你的 handler 单例。
 4. 在 `src/backend/common/backend.cpp` 中给 `GetBackendInstance` 和
    `BackendTypeToString` 各加一行，并在 `BackendType` 枚举中添加新值。
-   这是整个仓库里唯一按枚举展开的地方。
+   同时将新后端加入 `src/backend/common/sync_resources.cpp` 中
+   `FindResourceCatalog` 使用的后端列表，使目标字符串查询能够访问新 handler 的同步资源目录。
 
 任何 pass / codegen 文件都不需要修改。可以用
 `tests/ut/backend/test_backend_handler.py` 配合 `tests/ut/ir/transforms/` 与

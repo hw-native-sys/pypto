@@ -383,6 +383,7 @@ nav:
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md
+          - en/dev/backend/01-sync_resources.md
       - Debug:
           - en/dev/debug/index.md
           - en/dev/debug/00-torch_codegen.md

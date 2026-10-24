@@ -19,6 +19,8 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
+#include "pypto/sync/resource_catalog.h"
+#include "src/backend/common/sync_resources.h"
 
 namespace pypto {
 namespace backend {
@@ -28,6 +30,13 @@ Ascend950Handler::Ascend950Handler() : BackendHandler(Backend950::Instance()) {}
 const Ascend950Handler& Ascend950Handler::Instance() {
   static const Ascend950Handler instance;
   return instance;
+}
+
+/// Own the A5 resource model independently of the process-global target.
+const sync::ResourceCatalog& Ascend950Handler::GetSyncResourceCatalog() const {
+  // PTOAS UnifiedSyncModel::ResourceModel exposes 32 AIV buffer credits on A5.
+  static const auto catalog = MakeAscendSyncResourceCatalog(GetPtoTargetArch(), 32);
+  return catalog;
 }
 
 ir::TileView Ascend950Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_ms,

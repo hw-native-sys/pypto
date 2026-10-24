@@ -46,3 +46,19 @@ target_link_libraries(pypto_vf_ir_contract_test PRIVATE libbacktrace)
 target_compile_options(pypto_vf_ir_contract_test PRIVATE -UNDEBUG)
 # Invalid RegKind, wide RegKind, and HardwareLoopPolicy values, respectively.
 add_test(NAME pypto_vf_ir_contract_test COMMAND pypto_vf_ir_contract_test 2 255 2)
+
+# Test native construction and query contracts without Python or a device runtime.
+add_executable(pypto_sync_resource_catalog_test
+    sync_resource_catalog_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/backtrace.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/core.cpp
+    ${CMAKE_SOURCE_DIR}/src/sync/resource_catalog.cpp
+)
+target_include_directories(pypto_sync_resource_catalog_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(pypto_sync_resource_catalog_test PRIVATE libbacktrace)
+# Assertions enforce catalog invariants in release builds as well.
+target_compile_options(pypto_sync_resource_catalog_test PRIVATE -UNDEBUG)
+add_test(NAME pypto_sync_resource_catalog_test COMMAND pypto_sync_resource_catalog_test)

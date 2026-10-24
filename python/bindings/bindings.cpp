@@ -63,6 +63,9 @@ NB_MODULE(pypto_core, m) {
   // Register backend bindings
   pypto::python::BindBackend(m);
 
+  // Register hardware synchronization resource catalog queries after their IR enum dependencies.
+  pypto::python::BindSync(m);
+
   // Register arithmetic simplification utilities
   pypto::python::BindArith(m);
 

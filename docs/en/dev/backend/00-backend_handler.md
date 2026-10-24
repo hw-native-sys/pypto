@@ -52,6 +52,7 @@ to global state.
 | Method | Purpose | Ascend910 | Ascend950 |
 | ------ | ------- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
+| `GetSyncResourceCatalog()` | Immutable [synchronization resource facts](01-sync_resources.md) owned by this backend | A2/A3 pools | A5 pools |
 | `GetLaunchSpecCoreCountMethod()` | runtime API name for the logical block count on `launch_spec` | `"set_block_num"` | `"set_block_num"` |
 | `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
@@ -161,7 +162,9 @@ cost-model parameters remain separate from capacity.
 3. Override `Backend<Arch>::GetHandler()` to return your handler singleton.
 4. Append the new backend to `BackendType` and to the factory switch in
    `src/backend/common/backend.cpp` (`GetBackendInstance` and
-   `BackendTypeToString`). These are the only places that fan out by enum.
+   `BackendTypeToString`). Also add it to the backend list used by
+   `FindResourceCatalog` in `src/backend/common/sync_resources.cpp`, so target-string
+   queries reach the new handler's synchronization catalog.
 
 No pass or codegen file needs to change. Validate with
 `tests/ut/backend/test_backend_handler.py` plus the regression tests in

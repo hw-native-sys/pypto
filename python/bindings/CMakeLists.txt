@@ -21,6 +21,7 @@ set(PYPTO_BINDING_SOURCES
     modules/passes.cpp
     modules/codegen.cpp
     modules/backend.cpp
+    modules/sync.cpp
     modules/arith.cpp
     modules/functor.cpp
 )

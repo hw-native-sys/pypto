@@ -37,6 +37,7 @@ class Ascend950Handler : public BackendHandler {
   static const Ascend950Handler& Instance();
 
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a5"; }
+  [[nodiscard]] const sync::ResourceCatalog& GetSyncResourceCatalog() const override;
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_block_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a5sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a5"}; }
