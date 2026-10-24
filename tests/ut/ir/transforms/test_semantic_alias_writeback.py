@@ -291,7 +291,7 @@ def _tensor_loop_program(
         body = ir.SeqStmts([ir.AssignStmt(written, store, span), ir.YieldStmt([written], span)], span)
         loop = ir.ForStmt(index, zero, stop, one, [carried], body, [returned], span)
     else:
-        assert loop_kind == "while"
+        assert loop_kind in {"while", "false_while"}
         counter = ir.IterArg("counter", ir.ScalarType(DataType.INDEX), zero, span)
         advanced = ir.Var("advanced", counter.type, span)
         counter_result = ir.Var("counter_result", counter.type, span)
@@ -304,7 +304,9 @@ def _tensor_loop_program(
             span,
         )
         loop = ir.WhileStmt(
-            ir.Lt(counter, stop, DataType.BOOL, span),
+            ir.ConstBool(False, span)
+            if loop_kind == "false_while"
+            else ir.Lt(counter, stop, DataType.BOOL, span),
             [carried, counter],
             body,
             [returned, counter_result],
@@ -325,8 +327,11 @@ def _tensor_loop_program(
 
 
 @pytest.mark.parametrize("distributed", [False, True], ids=["tensor", "distributed_tensor"])
-@pytest.mark.parametrize("loop_kind", ["for", "while"])
-@pytest.mark.parametrize("trip_count", [0, 2], ids=["zero_trip", "two_trips"])
+@pytest.mark.parametrize(
+    "loop_kind,trip_count",
+    [("for", 0), ("for", 2), ("while", 0), ("while", 2), ("false_while", 0)],
+    ids=["for_zero", "for_two", "while_zero", "while_two", "while_false"],
+)
 @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy", "buffer_ir"])
 def test_tensor_loop_bindings_follow_reanchored_initializer(
     distributed: bool,

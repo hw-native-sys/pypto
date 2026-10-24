@@ -12,6 +12,11 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑定的一侧
 （`put.dst`、`get.src`）仍然必须是 `DistributedTensor`。
 
+HOST 通信域分配会将每个 buffer 的物理大小向上取整到 64 字节，保留 tensor
+的精确逻辑大小。这既满足 32 字节传输对齐，也将不同 buffer 隔离在独立的标量
+缓存行（cache line）中：暂存 counts 时的 DCCI 回写不能覆盖 peer 并发写入相邻
+buffer 的 signal credit。同一个 buffer 内共享缓存行的多个 view 仍需自行同步。
+
 共有**十五个算子**和**四个 ABI 枚举**：
 
 | 算子 | 方向 | 结果 | 硬件 |

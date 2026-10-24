@@ -45,7 +45,39 @@ program = passes.materialize_semantic_aliases()(program)
 1. **自顶向下重定向**（`TopDownRetargeter`）：对每个 `ForStmt`，取每个 `iter_arg`
    的规范 MemRef 作为目标，推送到 yield 值及其 producer 链上（跟随原地
    `output-reuses-input` 算子与 view 输入）。`IfStmt` 的返回值被推送到两个分支的
-   yield，然后应用收集到的类型改写。
+   yield，然后应用收集到的类型改写。遍历会进入 `WhileStmt` 的循环体，因此外层
+   标量 while 不会使嵌套 For carry 绕过既有的重定向及活跃性检查。改变 producer 的
+   目标之前，还会检查通过外层循环可重复的目标物理窗口独立读取，包括内层 For 的
+   词法生命周期之外的读取。若循环体通过原始 initializer 句柄读取旧值，同一个 For
+   自身的回边也必须保护该读取；通过随迭代推进的 carry 读取时，则由其 header 定义
+   排除自身回边。仅把 initializer 绑定为 carry 不算独立的数据观测。
+   对于实际被读取的 For/While carry，在绑定 header 记录 initializer 的数据读取，
+   并通过工作队列沿嵌套 carry 绑定传播这些入口观测，保护间隔循环中的中间逻辑版本。
+   循环体读取仍保留 carry 当前的定义：自身回边推进该值，并非重读原始 seed。
+   header 读取不属于自身循环的重复读取，但外层循环仍会保护重复初始化所需的值。
+   这也保证经过元数据 view yield 的 accumulator phi 仍能安全合并。
+   消费可能零次迭代的 For/While 结果时，即使循环体不读取 carry，也会在入口观测
+   initializer。常量 For 边界若证明至少执行一次，则排除零次迭代观测；未知边界
+   保守处理。结果观测沿同一工作队列传播，也覆盖结果用作其他被读取 carry 的
+   initializer 的情况。裸 SSA 赋值、零拷贝 view 的源和仅 yield 变量均属于转发绑定，
+   不是数据读取。别名和物理窗口的重复读取索引、Buffer IR 循环输入隔离共同使用
+   已激活的数据观测，普通访问
+   索引仍保留全部转发使用。只有别名、分支/循环结果或后续迭代实际消费该值时，
+   工作队列才激活相应源的观测。常量 For 边界若证明零次迭代，则禁用循环体结果边；
+   若证明至多一次迭代，则禁用回边。已知零次 For 或条件恒假的 While，其循环体的
+   普通数据观测也被排除。至多一次的 For 不建立重复读取区间，但外层可重复循环
+   仍会保护其真实读取。注册为仅写的参数不观测旧数据，读取、读写、计算参数及
+   引用属性的观测仍保留。未知边界及条件保守处理。因此，非空循环
+   转发且被消费的结果仍受保护，而未使用的 Acc carry 不会错误阻止重定向，进而
+   要求不受支持的 Acc-to-Acc 复制。对于已知零次循环，或循环体仅将所有 carry
+   原样 yield 的循环，或仅 yield initializer 及其不可变完整窗口别名的循环，Buffer IR
+   也不创建私有循环输入存储，因为这些绑定不会覆盖输入数据。不可变别名根在已有
+   定义遍历中缓存；可变输出和局部窗口不构成数据身份关系。
+   零次循环体规范化仅用于 Tile carry 边界；仅包含 Tensor/DistributedTensor 的循环
+   保留描述符写回和循环体结构，由 tensor 边界规范化负责处理。
+   Legacy Vec carry 也复用隔离分析来保护循环中重复读取的原始 seed：在入口复制到
+   私有存储，让 carry 更新时保留原 seed。输入参数、循环后读取和重叠输入的策略
+   仍专用于 Buffer IR；不支持复制的存储空间保留重定向保护和已有显式复制报错。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
@@ -54,7 +86,12 @@ program = passes.materialize_semantic_aliases()(program)
    在 seed 分支剩余部分必须已 dead。无论 continuation 是直接的
    `tile.matmul_acc` 还是分支内 loop，它复用的 input 及所有 bare/metadata alias 在
    `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
-   路径上，重定向后的 producer 会覆盖仍可观察的值。
+   路径上，重定向后的 producer 会覆盖仍可观察的值。后序遍历也会进入 `WhileStmt`
+   的循环体。For/While 的 carry 参数及结果与 initializer 属于同一别名族，避免通过
+   carry 名称漏掉对 initializer 的独立读取。即使读取位于 `if` 之前，只要外层循环
+   能在分支之后再次执行该读取，也会阻止合并。重复读取索引只考虑在读取句柄定义之后
+   才进入的循环，因此每轮在循环体内重新生成的累加器仍可安全合并。别名和循环区间
+   索引均预先建立，分析复杂度保持 O(N log N)。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
    alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
    让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护

@@ -15,6 +15,13 @@ accept a plain `Tensor` as `src`, and `get`/`tile.get` accept one as `dst` —
 TPUT/TGET only need a readable/writable *local* GM region on that side. The
 window-bound side (`put.dst`, `get.src`) still requires a `DistributedTensor`.
 
+HOST communication-domain allocations round each buffer's physical size to
+64 bytes while retaining its exact logical tensor size. This satisfies the
+32-byte transfer alignment and isolates distinct buffers on scalar cache
+lines: a DCCI writeback while staging counts must not overwrite signal credits
+concurrently delivered by a peer into a neighbouring buffer. Views within one
+buffer still require their own synchronization when sharing a cache line.
+
 There are **fifteen ops** and **four ABI enums**:
 
 | Op | Direction | Result | Hardware |

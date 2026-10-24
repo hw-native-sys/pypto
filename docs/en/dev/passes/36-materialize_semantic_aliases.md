@@ -51,7 +51,57 @@ its own fresh MemRef. This pass closes that gap:
    `iter_arg`'s canonical MemRef as the target and push it onto the yielded value
    and its producer chain (following in-place `output-reuses-input` ops and
    view inputs). `IfStmt` return values are retargeted into both branch yields,
-   then the collected type rewrites are applied.
+   then the collected type rewrites are applied. The traversal descends through
+   `WhileStmt` bodies, so an enclosing scalar while does not hide nested For
+   carries from the existing retargeting and liveness checks. Before changing a
+   producer's destination, check independent reads of the target's physical
+   window that can recur through an enclosing loop, including reads outside the
+   inner For's lexical lifetime. This includes the same For's backedge when a
+   body read names the original pre-loop initializer; reads through the advancing
+   carry itself are excluded by its loop-header definition. Binding a loop initializer to a carry is not
+   itself an independent data observation. For an actually observed For/While
+   carry, record its initializer's payload read at the binding header. A worklist
+   propagates these entry observations through nested carry bindings, preserving
+   intermediate versions across intervening loops. Body reads retain the carry's
+   current definition: its own backedge advances the value rather than rereading
+   the original seed. Header reads exclude their own loop from recurrence, while
+   enclosing loops still protect repeated initialization. This distinction also
+   preserves accumulator-phi coalescing through metadata-view yields.
+   Consuming a possibly zero-trip For/While result also observes its initializer
+   at entry, even when the body never reads the carry. Constant For bounds that
+   prove at least one iteration exclude this zero-trip observation; unknown
+   bounds remain conservative. Result observations participate in the same
+   worklist, including results used to initialize another observed loop carry.
+   Bare SSA assignments, zero-copy view sources, and bare-variable yields are
+   forwarding bindings, not payload reads. Both alias and physical recurrence
+   indexes and Buffer IR loop-input isolation share the activated payload
+   observations; ordinary access indexes still
+   retain all forwarding uses. Only when an alias, branch/loop result, or later
+   iteration actually consumes the value does the worklist activate its source
+   observations. Constant For bounds disable body-result edges for zero trips
+   and backedge edges for at most one trip. Ordinary body observations are also
+   excluded for proven zero-trip For loops and constant-false While conditions.
+   A For with at most one iteration contributes no recurrence interval, though
+   enclosing repeating loops still protect its actual reads. Registered
+   write-only operands do not observe old payloads; reads, read-modify-writes,
+   computed arguments and reference attributes retain their observations.
+   Unknown bounds and conditions remain conservative. This also preserves
+   consumed forwarding results of nonempty loops, without making unused Acc
+   carries falsely block retargeting and require an unsupported Acc-to-Acc copy.
+   Buffer IR also avoids private loop-input storage for proven zero-trip loops
+   and when the complete body only
+   yields every carry unchanged, its initializer, or an immutable full-window
+   alias of that initializer: these bindings cannot overwrite input payloads.
+   Immutable alias roots are cached during the existing definition walk;
+   mutating outputs and partial windows do not establish identity.
+   Zero-trip body canonicalization applies only to Tile carry boundaries;
+   Tensor/DistributedTensor-only loops retain their descriptor writebacks and
+   body structure, handled by tensor boundary normalization.
+   Legacy Vec carries also use the shared isolation analysis for recurring
+   independent seed reads: an entry copy lets the carry advance in private
+   storage while preserving the original seed. Incoming-parameter, post-loop
+   and overlapping-input policies remain specific to Buffer IR; unsupported
+   copy spaces retain the retarget guard and existing explicit copy diagnostic.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.
@@ -63,7 +113,14 @@ its own fresh MemRef. This pass closes that gap:
    direct `tile.matmul_acc` or a branch-local loop, its reused input and every
    bare/metadata alias must have no independent post-`if` read; otherwise the
    sibling branch would clobber an observable value on the path where the
-   continuation does not execute.
+   continuation does not execute. This post-order traversal also descends through
+   `WhileStmt` bodies. For/While carry arguments and results belong to their
+   initializer's alias family, so reading an initializer cannot bypass this
+   check through a carry name. Reads before the `if` also block coalescing when
+   an enclosing loop can repeat them after the branch. The recurrence index
+   considers loops entered after the read handle's definition; an accumulator
+   recreated inside the loop can still be coalesced safely. These queries use
+   precomputed alias and loop-interval indexes, retaining O(N log N) analysis.
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
    after retargeting, rather than repairing one producer in isolation. Bare SSA

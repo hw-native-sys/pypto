@@ -32,10 +32,13 @@ Plus regressions:
   ``allocate_domain`` wrapper.
 """
 
+import ast
+import operator
 import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from importlib import resources
 
 import pypto.language as pl
@@ -468,6 +471,76 @@ def test_comm_buffer_specs_isolate_signal_and_counts_cache_lines():
         assert (
             f'CommBufferSpec(name="{name}", dtype="opaque", count={logical_bytes}, nbytes={alloc_bytes}),'
         ) in code, code
+
+
+@pytest.mark.parametrize("nr,stride", [(2, 1), (2, 4), (2, 17), (4, 4), (4, 17)])
+def test_comm_signal_and_counts_do_not_share_cache_lines(nr, stride):
+    """Counts staging must not flush stale signal credits from a shared line.
+
+    In the failing P=2/B=4 layout, the 32-byte signal was followed immediately
+    by send_counts. A slow rank staging counts could erase a faster peer's
+    Barrier A credits. Check the emitted sizes, including odd lane widths,
+    rather than merely checking that each start is DMA-aligned.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip_orch(
+            self,
+            signal: pld.DistributedTensor[[nr, stride], pl.INT32],
+            counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            recv: pld.DistributedTensor[[nr, 1], pl.INT32],
+        ):
+            return recv
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            signal_buf = pld.alloc_window_buffer(nr * stride * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            signal = pld.window(signal_buf, [nr, stride], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(signal, counts, recv, device=r)
+            return recv
+
+    # Only constant arithmetic occurs in these generated allocation expressions.
+    # Interpret that AST directly so the test uses the allocator's emitted sizes.
+    operations: dict[type[ast.operator], Callable[[int, int], int]] = {
+        ast.Add: operator.add,
+        ast.Mult: operator.mul,
+        ast.FloorDiv: operator.floordiv,
+    }
+
+    def constant_size(node: ast.expr) -> int:
+        if isinstance(node, ast.Constant):
+            assert isinstance(node.value, int)
+            return node.value
+        assert isinstance(node, ast.BinOp), ast.dump(node)
+        return operations[type(node.op)](constant_size(node.left), constant_size(node.right))
+
+    specs = []
+    for node in ast.walk(ast.parse(_lower(Prog))):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "CommBufferSpec"
+        ):
+            fields = {kw.arg: kw.value for kw in node.keywords}
+            specs.append((constant_size(fields["count"]), constant_size(fields["nbytes"])))
+    assert [logical for logical, _ in specs] == [nr * stride * 4, nr * 4, nr * 4]
+    previous_lines = set()
+    offset = 0
+    for logical, physical in specs:
+        assert physical >= logical
+        assert offset % 32 == 0  # Preserve the existing MTE/CCU contract too.
+        lines = set(range(offset // 64, (offset + logical - 1) // 64 + 1))
+        assert previous_lines.isdisjoint(lines), "DCCI can overwrite another communication buffer"
+        previous_lines.update(lines)
+        offset += physical
+    assert offset % 64 == 0  # The last buffer's writeback must stay in the domain.
 
 
 # ---------------------------------------------------------------------------
