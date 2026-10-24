@@ -3239,5 +3239,332 @@ class TestDistributedWindowBufferRemap:
         assert signal_type.window_buffer is signal_slots[0]
 
 
+class TestScopeWrappedYields:
+    """Control-flow results cross runtime wrappers without moving their contents."""
+
+    @pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+    @pytest.mark.parametrize("select_then", [False, True])
+    def test_constant_branch_preserves_scope(self, mode, select_then):
+        # Enum literals are syntactic DSL constructs, so specialize the source.
+        amount = 1.0 if select_then else 2.0
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        if pl.const({1 if select_then else 2}, pl.INDEX) == pl.const(1, pl.INDEX):
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="producer"):
+                a = pl.tensor.add(x, 1.0)
+                result = pl.yield_(a)
+        else:
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="producer"):
+                b = pl.tensor.add(x, 2.0)
+                result = pl.yield_(b)
+        return result
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="producer"):
+            result = pl.tensor.add(x, {amount})
+        return result
+""")
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    @pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+    def test_fold_yield_only_scope_preserves_empty_wrapper(self, mode):
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        if True:
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="empty"):
+                result = pl.yield_(x)
+        else:
+            result = pl.yield_(x)
+        return result
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="empty"):
+            pass
+        return x
+""")
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_runtime_phi_prunes_wrapped_yield_slots(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.scope(name_hint="outer"):
+                        with pl.manual_scope(name_hint="inner"):
+                            result, _unused = pl.yield_(x, x)
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        result, _unused = pl.yield_(x, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.scope(name_hint="outer"):
+                        with pl.manual_scope(name_hint="inner"):
+                            result = pl.yield_(x)
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        result = pl.yield_(x)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_runtime_phi_removes_all_slots_without_removing_scopes(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.manual_scope(name_hint="then"):
+                        _unused = pl.yield_(x)
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        _unused = pl.yield_(x)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.manual_scope(name_hint="then"):
+                        pass
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        pass
+                return x
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_for_carry_prunes_wrapped_yield_slots(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                for i, (acc, dead) in pl.range(4, init_values=(x, x)):
+                    with pl.manual_scope():
+                        result, _unused = pl.yield_(x, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                for i, (acc,) in pl.range(4, init_values=(x,)):
+                    with pl.manual_scope():
+                        result = pl.yield_(x)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_while_carry_prunes_wrapped_yield_slots(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                for acc, dead in pl.while_(init_values=(x, x)):
+                    pl.cond(flag)
+                    with pl.manual_scope():
+                        result, _unused = pl.yield_(x, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                for (acc,) in pl.while_(init_values=(x,)):
+                    pl.cond(flag)
+                    with pl.manual_scope():
+                        result = pl.yield_(x)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_single_trip_loop_preserves_scope(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                for i, (acc,) in pl.range(1, init_values=(x,)):
+                    with pl.manual_scope():
+                        updated = pl.tensor.add(acc, 1.0)
+                        result = pl.yield_(updated)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                with pl.manual_scope():
+                    result = pl.tensor.add(x, 1.0)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_loop_removes_all_slots_preserving_empty_scope(self, loop_kind):
+        header = (
+            "for i, (dead,) in pl.range(4, init_values=(x,)):"
+            if loop_kind == "for"
+            else "for (dead,) in pl.while_(init_values=(x,)):"
+        )
+        condition = "            pl.cond(flag)\n" if loop_kind == "while" else ""
+        expected_header = "for i in pl.range(4):" if loop_kind == "for" else "while flag:"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+        {header}
+{condition}            with pl.manual_scope(name_hint="iteration"):
+                _unused = pl.yield_(x)
+        return x
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+        {expected_header}
+            with pl.manual_scope(name_hint="iteration"):
+                pass
+        return x
+""")
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_constant_if_preserves_split_scope(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]):
+                if True:
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                        result = pl.yield_(x)
+                else:
+                    result = pl.yield_(x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]):
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    pass
+                return x
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+
+class TestEffectfulYieldsKeepControlFlow:
+    """A call in a yield must stay at its evaluation site, even with no readers."""
+
+    def test_constant_if_keeps_nested_call_yield(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, t: pl.Tensor[[1], pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    value = pl.yield_(pl.tensor.read(t, [0]) + 1)
+                else:
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value + value
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, t: pl.Tensor[[1], pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    value = pl.yield_(pl.tensor.read(t, [0]) + 1)
+                else:
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value * 2
+
+        # Reusing an expression would duplicate the read; the whole IfStmt stays.
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_single_trip_loop_keeps_unused_call_yield(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, t: pl.Tensor[[1], pl.INDEX]):
+                for i, (acc,) in pl.range(1, init_values=(pl.const(0, pl.INDEX),)):
+                    with pl.manual_scope():
+                        _result = pl.yield_(pl.tensor.read(t, [0]))
+                return t
+
+        # Both the folding guard and DCE must preserve this otherwise-unused call.
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_bound_submit_result_can_fold_inside_manual_scope(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[16], pl.FP32], dep: pl.Scalar[pl.TASK_ID]):
+                with pl.manual_scope():
+                    if True:
+                        out, tid = pl.submit(self.kernel, x, deps=[dep])
+                        result, ready = pl.yield_(out, tid)
+                    else:
+                        other, other_tid = pl.submit(self.kernel, x, deps=[dep])
+                        result, ready = pl.yield_(other, other_tid)
+                    return result, ready
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[16], pl.FP32], dep: pl.Scalar[pl.TASK_ID]):
+                with pl.manual_scope():
+                    out, tid = pl.submit(self.kernel, x, deps=[dep])
+                    return out, tid
+
+        # The launch has already been evaluated: folding reuses its two values,
+        # preserving exactly one Submit, its dependency, and its runtime scope.
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

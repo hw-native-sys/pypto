@@ -163,6 +163,7 @@ class ScopeOutliner : public IRMutator {
    * ReturnStmt) resolves to the latest, never a stale intermediate.
    */
   ExprPtr VisitExpr_(const VarPtr& op) override;
+  ExprPtr VisitExpr_(const IterArgPtr& op) override;
 
   /**
    * @brief Compute used_after when no explicit context is available.

@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -94,6 +95,19 @@ inline YieldStmtPtr GetLastYieldStmt(const StmtPtr& body) {
   }
   return As<YieldStmt>(body);
 }
+
+/// Rewrite the yield on the same trailing spine as GetLastYieldStmt.
+///
+/// The callback may return nullptr to remove the yield. Empty sequences are
+/// removed too, but runtime/split wrappers retain a non-null empty body and
+/// all their metadata. Never enters nested control flow or outlining scopes:
+/// their yields belong to a different owner. Returns the original body when
+/// no trailing yield exists or the callback leaves it unchanged.
+StmtPtr RewriteLastYieldStmt(const StmtPtr& body, const std::function<StmtPtr(const YieldStmtPtr&)>& rewrite);
+
+/// Conservatively identify expressions whose evaluation must not be duplicated
+/// or deleted. Includes nested Call and Submit nodes; no purity is assumed.
+bool ExprContainsCallLike(const ExprPtr& expr);
 
 /// Unwrap a StmtPtr into a flat vector of statements.
 ///

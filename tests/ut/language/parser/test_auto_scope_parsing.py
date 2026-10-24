@@ -105,6 +105,43 @@ def test_runtime_scope_name_is_structural():
     assert not ir.structural_equal(named, unnamed)
 
 
+@pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+def test_empty_runtime_scope_roundtrip(mode):
+    """Folding the sole yield leaves a real scope with an empty body."""
+    Original = pl.parse(f"""
+@pl.program
+class Original:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self):
+        with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="empty"):
+            pass
+""")
+    ir.assert_structural_equal(Original, pl.parse(python_print(Original, format=False)))
+
+
+@pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+def test_trailing_runtime_scope_preserves_branch_result_bindings(mode):
+    """A prefix statement must not hide the scope's enclosing phi bindings."""
+    Original = pl.parse(f"""
+@pl.program
+class Original:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+        if flag:
+            a = pl.tensor.add(x, 1.0)
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="then"):
+                first, second = pl.yield_(a, x)
+        else:
+            b = pl.tensor.add(x, 2.0)
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="else"):
+                first, second = pl.yield_(x, b)
+        return first, second
+""")
+    restored = pl.parse(python_print(Original, format=False))
+    ir.assert_structural_equal(Original, restored)
+    assert ir.structural_hash(Original) == ir.structural_hash(restored)
+
+
 @pytest.mark.parametrize("header", ["if flag:", "for i in pl.range(4):", "while flag:"])
 def test_named_auto_scope_in_control_flow_body_roundtrip(header):
     """Preserve a named AUTO scope when it is the only control-flow body statement."""

@@ -90,6 +90,17 @@ program_simplified = simplify_pass(program)
 
 `return_vars` 通过 `var_remap_` 代换而非直接产出 `AssignStmt(rv, yielded)`，这是有意为之：编排（orchestration）代码生成器的角色感知命名消歧（`role == "out"` 等）会把多个 role 标签的 SSA 版本折叠到同一个 C++ 标识符，于是 `out__rv_v2 = out__co_l0_rv_v3` 这样的别名赋值会下沉为不合法的 `auto out = out;`。在使用点代换可以完全绕开消歧。
 
+末尾的 yield 可以位于 `RuntimeScopeStmt`（AUTO 或 MANUAL）或
+`SplitAivScopeStmt` 内。折叠和无用槽位裁剪沿同一条末尾路径查找 yield，
+保留作用域元数据及其他语句的顺序。移除唯一的 yield 后仍保留空作用域体，
+打印为 `pass`。
+
+当 yield 的表达式包含 `Call` 或 `Submit`（包括嵌套调用）时，常量分支和
+单次循环折叠会保留控制流，防止代换重复、删除或移动调用。循环 carry 的
+初值含调用时也保留单次循环。先把调用结果赋给变量，再 yield 该变量，
+不会阻止折叠。后续 `FlattenCallExpr` 可以先将调用结果物化为变量，
+之后的 Simplify 才能折叠该控制流。
+
 #### 逃逸的 return var
 
 代换只能作用于「`var_remap_` 条目仍然有效时被访问到」的使用点，而 `ForStmt`、`WhileStmt`、`IfStmt` 在离开各自的体时都会把 `var_remap_` 恢复到进入前的基线，以免体内的 remap 改写兄弟语句或循环之后的代码。活过这次恢复的使用点会继续指向原始 `Var` —— 而折叠恰好删除了它唯一的定义，形成 `UseAfterDefCheck` 会报告的悬空引用。

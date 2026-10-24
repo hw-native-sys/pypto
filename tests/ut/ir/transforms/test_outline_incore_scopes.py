@@ -837,6 +837,115 @@ class TestOutlineIncoreScopes:
         ]
         assert not errors, f"SSAForm violated: {[d.message for d in errors]}"
 
+    def test_store_to_existing_iter_arg_returns_updated_value(self):
+        """The parallel producer in #3115 stores into an existing Tensor carry.
+
+        IterArg is a Var subclass with a distinct IR kind. Missing that kind
+        drops the kernel's return and leaves the caller using its stale input.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for i, (acc,) in pl.parallel(4, init_values=(out,)):
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        value = pl.load(a, [0, 0], [16, 16])
+                        pl.store(value, [0, 0], acc)
+                    result = pl.yield_(acc)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, a: pl.Tensor[[16, 16], pl.FP32], acc: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                value = pl.load(a, [0, 0], [16, 16])
+                updated = pl.store(value, [0, 0], acc)
+                # The outlined ABI returns the output parameter by identity;
+                # the caller below must still bind and use the returned handle.
+                return acc
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, a: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for i, (acc,) in pl.parallel(4, init_values=(out,)):
+                    updated = self.main_incore_0(a, acc)
+                    result = pl.yield_(updated)
+                return result
+
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+    def test_conditional_store_extends_existing_scoped_yield(self, mode):
+        """An outlined store adds a carry alongside the branch's existing result.
+
+        Appending a separate yield outside the runtime scope used to lose the
+        existing slot and fail the IfStmt arity check (one value, expected two).
+        Keep both values in the original named scope, including the no-store
+        branch whose extra slot must forward the incoming carry unchanged.
+        """
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(auto_scope=False)
+    def main(
+        self,
+        flag: pl.Scalar[pl.BOOL],
+        a: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        for i, (acc,) in pl.parallel(4, init_values=(out,)):
+            if flag:
+                with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="then"):
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        value = pl.load(a, [0, 0], [16, 16])
+                        pl.store(value, [0, 0], acc)
+                    chosen = pl.yield_(a)
+            else:
+                with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="else"):
+                    chosen = pl.yield_(a)
+            result = pl.yield_(acc)
+        return result
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_0(
+        self, a: pl.Tensor[[16, 16], pl.FP32], acc: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        value = pl.load(a, [0, 0], [16, 16])
+        updated = pl.store(value, [0, 0], acc)
+        return acc
+
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(
+        self,
+        flag: pl.Scalar[pl.BOOL],
+        a: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        for i, (acc,) in pl.parallel(4, init_values=(out,)):
+            if flag:
+                with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="then"):
+                    updated = self.main_incore_0(a, acc)
+                    chosen, merged = pl.yield_(a, updated)
+            else:
+                with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="else"):
+                    chosen, merged = pl.yield_(a, acc)
+            result = pl.yield_(merged)
+        return result
+""")
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
     def test_outline_scope_with_loop_carried_init_values(self):
         """Test outlining scope where inner loop references outer loop-carried variable via init_values.
 

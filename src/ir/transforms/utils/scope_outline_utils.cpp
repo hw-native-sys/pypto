@@ -27,6 +27,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -134,7 +135,9 @@ class StoreTargetCollector : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override {
     auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
     if (opnode && IsOp(opnode, "tile.store") && op->args_.size() >= 3) {
-      if (auto var = As<Var>(op->args_[2])) {
+      // A loop-carried destination is an IterArg, with its own ObjectKind.
+      // It needs the same post-store return binding as an ordinary Var.
+      if (auto var = AsVarLike(op->args_[2])) {
         store_targets.insert(var.get());
       }
     }
@@ -469,7 +472,7 @@ class PostStoreAliasCollector : public IRVisitor {
     auto call = std::dynamic_pointer_cast<const Call>(op->value_);
     auto opnode = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
     if (opnode && IsOp(opnode, "tile.store") && call->args_.size() >= 3) {
-      if (auto target = As<Var>(call->args_[2])) {
+      if (auto target = AsVarLike(call->args_[2])) {
         alias_to_target.emplace(op->var_.get(), target.get());
       }
     }
@@ -590,7 +593,7 @@ class StoreEvalToAssignMutator : public IRMutator {
   [[nodiscard]] std::optional<TrackedStore> MatchTrackedStore(const ExprPtr& value) const {
     auto call = std::dynamic_pointer_cast<const Call>(value);
     if (!IsOp(call, "tile.store") || call->args_.size() < 3) return std::nullopt;
-    auto target = As<Var>(call->args_[2]);
+    auto target = AsVarLike(call->args_[2]);
     if (!target) return std::nullopt;
     auto it = target_vars_.find(target.get());
     if (it == target_vars_.end()) return std::nullopt;
@@ -797,6 +800,13 @@ ExprPtr ScopeOutliner::VisitExpr_(const VarPtr& op) {
     return it->second;
   }
   return IRMutator::VisitExpr_(op);
+}
+
+ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) {
+  // A post-store result replaces a use of the carry, not its header binding or
+  // initializer. Return the replacement before the base visitor rebuilds it.
+  auto it = store_target_renames_.find(op.get());
+  return it != store_target_renames_.end() ? it->second : IRMutator::VisitExpr_(op);
 }
 
 /**
@@ -1023,25 +1033,18 @@ namespace {
 /// Append @p extra to @p body's trailing YieldStmt, adding one when the body has
 /// none (a loop that carried nothing yields nothing today).
 ///
-/// Walks the same spine as ``GetLastYieldStmt``: the trailing yield is the last
-/// element of the outermost SeqStmts chain. A statement kind that hides a yield
-/// from this walk gets a *new* trailing yield instead, which is why the caller
-/// checks the resulting arity.
+/// Existing result slots belong to the enclosing control flow even when a
+/// transparent runtime/split scope wraps their yield. Extend that yield in
+/// place, retaining its metadata and scheduling scope; a separate yield would
+/// leave two terminators and lose the original slots at the trailing spine.
 StmtPtr AppendTrailingYieldValues(const StmtPtr& body, const std::vector<ExprPtr>& extra, const Span& span) {
   if (extra.empty()) return body;
-  if (auto yield = As<YieldStmt>(body)) {
-    auto values = yield->value_;
-    values.insert(values.end(), extra.begin(), extra.end());
-    return std::make_shared<YieldStmt>(values, yield->span_);
-  }
-  if (auto seq = As<SeqStmts>(body)) {
-    auto stmts = seq->stmts_;
-    if (!stmts.empty() && transform_utils::GetLastYieldStmt(stmts.back())) {
-      stmts.back() = AppendTrailingYieldValues(stmts.back(), extra, span);
-    } else {
-      stmts.push_back(std::make_shared<YieldStmt>(extra, span));
-    }
-    return SeqStmts::Flatten(std::move(stmts), seq->span_);
+  if (transform_utils::GetLastYieldStmt(body)) {
+    return transform_utils::RewriteLastYieldStmt(body, [&](const YieldStmtPtr& yield) -> StmtPtr {
+      auto result = MutableCopy(yield);
+      result->value_.insert(result->value_.end(), extra.begin(), extra.end());
+      return result;
+    });
   }
   return SeqStmts::Flatten({body, std::make_shared<YieldStmt>(extra, span)}, span);
 }
@@ -1620,6 +1623,11 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   std::vector<std::pair<const Var*, const Var*>> deferred_post_store_aliases;
   for (const Var* var_ptr : body_collector.var_defs_ordered) {
     if (!used_after.count(var_ptr)) continue;
+    // Fallback output discovery includes store destinations. A destination
+    // bound by a loop *inside* this scope still leaves that loop through its
+    // return_vars, never through the IterArg binder itself. Exporting the
+    // binder would later substitute a plain Var into a loop header.
+    if (var_ptr->GetKind() == ObjectKind::IterArg) continue;
 
     // Skip if this var_def is a post-store alias of an external store
     // target: that same tensor will be exported by the store-target pass

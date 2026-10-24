@@ -1575,6 +1575,36 @@ def test_composite_shape_dim_roundtrips(dim_factory):
     assert python_print(reparsed, format=False) == printed
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_unallocated_tensor_dim_binding_roundtrips(nested):
+    """Inlining may retain a dim call that the authoring parser normally folds."""
+    span = ir.Span.unknown()
+    extent = ir.Var("T", ir.ScalarType(DataType.INDEX), span)
+    x = ir.Var("x", ir.TensorType([extent, ir.ConstInt(32, DataType.INDEX, span)], DataType.FP32), span)
+    size = ir.Var("size", ir.ScalarType(DataType.INDEX), span)
+    dim = ir.Call(
+        ir.get_op("tensor.dim"),
+        [x, ir.ConstInt(0, DataType.INDEX, span)],
+        {},
+        {},
+        size.type,
+        span,
+    )
+    value = ir.Add(dim, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span) if nested else dim
+    function = ir.Function(
+        "main",
+        [x],
+        [size.type],
+        ir.SeqStmts([ir.AssignStmt(size, value, span), ir.ReturnStmt([size], span)], span),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    original = ir.Program([function], "DimBinding", span)
+    restored = pl.parse(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+
+
 @pytest.mark.parametrize("prefix", ["pl", "custom"])
 @pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.INT64])
 @pytest.mark.parametrize("composite", [False, True])

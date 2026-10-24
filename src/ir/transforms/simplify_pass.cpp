@@ -252,9 +252,7 @@ class ReturnVarEscapeIndex : public IRVisitor {
 /// `out`. The substituted form lets subsequent SimplifyMutator visits
 /// (including the function's ReturnStmt) read the yielded value directly.
 ///
-/// Recurses through trailing SeqStmts to find the yield, mirroring
-/// `transform_utils::GetLastYieldStmt` — a well-formed control-flow body
-/// can place its terminating YieldStmt inside a nested SeqStmts wrapper.
+/// Follows the shared trailing-yield spine, preserving runtime/split wrappers.
 ///
 /// Pre: @p body is a well-formed control-flow body with `return_vars`
 /// non-empty — its (possibly nested) tail is a YieldStmt with
@@ -265,27 +263,24 @@ struct StrippedYield {
 };
 
 StrippedYield StripTrailingYield(const StmtPtr& body, size_t return_var_count) {
-  if (auto seq = As<SeqStmts>(body)) {
-    INTERNAL_CHECK_SPAN(!seq->stmts_.empty(), seq->span_)
-        << "Internal error: control-flow body must end with YieldStmt "
-           "when return_vars is non-empty";
-    auto stripped = seq->stmts_;
-    auto inner = StripTrailingYield(stripped.back(), return_var_count);
-    if (inner.body) {
-      stripped.back() = inner.body;
-    } else {
-      stripped.pop_back();
-    }
-    return {loop_repair::MakeBody(stripped, seq->span_), std::move(inner.yielded_values)};
-  }
-  auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body);
+  auto yield_stmt = transform_utils::GetLastYieldStmt(body);
   INTERNAL_CHECK_SPAN(yield_stmt, body->span_)
       << "Internal error: control-flow body tail must be YieldStmt when "
          "return_vars is non-empty";
   INTERNAL_CHECK_SPAN(yield_stmt->value_.size() == return_var_count, yield_stmt->span_)
       << "Internal error: yielded value count " << yield_stmt->value_.size()
       << " does not match return_vars count " << return_var_count;
-  return {/*body=*/nullptr, yield_stmt->value_};
+  auto stripped = transform_utils::RewriteLastYieldStmt(body, [](const YieldStmtPtr&) { return nullptr; });
+  return {std::move(stripped), yield_stmt->value_};
+}
+
+/// Folding substitutes yielded expressions at their users. Calls must instead
+/// remain at their evaluation site (including inside a MANUAL scope), so retain
+/// the control flow until FlattenCallExpr has materialized their results.
+bool HasEffectfulYield(const StmtPtr& body) {
+  auto yield = body ? transform_utils::GetLastYieldStmt(body) : nullptr;
+  return yield &&
+         std::any_of(yield->value_.begin(), yield->value_.end(), transform_utils::ExprContainsCallLike);
 }
 
 /// Rebind storage expressions without folding values or revisiting a mapped
@@ -472,7 +467,14 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       // Empty Require loops need no hardware evidence. Nonempty ones must
       // survive for qualification, even when ordinary folding could unfold them.
       if (trips == 1 && op->hardware_loop_policy_ == HardwareLoopPolicy::Auto &&
-          fold_b_depth_ < kMaxNestedSingleTripFolds) {
+          fold_b_depth_ < kMaxNestedSingleTripFolds && !HasEffectfulYield(op->body_) &&
+          std::none_of(
+              new_iter_args.begin(), new_iter_args.end(),
+              [](const IterArgPtr& arg) {
+                // Substituting an effectful init could introduce a call into an
+                // otherwise harmless yield (or duplicate it at other carry uses).
+                return transform_utils::ExprContainsCallLike(arg->initValue_);
+              })) {
         // Exactly one iteration: substitute loop_var → start and each
         // iter_arg → its init value via DeepClone (matches the substitution
         // pattern used by LoopUnrollMutator in unroll_loops_pass.cpp), then
@@ -666,7 +668,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     const bool always_true = !constants_only_ && analyzer_->CanProve(new_condition);
     const bool always_false =
         !constants_only_ && !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
-    if (always_true || always_false) {
+    const auto selected_body = always_true ? new_then : new_else.value_or(nullptr);
+    if ((always_true || always_false) && !HasEffectfulYield(selected_body)) {
       StmtPtr kept;
       if (always_true) {
         kept = new_then;

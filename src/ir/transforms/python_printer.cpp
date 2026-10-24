@@ -424,6 +424,7 @@ class IRPythonPrinter : public IRVisitor {
   // everywhere else.
   bool typed_index_consts_ = false;
   bool force_recorded_call_ = false;
+  bool orchestration_function_ = false;
   std::unordered_map<const Type*, bool> storage_type_cache_;
 
   // Helper methods
@@ -577,6 +578,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
+  void PrintSplitAivScope(const SplitAivScopeStmtPtr& op, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
   void PrintYieldWithResults(const YieldStmtPtr& yield, const std::vector<VarPtr>& return_vars);
 
@@ -1107,7 +1109,12 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // event_id attributes, so use the lossless dump to preserve this operand.
   const bool folded_flag = (IsOp(op, "system.set_flag") || IsOp(op, "system.wait_flag")) &&
                            op->args_.size() == 1 && As<ConstInt>(op->args_[0]);
-  if (!storage_call && !folded_flag &&
+  // Inlining can retain dimension reads in orchestration expressions, including
+  // nested arithmetic. Its authoring parser folds those reads, so preserve the
+  // recorded Call. Type expressions use a separate printer and keep their DSL
+  // spelling, as do Inline/InCore functions whose parser does not fold reads.
+  const bool dimension_call = orchestration_function_ && IsOp(op, "tensor.dim");
+  if (!storage_call && !folded_flag && !dimension_call &&
       (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value()))) {
     PrintCall(op);
     return;
@@ -2650,7 +2657,10 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   DecreaseIndent();
 }
 
-void IRPythonPrinter::VisitStmt_(const SplitAivScopeStmtPtr& op) {
+void IRPythonPrinter::VisitStmt_(const SplitAivScopeStmtPtr& op) { PrintSplitAivScope(op); }
+
+void IRPythonPrinter::PrintSplitAivScope(const SplitAivScopeStmtPtr& op,
+                                         const std::vector<VarPtr>& return_vars) {
   // Round-trips as `for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.X): <body>`.
   // The region body begins with `aiv_id = tile.get_subblock_idx()`; that binding
   // is materialized as the loop variable and skipped in the body.
@@ -2669,13 +2679,12 @@ void IRPythonPrinter::VisitStmt_(const SplitAivScopeStmtPtr& op) {
   ++split_aiv_scope_depth_;
   const size_t start = has_idx_binding ? 1 : 0;
   if (body_seq && body_seq->stmts_.size() > start) {
-    for (size_t i = start; i < body_seq->stmts_.size(); ++i) {
-      if (ShouldSuppressPlaceholder(body_seq->stmts_, i)) continue;
-      PrintStmtBlock(body_seq->stmts_[i]);
-      if (i + 1 < body_seq->stmts_.size()) stream_ << "\n";
-    }
+    auto first_stmt = body_seq->stmts_.begin();
+    if (has_idx_binding) ++first_stmt;
+    std::vector<StmtPtr> stmts(first_stmt, body_seq->stmts_.end());
+    VisitStmtBody(SeqStmts::Flatten(std::move(stmts), body_seq->span_), return_vars);
   } else if (!body_seq && !has_idx_binding) {
-    PrintStmtBlock(op->body_);
+    VisitStmtBody(op->body_, return_vars);
   } else {
     stream_ << GetIndent() << "pass\n";
   }
@@ -2719,7 +2728,7 @@ void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
   // surface and preserve their structural name_hint through `pl.scope(...)`.
   PrintRuntimeScopeHeader(op->manual_, op->name_hint_);
   IncreaseIndent();
-  PrintStmtBlock(op->body_);
+  VisitStmtBody(op->body_);
   DecreaseIndent();
 }
 
@@ -2846,7 +2855,7 @@ void IRPythonPrinter::PrintYieldWithResults(const YieldStmtPtr& yield_stmt,
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
   // A single-statement SeqStmts is a transparent wrapper (e.g. a user-written
   // `with pl.auto_scope():` body before NormalizeStmtStructure collapses it).
-  // Unwrap it first so an AUTO scope reaches the rscope branch below with
+  // Unwrap it first so a transparent scope reaches its branch below with
   // return_vars intact — otherwise a trailing return-var yield inside the scope
   // would lose its `var = pl.yield_(...)` assignment LHS.
   if (auto seq = As<SeqStmts>(body); seq && seq->stmts_.size() == 1) {
@@ -2873,16 +2882,11 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       if (ShouldSuppressPlaceholder(seq_stmts->stmts_, i)) continue;
       auto stmt = seq_stmts->stmts_[i];
 
-      // Check if this is the last statement and it's a YieldStmt
+      // Only the trailing spine can yield this owner's results. Forward them
+      // through a trailing sequence/runtime/split wrapper as well as a yield.
       bool is_last = (i == seq_stmts->stmts_.size() - 1);
-      if (auto yield_stmt = As<YieldStmt>(stmt)) {
-        if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
-          PrintYieldWithResults(yield_stmt, return_vars);
-        } else {
-          stream_ << GetIndent();
-          PrintLeadingComments(yield_stmt);
-          VisitStmt(stmt);
-        }
+      if (is_last) {
+        VisitStmtBody(stmt, return_vars);
       } else {
         PrintStmtBlock(stmt);
       }
@@ -2891,16 +2895,18 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         stream_ << "\n";
       }
     }
-  } else if (auto rscope = As<RuntimeScopeStmt>(body); rscope && !rscope->manual_) {
-    // An AUTO RuntimeScopeStmt wrapping a loop/if body: preserve its name in
-    // the `with pl.scope(...):` header and recurse with return_vars so a
-    // trailing return-var yield *inside* the scope still prints its
-    // `var = pl.yield_(...)` assignment LHS.
+  } else if (auto rscope = As<RuntimeScopeStmt>(body)) {
+    // Both runtime modes share the enclosing control flow's result bindings.
     stream_ << GetIndent();
-    PrintRuntimeScopeHeader(/*manual=*/false, rscope->name_hint_);
+    PrintLeadingComments(rscope);
+    PrintRuntimeScopeHeader(rscope->manual_, rscope->name_hint_);
     IncreaseIndent();
     VisitStmtBody(rscope->body_, return_vars);
     DecreaseIndent();
+  } else if (auto split = As<SplitAivScopeStmt>(body)) {
+    stream_ << GetIndent();
+    PrintLeadingComments(split);
+    PrintSplitAivScope(split, return_vars);
   } else {
     PrintStmtBlock(body);
   }
@@ -2985,6 +2991,8 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
+  const bool saved_orchestration =
+      std::exchange(orchestration_function_, IsOrchestrationLike(func->func_type_));
   // Build rename map for this function to handle SSA name shadowing.
   BuildVarRenameMap(func);
 
@@ -3193,6 +3201,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     }
   }
   DecreaseIndent();
+  orchestration_function_ = saved_orchestration;
 }
 
 // Helper class to collect GlobalVar references from a function's body

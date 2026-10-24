@@ -27,7 +27,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -39,6 +38,7 @@ namespace ir {
 namespace dce {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
+using transform_utils::ExprContainsCallLike;
 
 std::string GetStmtOpName(const StmtPtr& stmt) {
   CallPtr call;
@@ -491,37 +491,6 @@ bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
   return std::dynamic_pointer_cast<const AssignStmt>(stmt) != nullptr && !IsSideEffectOp(stmt);
 }
 
-/// Walk an expression tree and report whether any Call or Submit appears.
-/// Both are call-like and side-effecting from the DCE perspective: a Call
-/// may invoke a kernel with arbitrary side effects, and a Submit launches
-/// an asynchronous task. Either form must be preserved conservatively
-/// because the IR has no purity annotations yet.
-class CallLikeFinder : public IRVisitor {
- public:
-  bool found = false;
-
- private:
-  using IRVisitor::VisitExpr_;
-  void VisitExpr_(const CallPtr& op) override {
-    found = true;
-    // Keep walking — nested args may also contain Calls, but early-exit
-    // would require throwing. The overhead is bounded by the expression
-    // size which is small.
-    IRVisitor::VisitExpr_(op);
-  }
-  void VisitExpr_(const SubmitPtr& op) override {
-    found = true;
-    IRVisitor::VisitExpr_(op);
-  }
-};
-
-bool ExprContainsCallLike(const ExprPtr& expr) {
-  if (!expr) return false;
-  CallLikeFinder finder;
-  finder.VisitExpr(expr);
-  return finder.found;
-}
-
 bool IsTaskIdTupleElement(const AssignStmtPtr& assign) {
   auto tuple_get = As<TupleGetItemExpr>(assign ? assign->value_ : ExprPtr{});
   if (!tuple_get) return false;
@@ -558,23 +527,39 @@ bool IsRemovableScalarAssign(const StmtPtr& stmt) {
 
 /// Filter a branch's trailing YieldStmt in place, keeping only `kept_indices`.
 /// When `kept_indices` is empty, the trailing YieldStmt is removed entirely.
-/// No-op when the branch does not end in a YieldStmt.
+/// Only touches the enclosing control flow's yield; scope contents and their
+/// metadata stay in place even when every slot disappears.
 void FilterTrailingYieldSlots(std::vector<StmtPtr>& branch, const std::vector<size_t>& kept_indices) {
   if (branch.empty()) return;
-  auto yield = std::dynamic_pointer_cast<const YieldStmt>(branch.back());
-  if (!yield) return;
-  if (kept_indices.empty()) {
+  auto tail = transform_utils::RewriteLastYieldStmt(branch.back(), [&](const YieldStmtPtr& yield) -> StmtPtr {
+    if (kept_indices.empty()) return nullptr;
+    auto result = MutableCopy(yield);
+    result->value_.clear();
+    result->value_.reserve(kept_indices.size());
+    for (size_t idx : kept_indices) {
+      INTERNAL_CHECK_SPAN(idx < yield->value_.size(), yield->span_)
+          << "Internal error: yield index " << idx << " out of range " << yield->value_.size();
+      result->value_.push_back(yield->value_[idx]);
+    }
+    return result;
+  });
+  if (tail) {
+    branch.back() = std::move(tail);
+  } else {
     branch.pop_back();
-    return;
   }
-  std::vector<ExprPtr> new_values;
-  new_values.reserve(kept_indices.size());
-  for (size_t idx : kept_indices) {
-    INTERNAL_CHECK_SPAN(idx < yield->value_.size(), yield->span_)
-        << "Internal error: yield index " << idx << " out of range " << yield->value_.size();
-    new_values.push_back(yield->value_[idx]);
+}
+
+/// Resolve the trailing spine once per body, rather than once for every slot.
+/// Pre-SSA loops can have implicit carries without a yield; callers retain
+/// those slots until ConvertToSSA supplies their terminator.
+YieldStmtPtr GetYieldForSlots(const std::vector<StmtPtr>& body, size_t slots, const Span& span) {
+  auto yield = body.empty() ? nullptr : transform_utils::GetLastYieldStmt(body.back());
+  if (yield && slots != 0) {
+    INTERNAL_CHECK_SPAN(yield->value_.size() == slots, span)
+        << "Internal error: control-flow yield must match its " << slots << " result slots";
   }
-  branch.back() = std::make_shared<YieldStmt>(std::move(new_values), yield->span_);
+  return yield;
 }
 
 /// True when the trailing `YieldStmt` of @p body feeds slot @p slot with an
@@ -585,9 +570,7 @@ void FilterTrailingYieldSlots(std::vector<StmtPtr>& branch, const std::vector<si
 /// The IR has no purity annotations, so an effect there keeps the slot alive,
 /// matching how `IsRemovableScalarAssign` refuses to drop a call-backed
 /// assignment.
-bool YieldSlotHasCallLike(const std::vector<StmtPtr>& body, size_t slot) {
-  if (body.empty()) return false;
-  auto yield = std::dynamic_pointer_cast<const YieldStmt>(body.back());
+bool YieldSlotHasCallLike(const YieldStmtPtr& yield, size_t slot) {
   if (!yield || slot >= yield->value_.size()) return false;
   return ExprContainsCallLike(yield->value_[slot]);
 }
@@ -693,10 +676,11 @@ StmtPtr RewriteLoopCarrySlots(const std::shared_ptr<const LoopT>& loop,
   kept_indices.reserve(loop->iter_args_.size());
   new_iter_args.reserve(loop->iter_args_.size());
   new_return_vars.reserve(loop->return_vars_.size());
+  auto yield = GetYieldForSlots(rewritten, loop->return_vars_.size(), loop->span_);
   for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
-    if (live_uses.count(loop->iter_args_[i].get()) || live_uses.count(loop->return_vars_[i].get()) ||
-        IsTaskIdCarrier(loop->iter_args_[i]->GetType()) ||
-        ExprContainsCallLike(loop->iter_args_[i]->initValue_) || YieldSlotHasCallLike(rewritten, i)) {
+    if (!yield || live_uses.count(loop->iter_args_[i].get()) ||
+        live_uses.count(loop->return_vars_[i].get()) || IsTaskIdCarrier(loop->iter_args_[i]->GetType()) ||
+        ExprContainsCallLike(loop->iter_args_[i]->initValue_) || YieldSlotHasCallLike(yield, i)) {
       kept_indices.push_back(i);
       new_iter_args.push_back(loop->iter_args_[i]);
       new_return_vars.push_back(loop->return_vars_[i]);
@@ -747,10 +731,13 @@ std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts
       std::vector<VarPtr> new_return_vars;
       kept_indices.reserve(if_stmt->return_vars_.size());
       new_return_vars.reserve(if_stmt->return_vars_.size());
+      auto then_yield = GetYieldForSlots(new_then, if_stmt->return_vars_.size(), if_stmt->span_);
+      auto else_yield = new_else.has_value()
+                            ? GetYieldForSlots(*new_else, if_stmt->return_vars_.size(), if_stmt->span_)
+                            : nullptr;
       for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-        const bool branch_effect =
-            YieldSlotHasCallLike(new_then, i) || (new_else.has_value() && YieldSlotHasCallLike(*new_else, i));
-        if (live_uses.count(if_stmt->return_vars_[i].get()) || branch_effect) {
+        const bool branch_effect = YieldSlotHasCallLike(then_yield, i) || YieldSlotHasCallLike(else_yield, i);
+        if (!then_yield || !else_yield || live_uses.count(if_stmt->return_vars_[i].get()) || branch_effect) {
           kept_indices.push_back(i);
           new_return_vars.push_back(if_stmt->return_vars_[i]);
         }

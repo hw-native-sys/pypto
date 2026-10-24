@@ -90,6 +90,19 @@ Only definitions inside the cloned subtree receive fresh identities. A reference
 
 The choice to substitute `return_vars` via `var_remap_` rather than emit a literal `AssignStmt(rv, yielded)` is deliberate: the orchestration codegen's role-aware name disambiguation (`role == "out"` etc.) collapses several role-tagged SSA versions to the same C++ identifier, so an `out__rv_v2 = out__co_l0_rv_v3` alias would lower to the ill-formed `auto out = out;`. Substituting at use sites side-steps the disambiguation entirely.
 
+Trailing yields may be nested inside `RuntimeScopeStmt` (AUTO or MANUAL) or
+`SplitAivScopeStmt`. Folding and dead-slot pruning follow that same trailing
+path, preserving scope metadata and the ordering of all other statements.
+Removing the only yield retains an empty scope body, printed as `pass`.
+
+Constant-branch and single-trip folding retain the control flow when a yielded
+expression contains a `Call` or `Submit`, including a nested call, so substitution
+cannot duplicate, delete, or move the operation. Single-trip folding also retains
+loops with call-containing carry initializers. A call already assigned to a
+variable before yielding that variable does not prevent folding.
+`FlattenCallExpr`, which runs later, can materialize call results before a
+subsequent Simplify folds the control flow.
+
 #### Escaping return vars
 
 A substitution only reaches uses visited while its `var_remap_` entry is live, and `ForStmt`, `WhileStmt` and `IfStmt` each rebase `var_remap_` to a pre-body baseline on the way out so a body-internal remap cannot rewrite siblings or post-loop code. A use that outlives that restore would keep the original `Var` — which the fold has just stripped the only definition of, a dangling reference `UseAfterDefCheck` reports.

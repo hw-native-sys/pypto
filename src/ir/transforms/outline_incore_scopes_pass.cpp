@@ -285,7 +285,12 @@ Pass OutlineIncoreScopes() {
       // symbol placeholder is not the caller's and may be reached with a
       // statically-shaped actual.
       StmtPtr source_body = func->body_;
-      if (func->func_type_ == FunctionType::Opaque) {
+      if (func->func_type_ == FunctionType::Orchestration) {
+        // InlineFunctions can introduce these reads after the authoring parser
+        // established orchestration form. Canonicalize them before capture,
+        // or an outlined Tensor type can retain a caller-local shape alias.
+        source_body = FoldParamDimReads(func->params_, source_body);
+      } else if (func->func_type_ == FunctionType::Opaque) {
         HasInCoreScope probe;
         probe.VisitStmt(source_body);
         if (probe.found_) source_body = FoldParamDimReads(func->params_, source_body);

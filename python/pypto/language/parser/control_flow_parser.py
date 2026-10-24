@@ -1074,6 +1074,16 @@ class ControlFlowParser:
             elif isinstance(stmt, ast.With) and self.is_runtime_scope_with(stmt):
                 yield_vars.extend(self.scan_for_yields(stmt.body))
 
+            # The split_aiv for-syntax creates a transparent scope, not a loop.
+            # Real loops still own their yields and must not be traversed here.
+            elif (
+                isinstance(stmt, ast.For)
+                and isinstance(stmt.iter, ast.Call)
+                and isinstance(stmt.iter.func, ast.Attribute)
+                and stmt.iter.func.attr == "split_aiv"
+            ):
+                yield_vars.extend(self.scan_for_yields(stmt.body))
+
         return yield_vars
 
     @staticmethod
