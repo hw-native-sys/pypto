@@ -4,12 +4,12 @@
 
 `BlockNzTensorViews` turns a *logical* `pl.NZ` tensor into the *blocked* form
 pto-isa's `Layout::NZ` GlobalTensor requires, and retargets the `tile.load`
-that reads it.
+that reads it or the supported `tile.store` that writes it.
 
-A `pl.Tensor[[R, C], dtype, pl.NZ]` annotation — or `[[B, R, C], ...]` — is an
-**assertion about the bytes already in GM**: they are stored in PTO-native NZ
-fractal order. It is not
-a request to convert anything. The DSL keeps the logical shape and logical
+A `pl.Tensor[[R, C], dtype, pl.NZ]` annotation — or `[[B, R, C], ...]` — is a
+**declaration of the GM byte order**: a reader expects PTO-native NZ fractal
+bytes, and a supported accumulator store produces them. Adding the annotation
+does not convert existing bytes. The DSL keeps the logical shape and logical
 slicing; this pass supplies the physical description the backend needs.
 
 The payoff is that a matmul B-operand `TLOAD` becomes NZ→NZ instead of ND→NZ,
@@ -68,8 +68,8 @@ true of a logical 2-D shape, false of the blocked rank-5 one.
 
 Three constraints fix this slot:
 
-- **After `ConvertTensorToTileOps` / `LowerCompositeOps`** — the `tile.load` ops
-  phase 2 rewrites must already exist.
+- **After `ConvertTensorToTileOps` / `LowerCompositeOps`** — the `tile.load`
+  and `tile.store` ops phase 2 rewrites must already exist.
 - **After `FlattenTileNdTo2D`** — the destination tile must already be the
   logical 2-D operand. Blocking a still-ND-rank tile would leave a `tile.load`
   whose type annotation and argument ranks cannot both be printed, breaking the
@@ -103,7 +103,7 @@ w: pl.Tensor[[256, 512], pl.INT8, pl.NZ]
 w: pl.Tensor[[1, 16, 16, 16, 32], pl.INT8, pl.NZ]
 ```
 
-**Phase 2 — retarget the consuming `tile.load`.**
+**Phase 2 — retarget supported loads and stores.**
 
 ```text
 # before  (slicing w[1:2, 256:512, 512:1024] out of an [E, N, K] weight)
@@ -114,6 +114,74 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
     pl.tile.load(w, [1, 16, 16, 0, 0], [1, 16, 16, 16, 32], target_memory=pl.Mem.Mat)
 ```
+
+### Accumulator stores
+
+On A2/A3, `pl.store(acc, offsets, out)` can write a fully valid, static 2-D
+FP32 Acc tile directly to FP32 `pl.NZ` GM. It preserves the logical tile and
+mathematical values; FP32 NZ uses `c0 = 8`, while the Acc tile keeps its own
+on-chip layout. No extra GM layout-conversion kernel is inserted.
+
+For a `64 x 16` tile and a logical `[64, 16]` destination, the store's offsets
+become `[0, 0, 0, 0, 0]`, and its fourth IR argument becomes the explicit
+partition shape `[1, 2, 4, 16, 8]`. The existing rank-N store emitter consumes
+that shape; it must not derive a rank-2 GM partition from the Acc tile. The
+descriptor represents:
+
+```cpp
+using NzShape = pto::Shape<1, 2, 4, 16, 8>;
+using NzStride = pto::Stride<1024, 512, 128, 8, 1>;
+pto::GlobalTensor<float, NzShape, NzStride, pto::Layout::NZ> dst(
+    output_address, NzShape(), NzStride());
+pto::TSTORE(dst, accumulator);
+```
+
+The store call's result remains an alias of the destination tensor. Rebuilding
+the call preserves its kwargs and attrs, including `st_phase=Final`; changing
+the GM coordinates must not change the tile type or unit-flag behavior.
+
+The supported write scope is narrower than the read scope:
+
+| Condition | Store behavior |
+| --------- | -------------- |
+| Backend and dtypes | A2/A3, FP32 Acc to FP32 GM only |
+| Tile shape and valid region | Static, positive, 2-D, fully valid; rows and columns are multiples of 16 |
+| Hardware extent limits | Rows at most 65535, columns at most 4095; alignment makes the effective maxima 65520 and 4080 |
+| Destination row window | Entire parent row axis, at row offset 0 |
+| Leading axes | Exactly one panel per store; a nonzero batch offset is allowed |
+| Column offset | Non-negative and provably a multiple of `c0 = 8` |
+| Unknown alignment or sign | Rejected; existing offset facts are reused rather than assuming validity |
+| Atomic, `pre_quant`, `pre_relu`, or dtype conversion | Rejected |
+| A5, Vec/Mat sources, dynamic or partially valid tiles | Rejected |
+
+The full-row restriction protects against a limitation of A2/A3 pto-isa's
+`TStoreAccNz2nz`. It computes the destination column-block pitch from the
+partition height rather than the parent tensor's stride:
+
+```cpp
+uint32_t dstStride = gShape2 * gShape3 * c0Size >> SHIFT_BLOCK_BYTE;
+// gStride1 is not used by this path.
+```
+
+For example, a `64 x 16` write into a `[128, 32]` parent needs column blocks
+1024 FP32 elements apart, but this implementation uses 512. Aligned row
+offsets alone cannot make that write correct. Until the underlying stride
+handling supports row subwindows, they are rejected rather than silently
+miswritten. There is no single-column-block exception: even with FP32 C0=8,
+this Acc store requires its valid column count to be a multiple of 16.
+
+Stack independent panels on a leading batch axis (`[PANELS, R, C]`), not the
+row axis (`[PANELS * R, C]`), and store one panel at a time. The blocked
+partition's batch extent is 1; its batch offset locates the panel. A2/A3's
+Acc store folds a larger batch extent into the column count rather than
+traversing independent panels using the parent batch stride.
+
+This adds a supported hardware capability, not a performance guarantee.
+The combined CSA candidate reported in [issue #3036] regressed in its measured
+workload; that experiment also changed the dataflow and the AIV reader, so its
+result does not isolate the cost of NZ store itself.
+
+[issue #3036]: https://github.com/hw-native-sys/pypto/issues/3036
 
 ### Symbolic trailing offsets
 
@@ -236,8 +304,9 @@ On 0.60 and earlier the same IR does not assemble — see
 
 ## Scope and rejections
 
-Milestone 1 is deliberately narrow. Everything outside it is rejected with a
-diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
+NZ loads and accumulator stores have deliberately bounded scopes. Everything
+outside them is rejected with a diagnostic naming the fix — an NZ tensor must
+never be silently mis-addressed.
 
 | Condition | Outcome |
 | --------- | ------- |
@@ -253,15 +322,16 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | logical rank > 3 | blocked with every leading axis folded into the batch (see below) |
 | logical rank < 2 | rejected — the trailing pair is the fractal plane |
 | dynamic leading extent, rank > 3 | rejected — the fold needs static extents to multiply |
-| `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
+| `tile.load` with `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
 | `tensor.slice` narrowing the leading axes only | blocked like the load that follows it (see below) |
 | `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
 | `tensor.reshape` flattening the whole tensor to `[N]` | kept as written — see [Flattening an NZ tensor](#flattening-an-nz-tensor) |
 | `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
-| consumer other than `tile.load` / `tensor.slice` / a whole-tensor flatten | rejected — NZ is read-only here |
-| explicit stride or partial `valid_shape` | rejected |
-| dynamic `valid_shape[-2]` provably a multiple of 16 (a ragged last tile) | blocked — the row-fractal count becomes `FloorDiv(rows, 16)` |
-| dynamic `valid_shape[-2]` that may end inside a fractal | rejected — a partial fractal has no blocked form |
+| `tile.store` to an NZ destination | supported under [Accumulator stores](#accumulator-stores) |
+| consumer other than a supported load, store, slice, or whole-tensor flatten | rejected — unsupported NZ coordinates must not pass through unchanged |
+| explicit tensor stride or partial tensor `valid_shape` | rejected |
+| `tile.load` dynamic `valid_shape[-2]` provably a multiple of 16 (a ragged last tile) | blocked — the row-fractal count becomes `FloorDiv(rows, 16)` |
+| `tile.load` dynamic `valid_shape[-2]` that may end inside a fractal | rejected — a partial fractal has no blocked form |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
 | GM row gap above 65535 blocks, on a multi-column-block load | rejected — **temporary**, see [GM row gap](#gm-row-gap-a-temporary-guard) |

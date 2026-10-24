@@ -337,6 +337,11 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
 
+  /// Whether the backend implements the FP32 Acc -> FP32 NZ GM writeback
+  /// contract. Other dtypes and partial row windows are separately guarded;
+  /// a generic Acc -> GM dtype capability does not imply NZ support.
+  [[nodiscard]] virtual bool SupportsAccToNzGmStore() const { return false; }
+
   /**
    * @brief Whether the cube fix-pipe may store an Acc-resident tile straight
    *        into a GM tensor of @p dtype.

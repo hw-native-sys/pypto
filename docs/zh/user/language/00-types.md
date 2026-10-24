@@ -198,7 +198,22 @@ b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 
 `device=` dispatch 是另一个例外：host 只负责指明缓冲区发往哪张卡，因此存放 NZ 打包字节的 ND host 张量可以绑定到 device program 中声明为 `pl.NZ` 的形参。但这只对完整矩阵成立 —— host 张量本身，或保留最后两个轴完整的切片，例如 `[N_RANKS, R, C]` 堆叠张量的 rank 分片 `w[r]`。矩阵内部的窗口（对整体打包一次的 `[N_RANKS * R, C]` 权重取 `w[r * R : (r + 1) * R]`）会被拒绝：这些行在内存中连续，但它们是若干分形列块中的片段，而不是 NZ 打包的 `[R, C]`。应当对每个分片单独打包，再把分片堆叠起来。无法经由这类切片追溯到 host 形参的实参 —— 例如 reshape 的结果或新创建的张量 —— 同样会被拒绝。追溯只在发起 dispatch 的函数内部进行，因此传入辅助函数的窗口在那里表现为形参，不会被追溯回调用方。
 
-`pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 断言该张量在全局内存中的字节**已经**按 PTO 原生 NZ 分形序存放，于是 matmul 权重载入可以跳过在线 ND→NZ 转换。它是对现有字节的断言，不是转换请求：你写的 shape 和切片保持逻辑形式，编译器负责推导分块后的物理描述符。目前要求 dtype 为整字节、张量形状静态且分形对齐（`shape[-2] % 16 == 0`、`shape[-1] % (256 / dtype 位宽) == 0`）、**逻辑秩为 2 或 3**（`[R, C]` 或 `[B, R, C]`，因为底层 NZ 描述符只有一个 batch 槽位），并作为 matmul 操作数读取；其余情形一律报错。
+`pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 声明全局内存中的字节按 PTO
+原生 NZ 分形序存放。matmul 操作数 load 要求字节已打包，因此可以跳过在线 ND→NZ
+转换；受支持的 Acc store 则直接产生 NZ 字节序。标注本身不会转换现有字节：shape
+和切片保持逻辑形式，编译器负责推导分块后的物理描述符。要求 dtype 为整字节、
+末尾矩阵平面静态且分形对齐（`shape[-2] % 16 == 0`、
+`shape[-1] % (256 / dtype 位宽) == 0`），逻辑秩至少为 2。前导轴折叠进描述符唯一的
+batch 槽位。
+
+在 A2/A3 上，`pl.store(acc, offsets, out)` 还支持将有效区域完整、静态二维的
+FP32 Acc tile 写入 FP32 `pl.NZ` 目标。行列均须为 16 的倍数；tile 必须从行偏移
+0 开始覆盖目标的整个行轴。每次 store 只写一个 panel，列偏移和 batch 偏移必须
+非负且可证明对齐。独立 panel 应写成 `[PANELS, R, C]`，逐个写回。FP32 NZ 的
+C0=8，不改变 tile 的数学值。Atomic store、FIXPIPE epilogue 选项（`pre_quant`、
+`pre_relu`）、dtype 转换、A5、Vec/Mat 源、动态或部分有效 tile 都会被拒绝。
+完整范围及底层行窗口限制见
+[BlockNzTensorViews](../../dev/passes/16-block_nz_tensor_views.md#accumulator-写回)。
 
 当一个张量的行不连续时 —— 大缓冲区里的一个窗口、外部传进来的跨步切片 —— 用 `pl.TensorView` 描述它，把 stride 显式写出来，而不是留给推断：
 

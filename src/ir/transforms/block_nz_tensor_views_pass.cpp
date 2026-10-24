@@ -40,7 +40,9 @@
  *             shapes / valid_shape rewritten into blocked coordinates, while
  *             its result ``TileType`` is preserved verbatim: the GM partition
  *             becomes rank-5 but the destination tile stays the logical
- *             2-D ``[N_TILE, K_TILE]``.
+ *             2-D ``[N_TILE, K_TILE]``. Supported FP32 Acc ``tile.store`` calls
+ *             similarly receive blocked offsets and an explicit rank-5 GM
+ *             partition while retaining the two-dimensional source tile.
  *
  * After this pass no logical-shaped NZ TensorType survives, so nothing
  * downstream — including codegen, which derives every rank from
@@ -59,13 +61,15 @@
  *     rejects. FlattenTileNdTo2D skips its ND2NZ source-window collapse for an
  *     NZ source, so the logical window is still intact when this pass runs.
  *
- * Milestone 1 scope: read-only, matmul operands only (``target_memory=Mat``),
+ * Loads support matmul operands only (``target_memory=Mat``),
  * whole-byte dtypes, static shapes, fractal-aligned shapes and slice offsets. A
  * slice offset may be symbolic when its alignment is *provable* — see
  * ``NzOffsetFactStore`` below and ``DivideIndexExactly`` in
  * ``tensor_view_semantics.h``. Everything outside that is rejected with a
  * diagnostic naming the authoring fix — an NZ tensor must never be silently
- * mis-addressed.
+ * mis-addressed. A2/A3 also supports plain FP32 Acc -> FP32 NZ stores over
+ * complete parent rows and one batch panel; see ``BlockTileStoreArgs`` for
+ * the stricter FIXPIPE geometry contract.
  */
 
 #include <any>
@@ -80,6 +84,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -94,9 +101,11 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/nz_store_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -418,14 +427,12 @@ class BlockNzMutator : public IRMutator {
   }
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
-    std::vector<ExprPtr> new_args;
-    new_args.reserve(op->args_.size());
-    bool args_changed = false;
-    for (const auto& arg : op->args_) {
-      auto new_arg = IRMutator::VisitExpr(arg);
-      if (new_arg.get() != arg.get()) args_changed = true;
-      new_args.push_back(std::move(new_arg));
-    }
+    // Reuse the generic traversal so expression-valued attributes follow the
+    // same substitutions as operands (dump/alias metadata can name tensors).
+    auto visited = As<Call>(IRMutator::VisitExpr_(op));
+    INTERNAL_CHECK_SPAN(visited, op->span_) << "Internal error: Call mutation must preserve its kind";
+    std::vector<ExprPtr> new_args = visited->args_;
+    bool args_changed = visited.get() != op.get();
 
     // Scan *every* operand, not just the first. An NZ tensor can appear in any
     // position — `tile.store`'s destination is argument 2 — and phase 1 has
@@ -442,20 +449,17 @@ class BlockNzMutator : public IRMutator {
     // params are blocked when that function is transformed.
     const bool is_function_call = static_cast<bool>(As<GlobalVar>(op->op_));
     if (!nz_args.empty() && !is_function_call) {
-      // Name the store case directly: annotating an Out/InOut tensor pl.NZ is
-      // the likely authoring mistake, and "read-only" is the actionable fact.
-      CHECK_SPAN(!IsOp(op, "tile.store"), op->span_)
-          << "NZ layout is read-only: an NZ tensor cannot be a store destination. "
-          << "Annotate the output tensor as pl.ND.";
+      const bool is_store = IsOp(op, "tile.store") && nz_args.size() == 1 && nz_args[0] == 2;
       const bool is_load = IsOp(op, "tile.load");
       const bool is_slice = IsOp(op, "tensor.slice");
       const bool is_flatten = IsWholeTensorFlatten(op);
-      CHECK_SPAN((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
+      CHECK_SPAN(is_store || ((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0),
+                 op->span_)
           << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
-          << "their source, plus a whole-tensor 'tensor.reshape' flatten, but it is used by '"
-          << op->op_->name_ << "' at argument " << nz_args[0]
-          << ". NZ tensors are read-only matmul operands in this release.";
-      auto logical_type = AsTensorTypeLike(op->args_[0]->GetType());
+          << "their source, a whole-tensor 'tensor.reshape' flatten, and supported FP32 Acc 'tile.store' "
+          << "destinations, but it is used by '" << op->op_->name_ << "' at argument " << nz_args[0]
+          << ". Use pl.ND for unsupported NZ consumers or writers.";
+      auto logical_type = AsTensorTypeLike(op->args_[is_store ? 2 : 0]->GetType());
       INTERNAL_CHECK_SPAN(logical_type, op->span_)
           << "Internal error: the NZ source of '" << op->op_->name_ << "' must be a tensor";
       const std::vector<ExprPtr>& logical_shape = logical_type->shape_;
@@ -463,20 +467,37 @@ class BlockNzMutator : public IRMutator {
       // and the result is already ND.
       if (!is_flatten) {
         args_changed = true;
-        new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
-                           : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
+        if (is_store) {
+          new_args = BlockTileStoreArgs(op, std::move(new_args), logical_shape);
+        } else {
+          new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
+                             : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
+        }
       }
     }
 
-    auto new_return_type = BlockNzType(op->GetType(), op->span_);
+    auto new_return_type = BlockNzType(visited->GetType(), op->span_);
     const bool type_changed = new_return_type.get() != op->GetType().get();
     if (!args_changed && !type_changed) return op;
 
     // Direct ctor, not OpRegistry::Create: re-deducing ``tile.load``'s type
     // from the now rank-5 shapes argument would turn the destination tile into
     // a rank-5 TileType. The GM partition is blocked; the tile is not.
-    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
+    return std::make_shared<Call>(op->op_, std::move(new_args), visited->kwargs_, visited->attrs_,
                                   std::move(new_return_type), op->span_);
+  }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    // The base mutator preserves task dependencies and launch operands, but
+    // only remaps expressions inside the result type. NZ blocking also changes
+    // its geometry, including the tensor elements before the TaskId suffix.
+    auto visited = As<Submit>(IRMutator::VisitExpr_(op));
+    INTERNAL_CHECK_SPAN(visited, op->span_) << "Internal error: Submit mutation must preserve its kind";
+    auto new_type = BlockNzType(visited->GetType(), op->span_);
+    if (new_type.get() == visited->GetType().get()) return visited;
+    return std::make_shared<Submit>(visited->op_, visited->args_, visited->deps_, visited->kwargs_,
+                                    visited->attrs_, std::move(new_type), visited->span_, visited->core_num_,
+                                    visited->sync_start_, visited->allow_early_resolve_, visited->predicate_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -489,6 +510,65 @@ class BlockNzMutator : public IRMutator {
   }
 
  private:
+  /// Lower only a proven Acc -> NZ store. Reuse the existing fourth operand
+  /// for the physical partition; deriving it in the emitter from the 2-D tile
+  /// would lose the NZ column-block / row-fractal axes.
+  std::vector<ExprPtr> BlockTileStoreArgs(const CallPtr& op, std::vector<ExprPtr> args,
+                                          const std::vector<ExprPtr>& logical_shape) {
+    const auto* ctx = PassContext::Current();
+    const backend::BackendHandler* handler = nullptr;
+    if (backend::BackendConfig::IsConfigured()) {
+      handler = ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+    }
+    const auto valid = nz_store_utils::CheckSourceAndAttrs(op, handler && handler->SupportsAccToNzGmStore());
+    auto offsets = As<MakeTuple>(args[1]);
+    INTERNAL_CHECK_SPAN(offsets, op->span_) << "Internal error: tile.store offsets must be a MakeTuple";
+    const size_t rank = logical_shape.size();
+    CHECK_SPAN(rank >= 2 && offsets->elements_.size() == rank, op->span_)
+        << "NZ tile.store offsets must have the destination tensor's logical rank.";
+
+    // FlattenTileNdTo2D may already have supplied a tensor-rank window. Keep
+    // and validate it, particularly its leading batch slots, instead of
+    // silently replacing a multi-panel transfer with a one-panel write.
+    std::vector<ExprPtr> window(rank, std::make_shared<ConstInt>(1, DataType::INDEX, op->span_));
+    window[rank - 2] = valid[0];
+    window[rank - 1] = valid[1];
+    if (args.size() == 4) {
+      auto explicit_window = As<MakeTuple>(args[3]);
+      INTERNAL_CHECK_SPAN(explicit_window, op->span_)
+          << "Internal error: tile.store partition sizes must be a MakeTuple";
+      CHECK_SPAN(explicit_window->elements_.size() == rank, op->span_)
+          << "NZ tile.store partition sizes must have the destination tensor's logical rank.";
+      for (size_t axis = 0; axis < rank; ++axis) {
+        auto given = As<ConstInt>(explicit_window->elements_[axis]);
+        auto expected = As<ConstInt>(window[axis]);
+        CHECK_SPAN(given && expected && given->value_ == expected->value_, op->span_)
+            << "NZ tile.store must transfer exactly one full Acc tile in a single batch panel.";
+      }
+    }
+    // The load helper already proves the trailing alignment and sign. Leading
+    // axes need a sign proof too for writes: partition_view clamps a negative
+    // offset to zero, which would otherwise overwrite an unintended panel.
+    for (size_t axis = 0; axis + 2 < rank; ++axis) {
+      int budget = tensor_view_semantics::kNzDivideStepBudget;
+      CHECK_SPAN(tensor_view_semantics::IsProvableNonNegative(offsets->elements_[axis], facts_, &budget),
+                 op->span_)
+          << "NZ tile.store requires provably non-negative leading batch offsets.";
+    }
+    args[1] = BlockTupleArg(args[1], logical_shape, DataType::FP32, op->span_, /*is_offsets=*/true, facts_);
+    auto sizes = std::make_shared<MakeTuple>(
+        tensor_view_semantics::BlockNzShape(window, DataType::FP32, op->span_), op->span_);
+    if (args.size() == 4) {
+      args[3] = sizes;
+    } else {
+      args.push_back(sizes);
+    }
+    auto blocked_store =
+        std::make_shared<Call>(op->op_, args, op->kwargs_, op->attrs_, args[2]->GetType(), op->span_);
+    nz_store_utils::CheckBlockedPartition(blocked_store, valid);
+    return args;
+  }
+
   /// Rewrite ``tensor.slice``'s (shapes, offsets) into blocked coordinates.
   ///
   /// Only a window that narrows the *leading* axes is representable. A blocked

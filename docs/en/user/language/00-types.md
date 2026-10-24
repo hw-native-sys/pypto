@@ -243,15 +243,24 @@ cannot trace back to a host parameter through such slices — a reshape, a newly
 is rejected too. The trace stays within the dispatching function, so a window passed into a
 helper function arrives there as a parameter and is not followed back to its caller.
 
-`pl.ND` is the default row-major layout and never needs writing. `pl.NZ` asserts that the
-tensor's bytes in global memory are *already* stored in PTO-native NZ fractal order, so a
-matmul weight load can skip the online ND→NZ conversion. It is an assertion about existing
-bytes, not a request to convert: the shape and slicing you write stay logical, and the
-compiler derives the blocked physical descriptor. It currently requires a statically shaped,
-fractal-aligned tensor with a whole-byte dtype (`shape[-2] % 16 == 0`,
-`shape[-1] % (256 / dtype bits) == 0`) of **logical rank 2 or 3** — `[R, C]` or `[B, R, C]`,
-since the underlying NZ descriptor has exactly one batch slot — read
-into a matmul operand; anything else is rejected with a diagnostic.
+`pl.ND` is the default row-major layout and never needs writing. `pl.NZ` declares PTO-native
+NZ fractal byte order in global memory. A matmul operand load expects already packed bytes
+and can skip online ND→NZ conversion; a supported Acc store produces NZ bytes directly.
+The annotation itself does not convert existing bytes: shape and slicing remain logical,
+and the compiler derives the blocked physical descriptor. The tensor needs a static,
+fractal-aligned trailing plane with a whole-byte dtype (`shape[-2] % 16 == 0`,
+`shape[-1] % (256 / dtype bits) == 0`) and logical rank at least 2. Leading axes fold into
+the descriptor's single batch slot.
+
+On A2/A3, `pl.store(acc, offsets, out)` also supports a fully valid, static 2-D FP32 Acc
+tile and an FP32 `pl.NZ` destination. Rows and columns must be multiples of 16; the tile
+must cover the destination's entire row axis at row offset 0. Each store writes one panel,
+with non-negative, provably aligned column and batch offsets. Stack independent panels as
+`[PANELS, R, C]` and write them separately. FP32 NZ uses C0=8; it does not change the tile's
+mathematical values. Atomic stores, FIXPIPE epilogue options (`pre_quant`, `pre_relu`),
+dtype conversion, A5, Vec/Mat sources, and dynamic or partially valid tiles are rejected.
+The full scope and the underlying row-window restriction are documented in
+[BlockNzTensorViews](../../dev/passes/16-block_nz_tensor_views.md#accumulator-stores).
 
 When a tensor's rows are not contiguous — a window into a larger buffer, a strided slice
 handed in from outside — describe it with `pl.TensorView`, which makes the strides explicit
