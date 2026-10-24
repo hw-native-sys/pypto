@@ -530,6 +530,142 @@ writes and optional Git index refreshes during read-only checks.
 When the primary PyPTO checkout has `.claude/skills/testing/testing.env`, the launcher
 mounts that file read-only at its original path too, preserving the machine's job limits.
 
+### Maintaining published images in CI
+
+[`docker/images.json`](../../../docker/images.json) is the maintenance entrypoint.
+The `Maintain Development Images` workflow runs daily at 19:37 UTC (03:37 Beijing),
+on changes to `docker/`, toolchain pins, build constraints or its workflow on `main`,
+and through **Run workflow**. PRs touching those paths run configuration and
+offline script tests on GitHub-hosted runners. Only PRs whose source repository is
+`hw-native-sys/pypto` or the explicitly trusted fork `luohuan19/pypto` also build
+the image and validate doctor, single-card decode and two-card all-reduce on the
+configured NPU runner. All other forks skip that job. The allowlist lives in the
+workflow's `image.if` condition; adding a repository grants its code execution on
+the persistent host and requires a maintainer trust review.
+Because PRs can edit workflow YAML, this allowlist alone is not a security boundary.
+Before enabling shared-runner PR builds, an administrator must configure **Settings
+→ Actions → General → Require approval for all external contributors** and ensure
+that maintainers approve only trusted sources and reviewed code, including workflow
+changes. This repository-wide policy affects all external PR workflows; pending
+approval also prevents their configuration checks from running. It does not isolate
+approved code. See [GitHub's fork workflow approval settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories).
+PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
+Manual runs validate without publishing by default; publication also requires `main`.
+
+The initial configuration enables only `arm-a2a3`, using CANN 9.2.0 and the
+`self-hosted`, `linux`, `ARM64`, `npu-xp` labels. A preflight check additionally
+requires runner `227-npu-a2a3-XP-1`. If the label pool grows, assign that host a
+dedicated label and update `runners` to avoid scheduling on a different host.
+The runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker, Ascend Docker Runtime and
+`task-submit` with `--find`/`--kill` support. No host PyPTO installation is used.
+Host maintenance commands enter that bundle explicitly; the system `python3` may be older.
+The workflow installs Buildx v0.35.0 in its isolated Docker configuration and uses
+the host's default Docker builder, preserving the shared build cache.
+
+Configure these repository settings before the first publishing run:
+
+| Kind | Name | Value |
+| ---- | ---- | ----- |
+| Secret | `SWR_USERNAME` | Username from the long-term SWR login command |
+| Secret | `SWR_PASSWORD` | Password from that command |
+
+Credentials are supplied only to the publishing step with `--password-stdin`.
+Each attempt has a private temporary Docker configuration directory, removed by
+an `always()` step. The temporary login token must never be committed.
+The workflow sets `PYPTO_DOCKER_PROXY=http://127.0.0.1:7892` to use the CI runner's
+local proxy; no GitHub Actions proxy variable is required. The proxy is passed to
+Git and Docker build arguments, not baked into the image environment.
+Buildx installation and GitHub artifact uploads also use this proxy.
+For manual script invocation, set the `PYPTO_DOCKER_PROXY` environment variable
+to a proxy reachable from that machine. The initial configuration sets
+`proxy_required: true`, so a missing environment variable fails preflight.
+`--network=host` affects build steps; registry pulls still use the Docker daemon's
+network/proxy configuration. SWR authentication and manifest operations connect
+directly without a proxy. Login/push subprocesses also clear proxy variables;
+if the Docker daemon has its own proxy, its `NO_PROXY` must include the SWR host.
+
+Before the first build, make the configured CANN base accessible. The default
+`cann_repository` is `quay.io/ascend/cann`; if the daemon cannot reach it, mirror
+the exact ARM64 image to an anonymously readable SWR repository and update that
+field. The initial ARM64 digest is pinned; replace `cann_digest` with the verified
+mirror digest when changing repositories. A null digest
+means pull the configured tag and resolve its digest on every run. Both modes
+build from the resolved digest and record it in the artifact; a stale local cache
+cannot hide a failed pull. Changing CANN requires editing the tag, digest, driver
+expectation and published tag together.
+
+Each run freezes the PyPTO and pypto-lib revisions before building. With PyPTO
+`ref: main`, it uses the workflow checkout's commit so the Docker recipe and helper
+scripts belong to the same event snapshot. For PRs, this is the exact PR head commit
+cloned from its source repository, including forks, rather than a temporary merge
+commit. Explicitly configured PyPTO refs keep their configured source repository.
+Other refs and pypto-lib refs resolve
+to full commit IDs. Runtime always follows PyPTO's gitlink; PTO-ISA follows that
+runtime's `pto_isa.pin`, and PTOAS follows the selected PyPTO toolchain pin.
+Build cache invalidation uses these SHAs instead of a mutable `main` argument.
+Compilation is capped by both `build_jobs` and the resource-limit loader.
+CI selects simpler's `build_package_<validation_platform>` and `build_package_sim`
+targets: the `arm-a2a3` image prebuilds A2/A3 onboard and both CPU simulators, without
+compiling A5 onboard binaries. `DIST_RUNTIME_TARGETS` stores this selection as
+`PYPTO_RUNTIME_BUILD_TARGETS` for later `pypto-build` calls; an empty value uses
+simpler's default targets. The override applies only to the runtime wheel build.
+Selected PyPTO refs must provide `pypto-doctor --strict`; validation rejects older
+helpers that would silently ignore the strict option.
+
+The `cann92-a2a3-aicpu-class-memaccess` patch adds only the onboard AICPU warning
+exception needed by CANN 9.2's GNU compiler. It is applied before building, skipped
+if its exact change is already upstream, and rejected if its context no longer
+matches. `/opt/pypto/dist-state.json` records the runtime SHA, diff hash, patch hash
+and installed extension hash after a successful build. `pypto-doctor --strict`
+accepts only this recorded patch; other edits, missing stamps or unverified
+bindings fail. The CANN 9.2.0 / driver 26.0.rc1 pair is a deployment validation
+configuration, not a general compatibility guarantee.
+
+Validation uses fresh containers without source/cache volumes. A single-card
+`task-submit` reservation runs strict doctor and Qwen3-14B decode; a separate
+two-card reservation runs pypto-lib's all-reduce example. Physical cards come from
+`TASK_DEVICE`, while model arguments use container-local IDs `0` or `0,1`.
+Driver metadata is mounted read-only from the host. Both models must exit zero
+and produce `[RUN] PASS`; missing PASS, timeouts and test failures prevent
+publication. `task_timeout_seconds` bounds the total wait for queueing and execution;
+`task_max_seconds` independently caps device execution. The total timeout must
+exceed the execution cap; the initial limits allow 3600 seconds total and 1800
+seconds of device execution for each case. Cleanup steps remove
+only this run's containers/tasks, without pruning shared caches.
+
+After validation, the exact tested image ID is pushed to a temporary
+`arm-a2a3-cann9.2-dist-<run_id>-<attempt>` tag. Its manifest and config digest must
+match the tested local image before promotion. The current
+`arm-a2a3-cann9.2-dist` moves to `arm-a2a3-cann9.2-dist-previous`, then the new
+image becomes current. Retrying the same digest preserves the previous version.
+The first publication creates only current; the second distinct publication
+creates previous. Temporary tags are removed by tag name, never by shared digest.
+Successful publication retains only these two tags for each configured image.
+
+Legacy tags such as `a3-dist` and `a3-dist-20260918` are neither updated nor deleted
+by this workflow. Keep them until two new builds have passed hardware validation,
+been uploaded, and are available through current/previous; remove the old tags
+in a separate migration cleanup afterward. Do not relabel old images as CANN 9.2
+without verifying their contents.
+
+The Actions summary and 14-day artifacts contain revisions, digests, build logs,
+validation logs and pre-promotion manifests for recovery. Repoint current to the
+previous digest to roll back without rebuilding. Promotion spans multiple registry
+requests: if it fails midway, inspect both tags and the saved manifests before
+retrying. A failed temporary-tag deletion fails the job and may require removing
+that specific run tag manually; never delete its digest or shared layers.
+
+These images contain detached source snapshots. `pypto-update.sh` will not pull
+them, and the managed patch also makes runtime dirty. Pull a newer image and
+create a fresh container/source volume to consume a new snapshot. Existing named
+volumes keep their own source. Developers choosing to track branches must handle
+their checkout and any local patch explicitly before using the updater.
+
+To add `x86-a2a3`, `x86-a5` or `arm-a5`, add a configuration entry with matching
+native runner labels, CANN base, driver and hardware validation paths. Keep it
+disabled until that combination has been provisioned. Publish independent tags;
+Docker architecture manifests cannot select images based on the attached NPU.
+
 ### Without Ascend Docker Runtime
 
 When no Ascend runtime is registered, the launcher's default `auto` mode selects

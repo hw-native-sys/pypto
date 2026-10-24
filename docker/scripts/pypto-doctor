@@ -14,16 +14,23 @@
 set -uo pipefail
 
 if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
-    echo 'Usage: pypto-doctor (checks toolchain, checkout, and NPU access)'
+    echo 'Usage: pypto-doctor [--strict] (checks toolchain, checkout, and NPU access)'
     exit 0
 fi
+strict=false
+case "${1:-}" in
+    --strict) strict=true ;;
+    '') ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+esac
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/pypto-activate.sh"
 source "$here/pypto-owner.sh"
 
 fail=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
-warn() { printf '  \033[33mwarn\033[0m  %s\n' "$*"; }
+warn() { printf '  \033[33mwarn\033[0m  %s\n' "$*"; if $strict; then fail=1; fi; }
+note() { printf '  note  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; fail=1; }
 
 echo "toolchain"
@@ -49,8 +56,8 @@ if grep -q GLIBCXX_3.4.29 /usr/lib/*-linux-gnu/libstdc++.so.6 2>/dev/null; then
 else
     bad "libstdc++ lacks GLIBCXX_3.4.29 — ptoas will not load"
 fi
-if ptoas_v="$("$PTOAS_ROOT/bin/ptoas" --version 2>&1)"; then
-    if version_check="$(python - "$PYPTO_SRC/toolchain/versions.env" "$ptoas_v" 2>&1 <<'PY'
+if ptoas_v="$(PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version 2>&1)"; then
+    if version_check="$(python - "$PYPTO_SRC/toolchain/versions.env" "$ptoas_v" "$strict" 2>&1 <<'PY'
 import pathlib
 import re
 import sys
@@ -61,6 +68,8 @@ if pin is None or found is None:
     sys.exit("Cannot determine PTOAS versions; run pypto-install-ptoas.sh")
 if tuple(map(int, found[1].split("."))) < tuple(map(int, pin[1].split("."))):
     sys.exit(f"PTOAS {found[1]} is older than {pin[1]}; run pypto-install-ptoas.sh")
+if sys.argv[3] == "true" and found[1] != pin[1]:
+    sys.exit(f"PTOAS {found[1]} differs from the image pin {pin[1]}")
 print(sys.argv[2])
 PY
     )"; then ok "$version_check"; else bad "$version_check"; fi
@@ -79,6 +88,12 @@ if [ -n "${ASCEND_HOME_PATH:-}" ]; then
 else
     bad "CANN set_env.sh did not run — is this the CANN-based image?"
 fi
+if $strict; then
+    expected_cann="${PYPTO_CANN_TAG:-}"
+    if [ -z "$cann" ] || [ "$cann" != "${expected_cann%%-*}" ]; then
+        bad "CANN ${cann:-unknown} differs from the image tag ${expected_cann:-missing}"
+    fi
+fi
 # Exactly the binaries the on-device path shells out to: CCECToolchain takes
 # bin/ccec and bin/ld.lld, Aarch64GxxToolchain the hcc cross pair. Each of those
 # constructors raises FileNotFoundError when its binary is absent, so a missing
@@ -95,13 +110,18 @@ done
 # version.info. In that mode compatibility still needs a host-side check; the
 # ACL probe establishes access, not whether AICPU initialization will work.
 driver_root="${ASCEND_DRIVER_ROOT:-/usr/local/Ascend/driver}"
-if [ -r "$driver_root/version.info" ]; then
-    driver="$(sed -n 's/^Version=//p' "$driver_root/version.info" | head -1)"
+driver_file="${PYPTO_DRIVER_VERSION_FILE:-$driver_root/version.info}"
+if [ -r "$driver_file" ]; then
+    driver="$(sed -n 's/^Version=//p' "$driver_file" | head -1)"
     # Supported pairs from runtime/docs/install.md. compatible_version contains
     # internal V100R... identifiers, not public CANN release numbers.
     case "$cann:$driver" in
         9.0.0:26.0.rc1|9.1.T500:25.6.rc1.b108)
             ok "host driver $driver matches supported CANN $cann" ;;
+        9.2.0:26.0.rc1)
+            # Deployment-specific pair; CI still requires ACL, decode and
+            # all-reduce on the real host before publishing a 9.2 image.
+            ok "host driver $driver matches CANN $cann image validation configuration" ;;
         9.0.0:*) bad "host driver ${driver:-unknown} is unsupported for CANN $cann; expected 26.0.rc1" ;;
         9.1.T500:*) bad "host driver ${driver:-unknown} is unsupported for CANN $cann; expected 25.6.rc1.b108" ;;
         *) bad "cannot verify host driver ${driver:-unknown} for CANN ${cann:-unknown}; see runtime/docs/install.md for supported pairs" ;;
@@ -123,10 +143,10 @@ if command -v npu-smi >/dev/null 2>&1; then
     if npu_out="$(npu-smi info 2>&1)"; then
         ok "npu-smi sees $(printf '%s\n' "$npu_out" | grep -cE '^\| [0-9]+ ') chip line(s)"
     else
-        warn "npu-smi: $(printf '%s\n' "$npu_out" | head -1) — expected under --runtime=ascend (it enumerates all boards); see the device access check below"
+        note "npu-smi: $(printf '%s\n' "$npu_out" | head -1) — expected under --runtime=ascend (it enumerates all boards); see the device access check below"
     fi
 else
-    warn "npu-smi not present — device checks fall back to the ACL probe below"
+    note "npu-smi not present — device checks fall back to the ACL probe below"
 fi
 
 # The check that actually matters: can this container open a card? Everything
@@ -224,7 +244,13 @@ sys.exit(3 if runtime_tree_is_dirty(status) else 0)
 else
     result=$?
     if [ "$result" -eq 3 ]; then
-        warn "runtime/ has uncommitted changes; the matching build stamp cannot prove the binding is current — rerun pypto-build"
+        if [ -f "$PYPTO_HOME/dist-state.json" ] && \
+            pypto_as_checkout_owner "$PYPTO_SRC" python "$PYPTO_HOME/image-tools/dist_state.py" \
+                verify --source "$PYPTO_SRC" --home "$PYPTO_HOME"; then
+            ok "simpler binding matches the recorded image patch and build"
+        else
+            warn "runtime/ has uncommitted changes; the matching build stamp cannot prove the binding is current — rerun pypto-build"
+        fi
     elif [ "$result" -eq 4 ]; then
         warn "simpler binding revision is unverified: $err — restore runtime/ Git metadata and rerun pypto-build"
     elif printf '%s' "$err" | grep -q 'ModuleNotFoundError'; then
@@ -232,6 +258,17 @@ else
     else
         bad "simpler binding rejected: $(printf '%s\n' "$err" | tail -1)"
         echo "        verify the compiled _task_interface against runtime/ — rerun pypto-build"
+    fi
+fi
+
+if $strict; then
+    # Check pristine as well as patched dist images. Removing a managed patch
+    # or replacing its extension must not turn a dirty-tree warning into success.
+    if pypto_as_checkout_owner "$PYPTO_SRC" python "$PYPTO_HOME/image-tools/dist_state.py" \
+        verify --source "$PYPTO_SRC" --home "$PYPTO_HOME"; then
+        ok "dist image source and binding record verified"
+    else
+        bad "dist image build record is missing or differs from this checkout/binding"
     fi
 fi
 

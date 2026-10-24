@@ -475,6 +475,105 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 如果 PyPTO 主 checkout 包含 `.claude/skills/testing/testing.env`，启动器也会将该文件
 只读挂载到原始路径，以保留机器的构建并行度限制。
 
+### 在 CI 中维护发布镜像
+
+[`docker/images.json`](../../../docker/images.json) 是镜像维护入口。
+`Maintain Development Images` workflow 每天在 UTC 19:37（北京时间 03:37）运行；
+`main` 上的 `docker/`、工具链版本、构建约束或该 workflow 变化时也会触发，
+还可通过 **Run workflow** 手动运行。修改上述路径的 PR 在 GitHub 托管 runner 上运行配置检查和
+离线脚本测试。仅当 PR 来源仓库为 `hw-native-sys/pypto` 或明确认可的可信 fork `luohuan19/pypto` 时，
+才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡 all-reduce 验证；其他 fork 跳过该 job。
+允许名单位于 workflow 的 `image.if` 条件中；新增仓库意味着允许其代码在持久化宿主机上执行，
+必须由维护者审核其可信性。
+PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用共享 runner 的 PR 构建前，
+管理员必须在 **Settings → Actions → General** 中设置 **Require approval for all external contributors**，
+并确保维护者只批准可信来源和经过审查的代码，包括 workflow 修改。这是仓库级策略，会影响所有外部 PR workflow；
+等待批准时，配置检查也不会运行。该设置不会隔离已经批准执行的代码。
+参见 [GitHub fork workflow 审批设置](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories)。
+PR 不发布镜像，也不获取 SWR 凭据。
+硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
+
+首期仅启用 `arm-a2a3`，使用 CANN 9.2.0，以及 `self-hosted`、`linux`、`ARM64`、`npu-xp` 标签。
+预检还要求 runner 名称为 `227-npu-a2a3-XP-1`。如果标签池扩大，应给这台服务器添加专用标签，
+并更新 `runners`，避免调度到其他服务器。runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
+Ascend Docker Runtime，以及支持 `--find`/`--kill` 的 `task-submit`；不使用宿主机的 PyPTO 安装。
+宿主机维护命令会显式进入该工具链环境，不依赖可能较旧的系统 `python3`。
+workflow 在独立 Docker 配置中安装 Buildx v0.35.0，使用宿主机的默认 Docker builder，保留共享构建缓存。
+
+首次发布前，在仓库设置中配置：
+
+| 类型 | 名称 | 内容 |
+| ---- | ---- | ---- |
+| Secret | `SWR_USERNAME` | SWR 长期登录指令中的用户名 |
+| Secret | `SWR_PASSWORD` | 该指令中的密码 |
+
+凭据仅提供给发布步骤，通过 `--password-stdin` 登录。每次执行使用独立的临时 Docker 配置目录，
+由 `always()` 步骤删除。不要提交临时登录 token。
+workflow 设置 `PYPTO_DOCKER_PROXY=http://127.0.0.1:7892`，使用 CI runner 上的本地代理，
+无需配置 GitHub Actions 代理 Variable。代理传给 Git 和 Docker build arguments，不写入最终镜像环境。
+Buildx 安装和 GitHub artifact 上传也使用该代理。
+手动调用脚本时，将 `PYPTO_DOCKER_PROXY` 环境变量设置为当前机器可访问的代理。
+首期配置设置了 `proxy_required: true`，缺少该环境变量时预检直接失败。
+`--network=host` 作用于构建步骤；拉取基础镜像仍依赖 Docker daemon 的网络和代理。
+SWR 认证与 manifest 操作直接连接，不使用代理。登录和推送子进程也会清除代理变量；
+如果 Docker daemon 自身配置了代理，其 `NO_PROXY` 必须包含 SWR 主机名。
+
+首次构建前，确认配置中的 CANN 基础镜像可访问。默认 `cann_repository` 为 `quay.io/ascend/cann`；
+若 daemon 无法访问，将准确的 ARM64 镜像同步到允许匿名读取的 SWR 仓库，再修改该字段。
+首期已固定 ARM64 镜像 digest；切换仓库时，应将验证过的镜像仓库 digest 填入 `cann_digest`。
+值为 null 时，每次拉取指定 tag 并解析 digest。
+两种模式都会使用解析后的 digest 构建并记录到产物中；旧缓存不能掩盖拉取失败。
+升级 CANN 时，应一起修改 tag、digest、驱动要求和发布标签。
+
+每次构建前冻结 PyPTO 和 pypto-lib 的提交。PyPTO 的 `ref: main` 使用 workflow checkout 的提交，
+保证 Docker 配方与辅助脚本属于同一次事件快照。PR 使用准确的 head 提交，从 PR 来源仓库
+（包括 fork）克隆，不使用临时合并提交。显式指定的 PyPTO ref 仍使用配置中的来源仓库。
+其他 ref 和 pypto-lib ref 解析为完整提交 SHA。
+runtime 始终跟随 PyPTO 的 gitlink；PTO-ISA 跟随该 runtime 的 `pto_isa.pin`；
+PTOAS 跟随所选 PyPTO 的工具链版本。使用这些 SHA 使源码构建缓存失效，而不是传入可变的 `main`。
+编译并发同时受 `build_jobs` 和资源限制加载器约束。
+CI 选择 simpler 的 `build_package_<validation_platform>` 和 `build_package_sim` 目标：
+`arm-a2a3` 镜像预编译 A2/A3 上板 runtime 和两种 CPU 模拟器，不编译 A5 上板二进制。
+`DIST_RUNTIME_TARGETS` 将该选择保存为 `PYPTO_RUNTIME_BUILD_TARGETS`，供后续 `pypto-build`
+继续使用；空值使用 simpler 的默认目标。该选项只影响 runtime wheel 的构建。
+所选 PyPTO ref 必须提供 `pypto-doctor --strict`；验证会拒绝那些静默忽略严格选项的旧辅助脚本。
+
+`cann92-a2a3-aicpu-class-memaccess` 补丁只增加 CANN 9.2 的 GNU 编译器所需的 onboard AICPU 警告豁免。
+编译前应用补丁；若相同修改已经进入上游则跳过；上下文变化导致无法应用时直接失败。
+成功构建后，`/opt/pypto/dist-state.json` 记录 runtime SHA、差异哈希、补丁哈希及安装的扩展哈希。
+`pypto-doctor --strict` 仅接受该记录对应的补丁；其他修改、缺少编译版本标记或无法验证的绑定都会失败。
+CANN 9.2.0 / 驱动 26.0.rc1 是当前部署的验证配置，不代表一般性的兼容保证。
+
+验证使用全新容器，不挂载源码或缓存卷。一次单卡 `task-submit` 借卡运行严格 doctor 和 Qwen3-14B decode；
+另一次双卡借卡运行 pypto-lib 的 all-reduce 示例。物理卡来自 `TASK_DEVICE`，模型参数使用容器内编号 `0` 或 `0,1`。
+宿主机驱动元数据以只读方式挂载。两个模型都必须退出码为零且输出 `[RUN] PASS`；
+缺少 PASS、超时或测试失败都禁止发布。`task_timeout_seconds` 限制排队加执行的总等待时间，
+`task_max_seconds` 单独限制设备执行时间。总超时必须大于执行上限；首期每个用例允许总计 3600 秒，
+其中设备执行最多 1800 秒。清理步骤约束孤儿任务，
+只删除本次运行的容器和任务，不清理共享构建缓存。
+
+验证通过后，先将测试过的准确 image ID 推送到临时标签
+`arm-a2a3-cann9.2-dist-<run_id>-<attempt>`，核对 manifest 和 config digest 与测试镜像一致后才发布。
+先将现有 `arm-a2a3-cann9.2-dist` 移到 `arm-a2a3-cann9.2-dist-previous`，再更新为新镜像。
+对相同 digest 重试不会覆盖前一个版本。首次发布仅创建最新标签；第二次不同镜像发布才创建前一个标签。
+临时标签按名称删除，绝不删除共用 digest。成功发布后，每个配置的镜像只保留这两个标签。
+
+workflow 不会更新或删除 `a3-dist`、`a3-dist-20260918` 等旧标签。
+等两个新构建均通过上板验证、完成上传，且最新与前一个标签均可用后，再单独清理旧标签。
+未核实内容前，不要把旧镜像改名为 CANN 9.2。
+
+Actions Summary 和保留 14 天的 artifacts 包含提交版本、digest、构建与验证日志，以及发布前的 manifest，
+供失败恢复使用。将最新标签重新指向前一个 digest 即可回滚，无需重建。
+发布跨越多个仓库请求：若中途失败，重试前应检查两个标签及保存的 manifest。
+临时标签删除失败会使 job 失败，可能需要手动删除该次运行的具体标签；不得删除其 digest 或共享层。
+
+镜像内的源码是 detached 快照，`pypto-update.sh` 不会直接拉取更新，受管补丁也会使 runtime 工作树变脏。
+获取新快照时，拉取新镜像并创建新容器或源码卷。已有 named volume 会保留原来的源码。
+希望跟踪分支的开发者，需要显式处理 checkout 和本地补丁，然后再使用更新脚本。
+
+后续添加 `x86-a2a3`、`x86-a5` 或 `arm-a5` 时，新增配置项并指定匹配的原生 runner、CANN 基础镜像、
+驱动和硬件验证路径；环境准备好前保持禁用。各组合独立发布标签；Docker 架构 manifest 无法按宿主机 NPU 选择镜像。
+
 ### 不装 Ascend Docker Runtime
 
 未注册 Ascend runtime 时，启动器默认的 `auto` 模式会选择 `privileged`。

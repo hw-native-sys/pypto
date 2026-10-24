@@ -10,6 +10,7 @@
 """Exercise container maintenance without downloading packages or using an NPU."""
 
 import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -951,10 +952,13 @@ def runtime_wheel_environment(container: dict[str, str], rootful: bool) -> dict[
 
 
 @pytest.mark.parametrize("rootful", [False, True])
+@pytest.mark.parametrize("runtime_targets", [None, "build_package_a2a3;build_package_sim"])
 def test_build_reinstalls_runtime_source_edits(
-    runtime_wheel_environment: dict[str, str], rootful: bool
+    runtime_wheel_environment: dict[str, str], rootful: bool, runtime_targets: str | None
 ) -> None:
     container = runtime_wheel_environment
+    if runtime_targets is not None:
+        container["PYPTO_RUNTIME_BUILD_TARGETS"] = runtime_targets
     home = Path(container["PYPTO_HOME"])
     commands = Path(container["PATH"].split(":")[0])
     executable(commands / "cmake", 'if [ "$1" = -B ]; then mkdir -p build; touch build/CMakeCache.txt; fi')
@@ -977,9 +981,11 @@ def test_build_reinstalls_runtime_source_edits(
     # A standard-library-only wheel backend keeps this an actual uv install,
     # without compiling PyPTO, fetching dependencies, or touching a real runtime.
     (runtime / "backend.py").write_text(
+        "import json\n"
         "from pathlib import Path\n"
         "from zipfile import ZipFile\n"
         "def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):\n"
+        '    Path("received-settings.json").write_text(json.dumps(config_settings))\n'
         '    name = "simpler-0.1.0-py3-none-any.whl"\n'
         '    info = "simpler-0.1.0.dist-info"\n'
         "    files = {\n"
@@ -1010,6 +1016,8 @@ def test_build_reinstalls_runtime_source_edits(
         (runtime / "task_interface.py").write_text(f'REVISION = "{revision}"\n')
         result = run(SCRIPTS / "pypto-build", container)
         assert result.returncode == 0, result.stderr
+        settings = json.loads((runtime / "received-settings.json").read_text()) or {}
+        assert settings.get("build.targets") == runtime_targets
         installed = subprocess.check_output(
             [
                 str(home / "venv/bin/python"),
@@ -1836,6 +1844,29 @@ def test_doctor_warns_when_runtime_hides_driver_version(healthy_doctor: dict[str
     result = run(SCRIPTS / "pypto-doctor", healthy_doctor)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "verify the supported CANN/driver pair on the host" in result.stdout
+
+
+@pytest.mark.parametrize("driver,valid", [("26.0.rc1", True), ("25.6.rc1.b108", False)])
+def test_doctor_cann92_uses_mounted_host_metadata(
+    healthy_doctor: dict[str, str], tmp_path: Path, driver: str, valid: bool
+) -> None:
+    env = healthy_doctor
+    (Path(env["ASCEND_HOME_PATH"]) / "compiler/version.info").write_text("Version=9.2.0\n")
+    host_metadata = tmp_path / "host-version.info"
+    host_metadata.write_text(f"Version={driver}\n")
+    env["PYPTO_DRIVER_VERSION_FILE"] = str(host_metadata)
+    result = run(SCRIPTS / "pypto-doctor", env)
+    assert (result.returncode == 0) == valid, result.stdout + result.stderr
+    assert ("image validation configuration" in result.stdout) == valid
+
+
+def test_doctor_strict_rejects_incomplete_image(healthy_doctor: dict[str, str]) -> None:
+    # The diagnostic's default mode warns about missing developer checkouts.
+    # Publication must fail even if these warnings would normally exit zero.
+    result = run(SCRIPTS / "pypto-doctor", healthy_doctor, "--strict")
+    assert result.returncode != 0
+    assert "no pypto-lib" in result.stdout
+    assert "environment looks good" not in result.stdout
 
 
 @pytest.mark.parametrize("failure", ["missing", "startup", "import", "probe"])

@@ -46,8 +46,9 @@
 # ---------------------------------------------------------------------------
 ARG CANN_REPO=quay.io/ascend/cann
 ARG CANN_TAG=9.0.0-a3-ubuntu22.04-py3.11-devel
+ARG CANN_IMAGE=${CANN_REPO}:${CANN_TAG}
 
-FROM ${CANN_REPO}:${CANN_TAG} AS deps
+FROM ${CANN_IMAGE} AS deps
 ARG CANN_TAG
 
 # Pinned to what the CI fleet carries. Left to resolve `torch>=2.0.0` itself,
@@ -204,6 +205,14 @@ ARG PYPTO_LIB_REF=main
 # Explicit, never `nproc`: this builds on whatever machine CI hands it, and the
 # repo's own rule is that the job count is stated rather than inferred.
 ARG DIST_BUILD_JOBS=2
+ARG DIST_PATCH=
+ARG DIST_RUNTIME_TARGETS=
+# Keep the same runtime selection when developers rebuild inside this image.
+ENV PYPTO_RUNTIME_BUILD_TARGETS=${DIST_RUNTIME_TARGETS}
+
+# The recipe owns its compatibility patch and build record. Keep these separate
+# from helpers refreshed from PYPTO_REF, so setup cannot replace the record.
+COPY docker/ci/dist_state.py docker/patches/*.patch ${PYPTO_HOME}/image-tools/
 
 # Branch refs retain their upstream so the shipped updater can fast-forward.
 # Git detaches tags and commit IDs, preserving reproducible pinned builds.
@@ -214,6 +223,8 @@ RUN set -eu; \
     git -C /workspace/pypto submodule update --init --recursive; \
     git clone "$PYPTO_LIB_REPO" /workspace/pypto-lib; \
     git -C /workspace/pypto-lib checkout "$PYPTO_LIB_REF" --
+
+RUN "$PYPTO_HOME/venv/bin/python" "$PYPTO_HOME/image-tools/dist_state.py" apply --patch "$DIST_PATCH"
 
 # The selected ref owns its setup inputs and helpers. Refresh the environment
 # before building so a context/ref mismatch cannot silently use stale logic.
@@ -247,6 +258,10 @@ RUN set -eu; \
     test "$(git -C "$managed_pto_isa" rev-parse HEAD)" = \
       "$(cat /workspace/pypto/runtime/pto_isa.pin)"; \
     test -z "$(git -C "$managed_pto_isa" status --porcelain)"
+
+# Run with the same activated environment that loads the installed runtime.
+# Record only after compilation and wheel installation have both succeeded.
+RUN /bin/bash -c 'python "$PYPTO_HOME/image-tools/dist_state.py" record --patch "$DIST_PATCH"'
 
 # What this image shipped with. Not for version comparison — the user tracks
 # main with `git pull` — but so a support question can be answered: the tree in
