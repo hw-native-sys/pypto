@@ -116,7 +116,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // is the driver-owned distance to the page's uncached alias, threaded in as a
   // synthetic kernel parameter (see PTOCodegen::GetL2CacheOffsetArgSSA); the
   // attribute alone declares the policy but moves no address. Both are attached
-  // below, alongside the MX layout attribute when it applies.
+  // below, alongside the MX layout attribute when it applies. Non-A2/A3 O4
+  // lowering requires the pending PTOAS #1637 companion change; the public
+  // v0.67 pin accepts the attribute but does not emit the TLOAD L2 hint.
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
@@ -186,9 +188,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   // The offset operand follows the attribute dict, and PTOAS applies it only to
   // a load that also declared l2_bypass. It is empty on an architecture with no
-  // address alias to reach, which leaves the declaration carried by the
-  // attribute alone -- and PTOAS v0.64 lowers a bare attribute to an ordinary
-  // TLOAD, so that declaration costs nothing and does nothing.
+  // address alias to reach (A5): with the pending companion PTOAS lowering,
+  // the attribute alone supplies the TLoadL2Hint template argument so the
+  // declared streaming policy reaches the load instruction itself. The public
+  // v0.67 pin does not yet emit that hint.
   if (policy == ir::CachePolicy::kBypass) {
     const std::string l2_cache_offset = codegen.GetL2CacheOffsetArgSSA();
     if (!l2_cache_offset.empty()) {

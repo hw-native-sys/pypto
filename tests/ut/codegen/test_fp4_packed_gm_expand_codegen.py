@@ -13,7 +13,7 @@ import re
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
@@ -458,6 +458,329 @@ def test_fp4e2m1x2_byte_reshape_round_trip_consumed(planner, byte_dtype, tensor_
     mlir = _emit_incore_mlir(Program, planner)
     assert "pto.tload" in mlir and "pto.tcvt" in mlir and "pto.tstore" in mlir, mlir
     assert "8x128x!pto.f4E2M1x2" in mlir or "rows=8, cols=128" in mlir, mlir
+
+
+def _fp4_gm_metadata(
+    mlir: str, runtime_indices: dict[str, int] | None = None
+) -> tuple[list[tuple], list[tuple]]:
+    """Resolve static index arithmetic in emitted views and their partitions.
+
+    Assertions use the actual descriptor strides and offsets to compute typed
+    pointer byte addresses, so a compensating pair of wrong units cannot pass.
+    """
+    values: dict[str, int] = dict(runtime_indices or {})
+    views: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+    descriptors, accesses = [], []
+    ssa = r"%[\w.$]+"
+
+    def indices(text: str) -> tuple[int, ...]:
+        return tuple(values[name.strip()] for name in text.split(","))
+
+    for line in mlir.splitlines():
+        if "func.func @" in line:
+            values, views = dict(runtime_indices or {}), {}
+        constant = re.search(rf"({ssa}) = arith.constant (-?\d+) : index", line)
+        if constant:
+            values[constant[1]] = int(constant[2])
+        arithmetic = re.search(rf"({ssa}) = arith.(muli|divsi|addi|maxsi) ({ssa}), ({ssa}) : index", line)
+        if arithmetic and arithmetic[3] in values and arithmetic[4] in values:
+            lhs, rhs = values[arithmetic[3]], values[arithmetic[4]]
+            if arithmetic[2] == "muli":
+                values[arithmetic[1]] = lhs * rhs
+            elif arithmetic[2] == "divsi":
+                values[arithmetic[1]] = lhs // rhs
+            elif arithmetic[2] == "addi":
+                values[arithmetic[1]] = lhs + rhs
+            else:
+                # Dynamic partition offsets are clamped to zero in the emitted
+                # descriptor; this does not rescale their carrier-byte units.
+                values[arithmetic[1]] = max(lhs, rhs)
+        if "f4E2M1x2" not in line:
+            continue
+        view = re.search(
+            rf"({ssa}) = pto.make_tensor_view .*?, shape = \[([^\]]+)\], strides = \[([^\]]+)\]",
+            line,
+        )
+        if view:
+            metadata = indices(view[2]), indices(view[3])
+            views[view[1]] = metadata
+            descriptors.append(metadata)
+        partition = re.search(
+            rf"pto.partition_view ({ssa}), offsets = \[([^\]]+)\], sizes = \[([^\]]+)\]", line
+        )
+        if partition:
+            shape, strides = views[partition[1]]
+            offsets, sizes = indices(partition[2]), indices(partition[3])
+            assert len(offsets) == len(strides), line
+            byte_offset = sum(offset * stride for offset, stride in zip(offsets, strides))
+            accesses.append((shape, strides, offsets, sizes, byte_offset))
+    return descriptors, accesses
+
+
+def _assert_fp4_gm_window(mlir, shape, strides, offsets, sizes, byte_offset):
+    descriptors, accesses = _fp4_gm_metadata(mlir)
+    assert descriptors and all(item == (shape, strides) for item in descriptors), mlir
+    assert accesses and all(item == (shape, strides, offsets, sizes, byte_offset) for item in accesses), mlir
+    partition_type = "x".join(str(size) for size in sizes)
+    assert f"!pto.partition_tensor_view<{partition_type}x!pto.f4E2M1x2>" in mlir, mlir
+
+
+def _partition_line(mlir: str, dtype_fragment: str) -> str:
+    lines = [ln for ln in mlir.splitlines() if "pto.partition_view" in ln and dtype_fragment in ln]
+    assert lines, mlir
+    return lines[0]
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_fp4_make_tensor_view_and_partition_use_carrier_units(planner):
+    """Parameter views and tensor.view agree with the unchanged packed ABI."""
+    columns = 256
+
+    @pl.program
+    class Rank2:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[2, columns], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[2, columns], pl.FP4E2M1X2]],
+        ) -> pl.Tensor[[2, columns], pl.FP4E2M1X2]:
+            viewed: pl.Tensor[[2, columns], pl.FP4E2M1X2] = pl.tensor.view(src, [2, columns])
+            return pl.store(pl.load(viewed, [0, 0], [2, columns]), [0, 0], out)
+
+    mlir = _emit_incore_mlir(Rank2, planner)
+    _assert_fp4_gm_window(mlir, (2, 256), (256, 1), (0, 0), (2, 256), 0)
+    assert "pto.tload" in mlir and "pto.tstore" in mlir
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_fp4_rank3_keeps_odd_batch_and_row_coordinates(planner):
+    """The rank-3 load and explicit-shapes store both address byte 616."""
+    columns = 32
+    column_offset = 8
+    window_columns = 16
+
+    @pl.program
+    class Rank3:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[3, 16, columns], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[3, 16, columns], pl.FP4E2M1X2]],
+        ) -> pl.Tensor[[3, 16, columns], pl.FP4E2M1X2]:
+            tile = pl.load(src, [1, 3, column_offset], [1, 8, window_columns])
+            return pl.store(tile, [1, 3, column_offset], out)
+
+    mlir = _emit_incore_mlir(Rank3, planner)
+    _assert_fp4_gm_window(mlir, (3, 16, 32), (512, 32, 1), (1, 3, 8), (1, 8, 16), 616)
+    assert "pto.tload" in mlir and "pto.tstore" in mlir
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_fp4_strided_nd_load_and_standard_store_keep_carrier_addresses(planner):
+    """A padded carrier pitch must remain unchanged in both GM descriptors."""
+    columns = 32
+    row_stride = 80
+    column_offset = 16
+    window_columns = 16
+
+    @pl.program
+    class Strided:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[
+                [16, columns], pl.FP4E2M1X2, pl.TensorView(stride=[row_stride, 1], layout=ir.TensorLayout.ND)
+            ],
+            out: pl.Out[
+                pl.Tensor[
+                    [16, columns],
+                    pl.FP4E2M1X2,
+                    pl.TensorView(stride=[row_stride, 1], layout=ir.TensorLayout.ND),
+                ]
+            ],
+        ) -> pl.Tensor[
+            [16, columns], pl.FP4E2M1X2, pl.TensorView(stride=[row_stride, 1], layout=ir.TensorLayout.ND)
+        ]:
+            return pl.store(pl.load(src, [3, column_offset], [8, window_columns]), [3, column_offset], out)
+
+    mlir = _emit_incore_mlir(Strided, planner)
+    _assert_fp4_gm_window(mlir, (16, 32), (80, 1), (3, 16), (8, 16), 256)
+    assert "pto.tload" in mlir and "pto.tstore" in mlir
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_fp4_dense_512_window_uses_256_byte_row_pitch(planner):
+    """The failing dense KN geometry must yield 256-byte rows, not 512."""
+    columns = 256
+    column_offset = 64
+    window_columns = 128
+
+    @pl.program
+    class Dense512:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[512, columns], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[128, 256], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[128, 256], pl.FP8E4M3FN]:
+            tile = pl.load(src, [128, column_offset], [128, window_columns])
+            return pl.store(pl.cast(tile, pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(Dense512, planner)
+    _assert_fp4_gm_window(mlir, (512, 256), (256, 1), (128, 64), (128, 128), 32832)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_packed_fp4_odd_carrier_columns_and_stride_are_preserved(planner):
+    """Odd packed metadata already counts bytes and needs no parity guard."""
+
+    @pl.program
+    class OddCarriers:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[16, 65], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[8, 34], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[8, 34], pl.FP8E4M3FN]:
+            return pl.store(pl.cast(pl.load(src, [3, 17], [8, 17]), pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(OddCarriers, planner)
+    _assert_fp4_gm_window(mlir, (16, 65), (65, 1), (3, 17), (8, 17), 212)
+
+
+def test_fp4_to_fp8_lowers_to_single_native_cast():
+    """Packed FP4 lowers to one native conversion with no compiler LUT."""
+
+    @pl.program
+    class BitopsCast:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            return pl.store(pl.cast(pl.load(src, [0, 0], [16, 32]), pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(BitopsCast)
+    assert "pto.tgather" not in mlir and "pto.tci" not in mlir, mlir
+    data_tcvt = [ln for ln in mlir.splitlines() if "pto.tcvt" in ln]
+    assert len(data_tcvt) == 1, mlir
+    assert "dtype=!pto.f4E2M1x2" in data_tcvt[0] and "dtype=f8E4M3FN" in data_tcvt[0]
+
+
+def test_fp4_partition_offsets_use_carrier_coordinates():
+    """Packed windows use carrier coordinates; FP8 coordinates stay unchanged."""
+
+    @pl.program
+    class PackedWindow:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[16, 64], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[8, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[8, 64], pl.FP8E4M3FN]:
+            return pl.store(pl.cast(pl.load(src, [4, 16], [8, 32]), pl.FP8E4M3FN), [0, 0], out)
+
+    mlir = _emit_incore_mlir(PackedWindow)
+    line = _partition_line(mlir, "f4E2M1x2")
+    # Packed row/column coordinates and window extents already count carriers.
+    assert "offsets = [%c4_index, %c16_index]" in line, line
+    assert "sizes = [%c8_index, %c32_index]" in line, line
+    _assert_fp4_gm_window(mlir, (16, 64), (64, 1), (4, 16), (8, 32), 272)
+
+    @pl.program
+    class Fp8Control:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+            out: pl.Out[pl.Tensor[[8, 32], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[8, 32], pl.FP8E4M3FN]:
+            return pl.store(pl.load(src, [4, 32], [8, 32]), [0, 0], out)
+
+    mlir_ctl = _emit_incore_mlir(Fp8Control)
+    line_ctl = _partition_line(mlir_ctl, "f8E4M3FN")
+    assert "offsets = [%c4_index, %c32_index]" in line_ctl, line_ctl
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("row_stride", [64, 65, 160, None])
+@pytest.mark.parametrize("offset_kind", ["row", "column", "named_row", "chained_row", "odd_row"])
+def test_packed_dynamic_offsets_and_strides_are_already_bytes(planner, row_stride, offset_kind):
+    """Dynamic carrier coordinates need no old nibble-parity proof or division."""
+    span = ir.Span.unknown()
+
+    def index(n):
+        return ir.ConstInt(n, DataType.INDEX, span)
+
+    runtime = ir.Var("runtime", ir.ScalarType(DataType.INDEX), span)
+    named = ir.Var("named", runtime.type, span)
+    chained = ir.Var("chained", runtime.type, span)
+    statements: list[ir.Stmt] = [
+        ir.AssignStmt(
+            named, ir.Mul(runtime, index(3 if offset_kind == "odd_row" else 64), DataType.INDEX, span), span
+        ),
+        ir.AssignStmt(chained, ir.Add(named, index(0), DataType.INDEX, span), span),
+    ]
+    row = {"row": runtime, "named_row": named, "chained_row": chained, "odd_row": named}.get(
+        offset_kind, index(3)
+    )
+    column = runtime if offset_kind == "column" else index(17)
+    tensor_type = ir.TensorType(
+        [256, 64],
+        DataType.FP4E2M1X2,
+        tensor_view=ir.TensorView(
+            stride=[runtime if row_stride is None else row_stride, 1], layout=ir.TensorLayout.ND
+        ),
+    )
+    gm = ir.Var("gm", tensor_type, span)
+    tile_type = ir.TileType(
+        [8, 32],
+        DataType.FP4E2M1X2,
+        ir.MemRef("tile_base", 0, 256),
+        ir.TileView(valid_shape=[8, 17]),
+        ir.MemorySpace.Vec,
+    )
+    tile = ir.Var("tile", tile_type, span)
+    shape = ir.MakeTuple([index(8), index(32)], span)
+    valid = ir.MakeTuple([index(8), index(17)], span)
+    load = ir.Call(
+        ir.get_op("tile.load"), [gm, ir.MakeTuple([row, column], span), shape, valid], {}, tile_type, span
+    )
+    statements += [ir.AssignStmt(tile, load, span), ir.ReturnStmt([], span)]
+    function = ir.Function(
+        "packed_dynamic", [gm, runtime], [], ir.SeqStmts(statements, span), span, ir.FunctionType.AIV
+    )
+    set_backend_type(BackendType.Ascend950)
+    with passes.PassContext([], memory_planner=planner):
+        mlir = codegen.PTOCodegen().generate(
+            ir.Program([function], "packed_dynamic", span),
+            emit_tile_addr=planner == passes.MemoryPlanner.PYPTO,
+        )
+    # Scalar arguments use ABI names and aliases use expression SSA names.
+    # Evaluate actual emitted descriptors instead of guessing those names.
+    runtime_value = 3
+    descriptors, accesses = _fp4_gm_metadata(mlir, {"%arg1": runtime_value})
+    pitch = runtime_value if row_stride is None else row_stride
+    expected_row = {
+        "row": runtime_value,
+        "column": 3,
+        "named_row": runtime_value * 64,
+        "chained_row": runtime_value * 64,
+        "odd_row": runtime_value * 3,
+    }[offset_kind]
+    expected_column = runtime_value if offset_kind == "column" else 17
+    expected_view = ((256, 64), (pitch, 1))
+    expected_access = (
+        *expected_view,
+        (expected_row, expected_column),
+        (8, 17),  # DMA describes the valid carrier window, not the UB allocation.
+        expected_row * pitch + expected_column,
+    )
+    assert descriptors and all(view == expected_view for view in descriptors), mlir
+    assert accesses and all(access == expected_access for access in accesses), mlir
+    assert "arith.div" not in mlir and "arith.rem" not in mlir, mlir
+    assert "dtype=!pto.f4E2M1x2, rows=8, cols=32" in mlir, mlir
 
 
 if __name__ == "__main__":

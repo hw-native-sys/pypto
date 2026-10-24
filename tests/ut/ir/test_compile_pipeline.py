@@ -247,5 +247,46 @@ def test_compile_platform_deprecation_does_not_leak_into_new_api(tmp_path, legac
     assert compiled.platform == "a2a3"
 
 
+@pytest.mark.parametrize("mode", ["plain", "dump", "profiling", "dump_and_profiling"])
+@pytest.mark.parametrize("nz,l0", [(False, False), (True, False), (False, True), (True, True)])
+def test_a5_options_survive_compile_dump_and_profile_contexts(tmp_path, mode, nz, l0):
+    seen = []
+
+    def observe(_pass, _program):
+        ctx = passes.PassContext.current()
+        assert ctx is not None
+        seen.append((ctx.get_enable_fp4_nz_row_plus_one(), ctx.get_enable_mx_l0_ping_pong()))
+
+    instrument = passes.CallbackInstrument(before_pass=observe, name="ObserveA5Options")
+    profiling = CompileProfiler() if "profiling" in mode else nullcontext()
+    with (
+        passes.PassContext([instrument], enable_fp4_nz_row_plus_one=nz, enable_mx_l0_ping_pong=l0),
+        profiling,
+    ):
+        result = _run_pass_pipeline(
+            _scalar_program(),
+            operation="lower",
+            dump_passes="dump" in mode,
+            passes_dump_dir=str(tmp_path / "passes"),
+        )
+    assert (result.enable_fp4_nz_row_plus_one, result.enable_mx_l0_ping_pong) == (nz, l0)
+    assert seen and all(value == (nz, l0) for value in seen)
+
+
+def test_compile_records_explicit_a5_options_without_claiming_eligibility(tmp_path):
+    # A scalar program has no eligible NZ/MX operation. The file records
+    # requested options and never rewrites unsupported work into a special shape.
+    ir.compile(
+        _scalar_program(),
+        output_dir=str(tmp_path),
+        dump_passes=False,
+        skip_ptoas=True,
+        enable_fp4_nz_row_plus_one=True,
+        enable_mx_l0_ping_pong=True,
+    )
+    options = json.loads((tmp_path / "compiler_options.json").read_text())
+    assert options == {"enable_fp4_nz_row_plus_one": True, "enable_mx_l0_ping_pong": True}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

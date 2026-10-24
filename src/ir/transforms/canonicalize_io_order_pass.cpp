@@ -131,6 +131,13 @@ struct IOCategoryOps {
   /// disturb compute orderings the dependency graph already constrains.
   [[nodiscard]] bool IsL1ToL0ExtractCall(const Call& call) const {
     if (call.op_ != tile_extract) return false;
+    // MX L0 ping-pong uses function-shared pinned slots. Pipeline clones must
+    // consume each stage's slots before the next stage overwrites them; SSA
+    // edges alone do not express those physical WAR/WAW dependencies here,
+    // before InitMemRef. Keep these extracts in compute-stage order while the
+    // unchanged Mat loads still cluster for L1 prefetch. The call attribute is
+    // preserved by pipeline cloning and IR serialization.
+    if (call.GetAttr<bool>("mx_l0_ping_pong", false)) return false;
     if (call.args_.empty()) return false;
     auto src_tile = std::dynamic_pointer_cast<const TileType>(call.args_[0]->GetType());
     if (!src_tile) return false;

@@ -23,6 +23,20 @@
 
 **Requires / Produces / Invalidates**：无（空 `PassProperties`）。
 
+## A5 原生 FP4 转换
+
+A5 将打包 `FP4E2M1X2` 直接转换到精确 `FP8E4M3FN`，两种内存 planner
+均使用此原生边。仅数值 cast 边界将 carrier 列和有效列按 2:1 扩展；
+源 shape、stride 和 offset 保持 carrier 字节单位。E1M2 没有原生转换边。
+公开 `pl.cast` 保持 ND 结果。发出的 `pto.tcvt` 使用 ISA
+字节寄存器 LUT，不分配编译器 LUT、索引或 scratch。其他转换对保留通用图、
+舍入、饱和及 A2/A3 scratch 规则。
+
+[ExpandMixedKernel](25-expand_mixed_kernel.md) 可在分配前将唯一且兼容的 NZ move
+合入此转换。存储或额外消费者保留原生 ND cast。此直连转换依赖
+[FP4](../fp4.md#cast-策略ascend950) 所述配套 PTOAS 与 pto-isa 支持；
+单独使用公开 PTOAS v0.67 pin 无法支持。
+
 ## 目标类型饱和模式
 
 `pl.cast`、`pl.tensor.cast` 与 `pl.tile.cast` 接受仅关键字参数 `saturation_mode`，
@@ -127,19 +141,19 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 
 | 源类型 | 原生（1 条指令） | 展开链（n 条指令） |
 | ------ | ---------------- | ------------------ |
-| `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
-| `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
-| `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
-| `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
-| `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
-| `int16` | `fp16`, `fp32`, `int32`, `uint32`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int8`(2), `uint16`(2), `fp4`(3) |
-| `int32` | `fp32`, `int16`, `int64`, `uint16`, `uint8` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `fp4`(3), `int8`(3) |
-| `int64` | `fp32`, `int32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `uint16`(2), `uint8`(2), `fp4`(3), `int8`(3) |
-| `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+| `bf16` | `fp16`, `fp32`, `fp4e2m1x2`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
+| `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4e2m1x2`(3) |
+| `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4e2m1x2`(2), `int8`(2), `uint16`(2), `uint8`(2) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3` | `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4e2m1x2`(3), `int8`(3), `uint16`(3), `uint8`(3) |
+| `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4e2m1x2`(3), `int8`(3), `uint16`(3), `uint8`(3) |
+| `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4e2m1x2`(3), `int8`(3), `uint16`(3), `uint8`(3) |
+| `int16` | `fp16`, `fp32`, `int32`, `uint32`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int8`(2), `uint16`(2), `fp4e2m1x2`(3) |
+| `int32` | `fp32`, `int16`, `int64`, `uint16`, `uint8` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `fp4e2m1x2`(3), `int8`(3) |
+| `int64` | `fp32`, `int32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `uint16`(2), `uint8`(2), `fp4e2m1x2`(3), `int8`(3) |
+| `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4e2m1x2`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
-| `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+| `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4e2m1x2`(4) |
 
 ### Ascend910 (a2a3)
 

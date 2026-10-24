@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -49,33 +50,35 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 3) << "The operator " << op_name
                           << " requires 3 arguments (src, indices, tmp), but got " << args.size();
 
-  // First arg: src tile (f16, f32, i16, or i32)
+  // First arg: src tile (f16, f32, i16, i32, or u16 for the FP4->FP8 LUT)
   auto src_type = As<TileType>(args[0]->GetType());
   CHECK(src_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                   << args[0]->GetType()->TypeName();
   CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32 ||
-        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires src dtype to be FP16, FP32, INT16, or INT32, but got "
+        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32 ||
+        src_type->dtype_ == DataType::UINT16)
+      << "The operator " << op_name
+      << " requires src dtype to be FP16, FP32, INT16, INT32, or UINT16, but got "
       << src_type->dtype_.ToString();
 
-  // Second arg: indices tile. i32 is valid with any src; i16 is valid only with a
-  // 16-bit src (FP16/INT16). The A5 (Ascend950) tgather b16 form pairs a 2-byte
-  // src with 2-byte indices, whereas a 32-bit src uses the b32 form that reads
-  // each index as a u32 — so an INT16 index with a 32-bit src is unsafe on every
-  // target, not merely arch-gated. That universal constraint is checked here in
-  // the backend-agnostic deducer; A2/A3's i32-only rule is still enforced later
-  // by the PTOAS verifier (PTO IR manual, tgather index-form checks — A2/A3 vs
-  // A5).
+  // Second arg: indices tile. i32/u32 is valid with any src; i16/u16 is valid
+  // only with a 16-bit src (FP16/INT16/UINT16). The A5 (Ascend950) tgather b16
+  // form pairs a 2-byte src with 2-byte indices, whereas a 32-bit src uses the
+  // b32 form that reads each index as a u32 — so a 16-bit index with a 32-bit
+  // src is unsafe on every target, not merely arch-gated. That universal
+  // constraint is checked here in the backend-agnostic deducer; A2/A3's
+  // i32-only rule is still enforced later by the PTOAS verifier.
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
-  const bool idx_is_i16 = idx_type->dtype_ == DataType::INT16;
-  const bool src_is_16bit = src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::INT16;
+  const bool idx_is_i16 = idx_type->dtype_ == DataType::INT16 || idx_type->dtype_ == DataType::UINT16;
+  const bool src_is_16bit = src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::INT16 ||
+                            src_type->dtype_ == DataType::UINT16;
   CHECK(idx_type->dtype_ == DataType::INT32 || (idx_is_i16 && src_is_16bit))
       << "The operator " << op_name
-      << " requires indices dtype INT32 (any src), or INT16 with a 16-bit src "
-         "(FP16/INT16); INT16 indices with a 32-bit src are unsafe (tgather b32 "
-         "reads them as u32). Got indices "
+      << " requires indices dtype INT32 (any src), or INT16/UINT16 with a 16-bit src "
+         "(FP16/INT16/UINT16); 16-bit indices with a 32-bit src are unsafe (tgather "
+         "b32 reads them as u32). Got indices "
       << idx_type->dtype_.ToString() << " with src " << src_type->dtype_.ToString();
 
   // Third arg: tmp workspace tile. A5 (Ascend950) does not read tmp in the
@@ -90,7 +93,8 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
 
   // Output: shape from indices tile, dtype from src tile, propagate tile_view
   TileView tile_view;
-  tile_view.valid_shape = idx_type->shape_;
+  // A gather produces one lane per valid index, including partial tiles.
+  tile_view.valid_shape = tile_view_semantics::GetEffectiveTileView(*idx_type).valid_shape;
   InheritTileViewLayout(tile_view, src_type);
   return std::make_shared<TileType>(idx_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }

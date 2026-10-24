@@ -74,14 +74,25 @@ non-negativity. It understands:
 - scalar SSA definitions;
 - constants, multiplication, addition, and subtraction for divisibility;
 - positive power-of-two floor division, including forms such as `k0 // 32`;
-- loop variables with constant start and step;
+- loop variables with a constant step and a provable start expression; a
+  positive step preserves a proven non-negative start, including a block index;
+- remainder by a positive constant when the dividend is provably non-negative;
 - the non-negative results of `tile.get_block_idx` and `tile.get_block_num`;
+- unsigned scalar values of at most 32 bits, including descriptor reads, and their
+  value-preserving casts to `INDEX`; `UINT64` to `INDEX` and narrowing signed
+  casts remain unproven, and alignment is still checked independently;
 - scalar arguments propagated through every Call and Submit site.
 
 Every caller must prove a callee parameter fact. Missing or malformed call
 mappings, recursion, and expressions that exceed the bounded 256-step proof
 budget are rejected conservatively. The bound keeps the pass O(N) and proof
 failure can never turn into assumed alignment.
+
+These facts support persistent work loops such as
+`work = block_idx, block_idx + 32, ...`: expert/chunk/N coordinates derived with
+positive floor division and remainder remain provably non-negative. Remainder
+does not itself establish divisibility; the final scale offset still needs its
+own alignment proof. Unknown or possibly negative starts are not assumed safe.
 
 The quotient is emitted as `FloorDiv(offset, divisor)`, preserving the original
 fixed-width expression's evaluation before division.

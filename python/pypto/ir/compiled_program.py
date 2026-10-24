@@ -125,6 +125,22 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
             f"Packed FP4 parameter {info.name!r} requires a positive runtime x2 carrier last dimension; "
             f"got shape {tuple(shape)}"
         )
+    # Blocked layouts (NZ / MX_*) address a rank-5 shape the caller does not
+    # allocate directly; comparing those needs the caller's logical shape
+    # re-blocked first (see ``_arg_shape_as_declared``), so leave them to the
+    # layout-aware paths rather than guess a rule here.
+    if info.shape is None or info.layout not in (None, "ND"):
+        return
+    mismatch = len(shape) != len(info.shape) or any(
+        expected_dim >= 0 and expected_dim != actual_dim
+        for expected_dim, actual_dim in zip(info.shape, shape, strict=False)
+    )
+    if mismatch:
+        raise TypeError(
+            f"Packed FP4 parameter {info.name!r} expects runtime x2 carrier shape {tuple(info.shape)} "
+            f"(each element is a byte carrier containing two FP4 values); got tensor shape {tuple(shape)}. "
+            f"Shapes at this boundary must keep the declared carrier dimensions."
+        )
 
 
 def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:

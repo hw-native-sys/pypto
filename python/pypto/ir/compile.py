@@ -9,6 +9,7 @@
 
 """High-level API functions for PyPTO IR compilation."""
 
+import json
 import logging
 import os
 import tempfile
@@ -124,6 +125,8 @@ class _PassPipelineResult(NamedTuple):
     memory_planner: _passes.MemoryPlanner
     backend_type: BackendType
     runtime: _passes.RuntimeKind
+    enable_fp4_nz_row_plus_one: bool
+    enable_mx_l0_ping_pong: bool
 
 
 class _CompilationResult(NamedTuple):
@@ -196,6 +199,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_fp4_nz_row_plus_one: bool | None = None,
+    enable_mx_l0_ping_pong: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
@@ -237,6 +242,16 @@ def _run_pass_pipeline(  # noqa: PLR0913
         )
         rt = runtime if runtime is not None else outer.get_runtime()
         buffer_ir = outer.get_enable_buffer_ir()
+        nz_pad = (
+            enable_fp4_nz_row_plus_one
+            if enable_fp4_nz_row_plus_one is not None
+            else outer.get_enable_fp4_nz_row_plus_one()
+        )
+        mx_ping_pong = (
+            enable_mx_l0_ping_pong
+            if enable_mx_l0_ping_pong is not None
+            else outer.get_enable_mx_l0_ping_pong()
+        )
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -248,7 +263,20 @@ def _run_pass_pipeline(  # noqa: PLR0913
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = True
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir)
+        nz_pad = enable_fp4_nz_row_plus_one if enable_fp4_nz_row_plus_one is not None else False
+        mx_ping_pong = enable_mx_l0_ping_pong if enable_mx_l0_ping_pong is not None else False
+    ctx = _passes.PassContext(
+        instruments,
+        vlevel,
+        dphase,
+        disabled,
+        mplan,
+        dbc_flag,
+        rt,
+        buffer_ir,
+        nz_pad,
+        mx_ping_pong,
+    )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -274,7 +302,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
                 output_dir=passes_dump_dir,
             )
 
-    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt)
+    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt, nz_pad, mx_ping_pong)
 
 
 def make_default_output_dir(name: str) -> str:
@@ -316,6 +344,8 @@ def compile(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_fp4_nz_row_plus_one: bool | None = None,
+    enable_mx_l0_ping_pong: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
@@ -391,6 +421,12 @@ def compile(  # noqa: PLR0913
             ``False``). Automatic dbC is disabled for PYPTO and DSA_RP;
             PTOAS retains its existing selection independently of this flag.
             Explicit buffering is preserved.
+        enable_fp4_nz_row_plus_one: Opt in to padded NZ for full 128x256
+            A5 FP4-to-FP8 producers consumed only by TPUSH. Unsupported
+            geometry and consumers keep ordinary NZ. None inherits the
+            outer PassContext setting, otherwise defaults to False.
+        enable_mx_l0_ping_pong: Independently opt in to supported A5 MX
+            K128 L0 ping/pong. None inherits PassContext, else False.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Deprecated; use backend_type and execution_mode.
@@ -455,6 +491,8 @@ def compile(  # noqa: PLR0913
         disabled_diagnostics=disabled_diagnostics,
         memory_planner=memory_planner,
         enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        enable_fp4_nz_row_plus_one=enable_fp4_nz_row_plus_one,
+        enable_mx_l0_ping_pong=enable_mx_l0_ping_pong,
         profiling=profiling,
         platform=platform,
         execution_mode=execution_mode,
@@ -567,6 +605,8 @@ def _compile_to_files(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_fp4_nz_row_plus_one: bool | None = None,
+    enable_mx_l0_ping_pong: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
@@ -632,6 +672,8 @@ def _compile_to_files(  # noqa: PLR0913
             disabled_diagnostics=disabled_diagnostics,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            enable_fp4_nz_row_plus_one=enable_fp4_nz_row_plus_one,
+            enable_mx_l0_ping_pong=enable_mx_l0_ping_pong,
             runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),
@@ -667,6 +709,18 @@ def _compile_to_files(  # noqa: PLR0913
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)
             raise
+        # Record requested compiler modes independently from their per-op
+        # eligibility. This metadata never claims a fallback was optimized.
+        files["compiler_options.json"] = (
+            json.dumps(
+                {
+                    "enable_fp4_nz_row_plus_one": pipeline.enable_fp4_nz_row_plus_one,
+                    "enable_mx_l0_ping_pong": pipeline.enable_mx_l0_ping_pong,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         _write_files(files, output_dir)
         _ensure_orchestration_headers(output_dir)
     finally:

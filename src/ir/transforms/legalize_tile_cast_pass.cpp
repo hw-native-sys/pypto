@@ -56,6 +56,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -275,11 +276,10 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    MaybeWarnFp4FamilyToFp8(src, dst, op->span_, diags_);
-
     if (IsNativeCast(adj_, src, dst)) {
       return IRMutator::VisitStmt_(op);
     }
+    MaybeWarnFp4FamilyToFp8(src, dst, op->span_, diags_);
 
     std::vector<DataType> chain = FindCastChain(adj_, src, dst);
     CHECK_SPAN(!chain.empty(), op->span_)
@@ -326,7 +326,9 @@ class LegalizeTileCastMutator : public IRMutator {
       final_args.push_back(VisitExpr(call->args_[i]));
     }
     auto final_assign = MutableCopy(op);
-    final_assign->value_ = OpRegistry::GetInstance().Create("tile.cast", final_args, final_kwargs, op->span_);
+    auto final_call = OpRegistry::GetInstance().Create("tile.cast", final_args, final_kwargs, op->span_);
+    // Legalizing a non-native hop must preserve caller metadata on its final cast.
+    final_assign->value_ = transform_utils::PreserveCallAttrs(call, final_call);
     stmts.push_back(std::move(final_assign));
 
     if (stmts.size() == 1) return stmts.front();
