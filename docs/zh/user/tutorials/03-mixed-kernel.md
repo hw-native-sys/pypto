@@ -4,14 +4,15 @@
 > 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
 > `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
 
-cube 与 vector 在同一个作用域里同时工作。
+cube 与 vector 在同一个作用域内工作，传输由编译器管理。
 
 > **前置**：[分块 matmul](02-matmul.md)。
 > **配套文件**：`examples/advanced/03_mixed_kernel.py`。
 
 ## 你要做的东西
 
-`a @ b + bias` —— 一个 cube 运算接一个 vector 运算 —— 写成让两个单元重叠而非轮流的形式。
+`a @ b + bias` —— 一个 cube 运算接一个 vector 运算 —— 写成一次混合派发，
+而不是两个独立作用域。本示例演示数据流，并不证明性能提升。
 
 ## 为什么值得
 
@@ -44,7 +45,7 @@ def mixed(
 ):
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
@@ -76,25 +77,33 @@ assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 
 | 量 | 值 |
 | -- | -- |
-| 跨越边界的 tile | `[128, 128]` FP32 = 64 KB |
+| 跨越边界的 tile | `[128, 128]` FP32 = 64 KiB |
 | 默认环深 | 2 槽 |
-| 环的大小 | 2 × 64 KB = **128 KB** |
-| vector 预算 | **184 KB** |
+| 本示例显式选择的环深 | 1 槽 = **64 KiB** |
+| 每个 vector 通道的 bias 与输出 | 各 32 KiB，共 **64 KiB** |
+| 单槽时的总占用 | **128 KiB** |
+| vector 安全预算 | **184 KiB** |
 
 环是一个整 tile 的队列，所以它的大小随跨越的 tile 而变，与工作量无关。默认的 2 是仍能双缓冲的最浅深度：cube 填一个槽的同时，vector 抽干另一个。
 
-`pl.cross_core_slot(slot_num=N)` 用来重新调整它。更深的环换来更多重叠 —— 生产者在阻塞前能跑得更靠前 —— 所以当两个单元负载不均衡时可以调高它。但预算很紧：在这个 kernel 上 `slot_num=4` 就已经分配不下了。
+`pl.cross_core_slot(slot_num=N)` 用来重新调整它。在 Ascend910 上，load/TPOP
+安全约束要求加载的 bias 与加法输出使用独立缓冲区。因此默认双槽环需要
+128 + 32 + 32 = **192 KiB**，超过安全预算。本示例显式选择单槽；它演示混合
+数据流，而非生产者/消费者的双缓冲重叠。tile 更小时，剩余空间可能允许更深的环，
+让生产者运行得更靠前，但这并不保证加速。
+
+将本示例改回双槽，会在分配阶段失败：
 
 ```python
 with pl.at(
     level=pl.Level.CORE_GROUP,
-    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=4)],
+    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
     name_hint="mixed",
 ):
 ```
 
 ```text
-Vec buffer usage (294912 bytes) exceeds platform limit (188416 bytes). The first 262144
+Vec buffer usage (196608 bytes) exceeds platform limit (188416 bytes). The first 131072
 bytes of that space are reserved by system.reserve_buffer, so tiles are allocated above
 them — this is the cross-core pipe ring. Lower its depth with
 optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the
