@@ -199,7 +199,7 @@ still needs. The check is per slot, not per allocation: two tiles on *different*
 only tiles landing on one slot can corrupt each other. A runtime slot index (`l0c[i % 2]`)
 has no static slot to attribute a tile to, so the check is skipped there — the rotation is
 the author's to get right — while isolation from every other allocation still holds. This pass owns the check because it is where lifetimes are computed
-(`ComputeLifetimes`); the rule matches the packer's own `var_overlap`, so *touching* is
+(`AnalyzeAllocationLifetimes`); the rule matches the packer's own `var_overlap`, so *touching* is
 allowed (one tile's last read may be the statement that produces the next member).
 Tiles that land on the allocation by inheritance rather than by binding — views, in-place
 results, bare SSA aliases — are excluded: they are the same data as their source, so
@@ -319,8 +319,20 @@ Pass MemoryReuse();
 
 **Implementation**: `src/ir/transforms/memory_reuse_pass.cpp`
 
+**Internal modules** (`src/ir/transforms/memory_reuse/`):
+
+- `semantic_aliases.cpp` owns must-alias retargeting and its planner-specific orchestration.
+- `lifetime_analysis.cpp` implements the public allocation-lifetime analysis overloads.
+- `allocation_constraints.cpp` collects hardware/no-alias constraints and validates declared allocations for both planners.
+- `packing.cpp` selects placements and applies physical MemRef sharing.
+- `yield_fixup.cpp` repairs control-flow storage boundaries, normalizes identity aliases and removes obsolete allocations.
+- `storage.cpp` / `storage.h` share physical-window predicates, storage moves and small visitor helpers.
+- `internal.h` declares private stage interfaces; the entry file retains pass registration and the MemoryReuse phase order.
+
+**Key algorithms**:
+
 - `LifetimeAnalyzer` walks the full IR tree to compute variable lifetimes (including nested control flow)
-- `ComputeLifetimes` builds MemRef sharing groups and lifetime intervals
+- `AnalyzeAllocationLifetimes` builds MemRef sharing groups and lifetime intervals
 - `IdentifyReuseOpportunities` finds reuse candidates, retries with aligned subrange placement on a known-capacity overflow, and records each member's placement offset
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
 - `TopDownRetargeter::CoalesceAccumulatorIfPhis` coalesces peeled loop-carried accumulator `if`-phis by retargeting the dead-branch seed onto the in-place accumulator buffer, so `YieldFixupMutator` never emits an illegal `acc→acc tile.move` (see Algorithm step 5)
