@@ -13,6 +13,8 @@ import ast
 import math
 import textwrap
 import warnings
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -1324,6 +1326,37 @@ class TestVariableRebinding:
         assert "x =" in out
         assert "x_v1" not in out
 
+    def test_chained_assignment_keeps_rhs_snapshot(self):
+        """Chains evaluate once and do not read stale inlined or renamed targets."""
+        src = """
+            def f(a):
+                total = 32
+                total = half = total = observe(total // 2)
+                saved = total + half
+                total = total + 1
+                total = half = observe(a.shape[1])
+                width = a.shape[1]
+                with scope():
+                    width = other = observe(width // 2)
+                return saved, total, half, width, other
+        """
+        transformed = self._transform(src, tensor_meta={"a": TensorMeta((1, 128), DataType.FP32)})
+        calls = []
+
+        def observe(value):
+            calls.append(value)
+            return value
+
+        namespace: dict = {"observe": observe, "scope": nullcontext}
+        exec(transformed, namespace)
+        assert namespace["f"](None) == (32, 128, 128, 64, 64)
+        assert calls == [16, 128, 64]
+        assert all(
+            len(node.targets) == 1
+            for node in ast.walk(ast.parse(transformed))
+            if isinstance(node, ast.Assign)
+        )
+
     def test_rebind_generates_fresh_name(self):
         src = """
             def f(a):
@@ -1402,6 +1435,60 @@ class TestVariableRebinding:
         # x is a param, so re-assignment generates x_v1; reads of x after rebinding → x_v1
         assert "x_v1 = some_call(x)" in out
         assert "y = x_v1" in out
+
+    def test_rebound_tensor_shape_reads_current_value(self):
+        """Dimension arithmetic after a parameter rebind uses its new tensor."""
+        src = """
+            def f(src, other):
+                before = src.shape[1]
+                saved = src
+                with scope():
+                    src = identity(src)
+                    src = saved
+                    restored = src.shape
+                with scope():
+                    src = other
+                    nested = src.shape[1]
+                src = other
+                width = src.shape[1]
+                half = width // 2
+                rows, cols, tail = src.shape
+                whole = src.shape
+                dtype = src.dtype
+                src: object = src
+                annotated = src.shape
+                total = src.shape[0] * width
+                return before, nested, width, half, total, rows, cols, tail, whole, dtype, annotated, restored
+        """
+        transformed = self._transform(
+            src,
+            tensor_meta={
+                "src": TensorMeta((1, 128), DataType.FP32),
+                "other": TensorMeta((4, 64, 2), DataType.FP16),
+            },
+        )
+        namespace = {
+            "pl": SimpleNamespace(
+                tensor=SimpleNamespace(dim=lambda tensor, axis: tensor[axis]), FP16=DataType.FP16
+            ),
+            "scope": nullcontext,
+            "identity": lambda tensor: tensor,
+        }
+        exec(transformed, namespace)
+        assert namespace["f"]((1, 128), (4, 64, 2)) == (
+            128,
+            64,
+            64,
+            32,
+            256,
+            4,
+            64,
+            2,
+            (4, 64, 2),
+            DataType.FP16,
+            (4, 64, 2),
+            (1, 128),
+        )
 
     def test_alias_skips_collision(self):
         """Generated alias skips names already defined by the user."""

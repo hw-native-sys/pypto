@@ -64,6 +64,25 @@ or editing compiler/source files during compilation is not supported by this
 constant-tracking mechanism. Persistent reuse additionally requires the full
 [artifact identity and cache policy](../10-jit-cache.md).
 
+### Dynamic dimension metadata
+
+Before parsing the specialized program, the JIT infers local `TensorMeta` values
+to type arguments passed to bare-annotated helpers. Scalar bindings use `int`
+constants, existing-axis `DynDim` references, immutable expression tuples, or
+`None` (unknown). For `width = n * 8`, the snapshot is `(ast.Mult, (n_dim, 8))`.
+Assignment aliases retain that tuple; subsequent arithmetic creates a different
+snapshot. Rebinding an operand's source name does not change an earlier snapshot.
+
+Reshape inference gives scalar expressions result-specific `DynDim` symbols
+when recording `TensorMeta.shape`; scalar snapshots stay outside tensor types. Repeated
+uses of the same snapshot within one result shape share a symbol; separate
+results get independent bindings. The callee reads the dimension from its actual
+tensor argument's descriptor. The original arithmetic and reshape validation
+remain in the program; placeholder bounds do not replace runtime extents.
+
+`synthesized` records an automatically generated placeholder symbol and retains
+its existing annotation-overlay and helper-return behavior.
+
 ### Compile options and diagnostic requests
 
 JIT calls and `kernel.compile()` resolve compile options before looking up an

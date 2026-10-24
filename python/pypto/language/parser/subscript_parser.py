@@ -389,6 +389,13 @@ class SubscriptParser:
                 span=span,
                 hint="Use a constant integer index like tuple[0]",
             )
+        if (
+            isinstance(subscript.value, ast.Attribute)
+            and subscript.value.attr == "shape"
+            and isinstance(value_expr, ir.MakeTuple)
+            and 0 <= index < len(value_expr.elements)
+        ):
+            return value_expr.elements[index]
         return ir.TupleGetItemExpr(value_expr, index, span)
 
     def normalize_subscript_indices(self, subscript: ast.Subscript, span: ir.Span) -> list[ast.expr]:

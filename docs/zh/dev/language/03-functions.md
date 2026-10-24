@@ -52,6 +52,20 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 内部状态，或修改编译器/源码文件。持久复用还需要完整的
 [产物身份与缓存策略](../10-jit-cache.md)。
 
+### 动态维度元数据
+
+解析特化程序前，JIT 会推导局部 `TensorMeta`，为仅有裸张量注解的 helper 补齐实参类型。
+标量绑定使用 `int` 常量、已有张量轴的 `DynDim` 引用、不可变表达式元组或表示未知的
+`None`。`width = n * 8` 保存为快照 `(ast.Mult, (n_dim, 8))`；赋值别名保留同一元组，
+后续算术则创建不同快照。重新绑定操作数的源变量名不会改变已有快照。
+
+reshape 推导在记录 `TensorMeta.shape` 时，才为标量表达式建立结果专属的 `DynDim`
+符号；标量快照不进入张量类型。同一结果 shape 内重复使用同一快照时共享
+符号；不同结果建立独立绑定。被调函数从实际张量参数的描述符（descriptor）读取维度。
+原始算术及 reshape 校验仍保留在程序中，占位上界不会替代真实运行时尺寸。
+
+`synthesized` 标记自动生成的占位符号，继续沿用既有注解覆盖及 helper 返回行为。
+
 ### 编译选项与诊断请求
 
 JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选项。

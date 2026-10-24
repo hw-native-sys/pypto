@@ -185,10 +185,43 @@ pipeline judges whatever the program then does with it (loading the whole tensor
 say, gets you `InitMemRef requires static shape` — the same error the equivalent
 `@pl.program` earns).
 
+`pl.reshape` also preserves metadata when its target dimensions use known tensor
+dimensions and integer arithmetic (`+`, `-`, `*`, `//`, and unary `-`). For example,
+`pl.reshape(src, [src.shape[0] * src.shape[1]])` keeps a dynamic extent when either
+source dimension is dynamic. The consuming JIT function reads the actual extent from
+the reshaped tensor's descriptor. The original reshape expression remains in IR,
+and existing reshape validation is unchanged.
+Calls to `pl.tensor.dim` support positional or keyword `tensor`/`axis` arguments
+and static constant or negative axes. Unknown runtime axes remain unresolved.
+Shape subscripts use nonnegative integer literal indices; use `pl.tensor.dim(src, -1)` for
+a negative axis. Dynamic unary `+` remains unsupported.
+
+Intermediate scalar aliases work as well: `total = src.shape[0] * src.shape[1]`
+followed by `flat = pl.reshape(src, [total])` preserves the dynamic extent.
+Scalar calculations stay scalar: inference records immutable expression snapshots
+and creates dynamic-axis symbols when recording a tensor shape. Rebinding a source
+name does not change an already computed alias. Chains of simple names such as
+`total = half = total // 2` evaluate the right-hand side once and are lowered
+to individual assignments before parsing. Static integer aliases fold normally;
+unknown runtime values and invalid arithmetic remain unresolved. Aliases rebound
+under conditionals or loops are handled conservatively across control-flow
+boundaries, rather than assuming the value from one syntactic execution.
+After a tensor variable is rebound, shape reads use its current value, including
+whole-shape unpacking and results of tensor operations. Shape and dtype arguments
+such as `shape=src.shape` and `dtype=src.dtype` also use the current tensor type.
+Unrelated branches and loops keep existing aliases; a loop-carried alias becomes
+unknown until a definite assignment establishes its value in the current iteration.
+Mutually exclusive `if`/`elif`/`else` arms start from the same incoming scalar
+bindings and tensor metadata. Conditional scalar writes remain unknown after
+the branches join. Tensor metadata established identically in both arms remains
+usable; conflicting or missing tensor metadata remains unknown.
+Metadata keeps independent derived dimensions separate when a Python variable
+is reused or a helper is called repeatedly. Use explicit assignments such as
+`n = n + step`; augmented assignment (`n += step`) remains unsupported.
+
 What does not resolve is a returned tensor whose shape the specializer cannot *reach* at
-all: a `pl.reshape` whose target shape is not static (a reshape is constrained by its
-source's element count, so no dynamic dimension can stand in for it), or a result rebound
-through an operation the specializer does not model. That surfaces as
+all: a `pl.reshape` sized from an unknown runtime scalar, such as `pl.tensor.read(cfg, [0])`,
+or a result rebound through an operation the specializer does not model. That surfaces as
 `missing inferred tensor metadata for parameter '<name>'` at the *next* call that consumes
 it — the error names the consumer, but the fix belongs at the producer: give the producing
 statement a statically inferable shape, or pass the buffer in as a `pl.Out[...]` parameter.

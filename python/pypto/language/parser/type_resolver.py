@@ -1614,6 +1614,16 @@ class TypeResolver:
             if dtype_name in self._DTYPE_MAP:
                 return self._DTYPE_MAP[dtype_name]
 
+            if (
+                dtype_name == "dtype"
+                and isinstance(dtype_node.value, ast.Name)
+                and self.scope_lookup is not None
+            ):
+                tensor = self.scope_lookup(dtype_node.value.id)
+                tensor_type = getattr(tensor, "type", None)
+                if isinstance(tensor_type, (ir.TensorType, ir.TileType)):
+                    return tensor_type.dtype
+
             # Distinguish DataType.UNKNOWN from pl.UNKNOWN for error message quality
             if isinstance(dtype_node.value, ast.Name) and dtype_node.value.id == "DataType":
                 raise ParserTypeError(

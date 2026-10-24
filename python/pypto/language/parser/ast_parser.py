@@ -15,6 +15,7 @@ from typing import Any, NoReturn, cast
 
 from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
 from pypto.ir import IRBuilder
+from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 from pypto.ir.type import _merge_annotation_metadata  # noqa: PLC2701
 from pypto.language.distributed import op as _dsl_pld
@@ -1065,6 +1066,29 @@ class ASTParser:
                 span = self.span_tracker.get_span(stmt)
                 value_expr = self.parse_expression(stmt.value)
 
+                if (
+                    isinstance(stmt.value, ast.Attribute)
+                    and stmt.value.attr == "shape"
+                    and isinstance(stmt.value.value, ast.Name)
+                    and isinstance(value_expr, ir.MakeTuple)
+                ):
+                    if len(target.elts) != len(value_expr.elements):
+                        raise ParserTypeError(
+                            "Tensor shape unpacking requires one target per dimension",
+                            span=span,
+                        )
+                    # Preserve parameter-dimension aliases instead of copying
+                    # their symbols through a tuple temporary and projections.
+                    for elt, item_expr in zip(target.elts, value_expr.elements, strict=True):
+                        if not isinstance(elt, ast.Name):
+                            raise ParserSyntaxError(
+                                "Tensor shape unpacking targets must be variable names",
+                                span=self.span_tracker.get_span(elt),
+                            )
+                        var = self._assign_or_let(elt.id, item_expr, span)
+                        self.scope_manager.define_var(elt.id, var, span=span)
+                    return
+
                 # Bind the tuple result to a temporary variable
                 tuple_var = self.builder.let("_tuple_tmp", value_expr, span=span)
 
@@ -1900,6 +1924,22 @@ class ASTParser:
         Returns:
             IR expression
         """
+        if attr.attr == "shape" and isinstance(attr.value, ast.Name):
+            tensor = self.scope_manager.lookup_var(attr.value.id)
+            if isinstance(tensor, ir.Expr) and isinstance(tensor.type, ir.TensorType):
+                span = self.span_tracker.get_span(attr)
+                # Match tensor.dim's signature-symbol folding while deriving
+                # the rank from the current IR value, including local results.
+                orchestration = ir.is_orchestration_like(self.function.func_type)
+                dimensions = [
+                    extent
+                    if isinstance(extent, ir.ConstInt)
+                    or (orchestration and self.ops.is_param_dim_symbol(extent))
+                    else ir_op.tensor.dim(tensor, axis, span)
+                    for axis, extent in enumerate(tensor.type.shape)
+                ]
+                return ir.MakeTuple(dimensions, span)
+
         # Try to evaluate as a Python enum value (e.g., pl.MemorySpace.Vec -> ConstInt)
         try:
             value = self.expr_evaluator.eval_expr(attr)

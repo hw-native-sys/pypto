@@ -480,6 +480,13 @@ class OpParser:
             meta = self.buffer_meta.get(value.value.id)
             if meta is not None and value.attr in meta:
                 return meta[value.attr]
+            tensor = self.services.scope_manager.lookup_var(value.value.id)
+            if (
+                value.attr == "shape"
+                and isinstance(tensor, ir.Expr)
+                and isinstance(tensor.type, ir.TensorType)
+            ):
+                return self.callbacks.expression(value)
 
         # Not a dtype or buffer attr — evaluate as a general expression from closure.
         return self.services.expr_evaluator.eval_expr(value)
