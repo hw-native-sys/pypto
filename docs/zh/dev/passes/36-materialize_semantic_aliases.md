@@ -70,10 +70,14 @@ program = passes.materialize_semantic_aliases()(program)
    引用属性的观测仍保留。未知边界及条件保守处理。因此，非空循环
    转发且被消费的结果仍受保护，而未使用的 Acc carry 不会错误阻止重定向，进而
    要求不受支持的 Acc-to-Acc 复制。对于已知零次循环，或循环体仅将所有 carry
-   原样 yield 的循环，Buffer IR
-   也不为其创建私有循环输入存储，因为这种绑定不会覆盖 initializer。
+   原样 yield 的循环，或仅 yield initializer 及其不可变完整窗口别名的循环，Buffer IR
+   也不创建私有循环输入存储，因为这些绑定不会覆盖输入数据。不可变别名根在已有
+   定义遍历中缓存；可变输出和局部窗口不构成数据身份关系。
    零次循环体规范化仅用于 Tile carry 边界；仅包含 Tensor/DistributedTensor 的循环
    保留描述符写回和循环体结构，由 tensor 边界规范化负责处理。
+   Legacy Vec carry 也复用隔离分析来保护循环中重复读取的原始 seed：在入口复制到
+   私有存储，让 carry 更新时保留原 seed。输入参数、循环后读取和重叠输入的策略
+   仍专用于 Buffer IR；不支持复制的存储空间保留重定向保护和已有显式复制报错。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部

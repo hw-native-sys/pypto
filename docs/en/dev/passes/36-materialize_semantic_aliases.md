@@ -90,10 +90,18 @@ its own fresh MemRef. This pass closes that gap:
    carries falsely block retargeting and require an unsupported Acc-to-Acc copy.
    Buffer IR also avoids private loop-input storage for proven zero-trip loops
    and when the complete body only
-   yields every carry unchanged: this binding cannot overwrite its initializer.
+   yields every carry unchanged, its initializer, or an immutable full-window
+   alias of that initializer: these bindings cannot overwrite input payloads.
+   Immutable alias roots are cached during the existing definition walk;
+   mutating outputs and partial windows do not establish identity.
    Zero-trip body canonicalization applies only to Tile carry boundaries;
    Tensor/DistributedTensor-only loops retain their descriptor writebacks and
    body structure, handled by tensor boundary normalization.
+   Legacy Vec carries also use the shared isolation analysis for recurring
+   independent seed reads: an entry copy lets the carry advance in private
+   storage while preserving the original seed. Incoming-parameter, post-loop
+   and overlapping-input policies remain specific to Buffer IR; unsupported
+   copy spaces retain the retarget guard and existing explicit copy diagnostic.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.

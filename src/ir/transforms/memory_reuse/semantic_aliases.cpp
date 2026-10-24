@@ -60,6 +60,22 @@ namespace pypto {
 namespace ir {
 namespace memory_reuse {
 
+bool LoopMayExecute(const StmtPtr& statement, bool after_first) {
+  if (auto loop = As<ForStmt>(statement)) {
+    const auto start = As<ConstInt>(loop->start_);
+    const auto stop = As<ConstInt>(loop->stop_);
+    const auto step = As<ConstInt>(loop->step_);
+    if (!start || !stop || !step || step->value_ == 0) return true;
+    const __int128 current =
+        static_cast<__int128>(start->value_) + (after_first ? static_cast<__int128>(step->value_) : 0);
+    return step->value_ > 0 ? current < stop->value_ : current > stop->value_;
+  }
+  if (auto loop = As<WhileStmt>(statement)) {
+    if (auto condition = As<ConstBool>(loop->condition_)) return condition->value_;
+  }
+  return true;
+}
+
 namespace {
 
 // ============================================================================
@@ -263,21 +279,6 @@ struct VarDef {
 
 // Known bounds exclude dead bodies and loops without a backedge. Unknown
 // conditions remain conservative; widen arithmetic before advancing a For.
-bool LoopMayExecute(const StmtPtr& statement, bool after_first) {
-  if (auto loop = As<ForStmt>(statement)) {
-    const auto start = As<ConstInt>(loop->start_);
-    const auto stop = As<ConstInt>(loop->stop_);
-    const auto step = As<ConstInt>(loop->step_);
-    if (!start || !stop || !step || step->value_ == 0) return true;
-    const __int128 current =
-        static_cast<__int128>(start->value_) + (after_first ? static_cast<__int128>(step->value_) : 0);
-    return step->value_ > 0 ? current < stop->value_ : current > stop->value_;
-  }
-  if (auto loop = As<WhileStmt>(statement)) {
-    if (auto condition = As<ConstBool>(loop->condition_)) return condition->value_;
-  }
-  return true;
-}
 
 /// Walks the IR once to build definitions, lexical statement intervals and
 /// per-statement VarLike accesses. Definitions keep only their nearest loop;
@@ -815,7 +816,8 @@ class LoopInputIsolation : public IRVisitor {
   std::map<const Stmt*, std::vector<StmtPtr>> entries;
   std::vector<StmtPtr> allocations;
 
-  void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
+  void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool recurrence_only = false) {
+    recurrence_only_ = recurrence_only;
     names_.Collect(body, parameters);
     DefMapVisitor demand;
     demand.Run(body);
@@ -885,15 +887,25 @@ class LoopInputIsolation : public IRVisitor {
   }
   void VisitStmt_(const AssignStmtPtr& statement) override {
     auto source = AsVarLike(statement->value_);
+    bool identity = source != nullptr;
     if (auto call = As<Call>(statement->value_); call && call->op_ && !call->args_.empty() &&
                                                  op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
       source = AsVarLike(call->args_[0]);
+      const auto input = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
+      const auto output = GetTileTypeWithMemRef(statement->var_->GetType());
+      identity = input && output && SameKnownTileMemorySpace(input, output) &&
+                 SamePhysicalWindow(GetDefinedMemRef(input), GetDefinedMemRef(output)) &&
+                 OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
+                     ExecutionMemoryAccessEvidence::NoAccess;
     }
     if (source && GetTileTypeWithMemRef(source->GetType())) {
       // Metadata views do not read data. Their later readers observe the same
       // logical version, including a view created inside a loop from old input.
       auto origin = definitions_.find(source.get());
       definitions_[statement->var_.get()] = origin == definitions_.end() ? 0 : origin->second;
+      // Flatten immutable renames/full-window views once in definition order.
+      // Mutating aliases and partial windows do not establish value identity.
+      if (identity) identity_roots_[statement->var_.get()] = IdentityRoot(source);
       // Visit the expression through the demand filter: non-source operands
       // and reference attributes can be real observations even for a view.
       VisitExpr(statement->value_);
@@ -934,8 +946,15 @@ class LoopInputIsolation : public IRVisitor {
   }
 
  private:
+  bool recurrence_only_ = false;
   const Stmt* current_statement_ = nullptr;
   std::map<const Stmt*, std::set<VarPtr>> payload_observations_;
+  std::map<const Var*, VarPtr> identity_roots_;
+
+  [[nodiscard]] VarPtr IdentityRoot(const VarPtr& value) const {
+    auto root = identity_roots_.find(value.get());
+    return root == identity_roots_.end() ? value : root->second;
+  }
 
   template <typename LoopPtr>
   void VisitLoop(const LoopPtr& loop) {
@@ -970,9 +989,14 @@ class LoopInputIsolation : public IRVisitor {
     if (auto yield = As<YieldStmt>(body); yield && yield->value_.size() == loop->iter_args_.size()) {
       bool unchanged = true;
       for (size_t i = 0; i < yield->value_.size(); ++i) {
-        unchanged = unchanged && AsVarLike(yield->value_[i]) == loop->iter_args_[i];
+        const auto source = AsVarLike(yield->value_[i]);
+        const auto& argument = loop->iter_args_[i];
+        const auto initial = AsVarLike(argument->initValue_);
+        unchanged = unchanged && source &&
+                    (source == argument || (initial && IdentityRoot(source) == IdentityRoot(initial)));
       }
-      // A body containing only identity forwarding cannot overwrite any input,
+      // Forwarding a carry, its initializer, or an immutable alias of that
+      // initializer cannot overwrite input payloads,
       // even when another handle observes that input after this loop. Such a
       // binding needs no private buffer (and no unsupported Acc-to-Acc copy).
       if (unchanged) return;
@@ -994,6 +1018,14 @@ class LoopInputIsolation : public IRVisitor {
       // all such loops cannot observe this carry on a later iteration.
       const bool nested_observation =
           recurring != recurring_indexes_.end() && recurring->second.HasAfter(0, position, position - 1);
+      if (recurrence_only_) {
+        // Legacy fixup copies yields back into the carry. Preserve independently
+        // read seed payloads with a private carry when a legal entry copy exists;
+        // unsupported spaces retain the retarget guard and explicit copy error.
+        const auto memory = tile->GetMemorySpace();
+        if (nested_observation && memory && IsTileMoveEverSupported(*memory, *memory)) isolate.insert(i);
+        continue;
+      }
       if (incoming_bases_.count(base) != 0 || nested_observation ||
           (reachable != reachable_indexes_.end() &&
            reachable->second.HasAfter(position + 1, order_, reverse_order_.at(loop.get())))) {
@@ -2515,7 +2547,10 @@ class RetypeApplier : public IRMutator {
   template <typename LoopPtr>
   StmtPtr RetypeLoop(const LoopPtr& op) {
     const auto* context = PassContext::Current();
-    if (context == nullptr || !context->GetEnableBufferIR()) {
+    if ((context == nullptr || !context->GetEnableBufferIR()) && entries_.empty() && initializers_.empty()) {
+      // An isolation application normalizes every dependent loop binding,
+      // including nested loops without an entry copy of their own. Ordinary
+      // legacy retypes without isolation retain their old behavior.
       // Pre-register the IterArg's TileType retype so body references to the
       // IterArg are substituted via VisitExpr_(IterArgPtr). The init value
       // recursion is handled inside VisitExpr_(IterArgPtr).
@@ -2640,8 +2675,11 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     // remain unsettled until CanonicalizeBranchStorage/YieldFixup selects it.
     new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
     new_body = RetypeApplier({}).VisitStmt(new_body);
+  }
+  {
+    const bool buffer_ir = ctx != nullptr && ctx->GetEnableBufferIR();
     LoopInputIsolation isolation;
-    isolation.Plan(new_body, func->params_);
+    isolation.Plan(new_body, func->params_, /*recurrence_only=*/!buffer_ir);
     if (!isolation.initializers.empty()) {
       RetypeApplier applier(std::move(isolation.rewrites), std::move(isolation.initializers),
                             std::move(isolation.entries));
@@ -2649,7 +2687,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
       new_body = InsertAllocsIntoBody(new_body, isolation.allocations);
       new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
     }
-    new_body = RetypeApplier({}).VisitStmt(new_body);
+    if (buffer_ir) new_body = RetypeApplier({}).VisitStmt(new_body);
   }
   TopDownRetargeter retargeter;
   auto rewrites = retargeter.Compute(new_body);

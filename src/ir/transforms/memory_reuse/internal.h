@@ -30,6 +30,10 @@ namespace pypto {
 namespace ir {
 namespace memory_reuse {
 
+// Shared by alias analysis and yield repair: unknown bounds conservatively
+// may execute; after_first asks whether another iteration may run.
+bool LoopMayExecute(const StmtPtr& statement, bool after_first);
+
 // Private stage boundaries. The pass entry orders packing and writeback repair;
 // semantic_aliases.cpp also uses writeback repair for planners that skip reuse.
 // Each call owns its analysis/mutator state; no state survives a function pass.
