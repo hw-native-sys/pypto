@@ -493,11 +493,22 @@ PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用
 PR 不发布镜像，也不获取 SWR 凭据。
 硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
 
-首期仅启用 `arm-a2a3`，使用 CANN 9.2.0，以及 `self-hosted`、`linux`、`ARM64`、`npu-xp` 标签。
-预检还要求 runner 名称为 `227-npu-a2a3-XP-1`。如果标签池扩大，应给这台服务器添加专用标签，
-并更新 `runners`，避免调度到其他服务器。runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
+当前启用两个原生 ARM64 镜像，均使用 CANN 9.2.0：
+
+| 镜像 | Runner 标签 | 宿主机驱动（`Version=`） | 发布标签 |
+| ---- | ----------- | ------------------------ | -------- |
+| `arm-a2a3` | `self-hosted`、`linux`、`ARM64`、`npu-xp` | `26.0.rc1` | `arm-a2a3-cann9.2-dist` |
+| `arm-a5` | `self-hosted`、`Linux`、`ARM64`、`npu-a5` | `25.6.rc2.b023` | `arm-a5-cann9.2-dist` |
+
+A5 基础镜像为 `9.2.0-950-ubuntu22.04-py3.11-devel`，固定到 ARM64 manifest。
+`ARM64` 标签确保 A5 任务不会调度到 x86 A5 runner。
+A2/A3 预检还要求 runner 名称为 `227-npu-a2a3-XP-1`；若该标签池扩大，
+应为宿主机分配专用标签并更新 `runners`。
+每个 runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
 Ascend Docker Runtime，以及支持 `--find`/`--kill` 的 `task-submit`；不使用宿主机的 PyPTO 安装。
 宿主机维护命令会显式进入该工具链环境，不依赖可能较旧的系统 `python3`。
+工具链检查打印的是宿主机 CANN 版本；镜像版本由 `cann_tag`/`cann_digest` 指定，
+并由容器内的 strict doctor 核实。
 workflow 在独立 Docker 配置中安装 Buildx v0.35.0，使用宿主机的默认 Docker builder，保留共享构建缓存。
 
 首次发布前，在仓库设置中配置：
@@ -533,20 +544,23 @@ runtime 始终跟随 PyPTO 的 gitlink；PTO-ISA 跟随该 runtime 的 `pto_isa.
 PTOAS 跟随所选 PyPTO 的工具链版本。使用这些 SHA 使源码构建缓存失效，而不是传入可变的 `main`。
 编译并发同时受 `build_jobs` 和资源限制加载器约束。
 CI 选择 simpler 的 `build_package_<validation_platform>` 和 `build_package_sim` 目标：
-`arm-a2a3` 镜像预编译 A2/A3 上板 runtime 和两种 CPU 模拟器，不编译 A5 上板二进制。
+每个镜像预编译自身平台的上板 runtime 和两种 CPU 模拟器。
 `DIST_RUNTIME_TARGETS` 将该选择保存为 `PYPTO_RUNTIME_BUILD_TARGETS`，供后续 `pypto-build`
 继续使用；空值使用 simpler 的默认目标。该选项只影响 runtime wheel 的构建。
 所选 PyPTO ref 必须提供 `pypto-doctor --strict`；验证会拒绝那些静默忽略严格选项的旧辅助脚本。
 
-`cann92-a2a3-aicpu-class-memaccess` 补丁只增加 CANN 9.2 的 GNU 编译器所需的 onboard AICPU 警告豁免。
+`cann92-a2a3-aicpu-class-memaccess` 和 `cann92-a5-aicpu-class-memaccess` 补丁
+只增加对应平台在 CANN 9.2 GNU 编译器下所需的 onboard AICPU 警告豁免，每个镜像应用自身平台的补丁。
 编译前应用补丁；若相同修改已经进入上游则跳过；上下文变化导致无法应用时直接失败。
 成功构建后，`/opt/pypto/dist-state.json` 记录 runtime SHA、差异哈希、补丁哈希及安装的扩展哈希。
 `pypto-doctor --strict` 仅接受该记录对应的补丁；其他修改、缺少编译版本标记或无法验证的绑定都会失败。
-CANN 9.2.0 / 驱动 26.0.rc1 是当前部署的验证配置，不代表一般性的兼容保证。
+表中的驱动组合属于部署验证配置，发布仍须通过 strict doctor 和两个上板测试，
+不代表对其他宿主机的通用兼容保证。
 
 验证使用全新容器，不挂载源码或缓存卷。一次单卡 `task-submit` 借卡运行严格 doctor 和 Qwen3-14B decode；
 另一次双卡借卡运行 pypto-lib 的 all-reduce 示例。物理卡来自 `TASK_DEVICE`，模型参数使用容器内编号 `0` 或 `0,1`。
-宿主机驱动元数据以只读方式挂载。两个模型都必须退出码为零且输出 `[RUN] PASS`；
+宿主机驱动元数据以只读方式挂载。ARM A5 容器还传入 `/dev/ummu` 和 `/dev/uburma`，用于 URMA 通信。
+两个模型都必须退出码为零且输出 `[RUN] PASS`；
 缺少 PASS、超时或测试失败都禁止发布。`task_timeout_seconds` 限制排队加执行的总等待时间，
 `task_max_seconds` 单独限制设备执行时间。总超时必须大于执行上限；首期每个用例允许总计 3600 秒，
 其中设备执行最多 1800 秒。清理步骤约束孤儿任务，
@@ -571,7 +585,7 @@ Actions Summary 和保留 14 天的 artifacts 包含提交版本、digest、构�
 获取新快照时，拉取新镜像并创建新容器或源码卷。已有 named volume 会保留原来的源码。
 希望跟踪分支的开发者，需要显式处理 checkout 和本地补丁，然后再使用更新脚本。
 
-后续添加 `x86-a2a3`、`x86-a5` 或 `arm-a5` 时，新增配置项并指定匹配的原生 runner、CANN 基础镜像、
+后续添加 `x86-a2a3` 或 `x86-a5` 时，新增配置项并指定匹配的原生 runner、CANN 基础镜像、
 驱动和硬件验证路径；环境准备好前保持禁用。各组合独立发布标签；Docker 架构 manifest 无法按宿主机 NPU 选择镜像。
 
 ### 不装 Ascend Docker Runtime

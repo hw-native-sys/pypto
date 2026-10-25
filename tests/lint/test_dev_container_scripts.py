@@ -1846,11 +1846,21 @@ def test_doctor_warns_when_runtime_hides_driver_version(healthy_doctor: dict[str
     assert "verify the supported CANN/driver pair on the host" in result.stdout
 
 
-@pytest.mark.parametrize("driver,valid", [("26.0.rc1", True), ("25.6.rc1.b108", False)])
+@pytest.mark.parametrize(
+    "driver,chip,valid",
+    [
+        ("26.0.rc1", "a3", True),
+        ("25.6.rc1.b108", "a3", False),
+        ("25.6.rc2.b023", "950", True),
+        ("25.6.rc2.b023", "a3", False),
+        ("25.6.rc1.b108", "950", False),
+    ],
+)
 def test_doctor_cann92_uses_mounted_host_metadata(
-    healthy_doctor: dict[str, str], tmp_path: Path, driver: str, valid: bool
+    healthy_doctor: dict[str, str], tmp_path: Path, driver: str, chip: str, valid: bool
 ) -> None:
     env = healthy_doctor
+    env["PYPTO_CANN_TAG"] = f"9.2.0-{chip}-ubuntu22.04-py3.11-devel"
     (Path(env["ASCEND_HOME_PATH"]) / "compiler/version.info").write_text("Version=9.2.0\n")
     host_metadata = tmp_path / "host-version.info"
     host_metadata.write_text(f"Version={driver}\n")

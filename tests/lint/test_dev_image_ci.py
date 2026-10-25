@@ -69,6 +69,7 @@ def state(ci: ModuleType, tmp_path: Path) -> dict:
         ("validation_platform", "a5"),
         ("cann_digest", "sha256:missing"),
         ("patch", "unknown"),
+        ("patch", "cann92-a5-aicpu-class-memaccess"),
         ("allreduce", "/workspace/pypto-lib/../other.py"),
         ("tag", "bad tag"),
     ],
@@ -84,7 +85,14 @@ def test_invalid_configuration_fails_before_scheduling(
         ci.load_config(path)
 
 
-def test_disabled_future_architecture_is_not_scheduled(ci: ModuleType, capsys: pytest.CaptureFixture) -> None:
+def test_disabled_future_architecture_is_not_scheduled(
+    ci: ModuleType, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = ci.load_config()
+    config["images"]["x86-a5"] = dict(
+        config["images"]["arm-a5"], enabled=False, platform="linux/amd64", patch="", tag="x86-a5-cann9.2-dist"
+    )
+    monkeypatch.setattr(ci, "load_config", lambda: config)
     original = sys.argv
     try:
         sys.argv = ["maintain.py", "matrix"]
@@ -92,7 +100,8 @@ def test_disabled_future_architecture_is_not_scheduled(ci: ModuleType, capsys: p
     finally:
         sys.argv = original
     result = json.loads(capsys.readouterr().out)
-    assert [item["name"] for item in result["include"]] == ["arm-a2a3"]
+    assert [item["name"] for item in result["include"]] == ["arm-a2a3", "arm-a5"]
+    assert result["include"][1]["runners"] == ["self-hosted", "Linux", "ARM64", "npu-a5"]
 
 
 def test_annotated_tag_resolves_to_commit(ci: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,12 +119,19 @@ def test_annotated_tag_resolves_to_commit(ci: ModuleType, monkeypatch: pytest.Mo
 @pytest.mark.parametrize(
     "event,pypto_ref", [("push", "main"), ("pull_request", "main"), ("pull_request", "4" * 40)]
 )
+@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
 def test_build_freezes_refs_and_base_digest(
-    ci: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: str, pypto_ref: str
+    ci: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    pypto_ref: str,
+    image_name: str,
 ) -> None:
     config = ci.load_config()
     config["sources"]["pypto"]["ref"] = pypto_ref
-    config["images"]["arm-a2a3"]["cann_digest"] = "sha256:" + "3" * 64
+    image = config["images"][image_name]
+    image["cann_digest"] = "sha256:" + "3" * 64
     monkeypatch.setattr(ci.platform, "machine", lambda: "aarch64")
     monkeypatch.setattr(ci.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.delenv("RUNNER_NAME", raising=False)
@@ -130,7 +146,7 @@ def test_build_freezes_refs_and_base_digest(
 
     def read(path: Path, *args: object, **kwargs: object) -> str:
         if str(path) == "/usr/local/Ascend/driver/version.info":
-            return "Version=26.0.rc1\n"
+            return f"Version={image['driver_version']}\n"
         return original_read(path)
 
     monkeypatch.setattr(Path, "read_text", read)
@@ -151,7 +167,7 @@ def test_build_freezes_refs_and_base_digest(
 
     monkeypatch.setattr(ci, "run", command)
     ci.save(tmp_path / "validated.json", {"stale": True})
-    ci.build(config, "arm-a2a3", tmp_path)
+    ci.build(config, image_name, tmp_path)
     build = next(argv for argv in calls if argv[1:3] == ["buildx", "build"])
     expected_sha = recipe if pypto_ref == "main" else pypto_ref
     expected_repository = (
@@ -164,7 +180,9 @@ def test_build_freezes_refs_and_base_digest(
     assert f"PYPTO_LIB_REF={library}" in build
     assert f"CANN_IMAGE={base}" in build
     assert "DIST_BUILD_JOBS=1" in build
-    assert "DIST_RUNTIME_TARGETS=build_package_a2a3;build_package_sim" in build
+    assert f"DIST_RUNTIME_TARGETS=build_package_{image['validation_platform']};build_package_sim" in build
+    assert f"CANN_TAG={image['cann_tag']}" in build
+    assert f"DIST_PATCH={image['patch']}" in build
     assert "HTTP_PROXY=http://proxy.example:7892" in build
     assert "--load" in build and "--push" not in build
     assert not (tmp_path / "validated.json").exists()
@@ -196,9 +214,11 @@ def test_pr_build_rejects_missing_or_invalid_repository_before_network(
 
 
 @pytest.mark.parametrize("case,devices", [("decode", "5"), ("allreduce", "5,7")])
+@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
 def test_devices_expand_only_inside_queued_shell(
-    ci: ModuleType, state: dict, tmp_path: Path, case: str, devices: str
+    ci: ModuleType, state: dict, tmp_path: Path, case: str, devices: str, image_name: str
 ) -> None:
+    state["image"] = ci.load_config()["images"][image_name]
     # Execute the generated shell with a harmless Docker stand-in. Spaces in the
     # evidence path and physical-vs-logical device IDs must survive both shells.
     directory = tmp_path / "evidence with spaces"
@@ -222,6 +242,9 @@ def test_devices_expand_only_inside_queued_shell(
     assert state["image_id"] in calls
     assert ("pypto-doctor --strict" in calls) == (case == "decode")
     assert "-d 0,1" in calls if case == "allreduce" else "-d 0" in calls
+    assert f"-p {state['image']['validation_platform']}" in calls
+    assert ("--device\n/dev/ummu" in calls) == (image_name == "arm-a5")
+    assert ("--device\n/dev/uburma" in calls) == (image_name == "arm-a5")
     assert f"rm\n-f\npypto-ci-{state['identity']}-{case}" in calls
 
 
@@ -534,9 +557,10 @@ def test_cleanup_removes_only_this_runs_resources(
     assert not any("prune" in argv for argv in calls)
 
 
-@pytest.fixture
-def patch_tree(tmp_path: Path) -> tuple[ModuleType, Path, Path]:
+@pytest.fixture(params=["cann92-a2a3-aicpu-class-memaccess", "cann92-a5-aicpu-class-memaccess"])
+def patch_tree(tmp_path: Path, request: pytest.FixtureRequest) -> tuple[ModuleType, Path, Path]:
     module = load_module("dist_state")
+    patch_name: str = getattr(request, "param")
     source = tmp_path / "pypto"
     runtime = source / "runtime"
     runtime.mkdir(parents=True)
@@ -547,21 +571,21 @@ def patch_tree(tmp_path: Path) -> tuple[ModuleType, Path, Path]:
         "        -Wno-error=variadic-macros\n        -fno-common\n"
         "        -g\n        $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>\n)\n"
     )
-    target = runtime / module.PATCH_FILE
+    target = runtime / module.PATCH_FILES[patch_name]
     target.parent.mkdir(parents=True)
     target.write_text(original)
     module.git(runtime, "add", ".")
     module.git(
         runtime, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"
     )
-    patch = ROOT / "docker/patches" / f"{module.PATCH_NAME}.patch"
+    patch = ROOT / "docker/patches" / f"{patch_name}.patch"
     return module, source, patch
 
 
 def test_patch_applies_and_rejects_unrelated_dirty_source(patch_tree: tuple) -> None:
     module, source, patch = patch_tree
     module.apply_patch(source, patch)
-    assert "-Wno-error=class-memaccess" in (source / "runtime" / module.PATCH_FILE).read_text()
+    assert "-Wno-error=class-memaccess" in (source / "runtime" / module.PATCH_FILES[patch.stem]).read_text()
     with pytest.raises(ValueError, match="clean"):
         module.apply_patch(source, patch)
 
@@ -580,7 +604,7 @@ def test_already_upstream_patch_is_not_applied_twice(patch_tree: tuple) -> None:
 def test_changed_patch_context_is_a_hard_failure(patch_tree: tuple) -> None:
     module, source, patch = patch_tree
     runtime = source / "runtime"
-    (runtime / module.PATCH_FILE).write_text("new build system\n")
+    (runtime / module.PATCH_FILES[patch.stem]).write_text("new build system\n")
     module.git(
         runtime, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-am", "changed"
     )
@@ -606,12 +630,12 @@ def test_build_record_detects_later_changes(
     monkeypatch.setattr(
         module.importlib.util, "find_spec", lambda name: SimpleNamespace(origin=str(extension))
     )
-    module.record(source, home, module.PATCH_NAME)
+    module.record(source, home, patch.stem)
     module.verify(source, home)
     if change == "extension":
         extension.write_bytes(b"different build")
     elif change == "source":
-        (source / "runtime" / module.PATCH_FILE).write_text("uncommitted change")
+        (source / "runtime" / module.PATCH_FILES[patch.stem]).write_text("uncommitted change")
     elif change == "untracked":
         (source / "runtime/new.cpp").write_text("new source")
     elif change == "patch":

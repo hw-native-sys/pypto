@@ -552,13 +552,22 @@ approved code. See [GitHub's fork workflow approval settings](https://docs.githu
 PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
 Manual runs validate without publishing by default; publication also requires `main`.
 
-The initial configuration enables only `arm-a2a3`, using CANN 9.2.0 and the
-`self-hosted`, `linux`, `ARM64`, `npu-xp` labels. A preflight check additionally
-requires runner `227-npu-a2a3-XP-1`. If the label pool grows, assign that host a
-dedicated label and update `runners` to avoid scheduling on a different host.
-The runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker, Ascend Docker Runtime and
+The configuration enables two native ARM64 images, both using CANN 9.2.0:
+
+| Image | Runner labels | Host driver (`Version=`) | Published tag |
+| ----- | ------------- | ------------------------ | ------------- |
+| `arm-a2a3` | `self-hosted`, `linux`, `ARM64`, `npu-xp` | `26.0.rc1` | `arm-a2a3-cann9.2-dist` |
+| `arm-a5` | `self-hosted`, `Linux`, `ARM64`, `npu-a5` | `25.6.rc2.b023` | `arm-a5-cann9.2-dist` |
+
+The A5 base is `9.2.0-950-ubuntu22.04-py3.11-devel`, pinned to its ARM64
+manifest. The `ARM64` label prevents the A5 job from landing on an x86 A5 runner.
+The A2/A3 preflight additionally requires runner `227-npu-a2a3-XP-1`.
+If that label pool grows, assign the host a dedicated label and update `runners`.
+Each runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker, Ascend Docker Runtime and
 `task-submit` with `--find`/`--kill` support. No host PyPTO installation is used.
 Host maintenance commands enter that bundle explicitly; the system `python3` may be older.
+Its verification output reports the host's CANN version; the image's version is
+selected by `cann_tag`/`cann_digest` and checked inside the container by strict doctor.
 The workflow installs Buildx v0.35.0 in its isolated Docker configuration and uses
 the host's default Docker builder, preserving the shared build cache.
 
@@ -605,27 +614,30 @@ runtime's `pto_isa.pin`, and PTOAS follows the selected PyPTO toolchain pin.
 Build cache invalidation uses these SHAs instead of a mutable `main` argument.
 Compilation is capped by both `build_jobs` and the resource-limit loader.
 CI selects simpler's `build_package_<validation_platform>` and `build_package_sim`
-targets: the `arm-a2a3` image prebuilds A2/A3 onboard and both CPU simulators, without
-compiling A5 onboard binaries. `DIST_RUNTIME_TARGETS` stores this selection as
+targets: each image prebuilds its selected onboard platform and both CPU simulators.
+`DIST_RUNTIME_TARGETS` stores this selection as
 `PYPTO_RUNTIME_BUILD_TARGETS` for later `pypto-build` calls; an empty value uses
 simpler's default targets. The override applies only to the runtime wheel build.
 Selected PyPTO refs must provide `pypto-doctor --strict`; validation rejects older
 helpers that would silently ignore the strict option.
 
-The `cann92-a2a3-aicpu-class-memaccess` patch adds only the onboard AICPU warning
-exception needed by CANN 9.2's GNU compiler. It is applied before building, skipped
+The `cann92-a2a3-aicpu-class-memaccess` and `cann92-a5-aicpu-class-memaccess` patches
+add only the selected platform's onboard AICPU warning exception needed by CANN 9.2's
+GNU compiler. Each image applies its own patch before building; it is skipped
 if its exact change is already upstream, and rejected if its context no longer
 matches. `/opt/pypto/dist-state.json` records the runtime SHA, diff hash, patch hash
 and installed extension hash after a successful build. `pypto-doctor --strict`
 accepts only this recorded patch; other edits, missing stamps or unverified
-bindings fail. The CANN 9.2.0 / driver 26.0.rc1 pair is a deployment validation
-configuration, not a general compatibility guarantee.
+bindings fail. The driver pairs in the table are deployment validation configurations;
+publication still requires strict doctor and both hardware tests to pass. They are
+not general compatibility guarantees for other hosts.
 
 Validation uses fresh containers without source/cache volumes. A single-card
 `task-submit` reservation runs strict doctor and Qwen3-14B decode; a separate
 two-card reservation runs pypto-lib's all-reduce example. Physical cards come from
 `TASK_DEVICE`, while model arguments use container-local IDs `0` or `0,1`.
-Driver metadata is mounted read-only from the host. Both models must exit zero
+Driver metadata is mounted read-only from the host. ARM A5 containers also receive
+`/dev/ummu` and `/dev/uburma` for URMA communication. Both models must exit zero
 and produce `[RUN] PASS`; missing PASS, timeouts and test failures prevent
 publication. `task_timeout_seconds` bounds the total wait for queueing and execution;
 `task_max_seconds` independently caps device execution. The total timeout must
@@ -661,7 +673,7 @@ create a fresh container/source volume to consume a new snapshot. Existing named
 volumes keep their own source. Developers choosing to track branches must handle
 their checkout and any local patch explicitly before using the updater.
 
-To add `x86-a2a3`, `x86-a5` or `arm-a5`, add a configuration entry with matching
+To add `x86-a2a3` or `x86-a5`, add a configuration entry with matching
 native runner labels, CANN base, driver and hardware validation paths. Keep it
 disabled until that combination has been provisioned. Publish independent tags;
 Docker architecture manifests cannot select images based on the attached NPU.

@@ -20,8 +20,10 @@ import json
 import subprocess
 from pathlib import Path
 
-PATCH_NAME = "cann92-a2a3-aicpu-class-memaccess"
-PATCH_FILE = "src/a2a3/platform/onboard/aicpu/CMakeLists.txt"
+PATCH_FILES = {
+    "cann92-a2a3-aicpu-class-memaccess": "src/a2a3/platform/onboard/aicpu/CMakeLists.txt",
+    "cann92-a5-aicpu-class-memaccess": "src/a5/platform/onboard/aicpu/CMakeLists.txt",
+}
 
 
 def git(root: Path, *args: str) -> str:
@@ -67,15 +69,16 @@ def snapshot(source: Path) -> dict[str, str]:
 
 def record(source: Path, home: Path, patch_name: str) -> None:
     runtime = source / "runtime"
+    patch_file = PATCH_FILES.get(patch_name)
     changed = git(runtime, "diff", "--name-only", "HEAD")
     if changed:
-        if patch_name != PATCH_NAME or changed != PATCH_FILE:
+        if patch_file is None or changed != patch_file:
             raise ValueError("Only the configured runtime patch may differ from HEAD")
-        original = git(runtime, "show", f"HEAD:{PATCH_FILE}")
+        original = git(runtime, "show", f"HEAD:{patch_file}")
         anchor = "        -Wno-error=variadic-macros\n"
         flag = "        $<$<CXX_COMPILER_ID:GNU>:-Wno-error=class-memaccess>\n"
         expected = original.replace(anchor, anchor + flag)
-        if original.count(anchor) != 1 or (runtime / PATCH_FILE).read_text().strip() != expected:
+        if original.count(anchor) != 1 or (runtime / patch_file).read_text().strip() != expected:
             raise ValueError("Runtime changes differ from the configured patch")
     state = snapshot(source)
     state["patch"] = patch_name
@@ -89,7 +92,7 @@ def verify(source: Path, home: Path) -> None:
     state = json.loads((home / "dist-state.json").read_text())
     if state["patch"]:
         patch = home / "image-tools" / f"{state['patch']}.patch"
-        if state["patch"] != PATCH_NAME or digest(patch) != state["patch_sha256"]:
+        if state["patch"] not in PATCH_FILES or digest(patch) != state["patch_sha256"]:
             raise ValueError("Image patch differs from its build record")
     current = snapshot(source)
     for key, value in current.items():
@@ -102,7 +105,7 @@ def main() -> None:
     parser.add_argument("operation", choices=["apply", "record", "verify"])
     parser.add_argument("--source", type=Path, default=Path("/workspace/pypto"))
     parser.add_argument("--home", type=Path, default=Path("/opt/pypto"))
-    parser.add_argument("--patch", choices=["", PATCH_NAME], default="")
+    parser.add_argument("--patch", choices=["", *PATCH_FILES], default="")
     args = parser.parse_args()
     if args.operation == "apply":
         if args.patch:

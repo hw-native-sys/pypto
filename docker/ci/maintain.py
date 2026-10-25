@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dist_state import PATCH_FILES
 from swr_registry import Registry
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +34,6 @@ CONFIG = ROOT / "docker/images.json"
 SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 GITHUB_REPOSITORY_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-PATCH = "cann92-a2a3-aicpu-class-memaccess"
 
 
 def direct_environment() -> dict[str, str]:
@@ -118,10 +118,14 @@ def validate_image(name: str, image: dict[str, Any]) -> None:
             raise ValueError(f"Invalid {name}.{key}")
     if image["cann_digest"] is not None and not DIGEST.fullmatch(image["cann_digest"]):
         raise ValueError(f"Invalid CANN digest for {name}")
-    if image["patch"] not in ("", PATCH):
+    if image["patch"] and image["patch"] not in PATCH_FILES:
         raise ValueError(f"Unsupported runtime patch for {name}")
-    if image["patch"] and (name != "arm-a2a3" or not image["cann_tag"].startswith("9.2.0-")):
-        raise ValueError("The CANN 9.2 patch is only validated for arm-a2a3")
+    if image["patch"] and (
+        not name.startswith("arm-")
+        or not image["cann_tag"].startswith("9.2.0-")
+        or image["patch"] != f"cann92-{image['validation_platform']}-aicpu-class-memaccess"
+    ):
+        raise ValueError(f"The CANN 9.2 patch must match the ARM image platform: {name}")
     for key in ("decode", "allreduce"):
         path_value = image[key]
         if not path_value.startswith("/workspace/pypto-lib/") or ".." in Path(path_value).parts:
@@ -297,6 +301,9 @@ def task_command(state: dict[str, Any], directory: Path, case: str) -> list[str]
         "-e",
         "PYPTO_DRIVER_VERSION_FILE=/run/pypto-driver-version.info",
     ]
+    if image["platform"] == "linux/arm64" and image["validation_platform"] == "a5":
+        # ARM Ascend950 images use URMA for RoCE communication.
+        docker += ["--device", "/dev/ummu", "--device", "/dev/uburma"]
     # The trap removes the container before the queued shell releases its card.
     # always() cleanup is an additional fallback for cancellation/disconnection.
     command = (
