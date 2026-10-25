@@ -10,10 +10,14 @@
 """Public JIT eager dispatch, validated without native device execution."""
 
 import ctypes
+import gc
 import importlib
+import weakref
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pypto.language as pl
+import pypto.torch as pypto_torch
 import pytest
 import torch
 from pypto import CacheConfig
@@ -310,7 +314,7 @@ def prepared(eager, monkeypatch):
             raise RuntimeError("prepare failed")
         return object()
 
-    def enqueue(registration, frame):
+    def enqueue(registration, frame, *, plan=None):
         registration.require_live()
         eager.registrations.append(registration)
         eager.frames.append(frame)
@@ -445,6 +449,210 @@ def test_program_diagnostics_still_rebuild_without_key_lookup(eager, monkeypatch
     scale_eager.compile(x, 2, out)
     scale_eager.compile(x, 2, out)
     assert len(compiled) == 2
+
+
+def test_public_prepare_does_not_execute_and_hot_calls_skip_jit(prepared, monkeypatch):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    ready = pypto_torch.prepare(scale_eager, x, 2.0, out)
+    assert prepared.builds == len(prepared.prepares) == 1
+    assert not prepared.frames and not prepared.registrations
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("A prepared call repeated JIT analysis or signature construction")
+
+    # A timing assertion is noisy; forbidding the work proves it is absent
+    # even when the compiled entry contains a much deeper dependency graph.
+    for name in ("_resolve_compiled", "_resolve_specialization", "_get_source_hash"):
+        monkeypatch.setattr(JITFunction, name, unexpected)
+    monkeypatch.setattr(interop.CallSignature, "__init__", unexpected)
+    assert ready(x, 3.0, out) is out
+    assert ready(out=out, scale=4.0, x=x) is out
+    assert [frame.scalars[0].value for frame in prepared.frames] == [3.0, 4.0]
+    assert prepared.registrations[0] is prepared.registrations[1]
+
+
+def test_public_prepare_reuses_registration_and_publishes_warmup(prepared):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    first = pypto_torch.prepare(scale_eager, x, 2.0, out)
+    second = pypto_torch.prepare(scale_eager, x, 3.0, out)
+    assert prepared.builds == len(prepared.prepares) == 1
+    assert not prepared.frames
+    assert first(x, 4.0, out) is second(x, 5.0, out) is out
+    scale_eager(x, 6.0, out)
+    assert all(reg is prepared.registrations[0] for reg in prepared.registrations)
+    assert len(prepared.state._specializations) == 1
+
+
+def test_public_prepare_rejects_capture_before_build_or_registration(prepared, monkeypatch):
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    with pytest.raises(RuntimeError, match="prepare.*outside.*capture"):
+        pypto_torch.prepare(scale_eager, _tensor((4, 4)), 2.0, _tensor((4, 4)))
+    assert prepared.builds == 0 and not prepared.prepares and not prepared.frames
+
+
+@pytest.mark.parametrize(
+    "kernel,config,message", [(lambda: None, None, "@pl.jit"), (scale_eager, RunConfig(), "CompileOptions")]
+)
+def test_public_prepare_requires_jit_and_compile_options(prepared, kernel, config, message):
+    with pytest.raises(TypeError, match=message):
+        pypto_torch.prepare(kernel, _tensor((4, 4)), 2.0, _tensor((4, 4)), config=config)
+    assert prepared.builds == 0 and not prepared.prepares and not prepared.frames
+
+
+def test_public_prepare_requires_initialized_worker(prepared, monkeypatch):
+    _bind(monkeypatch, None)
+    with pytest.raises(RuntimeError, match=r"call pypto\.torch\.init"):
+        pypto_torch.prepare(scale_eager, _tensor((4, 4)), 2.0, _tensor((4, 4)))
+    assert prepared.builds == 0 and not prepared.prepares and not prepared.frames
+
+
+def test_public_prepared_call_rejects_stale_registration_before_arguments(prepared):
+    ready = pypto_torch.prepare(scale_eager, _tensor((4, 4)), 2.0, _tensor((4, 4)))
+    prepared.state.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        ready()
+    assert not prepared.frames
+
+
+_PREPARED_T = pl.dynamic("T")
+_PREPARED_OFFSET = 1.0
+
+
+@pl.jit
+def dynamic_prepared(
+    x: pl.Tensor[[_PREPARED_T, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[_PREPARED_T, 32], pl.FP32]],
+    value: pl.constexpr,
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        rows = pl.tensor.dim(x, 0)
+        tile = pl.load(x, [0, 0], [32, 32], valid_shape=[rows, 32])
+        pl.store(pl.add(tile, value + _PREPARED_OFFSET), [0, 0], out)
+    return out
+
+
+def test_prepared_freezes_constants_but_accepts_new_dynamic_tensors(prepared, monkeypatch):
+    dynamic_prepared._cache.clear()
+    dynamic_prepared._kernel_contracts.clear()
+    ready = pypto_torch.prepare(dynamic_prepared, _tensor((32, 32)), _tensor((32, 32)), value=2.0)
+    assert not prepared.frames
+    first_registration = ready._registration
+    monkeypatch.setitem(dynamic_prepared._func.__globals__, "_PREPARED_OFFSET", 7.0)
+    for rows in (16, 32):
+        x, out = _tensor((rows, 32)), _tensor((rows, 32))
+        assert ready(x, out) is out
+        assert prepared.registrations[-1] is first_registration
+        assert prepared.frames[-1].tensors[0].metadata.shape == (rows, 32)
+    assert prepared.builds == 1
+    # Explicit freezing is observable: ordinary JIT and a new prepare still
+    # resolve changed constants, while the old callable retains its artifact.
+    fresh = pypto_torch.prepare(dynamic_prepared, x, out, value=2.0)
+    assert fresh._registration is not first_registration
+    assert prepared.builds == 2
+    dynamic_prepared(x, out, value=2.0)
+    assert prepared.registrations[-1] is fresh._registration
+    changed_constexpr = pypto_torch.prepare(dynamic_prepared, x, out, value=3.0)
+    assert changed_constexpr._registration is not fresh._registration
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        ready(x, out, value=3.0)
+
+
+def test_prepare_does_not_retain_sample_tensors_or_scalars(prepared):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scalar = ctypes.c_float(2)
+    references = [weakref.ref(value) for value in (x, out, scalar)]
+    ready = pypto_torch.prepare(scale_eager, x, scalar, out)
+    del x, out, scalar
+    gc.collect()
+    assert all(reference() is None for reference in references)
+    current_out = _tensor((4, 4))
+    assert ready(_tensor((4, 4)), 5.0, current_out) is current_out
+
+
+@pytest.mark.parametrize("invalid", ["missing", "extra", "unknown", "duplicate", "config"])
+def test_prepared_binding_rejects_invalid_calls(prepared, invalid):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    ready = pypto_torch.prepare(scale_eager, x, 2.0, out)
+    args, kwargs = (x, 2.0, out), {}
+    if invalid == "missing":
+        args = (x, 2.0)
+    elif invalid == "extra":
+        args = (x, 2.0, out, 3)
+    elif invalid == "unknown":
+        kwargs = {"unknown": 3}
+    elif invalid == "duplicate":
+        kwargs = {"x": x}
+    else:
+        kwargs = {"config": CompileOptions()}
+    with pytest.raises(TypeError):
+        ready(*args, **kwargs)
+    assert not prepared.frames
+
+
+@pytest.mark.parametrize("invalid", ["shape", "dtype", "strides", "alias", "device", "grad"])
+def test_prepared_revalidates_tensor_contract(prepared, invalid):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    ready = pypto_torch.prepare(scale_eager, x, 2.0, out)
+    if invalid == "shape":
+        x = _tensor((8, 4))
+    elif invalid == "dtype":
+        x = _tensor((4, 4), dtype=torch.int32)
+    elif invalid == "strides":
+        x = x.t()
+    elif invalid == "alias":
+        base = _tensor((5, 4))
+        x, out = base[:4], base[1:]
+    elif invalid == "device":
+        prepared.device = 1
+    else:
+        x.requires_grad_(True)
+    with pytest.raises((TypeError, ValueError)):
+        ready(x, 2.0, out)
+    assert not prepared.frames
+
+
+def test_prepared_rechecks_current_stream_capture_and_scalar(prepared, monkeypatch):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scalar = ctypes.c_float(2)
+    ready = pypto_torch.prepare(scale_eager, x, scalar, out)
+    assert ready(x, scalar, out) is out
+    scalar.value = 9
+    prepared.stream = SimpleNamespace(device=SimpleNamespace(type="npu", index=0), stream_id=37)
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    assert ready(x, scalar, out) is out
+    assert [frame.scalars[0].value for frame in prepared.frames] == [2, 9]
+    assert [frame.stream.stream_id for frame in prepared.frames] == [12, 37]
+    assert [frame.capture_id for frame in prepared.frames] == [0, 42]
+    assert prepared.builds == len(prepared.prepares) == 1
+
+
+def test_prepared_rejects_zero_dynamic_extent_before_submission(prepared):
+    ready = pypto_torch.prepare(dynamic_prepared, _tensor((32, 32)), _tensor((32, 32)), value=2.0)
+    with pytest.raises(ValueError, match="positive u32"):
+        ready(_tensor((0, 32)), _tensor((0, 32)))
+    assert not prepared.frames
+
+
+@pytest.mark.parametrize("stale", ["pid", "generation"])
+def test_prepared_checks_registration_identity(prepared, stale):
+    ready = pypto_torch.prepare(scale_eager, _tensor((4, 4)), 2.0, _tensor((4, 4)))
+    registration = ready._registration
+    invalid = replace(registration, **{stale: getattr(registration, stale) + 1})
+    ready = replace(ready, _registration=invalid)
+    with pytest.raises(RuntimeError, match="live Worker generation"):
+        ready()
+    assert not prepared.frames
+
+
+def test_prepare_failure_does_not_publish_and_can_retry(prepared):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    prepared.fail_prepare = True
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        pypto_torch.prepare(scale_eager, x, 2.0, out)
+    assert not prepared.state._specializations and not prepared.frames
+    prepared.fail_prepare = False
+    ready = pypto_torch.prepare(scale_eager, x, 2.0, out)
+    assert ready(x, 2.0, out) is out
 
 
 if __name__ == "__main__":

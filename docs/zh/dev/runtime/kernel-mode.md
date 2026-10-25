@@ -41,6 +41,47 @@ program(host_x, 3.0, host_out, config=program_config)
 不分配省略的输出。底层显式 Worker API 保留原有内存管理行为。kernel 调用返回 `None` 或 IR
 return alias 指定的原始 Tensor 对象，不分配输出、不额外执行 warmup。
 
+## 准备冻结的 eager callable {#preparing-a-frozen-eager-callable}
+
+使用 `pypto.torch.prepare` 可移除热循环中重复的特化分析（specialization analysis）。
+准备过程要求先执行 `init` 并提供真实 NPU 样本参数，编译并注册一个特化，**不会执行 kernel**：
+
+```python
+ready = pypto.torch.prepare(op, x, 2.0, out)
+ready(x, 3.0, out)
+ready(out=out, x=x, scale=4.0)
+
+# Bind the same prepared entry to the dispatcher, including torch.compile.
+registered = pypto.torch.register(ready, "my_kernels::prepared_op")
+registered(x, 5.0, out)
+```
+
+返回的 `PreparedKernel` 冻结源码及引用的常量、constexpr 绑定、静态维度、dtype/layout
+和实际编译设置，并缓存 ABI 签名以及 native dtype/Scalar 编码器。后续调用跳过 JIT
+依赖发现、源码哈希、特化 key 构造和签名重建。普通 JIT 调用继续使用原有的变化检测语义。
+源码、常量或编译选项变化后，需重新 prepare。诊断输出与缓存策略仅在准备阶段生效，
+不在热调用中重新应用。
+
+样本参数遵循 JIT 签名，包含 constexpr 值。准备后的调用只接收按编译 ABI 顺序排列的
+运行时参数，可按位置或名称传入；所有参数均必填，包括有默认值的 Scalar 和全部
+Out/InOut 缓冲区。例如 `prepare(add_constant, x, out, value=2)` 冻结 constexpr
+`value`，返回的对象使用 `ready(x, out)` 调用。向该对象传入 constexpr 或 `config` 会报错。
+
+复用的只有签名数据。每次调用仍校验当前 Tensor 的 shape、dtype、layout、存储边界、
+可写别名、设备、Scalar 范围，以及绑定 Worker 的 PID/generation；快照当前 stream/capture
+和 Scalar 值，并在提交期间持有 native Tensor/Storage 所有权。支持新分配的 Tensor 和
+动态维度允许的尺寸变化；静态维度变化需要重新准备。准备对象不持有样本 Tensor、设备地址
+或之前的调用帧（call frame），Worker 关闭或进程 fork 后不能继续使用。
+
+准备必须在 graph capture 之外执行，并发布与直接 JIT 调用共享的 warmed registration。
+之后准备对象及其注册算子可使用既有的 graph capture/replay 生命周期集成。与普通捕获调用
+一样，replay 使用捕获时的地址和 Scalar 值。
+
+`register(ready, name)` 从冻结的 ABI 推导 schema，不再执行 JIT 特化；真实设备实现直接
+调用 `ready`。Fake/Meta 校验和供 `torch.compile` 使用的仅变更算子分解
+（mutation-only decomposition）在 Worker 关闭后仍可使用。此注册形式不能传入
+`constexpr` 或 `config`。同一准备对象和名称可以重复注册；不同准备对象需使用不同名称。
+
 ## kernel 执行设置 {#kernel-execution-setup}
 
 执行信息属于进程状态，而不是调用参数：

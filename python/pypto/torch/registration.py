@@ -15,7 +15,7 @@ import inspect
 import keyword
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -24,6 +24,7 @@ from pypto.ir.param_info import _DATATYPE_TO_CTYPE, ParamInfo, _to_torch_dtype, 
 from pypto.pypto_core.ir import ParamDirection
 
 from .interop import _scalar_value
+from .prepared import PreparedKernel
 
 if TYPE_CHECKING:
     from pypto.jit.decorator import JITFunction
@@ -197,14 +198,53 @@ class RegistrationSignature:
         register_fake(f"{library.ns}::{name}", self.fake, lib=library)
 
 
+def _registration_constants(
+    kernel: "JITFunction | PreparedKernel", constexpr: dict[str, Any] | None
+) -> tuple[dict[str, Any], tuple[tuple[str, Any], ...]]:
+    """Snapshot JIT constexpr bindings; a prepared kernel has already frozen them."""
+    from pypto.jit.decorator import _constexpr_params, _resolve_constexpr_value  # noqa: PLC0415
+
+    if isinstance(kernel, PreparedKernel):
+        return {}, ()
+    constants = copy.deepcopy(dict(constexpr or {}))
+    constant_names = _constexpr_params(kernel._func)
+    unknown = set(constants) - set(constant_names)
+    if unknown:
+        raise ValueError(f"Registration bindings must name constexpr parameters, got {sorted(unknown)}")
+    parameters = inspect.signature(kernel._func).parameters
+    for key in constant_names:
+        if key not in constants:
+            if parameters[key].default is inspect.Parameter.empty:
+                raise TypeError(f"Registration requires a value for constexpr parameter {key!r}")
+            constants[key] = copy.deepcopy(parameters[key].default)
+    identity = tuple(
+        (key, _resolve_constexpr_value(kernel.__name__, key, constants[key])) for key in constant_names
+    )
+    return constants, identity
+
+
+@overload
 def register(
     kernel: "JITFunction",
     name: str,
     *,
     constexpr: dict[str, Any] | None = None,
     config: "CompileOptions | None" = None,
+) -> torch._ops.OpOverload: ...
+
+
+@overload
+def register(kernel: PreparedKernel, name: str) -> torch._ops.OpOverload: ...
+
+
+def register(
+    kernel: "JITFunction | PreparedKernel",
+    name: str,
+    *,
+    constexpr: dict[str, Any] | None = None,
+    config: "CompileOptions | None" = None,
 ) -> torch._ops.OpOverload:
-    """Register a fully annotated JIT function as an inference-only torch operator.
+    """Register a JIT function or prepared kernel as an inference-only torch operator.
 
     Registration specializes only frontend IR to derive mutation/return aliases;
     it never builds binaries, needs ``pypto.torch.init`` or initializes a Worker.
@@ -213,13 +253,19 @@ def register(
     validate metadata without device work. All runtime arguments, including every
     Out/InOut tensor, are required by the dispatcher.
 
-    NPU graph capture requires prior execution of each specialization outside
-    capture. Warmup through either this operator or the matching direct JIT call
+    A ``PreparedKernel`` supplies its already frozen ABI instead of specializing
+    frontend IR. Its device entry calls the prepared object directly, with fresh
+    argument validation and no JIT analysis. Do not pass ``constexpr`` or
+    ``config`` for this form; both were fixed during ``prepare``. Re-registering
+    the same object and name is idempotent. Fake/Meta calls need no live Worker.
+
+    NPU graph capture requires each specialization to be prepared or executed
+    outside capture. Warmup through this operator or the matching direct JIT call
     shares the same artifact and registration. Replay uses captured addresses
     and scalar values; update tensor contents in place to supply new input data.
 
     Args:
-        kernel: A JIT function with shaped tensor annotations.
+        kernel: A JIT function with shaped tensor annotations, or a PreparedKernel.
         name: Explicit ``namespace::operator`` name owned by the application.
         constexpr: Fixed constexpr bindings; omitted values use signature defaults.
         config: Optional CompileOptions, part of the operator identity; omitting it
@@ -237,13 +283,17 @@ def register(
             describe a supported kernel schema.
     """
     from pypto.ir._kernel_compile import kernel_signature_for_program  # noqa: PLC0415
-    from pypto.jit.decorator import JITFunction, _constexpr_params, _resolve_constexpr_value  # noqa: PLC0415
+    from pypto.jit.decorator import JITFunction  # noqa: PLC0415
     from pypto.runtime import CompileOptions, RunConfig  # noqa: PLC0415
 
     from . import _registration_state  # noqa: PLC0415
 
-    if not isinstance(kernel, JITFunction):
-        raise TypeError("torch registration requires a @pl.jit function")
+    if not isinstance(kernel, (JITFunction, PreparedKernel)):
+        raise TypeError("torch registration requires a @pl.jit function or PreparedKernel")
+    if isinstance(kernel, PreparedKernel) and (constexpr is not None or config is not None):
+        raise ValueError(
+            "PreparedKernel already freezes constexpr and config; prepare a new kernel to change them"
+        )
     if not isinstance(name, str) or name.count("::") != 1:
         raise ValueError(f"Expected namespace::operator, got {name!r}")
     namespace, operator = name.split("::")
@@ -262,20 +312,7 @@ def register(
         raise ValueError("torch registration does not support CompileOptions.distributed_config")
     # CompileOptions is frozen; None and the default options select the same specialization.
     identity_options = config if config is not None else CompileOptions()
-    constants = copy.deepcopy(dict(constexpr or {}))
-    constant_names = _constexpr_params(kernel._func)
-    unknown = set(constants) - set(constant_names)
-    if unknown:
-        raise ValueError(f"Registration bindings must name constexpr parameters, got {sorted(unknown)}")
-    parameters = inspect.signature(kernel._func).parameters
-    for key in constant_names:
-        if key not in constants:
-            if parameters[key].default is inspect.Parameter.empty:
-                raise TypeError(f"Registration requires a value for constexpr parameter {key!r}")
-            constants[key] = copy.deepcopy(parameters[key].default)
-    constant_identity = tuple(
-        (key, _resolve_constexpr_value(kernel.__name__, key, constants[key])) for key in constant_names
-    )
+    constants, constant_identity = _registration_constants(kernel, constexpr)
 
     with _registration_state.lock:
         existing = _registration_state.registrations.get(name)
@@ -289,9 +326,15 @@ def register(
         if name in occupied or f"{namespace}::{mutation_name}" in occupied:
             raise ValueError(f"Torch operator {name!r} or its internal mutation name is already defined")
 
-        program = kernel.specialize(**constants)
-        # The dispatcher schema is target-independent, so registration may precede init.
-        params, return_aliases = kernel_signature_for_program(program)
+        if isinstance(kernel, PreparedKernel):
+            from .launch import _signature_params  # noqa: PLC0415
+
+            params = _signature_params(kernel._plan.abi)
+            return_aliases = kernel._plan.abi.return_aliases
+        else:
+            program = kernel.specialize(**constants)
+            # JIT registration is target-independent and may precede init.
+            params, return_aliases = kernel_signature_for_program(program)
         signature = RegistrationSignature(params, return_aliases=return_aliases)
         mutation_signature = RegistrationSignature(params)
         library = torch.library.Library(namespace, "FRAGMENT")
@@ -299,9 +342,14 @@ def register(
             mutation_signature.define(library, mutation_name)
 
             def execute(*args: Any) -> None:
-                mutation_signature._validate(args, abstract=False)
-                bound = dict(zip((p.name for p in params), args, strict=True))
-                kernel(**bound, **constants, config=config)
+                if isinstance(kernel, PreparedKernel):
+                    # The prepared CallSignature performs the full real-call
+                    # validation. Keep the metadata-only signature for Fake/Meta.
+                    kernel(*args)
+                else:
+                    mutation_signature._validate(args, abstract=False)
+                    bound = dict(zip((p.name for p in params), args, strict=True))
+                    kernel(**bound, **constants, config=config)
 
             library.impl(mutation_name, execute, "PrivateUse1")
             mutation = getattr(getattr(torch.ops, namespace), mutation_name).default

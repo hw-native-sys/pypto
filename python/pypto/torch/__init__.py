@@ -14,6 +14,7 @@ native launch adapter. Framework-specific dependencies are resolved on demand.
 """
 
 from .execution import begin_dfx, end_dfx, init
+from .prepared import PreparedKernel, prepare
 from .registration import register
 
-__all__ = ["begin_dfx", "end_dfx", "init", "register"]
+__all__ = ["PreparedKernel", "begin_dfx", "end_dfx", "init", "prepare", "register"]
