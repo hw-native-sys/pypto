@@ -2788,6 +2788,24 @@ def ands(lhs: Tile, rhs: int | Expr | Scalar) -> Tile:
     return Tile(expr=call_expr)
 
 
+def interleave(lhs: Tile, rhs: Tile) -> Tile:
+    """Interleave the last dimension of two byte tiles.
+
+    Computes ``out[..., 2*i] = lhs[..., i]`` and ``out[..., 2*i + 1] = rhs[..., i]``;
+    the result's last dimension is ``2 * lhs.shape[-1]``. Both operands must share
+    dtype (INT8 or UINT8) and physical shape. Maps to the VINTLV hardware intrinsic.
+
+    Args:
+        lhs: Left-hand side tile
+        rhs: Right-hand side tile
+
+    Returns:
+        Tile wrapping the interleave operation
+    """
+    call_expr = _ir_ops.interleave(lhs.unwrap(), rhs.unwrap())
+    return Tile(expr=call_expr)
+
+
 def or_(lhs: Tile, rhs: Tile) -> Tile:
     """Element-wise bitwise OR of two tiles.
 
