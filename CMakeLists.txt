@@ -368,6 +368,11 @@ set(PYPTO_SOURCES
     src/codegen/codegen_base.cpp
     src/codegen/orchestration/orchestration_analysis.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
+    src/codegen/orchestration/orchestration_control_flow.cpp
+    src/codegen/orchestration/orchestration_stmt_codegen.cpp
+    src/codegen/orchestration/orchestration_task_deps.cpp
+    src/codegen/orchestration/orchestration_task_dispatch.cpp
+    src/codegen/orchestration/orchestration_tensor_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
     src/codegen/pto/pto_buffer_codegen.cpp

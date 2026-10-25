@@ -27,12 +27,12 @@ The orchestration codegen generates simpler runtime C++ code that manages task-g
 
 | Component | Purpose | Location |
 | --------- | ------- | -------- |
-| `OrchestrationInfoCollector` | IR visitor collecting metadata (tuple maps, tensor assignments) | orchestration_codegen.cpp |
-| `OrchestrationStmtCodegen` | Statement-level C++ code generator (extends CodegenBase) | orchestration_codegen.cpp |
+| `OrchestrationInfoCollector` | IR visitor collecting metadata (tuple maps, tensor assignments) | orchestration_analysis.h / .cpp |
+| `OrchestrationStmtCodegen` | Statement-level C++ code generator (extends CodegenBase) | orchestration_stmt_codegen.h / .cpp |
 | `OrchestrationOpRegistry` | Singleton registry for tensor operation codegen handlers | orchestration_op_registry.h |
 | `GenerateOrchestration()` | Main entry point combining all generation phases | orchestration_codegen.cpp |
-| `VarLineageCollector` | Traces body variables back to function params via VarPtr identity | orchestration_codegen.cpp |
-| `GetSSABaseName()` | Strips SSA/pass-pipeline suffixes for C++ name emission (not identity) | orchestration_codegen.cpp |
+| `VarLineageCollector` | Traces body variables back to function params via VarPtr identity | orchestration_analysis.h / .cpp |
+| `GetSSABaseName()` | Strips SSA/pass-pipeline suffixes for C++ name emission (not identity) | orchestration_analysis.h / .cpp |
 
 ### OrchestrationInfoCollector
 
@@ -50,6 +50,23 @@ The main code generator. Visits each IR statement and emits corresponding C++:
 - **ForStmt** → `for` loop with iter_arg initialization and yield updates
 - **IfStmt** → conditional blocks with `SIMPLER_SCOPE` per branch and return variable handling
 - **YieldStmt** → variable reassignment for loop-carried values
+
+The private `orchestration_stmt_codegen.h` declares the visitor and owns its shared
+state. Its method implementations are organized under `src/codegen/orchestration/`:
+
+| File | Responsibility |
+| ---- | -------------- |
+| `orchestration_codegen.cpp` | Entry/Graph functions, parameter unpacking, and generated-file boilerplate |
+| `orchestration_stmt_codegen.cpp` | Visitor setup, expression rendering, assignment/evaluation, and emit names |
+| `orchestration_control_flow.cpp` | Loops, branches, runtime scopes, and yield/carry handling |
+| `orchestration_task_deps.cpp` | TaskId bindings, cross-scope hoists, dependency arrays, and barriers |
+| `orchestration_task_dispatch.cpp` | Task ABI arguments, launch hints, and direct/Spmd/Group/Graph dispatch |
+| `orchestration_tensor_codegen.cpp` | Tensor allocation batching, storage lifetime checks, and return aliases |
+
+These files implement one visitor instance per emitted function. Scope snapshots,
+TaskId bindings, tensor lifetimes, and name allocation remain on that instance;
+splitting the implementation does not introduce independent state or change emission order.
+The private header is not part of the public C++ API.
 
 ### Operation Registry
 
