@@ -38,6 +38,65 @@ def _run_pass(program: ir.Program) -> ir.Program:
 class TestLowerPipelineMechanics:
     """Before/Expected pairs verifying the cloning + outer-stride rewriting logic."""
 
+    def test_outer_iter_arg_survives_main_and_tail_clones(self):
+        """Both replicated stages and the remainder capture the enclosing state (#3130)."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.pipeline(3, stage=2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                    _result = pl.yield_(old + 16)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.range(0, 2, 2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                        _value_1: pl.Scalar[pl.INDEX] = old + (chunk + 1)
+                    _value_2: pl.Scalar[pl.INDEX] = old + 2
+                    _result = pl.yield_(old + 16)
+                return x
+
+        after = _run_pass(Before)
+        ir.assert_structural_equal(after, Expected)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        assert not passes.PropertyVerifierRegistry.verify(props, after)
+
+    def test_outer_iter_arg_survives_dynamic_pipeline(self):
+        """Runtime trip counts also clone captures into the conditional tail."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, n: pl.Scalar[pl.INDEX]):
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.pipeline(n, stage=2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                    _result = pl.yield_(old + 16)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n: pl.Scalar[pl.INDEX]):
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    main_end: pl.Scalar[pl.INDEX] = 0 + (n - 0) // 2 * 2
+                    for chunk in pl.range(0, main_end, 2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                        _value_1: pl.Scalar[pl.INDEX] = old + (chunk + 1)
+                    rem: pl.Scalar[pl.INDEX] = n - main_end
+                    if rem == 1:
+                        _value_2: pl.Scalar[pl.INDEX] = old + main_end
+                    _result = pl.yield_(old + 16)
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
     def test_clean_divide_produces_replicated_outer_loop(self):
         """trip=8, factor=4 → outer range(0, 8, 4) with 4 clones, no remainder."""
 

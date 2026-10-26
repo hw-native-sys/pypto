@@ -105,6 +105,9 @@ class DeepCloneMutator : public IRMutator {
     // A use of an enclosing loop's carry is external to this subtree, just
     // like an external Var. Cloning it here would create an unbound identity.
     // Local carries are registered at their loop's DefField before any uses.
+    if (!expr_map_.count(op.get()) && pending_iter_args_.count(op.get())) {
+      CloneIterArg(op);
+    }
     return VisitExpr_(std::static_pointer_cast<const Var>(op));
   }
 
@@ -184,6 +187,18 @@ class DeepCloneMutator : public IRMutator {
     expr_map_[op.get()] = fresh;
   }
 
+  /// Discover all loop-owned carries before cloning any of them. A carry's
+  /// type may reference a sibling later in the list; resolve that definition
+  /// lazily without mistaking external captures for locally owned variables.
+  void CloneIterArgs(const std::vector<IterArgPtr>& iter_args) {
+    for (const auto& op : iter_args) {
+      if (op && !expr_map_.count(op.get())) pending_iter_args_.insert(op.get());
+    }
+    for (const auto& op : iter_args) {
+      if (op) CloneIterArg(op);
+    }
+  }
+
   /// Clone a carry only at its definition, remapping its seed and type in the
   /// enclosing scope. Even pre-SSA cloning (clone_def_vars=false) must remap
   /// local loop seeds when an enclosing unrolled index is substituted.
@@ -194,6 +209,7 @@ class DeepCloneMutator : public IRMutator {
     auto new_type = RemapType(op->GetType());
     expr_map_[op.get()] =
         std::make_shared<IterArg>(op->name_hint_, std::move(new_type), std::move(new_init), op->span_);
+    pending_iter_args_.erase(op.get());
   }
 
   /// Remap expressions inside a TypePtr (shape, TileView/TensorView fields, MemRef).
@@ -255,13 +271,13 @@ class DeepCloneMutator : public IRMutator {
         if (var) CloneVar(var);
       }
     } else if constexpr (std::is_same_v<FieldType, std::vector<IterArgPtr>>) {
-      for (const auto& arg : desc.Get(stmt)) {
-        if (arg) CloneIterArg(arg);
-      }
+      CloneIterArgs(desc.Get(stmt));
     }
   }
 
   std::unordered_map<const Var*, ExprPtr> expr_map_;
+  /// Discovered loop definitions not yet cloned; never includes external uses.
+  std::unordered_set<const IterArg*> pending_iter_args_;
   /// Keys present in the caller-supplied seed map; filtered out of GetVarMap()
   /// so only entries created by the clone traversal are returned.
   std::unordered_set<const Var*> seed_keys_;

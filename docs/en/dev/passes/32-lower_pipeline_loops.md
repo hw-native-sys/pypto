@@ -56,6 +56,7 @@ for i in pl.pipeline(64, stage=4):
 For `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F}, start, stop, step, body)` with `F > 1`:
 
 - **Main loop**: stride `F*step`, body is a `SeqStmts` of `F` clones, kind still `ForKind::Pipeline` (marker), attr downgraded to `1`. The (kind, attr) pair stays together so `PipelineLoopValid` holds and the IR survives print/parse round-trip (renders as `pl.pipeline(..., stage=1)`).
+- **Outer captures**: variables and `IterArg`s defined outside the cloned body retain their identity unless explicitly substituted. This also applies to captures in shape/view metadata. Nested `For`/`While` definitions inside the body receive fresh `IterArg`s, with their initializers, types, and uses remapped consistently.
 - **Cloning**: each clone uses `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)`. Fresh def-vars per clone keep SSA intact and give `MemoryReuse` distinct tile identities to work with.
 
 `stage=1` is a no-op trigger: the pass leaves the loop intact (kind and attr stay) and only recurses into the body to lower nested pipelines. `CanonicalizeIOOrder` then scopes on the kept marker, applies the IO reorder, and demotes/strips on exit. The same path handles user-written `pl.pipeline(stage=1)` and the post-lowering output of a `factor>1` invocation — both ask for IO reorder without further replication, so re-running `LowerPipelineLoops` is naturally idempotent.

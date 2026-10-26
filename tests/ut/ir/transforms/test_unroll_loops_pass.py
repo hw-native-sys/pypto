@@ -29,6 +29,64 @@ def _unroll_and_ssa(program):
 class TestBasicUnroll:
     """Tests for basic loop unrolling."""
 
+    def test_unroll_preserves_enclosing_iter_arg(self):
+        """The clone_def_vars=false path must also preserve external loop state."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.unroll(2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                    _result = pl.yield_(old + 16)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    _value: pl.Scalar[pl.INDEX] = old + pl.const(0, pl.INDEX)
+                    _value_1: pl.Scalar[pl.INDEX] = old + pl.const(1, pl.INDEX)
+                    _result = pl.yield_(old + 16)
+                return x
+
+        ir.assert_structural_equal(_unroll_and_ssa(Before), Expected)
+
+    def test_unroll_clones_owned_iter_args(self):
+        """Keeping assignment Vars must not share nested loop definitions between clones."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self):
+                for chunk in pl.unroll(2):
+                    for (state,) in pl.while_(init_values=(chunk,)):
+                        pl.cond(state < 3)
+                        _result = pl.yield_(state + 1)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self):
+                for (state,) in pl.while_(init_values=(pl.const(0, pl.INDEX),)):
+                    pl.cond(state < 3)
+                    _result = pl.yield_(state + 1)
+                for (state_1,) in pl.while_(init_values=(pl.const(1, pl.INDEX),)):
+                    pl.cond(state_1 < 3)
+                    _result_1 = pl.yield_(state_1 + 1)
+
+        # Unroll deliberately shares ordinary return Vars until ConvertToSSA.
+        # Check the final SSA form; printing/reparsing the intermediate shared
+        # loop return definitions cannot preserve their pointer identity.
+        with passes.PassContext([]):
+            after = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(after, Expected)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        assert not passes.PropertyVerifierRegistry.verify(props, after)
+
     def test_simple_unroll(self):
         """Unroll a simple loop with 3 iterations."""
 

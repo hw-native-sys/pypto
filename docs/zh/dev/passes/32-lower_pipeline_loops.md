@@ -53,6 +53,7 @@ for i in pl.pipeline(64, stage=4):
 对于 `attrs_["pipeline_stages"] = F`（`F > 1`）的循环：
 
 - **主循环**：步长为 `F*step`，循环体为 `F` 份副本组成的 `SeqStmts`，kind 仍为 `ForKind::Pipeline`，属性下调为 `1`（降级后的标记位）。kind 与属性成对保留以维持 `PipelineLoopValid` 不变量，使 IR 在 print/parse 往返中保持一致（输出形式为 `pl.pipeline(..., stage=1)`）。
+- **外部捕获（outer captures）**：定义在克隆体外的变量和 `IterArg` 保留原身份，除非显式提供替换映射；shape/view 元数据中的捕获也遵循此规则。循环体内嵌套的 `For`/`While` 定义获得新鲜 `IterArg`，其初始值、类型和使用处保持一致的重映射。
 - **克隆细节**：每份副本通过 `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)` 生成。每个副本拥有新鲜的定义变量，既保持 SSA，又给 `MemoryReuse` 提供独立的 tile 身份。
 
 `stage=1` 是无操作触发：本 Pass 保留循环原样（kind 与属性都不动），仅递归进入循环体处理嵌套 pipeline。`CanonicalizeIOOrder` 随后基于该标记位完成 IO 重排并降级 kind / 移除属性。用户手写的 `pl.pipeline(stage=1)` 与 `factor>1` 路径输出后的循环走相同流程 —— 都需要 IO 重排但无需进一步复制；这也使再次运行 `LowerPipelineLoops` 自然幂等。
