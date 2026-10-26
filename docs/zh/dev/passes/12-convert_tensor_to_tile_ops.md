@@ -678,7 +678,21 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现**：`src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp`
+**Pass 入口**：`src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` 保留
+程序级阶段顺序、方向传播、携带值修复及 `IncoreTileOps` 验证器。
+私有实现位于 `src/ir/transforms/tensor_to_tile/`：
+
+| 文件 | 职责 |
+| ---- | ---- |
+| `incore_conversion.cpp` | 消费端/值流分析、操作数加载和桥接、算子转换及返回值存储物化 |
+| `gm_access.cpp` | 标量更新规范化、GM 别名/访问分析、混合存储诊断及参数方向升级 |
+| `output_propagation.cpp` | 包装函数输出传播和调用方存储分配，包括 Call/Submit 形状替换 |
+| `type_propagation.cpp` | 赋值、循环及分支共用的 SSA 类型传播 |
+| `internal.h`, `type_propagation.h` | 私有阶段接口及共享 mutator 声明 |
+
+每次内核转换统一拥有其分析器和 mutator 状态。共享 mutator 在自身生命周期内
+保留被映射的原始变量；将方法移至类外定义不改变这一所有权。
+Pass API 和转换注册表保持不变。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 

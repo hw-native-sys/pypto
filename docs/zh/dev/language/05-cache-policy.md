@@ -284,7 +284,7 @@ a5 并不是"缺一个 offset 等着填"：它根本没有第二份映射可寻�
 | DSL | `python/pypto/language/op/tensor_ops.py`（`set_cache_policy`）、`python/pypto/language/op/_tile_memory.py`（`load(cache=...)`） |
 | Parser | `python/pypto/language/parser/ast_parser.py`（标记提升 + 各项拒绝） |
 | 外提 | `src/ir/transforms/utils/scope_outline_utils.cpp` |
-| 下沉 | `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` |
+| 下沉 | `src/ir/transforms/tensor_to_tile/incore_conversion.cpp` |
 | Printer | `src/ir/transforms/python_printer_stmt.cpp`（`PrintScopeCachePolicyStmts`） |
 | Codegen | `src/backend/common/pto_ops_memory.cpp`（`MakeTileLoadCodegenPTO`） |
 | 合成参数 | `src/codegen/pto/pto_codegen.cpp`（`MemRefCollectorVisitor::UsesL2BypassLoad`、签名发射） |

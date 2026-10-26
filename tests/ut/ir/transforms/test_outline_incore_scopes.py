@@ -1417,7 +1417,7 @@ class Expected:
 
         The outliner's direction does not stay local: ``ConvertTensorToTileOps``
         propagates a callee ``InOut`` onto the caller's parameter
-        (convert_tensor_to_tile_ops_pass.cpp:2677-2678). So a false ``InOut`` on
+        (convert_tensor_to_tile_ops_pass.cpp, Phase 3). So a false ``InOut`` on
         the outlined InCore kernel rewrites the *chip-level* formal from ``Out``
         to ``InOut`` — and that formal is exactly what
         ``DistributedCodegen::EmitCallToWorker`` reads to tag each per-rank chip

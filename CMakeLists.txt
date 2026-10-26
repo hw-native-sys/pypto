@@ -206,6 +206,10 @@ set(PYPTO_SOURCES
     src/ir/transforms/memory_reuse/yield_fixup.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
+    src/ir/transforms/tensor_to_tile/gm_access.cpp
+    src/ir/transforms/tensor_to_tile/incore_conversion.cpp
+    src/ir/transforms/tensor_to_tile/output_propagation.cpp
+    src/ir/transforms/tensor_to_tile/type_propagation.cpp
     src/ir/transforms/synthesize_allreduce_signals_pass.cpp
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp

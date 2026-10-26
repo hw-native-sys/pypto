@@ -768,7 +768,23 @@ re-declared seed could not name it.
 
 **Header**: `include/pypto/ir/transforms/passes.h`
 
-**Implementation**: `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp`
+**Pass entry**: `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` retains
+program-level phase ordering, direction propagation, carry repair, and the
+`IncoreTileOps` verifier. Private implementations live in
+`src/ir/transforms/tensor_to_tile/`:
+
+| File | Responsibility |
+| ---- | -------------- |
+| `incore_conversion.cpp` | Consumer/value-flow analysis, operand loads and bridges, op conversion, and return storage materialization |
+| `gm_access.cpp` | Scalar-update canonicalization, GM alias/access analysis, mixed-store diagnostics, and parameter direction upgrades |
+| `output_propagation.cpp` | Wrapper output propagation and caller storage allocation, including Call/Submit shape substitution |
+| `type_propagation.cpp` | Shared SSA type propagation through assignments, loops, and branches |
+| `internal.h`, `type_propagation.h` | Private stage contracts and the shared mutator declaration |
+
+Each kernel conversion owns its analyses and mutator state together. The shared
+mutator retains mapped-from variables for its lifetime; moving its methods out of
+line does not change that ownership. The pass API and conversion registry remain
+unchanged.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
