@@ -238,6 +238,91 @@ def test_tensor_matmul_respects_out_dtype():
     assert "torch.matmul(a, b).to(torch.float32)" in code
 
 
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+@pytest.mark.parametrize(
+    "op_name", ["tensor.matmul", "tensor.matmul_acc", "tile.matmul", "tile.matmul_acc", "tile.matmul_bias"]
+)
+def test_hf32_matmul_reference_rounds_inputs_per_operation(mode, op_name):
+    """HF32 must round both inputs, while bias/accumulator and later FP32 ops stay exact."""
+    tensor_op = op_name.startswith("tensor.")
+    var = _tensor_var if tensor_op else _tile_var
+    a, b = var("a", [2, 2]), var("b", [2, 2])
+    seed = var("seed", [1, 2] if op_name.endswith("bias") else [2, 2])
+    init = _scalar("init", DataType.BOOL)
+    params = [a, b]
+    args: list[ir.Expr] = [a, b]
+    if op_name.endswith("acc"):
+        args = [seed, a, b, init]
+        params += [seed, init]
+    elif op_name.endswith("bias"):
+        args += [seed]
+        params += [seed]
+    # Exercise transposed, noncontiguous Tensor inputs as well as Tile handlers.
+    kwargs = {"a_trans": True, "b_trans": True} if tensor_op else {}
+    call = _op_call(op_name, args, {**kwargs, "tf32_mode": mode})
+    result, plain = var("result", [2, 2]), var("plain", [2, 2])
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(result, call, _span()),
+            ir.AssignStmt(plain, _op_call(op_name.split(".")[0] + ".matmul", [a, b], kwargs), _span()),
+            ir.ReturnStmt([result, plain], _span()),
+        ],
+        _span(),
+    )
+    namespace = {}
+    exec(torch_codegen(_simple_function("hf32", params, body, [result.type, plain.type])), namespace)  # noqa: S102
+    lhs = torch.tensor([[1 + 2**-11, -1], [-1 - 3 * 2**-11, 1]], dtype=torch.float32)
+    rhs = torch.tensor([[1024, 1 + 2**-11], [1024, 1 + 3 * 2**-11]], dtype=torch.float32)
+    # Hand-rounded ties include positive/negative values and even/odd retained LSBs.
+    rounded_one = 1 if mode == "round_even" else 1 + 2**-10
+    rounded_lhs = torch.tensor([[rounded_one, -1], [-1 - 2**-9, 1]])
+    rounded_rhs = torch.tensor([[1024, rounded_one], [1024, 1 + 2**-9]])
+    product = rounded_lhs @ rounded_rhs
+    plain_expected = lhs @ rhs
+    seed_data = torch.full((1, 2) if op_name.endswith("bias") else (2, 2), 3 + 2**-11)
+    for initialize in (False, True):
+        inputs: list[Any] = [lhs.T, rhs.T] if tensor_op else [lhs, rhs]
+        expected = product
+        if op_name.endswith("acc"):
+            inputs += [seed_data, initialize]
+            expected = product if initialize else seed_data + product
+        elif op_name.endswith("bias"):
+            inputs += [seed_data]
+            expected = product + seed_data
+        actual, plain_actual = namespace["hf32"](*inputs)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(plain_actual, plain_expected, rtol=0, atol=0)
+        assert actual.dtype == torch.float32
+
+
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+def test_hf32_rounding_boundaries(mode):
+    """Rounding must preserve special values and carry across fraction/exponent boundaries."""
+    namespace = {}
+    exec(torch_codegen_module._PREAMBLE, namespace)  # noqa: S102
+    values = torch.tensor(
+        [
+            0.0,
+            -0.0,
+            float("inf"),
+            -float("inf"),
+            float("nan"),
+            2 - 2**-11,
+            1 + 2**-12,
+            1 + 3 * 2**-12,
+            -1 - 2**-11,
+            -1 - 3 * 2**-11,
+        ]
+    )
+    negative_tie = -1 if mode == "round_even" else -1 - 2**-10
+    expected = torch.tensor(
+        [0.0, -0.0, float("inf"), -float("inf"), float("nan"), 2, 1, 1 + 2**-10, negative_tie, -1 - 2**-9]
+    )
+    actual = namespace["_hf32_round"](values, mode)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+    assert torch.equal(torch.signbit(actual[:2]), torch.signbit(values[:2]))
+
+
 def test_tensor_cast():
     """tensor.cast should emit .to(dtype)."""
     a = _tensor_var("a", [64])

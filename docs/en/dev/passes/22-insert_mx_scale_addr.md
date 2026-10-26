@@ -39,15 +39,17 @@ Walk each InCore-variant body. For every `tile.matmul_mx` / `tile.matmul_mx_acc`
 
 1. Pair data/scale operand indices (`(0,1)/(2,3)` for `matmul_mx` / `_bias`; `(1,2)/(3,4)` for `_acc`).
 2. Require Var-like operands (`Var` or `IterArg`) whose memory spaces already form a legal LeftScale↔Left or RightScale↔Right pair.
-3. Insert `tile.tget_scale_addr(scale, data)` immediately before the matmul and rewrite the matmul to consume the bound scale SSA.
+3. Reuse the latest binding on that side only if both SSA operands are unchanged and no invalidating operation intervened. Otherwise insert `tile.tget_scale_addr(scale, data)` immediately before the matmul. Rewrite the matmul to consume the bound scale SSA.
 
 `NormalizedStmtStructure` may unwrap a single-statement `SeqStmts`, leaving a bare `AssignStmt` as an `if` / `for` / `while` (or function) body. The pass wraps that body into a `SeqStmts` when it inserts bindings, matching the bare-body handling in `InsertCommFence`.
 
-### No cross-consumer reuse
+### Conservative binding reuse
 
-`tget_scale_addr` mutates the physical scale buffer address in place (`dst_addr = src_addr >> SHIFT_MX_ADDR`). Ordinary SSA aliases, view aliases, and the bound result may all share that buffer, so SSA identity cannot prove that a cached binding is still live. The pass therefore emits a fresh binding for every MX matmul consumer.
+`tget_scale_addr` mutates the physical scale buffer address in place (`dst_addr = src_addr >> SHIFT_MX_ADDR`). Repeating an unchanged binding after a scale consumer makes PTOAS attempt to hoist it across that consumer to the original Mat→Scale fill, which PTOAS 0.70 rejects. The pass therefore retains only the latest scale/data binding for each of the Left and Right sides within straight-line code.
 
-This rule also applies when the scale operand is already the bound result of an earlier `tget_scale_addr`: that result aliases the same mutable buffer and cannot prove that no intervening alias changed its address. Consequently, repeated pass execution conservatively adds another binding layer; the standard lowering pipeline runs the pass once.
+SSA identity alone is insufficient because aliases may share a mutable buffer. A different pair replaces that side's state; any non-MX operation taking or producing a Left/LeftScale or Right/RightScale tile invalidates the corresponding side. Unknown calls and control-flow boundaries clear both sides. Mat loads and Acc stores do not invalidate these bindings. State tracking takes constant space and preserves the pass's linear traversal.
+
+An explicit earlier `tget_scale_addr` also invalidates the state. Consequently, repeated pass execution conservatively adds another binding layer; the standard lowering pipeline runs the pass once.
 
 ## Related
 

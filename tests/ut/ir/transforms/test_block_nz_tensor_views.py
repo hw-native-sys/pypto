@@ -1691,13 +1691,12 @@ def test_store_layout_is_independent_of_arity_and_tile_configuration(layout, par
 
 
 @pytest.mark.usefixtures("ascend_backend")
-def test_registered_rebuild_remaps_canonical_kwargs_attrs_and_span():
+def test_registered_rebuild_remaps_operand_attrs_and_span():
     """Rebuilt MAD metadata must follow clone and narrowing in the same SSA.
 
-    Matmul has an open metadata schema, unlike store's closed kwargs. PTOAS's
-    canonical compatibility path retains the rebuilt MAD calls, letting this
-    check observe their Expr-valued kwargs without expanding the K emitter's
-    separate metadata policy.
+    Matmul's kwargs declare its precision contract. Expression-valued metadata
+    lives in Call.attrs; PTOAS's canonical compatibility path must remap those
+    references when it rebuilds and narrows the MAD calls.
     """
     before = _run(_wide_acc_nz_program(column_offset=8, split_k=True))
     seed = next(
@@ -1717,14 +1716,12 @@ def test_registered_rebuild_remaps_canonical_kwargs_attrs_and_span():
             return ir.Call(
                 op.op,
                 op.args,
+                op.kwargs,
                 {
-                    **op.kwargs,
+                    **op.attrs,
                     "lhs_ref": op.args[1],
                     "rhs_ref": op.args[2],
-                    "carry_ref": op.args[0],
-                    "seed_ref": seed,
                 },
-                {**op.attrs, "lhs_ref": op.args[1], "rhs_ref": op.args[2]},
                 op.type,
                 source_span,
             )
@@ -1741,14 +1738,11 @@ def test_registered_rebuild_remaps_canonical_kwargs_attrs_and_span():
     ]
     assert calls
     for call in calls:
-        for key, position in (("carry_ref", 0), ("lhs_ref", 1), ("rhs_ref", 2)):
-            assert call.kwargs[key].same_as(call.args[position])
-        assert call.attrs["lhs_ref"].same_as(call.args[1])
-        assert call.attrs["rhs_ref"].same_as(call.args[2])
+        for key, position in (("lhs_ref", 1), ("rhs_ref", 2)):
+            assert call.attrs[key].same_as(call.args[position])
         carry = call.args[0]
         assert isinstance(carry, ir.IterArg)
-        assert call.kwargs["seed_ref"].same_as(carry.initValue)
-        assert not call.kwargs["seed_ref"].same_as(seed)
+        assert not carry.initValue.same_as(seed)
         assert _shape_values(call) == [64, _shape_values(call.args[2])[1]]
         assert _shape_values(call)[1] < 2048
         assert call.span.filename == source_span.filename

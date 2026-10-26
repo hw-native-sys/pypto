@@ -110,19 +110,22 @@ def tmov_x2zz(
 # ============================================================================
 
 
-def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def matmul(lhs: Expr, rhs: Expr, span: Span | None = None, *, tf32_mode: str | None = None) -> Call:
     """Matrix multiplication of two tiles.
 
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.matmul", [lhs, rhs], {}, actual_span)
+    kwargs = {} if tf32_mode is None else {"tf32_mode": tf32_mode}
+    return _ir_core.create_op_call("tile.matmul", [lhs, rhs], kwargs, actual_span)
 
 
 def matmul_acc(
@@ -132,6 +135,7 @@ def matmul_acc(
     span: Span | None = None,
     *,
     init_cond: Expr | None = None,
+    tf32_mode: str | None = None,
 ) -> Call:
     """Matrix multiplication with accumulation.
 
@@ -151,16 +155,21 @@ def matmul_acc(
         rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
         init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
     args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
-    return _ir_core.create_op_call("tile.matmul_acc", args, {}, actual_span)
+    kwargs = {} if tf32_mode is None else {"tf32_mode": tf32_mode}
+    return _ir_core.create_op_call("tile.matmul_acc", args, kwargs, actual_span)
 
 
-def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Call:
+def matmul_bias(
+    lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None, *, tf32_mode: str | None = None
+) -> Call:
     """Matrix multiplication with bias add: C = lhs @ rhs + bias.
 
     Args:
@@ -169,12 +178,15 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
         bias: Bias tile (TileType [1, N]) with the accumulator dtype (FP32 for
             floating-point matrix operands, INT32 for integer matrix operands)
         span: Optional source span for debugging (auto-captured if not provided)
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with bias
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], {}, actual_span)
+    kwargs = {} if tf32_mode is None else {"tf32_mode": tf32_mode}
+    return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], kwargs, actual_span)
 
 
 def matmul_mx(

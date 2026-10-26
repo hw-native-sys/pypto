@@ -17,6 +17,7 @@
 #include <string>
 
 #include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
@@ -26,6 +27,9 @@ namespace codegen {
 
 /// Convert DataType to MLIR type string (e.g., FP32 -> "f32", INT32 -> "i32")
 std::string DataTypeToMLIR(DataType dtype);
+
+/// Emit an opt-in per-matmul HF32 attribute, rejecting unsupported targets.
+std::string FormatMatmulTf32Attr(const ir::CallPtr& call, const std::string& target_arch);
 
 /// Convert MemorySpace to PTO address space string (e.g., Vec -> "vec", DDR -> "gm")
 std::string MemorySpaceToMLIR(ir::MemorySpace space);

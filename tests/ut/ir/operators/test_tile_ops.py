@@ -9520,5 +9520,32 @@ def test_packed_fp4_extract_and_assemble_native_boundaries(dtype):
         tile.extract(mat, 0, 0, [16, 64], target_memory=ir.MemorySpace.Right)
 
 
+@pytest.mark.parametrize("namespace", ["tensor", "tile"])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize(
+    "mode,dtype,rank,message",
+    [
+        ("nearest", DataType.FP32, 2, "tf32_mode must be"),
+        ("", DataType.FP32, 2, "tf32_mode must be"),
+        ("round_even", DataType.FP16, 2, "requires FP32"),
+        ("round_away", DataType.BF16, 2, "requires FP32"),
+        ("round_even", DataType.FP32, 3, "requires 2D"),
+    ],
+)
+def test_matmul_tf32_mode_rejects_unsupported_inputs(namespace, accumulate, mode, dtype, rank, message):
+    span = ir.Span.unknown()
+    type_cls = ir.TensorType if namespace == "tensor" else ir.TileType
+    shape = [32] * rank
+    lhs = ir.Var("lhs", type_cls(shape, dtype), span)
+    rhs = ir.Var("rhs", type_cls(shape, dtype), span)
+    ops = ir.op.tensor if namespace == "tensor" else ir.op.tile
+    with pytest.raises(ValueError, match=message):
+        if accumulate:
+            acc = ir.Var("acc", type_cls(shape, DataType.FP32), span)
+            ops.matmul_acc(acc, lhs, rhs, tf32_mode=mode)
+        else:
+            ops.matmul(lhs, rhs, tf32_mode=mode)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

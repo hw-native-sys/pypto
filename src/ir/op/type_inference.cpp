@@ -531,6 +531,21 @@ void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const s
       << ". Write a comparison such as `k == 0` rather than passing the index itself.";
 }
 
+void CheckMatmulTf32Mode(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType lhs,
+                         DataType rhs, size_t lhs_rank, size_t rhs_rank, const Span& span,
+                         const std::string& op_name) {
+  for (const auto& [key, value] : kwargs) {
+    if (key != "tf32_mode") continue;
+    const auto mode = AnyCast<std::string>(value, "tf32_mode");
+    CHECK_SPAN(mode == "round_even" || mode == "round_away", span)
+        << op_name << " tf32_mode must be 'round_even' or 'round_away', got '" << mode << "'";
+    CHECK_SPAN(lhs == DataType::FP32 && rhs == DataType::FP32, span)
+        << op_name << " tf32_mode requires FP32 lhs and rhs operands";
+    CHECK_SPAN(lhs_rank == 2 && rhs_rank == 2, span)
+        << op_name << " tf32_mode currently requires 2D operands";
+  }
+}
+
 DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs) {
   return (lhs.IsFloat() && rhs.IsFloat()) ? DataType::FP32 : DataType::INT32;
 }

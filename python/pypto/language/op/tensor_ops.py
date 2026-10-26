@@ -724,6 +724,8 @@ def matmul(
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor:
     """Matrix multiplication with optional transpose.
 
@@ -743,13 +745,17 @@ def matmul(
         a_trans: Whether to transpose lhs (requires a 2D+ lhs)
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul operation
     """
     lhs_expr = lhs.unwrap()
     rhs_expr = rhs.unwrap()
-    call_expr = _ir_ops.matmul(lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz)
+    call_expr = _ir_ops.matmul(
+        lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz, tf32_mode=tf32_mode
+    )
     return Tensor(expr=call_expr)
 
 
@@ -831,6 +837,8 @@ def matmul_acc(
     a_trans: bool = False,
     b_trans: bool = False,
     init_cond: BoolLike | None = None,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor:
     """Matrix multiplication with accumulation: acc += lhs @ rhs.
 
@@ -854,6 +862,8 @@ def matmul_acc(
         a_trans: Whether to transpose lhs
         b_trans: Whether to transpose rhs
         init_cond: Optional predicate selecting overwrite over accumulate
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul_acc operation
@@ -865,6 +875,7 @@ def matmul_acc(
         a_trans,
         b_trans,
         init_cond=predicate_to_expr(init_cond),
+        tf32_mode=tf32_mode,
     )
     return Tensor(expr=call_expr)
 

@@ -628,11 +628,30 @@ def _buffer_extract(source, row, column, destination):
     data = _buffer_active(source)[int(row):int(row) + rows, int(column):int(column) + cols]
     _buffer_write(destination, data)
 
-def _buffer_matmul(lhs, rhs, destination, accumulate):
+def _hf32_round(value, mode):
+    # HF32 keeps FP32's exponent and ten fraction bits. Drop thirteen fraction
+    # bits, with a half-ULP bias adjusted by the retained LSB for ties-to-even.
+    # Integer rounding handles both signs without changing inputs or global
+    # Torch precision settings. Preserve infinities and NaNs before bit carries.
+    bits = value.contiguous().view(torch.int32)
+    if mode == "round_even":
+        bias = 4095 + ((bits >> 13) & 1)
+    elif mode == "round_away":
+        bias = 4096
+    else:
+        raise ValueError(f"Unsupported HF32 rounding mode: {mode!r}")
+    rounded = ((bits + bias) & -8192).view(torch.float32)
+    return torch.where(torch.isfinite(value), rounded, value)
+
+def _hf32_matmul(lhs, rhs, mode):
+    return torch.matmul(_hf32_round(lhs, mode), _hf32_round(rhs, mode))
+
+def _buffer_matmul(lhs, rhs, destination, accumulate, tf32_mode=None):
     left = _buffer_active(lhs)
     right = _buffer_active(rhs)[:left.shape[1]]
     dtype = torch.int32 if lhs.dtype == torch.int8 else torch.float32
-    product = left.to(dtype) @ right.to(dtype)
+    product = (left.to(dtype) @ right.to(dtype) if tf32_mode is None
+               else _hf32_matmul(left, right, tf32_mode))
     if accumulate:
         product = product + _buffer_active(destination)
     _buffer_write(destination, product)
@@ -771,13 +790,21 @@ def _noop(comment: str = "") -> OpHandler:
     return lambda _a, _kw: f"None  # {comment}" if comment else "None"
 
 
+def _matmul_expr(lhs: str, rhs: str, kw: dict[str, Any]) -> str:
+    """Round only the multiplicands when an operation requests HF32."""
+    mode = kw.get("tf32_mode")
+    if mode is not None:
+        return f"_hf32_matmul({lhs}, {rhs}, {mode!r})"
+    return f"torch.matmul({lhs}, {rhs})"
+
+
 def _handle_tensor_matmul(a: list[str], kw: dict[str, Any]) -> str:
     lhs, rhs = a[0], a[1]
     if kw.get("a_trans"):
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    expr = f"torch.matmul({lhs}, {rhs})"
+    expr = _matmul_expr(lhs, rhs, kw)
     out_dtype = kw.get("out_dtype")
     if isinstance(out_dtype, DataType):
         expr = f"{expr}.to({_torch_dtype(out_dtype)})"
@@ -823,16 +850,16 @@ def _handle_tensor_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    expr = _acc_expr(acc, f"torch.matmul({lhs}, {rhs})", _init_cond_arg(a, 3))
+    expr = _acc_expr(acc, _matmul_expr(lhs, rhs, kw), _init_cond_arg(a, 3))
     out_dtype = kw.get("out_dtype")
     if isinstance(out_dtype, DataType):
         expr = f"{expr}.to({_torch_dtype(out_dtype)})"
     return expr
 
 
-def _tile_matmul_acc(a: list[str], _kw: dict[str, Any]) -> str:
+def _tile_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
     """Accumulating tile matmul; `.float()` matches hardware FP32 accumulation."""
-    return _acc_expr(a[0], f"torch.matmul({a[1]}, {a[2]}).float()", _init_cond_arg(a, 3))
+    return _acc_expr(a[0], f"{_matmul_expr(a[1], a[2], kw)}.float()", _init_cond_arg(a, 3))
 
 
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
@@ -1235,11 +1262,11 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.cmps"] = _handle_cmp
 
     # tile matmul variants — .float() to match hardware FP32 accumulation output
-    m["tile.matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    m["tile.matmul"] = lambda a, kw: f"{_matmul_expr(a[0], a[1], kw)}.float()"
     m["tile.batch_matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.matmul_acc"] = _tile_matmul_acc
     m["tile.batch_matmul_acc"] = _tile_matmul_acc
-    m["tile.matmul_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
+    m["tile.matmul_bias"] = lambda a, kw: f"({_matmul_expr(a[0], a[1], kw)}.float() + {a[2]})"
     m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = _tile_matmul_acc
     m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
@@ -1267,8 +1294,8 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["buffer.set_validshape"] = lambda a, _kw: f"_buffer_set_valid({a[0]}, {a[1]})"
     m["buffer.copy"] = lambda a, _kw: f"_buffer_copy({', '.join(a)})"
     m["buffer.extract"] = lambda a, _kw: f"_buffer_extract({', '.join(a)})"
-    m["buffer.matmul"] = lambda a, _kw: f"_buffer_matmul({', '.join(a)}, False)"
-    m["buffer.matmul_acc"] = lambda a, _kw: f"_buffer_matmul({', '.join(a)}, True)"
+    m["buffer.matmul"] = lambda a, kw: f"_buffer_matmul({', '.join(a)}, False, {kw.get('tf32_mode')!r})"
+    m["buffer.matmul_acc"] = lambda a, kw: f"_buffer_matmul({', '.join(a)}, True, {kw.get('tf32_mode')!r})"
     # Evaluate all inputs before copy_ so exact source/destination aliases remain safe.
     for suffix in (
         "add",

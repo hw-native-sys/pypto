@@ -94,6 +94,58 @@ def test_fp32_matmul_clears_inherited_hf32(test_config, monkeypatch, split_k):
         torch.testing.assert_close(out, a @ b, rtol=1e-3, atol=1e-3)
 
 
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+@pytest.mark.parametrize("split_k", [False, True], ids=["matmul", "matmul_acc"])
+def test_hf32_rounding_and_fp32_restoration(test_config, mode, split_k):
+    """Halfway inputs distinguish both rounding modes and detect leaked HF32 state."""
+
+    @pl.jit
+    def kernel(
+        a: pl.Tensor[[32, 64], pl.FP32],
+        b: pl.Tensor[[64, 32], pl.FP32],
+        hf: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        fp: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            if split_k:
+                acc = pl.create_tensor([32, 32], dtype=pl.FP32)
+                for k in pl.range(0, 64, 32):
+                    av = a[:, k : k + 32]
+                    bv = b[k : k + 32, :]
+                    acc = pl.matmul_acc(acc, av, bv, init_cond=(k == 0), tf32_mode=mode)
+            else:
+                acc = pl.matmul(a, b, tf32_mode=mode)
+            hf[:] = acc
+            fp[:] = pl.matmul_acc(acc, a, b)
+        return hf, fp
+
+    if test_config.codegen_only:
+        kernel.compile(config=test_config)
+        return
+
+    # Positive and negative halfway values, with both even and odd retained
+    # mantissas. Every output has exactly two nonzero products, so the golden
+    # is independent of the hardware's reduction order.
+    values = torch.tensor([1 + 2**-11, 1 + 3 * 2**-11, -1 - 2**-11, -1 - 3 * 2**-11])
+    rounded = torch.tensor([1.0, 1 + 2**-9, -1.0, -1 - 2**-9])
+    rhs_rounded = 1.0
+    if mode == "round_away":
+        rounded = torch.tensor([1 + 2**-10, 1 + 2**-9, -1 - 2**-10, -1 - 2**-9])
+        rhs_rounded = 1 + 2**-10
+    a = values.repeat(8).reshape(32, 1).expand(32, 64).contiguous()
+    b = torch.eye(32).repeat(2, 1) * (1 + 2**-11)
+    expected_hf = (2 * rounded.repeat(8) * rhs_rounded).reshape(32, 1).expand(32, 32)
+    expected_fp = (2 * values.repeat(8) * (1 + 2**-11)).reshape(32, 1).expand(32, 32)
+    expected_fp = expected_hf + expected_fp
+    hf = torch.empty(32, 32)
+    fp = torch.empty(32, 32)
+    for _ in range(2):
+        kernel(a, b, hf, fp, config=test_config)
+        torch.testing.assert_close(hf, expected_hf, rtol=0, atol=0)
+        torch.testing.assert_close(fp, expected_fp, rtol=0, atol=0)
+
+
 @pl.jit
 def explicit_valid_shape_matmul(
     a: pl.Tensor[[17, 128], pl.FP16],

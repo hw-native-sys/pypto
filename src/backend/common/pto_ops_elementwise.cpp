@@ -38,6 +38,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -283,7 +284,11 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
       return "";
     }
   }
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  const auto tf32_attr =
+      (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias"))
+          ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
+          : "";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + tf32_attr);
   return "";
 }
 
@@ -416,7 +421,8 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   if (high_precision) {
     code += " {precisionType = #pto<";
     code += attr_kind;
-    code += " high_precision>}";
+    // PTOAS 0.70 names the former division HighPrecision selector DiffCompensation.
+    code += ir::IsOp(op, "tile.div") ? " diff_compensation>}" : " high_precision>}";
     codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
   }
   codegen.Emit(code);
@@ -1287,7 +1293,10 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
-      const std::string acc_phase = GemvAccPhaseAttr(op);
+      const std::string attrs =
+          ir::IsOp(op, "tile.matmul_acc")
+              ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
+              : GemvAccPhaseAttr(op);
 
       // ins() carries the accumulator only on the accumulating form; the
       // initializing form reads lhs/rhs alone and writes dst from scratch.
@@ -1323,7 +1332,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
         }
         inst << ") outs(" << dst;
         if (!dst_type.empty()) inst << " : " << dst_type;
-        inst << ")" << acc_phase;
+        inst << ")" << attrs;
         return inst.str();
       };
 

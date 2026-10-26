@@ -105,6 +105,8 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   CHECK(rhs_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
 
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_type->shape_.size(),
+                      rhs_type->shape_.size(), args[0]->span_, op_name);
   auto geometry = DeduceMatmulProductInfo(lhs_type, rhs_type, op_name);
 
   // Acc layout (Nz), taken from the destination space's implicit layout rather
@@ -142,6 +144,8 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   CHECK(rhs_type) << "The operator " << op_name << " requires third argument (rhs) to be a TileType, but got "
                   << args[2]->GetType()->TypeName();
 
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_type->shape_.size(),
+                      rhs_type->shape_.size(), args[0]->span_, op_name);
   auto geometry = DeduceMatmulProductInfo(lhs_type, rhs_type, op_name);
   const auto& acc_shape = acc_type->shape_;
 
@@ -230,6 +234,8 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
                    << " requires third argument (bias) to be a TileType, but got "
                    << args[2]->GetType()->TypeName();
 
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_type->shape_.size(),
+                      rhs_type->shape_.size(), args[0]->span_, op_name);
   auto geometry = DeduceMatmulProductInfo(lhs_type, rhs_type, op_name);
   const auto& rhs_shape = rhs_type->shape_;
   const auto& bias_shape = bias_type->shape_;
@@ -422,6 +428,7 @@ REGISTER_OP("tile.matmul")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::Right)
     .set_output_memory(MemorySpace::Acc)
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulType(args, kwargs, "tile.matmul");
@@ -444,6 +451,7 @@ REGISTER_OP("tile.matmul_acc")
     .set_output_reuses_input(0)
     // Accumulates into `acc`: C += A@B reads the running sum it adds to.
     .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulAccType(args, kwargs, "tile.matmul_acc");
@@ -460,6 +468,7 @@ REGISTER_OP("tile.matmul_bias")
     .set_input_memory(1, MemorySpace::Right)
     .set_input_memory(2, MemorySpace::Bias)
     .set_output_memory(MemorySpace::Acc)
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulBiasType(args, kwargs, "tile.matmul_bias");

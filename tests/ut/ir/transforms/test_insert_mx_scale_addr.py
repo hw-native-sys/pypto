@@ -229,8 +229,8 @@ class TestInsertMxScaleAddr:
         assert once_mx.args[1].unique_id != twice_mx.args[1].unique_id
         assert once_mx.args[3].unique_id != twice_mx.args[3].unique_id
 
-    def test_shared_scales_across_mx_consumers_get_fresh_bindings(self):
-        """Each consumer must rebind even when its scale SSA operands are identical."""
+    def test_unchanged_scale_data_pairs_reuse_bindings(self):
+        """A repeated bind after the first consumer cannot be hoisted over its use."""
 
         @pl.program
         class Before:
@@ -265,7 +265,7 @@ class TestInsertMxScaleAddr:
 
         after = self._run(Before)
         tgets = self._collect_calls(after, "tile.tget_scale_addr")
-        assert len(tgets) == 4
+        assert len(tgets) == 2
 
         mx = self._collect_calls(after, "tile.matmul_mx")[0]
         mx_acc = self._collect_calls(after, "tile.matmul_mx_acc")[0]
@@ -273,8 +273,8 @@ class TestInsertMxScaleAddr:
         assert mx.args[3].name_hint.endswith("_bound")
         assert mx_acc.args[2].name_hint.endswith("_bound")
         assert mx_acc.args[4].name_hint.endswith("_bound")
-        assert mx.args[1].unique_id != mx_acc.args[2].unique_id
-        assert mx.args[3].unique_id != mx_acc.args[4].unique_id
+        assert mx.args[1].same_as(mx_acc.args[2])
+        assert mx.args[3].same_as(mx_acc.args[4])
 
     def test_bindings_do_not_leak_between_if_branches(self):
         """Each branch must define the bound scale SSAs consumed in that branch."""
@@ -374,25 +374,60 @@ class TestInsertMxScaleAddr:
             "bind",
             "matmul",
             "bind",
-            "bind",
             "matmul",
-            "bind",
             "bind",
             "matmul",
         ]
-        lhs0_a, rhs0, first_mx, lhs1_binding, rhs1, second_mx, lhs0_b, rhs2, third_mx = events
+        lhs0_a, rhs0, first_mx, lhs1_binding, second_mx, lhs0_b, third_mx = events
         assert [ref[0] for ref in lhs0_a[1:]] == ["lhs_scale_bound", "lhs_scale", "lhs0"]
         assert [ref[0] for ref in lhs1_binding[1:]] == ["lhs_scale_bound", "lhs_scale", "lhs1"]
         assert [ref[0] for ref in lhs0_b[1:]] == ["lhs_scale_bound", "lhs_scale", "lhs0"]
         assert lhs0_a[1][1] != lhs0_b[1][1]
         assert lhs0_a[1][1] != lhs1_binding[1][1]
         assert first_mx[1:] == (lhs0_a[3], lhs0_a[1], rhs0[3], rhs0[1])
-        assert second_mx[1:] == (lhs1_binding[3], lhs1_binding[1], rhs1[3], rhs1[1])
-        assert third_mx[1:] == (lhs0_b[3], lhs0_b[1], rhs2[3], rhs2[1])
+        assert second_mx[1:] == (lhs1_binding[3], lhs1_binding[1], rhs0[3], rhs0[1])
+        assert third_mx[1:] == (lhs0_b[3], lhs0_b[1], rhs0[3], rhs0[1])
         lhs_tgets = [e for e in events if e[0] == "bind" and e[3][0].startswith("lhs")]
         assert len(lhs_tgets) == 3
         rhs_tgets = [e for e in events if e[0] == "bind" and e[3][0] == "rhs"]
-        assert len(rhs_tgets) == 3
+        assert len(rhs_tgets) == 1
+
+    @pytest.mark.parametrize("alias_index", range(4), ids=["left", "left-scale", "right", "right-scale"])
+    def test_metadata_update_through_possible_alias_invalidates_side(self, alias_index):
+        """A distinct SSA tile can alias the physical buffer of a cached binding."""
+        span = ir.Span.unknown()
+        specs = [
+            ("lhs", [16, 64], ir.DataType.FP8E4M3FN, ir.MemorySpace.Left),
+            ("lhs_scale", [16, 2], ir.DataType.FP8E8M0, ir.MemorySpace.LeftScale),
+            ("rhs", [64, 32], ir.DataType.FP8E4M3FN, ir.MemorySpace.Right),
+            ("rhs_scale", [2, 32], ir.DataType.FP8E8M0, ir.MemorySpace.RightScale),
+        ]
+        operands = [
+            ir.Var(name, ir.TileType(shape, dtype, memory_space=space), span)
+            for name, shape, dtype, space in specs
+        ]
+        alias = ir.Var("possible_alias", operands[alias_index].type, span)
+        first = ir.op.tile.matmul_mx(*operands, span)
+        second = ir.op.tile.matmul_mx(*operands, span)
+        update = ir.op.tile.set_validshape(alias, *specs[alias_index][1], span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(ir.Var("first", first.type, span), first, span),
+                ir.EvalStmt(update, span),
+                ir.AssignStmt(ir.Var("second", second.type, span), second, span),
+            ],
+            span,
+        )
+        func = ir.Function("kernel", [*operands, alias], [], body, span, ir.FunctionType.InCore)
+        after = passes.insert_mx_scale_addr()(ir.Program([func], "alias_update", span))
+        matmuls = self._collect_calls(after, "tile.matmul_mx")
+        assert len(self._collect_calls(after, "tile.tget_scale_addr")) == 3
+        # Only the touched side is invalidated; the opposite binding remains valid.
+        invalidated_scale = 1 if alias_index < 2 else 3
+        for scale_index in (1, 3):
+            assert matmuls[0].args[scale_index].same_as(matmuls[1].args[scale_index]) == (
+                scale_index != invalidated_scale
+            )
 
     def test_bare_if_body_matmul_gets_bindings(self):
         """NormalizedStmtStructure may leave a sole AssignStmt as an if body."""

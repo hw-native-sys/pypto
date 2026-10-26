@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -987,8 +988,10 @@ class TileToBufferMutator : public IRMutator {
                         Valid(tile), out, tile->span_);
   }
 
-  StmtPtr Operation(const std::string& name, const std::vector<ExprPtr>& args, const Span& span) const {
-    return std::make_shared<EvalStmt>(OpRegistry::GetInstance().CreateInternal(name, args, span), span);
+  StmtPtr Operation(const std::string& name, const std::vector<ExprPtr>& args, const Span& span,
+                    const std::vector<std::pair<std::string, std::any>>& kwargs = {}) const {
+    return std::make_shared<EvalStmt>(OpRegistry::GetInstance().CreateInternal(name, args, kwargs, span),
+                                      span);
   }
 
   StmtPtr LowerCall(const CallPtr& call, const VarPtr& result) {
@@ -1250,7 +1253,7 @@ class TileToBufferMutator : public IRMutator {
           call->span_);
     }
     if (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {
-      // Neither operator declares attributes; reject any kwarg instead of dropping it.
+      // Preserve supported attributes and reject unknown kwargs instead of dropping them.
       ValidateKwargs(call->kwargs_, OpRegistry::GetInstance().GetEntry(call->op_->name_).GetOp()->GetAttrs(),
                      call->op_->name_);
     }
@@ -1258,7 +1261,7 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result && call->args_.size() == 2, call->span_)
           << "Internal error: tile.matmul requires lhs, rhs and a result";
       return Operation("buffer.matmul", {Handle(call->args_[0]), Handle(call->args_[1]), Handle(result)},
-                       call->span_);
+                       call->span_, call->kwargs_);
     }
     if (IsOp(call, "tile.matmul_acc")) {
       INTERNAL_CHECK_SPAN(result && (call->args_.size() == 3 || call->args_.size() == 4), call->span_)
@@ -1272,17 +1275,22 @@ class TileToBufferMutator : public IRMutator {
       const auto view = storage_.write_views.find(call.get());
       const std::vector<ExprPtr> operands{Handle(call->args_[1]), Handle(call->args_[2]),
                                           view == storage_.write_views.end() ? destination : view->second};
-      if (call->args_.size() == 3) return Operation("buffer.matmul_acc", operands, call->span_);
+      if (call->args_.size() == 3) {
+        return Operation("buffer.matmul_acc", operands, call->span_, call->kwargs_);
+      }
       // init_cond overwrites instead of accumulating. A literal selects one
       // form; a runtime predicate selects between both explicit writes.
       const auto& init = call->args_[3];
       std::optional<bool> literal;
       if (auto value = As<ConstInt>(init)) literal = value->value_ != 0;
       if (auto value = As<ConstBool>(init)) literal = value->value_;
-      if (literal) return Operation(*literal ? "buffer.matmul" : "buffer.matmul_acc", operands, call->span_);
+      if (literal) {
+        return Operation(*literal ? "buffer.matmul" : "buffer.matmul_acc", operands, call->span_,
+                         call->kwargs_);
+      }
       return std::make_shared<IfStmt>(
-          VisitExpr(init), Operation("buffer.matmul", operands, call->span_),
-          std::optional<StmtPtr>(Operation("buffer.matmul_acc", operands, call->span_)),
+          VisitExpr(init), Operation("buffer.matmul", operands, call->span_, call->kwargs_),
+          std::optional<StmtPtr>(Operation("buffer.matmul_acc", operands, call->span_, call->kwargs_)),
           std::vector<VarPtr>{}, call->span_);
     }
     if (IsOp(call, "tile.move")) {

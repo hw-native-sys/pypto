@@ -417,6 +417,8 @@ def matmul(
     b_trans: bool = False,
     c_matrix_nz: bool = False,
     span: Span | None = None,
+    *,
+    tf32_mode: str | None = None,
 ) -> Call:
     """Matrix multiplication with optional transpose.
 
@@ -434,6 +436,8 @@ def matmul(
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
         span: Optional source span for debugging (auto-captured if not provided)
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication
@@ -446,6 +450,8 @@ def matmul(
         "b_trans": b_trans,
         "c_matrix_nz": c_matrix_nz,
     }
+    if tf32_mode is not None:
+        kwargs["tf32_mode"] = tf32_mode
     if out_dtype is not None:
         kwargs["out_dtype"] = out_dtype
 
@@ -530,6 +536,7 @@ def matmul_acc(
     span: Span | None = None,
     *,
     init_cond: Expr | None = None,
+    tf32_mode: str | None = None,
 ) -> Call:
     """Matrix multiplication with accumulation: acc = acc + lhs @ rhs.
 
@@ -546,12 +553,16 @@ def matmul_acc(
         b_trans: Whether to transpose rhs
         span: Optional source span for debugging (auto-captured if not provided)
         init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans}
+    if tf32_mode is not None:
+        kwargs["tf32_mode"] = tf32_mode
     args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
     return _ir_core.create_op_call("tensor.matmul_acc", args, kwargs, actual_span)
 

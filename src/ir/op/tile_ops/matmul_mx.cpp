@@ -470,9 +470,9 @@ REGISTER_OP("tile.tget_scale_addr")
     .set_output_memory_inherit_input()
     .set_output_reuses_input(0)
     // Binds a derived address into the shared physical scale buffer `dst_scale`
-    // names — a mutation of that buffer, which is why InsertMxScaleAddr never
-    // reuses one binding across two MX matmul consumers. Declaring the write
-    // keeps that hazard visible to any analysis that orders accesses.
+    // names. Only an unchanged scale/data pair with no intervening invalidation
+    // can reuse a binding; declaring the write keeps aliasing hazards visible
+    // to analyses that order accesses.
     .set_arg_effect(0, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

@@ -123,6 +123,8 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   // Extract shapes
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_shape.size(), rhs_shape.size(),
+                      args[0]->span_, "tensor.matmul");
 
   CHECK(lhs_shape.size() >= 1) << "tensor.matmul requires lhs to have at least 1 dimension";
   CHECK(rhs_shape.size() >= 1) << "tensor.matmul requires rhs to have at least 1 dimension";
@@ -393,6 +395,7 @@ REGISTER_OP("tensor.matmul")
     .set_attr<bool>("a_trans")
     .set_attr<bool>("b_trans")
     .set_attr<bool>("c_matrix_nz")
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorMatMulType(args, kwargs);
@@ -457,6 +460,15 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   const auto& acc_shape = acc_type->shape_;
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_shape.size(), rhs_shape.size(),
+                      args[0]->span_, "tensor.matmul_acc");
+
+  for (const auto& [key, value] : kwargs) {
+    if (key == "tf32_mode") {
+      CHECK_SPAN(acc_shape.size() == 2, args[0]->span_)
+          << "tensor.matmul_acc tf32_mode currently requires a 2D accumulator";
+    }
+  }
 
   CHECK(acc_shape.size() >= 2) << "tensor.matmul_acc requires acc to be at least 2D, but got "
                                << acc_shape.size() << "D";
@@ -544,6 +556,7 @@ REGISTER_OP("tensor.matmul_acc")
                   "lhs @ rhs instead of accumulated into (the split-K `k == 0` step)")
     .set_attr<bool>("a_trans")
     .set_attr<bool>("b_trans")
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorMatMulAccType(args, kwargs);

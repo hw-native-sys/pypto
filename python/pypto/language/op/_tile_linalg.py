@@ -147,17 +147,19 @@ def tmov_x2zz(
 # ============================================================================
 
 
-def matmul(lhs: Tile, rhs: Tile) -> Tile:
+def matmul(lhs: Tile, rhs: Tile, *, tf32_mode: str | None = None) -> Tile:
     """Matrix multiplication of two tiles.
 
     Args:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tile wrapping the matmul operation
     """
-    call_expr = _ir_ops.matmul(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.matmul(lhs.unwrap(), rhs.unwrap(), tf32_mode=tf32_mode)
     return Tile(expr=call_expr)
 
 
@@ -178,7 +180,9 @@ def batch_matmul(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None = None) -> Tile:
+def matmul_acc(
+    acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None = None, *, tf32_mode: str | None = None
+) -> Tile:
     """Matrix multiplication with accumulation: acc += lhs @ rhs.
 
     ``init_cond`` makes the accumulator's initial value conditional: on the steps
@@ -211,12 +215,14 @@ def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None = Non
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         init_cond: Optional predicate selecting overwrite over accumulate
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tile wrapping the matmul_acc operation
     """
     call_expr = _ir_ops.matmul_acc(
-        acc.unwrap(), lhs.unwrap(), rhs.unwrap(), init_cond=predicate_to_expr(init_cond)
+        acc.unwrap(), lhs.unwrap(), rhs.unwrap(), init_cond=predicate_to_expr(init_cond), tf32_mode=tf32_mode
     )
     return Tile(expr=call_expr)
 
@@ -249,7 +255,7 @@ def batch_matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, init_cond: BoolLike | None
     return Tile(expr=call_expr)
 
 
-def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
+def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = None) -> Tile:
     """Matrix multiplication with bias add: C = lhs @ rhs + bias.
 
     Args:
@@ -257,11 +263,13 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
         rhs: Right-hand side tile [K, N]
         bias: Bias tile [1, N] with the accumulator dtype (FP32 for
             floating-point matrix operands, INT32 for integer matrix operands)
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tile wrapping the matmul_bias operation
     """
-    call_expr = _ir_ops.matmul_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap())
+    call_expr = _ir_ops.matmul_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap(), tf32_mode=tf32_mode)
     return Tile(expr=call_expr)
 
 

@@ -497,5 +497,91 @@ def test_shared_row_accumulator_compiles_without_acc_to_acc_copy(tmp_path, runti
     assert sum("pto.tstore " in line for line in mlir.splitlines()) == 4
 
 
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+@pytest.mark.parametrize("form", ["matmul", "matmul_acc", "matmul_bias"])
+def test_hf32_tile_matmul_preserves_rounding(mode, form):
+    """Fresh, predicated accumulation, and bias reach both PTO emitter paths."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    is_acc = form == "matmul_acc"
+    is_bias = form == "matmul_bias"
+
+    @pl.program
+    class Kernel:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[32, 64], pl.FP32],
+            b: pl.Tensor[[64, 32], pl.FP32],
+            bias: pl.Tensor[[1, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            acc = pl.tile.create([32, 32], pl.FP32, target_memory=pl.Mem.Acc)
+            for k in pl.range(0, 64, 32):
+                av = pl.tile.load(a, [0, k], [32, 32], target_memory=pl.Mem.Mat)
+                bv = pl.tile.load(b, [k, 0], [32, 32], target_memory=pl.Mem.Mat)
+                if is_acc:
+                    acc = pl.matmul_acc(acc, av, bv, init_cond=(k == 0), tf32_mode=mode)
+                elif is_bias:
+                    biasv = pl.tile.load(bias, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+                    acc = pl.tile.matmul_bias(av, bv, biasv, tf32_mode=mode)
+                else:
+                    acc = pl.matmul(av, bv, tf32_mode=mode)
+            return pl.tile.store(acc, [0, 0], out)
+
+    mlir = _generate_default_mlir(Kernel)
+    instructions = [line for line in mlir.splitlines() if "pto.tmatmul" in line]
+    assert instructions
+    assert all(f"tf32_mode = #pto<tf32_mode {mode}>" in line for line in instructions), mlir
+    if form == "matmul_acc":
+        assert "pto.tmatmul.acc" in mlir and "pto.tmatmul " in mlir, mlir
+    if form == "matmul_bias":
+        assert "pto.tmatmul.bias" in mlir, mlir
+
+
+@pytest.mark.parametrize("shape", [(32, 512, 32), (256, 64, 256)])
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+def test_hf32_tensor_matmul_preserves_rounding_through_auto_tiling(shape, mode):
+    """K splitting and M/N splitting must retain the per-op arithmetic contract."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    m, k, n = shape
+
+    @pl.program
+    class Kernel:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[m, k], pl.FP32],
+            b: pl.Tensor[[k, n], pl.FP32],
+            out: pl.Out[pl.Tensor[[m, n], pl.FP32]],
+        ) -> pl.Tensor[[m, n], pl.FP32]:
+            product = pl.matmul(a, b, tf32_mode=mode)
+            return pl.assemble(out, product, [0, 0])
+
+    mlir = _generate_default_mlir(Kernel)
+    instructions = [line for line in mlir.splitlines() if "pto.tmatmul" in line]
+    assert instructions
+    assert all(f"tf32_mode = #pto<tf32_mode {mode}>" in line for line in instructions), mlir
+
+
+def test_hf32_rejects_ascend910_codegen():
+    @pl.program
+    class Kernel:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[32, 32], pl.FP32],
+            b: pl.Tensor[[32, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            product = pl.matmul(a, b, tf32_mode="round_away")
+            return pl.assemble(out, product, [0, 0])
+
+    with pytest.raises(ValueError, match="tf32_mode requires the Ascend950 PTO backend"):
+        _generate_default_mlir(Kernel)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

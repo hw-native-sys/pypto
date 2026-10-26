@@ -320,6 +320,11 @@ void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const s
  */
 DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs);
 
+/// Validate opt-in HF32 rounding: two rank-2 FP32 operands and a supported mode.
+void CheckMatmulTf32Mode(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType lhs,
+                         DataType rhs, size_t lhs_rank, size_t rhs_rank, const Span& span,
+                         const std::string& op_name);
+
 /**
  * @brief Can the Cube writeback turn @p accumulator into @p out without a scale?
  *

@@ -406,10 +406,11 @@ VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int
 /// reaches the same one-buffer chain without a predicate.  No caller therefore
 /// passes a bias operand here.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
-                        const AssignStmtPtr& sb, const std::string& base, const Span& sp) {
+                        const AssignStmtPtr& sb, const std::string& base, const Span& sp,
+                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
   auto& reg = OpRegistry::GetInstance();
   auto init_cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
-  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, sp);
+  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, kwargs, sp);
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto body_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -425,7 +426,8 @@ StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const As
 /// operand and the emitted call ANDs it with the generated ``ko == 0``.
 StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, const AssignStmtPtr& sb,
                            const std::string& base, const Span& sp, const ExprPtr& user_init_cond,
-                           const VarPtr& ko_var) {
+                           const VarPtr& ko_var,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
   auto& reg = OpRegistry::GetInstance();
   std::vector<ExprPtr> args{ExprPtr(c_iter), sa->var_, sb->var_};
   if (user_init_cond) {
@@ -438,7 +440,7 @@ StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, co
     // introduced here.
     args.push_back(MakeAnd(user_init_cond, MakeEq(ko_var, MakeIndex(0, sp), sp), sp));
   }
-  auto c_call = reg.Create("tile.matmul_acc", args, sp);
+  auto c_call = reg.Create("tile.matmul_acc", args, kwargs, sp);
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -449,6 +451,9 @@ StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, co
 /// See the file-level comment for the emitted shape.
 RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const Span sp = r.original->span_;
+  const auto original_call = As<Call>(r.original->value_);
+  INTERNAL_CHECK_SPAN(original_call, sp) << "Internal error: matmul rewrite requires a call";
+  const auto& kwargs = original_call->kwargs_;
   const std::string base = r.name_base.empty() ? r.original->var_->name_hint_ : r.name_base;
   const bool is_acc = r.kind == MatmulKind::kAccumulate;
   const bool is_bias = r.kind == MatmulKind::kBias;
@@ -539,11 +544,11 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     if (acc_in) {
       std::vector<ExprPtr> mm_args{acc_in, sa->var_, sb->var_};
       if (init_cond) mm_args.push_back(init_cond);
-      call = reg.Create("tile.matmul_acc", mm_args, sp);
+      call = reg.Create("tile.matmul_acc", mm_args, kwargs, sp);
     } else if (bias_operand) {
-      call = reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp);
+      call = reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, kwargs, sp);
     } else {
-      call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+      call = reg.Create("tile.matmul", {sa->var_, sb->var_}, kwargs, sp);
     }
     auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
     out.push_back(sa);
@@ -568,8 +573,8 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // predicated it.  The bias path passes neither: its seed already holds the
     // first block's product, so every block here accumulates.
     StmtPtr body = (k_lo == 0 && r.kind == MatmulKind::kFresh)
-                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp)
-                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var);
+                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, kwargs)
+                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, kwargs);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
     // Loop return var: an intermediate when a partial tail follows (named
     // distinctly so round-trip names stay unique), else the final result.
@@ -1685,6 +1690,9 @@ VarPtr EmitFullKTile(std::vector<StmtPtr>& stmts, const MatmulTiling& t, Subtile
                      const VarPtr& chain, int64_t mi, int64_t ni, int64_t m_eff, int64_t n_eff,
                      const std::string& base, int step) {
   const Span sp = t.assign->span_;
+  const auto original_call = As<Call>(t.assign->value_);
+  INTERNAL_CHECK_SPAN(original_call, sp) << "Internal error: matmul tiling requires a call";
+  const auto& kwargs = original_call->kwargs_;
   auto& reg = OpRegistry::GetInstance();
   auto sa = BuildExtract(t.lhs, {m_eff, t.K}, MakeIndex(mi, sp), MakeIndex(0, sp), MemorySpace::Left,
                          base + "_ta" + std::to_string(step), sp);
@@ -1694,8 +1702,8 @@ VarPtr EmitFullKTile(std::vector<StmtPtr>& stmts, const MatmulTiling& t, Subtile
   stmts.push_back(sb);
   auto bias_operand = BuildBiasOperand(stmts, t.bias, n_eff, t.N, MakeIndex(ni, sp), t.bias_load,
                                        base + "_tbias" + std::to_string(step), sp);
-  auto c_call = bias_operand ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp)
-                             : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+  auto c_call = bias_operand ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, kwargs, sp)
+                             : reg.Create("tile.matmul", {sa->var_, sb->var_}, kwargs, sp);
   auto c_var = std::make_shared<Var>(base + "_tc" + std::to_string(step), c_call->GetType(), sp);
   stmts.push_back(std::make_shared<AssignStmt>(c_var, c_call, sp));
   return placer.PlaceAt(stmts, c_var, MakeIndex(mi, sp), MakeIndex(ni, sp), chain, step);
@@ -1729,6 +1737,9 @@ VarPtr EmitFullKTile(std::vector<StmtPtr>& stmts, const MatmulTiling& t, Subtile
 /// out double-buffered.
 std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& t, SubtilePlacer& placer) {
   const Span sp = t.assign->span_;
+  const auto original_call = As<Call>(t.assign->value_);
+  INTERNAL_CHECK_SPAN(original_call, sp) << "Internal error: matmul tiling requires a call";
+  const auto& kwargs = original_call->kwargs_;
   auto& reg = OpRegistry::GetInstance();
   const std::string base = t.assign->var_->name_hint_;
   // A tile never exceeds the problem dims (you cannot tile M into blocks larger
@@ -1782,8 +1793,9 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     const AssignStmtPtr& inner_extract = row_outer ? sb : sa;  // moving panel
     std::vector<StmtPtr> bias_stmts;
     auto bias_operand = BuildBiasOperand(bias_stmts, t.bias, t.n, t.N, ni, t.bias_load, base + "_bias", sp);
-    auto c_call = bias_operand ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp)
-                               : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+    auto c_call = bias_operand
+                      ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, kwargs, sp)
+                      : reg.Create("tile.matmul", {sa->var_, sb->var_}, kwargs, sp);
     auto c_var = std::make_shared<Var>(base + "_c", c_call->GetType(), sp);
     std::vector<StmtPtr> inner_body{inner_extract};
     // Bias varies with N. In a row-outer schedule N is the moving inner axis;

@@ -853,7 +853,10 @@ class TestB01PrecisionAndRowExpandAddCodegen:
         default_line = self._op_line(self._generate_mlir(DefaultProg), "pto.tdiv")
         high_precision_line = self._op_line(self._generate_mlir(HighPrecisionProg), "pto.tdiv")
         assert "precisionType" not in default_line
-        assert strip_loc(high_precision_line).endswith("{precisionType = #pto<div_precision high_precision>}")
+        # PTOAS v0.70 maps high-precision division to diff_compensation.
+        assert strip_loc(high_precision_line).endswith(
+            "{precisionType = #pto<div_precision diff_compensation>}"
+        )
         assert ") outs(" in high_precision_line
         assert high_precision_line.index("outs(") < high_precision_line.index("precisionType")
 
@@ -885,7 +888,8 @@ class TestB01PrecisionAndRowExpandAddCodegen:
             pytest.skip("PTOAS is not available")
         cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
         assert "TDIV<pto::DivAlgorithm::HIGH_PRECISION>" in cpp
-        assert "#pto<div_precision high_precision>" in mlir
+        # PTOAS v0.70 renamed the MLIR selector for high-precision division.
+        assert "#pto<div_precision diff_compensation>" in mlir
 
     def test_tlog_emits_exact_high_precision_attr(self):
         @pl.program

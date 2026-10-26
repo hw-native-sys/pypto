@@ -237,6 +237,16 @@ REGISTER_OP("tensor.matmul")
 M/N/K 装箱严格兼容，同时允许累加器的有效 M/N 矩形以及 rhs 的有效 K 包含 PTO 根据
 lhs M/K 与 rhs N 实际计算的较小矩形。
 
+对于 Ascend950 上的二维 FP32 操作数，`matmul`、`matmul_acc` 和
+`tile.matmul_bias` 支持仅限关键字参数 `tf32_mode="round_even"` 或
+`tf32_mode="round_away"`。两者将输入舍入为 HF32（e8m10），仍使用 FP32 累加；
+中间值分别采用向偶数舍入或远离零舍入。省略该参数时保持普通 FP32 矩阵乘法。
+该设置贯穿 tensor 到 tile 的降级和自动 L0 分块，仅作用于指定操作。
+需要 PTOAS v0.70 或更新版本的 PTO/EmitC 路径，不支持 VPTO 降级。
+其他输入类型、非二维操作数和 Ascend910 会被拒绝。
+Torch 参考代码生成器会在 Tensor、Tile 和 Buffer IR 中按指定模式舍入两个乘法操作数；
+偏置与累加器的值保持 FP32。
+
 #### 条件式累加器初始化（`init_cond`）
 
 `tile.matmul_acc`、`tile.batch_matmul_acc`、`tensor.matmul_acc` 与 `tile.gemv_acc`

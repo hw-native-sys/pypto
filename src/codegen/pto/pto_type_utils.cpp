@@ -38,6 +38,16 @@ namespace codegen {
 
 using ir::As;
 
+std::string FormatMatmulTf32Attr(const ir::CallPtr& call, const std::string& target_arch) {
+  const auto mode = call->GetKwarg<std::string>("tf32_mode", "");
+  if (mode.empty()) return "";
+  CHECK_SPAN(target_arch == "a5", call->span_)
+      << call->op_->name_ << " tf32_mode requires the Ascend950 PTO backend";
+  INTERNAL_CHECK_SPAN(mode == "round_even" || mode == "round_away", call->span_)
+      << "Internal error: invalid matmul tf32_mode '" << mode << "'";
+  return " {tf32_mode = #pto<tf32_mode " + mode + ">}";
+}
+
 std::string DataTypeToMLIR(DataType dtype) {
   if (dtype == DataType::FP32) {
     return "f32";

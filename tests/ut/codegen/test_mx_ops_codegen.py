@@ -404,9 +404,9 @@ class TestMxMatmulCodegen:
                 pl.store(result, [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
-        # Each consumer needs fresh LeftScale and RightScale bindings because
-        # tget_scale_addr mutates a physical buffer shared by SSA aliases.
-        assert mlir.count("pto.tget_scale_addr") == 4
+        # Reuse unchanged bindings: a second bind would hoist across the first
+        # MX consumer and is rejected by PTOAS v0.70 (PTOAS #1691).
+        assert mlir.count("pto.tget_scale_addr") == 2
         acc_line = next(line for line in mlir.splitlines() if "pto.tmatmul.mx.acc" in line)
         ins_acc = acc_line.split("ins(", 1)[1].split(",", 1)[0].strip()
         outs_acc = acc_line.split("outs(", 1)[1].split(":", 1)[0].strip()

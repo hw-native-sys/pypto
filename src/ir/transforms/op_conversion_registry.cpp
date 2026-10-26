@@ -1281,11 +1281,15 @@ void OpConversionRegistry::RegisterMatmulOps() {
       "tensor.matmul",
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
-        (void)kwargs;
+        std::vector<std::pair<std::string, std::any>> tile_kwargs;
+        for (const auto& kwarg : kwargs) {
+          if (kwarg.first == "tf32_mode") tile_kwargs.push_back(kwarg);
+        }
         INTERNAL_CHECK_SPAN(args.size() == 2, span) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2;
         const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
-        return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
+        return ConversionResult{
+            OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, tile_kwargs, span)};
       },
       // Both targets of the rank dispatch above are named: an ND operand makes
       // this a tile.batch_matmul, so deriving from tile.matmul alone would read
@@ -1341,7 +1345,10 @@ void OpConversionRegistry::RegisterMatmulOps() {
       "tensor.matmul_acc",
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
-        (void)kwargs;
+        std::vector<std::pair<std::string, std::any>> tile_kwargs;
+        for (const auto& kwarg : kwargs) {
+          if (kwarg.first == "tf32_mode") tile_kwargs.push_back(kwarg);
+        }
         INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
             << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs) or 4 with init_cond";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
@@ -1354,7 +1361,7 @@ void OpConversionRegistry::RegisterMatmulOps() {
         // later, in FlattenTileNdTo2D, for a reason unrelated to init_cond — the
         // per-batch accumulator is a strided L0C row window the MAD cannot address.)
         if (args.size() == 4) out_args.push_back(args[3]);
-        return ConversionResult{OpRegistry::GetInstance().Create(out_op, out_args, span)};
+        return ConversionResult{OpRegistry::GetInstance().Create(out_op, out_args, tile_kwargs, span)};
       },
       // Same M boxing as tensor.matmul, on *both* cube tiles the M axis runs
       // through. tile.matmul_acc requires the accumulator and the product to
