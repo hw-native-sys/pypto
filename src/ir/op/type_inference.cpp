@@ -1725,7 +1725,6 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
     CollectCallTypeBindings(callee_params[i]->GetType(), args[i]->GetType(), "argument " + std::to_string(i),
                             var_map, constraints);
   }
-  if (var_map.empty()) return return_types;
 
   // Validate repeated bindings only after all arguments have contributed.
   // A constraint may mention another callee placeholder that is bound by a
@@ -1740,6 +1739,16 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
         << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
         << constraint.context << "; cross-function calls do not emit a runtime shape guard";
   }
+
+  // A scalar parameter may be used only in return metadata. Preserve
+  // bindings already deduced from tensor shapes, then bind remaining scalar
+  // operands to caller arguments just like retained tensor.dim operands.
+  for (size_t i = 0; i < callee_params.size(); ++i) {
+    if (callee_params[i] && args[i] && As<ScalarType>(callee_params[i]->GetType())) {
+      var_map.try_emplace(callee_params[i].get(), args[i]);
+    }
+  }
+  if (var_map.empty()) return return_types;
 
   std::vector<TypePtr> result;
   result.reserve(return_types.size());

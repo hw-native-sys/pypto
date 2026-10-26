@@ -4288,15 +4288,24 @@ class TestOutlineScalarOutputHoist:
     ],
     ids=["tensor-valid-shape", "tensor-stride", "tile-valid-shape", "tile-stride", "tile-start-offset"],
 )
-def test_outline_captures_tensor_referenced_only_by_local_view_metadata(annotation, value):
-    """Retained metadata on a local definition must use an outlined parameter."""
+@pytest.mark.parametrize("extent_kind", ["tensor-dim", "mixed", "scalar-only"])
+def test_outline_captures_operands_referenced_only_by_local_view_metadata(annotation, value, extent_kind):
+    """Retained metadata must capture both tensor and independent scalar operands."""
+    for axis in (0, 1):
+        dim = f"pl.tensor.dim(source, {axis})"
+        if extent_kind == "mixed":
+            annotation = annotation.replace(dim, f"({dim} + rows)")
+        elif extent_kind == "scalar-only":
+            annotation = annotation.replace(dim, "rows")
     before = text_parse(f"""
 import pypto.language as pl
 
 @pl.program
 class Before:
     @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, source: pl.Tensor[[8, 16], pl.FP32], out: pl.Tensor[[8, 16], pl.FP32]):
+    def main(
+        self, source: pl.Tensor[[8, 16], pl.FP32], out: pl.Tensor[[8, 16], pl.FP32], rows: pl.Scalar[pl.INDEX]
+    ):
         with pl.at(level=pl.Level.CORE_GROUP):
             local: {annotation} = {value}
         return {"local" if annotation.startswith("pl.Tensor") else "out"}
@@ -4304,7 +4313,67 @@ class Before:
     assert isinstance(before, ir.Program)
     after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
     outlined = next(func for func in after.functions.values() if func.func_type == ir.FunctionType.InCore)
-    assert any(param.name_hint.startswith("source") for param in outlined.params), python_print(after)
+    if extent_kind != "scalar-only":
+        assert any(param.name_hint.startswith("source") for param in outlined.params), python_print(after)
+    if extent_kind != "tensor-dim":
+        assert any(param.name_hint.startswith("rows") for param in outlined.params), python_print(after)
+    assert "__FREE_VAR" not in python_print(after)
+
+
+@pytest.mark.parametrize("read_dimension_in_body", [False, True])
+def test_outline_type_only_scalar_bound_by_later_tensor_shape(read_dimension_in_body):
+    """A later captured tensor supplies type-only dimensions, but not direct reads."""
+    before = text_parse(f"""
+import pypto.language as pl
+
+{'n = pl.dynamic("n")' if not read_dimension_in_body else ""}
+
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, {"n: pl.Scalar[pl.INDEX]," if read_dimension_in_body else ""}
+        source: pl.Tensor[[8, 16], pl.FP32], out: pl.Tensor[[n, 16], pl.FP32]
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            local: pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[n, 16])] = pl.load(
+                source, [{"n" if read_dimension_in_body else "0"}, 0], [8, 16]
+            )
+            result = pl.add(out, out)
+        return result
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    outlined = next(func for func in after.functions.values() if func.func_type == ir.FunctionType.InCore)
+    scalars = [param for param in outlined.params if isinstance(param.type, ir.ScalarType)]
+    assert len(scalars) == int(read_dimension_in_body), python_print(after)
+    assert "__FREE_VAR" not in python_print(after)
+
+
+def test_outline_scalar_iter_arg_used_only_in_tile_metadata():
+    """Capture the current loop carry without capturing its initializer too."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, source: pl.Tensor[[8, 16], pl.FP32], seed: pl.Scalar[pl.INDEX]):
+            for (rows,) in pl.while_(init_values=(seed,)):
+                pl.cond(rows < 8)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    local: pl.Tile[
+                        [8, 16],
+                        pl.FP32,
+                        pl.Mem.Vec,
+                        pl.TileView(valid_shape=[pl.tensor.dim(source, 0) + rows, 16]),
+                    ] = pl.load(source, [0, 0], [8, 16])
+                (final_rows,) = pl.yield_(rows + 1)
+            return source
+
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+    outlined = next(func for func in after.functions.values() if func.func_type == ir.FunctionType.InCore)
+    scalars = [param for param in outlined.params if isinstance(param.type, ir.ScalarType)]
+    assert len(scalars) == 1, python_print(after)
+    assert scalars[0].name_hint.startswith("rows"), python_print(after)
     assert "__FREE_VAR" not in python_print(after)
 
 

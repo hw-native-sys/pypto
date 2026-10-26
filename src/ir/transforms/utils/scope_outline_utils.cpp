@@ -605,18 +605,14 @@ class StoreEvalToAssignMutator : public IRMutator {
   std::unordered_set<const Var*> claimed_;
 };
 
-/// Collect tensor operands in type expressions without traversing their types.
-class TensorTypeDependencyCollector : public IRVisitor {
+/// Collect type operands without following their types or IterArg initializers.
+class TypeDependencyCollector : public IRVisitor {
  public:
-  std::vector<const Var*> tensors;
+  std::vector<const Var*> vars;
 
  protected:
-  void VisitExpr_(const VarPtr& op) override {
-    if (AsTensorTypeLike(op->GetType())) tensors.push_back(op.get());
-  }
-  void VisitExpr_(const IterArgPtr& op) override {
-    if (AsTensorTypeLike(op->GetType())) tensors.push_back(op.get());
-  }
+  void VisitExpr_(const VarPtr& op) override { vars.push_back(op.get()); }
+  void VisitExpr_(const IterArgPtr& op) override { vars.push_back(op.get()); }
 };
 
 /**
@@ -651,6 +647,39 @@ class UpwardExposedUseCollector : public IRVisitor {
   /// True when `var`'s value on entry to the visited subtree comes from
   /// outside it — i.e. the subtree captures rather than defines it.
   [[nodiscard]] bool IsExternal(const Var* var) const { return live_in_.count(var) > 0; }
+
+  /// Resolve implicit signature bindings after every captured tensor is known.
+  /// A type-only scalar can precede the tensor whose shape supplies it.
+  void Finalize() {
+    std::unordered_set<const Var*> signature_bound;
+    std::unordered_set<const Type*> scanned;
+    for (const auto* var : ordered) {
+      auto tensor = AsTensorTypeLike(var->GetType());
+      if (!tensor || !scanned.insert(tensor.get()).second) continue;
+      TypeDependencyCollector dependencies;
+      for (const auto& dim : tensor->shape_) dependencies.VisitExpr(dim);
+      for (const auto* dependency : dependencies.vars) {
+        if (As<ScalarType>(dependency->GetType())) signature_bound.insert(dependency);
+      }
+      // MaterializeValidShapeSymbols supplies bare valid-shape symbols from
+      // the caller's tensor metadata. Compound expressions do not bind their
+      // scalar operands; those still need explicit capture.
+      if (tensor->tensor_view_.has_value()) {
+        for (const auto& dim : tensor->tensor_view_->valid_shape) {
+          if (auto symbol = AsVarLike(dim); symbol && As<ScalarType>(symbol->GetType())) {
+            signature_bound.insert(symbol.get());
+          }
+        }
+      }
+    }
+    ordered.erase(std::remove_if(ordered.begin(), ordered.end(),
+                                 [&](const Var* var) {
+                                   if (direct_uses_.count(var) || !signature_bound.count(var)) return false;
+                                   live_in_.erase(var);
+                                   return true;
+                                 }),
+                  ordered.end());
+  }
 
   void VisitExpr(const ExprPtr& expr) override {
     IRVisitor::VisitExpr(expr);
@@ -716,11 +745,11 @@ class UpwardExposedUseCollector : public IRVisitor {
   }
 
  private:
-  void RecordUse(const Var* var) {
+  void RecordUse(const Var* var, bool from_type = false) {
+    if (var && !from_type) direct_uses_.insert(var);
     if (var && defined_.count(var) == 0 && live_in_.insert(var).second) {
-      // A retained tensor.dim in a captured type names another tensor. Capture
-      // that tensor before its dependent parameter so the outlined signature
-      // is self-contained. Bare dimension symbols remain signature-bound.
+      // Capture type dependencies before their dependent parameter. Finalize
+      // removes only type-only scalars supplied by captured tensor signatures.
       RecordTypeUses(var->GetType());
       ordered.push_back(var);
     }
@@ -730,15 +759,15 @@ class UpwardExposedUseCollector : public IRVisitor {
     if (!type) return;
     auto [it, inserted] = type_dependencies_.try_emplace(type.get());
     if (inserted) {
-      TensorTypeDependencyCollector dependencies;
+      TypeDependencyCollector dependencies;
       var_collectors::VisitTypeExprFields(dependencies, type);
-      it->second = std::move(dependencies.tensors);
+      it->second = std::move(dependencies.vars);
     }
     // Cache the scan, not the live-in decision: a shared type can occur on
     // different branches with different definitions in scope. References to
     // map elements survive rehashing during recursive dependency capture.
     const auto& dependencies = it->second;
-    for (const Var* dependency : dependencies) RecordUse(dependency);
+    for (const Var* dependency : dependencies) RecordUse(dependency, true);
   }
 
   void Define(const VarPtr& var) { Define(var.get()); }
@@ -766,6 +795,7 @@ class UpwardExposedUseCollector : public IRVisitor {
   }
 
   std::unordered_map<const Type*, std::vector<const Var*>> type_dependencies_;
+  std::unordered_set<const Var*> direct_uses_;
   std::unordered_set<const Var*> live_in_;  ///< membership view of `ordered`
   std::unordered_set<const Var*> defined_;
   std::vector<const Var*> journal_;  ///< insertion order, for branch rollback
@@ -1548,6 +1578,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // ``scope_body``, not ``op->body_``.
   UpwardExposedUseCollector pre_hoist_live_in;
   pre_hoist_live_in.VisitStmt(op->body_);
+  pre_hoist_live_in.Finalize();
   auto hoist = PlanScalarOutputHoist(op->body_, pre_hoist_live_in.ordered, used_after);
   // Span source is the blocker itself, which the predicate guarantees non-null
   // in the failure path.
@@ -1584,6 +1615,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // substitution and the call-site lookup below.
   UpwardExposedUseCollector live_in;
   live_in.VisitStmt(scope_body);
+  live_in.Finalize();
 
   std::vector<VarPtr> input_vars;
   for (const Var* var_ptr : live_in.ordered) {
