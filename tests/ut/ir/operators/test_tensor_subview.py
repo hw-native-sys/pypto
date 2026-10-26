@@ -40,7 +40,7 @@ def source(shape=(8, 512)):
 
 def test_subview_preserves_parent_pitch_and_has_no_allocation():
     call = ir.op.tensor.subview(source(), [2, 512], [1, 0], steps=[3, 1])
-    assert call.op.name == "tensor.subview"
+    assert call.op.name == ir.get_op("tensor.subview").name
     assert values(tensor_type(call).shape) == [2, 512]
     assert values(tensor_view(call).stride) == [1536, 1]
     assert tensor_view(call).addressing_kind == ir.TensorAddressingKind.AffineSubview
