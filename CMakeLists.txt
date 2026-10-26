@@ -274,6 +274,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/passes.cpp
     src/ir/transforms/resolve_backend_op_layouts_pass.cpp
     src/ir/transforms/python_printer.cpp
+    src/ir/transforms/python_printer_expr.cpp
+    src/ir/transforms/python_printer_stmt.cpp
+    src/ir/transforms/python_printer_type.cpp
     src/ir/transforms/simplify_pass.cpp
     src/ir/transforms/inject_gm_pipe_buffer_pass.cpp
     src/ir/transforms/unroll_loops_pass.cpp

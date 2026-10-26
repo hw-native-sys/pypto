@@ -501,6 +501,24 @@ resolve to the function's own parameters. The prologue must precede executable
 statements (a leading docstring is allowed); misplaced directives and duplicate
 keys are errors, also for SubWorkers.
 
+### Printer implementation
+
+The private `IRPythonPrinter` declaration lives in
+`src/ir/transforms/python_printer.h`. Its implementations share one visitor
+instance, so variable renaming, signature context, indentation, and scope state
+remain consistent across recursive expression, type, and statement printing.
+
+| Source file in `src/ir/transforms/` | Responsibility |
+| ----------------------------------- | -------------- |
+| `python_printer.cpp` | Public entry points and format callback, name disambiguation, function/program printing and dependency order |
+| `python_printer_expr.cpp` | Expression precedence, constants, calls/submits, and attribute values |
+| `python_printer_stmt.cpp` | Control flow, scopes, comments, SSA yields, and window-buffer declarations |
+| `python_printer_type.cpp` | Type annotations, shapes, memory references, and tensor/tile views |
+
+The public declarations remain in `include/pypto/ir/transforms/printer.h`.
+Sub-expression printers inherit the enclosing variable-name maps, preserving
+bindings in shape expressions, memory offsets, and slot indices.
+
 ### Concise Mode
 
 Pass `concise=True` to omit intermediate type annotations. Function signature types (parameters and return) are always preserved:

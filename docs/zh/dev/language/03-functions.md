@@ -454,6 +454,22 @@ print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b"（自定义�
 引用参数的 attrs 绑定到函数自身的参数。前导区必须位于可执行语句之前
 （允许开头的 docstring）；指令位置错误或键重复都会报错，SubWorker 亦然。
 
+### 打印器实现
+
+私有的 `IRPythonPrinter` 声明位于 `src/ir/transforms/python_printer.h`。
+各实现文件共享同一个访问器（visitor）实例，因此递归打印表达式、类型和语句时，
+变量重命名、签名上下文（signature context）、缩进及作用域状态保持一致。
+
+| `src/ir/transforms/` 中的源文件 | 职责 |
+| ------------------------------- | ---- |
+| `python_printer.cpp` | 公开入口与格式化回调、名称消歧、函数/程序打印及依赖排序 |
+| `python_printer_expr.cpp` | 表达式优先级、常量、调用/提交及属性值 |
+| `python_printer_stmt.cpp` | 控制流、作用域、注释、SSA yield 及窗口缓冲区声明 |
+| `python_printer_type.cpp` | 类型标注、形状、内存引用（memory reference）及张量/Tile 视图 |
+
+公开声明仍位于 `include/pypto/ir/transforms/printer.h`。
+子表达式打印器继承外层的变量名称映射，保留形状表达式、内存偏移和槽位索引中的绑定。
+
 ### 简洁模式 (Concise Mode)
 
 传入 `concise=True` 可省略中间变量的类型标注。函数签名类型（参数和返回值）始终保留：
