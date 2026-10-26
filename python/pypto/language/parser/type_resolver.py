@@ -1255,29 +1255,66 @@ class TypeResolver:
     def _rebuild_composite_dim(self, node: ast.expr) -> ir.Expr | None:
         """Rebuild a composite shape dimension as an IR expression, no folding.
 
-        Handles int literals, names (closure/scope), ``pl.const(value, dtype)``
-        and binary +, -, *, //, % over those. Returns None for any other form.
+        Handles int literals, names (closure/scope), ``pl.const(value, dtype)``,
+        ``pl.tensor.dim`` reads and binary +, -, *, //, % over those.
+        Returns None for any other form.
         """
         span = self._get_span(node)
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
             return ir.ConstInt(node.value, DataType.INDEX, span)
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, int)
+        ):
+            return ir.ConstInt(-node.operand.value, DataType.INDEX, span)
         if isinstance(node, ast.Name):
             resolved = self._resolve_shape_dim(node)
             return ir.ConstInt(resolved, DataType.INDEX, span) if isinstance(resolved, int) else resolved
         if self._is_pl_const_call(node):
             call = cast(ast.Call, node)
-            if (
-                len(call.args) == 2
-                and isinstance(call.args[0], ast.Constant)
-                and isinstance(call.args[0].value, int)
-            ):
-                return ir.ConstInt(call.args[0].value, self.resolve_dtype(call.args[1]), span)
+            if len(call.args) == 2:
+                value = self._rebuild_composite_dim(call.args[0])
+                if isinstance(value, ir.ConstInt):
+                    return ir.ConstInt(value.value, self.resolve_dtype(call.args[1]), span)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "dim"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "tensor"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "pl"
+        ):
+            return self._rebuild_tensor_dim(node)
         if isinstance(node, ast.BinOp) and type(node.op) in self._SHAPE_BINOPS:
             lhs = self._rebuild_composite_dim(node.left)
             rhs = self._rebuild_composite_dim(node.right)
             if lhs is None or rhs is None:
                 return None
             return getattr(ir, self._SHAPE_BINOPS[type(node.op)])(lhs, rhs, span)
+        return None
+
+    def _rebuild_tensor_dim(self, call: ast.Call) -> ir.Expr | None:
+        """Rebuild a pure dimension read with positional or keyword operands."""
+        if len(call.args) > 2 or self.scope_lookup is None:
+            return None
+        operands: dict[str, ast.expr] = dict(zip(("tensor", "axis"), call.args))
+        for keyword in call.keywords:
+            if keyword.arg not in {"tensor", "axis"} or keyword.arg in operands:
+                return None
+            operands[keyword.arg] = keyword.value
+        tensor_node = operands.get("tensor")
+        axis_node = operands.get("axis")
+        if not isinstance(tensor_node, ast.Name) or axis_node is None:
+            return None
+        # Reconstruct only this pure read, without evaluating arbitrary calls
+        # or applying the statement parser's dynamic-symbol fold.
+        tensor = self.scope_lookup(tensor_node.id)
+        axis = self._rebuild_composite_dim(axis_node)
+        if isinstance(tensor, ir.Expr) and isinstance(axis, ir.ConstInt):
+            return ir.create_op_call("tensor.dim", [tensor, axis], self._get_span(call))
         return None
 
     def _get_span(self, node: ast.AST) -> ir.Span:

@@ -13,6 +13,11 @@
 5. Return 值不能是调用
 6. Yield 值不能是调用
 
+这些约束适用于求值表达式，不适用于类型元数据。张量形状中的
+`pl.tensor.dim(x, 0) * 2` 会保留为类型表达式；将它提取为函数体内的临时变量会
+破坏循环携带类型和提取后的函数签名。`NoNestedCalls` 遵循相同边界。
+作用域提取会捕获这些类型引用的张量，并将其排在依赖它的参数之前。
+
 **需要**：TypeChecked、SSAForm 属性 (Property)（通常由前序 Pass 产生；如需在执行前校验 required/produced，请在 `PassContext` 中启用 `VerificationInstrument`）。
 
 **使用时机**：通常在类型检查 Pass 之后、代码生成 (CodeGen) 之前运行此 Pass，以简化下游分析和代码生成；此顺序是约定而非自动强制的要求。

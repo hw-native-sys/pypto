@@ -34,6 +34,36 @@ def NormalizeIR(program):
     return passes.normalize_stmt_structure()(program)
 
 
+def test_tensor_dim_in_loop_carried_type_stays_an_expression():
+    """Type metadata must not acquire statement-local temporaries (#2951)."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, x: pl.Tensor[[8, 32], pl.FP32]):
+            flat = pl.reshape(x, [pl.tensor.dim(x, 0) * 2, 16])
+            for i, (acc,) in pl.range(2, init_values=(flat,)):
+                result = pl.yield_(pl.add(pl.exp(acc), 1.0))
+            return result
+
+    after = passes.flatten_call_expr()(Before)
+    before_func = next(iter(Before.functions.values()))
+    after_func = next(iter(after.functions.values()))
+    assert isinstance(before_func.body, ir.SeqStmts)
+    assert isinstance(after_func.body, ir.SeqStmts)
+    before_assign = before_func.body.stmts[0]
+    assert isinstance(before_assign, ir.AssignStmt)
+    before_flat = before_assign.var
+    after_flat = next(
+        stmt.var
+        for stmt in after_func.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "flat"
+    )
+    ir.assert_structural_equal(before_flat, after_flat)
+    assert before_flat.unique_id == after_flat.unique_id
+    assert "__FREE_VAR" not in ir.python_print(after)
+
+
 class TestFlattenCallInCallArgs:
     """Tests for flattening nested calls in call arguments."""
 
