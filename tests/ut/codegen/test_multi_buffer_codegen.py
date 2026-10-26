@@ -297,10 +297,12 @@ class SingleSlotDeclaration:
         return pl.store(t0, [0, 0], output)
 
 
-def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
+def _codegen(
+    program: ir.Program, planner: passes.MemoryPlanner, backend_type: BackendType = BackendType.Ascend910
+) -> str:
     """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910)
+    backend.set_backend_type(backend_type)
     with passes.PassContext([], memory_planner=planner):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
@@ -308,12 +310,99 @@ def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
     single = ir.Program([func], "kernel", optimized.span)
     # The planner also decides the address mode: PTOAS plans (no addr, level2),
     # PyPTO bakes (addr, level3) — same pairing compile() applies.
-    emit_tile_addr = planner == passes.MemoryPlanner.PYPTO
+    emit_tile_addr = planner != passes.MemoryPlanner.PTOAS
     return codegen.PTOCodegen().generate(single, emit_tile_addr=emit_tile_addr)
 
 
 def _lines(mlir: str, needle: str) -> list[str]:
     return [line.strip() for line in mlir.splitlines() if needle in line]
+
+
+def _explicit_accumulator_pipeline(trips: int, stages: int, m: int = 16, n: int = 64) -> ir.Program:
+    """Keep the final accumulator live after draining every distinct output tile."""
+
+    @pl.program
+    class ExplicitAccumulatorPipeline:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[m, 64], pl.BF16],
+            b: pl.Tensor[[64, (trips + 1) * n], pl.BF16],
+            out: pl.Out[pl.Tensor[[m, (trips + 1) * n], pl.FP32]],
+        ) -> pl.Tensor[[m, (trips + 1) * n], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [m, 64], target_memory=pl.Mem.Mat)
+            left = pl.move(a_mat, target_memory=pl.Mem.Left)
+            seed_mat = pl.load(b, [0, trips * n], [64, n], target_memory=pl.Mem.Mat)
+            seed_right = pl.move(seed_mat, target_memory=pl.Mem.Right)
+            seed = pl.tile.matmul(left, seed_right)
+            for i, (carry, output) in pl.pipeline(
+                trips,
+                stage=stages,
+                init_values=(seed, out),
+                attrs={"pipeline_double_buffer_c": True},
+            ):
+                b_mat = pl.load(b, [0, i * n], [64, n], target_memory=pl.Mem.Mat)
+                right = pl.move(b_mat, target_memory=pl.Mem.Right)
+                product = pl.tile.matmul(left, right)
+                drained = pl.store(product, [0, i * n], output)
+                final, final_out = pl.yield_(product, drained)
+            return pl.store(final, [0, trips * n], final_out)
+
+    return ExplicitAccumulatorPipeline
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("trips,stages", [(4, 2), (5, 2), (5, 3)])
+def test_explicit_dbc_yielded_accumulator_remains_defined(planner, trips, stages):
+    """An explicitly buffered pipeline may yield both its Acc and output chain."""
+    program = _explicit_accumulator_pipeline(trips, stages)
+    with passes.PassContext([], memory_planner=planner):
+        lowered = passes.lower_pipeline_loops()(program)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, lowered)
+    mlir = _codegen(program, planner)
+    assert "FREE_VAR" not in mlir
+
+
+@pytest.mark.parametrize("m,n", [(16, 64), (128, 128)])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_explicit_dbc_accumulators_remain_separate_in_native_ptoas(tmp_path, m, n, backend_type):
+    """Native planning must not collapse the explicit two-stage Acc contract."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    mlir = _codegen(_explicit_accumulator_pipeline(4, 2, m, n), passes.MemoryPlanner.PTOAS, backend_type)
+    source = tmp_path / "explicit_accumulator_pipeline.pto"
+    output = tmp_path / "explicit_accumulator_pipeline.cpp"
+    source.write_text(mlir)
+    arch = "a2" if backend_type == BackendType.Ascend910 else "a5"
+    _run_ptoas(str(source), str(output), ["--pto-level=level2", f"--pto-arch={arch}", "--enable-insert-sync"])
+    cpp = output.read_text()
+    # Native compilation alone is insufficient: a later scheduler can serialize
+    # the drains again and collapse the two requested accumulator stages.
+    definitions = dict(re.findall(r"^\s*(?:const )?u?int\d+_t (\w+) = (.+);$", cpp, re.MULTILINE))
+
+    def constant_address(name: str) -> int:
+        expression = definitions[name]
+        if expression.isdigit():
+            return int(expression)
+        cast = re.fullmatch(r"\(u?int\d+_t\) (\w+)", expression)
+        assert cast is not None, f"unresolved address {name} = {expression}"
+        return constant_address(cast.group(1))
+
+    accumulators = re.findall(r"^\s*Tile<TileType::Acc,[^\n]+?>\s+(\w+)\s*(?:=|;)", cpp, re.MULTILINE)
+    addresses = dict(re.findall(r"TASSIGN\((\w+), (\w+)\);", cpp))
+    assert accumulators and all(name in addresses for name in accumulators), cpp
+    loop = re.search(r"for \(int64_t \w+ =", cpp)
+    assert loop is not None, cpp
+    destinations = re.findall(r"TMATMUL\((\w+),", cpp[loop.start() :])
+    assert len(destinations) == 2 and all(name in accumulators for name in destinations), cpp
+    first, second = (constant_address(addresses[name]) for name in destinations)
+    tile_bytes = m * n * 4
+    assert first + tile_bytes <= second or second + tile_bytes <= first, cpp
 
 
 def _assert_logical_slot_index(mlir: str) -> None:

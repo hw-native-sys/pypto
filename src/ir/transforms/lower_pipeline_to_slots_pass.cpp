@@ -286,7 +286,11 @@ class SlotBindingMutator : public IRMutator {
     // previous `LowerPipelineLoops` run left behind. Nothing to multi-buffer:
     // leave the (kind, attr) pair whole for `CanonicalizeIOOrder` to scope on.
     std::vector<Candidate> candidates;
-    if (factor > 1 && !unslotted_pipeline_ancestor_ && LoopShapeAllowsSlots(op, factor)) {
+    // This lowering rotates loads only. Demoting a dbC loop here would bypass
+    // the compute/drain ordering and Acc membership supplied by the replication
+    // path, silently turning explicit accumulator buffering into single-C.
+    const bool double_buffer_c = op->GetAttr<bool>(kPipelineDoubleBufferCAttr, false);
+    if (factor > 1 && !double_buffer_c && !unslotted_pipeline_ancestor_ && LoopShapeAllowsSlots(op, factor)) {
       // `nullopt` means a load this pass would have slotted hit a codegen blocker,
       // so the whole loop goes back to `LowerPipelineLoops`.
       if (auto collected = CollectCandidates(op, factor)) candidates = std::move(*collected);
