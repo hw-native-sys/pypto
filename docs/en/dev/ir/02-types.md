@@ -421,8 +421,6 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 The origin remains in the defining call, rather than becoming an allocation
 size or a type-level pointer. The tag alone is not proof: conversion and PTO
 emission recheck provenance, containment, strict reduction, and index bounds.
-See the [GM subview RFC](gm-subview-rfc.md) and its
-[worked example](gm-subview-worked-example.md).
 
 #### Canonical TensorView form (RFC #1300)
 

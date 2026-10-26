@@ -5,8 +5,7 @@ shared contextual verifier proves strict containment, overflow-free geometry and
 read-only caller-owned provenance; false and unknown facts reject. An affine
 `tensor.set_validshape` alias also remains Tensor and may only narrow validity.
 Consumer `tensor.slice`/compute conversions load from that descriptor using its
-actual pitch. Existing materializing slice semantics are unchanged. See the
-[GM subview RFC](../ir/gm-subview-rfc.md).
+actual pitch. Existing materializing slice semantics are unchanged.
 
 Converts tensor operations to tile operations in InCore, AIC, and AIV functions and updates orchestration call sites.
 

@@ -19,8 +19,6 @@ IR 定义是整个编译器的真源：pass 可以重写，IR 节点定义不可
 | [参数方向](08-param-directions.md) | `In`/`Out`/`InOut` 如何被推导——各阶段共同读取的注册表声明，以及基于它的四个 pass |
 | [多输出算子](09-multi_output_ops.md) | 产生多个值的算子：`TupleType` 结果、为什么目的地绝不作为参数，以及注册表强制的规则 |
 | [算子效应](10-operator-effects.md) | Functional 参数访问、写通道及核放置/复制契约 |
-| [GM 子视图 RFC](gm-subview-rfc.md) | 显式 GM 别名、动态行 pitch 与可控 InCore load 的设计草案 |
-| [GM 子视图完整示例](gm-subview-worked-example.md) | 接口差异、IR 构造、pass 检查点与可运行 PTOAS fixture |
 
 ## 另请参阅
 
