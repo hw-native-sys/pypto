@@ -493,7 +493,7 @@ memory space. Redundant explicit defaults such as `pl.TileView()` are treated
 as semantically equivalent to the omitted form and may print back in canonical
 syntax. `TileView.compact` records whether a partial boxed tile uses PTO's
 valid-region-packed representation (`CompactMode.normal`) or the ordinary
-physical-box representation (`CompactMode.null`, the default). It is meaningful
+physical-box representation (`CompactMode.null`, the default). The normal mode is meaningful
 only in the fractal spaces — `Left` / `Right` / `Acc` — because it *is* an
 N-fractal pitch; the `AccCompactValid` verifier rejects it anywhere else. The
 compiler sets it automatically for partial `tile.extract` transfers into
@@ -501,6 +501,15 @@ L0A/L0B and for a row-narrowed matmul accumulator (whose L0C pitch `mad`
 derives from the L0A operand's valid rows), and `AutoTileMatmulL0` declares it
 on a synthesized accumulator seed via `tile.create(..., compact=True)`. Normal
 user code does not need to select it.
+
+`CompactMode.row_plus_one` independently describes padded standard Vec NZ
+storage for FP8E4M3FN (`blayout=col_major`, `slayout=row_major`, `fractal=512`).
+It keeps the logical shape and reserves one extra physical row per 32-byte
+panel: `(ceil(rows/16)*16 + 1) * cols` bytes. Explicit descriptors require
+static positive rows divisible by 16, columns divisible by 32, no explicit
+strides/start offset, and one allocation slot. Buffer IR rejects this mode.
+This type/storage contract does not select any conversion strategy; the
+separate FP4 option is limited to full `128x256` outputs and defaults to false.
 
 The implicit view depends on the memory space, so the constructor collapses a
 view to `nullopt` only against the space it is given. An `f_deduce_type`

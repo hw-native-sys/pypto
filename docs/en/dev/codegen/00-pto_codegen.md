@@ -874,7 +874,11 @@ layout/fractal/pad/compact mode from the associated TileView (when available):
 | `slayout` | `TileView::slayout` | `none_box`, `row_major`, `col_major` | `none_box` |
 | `fractal` | `TileView::fractal` | uint64 | `512` |
 | `pad` | `TileView::pad` | `null(0)`, `zero(1)`, `max(2)`, `min(3)` | `null(0)` |
-| `compact` | `TileView::compact` | `null(0)`, `normal(1)` | `null(0)` |
+| `compact` | `TileView::compact` | `null(0)`, `normal(1)`, `row_plus_one(2)` | `null(0)` |
+
+`row_plus_one(2)` is the independent padded FP8 Vec NZ storage mode.
+Logical rows/columns stay unchanged, while allocation includes the extra panel
+rows. See [TileType](../ir/02-types.md#tiletype) for descriptor restrictions.
 
 When no TileView is associated with the MemRef, the codegen falls back to the default values listed above.
 The `compact` attribute is omitted for its null default. Two paths set `normal(1)` automatically:

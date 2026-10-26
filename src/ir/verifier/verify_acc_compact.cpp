@@ -215,6 +215,9 @@ class AccCompactVisitor : public IRVisitor {
     auto tile_type = As<TileType>(type);
     if (!tile_type || !tile_type->tile_view_.has_value() || !tile_type->memory_space_.has_value()) return;
     if (tile_type->tile_view_->compact == CompactMode::null) return;
+    // TileType validates the independent Vec NZ RowPlusOne contract at
+    // construction; it does not participate in accumulator compaction.
+    if (tile_type->tile_view_->compact == CompactMode::row_plus_one) return;
     if (IsFractalSpace(*tile_type->memory_space_)) return;
 
     diagnostics_.emplace_back(

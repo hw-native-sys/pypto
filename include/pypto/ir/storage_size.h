@@ -40,6 +40,18 @@ inline std::optional<uint64_t> StaticStorageBytes(uint64_t logical_elements, con
   return total_bits / 8 + static_cast<uint64_t>(total_bits % 8 != 0);
 }
 
+/// Complete standard NZ capacity, including the trailing padding row.
+/// Match ISA Tile::StorageNumel rather than the last byte actually written:
+/// each 32-byte panel reserves ceil(rows/16)*16 + 1 physical rows.
+inline std::optional<uint64_t> RowPlusOneNZStorageBytes(uint64_t rows, uint64_t cols, const DataType& dtype) {
+  if (rows == 0 || cols == 0 || rows > std::numeric_limits<uint64_t>::max() - 16) {
+    return std::nullopt;
+  }
+  const uint64_t panel_rows = (rows + 15) / 16 * 16 + 1;
+  if (cols > std::numeric_limits<uint64_t>::max() / panel_rows) return std::nullopt;
+  return StaticStorageBytes(panel_rows * cols, dtype);
+}
+
 /// Byte offset of a statically known logical element offset.
 ///
 /// A packed-nibble origin cannot be represented by MemRef's byte_offset field,

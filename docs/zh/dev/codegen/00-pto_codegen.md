@@ -816,7 +816,10 @@ Tensor 和 Tile 转换算子有各自的降低规则。
 | `slayout` | `TileView::slayout` | `none_box`, `row_major`, `col_major` | `none_box` |
 | `fractal` | `TileView::fractal` | uint64 | `512` |
 | `pad` | `TileView::pad` | `null(0)`, `zero(1)`, `max(2)`, `min(3)` | `null(0)` |
-| `compact` | `TileView::compact` | `null(0)`, `normal(1)` | `null(0)` |
+| `compact` | `TileView::compact` | `null(0)`, `normal(1)`, `row_plus_one(2)` | `null(0)` |
+
+`row_plus_one(2)` 是独立的带填充 FP8 Vec NZ 存储模式。逻辑行列数不变，
+分配容量包含额外的面板行。描述符限制见 [TileType](../ir/02-types.md#tiletype)。
 
 当 MemRef 没有关联 TileView 时，代码生成器使用上表中的默认值。默认的 null
 `compact` 属性不会输出。有两条路径会自动设置 `normal(1)`：
