@@ -847,16 +847,32 @@ def test_packed_fp4_cast_dn_rejects_partial_or_padded_extent(dtype, valid, tile_
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype):
+@pytest.mark.parametrize("target", [pl.FP32, pl.FP8E4M3FN, pl.FP8E5M2])
+@pytest.mark.parametrize("tile_cast", [False, True], ids=["tensor", "tile"])
+def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype, target, tile_cast):
+    # The native E2M1-to-E4M3 ND edge must not enable wider DN casts. DN
+    # supports only packed/BF16 endpoints, independently of the cast graph.
     span = ir.Span.unknown()
-    strided = ir.TileView(stride=[1, 64], blayout=ir.TileLayout.col_major)
-    source = ir.Var("source", ir.TileType([32, 32], dtype, None, strided), span)
+    if tile_cast:
+        strided = ir.TileView(stride=[1, 64], blayout=ir.TileLayout.col_major)
+        source_type = ir.TileType([32, 32], dtype, None, strided)
+        cast = ir.op.tile.cast
+    else:
+        strided = ir.TensorView([1, 64], ir.TensorLayout.DN)
+        source_type = ir.TensorType([32, 32], dtype, None, strided)
+        cast = ir.op.tensor.cast
+    source = ir.Var("source", source_type, span)
     with pytest.raises(ValueError, match="requires canonical contiguous column-major strides"):
-        ir.op.tile.cast(source, pl.BF16)
-    dense = ir.TileView(blayout=ir.TileLayout.col_major)
-    source = ir.Var("source", ir.TileType([32, 32], dtype, None, dense), span)
+        cast(source, pl.BF16)
+    if tile_cast:
+        dense = ir.TileView(blayout=ir.TileLayout.col_major)
+        dense_type = ir.TileType([32, 32], dtype, None, dense)
+    else:
+        dense = ir.TensorView([1, 32], ir.TensorLayout.DN)
+        dense_type = ir.TensorType([32, 32], dtype, None, dense)
+    source = ir.Var("source", dense_type, span)
     with pytest.raises(ValueError, match="supports only BF16 and packed FP4 endpoints"):
-        ir.op.tile.cast(source, pl.FP32)
+        cast(source, target)
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
