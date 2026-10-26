@@ -236,6 +236,18 @@ TCVT implementation with padded storage sizing. It is disabled by default
 while runtime dependency pins are brought forward. The independent MX option
 requests supported K128 L0 ping/pong lowering; it does not change NZ eligibility.
 
+MX ping/pong applies to full A5 M48/M64, N256, K256 FP8/E8M0
+matrix operations whose four L0 staging moves have exclusive consumers.
+It preserves the K256 Mat/FIFO source and splits each matrix operation into
+two increasing-K128 operations with the original FP32 accumulation order.
+Two independent pinned L0B slots hold 32768 bytes each; L0A slots use the
+actual M*128-byte footprint. Each scale handle derives its address from its
+paired data address shifted right by four. The producer FIFO is released only
+after both B slices have been copied. Explicit user storage, unsupported
+shapes and PTOAS memory planning retain the original lowering. This fallback
+does not affect the independent padded NZ option. PyPTO memory planning still
+uses PTOAS for verification, synchronization and C++ emission.
+
 Explicit RowPlusOne Tile descriptors validate static positive physical rows
 divisible by 16, columns divisible by 32, and padded offset bounds.
 Buffer IR and multi-buffer slot descriptors currently reject this mode;
