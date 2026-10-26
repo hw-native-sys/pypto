@@ -4597,5 +4597,87 @@ def test_wrapper_diagnoses_runtime_payload_capacity(kind, limit, overflow):
         assert len(names) == limit
 
 
+@pytest.mark.parametrize("extent", ["B * 2", "2 * B", "B + 2", "2 + B", "B - 2", "32 - B"])
+@pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
+def test_outline_preserves_shape_only_affine_extraction(tmp_path, extent, scope):
+    """Shape-only B has no orch scalar binding; the wrapper must recover it."""
+    backend.reset_for_testing()
+    program = pl.parse(f"""import pypto.language as pl
+B = pl.dynamic("B")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        x: pl.Tensor[[{extent}, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        with {scope}:
+            worker = pl.tile.get_block_idx()
+            value = pl.load(x, [worker, 0], [1, 16])
+            out = pl.store(value, [worker, 0], out)
+        return out
+""")
+    assert isinstance(program, ir.Program)
+    compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    assert compiled is not None
+    orch = (tmp_path / "orchestration" / "main.cpp").read_text()
+    assert ".add_scalar(B)" not in orch
+    # Check the ABI extractor independently of assembler availability.
+    lowered = _run_default_passes(program)
+    kernels = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
+    assert len(kernels) == 1
+    unpacking, names = _generate_arg_unpacking(kernels[0])
+    assert "Extract dynamic dim: B" in unpacking
+    assert names[-1] == "B"
+
+
+@pytest.mark.parametrize("extent", ["B // 5", "B * B", "(B + 15) // 16 * 16 + T * 4"])
+@pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
+def test_outline_rejects_unbound_noninvertible_shape(tmp_path, extent, scope):
+    """A type-only symbol must not become an undeclared orchestration scalar."""
+    backend.reset_for_testing()
+    program = pl.parse(f"""import pypto.language as pl
+B = pl.dynamic("B")
+T = pl.dynamic("T")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(self, x: pl.Tensor[[{extent}, 16], pl.FP32]):
+        with {scope}:
+            worker = pl.tile.get_block_idx()
+            value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+            x = pl.store(value, [worker, 0], x)
+        return x
+""")
+    assert isinstance(program, ir.Program)
+    with pytest.raises(ValueError, match="B.*no caller-side runtime binding"):
+        ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+
+
+@pytest.mark.parametrize("binding", ["B: pl.Scalar[pl.INDEX]", "source: pl.Tensor[[B, 16], pl.FP32]"])
+@pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
+def test_outline_captures_noninvertible_shape_with_runtime_binding(tmp_path, binding, scope):
+    """A scalar parameter or unused bare-dimension parameter supplies the value."""
+    backend.reset_for_testing()
+    program = pl.parse(f"""import pypto.language as pl
+B = pl.dynamic("B")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(self, {binding}, x: pl.Tensor[[B // 5, 16], pl.FP32]):
+        with {scope}:
+            worker = pl.tile.get_block_idx()
+            value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+            x = pl.store(value, [worker, 0], x)
+        return x
+""")
+    assert isinstance(program, ir.Program)
+    ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    orch = (tmp_path / "orchestration" / "main.cpp").read_text()
+    assert ".add_scalar(B)" in orch
+    assert "int64_t B =" in orch
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

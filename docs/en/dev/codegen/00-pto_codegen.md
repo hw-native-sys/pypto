@@ -55,9 +55,15 @@ Constant extents are emitted directly as INDEX, including unsigned constants.
 
 An outlined scope captures scalar symbols needed by its tensor parameter types,
 even when the kernel body never reads them directly. A bare axis such as `[B, 16]`
-binds `B` through its tensor descriptor. A composite axis such as
+binds `B` through its tensor descriptor. Supported invertible axes such as
+`[B * 2, 16]` also retain descriptor extraction, so the caller need not have a
+separate scalar binding for `B`. A composite axis such as
 `[(B + 15) // 16 * 16 + T * 4, 16]` does not bind either symbol: the outliner
 conservatively adds explicit `B` and `T` parameters and passes their caller values.
+These symbols must have caller-side runtime bindings: scalar parameters, body
+value definitions, or bare dimensions of tensor parameters. A symbol appearing
+only inside a non-invertible type expression is rejected during outlining,
+before it can become an undeclared orchestration argument.
 It keeps the expression intact; it does not replace it with a new `ROWS` symbol.
 
 IR scalar parameters precede annotations that reference them. Runtime dispatch

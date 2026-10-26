@@ -103,7 +103,11 @@ def make_entry_no_pipeline(offset_for_step):
 
 @pytest.mark.parametrize("factory", [make_entry, make_entry_no_pipeline], ids=["pipeline", "range"])
 @pytest.mark.parametrize("offset", [conditional_offset, direct_offset], ids=["conditional", "direct"])
-def test_fifo_offset_compiles(factory, offset, tmp_path):
+def test_fifo_offset_compiles(factory, offset, tmp_path, test_config, monkeypatch):
+    # The CPU codegen job deliberately installs no assembler. Ignore an ambient
+    # (possibly outdated) ptoas there; full runs still exercise assembly.
+    if test_config.codegen_only:
+        monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
     # Repeated stores only exercise compilation; this kernel is never executed.
     compiled = factory(offset).compile(
         config=RunConfig(

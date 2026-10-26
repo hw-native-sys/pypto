@@ -2326,5 +2326,51 @@ def test_canonical_reg_annotation_resolves_without_captured_module():
     assert result.kind == ir.RegKind.MaskReg
 
 
+@pytest.mark.parametrize("shape_expr", ["SHAPE", "[SHAPE[0], 16]"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_shape_alias_uses_local_dynamic_binding(shape_expr, initialized):
+    """A captured container must not retain another function's dimension Var."""
+    B = pl.dynamic("B")
+    original = ir.Var("B", ir.ScalarType(DataType.INDEX), ir.Span.unknown()) if initialized else None
+    B._ir_var = original
+    resolver = _make_resolver({"SHAPE": [B, 16]})
+    local = ir.Var("B", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    resolver.bind_local_dynamic_symbol("B", local)
+    ty = resolver.resolve_type(ast.parse(f"pl.Tensor[{shape_expr}, pl.FP32]", mode="eval").body)
+    assert isinstance(ty, ir.TensorType)
+    assert ty.shape[0].same_as(local)
+    assert B._ir_var is original
+
+
+def test_shape_alias_shadowing_is_local_to_each_function():
+    B = pl.dynamic("B")
+    SHAPE = [B, 16]
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def first(self, x: pl.Tensor[SHAPE, pl.FP32]) -> pl.Tensor[SHAPE, pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def second(self, B: pl.Scalar[pl.INDEX], x: pl.Tensor[SHAPE, pl.FP32]) -> pl.Tensor[SHAPE, pl.FP32]:
+            return x
+
+    first = Program.get_function("first")
+    second = Program.get_function("second")
+    assert first is not None and second is not None
+    first_type = first.params[0].type
+    second_type = second.params[1].type
+    return_type = second.return_types[0]
+    assert isinstance(first_type, ir.TensorType)
+    assert isinstance(second_type, ir.TensorType)
+    assert isinstance(return_type, ir.TensorType)
+    assert B._ir_var is not None
+    assert second_type.shape[0].same_as(second.params[0])
+    assert return_type.shape[0].same_as(second.params[0])
+    assert first_type.shape[0].same_as(B._ir_var)
+    assert not B._ir_var.same_as(second.params[0])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -632,6 +632,24 @@ class TensorTypeDependencyCollector : public IRVisitor {
   }
 };
 
+/// Symbols recoverable from a tensor descriptor without a caller-side value.
+/// Keep this restricted to the wrapper's supported inverses: a bare symbol,
+/// +/- an integer constant, or multiplication by a nonzero integer constant.
+/// Floor division and multi-symbol expressions do not uniquely determine a Var.
+VarPtr DescriptorBoundSymbol(const ExprPtr& dim) {
+  if (auto symbol = AsVarLike(dim)) return symbol;
+  if (!As<Add>(dim) && !As<Sub>(dim) && !As<Mul>(dim)) return nullptr;
+  auto binary = As<BinaryExpr>(dim);
+  auto symbol = AsVarLike(binary->left_);
+  auto constant = As<ConstInt>(binary->right_);
+  if (!symbol || !constant) {
+    symbol = AsVarLike(binary->right_);
+    constant = As<ConstInt>(binary->left_);
+  }
+  if (!symbol || !constant || (As<Mul>(dim) && constant->value_ == 0)) return nullptr;
+  return symbol;
+}
+
 /**
  * @brief Collect the *upward-exposed* uses of a subtree — variables read
  *        before the subtree (re)defines them.
@@ -665,17 +683,17 @@ class UpwardExposedUseCollector : public IRVisitor {
   /// outside it — i.e. the subtree captures rather than defines it.
   [[nodiscard]] bool IsExternal(const Var* var) const { return live_in_.count(var) > 0; }
 
-  /// Close the capture set over tensor shape dependencies. A bare dimension
-  /// is available from a captured descriptor; occurrence inside an expression
-  /// is not a binding (e.g. rows = ceildiv(B, 16) * 16 + T * 4 loses B and T).
-  /// Conservatively pass such symbols rather than attempting algebraic inversion.
-  void CaptureShapeDependencies() {
+  /// Close the capture set over tensor shape dependencies. Preserve descriptor
+  /// extraction for supported invertible dimensions: a shape-only symbol may
+  /// have no caller-side scalar to pass. Other expressions (e.g. rows =
+  /// ceildiv(B, 16) * 16 + T * 4) need the original symbols passed explicitly.
+  void CaptureShapeDependencies(const std::unordered_set<const Var*>& runtime_bindings) {
     std::unordered_set<const Var*> descriptor_bound;
     var_collectors::VarDefUseCollector dependencies;
     for (const Var* var : ordered) {
       if (auto type = AsTensorTypeLike(var->GetType())) {
         for (const auto& dim : type->shape_) {
-          if (auto symbol = AsVarLike(dim)) descriptor_bound.insert(symbol.get());
+          if (auto symbol = DescriptorBoundSymbol(dim)) descriptor_bound.insert(symbol.get());
           dependencies.VisitExpr(dim);
         }
       }
@@ -687,6 +705,11 @@ class UpwardExposedUseCollector : public IRVisitor {
       if (descriptor_bound.count(var) && !IsExternal(var)) continue;
       RecordUse(var);
       if (IsExternal(var)) {
+        CHECK_SPAN(runtime_bindings.count(var) > 0, var->span_)
+            << "Cannot capture dynamic shape symbol '" << var->name_hint_
+            << "': no caller-side runtime binding is available for this non-invertible shape. "
+               "Pass the symbol as an explicit scalar parameter or expose it as a bare tensor "
+               "parameter dimension";
         shape_params.push_back(var);
         shape_param_set.insert(var);
       }
@@ -801,12 +824,15 @@ class UpwardExposedUseCollector : public IRVisitor {
 
 ScopeOutliner::ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                              const std::unordered_map<const Var*, VarPtr>& var_objects,
-                             const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
-                             FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program,
+                             const std::unordered_set<std::string>& known_names,
+                             const std::unordered_set<const Var*>& runtime_bindings,
+                             ScopeKind target_scope_kind, FunctionType outlined_func_type,
+                             std::string name_suffix, ProgramPtr program,
                              std::shared_ptr<std::unordered_set<std::string>> reserved_func_names)
     : func_name_(std::move(func_name)),
       var_types_(var_types),
       var_objects_(var_objects),
+      runtime_bindings_(runtime_bindings),
       known_names_(known_names),
       target_scope_kind_(target_scope_kind),
       outlined_func_type_(outlined_func_type),
@@ -1610,7 +1636,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // substitution and the call-site lookup below.
   UpwardExposedUseCollector live_in;
   live_in.VisitStmt(scope_body);
-  live_in.CaptureShapeDependencies();
+  live_in.CaptureShapeDependencies(runtime_bindings_);
 
   std::vector<VarPtr> input_vars;
   for (const Var* var_ptr : live_in.ordered) {

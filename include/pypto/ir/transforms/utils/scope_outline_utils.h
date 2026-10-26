@@ -24,6 +24,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
@@ -65,6 +66,26 @@ class VarCollector : public IRVisitor {
   std::unordered_map<const Var*, TypePtr> var_types;
   std::unordered_map<const Var*, VarPtr> var_objects;
   std::unordered_set<std::string> known_names;
+  // Value definitions, excluding symbols merely visited through a type.
+  std::unordered_set<const Var*> runtime_bindings;
+
+  void CollectParameter(const VarPtr& var) {
+    var_types[var.get()] = var->GetType();
+    var_objects[var.get()] = var;
+    known_names.insert(var->name_hint_);
+    runtime_bindings.insert(var.get());
+    if (auto tensor = AsTensorTypeLike(var->GetType())) {
+      for (const auto& dim : tensor->shape_) {
+        // Orchestration extracts bare dimensions from its tensor arguments.
+        if (auto symbol = AsVarLike(dim)) {
+          runtime_bindings.insert(symbol.get());
+          // An unused parameter may be the only source of this symbol. In
+          // particular, the base visitor does not walk DistributedTensorType.
+          VisitExpr(symbol);
+        }
+      }
+    }
+  }
 
  protected:
   // Use VisitVarLike_ to collect both Var and IterArg references.
@@ -78,6 +99,7 @@ class VarCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
+    runtime_bindings.insert(op->var_.get());
     var_types[op->var_.get()] = op->var_->GetType();
     var_objects[op->var_.get()] = op->var_;
     known_names.insert(op->var_->name_hint_);
@@ -85,15 +107,18 @@ class VarCollector : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
+    runtime_bindings.insert(op->loop_var_.get());
     var_types[op->loop_var_.get()] = op->loop_var_->GetType();
     var_objects[op->loop_var_.get()] = op->loop_var_;
     known_names.insert(op->loop_var_->name_hint_);
     for (const auto& iter_arg : op->iter_args_) {
+      runtime_bindings.insert(iter_arg.get());
       var_types[iter_arg.get()] = iter_arg->GetType();
       var_objects[iter_arg.get()] = iter_arg;
       known_names.insert(iter_arg->name_hint_);
     }
     for (const auto& return_var : op->return_vars_) {
+      runtime_bindings.insert(return_var.get());
       var_types[return_var.get()] = return_var->GetType();
       var_objects[return_var.get()] = return_var;
       known_names.insert(return_var->name_hint_);
@@ -103,11 +128,13 @@ class VarCollector : public IRVisitor {
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& iter_arg : op->iter_args_) {
+      runtime_bindings.insert(iter_arg.get());
       var_types[iter_arg.get()] = iter_arg->GetType();
       var_objects[iter_arg.get()] = iter_arg;
       known_names.insert(iter_arg->name_hint_);
     }
     for (const auto& return_var : op->return_vars_) {
+      runtime_bindings.insert(return_var.get());
       var_types[return_var.get()] = return_var->GetType();
       var_objects[return_var.get()] = return_var;
       known_names.insert(return_var->name_hint_);
@@ -117,6 +144,7 @@ class VarCollector : public IRVisitor {
 
   void VisitStmt_(const IfStmtPtr& op) override {
     for (const auto& return_var : op->return_vars_) {
+      runtime_bindings.insert(return_var.get());
       var_types[return_var.get()] = return_var->GetType();
       var_objects[return_var.get()] = return_var;
       known_names.insert(return_var->name_hint_);
@@ -141,7 +169,8 @@ class ScopeOutliner : public IRMutator {
  public:
   ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                 const std::unordered_map<const Var*, VarPtr>& var_objects,
-                const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
+                const std::unordered_set<std::string>& known_names,
+                const std::unordered_set<const Var*>& runtime_bindings, ScopeKind target_scope_kind,
                 FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr,
                 std::shared_ptr<std::unordered_set<std::string>> reserved_func_names = nullptr);
 
@@ -444,6 +473,7 @@ class ScopeOutliner : public IRMutator {
   std::string func_name_;
   std::unordered_map<const Var*, TypePtr> var_types_;
   std::unordered_map<const Var*, VarPtr> var_objects_;
+  std::unordered_set<const Var*> runtime_bindings_;
   std::unordered_set<std::string> known_names_;
   std::unordered_set<const Var*> required_outputs_;
   /// Accumulates across scopes intentionally (not saved/restored like func_name_

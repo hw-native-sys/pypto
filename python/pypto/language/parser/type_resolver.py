@@ -1335,14 +1335,7 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                if elem._ir_var is None:
-                    name = elem.name
-                    if name not in self._dyn_var_cache:
-                        self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-                    elem._ir_var = self._dyn_var_cache[name]
-                elif elem.name not in self._dyn_var_cache:
-                    self._dyn_var_cache[elem.name] = elem._ir_var
-                dims.append(elem._ir_var)
+                dims.append(self._validate_dim_value(elem, source_name, span))
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -1365,6 +1358,11 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
+            # Closure containers can retain the original DynVar after a scalar
+            # parameter shadows it. Resolve that alias through the local cache
+            # without rebinding the shared closure object to this function.
+            if value.name in self._dyn_var_cache:
+                return self._dyn_var_cache[value.name]
             if value._ir_var is None:
                 name = value.name
                 if name not in self._dyn_var_cache:
