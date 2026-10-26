@@ -90,6 +90,26 @@ with ib.function("tensor_example") as f:
 
 **设计**：使用 `TileType`（而非单独的 `BlockType`）以保持一致性。命名空间 `tile.*` + `TileType` 清楚地表示硬件优化的 Tile 操作。
 
+### Python 实现布局
+
+公开入口仍为 `pypto.ir.op.tile` 和 `pypto.language.tile`。
+两层的 `tile_ops.py` 模块直接重新导出函数，保留调用签名，并避免给源码位置捕获
+增加调用栈层级。两层 Python 实现采用相同的私有模块分类：
+
+| 模块 | 职责 |
+| ---- | ---- |
+| `_tile_memory.py` | 分配、load/store、初始化及形状/视图操作 |
+| `_tile_elementwise.py` | 逐元素算术、比较及标量分派 |
+| `_tile_linalg.py` | 矩阵乘积及 MX 量化 |
+| `_tile_reduction.py` | 行列归约与广播 |
+| `_tile_indexing.py` | 索引 gather/scatter、排序及归并排序 |
+| `_tile_cross_core.py` | Block 查询及 AIV/AIC 数据交换 |
+
+DSL 的 `_tile_common.py` 保存 `store` 和 `mscatter` 共用的张量类型参数。
+实现模块不得导入自身所属层的 `tile_ops.py` 入口模块；共享辅助逻辑位于入口模块
+下层，以避免循环导入。新增算子时，在两层对应的实现模块中添加定义，并通过
+原有公开模块重新导出。
+
 ### 操作列表
 
 | 分类 | 操作 | 描述 |

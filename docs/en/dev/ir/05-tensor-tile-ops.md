@@ -101,6 +101,28 @@ with ib.function("tensor_example") as f:
 
 **Design**: Uses `TileType` (not separate `BlockType`) for consistency. Namespace `tile.*` + `TileType` clearly indicates hardware-optimized tile operations.
 
+### Python implementation layout
+
+The public entry points remain `pypto.ir.op.tile` and `pypto.language.tile`.
+Their `tile_ops.py` modules re-export functions directly, preserving call
+signatures and avoiding extra stack frames in source-location capture.
+Both Python layers group implementations into the same private modules:
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `_tile_memory.py` | Allocation, load/store, initialization, and shape/view operations |
+| `_tile_elementwise.py` | Element-wise arithmetic, comparisons, and scalar dispatch |
+| `_tile_linalg.py` | Matrix products and MX quantization |
+| `_tile_reduction.py` | Row/column reductions and broadcasts |
+| `_tile_indexing.py` | Indexed gather/scatter, sorting, and merge sorting |
+| `_tile_cross_core.py` | Block queries and AIV/AIC transfers |
+
+The DSL's `_tile_common.py` holds the shared tensor type parameter used by
+`store` and `mscatter`. Implementation modules must not import their own
+`tile_ops.py` facade; shared helpers stay below the facade to avoid import
+cycles. Add new operators to the matching implementation in each layer and
+re-export them through the existing public modules.
+
 ### Operations
 
 | Category | Operations | Description |
