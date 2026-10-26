@@ -732,7 +732,9 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
       if (!source || source->shape_.size() != 2 || !shape || shape->elements_.size() != rank) {
         return std::nullopt;
       }
-      // Only singleton batch prefixes preserve the matrix row/column mapping.
+      // Selection and emission share this check against physical M/N, before
+      // valid bounds narrow the output grid. Only singleton batch prefixes
+      // preserve the matrix row/column mapping.
       for (size_t axis = 0; axis < rank; ++axis) {
         auto dim = As<ConstInt>(shape->elements_[axis]);
         auto expected = axis + 2 < rank ? nullptr : As<ConstInt>(source->shape_[axis + 2 - rank]);
@@ -1963,7 +1965,7 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
   // K-loop+peel, so test k == K rather than the integer-division proxy K/k < 2.
   const bool full_k = t.k == t.K;
 
-  // Direct-store: the sole consumer is a 2D or blocked NZ tile.store. The grid is emitted
+  // Direct-store: the sole consumer is a 2D, ND-page, or blocked NZ store. The grid is emitted
   // later at the store site, where the caller re-applies the then-current remap
   // — so a prior fold that redefined this output is rewritten correctly (a
   // stale-output SSA guard); resolving it here would miss folds emitted before
@@ -2417,10 +2419,11 @@ class AutoTileMutator : public IRMutator {
         const Stmt* next_effect =
             next_non_load[i] < op->stmts_.size() ? op->stmts_[next_non_load[i]].get() : nullptr;
         const auto consumer = AnalyzeMatmulOutputConsumer(assign, sibling_index, next_effect);
-        if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                        consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
-                                        /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0)) {
+        if (auto tiling =
+                AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
+                              /*output_box_alignment=*/std::nullopt, &direct_defs,
+                              consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
+                              /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0)) {
           auto emit_k_only = [&](const MatmulTiling& plan) {
             // AnalyzeMatmul skips a full M/N/K fit, so a shape-preserving plan
             // reaching this emitter must split K. Preserve the original result
@@ -2515,22 +2518,29 @@ class AutoTileMutator : public IRMutator {
               continue;  // drop the matmul; sub-tile stmts emit at the store site
             }
           }
-          // A cost-optimal M/N grid is not necessarily required for capacity.
-          // If neither placement can emit it, retry with the whole output held
-          // in one Acc tile. The chooser still checks physical L0A/B/C limits;
-          // truly oversized outputs remain deferred. This applies to every
-          // planner: lifetime packing cannot repair one oversized operand.
-          std::vector<Diagnostic> fallback_hints;
-          if (auto k_only = AnalyzeMatmul(assign, fallback_hints, /*force_output_stationary=*/true,
-                                          /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                          /*restrict_output_grid=*/false, /*keep_output_shape=*/true,
-                                          /*source_reduction=*/nullptr, consumer->fixed_output_m)) {
-            // The rejected grid's deferral no longer applies. Diagnostic spans
-            // are immutable, so remove by destruction and append by construction.
-            while (hints.size() > mn_hint_start) hints.pop_back();
-            for (auto& hint : fallback_hints) hints.push_back(std::move(hint));
-            emit_k_only(*k_only);
-            continue;
+          // A caller-owned accumulator belongs to an enclosing reduction.
+          // Replanning a rejected M/N choice here ignores that loop's buffering
+          // and can overflow L0A after nested pipeline lowering. Keep canonical
+          // split-K scheduling (including the PTOAS compatibility route) and
+          // manual storage decisions intact; retry only fresh/biased results.
+          if (!tiling->is_acc()) {
+            // A cost-optimal M/N grid is not necessarily required for capacity.
+            // If neither placement can emit it, retry with the whole output held
+            // in one Acc tile. The chooser still checks physical L0A/B/C limits;
+            // truly oversized outputs remain deferred. This applies to every
+            // planner: lifetime packing cannot repair one oversized operand.
+            std::vector<Diagnostic> fallback_hints;
+            if (auto k_only = AnalyzeMatmul(assign, fallback_hints, /*force_output_stationary=*/true,
+                                            /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                            /*restrict_output_grid=*/false, /*keep_output_shape=*/true,
+                                            /*source_reduction=*/nullptr, consumer->fixed_output_m)) {
+              // The rejected grid's deferral no longer applies. Diagnostic spans
+              // are immutable, so remove by destruction and append by construction.
+              while (hints.size() > mn_hint_start) hints.pop_back();
+              for (auto& hint : fallback_hints) hints.push_back(std::move(hint));
+              emit_k_only(*k_only);
+              continue;
+            }
           }
           // Neither placement nor a K-only reduction is legal; leave untouched.
         }

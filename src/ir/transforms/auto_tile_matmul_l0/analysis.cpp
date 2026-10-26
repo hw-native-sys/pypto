@@ -99,8 +99,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment,
     const DirectDefMap* direct_defs, bool restrict_output_grid, bool keep_output_shape,
-    const ForStmtPtr& source_reduction,
-    int64_t fixed_output_m) {
+    const ForStmtPtr& source_reduction, int64_t fixed_output_m) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -454,7 +453,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // requirement for this optimization: narrowing it would replace a legal
   // K-only rewrite with an unsupported bias-window fold. Keep its old grid.
   const bool can_bound_bias = !is_bias || bias_load || bias_tile->GetMemorySpace() == MemorySpace::Bias;
-  if (restrict_output_grid && !keep_output_shape && lhs_tile->GetMemorySpace() == MemorySpace::Mat && can_bound_bias) {
+  if (restrict_output_grid && !keep_output_shape && lhs_tile->GetMemorySpace() == MemorySpace::Mat &&
+      can_bound_bias) {
     auto work_extent = [&](int64_t physical, const ExprPtr& valid, int alignment) {
       const auto extent = As<ConstInt>(valid);
       if (!extent || extent->value_ <= 0) return physical;
@@ -538,7 +538,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     if (!keep_output_shape) {
       std::vector<Diagnostic> fallback_hints;
       if (auto k_only = AnalyzeMatmul(assign, fallback_hints, true, output_box_alignment, direct_defs,
-                                     restrict_output_grid, true, source_reduction, fixed_output_m)) {
+                                      restrict_output_grid, true, source_reduction, fixed_output_m)) {
         for (const auto& hint : fallback_hints) hints.push_back(hint);
         return k_only;
       }
