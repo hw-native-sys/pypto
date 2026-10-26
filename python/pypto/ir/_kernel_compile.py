@@ -9,8 +9,8 @@
 
 """Internal kernel artifact producer; public compile() remains a program entry."""
 
-import math
 import json
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +24,7 @@ from .compiled_program import _extract_func_param_infos, write_kernel_metadata
 from .param_info import _ParamInfo, kernel_abi_from_params, kernel_parameters_from_params
 
 if TYPE_CHECKING:
+    from pypto._kernel_abi import KernelParameter
     from pypto.runtime._kernel_artifact import KernelArtifact
 
 
