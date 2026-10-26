@@ -22,8 +22,10 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir::nz_store_utils {
 
