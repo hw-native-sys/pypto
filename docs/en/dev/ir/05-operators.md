@@ -607,6 +607,8 @@ UINT32 + INT32 → INT32 (signed precedence)
 See [Tensor and Tile Operators](05-tensor-tile-ops.md) for data-operator APIs,
 flat gather, valid-region semantics, tile layouts, and mask patterns.
 
+`tensor.subview` is a descriptor-only TensorOp; see [GM subviews](gm-subview-rfc.md).
+
 ## SyncOp: Synchronization Operations
 
 **Purpose**: Hardware synchronization and barriers, plus the TaskId and SPMD launch-shape queries sharing the `system.` namespace

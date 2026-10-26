@@ -1,5 +1,11 @@
 # PTO 代码生成 (CodeGen)
 
+GM `tensor.subview` 使用现有 PTO 操作：`pto.addptr` 将本次 origin 加到当前父指针，
+再由 `pto.make_tensor_view` 记录结果 shape 和采样 pitch；嵌套 origin 只应用一次。
+Metadata `tensor.view`/`tensor.set_validshape` 别名复用当前指针。Codegen 发射前
+重新检查 subview 上下文证明和 backend Vec-load 限制。不新增 PTO 方言操作或
+描述符分配；一个 TLOAD 本身不能证明一次物理 DMA。参见[完整示例](../ir/gm-subview-worked-example.md)。
+
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
 ## 设计原则：严格的 1-to-1 映射

@@ -496,18 +496,25 @@ void BindIR(nb::module_& m) {
              "worth caching and that nothing writes those bytes while the kernel runs")
       .export_values();
 
+  nb::enum_<TensorAddressingKind>(ir, "TensorAddressingKind")
+      .value("Canonical", TensorAddressingKind::Canonical)
+      .value("AffineSubview", TensorAddressingKind::AffineSubview);
+
   // TensorView - struct for tensor view information - must be before TensorType
   nb::class_<TensorView>(ir, "TensorView",
                          "Tensor view representation with stride, layout, valid shape, and pad mode")
       .def(nb::init<>(), "Create an empty tensor view")
-      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&, PadValue>(),
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&, PadValue,
+                    TensorAddressingKind>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
-           nb::arg("pad") = PadValue::null,
+           nb::arg("pad") = PadValue::null, nb::arg("addressing_kind") = TensorAddressingKind::Canonical,
            "Create a tensor view with stride, layout, optional valid shape, and optional pad")
-      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&, PadValue>(),
+      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&, PadValue,
+                    TensorAddressingKind>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<int64_t>{},
-           nb::arg("pad") = PadValue::null,
+           nb::arg("pad") = PadValue::null, nb::arg("addressing_kind") = TensorAddressingKind::Canonical,
            "Create a tensor view with integer stride, layout, optional integer valid shape, and optional pad")
+      .def_rw("addressing_kind", &TensorView::addressing_kind, "Tensor addressing contract")
       .def_rw("stride", &TensorView::stride, "Stride for each dimension")
       .def_rw("layout", &TensorView::layout, "Tensor layout type")
       .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension")

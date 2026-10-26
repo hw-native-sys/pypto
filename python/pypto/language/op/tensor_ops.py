@@ -27,6 +27,7 @@ __all__ = [
     "write",
     "dim",
     "slice",
+    "subview",
     "fillpad",
     "fillpad_expand",
     "full",
@@ -2746,3 +2747,43 @@ def get_block_num() -> Scalar:
     """
     call_expr = _ir_ops.get_block_num()
     return Scalar(expr=call_expr)
+
+
+def subview(
+    source: Tensor,
+    shape: Sequence[IntLike],
+    offsets: Sequence[IntLike],
+    *,
+    steps: Sequence[IntLike] | None = None,
+) -> Tensor:
+    """Borrow a strictly contained affine GM window without copying data.
+
+    The source coordinate is ``offsets[i] + index[i] * steps[i]`` on each
+    axis. Result strides multiply the immediate parent's strides by steps;
+    offsets do not change the allocation or create a snapshot. Only an
+    explicit load (or a tensor compute consumer) materializes a Tile.
+
+    Args:
+        source: Ordinary Tensor source; Tile and DistributedTensor are rejected.
+        shape: Positive logical result extents, with the source rank.
+        offsets: Nonnegative origin in immediate parent coordinates.
+        steps: Positive sampling steps; defaults to one on every axis.
+
+    Returns:
+        Read-only borrowed tensor descriptor with no MemRef allocation.
+
+    Raises:
+        ValueError: Invalid geometry. Compilation also rejects containment or
+            strict reduction that cannot be proven from dominating facts.
+            The first executable profile is rank-2 ND BF16 with unit inner
+            step and a caller-owned GM root, consumed by Vec loads.
+    """
+    if type(source) is not Tensor:
+        raise ValueError("tensor.subview requires an ordinary Tensor source")
+    call = _ir_ops.subview(
+        source.unwrap(),
+        _normalize_intlike(shape),
+        _normalize_intlike(offsets),
+        steps=None if steps is None else _normalize_intlike(steps),
+    )
+    return Tensor(expr=call)

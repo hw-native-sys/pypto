@@ -666,6 +666,11 @@ def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
         sliced._pypto_full_shape = shapes_t
     return sliced
 
+def _tensor_subview(tensor, shape, offsets, steps):
+    # Slice syntax preserves storage aliasing and composes parent strides.
+    return tensor[tuple(slice(o, o + n * step, step)
+                        for n, o, step in zip(shape, offsets, steps))]
+
 def _tensor_view(tensor, shape, is_dn, valid_shape=None):
     shape = _coerce_shape(shape)
     strides = [1] * len(shape)
@@ -1209,6 +1214,7 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tensor.dim"] = lambda a, _kw: f"{a[0]}.shape[{a[1]}]"
     m["tensor.create"] = _handle_create
     m["tensor.full"] = _handle_full
+    m["tensor.subview"] = lambda a, _kw: f"_tensor_subview({', '.join(a)})"
     m["tensor.slice"] = _handle_slice
     m["tensor.read"] = lambda a, _kw: f"{a[0]}[{a[1]}]"
     m["tensor.write"] = lambda a, _kw: f"_write_and_return({a[0]}, {a[1]}, {a[2]})"

@@ -32,6 +32,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -237,7 +238,8 @@ std::pair<int64_t, size_t> ResolveBoxedAxis(const CallPtr& call,
 }
 
 bool IsPassthroughTensorOp(const CallPtr& call) {
-  return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
+  return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view") || IsOp(call, "tensor.subview") ||
+         (IsOp(call, "tensor.set_validshape") && IsAffineSubviewType(call->GetType()));
 }
 
 /// Declared GM cache policy per source tensor, keyed by the param Var the
@@ -959,9 +961,12 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return HandlePassThroughAssign(op, new_value);
     }
 
+    if (IsOp(call, "tensor.set_validshape") && IsAffineSubviewType(call->GetType())) {
+      return HandlePassThroughAssign(op, new_value);
+    }
     const auto* entry = conv_registry_.Lookup(call->op_->name_);
     if (!entry) {
-      if (IsOp(call, "tensor.view")) {
+      if (IsOp(call, "tensor.view") || IsOp(call, "tensor.subview")) {
         CHECK_SPAN(!call->args_.empty() && AsTensorTypeLike(call->args_[0]->GetType()), call->span_)
             << "tensor.view in an InCore function requires a GM Tensor input that remains tensor-like "
                "through ConvertTensorToTileOps; viewing the result of an op lowered to Tile is not supported";

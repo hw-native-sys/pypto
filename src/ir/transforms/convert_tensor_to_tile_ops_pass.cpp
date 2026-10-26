@@ -26,6 +26,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -74,6 +75,7 @@ Pass ConvertTensorToTileOps() {
       // metadata effects; functional tensor-to-tile conversion must leave
       // their bodies and signatures intact.
       if (ShouldConvertTensorToTileOps(func)) {
+        VerifyTensorSubviews(func);
         auto result = TransformIncoreFunction(func);
         all_added_outputs.emplace(func->name_, std::move(result.added_outputs));
         all_transformed_funcs.emplace(func->name_, result.func);
@@ -374,6 +376,7 @@ class IncoreTileOpsVerifier : public IRVisitor {
     if (!op_registry.IsRegistered(call->op_->name_)) return;
 
     const auto& entry = op_registry.GetEntry(call->op_->name_);
+    if (IsOp(call, "tensor.set_validshape") && IsAffineSubviewType(call->GetType())) return;
     if (entry.GetOpCategory() == "TensorOp" &&
         OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
       // tensor.read/tensor.write on a gm_tensor (TensorType input) intentionally stays unconverted.
