@@ -496,9 +496,10 @@ void BindIR(nb::module_& m) {
              "worth caching and that nothing writes those bytes while the kernel runs")
       .export_values();
 
-  nb::enum_<TensorAddressingKind>(ir, "TensorAddressingKind")
-      .value("Canonical", TensorAddressingKind::Canonical)
-      .value("AffineSubview", TensorAddressingKind::AffineSubview);
+  nb::enum_<TensorAddressingKind>(ir, "TensorAddressingKind", "Tensor addressing contract enumeration")
+      .value("Canonical", TensorAddressingKind::Canonical, "Canonical tensor storage addressing")
+      .value("AffineSubview", TensorAddressingKind::AffineSubview,
+             "Borrowed affine GM descriptor created by tensor.subview");
 
   // TensorView - struct for tensor view information - must be before TensorType
   nb::class_<TensorView>(ir, "TensorView",

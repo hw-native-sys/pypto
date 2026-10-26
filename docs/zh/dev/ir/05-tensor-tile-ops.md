@@ -14,11 +14,15 @@
 `pl.tensor.subview(source, shape, offsets, *, steps=None)` 在 InCore 函数中
 借用普通 GM Tensor 的仿射窗口。它保留父视图的物理 pitch，本身不 load、
 不分配；`slice` 仍在 TensorToTile 时物化选定窗口。必须证明每个采样坐标
-都位于直接父视图的有效窗口内，且至少一维逻辑长度严格缩小；证明为假或
-未知均拒绝。首个可执行范围为二维 ND BF16、内层 stride 为 1、调用方拥有
-GM 根存储，并由 Vec load 消费。Tile/DistributedTensor 输入、描述符逃逸、
+都位于直接父视图的有效窗口内，且至少一维逻辑长度严格缩小。作为来源链的
+canonical `view` 也必须证明与父视图元素数相同，才能提供借用 GM 窗口；无关的
+普通 view 保持原有契约。证明为假或未知均拒绝。父视图的有效长度也必须证明
+不超过其物理 shape。首个可执行范围为二维 ND BF16、内层 stride 为 1、调用方拥有
+GM 根存储，并由 Ascend910（A2/A3）的 Vec load 消费。原生加载要求行数不超过
+4095、索引在有符号 32 位范围内、有效行和物理行均按 32 字节对齐，且源行间隔
+字节数在无符号 32 位范围内。`GetSubviewLoadLimits` 提供这些目标约束；其他
+后端在原生加载范围完成验证前拒绝 subview。Tile/DistributedTensor 输入、描述符逃逸、
 编译器分配的根存储及通过描述符写入均拒绝。
-参见 [RFC](gm-subview-rfc.md) 与 [完整示例](gm-subview-worked-example.md)。
 
 `tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）。编排层通常仅支持 ND shape 重新解释，且不能同时改变 layout；FP8E8M0 dynamic scale storage 还允许在 packed ND 与 `MX_A_ZZ` 或 `MX_B_NN` 之间建立元素数相同的 shaped alias，编排层保留同一个 runtime tensor，不调用 `reshape`。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 

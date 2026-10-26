@@ -10,8 +10,8 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -22,6 +22,8 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -29,6 +31,7 @@
 #include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 namespace {
@@ -54,8 +57,12 @@ class BorrowedTypeCache {
 // by merely acquiring an AffineSubview type (including through deserialization).
 class SubviewVerifier : public IRVisitor {
  public:
-  SubviewVerifier(const FunctionPtr& function, const backend::BackendHandler* handler)
-      : function_(function), handler_(handler), analyzer_(std::make_shared<arith::Analyzer>()) {
+  SubviewVerifier(const FunctionPtr& function, const backend::BackendHandler* handler,
+                  const std::unordered_set<const Expr*>& required_provenance)
+      : function_(function),
+        handler_(handler),
+        analyzer_(std::make_shared<arith::Analyzer>()),
+        required_provenance_(required_provenance) {
     for (const auto& param : function->params_) {
       CHECK_SPAN(!ContainsBorrowedTensorType(param->GetType()), param->span_)
           << "tensor.subview descriptors cannot be function parameters";
@@ -75,6 +82,14 @@ class SubviewVerifier : public IRVisitor {
     if (call &&
         (IsOp(call, "tensor.subview") || IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape"))) {
       alias = !call->args_.empty() && roots_.count(call->args_[0].get());
+    }
+    // A canonical view may defer symbolic shape equality during deduction.
+    // Prove it in the defining context before trusting it as a subview root.
+    // Only demanded ancestors are checked; unrelated ordinary views retain
+    // their existing contract in functions that happen to contain a subview.
+    if (alias && call && (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) &&
+        required_provenance_.count(op->var_.get()) && !IsAffineSubviewType(call->args_[0]->GetType())) {
+      CheckView(call);
     }
     CHECK_SPAN(!IsAffineSubviewType(op->value_->GetType()) || IsAffineSubviewType(op->var_->GetType()),
                op->span_)
@@ -100,6 +115,13 @@ class SubviewVerifier : public IRVisitor {
   }
 
   void VisitExpr_(const CallPtr& op) override {
+    if ((IsOp(op, "tensor.view") || IsOp(op, "tensor.set_validshape")) &&
+        IsAffineSubviewType(op->GetType())) {
+      // Metadata can preserve an established borrowed contract, never create
+      // one merely through an explicit (e.g. deserialized) result type.
+      CHECK_SPAN(!op->args_.empty() && IsAffineSubviewType(op->args_[0]->GetType()), op->span_)
+          << "tensor.subview metadata aliases cannot introduce borrowed provenance";
+    }
     if (IsOp(op, "tensor.subview")) {
       CheckSubview(op);
     }
@@ -313,7 +335,8 @@ class SubviewVerifier : public IRVisitor {
   void CheckBorrowedType(const TypePtr& actual, const TypePtr& expected, const Span& span) {
     auto a = As<TensorType>(actual);
     auto e = As<TensorType>(expected);
-    CHECK_SPAN(a && e && IsAffineSubviewType(actual) && IsAffineSubviewType(expected) && !a->memref_ &&
+    CHECK_SPAN(a && e && a->tensor_view_.has_value() && e->tensor_view_.has_value() &&
+                   IsAffineSubviewType(actual) && IsAffineSubviewType(expected) && !a->memref_ &&
                    a->dtype_ == e->dtype_ && a->shape_.size() == e->shape_.size() &&
                    a->tensor_view_->layout == e->tensor_view_->layout &&
                    a->tensor_view_->pad == e->tensor_view_->pad &&
@@ -321,14 +344,20 @@ class SubviewVerifier : public IRVisitor {
                    a->tensor_view_->valid_shape.size() == e->tensor_view_->valid_shape.size(),
                span)
         << "tensor.subview alias type does not preserve its defining address map";
+    const auto& a_metadata = a->tensor_view_;
+    const auto& e_metadata = e->tensor_view_;
+    CHECK_SPAN(a_metadata.has_value() && e_metadata.has_value(), span)
+        << "tensor.subview aliases require affine addressing metadata";
+    const auto& a_view = a_metadata.value();
+    const auto& e_view = e_metadata.value();
     auto compare = [&](const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
       for (size_t i = 0; i < lhs.size(); ++i) {
         Prove(MakeEq(lhs[i], rhs[i]), span, "alias geometry equality");
       }
     };
     compare(a->shape_, e->shape_);
-    compare(a->tensor_view_->stride, e->tensor_view_->stride);
-    compare(a->tensor_view_->valid_shape, e->tensor_view_->valid_shape);
+    compare(a_view.stride, e_view.stride);
+    compare(a_view.valid_shape, e_view.valid_shape);
   }
   void CheckEscape(const std::vector<ExprPtr>& values, const Span& span) {
     for (const auto& value : values) {
@@ -386,6 +415,8 @@ class SubviewVerifier : public IRVisitor {
       CHECK_SPAN(canonical.ok, op->span_)
           << "tensor.subview requires a canonical GM root: " << canonical.reason;
     }
+    CHECK_SPAN(result->tensor_view_.has_value(), op->span_)
+        << "tensor.subview result requires affine addressing metadata";
     CHECK_SPAN(result->dtype_ == parent->dtype_ && result->tensor_view_->layout == parent_view.layout &&
                    result->tensor_view_->pad == PadValue::null && result->tensor_view_->valid_shape.empty() &&
                    !result->memref_,
@@ -402,6 +433,7 @@ class SubviewVerifier : public IRVisitor {
     geometry.insert(geometry.end(), steps->elements_.begin(), steps->elements_.end());
     geometry.insert(geometry.end(), strides.begin(), strides.end());
     geometry.insert(geometry.end(), extent.begin(), extent.end());
+    geometry.insert(geometry.end(), parent->shape_.begin(), parent->shape_.end());
     CHECK_SPAN(ScalarArithmeticIsSafe(std::make_shared<MakeTuple>(geometry, op->span_)), op->span_)
         << "tensor.subview cannot prove overflow-free geometry arithmetic in its original dtype";
     auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, op->span_);
@@ -422,6 +454,8 @@ class SubviewVerifier : public IRVisitor {
       CheckFinite(span, op->span_);
       auto last = MakeAdd(offset, span);
       CheckFinite(last, op->span_);
+      // Validity metadata cannot enlarge the physical GM descriptor.
+      Prove(MakeLe(extent[i], parent->shape_[i]), op->span_, "parent valid extent inside physical shape");
       Prove(MakeLt(last, extent[i]), op->span_, "sampled window inside immediate parent");
       strict |= analyzer_->CanProve(MakeLt(size, extent[i]));
       CheckFinite(strides[i], op->span_);
@@ -473,21 +507,24 @@ class SubviewVerifier : public IRVisitor {
   void CheckValidShape(const CallPtr& op) {
     auto parent = As<TensorType>(op->args_[0]->GetType());
     auto result = As<TensorType>(op->GetType());
-    const auto& extent =
-        parent->tensor_view_->valid_shape.empty() ? parent->shape_ : parent->tensor_view_->valid_shape;
+    const auto& parent_metadata = parent->tensor_view_;
+    const auto& result_metadata = result->tensor_view_;
+    CHECK_SPAN(parent_metadata.has_value() && result_metadata.has_value(), op->span_)
+        << "tensor.subview set_validshape requires affine addressing metadata";
+    const auto& parent_view = parent_metadata.value();
+    const auto& result_view = result_metadata.value();
+    const auto& extent = parent_view.valid_shape.empty() ? parent->shape_ : parent_view.valid_shape;
     CHECK_SPAN(result->shape_.size() == parent->shape_.size() &&
-                   result->tensor_view_->stride.size() == parent->tensor_view_->stride.size() &&
-                   result->tensor_view_->layout == parent->tensor_view_->layout &&
-                   result->tensor_view_->pad == parent->tensor_view_->pad,
+                   result_view.stride.size() == parent_view.stride.size() &&
+                   result_view.layout == parent_view.layout && result_view.pad == parent_view.pad,
                op->span_)
         << "tensor.subview set_validshape must preserve the address map";
     for (size_t i = 0; i < parent->shape_.size(); ++i) {
       Prove(MakeEq(result->shape_[i], parent->shape_[i]), op->span_, "metadata alias shape equality");
-      Prove(MakeEq(result->tensor_view_->stride[i], parent->tensor_view_->stride[i]), op->span_,
+      Prove(MakeEq(result_view.stride[i], parent_view.stride[i]), op->span_,
             "metadata alias stride equality");
     }
-    const auto& result_valid =
-        result->tensor_view_->valid_shape.empty() ? result->shape_ : result->tensor_view_->valid_shape;
+    const auto& result_valid = result_view.valid_shape.empty() ? result->shape_ : result_view.valid_shape;
     CHECK_SPAN(result_valid.size() == extent.size(), op->span_)
         << "tensor.subview set_validshape rank mismatch";
     for (size_t i = 0; i < extent.size(); ++i) {
@@ -500,10 +537,15 @@ class SubviewVerifier : public IRVisitor {
   void CheckLoad(const CallPtr& op) {
     if (!handler_) return;
     auto source = As<TensorType>(op->args_[0]->GetType());
+    CHECK_SPAN(source, op->span_) << "tensor.subview native load requires an ordinary Tensor";
+    const auto& source_metadata = source->tensor_view_;
+    CHECK_SPAN(source_metadata.has_value(), op->span_)
+        << "tensor.subview native load requires affine addressing metadata";
+    const auto& source_view = source_metadata.value();
     auto one = std::make_shared<ConstInt>(1, DataType::INDEX, op->span_);
     CHECK_SPAN(source && source->shape_.size() == 2 && source->dtype_ == DataType::BF16 &&
-                   source->tensor_view_->layout == TensorLayout::ND &&
-                   analyzer_->CanProveEqual(source->tensor_view_->stride[1], one),
+                   source_view.layout == TensorLayout::ND && source_view.stride.size() == 2 &&
+                   analyzer_->CanProveEqual(source_view.stride[1], one),
                op->span_)
         << "tensor.subview backend load requires rank-2 ND BF16 with unit inner stride";
     auto tile = As<TileType>(op->GetType());
@@ -520,8 +562,7 @@ class SubviewVerifier : public IRVisitor {
     auto offsets = As<MakeTuple>(op->args_[1]);
     CHECK_SPAN(offsets && offsets->elements_.size() == 2, op->span_)
         << "tensor.subview native load offsets must have rank 2";
-    const auto& extent =
-        source->tensor_view_->valid_shape.empty() ? source->shape_ : source->tensor_view_->valid_shape;
+    const auto& extent = source_view.valid_shape.empty() ? source->shape_ : source_view.valid_shape;
     ExprPtr last_address = ci(0);
     for (size_t i = 0; i < 2; ++i) {
       auto offset = offsets->elements_[i];
@@ -533,8 +574,8 @@ class SubviewVerifier : public IRVisitor {
       Prove(MakeGe(offset, ci(0)), op->span_, "native load offsets >= 0");
       Prove(MakeLe(MakeAdd(offset, valid[i]), extent[i]), op->span_,
             "native load inside the borrowed window");
-      last_address = MakeAdd(
-          last_address, MakeMul(MakeSub(MakeAdd(offset, valid[i]), ci(1)), source->tensor_view_->stride[i]));
+      last_address =
+          MakeAdd(last_address, MakeMul(MakeSub(MakeAdd(offset, valid[i]), ci(1)), source_view.stride[i]));
       CheckFinite(last_address, op->span_);
     }
     auto byte_count = MakeMul(valid[1], ci(2));
@@ -543,7 +584,7 @@ class SubviewVerifier : public IRVisitor {
           "native valid row-byte alignment");
     Prove(MakeEq(MakeFloorMod(physical_bytes, ci(limits.row_alignment_bytes)), ci(0)), op->span_,
           "native tile row-byte alignment");
-    auto gap = MakeMul(MakeSub(source->tensor_view_->stride[0], valid[1]), ci(2));
+    auto gap = MakeMul(MakeSub(source_view.stride[0], valid[1]), ci(2));
     Prove(MakeGe(gap, ci(0)), op->span_, "native nonnegative source gap");
     Prove(MakeLe(gap, ci(limits.max_gap_bytes)), op->span_, "native source-gap width");
   }
@@ -556,6 +597,7 @@ class SubviewVerifier : public IRVisitor {
   std::vector<bool> yielded_safe_;
   std::unordered_map<const Expr*, bool> scalar_arithmetic_safe_;
   BorrowedTypeCache borrowed_types_;
+  const std::unordered_set<const Expr*>& required_provenance_;
 };
 }  // namespace
 void VerifyTensorSubviews(const FunctionPtr& function, const backend::BackendHandler* backend_handler) {
@@ -566,9 +608,25 @@ void VerifyTensorSubviews(const FunctionPtr& function, const backend::BackendHan
    public:
     bool found = false;
     BorrowedTypeCache types;
+    std::unordered_map<const Expr*, const Expr*> aliases;
+    std::vector<const Expr*> pending_roots;
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (auto call = As<Call>(op->value_);
+          call && !call->args_.empty() &&
+          (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape") ||
+           IsOp(call, "tensor.subview"))) {
+        aliases.emplace(op->var_.get(), call->args_[0].get());
+      } else if (AsVarLike(op->value_)) {
+        aliases.emplace(op->var_.get(), op->value_.get());
+      }
+      IRVisitor::VisitStmt_(op);
+    }
     void VisitVarLike_(const VarPtr& var) override { found |= types.Contains(var->GetType()); }
     void VisitExpr_(const CallPtr& call) override {
       found |= IsOp(call, "tensor.subview") || IsAffineSubviewType(call->GetType());
+      if (IsOp(call, "tensor.subview") && !call->args_.empty()) {
+        pending_roots.push_back(call->args_[0].get());
+      }
       IRVisitor::VisitExpr_(call);
     }
   } presence;
@@ -576,7 +634,18 @@ void VerifyTensorSubviews(const FunctionPtr& function, const backend::BackendHan
   for (const auto& result : function->return_types_) presence.found |= presence.types.Contains(result);
   presence.VisitStmt(function->body_);
   if (!presence.found) return;
-  SubviewVerifier verifier(function, backend_handler);
+  // Follow each demanded alias edge once, rather than rescanning every view
+  // chain at each subview. The ordered proof walk below still uses facts from
+  // each ancestor's own defining control-flow scope.
+  std::unordered_set<const Expr*> required_provenance;
+  while (!presence.pending_roots.empty()) {
+    auto root = presence.pending_roots.back();
+    presence.pending_roots.pop_back();
+    if (!required_provenance.insert(root).second) continue;
+    auto alias = presence.aliases.find(root);
+    if (alias != presence.aliases.end()) presence.pending_roots.push_back(alias->second);
+  }
+  SubviewVerifier verifier(function, backend_handler, required_provenance);
   verifier.VisitStmt(function->body_);
 }
 }  // namespace pypto::ir
