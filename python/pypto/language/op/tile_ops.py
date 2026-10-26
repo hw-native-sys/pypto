@@ -441,8 +441,10 @@ def load(
             back into the cache inside a bypassing scope. Requires PTOAS >= v0.64,
             where a BYPASS read compiles to a load issued against the page's
             uncached alias on A2/A3 — the only architecture that maps GM twice,
-            and the only one where the declaration has an effect today; DEFAULT
-            emits nothing.
+            and the only one where the declaration has an effect today. Targets
+            without the offset path retain cached reads and emit a
+            ``CacheBypassUnsupported`` warning once per affected kernel.
+            DEFAULT emits nothing.
 
     Returns:
         Tile wrapping the load operation

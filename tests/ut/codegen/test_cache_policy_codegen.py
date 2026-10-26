@@ -35,17 +35,22 @@ The contract asserted here has four sides:
    value cannot change during a dispatch, so it is read once at kernel entry and
    passed down; a kernel with no declared read gains no parameter. An
    architecture that does not map GM twice — a5 — emits the attribute and no
-   offset, and the declaration has no effect there.
+   offset, and reports that the declaration falls back to a cached read.
 
-The assembler's own acceptance of the attribute is not asserted here: every UT
-runs with ``skip_ptoas=True``, so these tests stop at the emitted MLIR text (the
-same contract as the MX ``layout`` attribute in ``test_mx_ops_codegen.py``).
+Tests marked ``ptoas_compile`` also check the real assembler output and its
+wrapper: the runtime supplies the numeric offset, the callee receives a symbolic
+parameter, and only the declared load's descriptor is rebased in bytes. CI runs
+these tests with ``--require-ptoas`` so missing compiler coverage cannot skip.
 """
+
+import re
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
 from pypto import LogLevel, backend, codegen, ir, passes, set_log_level
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir import OptimizationStrategy, PassManager
 
 # The exact attribute PTOAS >= v0.64 consumes on `pto.tload`.
@@ -54,8 +59,7 @@ BYPASS_ATTR = "cache_policy = #pto.load_cache_policy<l2_bypass>"
 # and the synthetic parameter it is bound to.
 OFFSET_PARAM = "%__pypto_l2_cache_offset"
 OFFSET_OPERAND = f"offset = {OFFSET_PARAM} : i64"
-# The diagnostic that stood in for the attribute while PTOAS had no bypass path.
-# It must never be emitted again — the request is now honoured, not reported.
+# A missing target offset path must be visible while preserving cached reads.
 BYPASS_WARNING_TAG = "[CacheBypassUnsupported]"
 
 M, K, N = 256, 128, 256
@@ -158,6 +162,24 @@ class TwoBypassingLoadsOfOneTensor:
 
 
 @pl.program
+class MixedCacheLoads:
+    """Read the same source window with both policies and consume both tiles."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[ROWS, COLS], pl.FP32],
+        out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+        # The source descriptor can be shared, but applying BYPASS to it in
+        # place would incorrectly change the following DEFAULT read as well.
+        bypassed = pl.load(x, [0, 0], [ROWS, COLS], cache=pl.CachePolicy.BYPASS)
+        cached = pl.load(x, [0, 0], [ROWS, COLS], cache=pl.CachePolicy.DEFAULT)
+        total = pl.add(bypassed, cached)
+        return pl.store(total, [0, 0], out)
+
+
+@pl.program
 class ReCachedSingleLoad:
     """A declared parameter with one access explicitly opted back into the cache.
 
@@ -186,6 +208,14 @@ class ReCachedSingleLoad:
 # ---------------------------------------------------------------------------
 
 
+def _incore_function(program_cls) -> ir.Function:
+    """Return the sole optimized kernel, excluding its orchestration parent."""
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+    incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
+    assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
+    return incore[0]
+
+
 def _incore_mlir(program_cls, *, emit_source_loc: bool = False) -> str:
     """Run the Default pipeline and emit PTO MLIR for the single in-core kernel.
 
@@ -203,12 +233,85 @@ def _incore_mlir(program_cls, *, emit_source_loc: bool = False) -> str:
     Returns:
         The generated MLIR text.
     """
-    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
-    incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
-    assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
-    single = ir.Program([incore[0]], incore[0].name, optimized.span)
+    func = _incore_function(program_cls)
+    single = ir.Program([func], func.name, func.span)
     result = codegen.PTOCodegen().generate(single, emit_source_loc=emit_source_loc)
     return result if isinstance(result, str) else "".join(result.values())
+
+
+def _compile_pto(mlir: str, output_dir: Path) -> str:
+    """Compile with the active target and PyPTO's checked PTOAS invocation."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    return pto_backend._compile_pto_module(mlir, "cache_policy", str(output_dir))
+
+
+def _assert_offset_loads(
+    cpp: str, func_name: str, bypass_count: int, cached_count: int, *, same_source: bool = False
+) -> None:
+    """Follow the runtime parameter through byte arithmetic and copied descriptors.
+
+    PTOAS assigns its own C++ variable names. Capture their dataflow instead of
+    pinning the test to a particular assembler's temporary numbering.
+    """
+    signature = re.search(rf"\bvoid\s+{re.escape(func_name)}\(([^)]*)\)", cpp)
+    assert signature is not None, cpp
+    offset = re.search(r"\b(?:u?int64_t)\s+(\w+)\s*$", signature[1])
+    assert offset is not None, signature[0]
+    rebased = re.findall(
+        rf"__gm__\s+\w+\s*\*\s*(\w+)\s*=\s*[^;]*"
+        rf"\(\s*(\w+)\s*\+\s*{re.escape(offset[1])}\s*\)\s*;",
+        cpp,
+    )
+    assert len(rebased) == bypass_count, cpp
+    load_sources = re.findall(r"\bTLOAD\(\w+,\s*(\w+)\);", cpp)
+    assert len(load_sources) == bypass_count + cached_count, cpp
+    bypass_sources = []
+    original_sources = []
+    for pointer, byte_pointer in rebased:
+        assign = re.search(rf"\bTASSIGN\((\w+),\s*{re.escape(pointer)}\);", cpp)
+        assert assign is not None, cpp
+        alias = assign[1]
+        copy = re.search(rf"\b{re.escape(alias)}\s*=\s*(\w+)\s*;", cpp)
+        assert copy is not None and copy[1] != alias, cpp
+        # The byte pointer must originate from this load's source descriptor,
+        # not merely have the correct uint8_t type: rebasing another tensor's
+        # address would preserve the policy syntax while reading wrong data.
+        byte_definition = re.search(
+            rf"__gm__\s+uint8_t\s*\*\s*{re.escape(byte_pointer)}\s*=\s*"
+            r"reinterpret_cast<\s*__gm__\s+uint8_t\s*\*>\(([^;]+)\);",
+            cpp,
+        )
+        assert byte_definition is not None, cpp
+        tensor_data = rf"PTOAS__GLOBAL_TENSOR_DATA\(\s*{re.escape(copy[1])}\s*\)"
+        byte_source = byte_definition[1].strip()
+        if re.fullmatch(r"\w+", byte_source):
+            # Some assembler versions materialize the typed data pointer
+            # before casting it to a byte pointer; follow that extra SSA edge.
+            assert re.search(
+                rf"__gm__\s+\w+\s*\*\s*{re.escape(byte_source)}\s*=\s*{tensor_data}\s*;",
+                cpp,
+            ), cpp
+        else:
+            assert re.fullmatch(tensor_data, byte_source), cpp
+        bypass_sources.append(alias)
+        original_sources.append(copy[1])
+    assert all(load_sources.count(alias) == 1 for alias in bypass_sources), cpp
+    cached_sources = [source for source in load_sources if source not in bypass_sources]
+    assert len(cached_sources) == cached_count, cpp
+    if same_source:
+        # MixedCacheLoads uses the identical source window twice. The cached
+        # load must retain exactly the descriptor copied for the bypass read.
+        assert cached_sources == original_sources, cpp
+    assert "TLoadL2Hint" not in cpp, cpp
+
+
+def _assert_no_gm_byte_rebase(cpp: str) -> None:
+    """The FP32 control kernels must not enter the GM byte-offset path."""
+    # TASSIGN also binds ordinary on-chip tile buffers to UB/L1 addresses.
+    # Those are expected here; the BYPASS-specific operation is casting a GM
+    # data pointer to bytes before adding the runtime alias distance.
+    assert not re.search(r"reinterpret_cast<\s*__gm__\s+uint8_t\s*\*>", cpp), cpp
 
 
 def _tload_lines(mlir: str) -> list[str]:
@@ -336,7 +439,7 @@ def test_one_parameter_serves_every_declared_load():
     assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, _signature_line(mlir)
 
 
-def test_a5_declares_the_policy_without_an_address_offset():
+def test_a5_declares_the_policy_without_an_address_offset(capfd):
     """A5 does not map GM twice, so there is no alias for an offset to reach.
 
     Its runtime exposes no ``get_l2_cache_offset`` either, so emitting the
@@ -351,6 +454,9 @@ def test_a5_declares_the_policy_without_an_address_offset():
 
     assert _hinted_tloads(mlir), f"a5 must still carry the declaration:\n{mlir}"
     assert OFFSET_PARAM not in mlir, f"a5 must take no address offset:\n{mlir}"
+    warnings = _warnings(capfd)
+    assert len(warnings) == 1, warnings
+    assert "kernel" in warnings[0] and "a5" in warnings[0], warnings
 
 
 # ---------------------------------------------------------------------------
@@ -380,13 +486,13 @@ def test_explicit_default_load_beats_the_declaration_and_emits_no_attribute():
 
 
 # ---------------------------------------------------------------------------
-# (d) The stand-in diagnostic is gone
+# (d) Supported A2/A3 kernels need no fallback diagnostic
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("program_cls", [PlainMatmul, DeclaredBypass, TwoBypassingLoadsOfOneTensor])
 def test_no_cache_bypass_warning_is_emitted(program_cls, capfd):
-    """Nothing warns any more: the request is honoured rather than reported.
+    """The supported offset path and ordinary DEFAULT reads need no warning.
 
     The warning travelled the C++ ``LOG_WARN`` channel, which writes to
     ``std::cerr`` from native code, so it is read with pytest's ``capfd``
@@ -395,6 +501,87 @@ def test_no_cache_bypass_warning_is_emitted(program_cls, capfd):
     """
     _incore_mlir(program_cls)
     assert _warnings(capfd) == []
+
+
+# ---------------------------------------------------------------------------
+# (e) Runtime wrapper -> symbolic parameter -> actual PTOAS load lowering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "program_cls,bypass_count,cached_count",
+    [(DeclaredBypass, 1, 1), (TwoBypassingLoadsOfOneTensor, 2, 0), (MixedCacheLoads, 1, 1)],
+)
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH]
+)
+def test_runtime_offset_reaches_only_bypassing_loads(
+    tmp_path, program_cls, bypass_count, cached_count, runtime
+):
+    """Check the complete bridge rather than only the MLIR attribute (#3116)."""
+    # Both supported runtimes transport the same device-owned byte offset.
+    # Select through PassContext, matching normal compilation legalization.
+    with passes.PassContext([], runtime=runtime):
+        func = _incore_function(program_cls)
+        mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, func.span), emit_source_loc=False)
+        assert isinstance(mlir, str)
+        cpp = _compile_pto(mlir, tmp_path)
+        wrapper = pto_backend._generate_kernel_wrapper(func, cpp)
+    assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, mlir
+    assert all(OFFSET_OPERAND in line for line in _hinted_tloads(mlir)), mlir
+    _assert_offset_loads(
+        cpp, func.name, bypass_count, cached_count, same_source=program_cls is MixedCacheLoads
+    )
+
+    # The concrete value belongs to runtime, so its accessor appears in the
+    # wrapper exactly once, rather than in the bare PTOAS-generated callee.
+    assert "get_l2_cache_offset" not in cpp, cpp
+    assert wrapper.count("get_l2_cache_offset(args)") == 1, wrapper
+    assert re.search(
+        r"\buint64_t\s+__pypto_l2_cache_offset\s*=\s*get_l2_cache_offset\(args\)\s*;", wrapper
+    ), wrapper
+    call = re.search(rf"^\s*{re.escape(func.name)}\(([^;]*)\);", wrapper, re.MULTILINE)
+    assert call is not None, wrapper
+    assert call[1].split(", ")[-1] == "__pypto_l2_cache_offset", call[0]
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("target", [BackendType.Ascend910, BackendType.Ascend950])
+def test_ptoas_without_offset_preserves_safe_cached_loads(tmp_path, target):
+    """A bare declaration must keep the assembler's ordinary-load fallback."""
+    backend.reset_for_testing()
+    backend.set_backend_type(target)
+    mlir = _incore_mlir(MixedCacheLoads)
+    # On A2/A3 remove the symbolic bridge deliberately to test PTOAS's safe
+    # fallback; on A5 this is the target's naturally emitted contract.
+    no_offset = mlir.replace(f" {OFFSET_OPERAND}", "").replace(f", {OFFSET_PARAM}: i64", "")
+    plain = no_offset.replace(f" {{{BYPASS_ATTR}}}", "")
+    assert BYPASS_ATTR in no_offset and BYPASS_ATTR not in plain, mlir
+    fallback_cpp = _compile_pto(no_offset, tmp_path / "fallback")
+    plain_cpp = _compile_pto(plain, tmp_path / "default")
+    assert fallback_cpp == plain_cpp
+    assert "TLOAD(" in fallback_cpp and "TLoadL2Hint" not in fallback_cpp, fallback_cpp
+    _assert_no_gm_byte_rebase(fallback_cpp)
+
+
+@pytest.mark.ptoas_compile
+def test_default_kernel_keeps_cached_loads_and_wrapper_abi(tmp_path):
+    """A DEFAULT kernel gains neither pointer rebasing nor runtime arguments."""
+    # This test covers the ordinary Tile load path; Buffer selection is not
+    # relevant to the hidden argument's absence.
+    with passes.PassContext([], enable_buffer_ir=False):
+        func = _incore_function(PlainMatmul)
+        mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, func.span), emit_source_loc=False)
+    assert isinstance(mlir, str)
+    assert OFFSET_PARAM not in mlir and BYPASS_ATTR not in mlir, mlir
+    cpp = _compile_pto(mlir, tmp_path)
+    assert len(re.findall(r"\bTLOAD\(", cpp)) == 2, cpp
+    _assert_no_gm_byte_rebase(cpp)
+    wrapper = pto_backend._generate_kernel_wrapper(func, cpp)
+    assert "get_l2_cache_offset" not in wrapper and "__pypto_l2_cache_offset" not in wrapper, wrapper
+    call = re.search(rf"^\s*{re.escape(func.name)}\(([^;]*)\);", wrapper, re.MULTILINE)
+    assert call is not None and len(call[1].split(", ")) == len(func.params), wrapper
 
 
 if __name__ == "__main__":

@@ -996,8 +996,20 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // No other architecture maps GM twice -- a5 expresses the policy on the
   // instruction instead -- and no other runtime exposes an accessor to read a
   // distance, so the parameter would be unfillable there.
-  const bool uses_l2_cache_offset =
-      collector.UsesL2BypassLoad() && backend_->GetHandler()->GetPtoTargetArch() == "a2a3";
+  const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
+  const bool uses_l2_cache_offset = collector.UsesL2BypassLoad() && target_arch == "a2a3";
+  if (collector.UsesL2BypassLoad() && !uses_l2_cache_offset) {
+    // A bare policy attribute is a safe cached load in PTOAS. Report the
+    // fallback once per kernel, even when it contains many bypass declarations.
+    ir::EmitDiagnostics(
+        {Diagnostic(DiagnosticSeverity::Warning, "CacheBypassUnsupported", 0,
+                    "CachePolicy.BYPASS in kernel '" + func->name_ +
+                        "' has no runtime L2 offset path on the '" + target_arch +
+                        "' backend; loads remain cached. The cache_policy attribute alone does "
+                        "not activate L2 bypass.",
+                    func->span_)},
+        "pto_codegen");
+  }
   fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));

@@ -400,7 +400,8 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
     reports no alias reports zero, leaving the read ordinary and correct. Other
     architectures do not map GM twice — A5 expresses the policy on the load
     instruction instead — and PTOAS lowers the bare attribute to an ordinary
-    load, so a declaration there is accepted and currently does nothing.
+    load. Targets without the offset path retain cached reads and emit a
+    ``CacheBypassUnsupported`` warning once per affected kernel.
     ``CachePolicy.DEFAULT`` emits nothing, so a read that declares no policy
     generates exactly the code it did before.
 

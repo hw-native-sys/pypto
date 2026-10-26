@@ -191,6 +191,12 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // TLOAD, so that declaration costs nothing and does nothing.
   if (policy == ir::CachePolicy::kBypass) {
     const std::string l2_cache_offset = codegen.GetL2CacheOffsetArgSSA();
+    // On A2/A3 the wrapper supplies a runtime value through this SSA parameter.
+    // Losing the operand would silently turn BYPASS into an ordinary cached
+    // load; it is a codegen invariant, independent of the value read at dispatch.
+    INTERNAL_CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() != "a2a3" || !l2_cache_offset.empty(),
+                        op->span_)
+        << "Internal error: A2/A3 CachePolicy.BYPASS load is missing its runtime L2 offset parameter";
     if (!l2_cache_offset.empty()) {
       tload_line << " offset = " << l2_cache_offset << " : i64";
     }

@@ -9,8 +9,10 @@
 
 > **要求 PTOAS >= v0.64**（`toolchain/versions.env` 中的 `PTOAS_VERSION`），并且
 > **只在 a2a3 上真正生效**。`BYPASS` 声明会变成 `pto.tload` 上的一个 `cache_policy`
-> 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条
-> load 的源地址上。参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。
+> 属性，外加一个携带该设备运行时 uncached 别名距离的 `offset` 操作数，由汇编器加到
+> 该条 load 的源地址上。目标不提供该 offset 契约时，读取安全地保持带缓存，并对每个
+> 受影响的 kernel 发出一次 `CacheBypassUnsupported` 警告。
+> 参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。
 
 ## 两个书写面
 
@@ -181,8 +183,9 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 
 ## codegen 发射什么
 
-一次 `BYPASS` 读取会变成发射出的那条 load 上的一个属性，外加一个操作数 —— 从张量地址
-到同一批字节的 uncached 别名之间的距离：
+在 a2a3 上，编译会把一次 `BYPASS` 读取变成发射出的那条 load 上的一个属性，外加一个
+符号操作数。该操作数引用 kernel 参数，表示从张量地址到同一批字节的 uncached 别名之间
+的距离：
 
 ```mlir
 func.func @main(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
@@ -198,6 +201,9 @@ func.func @main(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
 而没有 offset 的声明会编译成普通的带缓存 load。二者合在一起才构成绕过 L2 —— 也正因
 如此，真正让这个特性落地的是 offset 而不是属性，而[只有 a2a3 才有这个 offset](#架构差异)。
 
+编译器生成该参数与操作数时，无需知道 offset 的具体数值。数值在 dispatch 时提供；
+编译不需要 NPU，也不会查询设备驱动。
+
 ### offset 从哪里来
 
 A2/A3 把每个 GM 页映射两次 —— 一次带缓存，一次不带 —— 对 uncached 别名发起的 load
@@ -206,7 +212,8 @@ A2/A3 把每个 GM 页映射两次 —— 一次带缓存，一次不带 —— 
 而 pto-isa 注释中写的是 `0x100000000000`。
 
 simpler 每个 Worker 查询一次，并把它带到每个核的 `GlobalContext`，incore kernel 通过
-`get_l2_cache_offset(args)` 读取（simpler PR #2323）。生成的 kernel wrapper 在入口处
+`get_l2_cache_offset(args)` 读取（simpler PR #2323）。a2a3 的 `tensormap_and_ringbuffer`
+与 `host_build_graph` 两种 runtime 都提供该接口。生成的 kernel wrapper 在入口处
 **只读一次** —— 该值在一次 dispatch 内不会变化，逐 load 读取等于为一个常量反复走 GM
 —— 然后通过合成参数 `%__pypto_l2_cache_offset` 向下传递：
 
@@ -217,6 +224,10 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
     main(a__ssa_v0, b__ssa_v0, out__ssa_v0, __pypto_l2_cache_offset);
 }
 ```
+
+该接口调用位于 PyPTO wrapper 中，在 PTOAS 生成的函数之外。单独的 PTOAS C++ 函数体
+通过参数接收 offset，因此无需包含 `get_l2_cache_offset(args)` 调用。检查其绕过缓存的
+地址运算，再结合 wrapper 的参数转发，才能确认运行时数值传递到了 load。
 
 PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —— 因此同一张量的其它 load
 仍使用带缓存的地址 —— 随后发出一条普通 `TLOAD`：
@@ -231,8 +242,9 @@ PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —
 +  TLOAD(v45, v53);
 ```
 
-0 是合法取值而非失败：不提供别名的 a2a3 设备返回 0，`addr + 0` 就是原地址，此时该声明
-损失的是带宽而不是正确性。模拟器天然属于这种情况。注意这是**设备**返回 0，与"该架构
+0 是合法取值：不提供别名的 a2a3 设备返回 0；驱动查询失败时也会回退为 0，并给出运行时
+诊断。`addr + 0` 就是原地址，读取安全地保持带缓存。模拟器也使用 0。因此，只有声明并不能
+证明绕过缓存已经生效，也不能据此认定有性能收益。注意这是**设备**返回 0，与"该架构
 根本没有别名"不同 —— 后者压根不会拿到 offset 操作数。
 
 这次发射有五条性质值得写明，因为每一条都在
@@ -242,10 +254,14 @@ PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —
 | 性质 | 原因 |
 | ---- | ---- |
 | `CachePolicy.DEFAULT` **什么都不发射** | 未声明策略的 kernel 保持本特性出现之前的 PTO 形态，因此属性、操作数与参数就是两个在其余方面完全相同的 kernel 之间唯一的差异 |
-| 该属性按 **load** 发射，而不是按张量 | 它是指令的性质；若两条 load 只有第一条带 hint，第二条仍会在 L2 中分配（被取代的 `[CacheBypassUnsupported]` 诊断刻意是"每张量一次"—— 粒度正好相反） |
+| 该属性按 **load** 发射，而不是按张量 | 它是指令的性质；若两条 load 只有第一条带 hint，第二条仍会在 L2 中分配 |
 | offset 参数**每个 kernel 只追加一次** | 一个运行时取值服务于全部绕过缓存的 load，入口处读一次即可 |
 | 它与 MX 的 `layout` 合并进**同一个**属性字典且排在其后，操作数则跟在字典之后 | PTOAS 要求所有存在的属性在同一个字典里；把 `layout` 留在前面可使未声明策略的 MX load 保持逐字节一致 |
 | a5 只发射属性，**不**发射 offset | 那里没有第二份映射可寻址（见[架构差异](#架构差异)），也没有可供读取距离的入口 |
+
+缓存策略回归测试还会运行实际选中的 PTOAS 汇编器，检查它的 C++ 输出：绕过缓存的 load
+必须以**字节**为单位调整描述符副本，普通 load 与显式恢复缓存的 load 则保留原始源地址。
+这使验证覆盖到 MLIR 属性之后的实际 lowering，无需执行 NPU，也不代表测得了性能收益。
 
 ### 架构差异
 
@@ -253,9 +269,9 @@ PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —
 
 | 目标 | 当前一条 `BYPASS` 声明的实际效果 |
 | ---- | -------------------------------- |
-| a2a3 设备 | load 对 uncached 别名发起，即 `addr + get_l2_cache_offset(args)`。这正是该特性存在的场景 |
+| 运行时 offset 非零的 a2a3 设备 | load 对 uncached 别名发起，即 `addr + get_l2_cache_offset(args)` |
 | 无别名的 a2a3 设备 | 驱动返回 `0`，`addr + 0` 即原地址，读取照常带缓存 —— 结果正确，只是少了一项优化。模拟器天然如此 |
-| a5 | codegen 只发射属性、不发射 offset，而 PTOAS v0.64 把裸属性降级为普通 `TLOAD`。该声明被接受，但**不产生任何效果** |
+| a5 | codegen 只发射属性、不发射 offset；所选 PTOAS lowering 保留普通带缓存的 `TLOAD`。`CacheBypassUnsupported` 对每个受影响的 kernel 警告一次，说明绕过缓存未生效 |
 
 a5 并不是"缺一个 offset 等着填"：它根本没有第二份映射可寻址。pto-isa 在 a5 的
 `TLOAD` 上以指令操作数的形式携带 L2 hint，未来的 a5 路径应当落在那里 —— v0.64 并未把

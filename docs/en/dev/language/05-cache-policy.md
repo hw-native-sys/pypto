@@ -11,8 +11,10 @@ unchanged from the DSL to codegen.
 > **Requires PTOAS >= v0.64** (`PTOAS_VERSION` in `toolchain/versions.env`), and
 > **has an effect on a2a3 only**. A `BYPASS` declaration becomes a
 > `cache_policy` attribute on `pto.tload` plus an `offset` operand carrying that
-> device's no-cache alias distance, which the assembler adds to that one load's
-> source address. See [What codegen emits](#what-codegen-emits) and
+> device's runtime no-cache alias distance, which the assembler adds to that
+> one load's source address. Targets without that offset contract retain cached
+> reads and emit a `CacheBypassUnsupported` warning once per affected kernel.
+> See [What codegen emits](#what-codegen-emits) and
 > [Architectures](#architectures).
 
 ## Two surfaces
@@ -198,8 +200,9 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 
 ## What codegen emits
 
-A `BYPASS` read becomes one attribute on the emitted load and one operand — the
-distance from the tensor's address to the uncached alias of the same bytes:
+On a2a3, compilation turns a `BYPASS` read into one attribute on the emitted
+load and one symbolic operand. The operand references a kernel parameter for
+the distance from the tensor's address to the uncached alias of the same bytes:
 
 ```mlir
 func.func @main(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
@@ -217,6 +220,10 @@ one compiles to an ordinary cached load. Both together are what bypasses L2 —
 which is why the offset, not the attribute, is what makes the feature real, and
 why [only a2a3 has one](#architectures).
 
+The compiler emits this parameter and operand without knowing the numeric
+offset. That value is supplied at dispatch time; compilation does not require
+an NPU or query the device driver.
+
 ### Where the offset comes from
 
 A2/A3 maps every GM page twice — once cached, once not — and a load issued
@@ -227,10 +234,11 @@ pto-isa comment names `0x100000000000`.
 
 simpler queries it once per Worker and carries it to every core's
 `GlobalContext`, where an incore kernel reads it with
-`get_l2_cache_offset(args)` (simpler PR #2323). The generated kernel wrapper
-reads it **once at entry** — the value cannot change during a dispatch, so a
-per-load read would go back through GM for a constant — and forwards it through
-the synthetic `%__pypto_l2_cache_offset` parameter:
+`get_l2_cache_offset(args)` (simpler PR #2323). Both a2a3 runtimes,
+`tensormap_and_ringbuffer` and `host_build_graph`, provide this accessor. The
+generated kernel wrapper reads it **once at entry** — the value cannot change
+during a dispatch, so a per-load read would go back through GM for a constant —
+and forwards it through the synthetic `%__pypto_l2_cache_offset` parameter:
 
 ```cpp
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
@@ -239,6 +247,12 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
     main(a__ssa_v0, b__ssa_v0, out__ssa_v0, __pypto_l2_cache_offset);
 }
 ```
+
+This accessor call belongs to the PyPTO wrapper, outside the function PTOAS
+generates. A standalone PTOAS-generated C++ body receives the offset as an
+argument and is therefore not expected to call `get_l2_cache_offset(args)`.
+Its bypass address arithmetic, together with the wrapper's argument forwarding,
+is the evidence that the runtime value reaches the load.
 
 PTOAS >= v0.64 turns the pair into address arithmetic on a *copy* of the source
 descriptor, so other loads of the same tensor keep the cached address, and then
@@ -254,9 +268,11 @@ issues an ordinary `TLOAD`:
 +  TLOAD(v45, v53);
 ```
 
-Zero is a valid answer, not a failure: an a2a3 device that exposes no alias
-reports zero, `addr + 0` is the ordinary address, and the declaration costs
-bandwidth rather than correctness. The simulator is that case by construction.
+Zero is a valid answer: an a2a3 device that exposes no alias reports zero, and
+a failed driver query also falls back to zero with a runtime diagnostic.
+`addr + 0` is the ordinary address, so the read safely stays cached. The
+simulator uses zero by construction. A declaration alone therefore does not
+prove bypass is active or establish a performance benefit.
 That is a *device* answering zero — distinct from an architecture that has no
 alias at all, which never gets an offset operand to begin with.
 
@@ -267,10 +283,16 @@ Five properties of the emit are worth stating, because each one is asserted in
 | Property | Why |
 | -------- | --- |
 | `CachePolicy.DEFAULT` emits **nothing** | A kernel that states no policy keeps the PTO form it had before this existed, so the attribute, the operand and the parameter are the only difference between two otherwise identical kernels |
-| The attribute is emitted **per load**, not per tensor | It is a property of the instruction; a hint on only the first of two loads would leave the second one allocating in L2 (the superseded `[CacheBypassUnsupported]` diagnostic was deliberately once-per-tensor — the opposite granularity) |
+| The attribute is emitted **per load**, not per tensor | It is a property of the instruction; a hint on only the first of two loads would leave the second one allocating in L2 |
 | The offset parameter is appended **once per kernel** | One runtime value serves every bypassing load, read once at entry |
 | It joins the MX `layout` in **one** attribute dict, after it, and the operand follows the dict | PTOAS takes all present attributes in a single dict; keeping `layout` first leaves an MX load that declares no policy byte-identical |
 | a5 emits the attribute and **no** offset | There is no second mapping to address (see [Architectures](#architectures)), and no accessor to read a distance from |
+
+The cache-policy regressions also run the selected PTOAS assembler and inspect
+its C++ output: a bypass load must adjust a descriptor copy by a **byte** offset,
+while ordinary and explicitly re-cached loads keep the original source. This
+checks the lowering beyond MLIR attribute presence without requiring NPU
+execution or claiming a measured performance gain.
 
 ### Architectures
 
@@ -278,9 +300,9 @@ The double mapping is an a2a3 property, and so is everything built on it:
 
 | Target | What a `BYPASS` declaration does today |
 | ------ | -------------------------------------- |
-| a2a3 device | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)`. This is the case the feature exists for |
+| a2a3 device with a nonzero runtime offset | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)` |
 | a2a3 device with no alias | The driver reports `0`, `addr + 0` is the ordinary address, and the read is cached — correct, one optimisation short. The simulator is this case by construction |
-| a5 | Codegen emits the attribute and no offset, and PTOAS v0.64 lowers a bare attribute to an ordinary `TLOAD`. The declaration is accepted and **does nothing** |
+| a5 | Codegen emits the attribute and no offset; the selected PTOAS lowering preserves ordinary cached `TLOAD`. `CacheBypassUnsupported` warns once per affected kernel that bypass is inactive |
 
 A5 is not a missing offset waiting to be supplied: it has no second mapping to
 address. pto-isa carries an L2 hint on A5's `TLOAD` as an instruction operand
