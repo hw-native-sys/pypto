@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -334,9 +335,37 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
     }
   }
   CHECK_SPAN(inside, span) << "EmitReg requires RegScope";
-  auto call = OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+  // Keep raw builder calls equivalent to the public DSL wrappers. The wrappers
+  // materialize these defaults before creating a Call, so omitting them here
+  // would make print/parse roundtrips structurally different despite identical
+  // op inference.
+  auto normalized_kwargs = kwargs;
+  auto has_kwarg = [&normalized_kwargs](const std::string& key) {
+    return std::any_of(normalized_kwargs.begin(), normalized_kwargs.end(),
+                       [&key](const auto& item) { return item.first == key; });
+  };
+  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
+       op_name == "reg.minimum" || op_name == "reg.maximum") &&
+      !has_kwarg("pmode")) {
+    normalized_kwargs.emplace_back("pmode", std::string("zero"));
+  }
+  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
+    normalized_kwargs.emplace_back("order", std::string("ascending"));
+  }
+  auto call = OpRegistry::GetInstance().Create(op_name, args, normalized_kwargs, span);
   auto var = Var(name, call->GetType(), span);
-  Emit(std::make_shared<AssignStmt>(var, call, span));
+  // The DSL treats a same-dtype conversion without modifiers as a no-op and
+  // returns its operand. Preserve that canonical form for raw builder users.
+  bool no_op_convert = false;
+  if (op_name == "reg.convert" && args.size() == 1 && !has_kwarg("rounding") && !has_kwarg("saturate")) {
+    auto source = std::dynamic_pointer_cast<const RegType>(args[0]->GetType());
+    const DataType* dtype = nullptr;
+    for (const auto& [key, value] : normalized_kwargs) {
+      if (key == "dtype") dtype = std::any_cast<DataType>(&value);
+    }
+    no_op_convert = source != nullptr && dtype != nullptr && source->dtype_ == *dtype;
+  }
+  Emit(std::make_shared<AssignStmt>(var, no_op_convert ? args[0] : ExprPtr(call), span));
   return var;
 }
 

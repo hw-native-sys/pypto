@@ -153,5 +153,42 @@ def test_raw_generator_literal_roundtrip(op_name, dtype, value):
     ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
 
 
+@pytest.mark.parametrize(
+    ("op_name", "kwargs"),
+    [("reg.add", {}), ("reg.index_gen", {"lanes": 64, "dtype": pl.INT32})],
+)
+def test_raw_reg_defaults_roundtrip(op_name, kwargs):
+    """Raw EmitReg calls use the same defaults as their public DSL wrappers."""
+    span = ir.Span.unknown()
+    builder = ir.IRBuilder()
+    with builder.function("kernel", type=ir.FunctionType.InCore) as function:
+        with builder.reg_scope():
+            scalar = ir.ConstFloat(1.0, pl.FP32, span)
+            value = builder.emit_reg(
+                "value", "reg.broadcast", [scalar], {"lanes": 64, "dtype": pl.FP32}, span
+            )
+            args = [value, value] if op_name == "reg.add" else [ir.ConstInt(0, pl.INT32, span)]
+            builder.emit_reg("result", op_name, args, kwargs, span)
+    original = function.get_result()
+    restored = pl.parse(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
+
+
+def test_raw_same_dtype_convert_roundtrip():
+    """A no-op raw conversion matches the DSL's operand-preserving behavior."""
+    span = ir.Span.unknown()
+    builder = ir.IRBuilder()
+    with builder.function("kernel", type=ir.FunctionType.InCore) as function:
+        with builder.reg_scope():
+            scalar = ir.ConstFloat(1.0, pl.FP32, span)
+            value = builder.emit_reg(
+                "value", "reg.broadcast", [scalar], {"lanes": 64, "dtype": pl.FP32}, span
+            )
+            builder.emit_reg("result", "reg.convert", [value], {"dtype": pl.FP32}, span)
+    original = function.get_result()
+    restored = pl.parse(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
