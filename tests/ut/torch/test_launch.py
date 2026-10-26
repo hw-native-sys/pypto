@@ -123,6 +123,26 @@ def test_owners_live_until_retirement_and_closures_are_released(eager_env, prepa
     env.state.close()
 
 
+def test_partial_enqueue_failure_keeps_callback_until_explicit_close(eager_env, prepared, monkeypatch):
+    env = eager_env
+    native_enqueue = env.native.enqueue
+
+    def enqueue_then_fail(*args):
+        native_enqueue(*args)
+        raise RuntimeError("failed after queue admission")
+
+    monkeypatch.setattr(env.native, "enqueue", enqueue_then_fail)
+    with pytest.raises(RuntimeError, match="after queue admission"):
+        _invoke(env, prepared)
+    assert not env.runs and env.queue
+    ticket = env.state._submissions[0]
+    assert ticket._callback is not None and ticket._owners
+    assert not any(buffer.closed for buffer in env.buffers)
+    env.state.close()
+    assert env.events.index("synchronize") < env.events.index("wait") < env.events.index("source.close")
+    assert ticket._callback is None and not ticket._owners
+
+
 @pytest.mark.parametrize("failure", ["enqueue", "submit", "context", "stream"])
 def test_submission_failure_retains_owners_and_original_error(eager_env, prepared, failure):
     env = eager_env
@@ -133,13 +153,13 @@ def test_submission_failure_retains_owners_and_original_error(eager_env, prepare
             _invoke(env, prepared)
         assert caught.value is error
     else:
+        if failure == "stream":
+            env.rts_stream = 0
         _invoke(env, prepared)
         if failure == "submit":
             env.submit_error = error
         elif failure == "context":
             env.context += 1
-        else:
-            env.bridges[0].rts_stream = 0
         with pytest.raises((RuntimeError, ValueError)):
             env.run_queue()
     ticket = env.state._submissions[0]
@@ -189,6 +209,15 @@ def test_close_can_finish_queued_callback_without_admission_lock_deadlock(eager_
     assert not thread.is_alive() and not errors
     assert env.events.index("synchronize") < env.events.index("wait") < env.events.index("close")
     assert env.state.state is KernelState.CLOSED
+
+
+def test_close_synchronizes_the_retained_stream(eager_env, prepared):
+    env = eager_env
+    _invoke(env, prepared)
+    assert not env.runs
+    env.stream_id = 8
+    env.state.close()
+    assert env.synchronized_streams == [7]
 
 
 def test_sources_reject_another_worker_location(eager_env, prepared):

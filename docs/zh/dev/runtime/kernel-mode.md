@@ -161,6 +161,10 @@ assembly、callable 注册。后续调用复用兼容产物和 handle，runtime 
 返回值为调用方 Tensor 的别名，允许重复别名，不分配业务输出。即使已 eager 预热，
 capture/replay 也在编译或注册前抛出 `NotImplementedError`。
 
+kernel 调用通过 `runtime.kernel.arguments.BorrowedArguments`，从校验后的 NPU
+CallFrame 构造 TaskArgs，并管理本次调用的 storage 租用，不进入 program 的
+`runtime.tensor_arg.make_tensor_arg`。pending ticket 持有 BorrowedArguments
+直到退休，再调用其 `release()` 方法。
 storage 按基址和完整容量通过 `Buffer.wrap(..., location=worker.device_location)`
 注册。Tensor view 保留字节 offset 和 stride；原生 NZ 使用经过校验的物理 blocked
 维度。同一 storage 的 view 和重叠 pending 调用共享会话 source，每次调用持有租用
@@ -168,15 +172,17 @@ storage 按基址和完整容量通过 `Buffer.wrap(..., location=worker.device_
 INOUT 和显式 NONE transfer，Scalar 通过带类型的 ctypes 值传给公开
 `TaskArgs.add_scalar`，不隐式执行 H2D。
 
-`RunOpApiV2` 入队前，pending ticket 已持有参数、配置、Worker 和 callable。
-native bridge 记录 allocator stream 并捕获实际 RTS stream/context；callback 获取
+`RunOpApiV2` 入队前，Python pending ticket 已持有 BorrowedArguments、Torch stream、
+callback、配置、Worker 和 callable。native `enqueue` 函数校验 context、记录 allocator
+stream 并捕获 native stream，不再创建 native ticket 或持有 Tensor 引用。
+入队期间释放调用线程的 GIL；callback 获取
 GIL 后调用公开 Python `Worker.submit(..., caller_stream=...)`，再发布 RunHandle。
 不使用同步 `Worker.run`、私有 native submit 或 slot API。native 队列状态不拥有
 Python 引用；pending owners 和 callback closure 仅在退休成功后、持有 GIL 时释放。
 
 外层 JIT 返回、callback 提交返回、设备完成是三个不同阶段。普通 enqueue 和未完成
 ticket 轮询不会 drain、synchronize 或等待 callback/run。已完成的 run 仍需 `wait()`
-退休后才释放 source；显式 shutdown 可以同步队列并等待 run。Simpler submit 自身
+退休后才释放 source；显式 shutdown 可以同步保留的 Torch stream 并等待 run。Simpler submit 自身
 可能等待容量或前驱。提交或退休失败、完成状态未知时保留所有者。
 
 UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/恢复及二进制校验，

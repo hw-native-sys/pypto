@@ -209,6 +209,10 @@ recompile. Returns are aliases of caller tensors, including repeated aliases.
 No business output is allocated. Capture/replay raises `NotImplementedError`
 before compilation or registration, even after eager warmup.
 
+Kernel calls use `runtime.kernel.arguments.BorrowedArguments` to build TaskArgs
+from validated NPU call frames and own the per-call storage leases. They do not
+enter the program `runtime.tensor_arg.make_tensor_arg` helper. The pending ticket
+retains BorrowedArguments until retirement, then calls its `release()` method.
 Storage is registered by its base address and full capacity with
 `Buffer.wrap(..., location=worker.device_location)`. Tensor views preserve byte
 offsets and strides; native NZ uses validated physical blocked dimensions.
@@ -217,9 +221,12 @@ call holds a lease until retirement; the final lease closes the source. Tensor
 arguments use INPUT/OUTPUT_EXISTING/INOUT and explicit NONE transfers. Typed
 ctypes scalars use public `TaskArgs.add_scalar`; no implicit H2D occurs.
 
-A pending ticket owns parameters, configuration, Worker and callable before
-`RunOpApiV2` can enqueue. The native bridge records allocator streams and captures
-the actual RTS stream/context. Its callback acquires the GIL and calls public
+A Python pending ticket owns BorrowedArguments, the Torch stream, callback,
+configuration, Worker and callable before `RunOpApiV2` can enqueue.
+The native `enqueue` function validates the context, records allocator streams
+and captures the native stream; it creates no native ticket or Tensor owners.
+It releases the caller GIL during queue admission. Its callback acquires the GIL
+and calls public
 Python `Worker.submit(..., caller_stream=...)`, then publishes the RunHandle.
 It never calls synchronous `Worker.run`, private native submit or a slot API.
 Native queue state contains no owning Python references; pending owners and
@@ -228,7 +235,7 @@ callback closures are released under the GIL only after successful retirement.
 Outer JIT return, callback submission and device completion are distinct. Normal
 enqueue and incomplete-ticket polling never drain, synchronize or wait for a
 callback/run. A completed run still requires `wait()` retirement before releasing
-sources. Explicit shutdown may synchronize the queue and wait for runs. Simpler
+sources. Explicit shutdown may synchronize the retained Torch stream and wait for runs. Simpler
 submit itself can wait for capacity or a predecessor. Submission/retirement
 failures preserve owners when completion is unknown.
 
