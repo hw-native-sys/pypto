@@ -185,16 +185,21 @@ def test_fusion_preserves_geometry_metadata_and_producer_position(planner, dynam
 
 def test_fused_source_read_stays_before_intervening_source_mutation():
     source, _, nz, cast, move = _pair()
-    # A functional writeback mutates source storage between cast and move.
+    # Packed ND insertion uses a byte alias; the writeback still mutates the
+    # same source storage between the numerical cast and its NZ consumer.
+    alias_call = ir.create_op_call("tile.reinterpret_view", [source], {"dtype": DataType.UINT8}, SPAN)
+    alias = ir.Var("source_bytes", alias_call.type, SPAN)
+    alias_stmt = ir.AssignStmt(alias, alias_call, SPAN)
     update = ir.create_op_call(
-        "tile.assemble", [source, source, ir.MakeTuple([_const(0), _const(0)], SPAN)], {}, SPAN
+        "tile.assemble", [alias, alias, ir.MakeTuple([_const(0), _const(0)], SPAN)], {}, SPAN
     )
     mutation = ir.EvalStmt(update, SPAN)
-    before = _program([cast, mutation, move, ir.EvalStmt(nz, SPAN)], [source])
+    before = _program([alias_stmt, cast, mutation, move, ir.EvalStmt(nz, SPAN)], [source])
     after = _run(before)
     statements = list(_body(after).stmts)
-    assert statements[0].value.op.name == ir.get_op("tile.cast_to_nz").name
-    assert statements[1].same_as(mutation)
+    assert statements[0].same_as(alias_stmt)
+    assert statements[1].value.op.name == ir.get_op("tile.cast_to_nz").name
+    assert statements[2].same_as(mutation)
     _verify(after)
 
 
@@ -302,7 +307,18 @@ def test_unfusable_cases_leave_ordinary_cast_unchanged(case):
         source = _tile(view=ir.TileView(blayout=ir.TileLayout.col_major))
     elif case == "memref":
         source = _tile()
-    source, nd, nz, cast, move = _pair(source, **options)
+    if case == "source_layout":
+        # The public constructor now rejects DN wider casts before fusion.
+        # Also keep the matcher safety check using intentionally invalid IR,
+        # as for the other negative metadata cases in this test.
+        with pytest.raises(ValueError, match="DN cast supports only BF16 and packed FP4"):
+            ir.create_op_call("tile.cast", [source], CAST, SPAN)
+        _, nd, nz, cast, move = _pair()
+        cast = ir.AssignStmt(
+            nd, ir.Call(cast.value.op, [source], dict(cast.value.kwargs), cast.value.type, SPAN), SPAN
+        )
+    else:
+        source, nd, nz, cast, move = _pair(source, **options)
     if case in ("memref", "result_type"):
         ty = nz.type
         assert isinstance(ty, ir.TileType)
@@ -837,8 +853,16 @@ def test_e1m2_never_uses_the_e2m1_direct_path(planner):
     assert not _calls(after, "tile.cast_to_nz")
     backend.set_backend_type(BackendType.Ascend950)
     with passes.PassContext([], memory_planner=planner):
-        with pytest.raises(ValueError, match="no native cast path"):
-            passes.legalize_tile_cast()(before)
+        lowered = passes.legalize_tile_cast()(before)
+    assert not _calls(lowered, "tile.cast_to_nz")
+    casts = _calls(lowered, "tile.cast")
+    assert [call.kwargs["target_type"] for call in casts] == [
+        DataType.BF16,
+        DataType.FP32,
+        DataType.FP8E4M3FN,
+    ]
+    assert casts[0].args[0].type.dtype == DataType.FP4E1M2X2
+    _verify(lowered)
 
 
 def test_odd_carrier_valid_columns_expand_only_at_cast_boundary():
