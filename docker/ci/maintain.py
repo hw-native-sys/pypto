@@ -24,7 +24,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dist_state import PATCH_FILES
 from swr_registry import Registry
@@ -126,10 +126,20 @@ def validate_image(name: str, image: dict[str, Any]) -> None:
         or image["patch"] != f"cann92-{image['validation_platform']}-aicpu-class-memaccess"
     ):
         raise ValueError(f"The CANN 9.2 patch must match the ARM image platform: {name}")
-    for key in ("decode", "allreduce"):
+    validate_cases(name, image)
+
+
+def validate_cases(name: str, image: dict[str, Any]) -> None:
+    """Check the single-card and distributed case paths and extra arguments."""
+    for key in ("decode", "distributed"):
         path_value = image[key]
         if not path_value.startswith("/workspace/pypto-lib/") or ".." in Path(path_value).parts:
             raise ValueError(f"{name}.{key} must be a path inside pypto-lib")
+    arguments = image.get("distributed_args", [])
+    if not isinstance(arguments, list) or any(
+        not isinstance(value, str) or "\0" in value for value in cast(list[object], arguments)
+    ):
+        raise ValueError(f"{name}.distributed_args must be a list of strings without NUL characters")
 
 
 def resolve_ref(repository: str, ref: str) -> str:
@@ -273,10 +283,18 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
 
 def task_command(state: dict[str, Any], directory: Path, case: str) -> list[str]:
     image = state["image"]
-    count = 2 if case == "allreduce" else 1
+    count = 2 if case == "distributed" else 1
     container = f"pypto-ci-{state['identity']}-{case}"
     model = shlex.join(
-        ["python", image[case], "-p", image["validation_platform"], "-d", "0,1" if count == 2 else "0"]
+        [
+            "python",
+            image[case],
+            *(image.get("distributed_args", []) if count == 2 else []),
+            "-p",
+            image["validation_platform"],
+            "-d",
+            "0,1" if count == 2 else "0",
+        ]
     )
     inner = f"set -eo pipefail; {model}"
     if case == "decode":
@@ -296,6 +314,8 @@ def task_command(state: dict[str, Any], directory: Path, case: str) -> list[str]
         f"org.pypto.ci.run={state['identity']}",
         "--runtime=ascend",
         "--shm-size=16g",
+        "-e",
+        "PYPTO_BENCH=0",
         "--mount",
         "type=bind,src=/usr/local/Ascend/driver/version.info,dst=/run/pypto-driver-version.info,readonly",
         "-e",
@@ -330,7 +350,7 @@ def task_command(state: dict[str, Any], directory: Path, case: str) -> list[str]
 def validate(directory: Path) -> None:
     (directory / "validated.json").unlink(missing_ok=True)
     state = json.loads((directory / "state.json").read_text())
-    for case in ("decode", "allreduce"):
+    for case in ("decode", "distributed"):
         output = run(task_command(state, directory, case), directory / f"{case}.log")
         # task-submit may echo the submitted command: require an actual PASS
         # line, not a substring embedded in a command or an error explanation.
@@ -429,7 +449,7 @@ def cleanup(directory: Path) -> None:
         return
     state = json.loads(state_path.read_text())
     # Stop Docker workloads before killing the queue jobs that hold their cards.
-    for case in ("decode", "allreduce"):
+    for case in ("decode", "distributed"):
         run(["docker", "rm", "-f", f"pypto-ci-{state['identity']}-{case}"], check=False)
     ids = run(["task-submit", "--find", str(directory.resolve())])
     for task_id in ids.splitlines():

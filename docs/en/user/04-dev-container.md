@@ -538,7 +538,7 @@ on changes to `docker/`, toolchain pins, build constraints or its workflow on `m
 and through **Run workflow**. PRs touching those paths run configuration and
 offline script tests on GitHub-hosted runners. Only PRs whose source repository is
 `hw-native-sys/pypto` or the explicitly trusted fork `luohuan19/pypto` also build
-the image and validate doctor, single-card decode and two-card all-reduce on the
+the image and validate doctor, single-card decode and a two-card distributed case on the
 configured NPU runner. All other forks skip that job. The allowlist lives in the
 workflow's `image.if` condition; adding a repository grants its code execution on
 the persistent host and requires a maintainer trust review.
@@ -632,9 +632,16 @@ bindings fail. The driver pairs in the table are deployment validation configura
 publication still requires strict doctor and both hardware tests to pass. They are
 not general compatibility guarantees for other hosts.
 
-Validation uses fresh containers without source/cache volumes. A single-card
-`task-submit` reservation runs strict doctor and Qwen3-14B decode; a separate
-two-card reservation runs pypto-lib's all-reduce example. Physical cards come from
+Validation uses fresh containers without source/cache volumes and sets
+`PYPTO_BENCH=0` for correctness checks. Each image config selects a single-card
+`decode` script and a two-card `distributed` script; optional `distributed_args`
+are passed as individual arguments. A2/A3 uses Qwen3-14B decode and pypto-lib's
+all-reduce example. A5 uses `models/deepseek_v4_1_flash/decode_swa.py` for SWA,
+KV cache and MXFP8 validation, and `models/deepseek_v4_1_flash/decode_moe.py`
+with `--ep 2` for expert computation and cross-card dispatch/combine validation.
+Both A5 cases generate inputs and compare results against their golden references.
+A single-card `task-submit` reservation runs strict doctor before decode;
+a separate reservation runs the two-card case. Physical cards come from
 `TASK_DEVICE`, while model arguments use container-local IDs `0` or `0,1`.
 Driver metadata is mounted read-only from the host. ARM A5 containers also receive
 `/dev/ummu` and `/dev/uburma` for URMA communication. Both models must exit zero

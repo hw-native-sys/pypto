@@ -482,7 +482,7 @@ agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限�
 `main` 上的 `docker/`、工具链版本、构建约束或该 workflow 变化时也会触发，
 还可通过 **Run workflow** 手动运行。修改上述路径的 PR 在 GitHub 托管 runner 上运行配置检查和
 离线脚本测试。仅当 PR 来源仓库为 `hw-native-sys/pypto` 或明确认可的可信 fork `luohuan19/pypto` 时，
-才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡 all-reduce 验证；其他 fork 跳过该 job。
+才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡分布式用例验证；其他 fork 跳过该 job。
 允许名单位于 workflow 的 `image.if` 条件中；新增仓库意味着允许其代码在持久化宿主机上执行，
 必须由维护者审核其可信性。
 PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用共享 runner 的 PR 构建前，
@@ -557,8 +557,14 @@ CI 选择 simpler 的 `build_package_<validation_platform>` 和 `build_package_s
 表中的驱动组合属于部署验证配置，发布仍须通过 strict doctor 和两个上板测试，
 不代表对其他宿主机的通用兼容保证。
 
-验证使用全新容器，不挂载源码或缓存卷。一次单卡 `task-submit` 借卡运行严格 doctor 和 Qwen3-14B decode；
-另一次双卡借卡运行 pypto-lib 的 all-reduce 示例。物理卡来自 `TASK_DEVICE`，模型参数使用容器内编号 `0` 或 `0,1`。
+验证使用全新容器，不挂载源码或缓存卷，并设置 `PYPTO_BENCH=0` 执行正确性检查。
+每个镜像配置通过 `decode` 选择单卡脚本，通过 `distributed` 选择双卡脚本；
+可选的 `distributed_args` 列表按独立参数传入。A2/A3 使用 Qwen3-14B decode 和 pypto-lib 的 all-reduce 示例。
+A5 使用 `models/deepseek_v4_1_flash/decode_swa.py` 验证 SWA、KV cache 和 MXFP8，
+使用 `models/deepseek_v4_1_flash/decode_moe.py --ep 2` 验证专家计算和跨卡分发、合并。
+两个 A5 用例自行生成输入，并与各自的 golden 参考结果比较。
+一次单卡 `task-submit` 借卡先运行严格 doctor，再运行 decode；另一次借卡运行双卡用例。
+物理卡来自 `TASK_DEVICE`，模型参数使用容器内编号 `0` 或 `0,1`。
 宿主机驱动元数据以只读方式挂载。ARM A5 容器还传入 `/dev/ummu` 和 `/dev/uburma`，用于 URMA 通信。
 两个模型都必须退出码为零且输出 `[RUN] PASS`；
 缺少 PASS、超时或测试失败都禁止发布。`task_timeout_seconds` 限制排队加执行的总等待时间，

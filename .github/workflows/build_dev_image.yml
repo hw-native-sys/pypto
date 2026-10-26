@@ -119,7 +119,7 @@ jobs:
           eval "$bundle_env"
           source .claude/skills/testing/load-env.sh
           python3.10 docker/ci/maintain.py build --image "$IMAGE_NAME" --directory "$IMAGE_STATE"
-      - name: Validate doctor, single-card decode and two-card all-reduce
+      - name: Validate doctor and single-card and two-card cases
         run: |
           bundle_env="$(pypto-toolchain export)"
           eval "$bundle_env"

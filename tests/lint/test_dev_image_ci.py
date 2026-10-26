@@ -70,7 +70,10 @@ def state(ci: ModuleType, tmp_path: Path) -> dict:
         ("cann_digest", "sha256:missing"),
         ("patch", "unknown"),
         ("patch", "cann92-a5-aicpu-class-memaccess"),
-        ("allreduce", "/workspace/pypto-lib/../other.py"),
+        ("distributed", "/workspace/pypto-lib/../other.py"),
+        ("distributed_args", "--ep 2"),
+        ("distributed_args", ["--ep", 2]),
+        ("distributed_args", ["bad\0argument"]),
         ("tag", "bad tag"),
     ],
 )
@@ -213,7 +216,7 @@ def test_pr_build_rejects_missing_or_invalid_repository_before_network(
     assert calls == [["git", "-C", str(ci.ROOT), "rev-parse", "HEAD"]]
 
 
-@pytest.mark.parametrize("case,devices", [("decode", "5"), ("allreduce", "5,7")])
+@pytest.mark.parametrize("case,devices", [("decode", "5"), ("distributed", "5,7")])
 @pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
 def test_devices_expand_only_inside_queued_shell(
     ci: ModuleType, state: dict, tmp_path: Path, case: str, devices: str, image_name: str
@@ -234,27 +237,44 @@ def test_devices_expand_only_inside_queued_shell(
     )
     argv = ci.task_command(state, directory, case)
     assert argv[argv.index("--device") + 1] == "auto"
-    assert argv[argv.index("--device-num") + 1] == ("2" if case == "allreduce" else "1")
+    assert argv[argv.index("--device-num") + 1] == ("2" if case == "distributed" else "1")
     result = subprocess.run(["bash", "-c", argv[-1]], env=environment, check=False)
     assert result.returncode == 0
     calls = (tmp_path / "calls").read_text()
     assert f"ASCEND_VISIBLE_DEVICES={devices}" in calls
     assert state["image_id"] in calls
     assert ("pypto-doctor --strict" in calls) == (case == "decode")
-    assert "-d 0,1" in calls if case == "allreduce" else "-d 0" in calls
+    assert "-d 0,1" in calls if case == "distributed" else "-d 0" in calls
     assert f"-p {state['image']['validation_platform']}" in calls
+    assert "PYPTO_BENCH=0" in calls
+    if image_name == "arm-a5":
+        script = "decode_moe.py --ep 2" if case == "distributed" else "decode_swa.py"
+        assert f"/workspace/pypto-lib/models/deepseek_v4_1_flash/{script} -p a5" in calls
+    else:
+        script = (
+            "examples/advanced/allreduce.py" if case == "distributed" else "models/qwen3_14b/decode_fwd.py"
+        )
+        assert f"/workspace/pypto-lib/{script} -p a2a3" in calls
     assert ("--device\n/dev/ummu" in calls) == (image_name == "arm-a5")
     assert ("--device\n/dev/uburma" in calls) == (image_name == "arm-a5")
     assert f"rm\n-f\npypto-ci-{state['identity']}-{case}" in calls
 
 
 @pytest.mark.parametrize(
-    "failure", ["decode-exit", "allreduce-exit", "missing-pass", "reported-fail", "manifest"]
+    "failure", ["decode-exit", "distributed-exit", "missing-pass", "reported-fail", "manifest"]
 )
+@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
 def test_failed_validation_cannot_publish(
-    ci: ModuleType, state: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    ci: ModuleType,
+    state: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    image_name: str,
 ) -> None:
     # A previous successful marker must not survive a revalidation failure.
+    state["image"] = ci.load_config()["images"][image_name]
+    ci.save(tmp_path / "state.json", state)
     ci.save(tmp_path / "validated.json", state)
 
     def command(argv: list[str], log: Path | None = None, **kwargs: object) -> str:
@@ -550,7 +570,7 @@ def test_cleanup_removes_only_this_runs_resources(
     ci.cleanup(tmp_path)
     assert calls[:2] == [
         ["docker", "rm", "-f", f"pypto-ci-{state['identity']}-decode"],
-        ["docker", "rm", "-f", f"pypto-ci-{state['identity']}-allreduce"],
+        ["docker", "rm", "-f", f"pypto-ci-{state['identity']}-distributed"],
     ]
     assert ["task-submit", "--find", str(tmp_path)] in calls
     assert ["task-submit", "--kill", "task-42"] in calls
