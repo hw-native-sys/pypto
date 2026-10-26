@@ -294,11 +294,10 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
-
     if (IsNativeCast(adj_, src, dst)) {
       return IRMutator::VisitStmt_(op);
     }
+    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
 
     std::vector<DataType> chain = FindCastChain(adj_, src, dst);
     CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)

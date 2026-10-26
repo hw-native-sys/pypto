@@ -147,7 +147,7 @@ pipe（`pl.reserve_buffer`、`pl.{aic,aiv}_initialize_pipe` 与 `pl.tpush_to_aic
 路径。在 `RequiresVtoCFractalAdapt()` 成立的后端上，这样的推送会把裸 ND tile 送进一个被 cube
 按 fractal 解释的 FIFO，导致弹出 tile 的每个元素都错位。
 
-`AdaptManualVtoCPush` 负责补上这个缺口。它作为本 pass 的最后一个阶段，遍历本 pass **产出**的
+`AdaptManualVtoCPush` 负责补上这个缺口。它在 Group ABI 归一化之后，遍历本 pass **产出**的
 每一个 AIV 函数，包括转成 AIV 的纯向量 InCore 函数，以及 mixed 函数拆出的 AIV 半边。普通数据仍
 使用固定的 cube 侧 Mat transfer view。对于 MX，pass 会从 AIV import 解析到 AIC reserve，并按
 V2C pipe `id` 及出现顺序配对 push/pop，从实际消费方 `tpop` 契约规划每次传输。peer 缺失、initializer
@@ -155,6 +155,32 @@ V2C pipe `id` 及出现顺序配对 push/pop，从实际消费方 `tpop` 契约�
 
 该改写同时支持 FP8E8M0 MX scale 和普通 data tile，保留原 push 的 kwargs/attrs（包括 `id`），并且
 保持幂等：已经处于边界 view 的 push 不会再次改写。只有遇到手写 V→C push 时才查询后端能力。
+
+### FP4 直接转换到最终 NZ 缓冲区
+
+Group ABI 归一化及完整 AIV 适配器遍历完成后，私有函数变换在 backend 支持时，
+将 `tile.cast(fp4, FP8E4M3FN)` 与其唯一 NZ `tile.move` 消费者合并。
+普通、手写和 op-driven 适配器采用相同判定；Pass 清单及公开 DSL 不变。
+
+内部 `tile.cast_to_nz` 接受一个 ND/Null FP4E2M1X2 源、必需舍入及可选
+饱和设置，拥有独立的 Vec FP8E4M3FN 标准 512B NZ 结果。静态行数须为 16 的倍数，
+逻辑列数至少 64 且为 64 的倍数，物理偏移及寄存器计数须满足 ISA 边界。有效行可
+动态；打包轴有效列须为静态且表示偶数逻辑范围。打包列按 2:1 扩展。
+
+两条语句须处于同一词法序列，cast 结果仅有一次实际读取，结果尚未分配 MemRef。
+正常类型推导须与完整 move 结果类型相等，包括有效几何、padding、compact 和独立
+分块寻址。保留 cast 元数据；未知 move 元数据会拒绝融合。多次读取及跨区域配对
+保留 ND。在原 cast 位置绑定最终 NZ 变量，再移除 move，保证中间源写入和零次循环
+下的读取时机不变。不可变 use/definition/position 索引使分析保持线性。
+
+所有 FP4 输入均已使用字节 carrier 坐标。融合仅接受 E2M1 行优先 ND 输入，
+不增加 packed NZ/列优先输入或 E1M2 数值转换。ND/NZ 直连转换依赖 [FP4](../fp4.md#cast-策略ascend950) 所述
+配套工具链。
+
+该阶段先于克隆及分配。`[32,256]` packed 输入转为 `[32,512]` FP8，
+需要 8192 字节源和独立的 16384 字节 NZ
+结果（共 24576 字节），没有 FP8 ND 中间值及转换 scratch。完整 GEMM 还包含
+scale、FIFO 和流水线生命周期，其存储须另行统计。
 
 ### 经 GM 中转的跨核依赖
 

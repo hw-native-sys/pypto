@@ -57,7 +57,8 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
 | Either packed format ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
-| Either packed format → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1x2 → FP8E4M3FN cast | One exact native TCVT on A5; eligible private cast-plus-move chains write FP8 NZ directly |
+| E1M2 → FP8 or E2M1 → FP8E5M2 cast | Legalized through BF16 and FP32, with a warning |
 | E2M1↔E1M2 conversion | Numerical cast through BF16; carrier shape is unchanged |
 | Other wider-type casts | Existing legalization with lossless intermediates; see the encoding constraint below |
 | Packed Vec layout conversion | ND→NZ; carrier geometry changes with the packing axis while preserving the value geometry |
@@ -166,6 +167,43 @@ columns and FP4 physical columns divisible by 64. Axis0 groups 32 valid rows;
 See the [operator catalog](../user/ops/01-catalog.md) for the quantization entry
 points. Native packed FP4 `matmul_mx` remains unsupported; the quantization
 result does not establish a native matrix path.
+
+## Cast policy (Ascend950)
+
+The ISA conversion is merged in canonical
+[cann/pto-isa!1967](https://gitcode.com/cann/pto-isa/merge_requests/1967).
+The closed [GitHub mirror #355](https://github.com/hw-native-sys/pto-isa/pull/355)
+does not establish mirror or runtime-pin availability. The current runtime/ISA
+pins still lack the implementation. Compiler support remains tracked by
+[PTOAS #1637](https://github.com/hw-native-sys/PTOAS/pull/1637) and
+[#1669](https://github.com/hw-native-sys/PTOAS/issues/1669).
+The public PTOAS v0.67 pin and v0.69 release lack the direct path; a release
+containing all prerequisites is not declared here.
+
+A public cast from row-major ND E2M1 carriers returns a fresh row-major ND
+FP8 tile. Both PYPTO and PTOAS memory planners use one native conversion,
+without compiler LUT/index tiles, BF16/FP32 staging, or conversion scratch.
+Source shape, valid extents, strides, and GM offsets retain byte-carrier units;
+only the cast result expands columns and valid columns by two.
+For example, a source with shape `[32,256]` and valid extent `[23,129]`
+produces FP8 shape `[32,512]` and valid extent `[23,258]`.
+Odd carrier valid-column extents are valid within aligned physical tile
+geometry; they already represent complete pairs. Physical ND/NZ alignment
+restrictions still apply.
+
+Before allocation, `ExpandMixedKernel` may combine that cast with its sole
+compatible NZ move. This private path writes the fresh FP8 NZ result at the
+original cast position. Shared results, cross-region uses, allocated aliases,
+or mismatching layout/valid metadata retain the ND cast and separate move.
+A `[32,256]` packed source and `[32,512]` FP8 NZ result require disjoint
+8,192-byte and 16,384-byte buffers, with no FP8 ND intermediate.
+This enables NZ **output**, without adding packed NZ or column-major input.
+NK matrix addressing decodes row-major packed `[N,K/2]` then transposes FP8;
+packed reshape and transpose remain unsupported.
+
+E1M2-to-FP8 retains the existing BF16/FP32 bridge and warning.
+E2M1-to-E5M2 retains the BF16/FP32 bridge and warning. A2/A3 packed execution,
+public byte-alias planner restrictions, and other cast/scratch rules are unchanged.
 
 ## See also
 

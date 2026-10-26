@@ -49,7 +49,8 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | 打包 GM 视图与 load/store | 两种格式均支持 ND/DN 载体维度、步长和偏移；宽度为一个载体时仍保持 ND；PTOAS v0.67 负责 DMA 描述符转换 |
 | 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同、连续且带地址的二维行主序 Vec 存储；使用 PYPTO 或 DSA_RP 内存规划器 |
 | 任一打包格式 ↔ BF16 转换 | 无分块 Vec 上的原生 TCVT；ND 列或完整静态连续 DN 行按 2:1 展开或收缩 |
-| 任一打包格式 → FP8E4M3FN/FP8E5M2 转换 | 经 BF16 和 FP32 合法化，并发出警告；也可使用主机参考实现或查找表 |
+| E2M1x2 → FP8E4M3FN 转换 | A5 上执行一次精确的原生 TCVT；符合条件的私有 cast-plus-move 链直接写入 FP8 NZ |
+| E1M2 → FP8 或 E2M1 → FP8E5M2 转换 | 经 BF16 和 FP32 合法化，并发出警告 |
 | E2M1↔E1M2 转换 | 经 BF16 进行数值转换，载体 shape 不变 |
 | 其他宽类型转换 | 使用现有合法化路径，要求中间转换无损；编码限制见下文 |
 | 打包 Vec 布局转换 | ND→NZ；载体维度随打包轴变化，数值维度保持不变 |
@@ -149,3 +150,35 @@ axis0 每 32 个有效行分组；`interleave=True` 要求 FP16/BF16 的物理�
 
 - [类型](../user/language/00-types.md) — 公开别名与载体 ABI
 - [算子 / MX](ir/05-operators.md) — 现有 MXFP8 矩阵路径
+
+## Cast 策略（Ascend950）
+
+ISA 转换已合入规范仓库
+[cann/pto-isa!1967](https://gitcode.com/cann/pto-isa/merge_requests/1967)。
+[GitHub 镜像 #355](https://github.com/hw-native-sys/pto-isa/pull/355) 已关闭，
+但关闭并不证明镜像或运行时 pin 已包含实现。当前 runtime/ISA pin 仍缺少此实现。
+编译器支持仍由 [PTOAS #1637](https://github.com/hw-native-sys/PTOAS/pull/1637) 和
+[#1669](https://github.com/hw-native-sys/PTOAS/issues/1669) 跟踪。
+公开 PTOAS v0.67 pin 及 v0.69 发布版均缺少直接转换路径；
+此处未声明具备全部前置条件的发布版本。
+
+公开 cast 接受行优先 ND E2M1 carrier，并返回新分配的行优先 ND FP8 tile。
+PYPTO 和 PTOAS 两种内存规划器均使用一次原生转换，不产生编译器 LUT/索引
+tile、BF16/FP32 中转或转换 scratch。源 shape、有效范围、stride 和 GM
+offset 保持字节 carrier 单位；仅 cast 结果的列和有效列按两倍展开。
+例如 `[32,256]`、有效范围 `[23,129]` 转为 FP8 `[32,512]`、
+有效范围 `[23,258]`。在对齐的物理 tile 几何范围内，奇数 carrier
+有效列仍包含完整数值对，因此合法；物理 ND/NZ 对齐限制仍然适用。
+
+分配前，`ExpandMixedKernel` 可将 cast 与其唯一兼容 NZ move 合并，
+在原 cast 位置直接写入独立 FP8 NZ 结果。共享结果、跨区域使用、已分配别名
+或不匹配的布局/有效元数据会保留 ND cast 和独立 move。
+`[32,256]` packed 源与 `[32,512]` FP8 NZ 结果分别使用互不重叠的
+8,192 和 16,384 字节缓冲区，不产生 FP8 ND 中间值。
+此能力仅增加 NZ **输出**，不增加 packed NZ 或列优先输入。
+NK 矩阵路径先解码行优先 packed `[N,K/2]`，再转置 FP8；
+packed reshape 和 transpose 仍不支持。
+
+E1M2 到 FP8 仍通过现有 BF16/FP32 桥接路径。E2M1 到 E5M2 仍经
+BF16/FP32 中转并发出警告。A2/A3 packed 执行、公开字节别名的内存规划器
+限制和其他 cast/scratch 规则保持不变。

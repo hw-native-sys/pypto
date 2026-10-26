@@ -397,10 +397,13 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
     ``cache_policy`` attribute on ``pto.tload`` plus the device's no-cache alias
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
-    reports no alias reports zero, leaving the read ordinary and correct. Other
-    architectures do not map GM twice — A5 expresses the policy on the load
-    instruction instead — and PTOAS lowers the bare attribute to an ordinary
-    load, so a declaration there is accepted and currently does nothing.
+    reports no alias reports zero, leaving the read ordinary and correct. On
+    other architectures the attribute lowers to the load instruction's own L2
+    hint: PTOAS emits ``TLOAD`` with the ``pto::TLoadL2Hint::NotAllocKeep``
+    template argument, streaming the read without allocating L2 lines. This O4
+    lowering requires the pending companion PTOAS #1637 change; the public
+    v0.67 pin accepts the attribute but lowers it to an ordinary load. No
+    released version containing that companion change is asserted here.
     ``CachePolicy.DEFAULT`` emits nothing, so a read that declares no policy
     generates exactly the code it did before.
 

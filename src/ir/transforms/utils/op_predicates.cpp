@@ -29,11 +29,14 @@ namespace op_predicates {
 using core_affinity::CrossCoreRole;
 
 bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3) {
+  if (IsOp(call, "tile.cast_to_nz")) return true;
   if (!IsOp(call, "tile.cast") || call->args_.empty()) return false;
   const auto source = As<TileType>(call->args_[0]->GetType());
   const auto result = As<TileType>(call->GetType());
   if (!source || !result) return false;
-  const auto source_bits = source->dtype_.GetBit();
+  // Packed FP4 has an 8-bit carrier but contains two logical 4-bit scalars.
+  // Comparing carrier widths would allow destructive in-place 2:1 expansion.
+  const auto source_bits = source->dtype_.IsPackedFp4() ? 4 : source->dtype_.GetBit();
   const auto result_bits = result->dtype_.GetBit();
   return result_bits > source_bits || (is_a2a3 && result_bits < source_bits);
 }

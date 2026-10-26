@@ -1921,6 +1921,38 @@ def cast(
     return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 
 
+def cast_to_nz(
+    tile: Expr,
+    target_type: int | DataType,
+    mode: str | int = "round",
+    span: Span | None = None,
+    *,
+    saturation_mode: str | int | None = None,
+) -> Call:
+    """Build the internal native FP4 to FP8 NZ operation for printed IR.
+
+    This builder supports the parser's existing IR fallback. The compiler
+    creates the operation after mixed-kernel expansion; it has no public DSL
+    wrapper. Its one source is ND FP4 or packed FP4E2M1X2 in Vec memory, and
+    the exact FP8E4M3FN result owns fresh standard 512-byte NZ storage.
+
+    Args:
+        tile: ND FP4 source tile with accepted static physical geometry.
+        target_type: Exact FP8E4M3FN destination dtype.
+        mode: Cast rounding mode, resolved as for ordinary cast.
+        span: Optional source span.
+        saturation_mode: Optional destination saturation deviation.
+
+    Returns:
+        Internal cast call with deduced NZ result type.
+    """
+    kwargs: dict[str, Any] = {"target_type": target_type, "mode": resolve_cast_mode(mode)}
+    deviation = resolve_saturation_deviation(saturation_mode, target_type)
+    if deviation is not None:
+        kwargs["saturation_mode"] = deviation
+    return _ir_core.create_op_call("tile.cast_to_nz", [tile], kwargs, _get_span_or_capture(span))
+
+
 def log(tile: Expr, span: Span | None = None, *, high_precision: bool = False) -> Call:
     """Element-wise natural logarithm of a tile.
 

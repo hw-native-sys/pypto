@@ -4222,6 +4222,18 @@ class TestTileReinterpretViewIR:
         with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
             tile.reinterpret_view(self._var([4, 64], source_dtype), target_dtype, shape=shape)
 
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.UINT16, DataType.FP8E4M3FN),
+            (DataType.FP8E4M3FN, DataType.UINT16),
+        ],
+    )
+    def test_rejects_obsolete_uint16_fp8_pair_alias(self, source_dtype, target_dtype):
+        """Native FP4 conversion does not require the former software decoder's pair view."""
+        with pytest.raises(ValueError, match="only supports FP8 reinterpretation"):
+            tile.reinterpret_view(self._var([16, 64], source_dtype), target_dtype)
+
     @pytest.mark.parametrize("layout", [ir.TileLayout.row_major, ir.TileLayout.col_major])
     def test_complete_mx_scale_byte_alias_preserves_layout(self, layout):
         view = ir.TileView(blayout=layout, slayout=layout, fractal=32)

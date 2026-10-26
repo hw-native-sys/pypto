@@ -41,6 +41,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -58,12 +59,14 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
+#include "pypto/ir/transforms/utils/syntactic_use_analysis.h"
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/ir/transforms/fp4_cast_fusion.h"
 
 namespace pypto {
 namespace ir {
@@ -1255,7 +1258,7 @@ class AdaptManualVtoCPush : public IRMutator {
       return AdaptMxV2CPush(op, call, contract->second, definitions_);
     }
     const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
-    const TileView fractal_view =
+    TileView fractal_view =
         handler->BuildCrossCoreTransferView(GetBoundaryTpopMemory(CoreSide::AIC), src_view);
     // Already in the boundary layout: either a second run of this pass, or an
     // author who staged the move by hand. Either way there is nothing to add.
@@ -1263,6 +1266,10 @@ class AdaptManualVtoCPush : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
+    // This adapter owns fresh UB storage. Source ND addressing cannot describe
+    // its blocked destination; retain the transfer geometry and layout only.
+    fractal_view.stride.clear();
+    fractal_view.start_offset = nullptr;
     auto adapted_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
                                                    fractal_view, MemorySpace::Vec);
     std::string src_name = "tile";
@@ -1572,6 +1579,140 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   }
 }
 
+/// Syntactic function-wide use index for mixed-kernel boundary planning.
+class BoundaryUseAnalysis : public SyntacticUseAnalysis {
+ public:
+  std::unordered_map<const Var*, const CVBoundaryMove*> boundary_by_dest;
+};
+
+BoundaryUseAnalysis BuildBoundaryUseAnalysis(const std::vector<StmtPtr>& stmts,
+                                             const std::map<const Stmt*, CVBoundaryMove>& boundary_moves) {
+  BoundaryUseAnalysis analysis;
+  for (const auto& stmt : stmts) {
+    if (stmt) analysis.VisitStmt(stmt);
+  }
+  for (const auto& entry : boundary_moves) {
+    analysis.boundary_by_dest.emplace(entry.second.dest_var.get(), &entry.second);
+  }
+  return analysis;
+}
+
+struct BoundaryTransposeFusionPlan {
+  std::unordered_map<const Var*, TypePtr> transpose_types;
+  std::unordered_set<const Var*> transpose_results;
+};
+
+bool AreBoundaryTileViewsEqual(const TileView& lhs, const TileView& rhs) {
+  return lhs.blayout == rhs.blayout && lhs.slayout == rhs.slayout && lhs.compact == rhs.compact &&
+         lhs.pad == rhs.pad && lhs.fractal == rhs.fractal &&
+         AreExprVectorsEqual(lhs.valid_shape, rhs.valid_shape) &&
+         AreExprVectorsEqual(lhs.stride, rhs.stride) && AreExprsEqual(lhs.start_offset, rhs.start_offset);
+}
+
+bool IsZeroBoundaryOffset(const ExprPtr& offset) {
+  if (!offset) return true;
+  const auto constant = As<ConstInt>(offset);
+  return constant && constant->value_ == 0;
+}
+
+TileLayout TransposeBoundaryDualLayout(TileLayout layout) {
+  switch (layout) {
+    case TileLayout::row_major:
+      return TileLayout::col_major;
+    case TileLayout::col_major:
+      return TileLayout::row_major;
+    case TileLayout::none_box:
+      return TileLayout::none_box;
+  }
+  return layout;
+}
+
+BoundaryTransposeFusionPlan PlanBoundaryTransposeFusions(
+    CoreSide side, const std::vector<StmtPtr>& stmts,
+    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves, const BoundaryUseAnalysis& analysis) {
+  BoundaryTransposeFusionPlan plan;
+  if (side != CoreSide::AIC) return plan;
+
+  const auto* handler = PassContext::Current()->GetBackendHandler();
+  std::unordered_set<const Var*> preceding_boundary_dests;
+
+  for (const auto& stmt : stmts) {
+    const auto boundary_it = boundary_moves.find(stmt.get());
+    if (boundary_it != boundary_moves.end()) {
+      const CVBoundaryMove& bm = boundary_it->second;
+      if (bm.direction == CVDirection::VECTOR_TO_CUBE && !bm.op_driven) {
+        const auto indexed_it = analysis.boundary_by_dest.find(bm.dest_var.get());
+        if (indexed_it != analysis.boundary_by_dest.end() && indexed_it->second == &bm) {
+          preceding_boundary_dests.insert(bm.dest_var.get());
+        }
+      }
+      continue;
+    }
+
+    const auto assign = As<AssignStmt>(stmt);
+    if (!assign) continue;
+    const auto call = As<Call>(assign->value_);
+    if (!call || call->args_.size() != 1 || !IsOp(call, "tile.transpose_view")) continue;
+    const auto src_var = AsVarLike(call->args_[0]);
+    if (!src_var || preceding_boundary_dests.count(src_var.get()) == 0) continue;
+
+    const auto bm_it = analysis.boundary_by_dest.find(src_var.get());
+    if (bm_it == analysis.boundary_by_dest.end()) continue;
+    const CVBoundaryMove& bm = *bm_it->second;
+    if (bm.direction != CVDirection::VECTOR_TO_CUBE || bm.op_driven) continue;
+
+    const auto dest_tt = As<TileType>(bm.dest_var->GetType());
+    if (!dest_tt || !dest_tt->memory_space_.has_value()) continue;
+    const MemorySpace dest_ms = dest_tt->memory_space_.value();
+    if (dest_ms != MemorySpace::Mat) continue;
+    if (NeedsPostTpopMove(side, *dest_tt)) continue;
+
+    const auto count_it = analysis.read_counts.find(bm.dest_var.get());
+    if (count_it == analysis.read_counts.end() || count_it->second != 1) continue;
+
+    const auto output_tt = As<TileType>(assign->var_->GetType());
+    if (!output_tt || !output_tt->memory_space_.has_value()) continue;
+    if (output_tt->dtype_ != dest_tt->dtype_ || output_tt->memory_space_.value() != dest_ms) continue;
+
+    const TileView dest_view = tile_view_semantics::GetEffectiveTileView(*dest_tt);
+    const TileView transfer_view = BuildCrossCoreTransferView(dest_ms, dest_view);
+    if (!AreBoundaryTileViewsEqual(transfer_view, dest_view)) continue;
+    if (!transfer_view.stride.empty()) continue;
+    if (!IsZeroBoundaryOffset(transfer_view.start_offset)) continue;
+
+    if (dest_tt->shape_.size() < 2) continue;
+    if (!transfer_view.valid_shape.empty() && transfer_view.valid_shape.size() != dest_tt->shape_.size()) {
+      continue;
+    }
+
+    std::vector<ExprPtr> expected_shape = dest_tt->shape_;
+    std::vector<ExprPtr> expected_valid_shape =
+        transfer_view.valid_shape.empty() ? dest_tt->shape_ : transfer_view.valid_shape;
+    std::swap(expected_shape[expected_shape.size() - 2], expected_shape.back());
+    std::swap(expected_valid_shape[expected_valid_shape.size() - 2], expected_valid_shape.back());
+
+    const TileView output_view = tile_view_semantics::GetEffectiveTileView(*output_tt);
+    if (!output_view.stride.empty() || !IsZeroBoundaryOffset(output_view.start_offset)) continue;
+    const auto& output_valid_shape =
+        output_view.valid_shape.empty() ? output_tt->shape_ : output_view.valid_shape;
+    if (!AreExprVectorsEqual(output_tt->shape_, expected_shape) ||
+        !AreExprVectorsEqual(output_valid_shape, expected_valid_shape)) {
+      continue;
+    }
+    if (output_view.blayout != TransposeBoundaryDualLayout(transfer_view.blayout) ||
+        output_view.slayout != TransposeBoundaryDualLayout(transfer_view.slayout) ||
+        output_view.fractal != transfer_view.fractal || output_view.pad != transfer_view.pad ||
+        output_view.compact != transfer_view.compact) {
+      continue;
+    }
+    if (!handler->SupportsTransposeBoundaryPop(dest_tt->dtype_)) continue;
+
+    plan.transpose_types.emplace(bm.dest_var.get(), assign->var_->GetType());
+    plan.transpose_results.insert(assign->var_.get());
+  }
+  return plan;
+}
+
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
 /// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
@@ -1585,7 +1726,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
+                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops,
+                                   const BoundaryUseAnalysis& boundary_analysis) {
+  const BoundaryTransposeFusionPlan fusion_plan =
+      PlanBoundaryTransposeFusions(side, stmts, boundary_moves, boundary_analysis);
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -1644,6 +1788,27 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         }
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
+          // Device-verified hazard (defect C, 2026-10): a DATA-PARALLEL split
+          // push (both lanes TPUSH half a tile that the cube TPPOPs whole)
+          // deadlocks the device or corrupts a few random tiles at scale on
+          // the current PTOAS/pto-isa split-pipe protocol. Dense
+          // 4096x7168x16384 FP4-cast kernels with pl.split(UP_DOWN) failed
+          // SCHEDULER_TIMEOUT / 1-2 corrupted tiles in most runs while the
+          // identical no-split kernel passed repeatedly; slot_num=4, stage=1
+          // and LEFT_RIGHT all still failed (fp8fp4 worktree
+          // probe_fp4_dense_stab.py). The lane/consumer synchronization is
+          // inside the closed TPUSH/TPOP TileSplitAxis protocol, so PyPTO can
+          // only flag it: drop pl.split for this region until it is fixed
+          // upstream.
+          if (side == CoreSide::AIV && op_split != kSplitNone) {
+            LOG_WARN << "[SplitPipeHazard] " << stmt->span_.to_string()
+                     << ": a data-parallel pl.split region pushes tiles to the cube "
+                        "(tile.tpush_to_aic with a split code): on the current PTOAS/pto-isa build "
+                        "this combination can deadlock the device (scheduler timeout, lane poisoned) "
+                        "or silently corrupt a few tiles at scale -- the lane/consumer "
+                        "synchronization lives in the closed TPUSH/TPOP split-pipe protocol. Drop "
+                        "pl.split for this region until the pipe protocol is fixed upstream";
+          }
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
           // the required fractal layout before tpush.
           // On Ascend950 both cross as NZ: Left -> NZ, and Right -> NZ too, because
@@ -1674,10 +1839,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                   tile_view_semantics::GetEffectiveTileView(*push_dest_type));
             }
 
+            // Both boundary forms allocate a new UB adapter, whose blocked
+            // addressing is independent of the original ND source/destination.
+            fractal_view.stride.clear();
+            fractal_view.start_offset = nullptr;
             auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
                                                         fractal_view, MemorySpace::Vec);
             std::string src_name = "tile";
-            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+            if (auto sv = AsVarLike(bm.source_tile)) {
               src_name = sv->name_hint_;
             }
             bool is_nz = (fractal_view.blayout == TileLayout::col_major);
@@ -1733,6 +1902,15 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
           auto tpop_result_type = std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt,
                                                              fractal_view, tt->memory_space_);
+          auto fused_it = fusion_plan.transpose_types.find(bm.dest_var.get());
+          if (fused_it != fusion_plan.transpose_types.end()) {
+            const auto transposed_tt = As<TileType>(fused_it->second);
+            INTERNAL_CHECK_SPAN(transposed_tt, stmt->span_)
+                << "Fused boundary transpose must have a TileType result";
+            tpop_result_type = std::make_shared<TileType>(
+                transposed_tt->shape_, transposed_tt->dtype_, std::nullopt,
+                tile_view_semantics::GetEffectiveTileView(*transposed_tt), transposed_tt->memory_space_);
+          }
           auto tpop_var = std::make_shared<Var>(tpop_name, tpop_result_type, stmt->span_);
           if (!needs_post_move) {
             tpop_var_remap[bm.dest_var.get()] = tpop_var;
@@ -1774,6 +1952,16 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     // Skip original tpop statements whose results are superseded by boundary-generated tpops
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (superseded_tpop_vars.count(assign->var_.get()) > 0) continue;
+      // Skip fused transpose_views — the pop already carries the transposed type.
+      if (fusion_plan.transpose_results.count(assign->var_.get()) > 0) {
+        const auto call = As<Call>(assign->value_);
+        const auto src_var = (call && call->args_.size() == 1) ? AsVarLike(call->args_[0]) : nullptr;
+        const auto remap_it = src_var ? tpop_var_remap.find(src_var.get()) : tpop_var_remap.end();
+        INTERNAL_CHECK_SPAN(remap_it != tpop_var_remap.end(), stmt->span_)
+            << "Fused boundary transpose has no boundary pop remap";
+        tpop_var_remap[assign->var_.get()] = remap_it->second;
+        continue;
+      }
     }
 
     // GM cross-lane sync (issue #1433): on the consumer lane, emit a fence tpop
@@ -1804,20 +1992,22 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, boundary_analysis);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_then =
+            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, boundary_analysis);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
           auto new_else_stmts =
               BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, boundary_analysis);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -1825,8 +2015,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         new_if->else_body_ = new_else;
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, boundary_analysis);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -2101,8 +2292,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
+  // Build the function-wide syntactic use index once. SSA is already required
+  // by kExpandMixedKernelProperties, so definitions can be excluded without
+  // adding a second definition-counting analysis.
+  const BoundaryUseAnalysis boundary_analysis = BuildBoundaryUseAnalysis(stmts, boundary_moves);
   auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, boundary_analysis);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -2133,7 +2328,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, boundary_analysis);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap);
@@ -3332,6 +3527,13 @@ Pass ExpandMixedKernel() {
       auto adapted = std::make_shared<Function>(*func);
       adapted->body_ = adapted_body;
       func = adapted;
+    }
+
+    // Every automatic/manual/op-driven adapter now has its final layout.
+    // Fuse once per eligible final function before any later pipeline cloning
+    // or allocation, so the unused FP8 ND intermediate never gets storage.
+    for (auto& func : new_functions) {
+      func = FuseFp4CastToNZ(func);
     }
 
     return std::make_shared<Program>(new_functions, program->name_, program->span_);

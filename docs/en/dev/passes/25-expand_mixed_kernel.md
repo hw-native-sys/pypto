@@ -176,7 +176,7 @@ it. On a backend where `RequiresVtoCFractalAdapt()` holds, such a push would shi
 ND tile into a FIFO the cube reads as fractal, scattering every element of the popped
 tile.
 
-`AdaptManualVtoCPush` closes that gap. It runs as the pass's final phase over **every**
+`AdaptManualVtoCPush` closes that gap. It runs after Group ABI normalization over **every**
 AIV function the pass emits, including pure-vector InCore bodies converted to AIV and the
 AIV half of a mixed body. Ordinary data keeps the fixed cube-side Mat transfer view.
 For MX, the pass resolves the AIV import to its AIC reserve and pairs V2C operations by pipe
@@ -188,6 +188,41 @@ The rewrite applies to FP8E8M0 MX scales as well as ordinary data tiles, preserv
 original push kwargs and attrs (including `id`), and is idempotent: a push already staged
 into the boundary view is left unchanged. The backend capability is consulted only after a
 manual V→C push is encountered.
+
+### Native FP4 conversion into the final NZ buffer
+
+After Group ABI normalization and the complete AIV adapter sweep, a private
+function transform combines `tile.cast(fp4, FP8E4M3FN)` with its sole NZ
+`tile.move` consumer when the backend supports direct FP4 conversion. Normal,
+manual and op-driven adapters use the same checks. The pass inventory and
+public DSL remain unchanged.
+
+The internal `tile.cast_to_nz` takes one ND/Null FP4E2M1X2 source,
+required rounding and optional saturation, and owns a fresh Vec FP8E4M3FN
+standard-512B NZ result. Static rows must be divisible by 16, logical columns
+at least 64 and divisible by 64, and physical offsets/register counts must fit
+the ISA bounds. Valid rows may be dynamic; packed-axis valid extents must be
+static and represent an even logical extent. Packed columns expand 2:1.
+
+Both statements must belong to the same lexical sequence, with one real read
+of the cast result and no allocated result MemRef. Normal type deduction must
+match the complete move-result type, including valid geometry, padding,
+compact mode and fresh blocked addressing. Cast metadata is retained; unknown
+move metadata declines fusion. Multiple reads and cross-region pairs keep ND.
+The fused assignment binds the final NZ variable at the original cast site,
+then removes the move, preserving source-read timing across intervening writes
+and zero-trip loops. Immutable use/definition/position maps keep analysis linear.
+
+All FP4 inputs already use byte-carrier coordinates. Fusion accepts only
+E2M1 row-major ND input, and does not add packed NZ/column-major input or
+E1M2 numerical conversion. Direct ND/NZ conversion requires
+the companion toolchain described in [FP4](../fp4.md#cast-policy-ascend950).
+
+This finishes before cloning and allocation. A `[32,256]` packed conversion
+producing `[32,512]` FP8 uses
+8192 source bytes and 16384 disjoint NZ bytes (24576 total), with no FP8 ND
+intermediate or conversion scratch. Whole-GEMM storage also includes scales,
+FIFO and pipeline lifetimes; it is a separate quantity.
 
 ### GM-mediated cross-lane dependencies
 
