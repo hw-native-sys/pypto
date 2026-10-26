@@ -253,13 +253,17 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") || IsOp(call, "tile.rems")) {
+  } else if (IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") || IsOp(call, "tile.rems") ||
+             IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") || IsOp(call, "tile.row_sum") ||
+             IsOp(call, "tile.row_prod")) {
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so
     // emit an empty tile of the result shape instead of running the transpose.
-    // Scalar remainder similarly requires positive valid extents on A2/A3;
-    // its pure computation has no work to do on the empty replay lane.
+    // Scalar remainder and row reductions also require positive valid extents
+    // on A2/A3. Their results are discarded on this lane; materializing an empty
+    // result preserves the downstream pipe handshakes without executing an
+    // instruction with an invalid input shape.
     auto new_type = WithZeroValidShape(replay_type, call->span_);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
     // Fail loud (like the tile.slice branch) rather than silently fall through to

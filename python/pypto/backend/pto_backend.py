@@ -431,20 +431,17 @@ def _invert_var_plus_minus_const(
     return None
 
 
-def _invert_var_mul_or_floordiv_const(
-    dim_expr: _ir_core.BinaryExpr, target_var: _ir_core.Var, shape_expr: str, *, floordiv: bool
+def _invert_var_mul_const(
+    dim_expr: _ir_core.BinaryExpr, target_var: _ir_core.Var, shape_expr: str
 ) -> str | None:
     # ``Mul`` is commutative: both ``(var, c)`` and ``(c, var)`` invert to ``shape / c``.
-    # ``FloorDiv`` is non-commutative: only ``(var, c)`` inverts (to ``shape * c``);
-    # ``(c, var)`` is rejected because ``c // var`` is not uniquely invertible
-    # against the runtime shape (e.g. ``10 // var = 2`` admits var = 4 or 5).
     left, right = dim_expr.left, dim_expr.right
     if isinstance(left, _ir_core.Var) and left.same_as(target_var):
         c = _const_int_from_shape_expr(right)
         if c is None or c == 0:
             return None
-        return f"({shape_expr} * {c})" if floordiv else f"({shape_expr} / {c})"
-    if not floordiv and isinstance(right, _ir_core.Var) and right.same_as(target_var):
+        return f"({shape_expr} / {c})"
+    if isinstance(right, _ir_core.Var) and right.same_as(target_var):
         c = _const_int_from_shape_expr(left)
         if c is None or c == 0:
             return None
@@ -467,9 +464,9 @@ def _invert_shape_dim_for_var(
     if isinstance(dim_expr, _ir_core.Sub):
         return _invert_var_plus_minus_const(dim_expr, target_var, shape_expr, subtract=True)
     if isinstance(dim_expr, _ir_core.Mul):
-        return _invert_var_mul_or_floordiv_const(dim_expr, target_var, shape_expr, floordiv=False)
-    if isinstance(dim_expr, _ir_core.FloorDiv):
-        return _invert_var_mul_or_floordiv_const(dim_expr, target_var, shape_expr, floordiv=True)
+        return _invert_var_mul_const(dim_expr, target_var, shape_expr)
+    # FloorDiv loses the remainder. Without a divisibility proof, shape * c
+    # is not the original symbol (e.g. 11 // 5 == 2 but 2 * 5 != 11).
     return None
 
 
@@ -483,6 +480,7 @@ def _is_invertible_shape_dim_for_var(dim_expr: object, target_var: _ir_core.Var)
 
 
 def _append_dynamic_dim_unpacking(
+    func: _ir_core.Function,
     tensor_params: list[_ir_core.Var],
     used_c_names: set[str],
     lines: list[str],
@@ -499,29 +497,34 @@ def _append_dynamic_dim_unpacking(
     Python binding wrappers can differ for the same underlying C++ Var; the
     per-call dedup inside ``collect_vars_from_shape_expr`` uses raw ``Var*``.
     """
-    dyn_var_order: list[_ir_core.Var] = []
-    dyn_var_best: dict[int, tuple[_ir_core.Var, str, int, object]] = {}
+    # Use the exact same signature analysis as PTO codegen. A symbol explicitly
+    # passed as a scalar must never be reconstructed from a descriptor as well.
+    dyn_var_order = _codegen_core.collect_tensor_shape_dyn_vars(func)
+    required = {var.unique_id for var in dyn_var_order}
+    dyn_var_best: dict[int, tuple[_ir_core.Var, int, object]] = {}
     for param in tensor_params:
         assert isinstance(param.type, _ir_core.TensorType)
         for dim_idx, dim in enumerate(param.type.shape):
             for dyn_var in _codegen_core.collect_vars_from_shape_expr(dim):
                 key = dyn_var.unique_id
-                if key not in dyn_var_best:
-                    dyn_var_order.append(dyn_var)
-                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                if key not in required:
                     continue
-                _, _, _, src_expr = dyn_var_best[key]
+                if key not in dyn_var_best:
+                    dyn_var_best[key] = (param, dim_idx, dim)
+                    continue
+                _, _, src_expr = dyn_var_best[key]
                 # Upgrade source if the previous one was non-invertible and this one is.
                 if not _is_invertible_shape_dim_for_var(
                     src_expr, dyn_var
                 ) and _is_invertible_shape_dim_for_var(dim, dyn_var):
-                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                    dyn_var_best[key] = (param, dim_idx, dim)
 
     for dyn_var in dyn_var_order:
-        var_ref, source_tensor, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
+        source_param, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
+        source_tensor = source_param.name_hint
         value_expr = _invert_shape_dim_for_var(
             source_expr,
-            var_ref,
+            dyn_var,
             source_tensor,
             source_dim_idx,
         )
@@ -531,8 +534,8 @@ def _append_dynamic_dim_unpacking(
                 f"codegen: it only appears inside non-invertible shape expressions "
                 f"(seen as {source_tensor}.shapes[{source_dim_idx}] = {source_expr}). "
                 f"Wrapper extraction supports 'var' and single-var affine forms "
-                f"(var +/-/*// const_int) shape expressions; "
-                f"at least one tensor parameter must expose the variable in one of these "
+                f"(var +/-/* const_int) shape expressions; pass the variable as an explicit "
+                f"scalar parameter, or expose it in at least one tensor parameter in one of these "
                 f"forms so the runtime shape can be inverted back into the variable's value."
             )
         var_name = dyn_var.name_hint
@@ -580,6 +583,16 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
             f"Unsupported parameter type(s) for wrapper generation in function {func.name}: "
             + ", ".join(f"{p.name_hint}: {type(p.type).__name__}" for p in other_params)
         )
+
+    # CoreTaskArgs has fixed payload capacities (task_interface/arg_direction.h).
+    # Shape captures consume scalar slots; descriptor-derived dimensions and
+    # runtime-owned hidden arguments do not. Diagnose overflow before dispatch.
+    for kind, count, limit in (("tensor", len(tensor_params), 32), ("scalar", len(scalar_params), 16)):
+        if count > limit:
+            raise ValueError(
+                f"Kernel '{func.name}' requires {count} {kind} arguments; "
+                f"the runtime payload supports at most {limit}"
+            )
 
     scalar_start_idx = len(tensor_params)
 
@@ -651,7 +664,7 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
     used_c_names.update(
         f"{p.name_hint}_conv" for p in scalar_params if isinstance(p.type, _ir_core.ScalarType)
     )
-    _append_dynamic_dim_unpacking(tensor_params, used_c_names, lines, var_names)
+    _append_dynamic_dim_unpacking(func, tensor_params, used_c_names, lines, var_names)
 
     return "\n".join(lines), var_names
 

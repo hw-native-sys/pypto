@@ -1589,6 +1589,7 @@ def extract_local_tensor_metas(
         **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
         ("pld", "tensor", "window"): _pl_attr_handlers["window"],
         ("pld", "tensor", "all_to_all_v"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "indexed_all_to_all_v"): _same_operand_meta(local, 1, "target"),
         ("pld", "tensor", "all_to_all"): _same_operand_meta(local, 1, "target"),
         ("pld", "tensor", "allreduce"): _same_operand_meta(local, 0, "target"),
         ("pld", "tensor", "reduce_scatter"): _same_operand_meta(local, 0, "target"),

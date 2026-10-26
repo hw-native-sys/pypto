@@ -527,9 +527,33 @@ def all_to_all_v(
     return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {}, actual_span)
 
 
+def indexed_all_to_all_v(
+    input: Expr,
+    target: Expr,
+    signal: Expr,
+    send_counts: Expr,
+    recv_counts: Expr,
+    index: Expr,
+    core_num: int | Expr = 1,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build an A5 URMA indexed row exchange for L2 orchestration."""
+    if isinstance(core_num, bool):
+        raise TypeError("indexed_all_to_all_v core_num must be a positive int, got bool")
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call(
+        "pld.tensor.indexed_all_to_all_v",
+        [input, target, signal, send_counts, recv_counts, index, _normalize_expr(core_num, actual_span)],
+        {},
+        actual_span,
+    )
+
+
 __all__ = [
     "all_to_all",
     "all_to_all_v",
+    "indexed_all_to_all_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

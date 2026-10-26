@@ -46,6 +46,33 @@ def _const_int_value(value: object) -> int | None:
     return None
 
 
+class _LocalDynamicSymbolRemapper(ir.IRMutator):
+    """Rebind evaluated closure dimensions without mutating shared expressions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bindings: dict[str, ir.Var] = {}
+        self.local_ids: set[int] = set()
+
+    def bind(self, name: str, var: ir.Var) -> None:
+        self.bindings[name] = var
+        self.local_ids.add(var.unique_id)
+
+    def visit_var(self, op: ir.Var) -> ir.Expr:
+        # A parameter can have another symbol's name as its Python alias.
+        # Already-local Vars must not be rebound through that second name.
+        if op.unique_id in self.local_ids or not isinstance(op.type, ir.ScalarType):
+            return op
+        return self.bindings.get(op.name_hint, op)
+
+    def visit_iter_arg(self, op: ir.IterArg) -> ir.Expr:
+        # DynVars create plain Vars; loop carries are already lexical bindings.
+        return op
+
+    def remap(self, expr: ir.Expr) -> ir.Expr:
+        return self.visit_expr(expr) if self.bindings else expr
+
+
 def _infer_implicit_tile_layout_from_shape(shape: "Sequence[ir.Expr | int]") -> "ir.TileLayout":
     """Infer the block layout represented by omitted TileView syntax."""
     if len(shape) != 2:
@@ -264,6 +291,7 @@ class TypeResolver:
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
         self._dyn_var_cache: dict[str, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
+        self._local_dynamic_symbols = _LocalDynamicSymbolRemapper()
         self._parse_expression = parse_expression
         self._window_buffers: dict[str | int, tuple[str, ir.WindowBuffer]] = {}
         self._window_buffer_nodes: dict[str | int, ast.Call] = {}
@@ -388,6 +416,33 @@ class TypeResolver:
         window = ir.WindowBuffer(base, size, flags["load_from_host"], flags["store_to_host"], span)
         self._window_buffers[identifier] = (signature, window)
         return window
+
+    def bind_local_dynamic_symbol(self, name: str, var: ir.Var) -> None:
+        """Shadow a dimension for this function without rebinding the shared cache."""
+        # Only the shadowed key is local. New unrelated symbols must still enter
+        # the shared backing cache so later functions resolve the same identity.
+        self._local_dynamic_symbols.bind(name, var)
+
+    def get_dynamic_symbol(self, name: str) -> ir.Var | None:
+        """Look up the effective symbol, preferring this function's override."""
+        return self._local_dynamic_symbols.bindings.get(name, self._dyn_var_cache.get(name))
+
+    def _resolve_dynamic_symbol(self, value: DynVar, span: ir.Span) -> ir.Var:
+        local = self._local_dynamic_symbols.bindings.get(value.name)
+        if local is not None:
+            return local
+        cached = self._dyn_var_cache.get(value.name)
+        if cached is None:
+            cached = value._ir_var
+            if cached is None:
+                cached = ir.Var(value.name, ir.ScalarType(DataType.INDEX), span)
+            self._dyn_var_cache[value.name] = cached
+        # Unshadowed aliases may safely share the program symbol. Keep unwrap()
+        # consistent with their annotation, so subsequent arithmetic uses it too.
+        # The local-override path above must never write into a shared DynVar.
+        value._ir_var = cached
+        value.expr = cached
+        return cached
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
@@ -1331,14 +1386,7 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                if elem._ir_var is None:
-                    name = elem.name
-                    if name not in self._dyn_var_cache:
-                        self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-                    elem._ir_var = self._dyn_var_cache[name]
-                elif elem.name not in self._dyn_var_cache:
-                    self._dyn_var_cache[elem.name] = elem._ir_var
-                dims.append(elem._ir_var)
+                dims.append(self._validate_dim_value(elem, source_name, span))
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -1361,25 +1409,24 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
-            if value._ir_var is None:
-                name = value.name
-                if name not in self._dyn_var_cache:
-                    self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-                value._ir_var = self._dyn_var_cache[name]
-            elif value.name not in self._dyn_var_cache:
-                self._dyn_var_cache[value.name] = value._ir_var
-            return value._ir_var
+            # Closure containers can retain the original DynVar after a scalar
+            # parameter shadows it. Resolve that alias through the local cache
+            # without rebinding the shared closure object to this function.
+            return self._resolve_dynamic_symbol(value, span)
         if isinstance(value, Scalar) and not value._annotation_only and value.expr is not None:
             # Composite shape dim (e.g. `m + 0`, `pl.const(32, pl.INT64) * 2`)
-            # evaluated through DSL operator overloading — keep the IR tree
-            # as-is, without constant folding, so print->parse round-trips.
+            # evaluated through DSL operator overloading — preserve the IR
+            # structure without constant folding, so print->parse round-trips.
             expr_type = value.expr.type
             if not (isinstance(expr_type, ir.ScalarType) and expr_type.dtype.is_int()):
                 raise ParserTypeError(
                     f"Shape dimension '{source_name}' must be integer-typed, got {expr_type}",
                     span=span,
                 )
-            return value.expr
+            # Arithmetic on a DynVar retained in a closure container bypasses
+            # the bare-DynVar path above. Rewrite only this function's shadows
+            # inside the evaluated tree; do not fold or mutate the shared tree.
+            return self._local_dynamic_symbols.remap(value.expr)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
@@ -2190,15 +2237,7 @@ class TypeResolver:
             if name in self.expr_evaluator.closure_vars:
                 value = self.expr_evaluator.closure_vars[name]
                 if isinstance(value, DynVar):
-                    if value._ir_var is None:
-                        if value.name not in self._dyn_var_cache:
-                            self._dyn_var_cache[value.name] = ir.Var(
-                                value.name, ir.ScalarType(DataType.INDEX), self._get_span(node)
-                            )
-                        value._ir_var = self._dyn_var_cache[value.name]
-                    elif value.name not in self._dyn_var_cache:
-                        self._dyn_var_cache[value.name] = value._ir_var
-                    return value._ir_var
+                    return self._resolve_dynamic_symbol(value, self._get_span(node))
                 if isinstance(value, int):
                     return ir.ConstInt(value, DataType.INDEX, self._get_span(node))
                 raise ParserTypeError(
@@ -2209,9 +2248,11 @@ class TypeResolver:
             # Auto-create a dynamic variable for unknown names to support roundtrip with dynamic shapes.
             # When re-parsing printed IR, dynamic vars like M, N are defined as pl.dynamic() at module
             # scope but may not be captured in closure_vars from the decorator frame.
-            if name not in self._dyn_var_cache:
-                self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
-            return self._dyn_var_cache[name]
+            cached = self.get_dynamic_symbol(name)
+            if cached is None:
+                cached = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
+                self._dyn_var_cache[name] = cached
+            return cached
         if self._parse_expression is not None:
             # Pre-flight: pl.yield_() emits an ir.YieldStmt to the builder as a side
             # effect during parsing. Type-annotation parsing must stay pure, so reject

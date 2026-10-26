@@ -311,11 +311,11 @@ an error that names both versions.
 | ----- | ---- |
 | Enum, attr keys | `include/pypto/ir/expr.h` (`CachePolicy`, `kAttrCachePolicyVars`, `kAttrCachePolicyParams`) |
 | Op registration | `src/ir/op/tile_ops/memory.cpp` (`tile.load` `.set_attr<int>("cache")`) |
-| DSL | `python/pypto/language/op/tensor_ops.py` (`set_cache_policy`), `python/pypto/language/op/tile_ops.py` (`load(cache=...)`) |
+| DSL | `python/pypto/language/op/tensor_ops.py` (`set_cache_policy`), `python/pypto/language/op/_tile_memory.py` (`load(cache=...)`) |
 | Parser | `python/pypto/language/parser/ast_parser.py` (marker hoisting + rejections) |
 | Outlining | `src/ir/transforms/utils/scope_outline_utils.cpp` |
 | Lowering | `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` |
-| Printer | `src/ir/transforms/python_printer.cpp` (`PrintScopeCachePolicyStmts`) |
+| Printer | `src/ir/transforms/python_printer_stmt.cpp` (`PrintScopeCachePolicyStmts`) |
 | Codegen | `src/backend/common/pto_ops_memory.cpp` (`MakeTileLoadCodegenPTO`) |
 | Synthetic param | `src/codegen/pto/pto_codegen.cpp` (`MemRefCollectorVisitor::UsesL2BypassLoad`, signature emission) |
 | Kernel wrapper | `python/pypto/backend/pto_backend.py` (`_uses_l2_cache_offset`, `_generate_kernel_wrapper`) |

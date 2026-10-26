@@ -66,6 +66,7 @@ class ExprEvaluator:
         self.closure_vars = closure_vars
         self.span_tracker = span_tracker
         self.dynvar_cache: dict[str, ir.Var] = {}
+        self._local_dynamic_symbols: dict[str, ir.Var] = {}
 
     def eval_expr(self, node: ast.expr) -> Any:
         """Evaluate an AST expression node against closure variables.
@@ -158,12 +159,19 @@ class ExprEvaluator:
             hint="Closure variables must be int, float, bool, list, tuple, or IR expressions",
         )
 
+    def bind_local_dynamic_symbol(self, name: str, var: ir.Var) -> None:
+        """Override a symbol locally without synchronizing shared closure objects."""
+        self._local_dynamic_symbols[name] = var
+
     def get_or_create_dynvar(self, dv: DynVar, span: ir.Span) -> ir.Var:
         """Return a cached ir.Var for the given DynVar, creating one if needed.
 
         This ensures the same DynVar always maps to the same ir.Var instance,
         so pointer-based shape compatibility checks succeed.
         """
+        local = self._local_dynamic_symbols.get(dv.name)
+        if local is not None:
+            return local
         cached = self.dynvar_cache.get(dv.name)
         if cached is not None:
             # Always re-sync the DynVar so a stale _ir_var from an earlier

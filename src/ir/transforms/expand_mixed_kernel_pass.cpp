@@ -487,6 +487,14 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
   } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
     result =
         AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_defs, placement);
+  } else if (auto reg = As<RegScopeStmt>(stmt)) {
+    // A register boundary is indivisible and always belongs to AIV. Treating
+    // an unknown scope as SHARED would replicate its stores onto AIC as well.
+    auto body_affinity =
+        AnalyzeStmtsAffinity(FlattenBody(reg->body_), stmt_map, var_affinity, tpop_defs, placement);
+    CHECK_SPAN(body_affinity != CoreAffinity::CUBE && body_affinity != CoreAffinity::MIXED, reg->span_)
+        << "RegScope cannot contain AIC or cross-core operations";
+    result = CoreAffinity::VECTOR;
   } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
     result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_defs, placement);
   }

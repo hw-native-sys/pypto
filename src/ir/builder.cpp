@@ -21,14 +21,17 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/reg_scope.h"
 
 namespace pypto {
 namespace ir {
@@ -105,6 +108,8 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
       func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(), func_ctx->GetReturnTypes(),
       body, combined_span, func_ctx->GetFuncType(), func_ctx->GetLevel(), func_ctx->GetRole(),
       func_ctx->GetAttrs(), func_ctx->GetRequiresRuntimeBinding(), func_ctx->GetIRStage());
+
+  CheckRegScopes(func);
 
   // Pop context
   context_stack_.pop_back();
@@ -307,6 +312,68 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
   }
 
   return if_stmt;
+}
+
+void IRBuilder::BeginRegScope(const Span& span) { BeginScope(ScopeKind::Reg, span); }
+
+StmtPtr IRBuilder::EndRegScope(const Span& span) {
+  CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE &&
+        static_cast<ScopeContext*>(CurrentContext())->GetScopeKind() == ScopeKind::Reg)
+      << "EndRegScope requires an open RegScope";
+  return EndScope(span);
+}
+
+VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
+                          const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
+  CHECK(op_name.rfind("reg.", 0) == 0) << "EmitReg expects a reg operation";
+  bool inside = false;
+  for (const auto& context : context_stack_) {
+    if (context->GetType() == BuildContext::Type::SCOPE &&
+        static_cast<ScopeContext*>(context.get())->GetScopeKind() == ScopeKind::Reg) {
+      inside = true;
+    }
+  }
+  CHECK_SPAN(inside, span) << "EmitReg requires RegScope";
+  // Keep raw builder calls equivalent to the public DSL wrappers. The wrappers
+  // materialize these defaults before creating a Call, so omitting them here
+  // would make print/parse roundtrips structurally different despite identical
+  // op inference.
+  auto normalized_kwargs = kwargs;
+  auto has_kwarg = [&normalized_kwargs](const std::string& key) {
+    return std::any_of(normalized_kwargs.begin(), normalized_kwargs.end(),
+                       [&key](const auto& item) { return item.first == key; });
+  };
+  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
+       op_name == "reg.minimum" || op_name == "reg.maximum") &&
+      !has_kwarg("pmode")) {
+    normalized_kwargs.emplace_back("pmode", std::string("zero"));
+  }
+  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
+    normalized_kwargs.emplace_back("order", std::string("ascending"));
+  }
+  auto call = OpRegistry::GetInstance().Create(op_name, args, normalized_kwargs, span);
+  auto var = Var(name, call->GetType(), span);
+  // The DSL treats a same-dtype conversion without modifiers as a no-op and
+  // returns its operand. Preserve that canonical form for raw builder users.
+  bool no_op_convert = false;
+  if (op_name == "reg.convert" && args.size() == 1 && !has_kwarg("rounding") && !has_kwarg("saturate")) {
+    auto source = std::dynamic_pointer_cast<const RegType>(args[0]->GetType());
+    const DataType* dtype = nullptr;
+    for (const auto& [key, value] : normalized_kwargs) {
+      if (key == "dtype") dtype = std::any_cast<DataType>(&value);
+    }
+    no_op_convert = source != nullptr && dtype != nullptr && source->dtype_ == *dtype;
+  }
+  Emit(std::make_shared<AssignStmt>(var, no_op_convert ? args[0] : ExprPtr(call), span));
+  return var;
+}
+
+VarPtr IRBuilder::EmitRegStore(const std::string& name, const ExprPtr& tile, const ExprPtr& offset,
+                               const ExprPtr& value, const ExprPtr& mask, const Span& span) {
+  std::vector<ExprPtr> args{tile, offset, value};
+  if (mask) args.push_back(mask);
+  return EmitReg(name, "reg.store", args, {}, span);
 }
 
 // ========== Scope Building ==========

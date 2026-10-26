@@ -72,6 +72,10 @@ namespace codegen {
  */
 std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 
+/// Ordered trailing shape arguments shared by PTO codegen and its wrapper.
+/// Explicit scalar parameters take precedence; identity, not name, deduplicates.
+std::vector<ir::VarPtr> CollectTensorShapeDynVars(const ir::FunctionPtr& func);
+
 /**
  * @brief PTO MLIR code generator
  *

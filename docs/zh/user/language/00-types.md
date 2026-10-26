@@ -26,8 +26,9 @@ Shape 默认是静态的，在解析期检查。`pl.dynamic()` 让某一维退�
 可选第三项为 `pl.RegKind.VecReg`（默认值）或 `pl.RegKind.MaskReg`。
 MaskReg 必须使用 `pl.BOOL`，VecReg 禁止使用 BOOL。例如，
 `pl.Reg[64, pl.FP32]` 和 `pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`
-都是合法标注。当前描述符支持 IR 构造和二进制序列化，尚不支持寄存器操作、
-scope DSL 执行或 VF 编译；参见[寄存器 IR 描述符](../../dev/ir/02-types.md#寄存器-ir-描述符)。
+都是合法标注。`pl.reg` 提供 `pl.reg_scope()` 内的 P0 寄存器操作；输入隐式捕获，
+Reg 和局部 Scalar 不得逃逸。支持 IR 构造、验证、二进制序列化和 DSL 文本往返。
+VF 后端编译仍需 PR3；参见[寄存器操作](../../dev/language/06-register-operations.md)。
 
 ## Quickstart：读懂一个签名
 

@@ -1130,9 +1130,57 @@ def all_to_all_v(
     return DistributedTensor(expr=call)
 
 
+def indexed_all_to_all_v(
+    input: Tensor | DistributedTensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+    send_counts: DistributedTensor,
+    recv_counts: Tensor | DistributedTensor,
+    index: Tensor | DistributedTensor,
+    *,
+    core_num: IntLike = 1,
+) -> DistributedTensor:
+    """Exchange indexed rows on A5 URMA using one AIV writer per destination.
+
+    Input is [Nmax,H], index is INT32 [P,C], target is [P*C,H]. Each
+    destination receives the selected input rows in index order, in its
+    source-rank partition. Counts must be in [0,C]; valid indices must be
+    in [0,Nmax). Duplicate indices are allowed; unused tails are untouched.
+    Only L2 orchestration is supported. L2 accepts local input
+    and index tensors, and a local recv_counts output. Payload is FP32 or
+    INT8; HOST and InCore are unsupported. Self uses MTE, remote peers use URMA.
+    Signal is INT32 [P,S], S >= core_num, zero-initialized once.
+    Signal, send_counts and recv_counts must use pairwise distinct buffers.
+    All ranks use the same positive core_num and collective order. All AIVs share local
+    copies between remote submission and completion waits; AIVs beyond P
+    do not submit URMA work. Reuse must follow
+    the previous receive-window consumer. Completion is a task dependency,
+    not a CPU synchronization or asynchronous issue-only handle.
+    Callers must order exchanges sharing URMA queues: reuse the same InOut
+    signal or establish an explicit task dependency when signals differ.
+    """
+    target_expr, signal_expr, counts_expr = _unwrap_distributed_tensors(
+        "pld.tensor.indexed_all_to_all_v",
+        target=target,
+        signal=signal,
+        send_counts=send_counts,
+    )
+    call = _ir_tensor.indexed_all_to_all_v(
+        _unwrap(input),
+        target_expr,
+        signal_expr,
+        counts_expr,
+        _unwrap(recv_counts),
+        _unwrap(index),
+        _unwrap(core_num),
+    )
+    return DistributedTensor(expr=call)
+
+
 __all__ = [
     "all_to_all",
     "all_to_all_v",
+    "indexed_all_to_all_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

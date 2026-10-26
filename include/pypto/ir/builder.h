@@ -302,6 +302,14 @@ class IRBuilder {
    */
   StmtPtr EndIf(const Span& end_span);
 
+  /// Register region helpers use the same schema as DSL and raw op construction.
+  void BeginRegScope(const Span& span);
+  StmtPtr EndRegScope(const Span& span);
+  VarPtr EmitReg(const std::string& name, const std::string& op_name, const std::vector<ExprPtr>& args,
+                 const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span);
+  VarPtr EmitRegStore(const std::string& name, const ExprPtr& tile, const ExprPtr& offset,
+                      const ExprPtr& value, const ExprPtr& mask, const Span& span);
+
   // ========== Scope Building ==========
 
   /**

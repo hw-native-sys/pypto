@@ -16,6 +16,7 @@ from pypto.ir import op as ir_op
 from pypto.language.distributed import op as _dsl_pld
 from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import prefetch_ops as _dsl_prefetch
+from pypto.language.op import reg_ops as _dsl_reg
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
@@ -73,6 +74,15 @@ class OpParser:
         # Buffer metadata registry for reserve_buffer().base attribute access
         self.buffer_meta: dict[str, dict[str, Any]] = {}
 
+    def parse_reg_op(self, name: str, call: ast.Call) -> ir.Expr:
+        """Require a lexical register region before schema-validated dispatch."""
+        if not self.regions.is_inside_scope(ir.ScopeKind.Reg):
+            raise ParserSyntaxError(
+                "reg operations require RegScope; values cannot escape outside",
+                span=self.services.span_tracker.get_span(call),
+            )
+        return self.dispatch_op(_dsl_reg, "pl.reg", name, call)
+
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
         """Parse operation call like pl.tensor.create_tensor() or pl.add().
 
@@ -127,6 +137,9 @@ class OpParser:
         # and reporting the useless "Unknown operation 'pl.builtin'".
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "builtin":
             return self.parse_builtin_op(attrs[2:], call)
+
+        if len(attrs) == 3 and attrs[0] == "pl" and attrs[1] == "reg":
+            return self.parse_reg_op(attrs[2], call)
 
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":

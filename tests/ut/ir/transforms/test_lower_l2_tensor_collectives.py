@@ -554,5 +554,108 @@ def test_int8_synthesizes_int8_variant():
     assert template_vars == {"dtype_cpp": "int8_t"}
 
 
+def _build_indexed_program(*, incore=False, cores=NR):
+    @pl.program
+    class Indexed:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            inp: pl.Tensor[[13, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, cores], pl.INT32]],
+            counts: pld.DistributedTensor[[NR, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            index: pl.Tensor[[NR, MAX_RECV], pl.INT32],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=cores)
+
+    if incore:
+        return pl.parse_program(
+            ir.python_print(Indexed, format=False).replace(
+                "type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator",
+                "type=pl.FunctionType.InCore",
+            )
+        )
+    return Indexed
+
+
+def test_indexed_collective_l2_abi_and_dependency_directions():
+    result = passes.lower_l2_tensor_collectives()(_build_indexed_program())
+    name = "__builtin_indexed_all_to_all_v__fp32"
+    kernel = _get_func(result, name)
+    assert kernel is not None
+    assert [p.name_hint for p in kernel.params] == [
+        "input",
+        "target",
+        "signal",
+        "send_counts",
+        "recv_counts",
+        "index",
+    ]
+    assert kernel.param_directions == [
+        ir.ParamDirection.In,
+        ir.ParamDirection.InOut,
+        ir.ParamDirection.InOut,
+        ir.ParamDirection.In,
+        ir.ParamDirection.InOut,
+        ir.ParamDirection.In,
+    ]
+    assert isinstance(kernel.params[0].type, ir.TensorType)
+    assert isinstance(kernel.params[5].type, ir.TensorType)
+    assert kernel.attrs["builtin_template_dir"] == (
+        ":pypto.runtime.builtins.collectives.indexed_all_to_all_v"
+    )
+    main = _get_func(result, "main")
+    assert main is not None
+    calls = [c for c in _collect_calls(main.body) if c.op.name == name]
+    assert len(calls) == 1
+    arg_names = []
+    for arg in calls[0].args:
+        assert isinstance(arg, ir.Var)
+        arg_names.append(arg.name_hint)
+    assert arg_names == [
+        "inp",
+        "data",
+        "signal",
+        "counts",
+        "recv",
+        "index",
+    ]
+    # The public API must also survive printer/parser roundtrip before lowering.
+    before = _build_indexed_program()
+    reparsed = pl.parse_program(ir.python_print(before, format=False))
+    ir.assert_structural_equal(before, reparsed)
+
+
+def test_indexed_collective_rejects_incore_lowering():
+    with pytest.raises(ValueError, match="InCore is unsupported"):
+        passes.lower_composite_ops()(_build_indexed_program(incore=True))
+
+
+def test_indexed_collective_lowers_local_receive_counts():
+    source = ir.python_print(_build_indexed_program(), format=False)
+    source = source.replace("recv: pl.InOut[pld.DistributedTensor", "recv: pl.InOut[pl.Tensor")
+    result = passes.lower_l2_tensor_collectives()(pl.parse_program(source))
+    kernel = _get_func(result, "__builtin_indexed_all_to_all_v__fp32")
+    assert kernel is not None
+    assert isinstance(kernel.params[4].type, ir.TensorType)
+    assert kernel.param_directions[4] == ir.ParamDirection.InOut
+    assert sum(isinstance(p.type, ir.DistributedTensorType) for p in kernel.params) == 2
+
+
+@pytest.mark.parametrize("cores", [3, 5])
+def test_indexed_collective_launches_exact_extra_local_aivs(cores):
+    result = passes.lower_l2_tensor_collectives()(_build_indexed_program(cores=cores))
+    main = _get_func(result, "main")
+    assert main is not None
+    name = "__builtin_indexed_all_to_all_v__fp32"
+    calls = [c for c in _collect_calls(main.body) if c.op.name == name]
+    assert len(calls) == 1
+    launch_width = calls[0].attrs["core_num"]
+    assert isinstance(launch_width, ir.ConstInt)
+    assert launch_width.value == cores
+    assert calls[0].attrs["sync_start"] is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

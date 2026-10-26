@@ -207,3 +207,15 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   它把三条通路约束到同一份链路 golden；外加三条结构断言：不产生 builtin chip
   dispatch、builtin kernel 被渲染进 pipeline 自己的子构建、HOST 通路渲染出逐字节
   相同的 kernel 源码。
+
+## A5 URMA 索引交换
+
+`pld.tensor.indexed_all_to_all_v(input, target, signal, send_counts,
+recv_counts, index, core_num=L)` 使用托管 L2 任务流程及独立的内核模板。
+六个 Tensor 操作数之后，第一个 CommContext 位于槽位 6。input、index 和
+recv_counts 可以是本地 Tensor；send_counts 必须是窗口。
+`L` 为编译期正整数，表示精确启动核数。全部 AIV 在远端提交与 CQ 等待之间
+分担本地搬运；超过 P 的 AIV 只参与本地搬运。仅支持 A5 URMA PER_PEER 传输，
+每个目标队列只有一个写入者。调用者必须为共享队列的交换建立顺序；即使
+payload 窗口不同，复用同一个 InOut signal 也能建立此依赖。
+不支持 HOST 和 InCore 调用。参见[用户约定](../../user/distributed/20-all_to_all.md#a5-urma-索引-alltoallv)。

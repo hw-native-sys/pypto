@@ -19,7 +19,7 @@ from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 from pypto.ir.type import _merge_annotation_metadata  # noqa: PLC2701
 from pypto.language.distributed import op as _dsl_pld
-from pypto.language.typing.dynamic import DynVar
+from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.pypto_core import DataType, ir
 
 from ._dsl_invoker import invoke_dsl
@@ -271,10 +271,13 @@ class ASTParser:
             return
         if not isinstance(param_type, ir.ScalarType) or param_type.dtype != DataType.INDEX:
             return
-        previous = declared._ir_var
-        if previous is not None and id(previous) in symbols_used_so_far:
+        # An alias can resolve through the shared cache without populating its
+        # own _ir_var. Also retain the object's candidate for evaluated compound
+        # annotations, which can have read it directly through DynVar.unwrap().
+        previous = (self.type_resolver.get_dynamic_symbol(declared.name), declared._ir_var)
+        if any(var is not None and id(var) in symbols_used_so_far for var in previous):
             raise ParserTypeError(
-                f"Parameter '{param_name}' shadows the dynamic symbol '{param_name}', "
+                f"Parameter '{param_name}' shadows the dynamic symbol '{declared.name}', "
                 f"which an earlier parameter's type annotation already uses",
                 span=param_span,
                 hint=(
@@ -283,9 +286,17 @@ class ASTParser:
                     f"the parameter"
                 ),
             )
-        declared._ir_var = param_var
-        declared.expr = param_var
-        self.expr_evaluator.dynvar_cache[param_name] = param_var
+        # This is a function-local shadow, not a mutation of the program's
+        # DynVar. Sharing the replacement with another function would make its
+        # tensor annotation refer to this callee's scalar parameter (#3137).
+        local = dynamic(declared.name)
+        local._ir_var = param_var
+        local.expr = param_var
+        self.expr_evaluator.closure_vars = {**self.expr_evaluator.closure_vars, param_name: local}
+        # The closure uses the Python alias, but both dimension caches use the
+        # symbolic name: D = dynamic("B") must shadow the cached B, not D.
+        self.expr_evaluator.bind_local_dynamic_symbol(declared.name, param_var)
+        self.type_resolver.bind_local_dynamic_symbol(declared.name, param_var)
 
     def parse_function(
         self,

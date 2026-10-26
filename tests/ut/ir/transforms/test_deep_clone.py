@@ -77,6 +77,88 @@ class TestDeepCloneBasic:
         assert cloned_body is not func.body
 
 
+class TestDeepCloneWindows:
+    def test_many_views_share_unchanged_external_window(self):
+        """Memoized external slots retain identity without entering the definition map."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        size = n
+        for _ in range(256):
+            size = ir.Add(size, n, DataType.INDEX, span)
+        window = ir.WindowBuffer(ir.Var("buffer", ir.PtrType(), span), size)
+        tensor_type = ir.DistributedTensorType([ir.ConstInt(64, DataType.INDEX, span)], DataType.FP32, window)
+        before = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    ir.Var(f"view{i}", tensor_type, span),
+                    ir.Call(ir.GlobalVar("view"), [], {}, tensor_type, span),
+                    span,
+                )
+                for i in range(256)
+            ],
+            span,
+        )
+
+        after, mapping = ir.deep_clone(before)
+
+        assert len(mapping) == 256
+        assert all(original is not window and original is not n for original, _ in mapping)
+        for assignment in ir.flatten_to_stmts(after):
+            assert isinstance(assignment, ir.AssignStmt)
+            for value in (assignment.var, assignment.value):
+                assert isinstance(value.type, ir.DistributedTensorType)
+                assert value.type.window_buffer is window
+
+    @pytest.mark.parametrize("storage", ["external", "substituted", "local"])
+    @pytest.mark.parametrize("call_kind", ["call", "submit"])
+    def test_window_identity_shared_by_definition_and_call(self, storage, call_kind):
+        """Captured slots stay external; cloned storage has one shared replacement."""
+        span = ir.Span.unknown()
+        base = ir.Var("buffer", ir.PtrType(), span)
+        replacement = ir.Var("replacement", ir.PtrType(), span)
+        window = ir.WindowBuffer(base, ir.ConstInt(256, DataType.INDEX, span))
+        tensor_type = ir.DistributedTensorType([ir.ConstInt(64, DataType.INDEX, span)], DataType.FP32, window)
+        result_type = (
+            tensor_type
+            if call_kind == "call"
+            else ir.TupleType([tensor_type, ir.ScalarType(DataType.TASK_ID)])
+        )
+        view = ir.Var("view", result_type, span)
+        if call_kind == "call":
+            value = ir.Call(ir.GlobalVar("view"), [], {}, result_type, span)
+        else:
+            value = ir.Submit(ir.GlobalVar("view"), [], [], result_type, span)
+        before = ir.AssignStmt(view, value, span)
+        if storage == "local":
+            allocation = ir.AssignStmt(
+                base, ir.Call(ir.GlobalVar("allocate"), [], {}, ir.PtrType(), span), span
+            )
+            before = ir.SeqStmts([allocation, before], span)
+        after, mapping = ir.deep_clone(
+            before, var_map=[(base, replacement)] if storage == "substituted" else []
+        )
+        assignments = ir.flatten_to_stmts(after)
+        assignment = assignments[-1]
+        assert isinstance(assignment, ir.AssignStmt)
+        windows = []
+        for result in (assignment.var, assignment.value):
+            result_type = result.type
+            if isinstance(result_type, ir.TupleType):
+                result_type = result_type.types[0]
+            assert isinstance(result_type, ir.DistributedTensorType)
+            windows.append(result_type.window_buffer)
+        assert windows[0] is windows[1]
+        cloned_window = windows[0]
+        assert cloned_window is not None
+        if storage == "external":
+            assert cloned_window is window
+        else:
+            assert cloned_window is not window
+            expected_base = replacement if storage == "substituted" else dict(mapping)[base]
+            assert cloned_window.base is expected_base
+        ir.assert_structural_equal(assignment.var.type, assignment.value.type)
+
+
 class TestDeepCloneLoopCarries:
     """Only carries defined inside the cloned subtree receive fresh identities."""
 

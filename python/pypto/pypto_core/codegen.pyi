@@ -164,6 +164,9 @@ def collect_vars_from_shape_expr(expr: Expr) -> list[Var]:
         Vars in first-seen DFS order, deduped within this single call.
     """
 
+def collect_tensor_shape_dyn_vars(func: Function) -> list[Var]:
+    """Return ordered trailing shape arguments, excluding explicit scalar parameters."""
+
 __all__ = [
     "PTOCodegen",
     "BuiltinNextLevelSpec",
@@ -171,6 +174,7 @@ __all__ = [
     "OrchestrationResult",
     "KernelRegistration",
     "collect_vars_from_shape_expr",
+    "collect_tensor_shape_dyn_vars",
     "generate_orchestration",
     "infer_function_core_type",
 ]

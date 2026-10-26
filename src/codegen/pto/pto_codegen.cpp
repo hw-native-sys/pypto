@@ -363,7 +363,7 @@ void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>&
   if (!expr) {
     return;
   }
-  if (auto var = As<ir::Var>(expr)) {
+  if (auto var = ir::AsVarLike(expr)) {
     if (seen.insert(var.get()).second) {
       out.push_back(var);
     }
@@ -412,9 +412,15 @@ void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>&
 // Collect tensor-shape dyn Vars across a function's tensor params.
 // Used both to reserve %argN names upfront (so NewNamedTemp does not collide)
 // and to emit the trailing index params on the MLIR func.func signature.
-std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
+std::vector<VarPtr> CollectTensorShapeDynVarsImpl(const FunctionPtr& func) {
   std::vector<VarPtr> dyn_vars;
   std::set<const ir::Var*> seen;
+  // An explicit scalar payload already binds this identity. Appending another
+  // dimension argument would overwrite its MLIR binding and desynchronise the
+  // kernel signature from the wrapper's dispatch payload.
+  for (const auto& param : func->params_) {
+    if (As<ScalarType>(param->GetType())) seen.insert(param.get());
+  }
   for (const auto& param : func->params_) {
     if (auto tensor_type = ir::AsTensorTypeLike(param->GetType())) {
       for (const auto& dim : tensor_type->shape_) {
@@ -571,6 +577,10 @@ std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
   std::set<const ir::Var*> seen;
   CollectVarsFromShapeExprImpl(expr, seen, out);
   return out;
+}
+
+std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
+  return CollectTensorShapeDynVarsImpl(func);
 }
 
 // Visitor to collect all MemRef objects from TileType variables. Also

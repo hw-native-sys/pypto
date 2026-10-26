@@ -101,7 +101,7 @@ bool IsManagedTensorCollective(const OpPtr& op) {
   return IsOp(op, "pld.tensor.allgather") || IsOp(op, "pld.tensor.allreduce") ||
          IsOp(op, "pld.tensor.barrier") || IsOp(op, "pld.tensor.broadcast") ||
          IsOp(op, "pld.tensor.reduce_scatter") || IsOp(op, "pld.tensor.all_to_all") ||
-         IsOp(op, "pld.tensor.all_to_all_v");
+         (IsOp(op, "pld.tensor.all_to_all_v") || IsOp(op, "pld.tensor.indexed_all_to_all_v"));
 }
 
 bool IsPublishingWrite(const CallPtr& call) {

@@ -73,6 +73,7 @@ program_simplified = simplify_pass(program)
    - `IfStmt`：进入 `Analyzer::GetConstraintContext(cond)` 处理 then 分支，进入 `Not(cond)` 处理 else 分支；每个分支内绑定的标量会在该分支结束后解绑，以免泄漏到另一分支或越过 `IfStmt`。保留分支时，在共同的基线映射下重建 `return_vars_`，使结果类型跟随外层变量的重建，同时不引入分支内部的定义。可由分析器证明的条件也会被折叠 —— 见下文「控制流折叠」。
    - `WhileStmt`：除没有循环边界外与 `ForStmt` 相同 —— 在访问条件与循环体前复用同样的两阶段 carry 整组重建，在访问循环体前后快照并恢复 `var_remap_`，随后重建 `return_vars_`，并采用同样的区域化标量解绑方式。先建立完整的循环头映射，使条件、循环体与存储元数据中的引用始终指向声明的节点，不依赖 carry 的排列顺序。
    - `SpmdScopeStmt`：先在外层 carry 映射下折叠 `core_num_`，并重写任务依赖、运行时谓词等表达式属性，再访问语句体；体内标量绑定采用同样的区域化解绑方式。这样，调度使用点会指向重建后的 For/While 循环头，同时不会把运行时谓词固定为常量。
+   - `CommDomainScopeStmt`：遍历语句体时固定槽位身份，随后利用体内无条件标量绑定化简槽位大小。DCE 前通过一次不求值遍历更新所有依赖的窗口引用；分支局部事实不会特化域槽位。仅被槽位引用的符号大小依赖也会保持存活。
 3. **类型重建**：`SimplifyType` 递归地处理 `TensorType`、`TileType`、`TupleType`，对嵌入的表达式（shape、stride、valid_shape、start_offset、view 字段）调用 `SimplifyExpr`。`RemapPinnedMemRefExprs` 还会在 pinned 声明式分配的槽位下标转换为字节偏移之前化简该下标。非 pinned MemRef 在内部变量未被重映射时保留指针身份；若循环 carry 等变量被重建，其 base、字节偏移和保留的槽位下标会同步重绑，不经过分析器常量折叠，并通过共享缓存确保变量与 Call 类型使用同一个新 MemRef。仅在地址元数据中使用的标量定义仍会在 DCE 中保持存活。类型无变化时保留原对象，使往返一致性检查仍然便宜。
 4. **标量 DCE + 死 yield 槽位裁剪**：mutator 完成后，`dce::EliminateDeadScalarAssignments` 在展平的函数体上运行，删除所有「全部使用都被折掉了」的标量 `AssignStmt`。该 DCE 是保守的：永远不会删除 Call 支撑的赋值，因为 IR 目前还没有纯度标注，`Call` 可能存在可观察的副作用。两次标量 DCE 之间由 `dce::EliminateDeadYieldSlots` 裁掉没有任何读者的 yield 槽位——`IfStmt` 中无人使用的 phi `return_vars_[i]`，以及 `ForStmt` / `WhileStmt` 中 `iter_args_[i]`（循环体内读）与 `return_vars_[i]`（循环后读）都未被使用的循环携带槽位——同时删除对应的 `YieldStmt` 槽位。跨两个 scope 复用同一个 Python 局部变量恰好会产生这种死携带：SSA 用前一个 scope 的值给第二个循环做初值，循环体每一轮都覆盖它，两端都没有人读。若保留下来，它会让前一个 scope 的值变成 live-out；对设备 scope 而言，这会迫使外提出的 kernel 返回一个 `Scalar`——参见 [08-outline_incore_scopes.md](09-outline_incore_scopes.md)。
 5. **循环状态修复**：如果 DCE 删除了任何语句，由 `loop_repair::MakeBody` 重新组装函数体，确保循环携带元信息（yield/return 映射）保持一致。
@@ -81,12 +82,16 @@ program_simplified = simplify_pass(program)
 
 两个折叠在 `SimplifyMutator` 遍历内部运行，因此与周围的表达式级处理共享分析器的约束栈：
 
-- **Fold A —— 常量条件 `IfStmt` 折叠**。条件被化简后，分别用 `CanProve(cond)` 与 `CanProve(Not(cond))` 询问分析器。任一极性被证明，则丢弃死分支并把保留分支提升到父作用域。当 `return_vars_` 非空时，保留分支末尾的 `YieldStmt` 被剥离，每个 `return_vars[i]` 在 `var_remap_` 中绑定到对应的 yielded 值，使后续兄弟语句（以及函数 `ReturnStmt`）直接读取该值。真/假两种极性的处理是对称的；唯一的边界情况是「永远为假，无 else，且 `return_vars_` 为空」，此时折叠为空体。
+- **Fold A —— 常量条件 `IfStmt` 折叠**。条件被化简后，**在访问任一分支体之前**，分别用 `CanProve(cond)` 与 `CanProve(Not(cond))` 询问分析器。任一极性被证明，则完全跳过不可达分支，仅化简保留分支，并在允许时将其提升到父作用域。若保留分支的 yield 中包含调用而无法提升，则保留 `IfStmt`，并在不计算算术表达式的情况下，重映射不可达分支体中的外层变量引用及依赖类型。仅常量模式维持原有遍历行为。这样可避免常量折叠对不可达代码中的整数除零或模零等非法算术表达式报错。若两种极性均无法证明，则在各自的约束下化简两个分支；可能执行的代码中的错误仍会正常抛出。当 `return_vars_` 非空时，保留分支末尾的 `YieldStmt` 被剥离，每个 `return_vars[i]` 在 `var_remap_` 中绑定到对应的 yielded 值，使后续兄弟语句（以及函数 `ReturnStmt`）直接读取该值。真/假两种极性的处理是对称的；唯一的边界情况是「永远为假，无 else，且 `return_vars_` 为空」，此时折叠为空体。
 - **Fold B —— 纯单次/零次 `ForStmt` 折叠**。仅对*纯*顺序循环触发：`attrs_` 为空、`kind_ == ForKind::Sequential`。对这类循环，用 `CanProveGreaterEqual(step, 1)` 加 `CanProve(stop <= start)`（零次）或 `CanProve(start < stop && stop <= start + step)`（一次）询问分析器以证明循环次数。零次时，为每个 return var 发出 `AssignStmt(return_vars[i], iter_args[i].initValue_)` 并丢弃循环体；一次时，用 `DeepClone` 复制循环体并将 `loop_var → start`、`iter_args[i] → init_values[i]` 直接代入，再次访问克隆体让进一步折叠在同一次 Pass 中发生，最后剥离末尾的 `YieldStmt` 并把 `return_vars[i] → yielded_value[i]` 写入 `var_remap_`（与 Fold A 的提升机制一致）。单次折叠路径对*嵌套*单次循环设有上限 `kMaxNestedSingleTripFolds`（16 层）—— 见[代换深度上限](#代换深度上限fold-b)。
 
 在循环体上使用 `DeepClone` 且 `clone_def_vars=true`（而非就地的 `var_remap_` 覆盖），是为了让展开后的循环体在每个定义点获得全新的 `Var` 标识，与 `LoopUnrollMutator` 保持一致。这样提升后的副本在结构上与原（已丢弃的）循环体相互独立，并使重新访问时能在与外围作用域不同的标识上绑定循环体内的标量。
 
 只有克隆子树内部的定义才获得新身份。引用外层循环的 `IterArg` 时，除非显式提供替换映射，否则必须保留原对象，因为其定义所在的循环并未被克隆。子树内部 `ForStmt` 和 `WhileStmt` 的 carry 会在访问其使用点之前通过 `DefField` 注册。这样，折叠两个相邻的单次循环时就不会为同一个外层 carry 创建两个未绑定副本（issue #2955），也不会在后续 outlining 中产生非法的 SPMD 调用实参。
+
+保留的 `IfStmt` 结果是新的定义：对于复用的前 SSA 变量，会先清除旧值别名和标量事实，再重写后续使用。
+
+Fold B 克隆窗口视图时同样保留外层通信域槽位的身份。克隆或显式代换改变存储基址或大小时，定义类型与 Call/Submit 结果类型共享同一个重映射后的槽位。
 
 `return_vars` 通过 `var_remap_` 代换而非直接产出 `AssignStmt(rv, yielded)`，这是有意为之：编排（orchestration）代码生成器的角色感知命名消歧（`role == "out"` 等）会把多个 role 标签的 SSA 版本折叠到同一个 C++ 标识符，于是 `out__rv_v2 = out__co_l0_rv_v3` 这样的别名赋值会下沉为不合法的 `auto out = out;`。在使用点代换可以完全绕开消歧。
 

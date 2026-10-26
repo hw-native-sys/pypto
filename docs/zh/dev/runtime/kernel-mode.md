@@ -65,8 +65,81 @@ program 提交构造无地址的 `TaskArgs`，由 Simpler 解析为 `ChipStorage
 typed scalar 接口传入，由 Simpler 完成 ABI 编码。
 `ScalarArgument` 仅保留校验后的值和 dtype，不执行编码。
 
-Runtime 能力检查将在后续接入 Torch kernel runtime 首次初始化时统一执行。
-本阶段不新增 Worker 初始化、注册或 launch。
+Runtime 能力检查在显式 Torch kernel 初始化时执行。生命周期层支持 Worker 初始化和
+callable 注册；JIT 提交、公开算子注册和 DFX API 留待后续迁移。
+
+## 进程初始化与生命周期
+
+内部 `runtime/kernel` 包按资源归属组织：
+
+- `session.py`：配置、runtime 能力检查和借用上下文会话（`_BorrowedWorkerSession`），
+  将公开 `simpler.Worker` 的生命周期操作绑定到 Torch context。
+- `context.py`：进程状态、并发注册复用和 pending ticket 清理。
+- `owner.py`：生命周期 owner 线程。
+- `callable.py`：共享 artifact 身份及绑定上下文的注册记录。
+- `pending.py`：callback 结果发布及单次调用的资源保留。
+
+session 是生命周期适配层，不是独立执行引擎。Simpler 负责 callable 注册和执行，
+进程管理器负责调用准入和缓存。
+
+`pypto.torch.init()` 显式借用当前 torch_npu 设备上下文，支持 onboard `a2a3` 的
+`tensormap_and_ringbuffer` 和 `host_build_graph`。显式 `device` 必须匹配当前设备，
+初始化不会切换设备。graph capture 在占用进程模式前抛出 `NotImplementedError`。
+共享 `CallConfig.validate()` 在 preflight 中检查 native ring-size 约束。
+配置错误、能力缺失和 runtime 身份不匹配也在 preflight 阶段拒绝；内部异常保持原类型。
+
+配置包含 AICPU 线程数、swimlane/dep-gen、输出目录、ring task-window/heap/dep-pool
+及可选 `workspace_budget_bytes`。ring 标量广播到四个 scope-depth ring。诊断配置
+要求输出目录，本阶段只保留配置，公开 DFX 窗口后续实现。workspace budget 遵循公开
+Worker 的最小 1024 字节要求，不包含借用的 Tensor 存储。
+
+runtime submodule 跟随 upstream 的 Simpler revision
+`d8f997fabd1b6988b69a94feef61ab669dda0eea`。实际 native binding 的身份仍由既有
+`check_runtime_pin` 检查，包括身份缺失和显式跳过规则。能力检查要求公开 borrowed init、
+caller-stream submit、Buffer/TaskArgs、RunHandle 和 `flush_diagnostics` 接口；
+不查询旧 kernel supported bit 或私有 slot。接口检查和 UT 不构成设备执行正确性验证。
+
+进程管理器持有一个 Worker 和非零 context-generation token，状态包括 UNINITIALIZED、
+INITIALIZING、READY、FAILED、CLOSING、CLOSED。同配置初始化幂等，冲突及递归初始化
+拒绝，并发初始化共享结果。native 初始化失败保留 Worker 和模式以便清理；关闭后不允许
+切换到 program。program 模式在 runner 执行前（包括 DFX dependency-capture 子进程）
+及直接初始化 Worker 时占用，导入、编译和 metadata 加载
+均不占用模式。一次性分布式执行在将 host Tensor 转换为共享内存或清理已有 dispatch
+诊断文件之前占用 program 模式。kernel 初始化后 fork 的子进程必须改用 spawn；未使用的管理器及其继承的锁
+在单线程的 at-fork 子进程回调中统一替换一次，早于子进程中的并发首次访问。
+父进程未声明模式或使用 PROGRAM 模式时，模式门禁也在 at-fork 子进程回调中重置。
+子进程中竞争的 PROGRAM/KERNEL 声明共享同一把锁：一种模式获准，另一种在 native Worker
+初始化前抛出异常。继承的 KERNEL 声明不会被重置。
+
+生命周期 owner thread 在调用公开
+`Worker(level=2).init(prewarm_config=..., borrowed_context_generation=...)`、
+`Worker.register(callable)` 和 `Worker.close()` 前绑定借用的 RTS context。
+Simpler 管理 runtime binaries、slot 和 native 清理。注册复用 `CompiledArtifact`
+的公共加载器，校验 KERNEL 能力及 platform/runtime，保存 opaque `CallableHandle`。
+缓存产物复用既有 `ArtifactKey`，私有产物使用对象身份，避免目录覆写后误用旧 handle；
+不定义新散列。并发 prepare 共享成功或失败；registry busy 和容量
+错误原样传播，不新增 drain、wait 或自动淘汰。
+
+pending ticket 在入队前持有 registration 和每次调用的资源。后续 callback adapter
+向 ticket 发布 RunHandle，无需获取管理器锁。普通调用只轮询完成的 ticket；尚未执行的
+callback 视为未完成。`RunHandle.done` 为真后仍调用 `wait()` 完成 native 退休清理，
+随后才释放借用 source。显式 drain/shutdown 可同步框架队列，按 run 退休、source 释放、
+Worker 关闭的顺序清理。callback、退休或 source 释放失败均保留 ticket 和 Worker，
+不假定设备已静止。
+
+可选 `_torch_npu` 扩展本阶段只提供生命周期/context 和 NZ storage 查询。用匹配的
+Torch、torch_npu、CANN 头文件及库，通过 `-DPYPTO_BUILD_TORCH_NPU=ON` 构建；
+它不链接 Simpler C++ 实现或独立 kernel ABI。默认 core 构建不要求这些可选依赖。
+即使启用 `PYTHONOPTIMIZE`，配置阶段仍会执行 C++11 ABI 检查。
+关闭逻辑包装已验证的框架 teardown hooks（torch_npu `2.6.0.post2`、`2.10.0.post2`，
+允许构建后缀），在框架拆除前关闭 PyPTO。无法安全清理时通过 native anchor 保留资源
+直至进程退出，避免 context 销毁后运行析构。
+fork 子进程在框架拆除前通过 native anchor 保留继承的状态，不获取继承的锁，也不关闭父进程的 Worker。
+
+直接 `@pl.jit` 调用仍进入 program 路径。因此，本迁移中间阶段在 `pypto.torch.init()`
+之后直接调用 JIT 会被模式互斥检查拒绝。初始化可独立验证；JIT → callback →
+`Worker.submit` 的接通属于下一项。本阶段不新增公开 `compile_kernel`、shutdown、
+算子注册或 DFX 函数。
 
 ## 调用元数据与所有权
 
@@ -167,7 +240,7 @@ API 选择测试在 PyTorch 2.6 上模拟旧注册入口，验证 Fake/Meta disp
 
 ## 可选依赖与范围
 
-`import pypto.torch` 不导出执行 API。导入该包、`interop` 或 `registration` 模块不请求 torch_npu、
+`import pypto.torch` 导出 `init`，尚不提供 kernel 提交入口。导入该包、`interop` 或 `registration` 模块不请求 torch_npu、
 Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正描述 NPU 调用时
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 

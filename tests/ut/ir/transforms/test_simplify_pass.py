@@ -31,6 +31,18 @@ from .storage_test_utils import without_call_memrefs
 
 _OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
 
+
+def _swap_if_branches(program: ir.Program) -> ir.Program:
+    """Exercise the false polarity with the same live and dead branch bodies."""
+
+    class SwapBranches(ir.IRMutator):
+        def visit_if_stmt(self, op: ir.IfStmt) -> ir.Stmt:
+            assert op.else_body is not None
+            return ir.IfStmt(op.condition, op.else_body, op.then_body, op.return_vars, op.span)
+
+    return SwapBranches().visit_program(program)
+
+
 # ============================================================================
 # Pass metadata
 # ============================================================================
@@ -1918,6 +1930,799 @@ class TestScalarDCE:
 # ============================================================================
 
 
+class TestUnreachableBranchArithmetic:
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_inlined_zero_width_skips_division(self, ssa):
+        """Issue #3114: inlining exposes a zero divisor in an unreachable branch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def lookup(self, query: pl.Scalar[pl.INDEX], width: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                owner = pl.cast(pl.const(-1, pl.INT64), pl.INDEX)
+                if width > 0:
+                    owner = query // width
+                else:
+                    owner = pl.cast(pl.const(0, pl.INT64), pl.INDEX)
+                return owner
+
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                width = pl.cast(pl.const(0, pl.INT64), pl.INDEX)
+                owner = self.lookup(query, width)
+                return owner
+
+        if ssa:
+
+            @pl.program
+            class Expected:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                    return pl.const(0, pl.INDEX)
+
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                    # Pre-SSA multi-assignment bindings are deliberately not propagated.
+                    value: pl.Scalar[pl.INDEX] = -1
+                    value = 0
+                    owner: pl.Scalar[pl.INDEX] = value
+                    return owner
+
+        before = passes.inline_functions()(Before)
+        if ssa:
+            before = passes.convert_to_ssa()(before)
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_true_condition_skips_else_division(self, ssa):
+        """The unreachable else-body must be skipped just like an unreachable then-body."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    owner: pl.Scalar[pl.INDEX] = query
+                else:
+                    owner = query // pl.const(0, pl.INDEX)
+                return owner
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                owner: pl.Scalar[pl.INDEX] = query
+                return owner
+
+        before = passes.convert_to_ssa()(Before) if ssa else Before
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_false_condition_without_else_skips_modulo(self):
+        """An unreachable expression must not be folded even when it has no users."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if False:
+                    _unused: pl.Scalar[pl.INDEX] = query % pl.const(0, pl.INDEX)
+                return query
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                return query
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_loop_bounds_prove_division_unreachable(self):
+        """Reachability includes analyzer proofs, not just literal boolean conditions."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    if i < 0:
+                        bad: pl.Scalar[pl.INDEX] = i // pl.const(0, pl.INDEX)
+                        pl.tensor.write(out, [i], bad)
+                    pl.tensor.write(out, [i], i)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    pl.tensor.write(out, [i], i)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_outer_constraint_skips_nested_division(self):
+        """An unknown outer condition can still prove its inner branch unreachable."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if query > 0:
+                    if query <= 0:
+                        bad: pl.Scalar[pl.INDEX] = query // pl.const(0, pl.INDEX)
+                        pl.tensor.write(out, [0], bad)
+                    else:
+                        pl.tensor.write(out, [0], query)
+                else:
+                    pl.tensor.write(out, [0], pl.const(0, pl.INDEX))
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if 0 < query:
+                    pl.tensor.write(out, [0], query)
+                else:
+                    pl.tensor.write(out, [0], pl.const(0, pl.INDEX))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_reachable_zero_divisor_still_raises(self, take_then):
+        """Skipping a dead branch must not suppress errors in the surviving branch."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if take_then:
+                    owner: pl.Scalar[pl.INDEX] = query // pl.const(0, pl.INDEX)
+                else:
+                    owner = query % pl.const(0, pl.INDEX)
+                return owner
+
+        message = "Floor division by zero" if take_then else "Floor modulo by zero"
+        with pytest.raises(ValueError, match=message):
+            passes.simplify()(Before)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_effectful_yield_preserves_unvisited_branch(self, take_then):
+        """A retained IfStmt must keep both bodies even when only one is visited."""
+        if take_then:
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX], t: pl.Tensor[[1], pl.INDEX]):
+                    if True:
+                        value = pl.yield_(pl.tensor.read(t, [0]))
+                    else:
+                        value = pl.yield_(query // pl.const(0, pl.INDEX))
+                    return value
+
+        else:
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX], t: pl.Tensor[[1], pl.INDEX]):
+                    if False:
+                        value = pl.yield_(query // pl.const(0, pl.INDEX))
+                    else:
+                        value = pl.yield_(pl.tensor.read(t, [0]))
+                    return value
+
+        # Lifting the call would move its evaluation. Keep the IfStmt and leave
+        # the unreachable zero division untouched, rather than folding it.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("constant_alias", [False, True])
+    def test_retained_dead_branch_preserves_pre_ssa_assignment(self, take_then, constant_alias):
+        """Dead local definitions shadow enclosing aliases without folding arithmetic."""
+        select_constant = constant_alias if take_then else not constant_alias
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX]):
+                if select_constant:
+                    alias = pl.yield_(pl.const(3, pl.INDEX))
+                else:
+                    alias = pl.yield_(q)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    alias: pl.Scalar[pl.INDEX] = alias // pl.const(0, pl.INDEX)
+                    pl.tensor.write(x, [0], alias)
+                    result = pl.yield_(alias)
+                return result
+
+        # Swapping both IfStmts keeps the selected alias and effectful yield.
+        before = Before if take_then else _swap_if_branches(Before)
+        original = next(iter(before.functions.values()))
+        first = ir.flatten_to_stmts(original.body)[0]
+        assert isinstance(first, ir.IfStmt)
+        target = first.return_vars[0]
+        after = passes.simplify()(before)
+        func = next(iter(after.functions.values()))
+        branch = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        assignment = statements[0]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert assignment.var is target
+        assert isinstance(assignment.value, ir.FloorDiv)
+        if constant_alias:
+            assert isinstance(assignment.value.left, ir.ConstInt)
+            assert assignment.value.left.value == 3
+        else:
+            assert assignment.value.left is func.params[1]
+        assert isinstance(assignment.value.right, ir.ConstInt)
+        assert assignment.value.right.value == 0
+        write = statements[1]
+        assert isinstance(write, ir.EvalStmt)
+        assert isinstance(write.expr, ir.Call)
+        assert write.expr.args[-1] is target
+        yielded = statements[-1]
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[0] is target
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("constant_alias", [False, True])
+    def test_retained_dead_branch_scopes_nested_definitions(self, take_then, constant_alias):
+        """A nested branch definition cannot shadow the enclosing alias in its sibling."""
+        select_constant = constant_alias if take_then else not constant_alias
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]):
+                if select_constant:
+                    alias = pl.yield_(pl.const(3, pl.INDEX))
+                else:
+                    alias = pl.yield_(q)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    if cond:
+                        alias = pl.const(5, pl.INDEX)
+                        pl.tensor.write(x, [0], alias)
+                    else:
+                        pl.tensor.write(x, [0], alias)
+                    result = pl.yield_(pl.const(0, pl.INDEX))
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        inner = next(stmt for stmt in ir.flatten_to_stmts(dead_body) if isinstance(stmt, ir.IfStmt))
+        sibling = inner.else_body
+        assert sibling is not None
+        write = ir.flatten_to_stmts(sibling)[0]
+        assert isinstance(write, ir.EvalStmt)
+        assert isinstance(write.expr, ir.Call)
+        value = write.expr.args[-1]
+        if constant_alias:
+            assert isinstance(value, ir.ConstInt) and value.value == 3
+        else:
+            assert value is func.params[1]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_preserves_nested_return_definition(self, take_then):
+        """Merged branch results shadow outer aliases only after both bodies are visited."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INDEX], cond: pl.Scalar[pl.BOOL]):
+                if take_then:
+                    alias = pl.yield_(pl.const(3, pl.INDEX))
+                else:
+                    alias = pl.yield_(pl.const(4, pl.INDEX))
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    if cond:
+                        alias = pl.yield_(pl.const(5, pl.INDEX))
+                    else:
+                        alias = pl.yield_(alias)
+                    pl.tensor.write(x, [0], alias)
+                    result = pl.yield_(alias)
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        inner, write, yielded = statements
+        assert isinstance(inner, ir.IfStmt)
+        assert isinstance(write, ir.EvalStmt) and isinstance(write.expr, ir.Call)
+        assert isinstance(yielded, ir.YieldStmt)
+        assert write.expr.args[-1] is inner.return_vars[0]
+        assert yielded.value[0] is inner.return_vars[0]
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("constant_alias", [False, True])
+    @pytest.mark.parametrize("return_alias", [False, True])
+    def test_retained_dead_branch_scopes_loop_definitions(
+        self, loop_kind, take_then, constant_alias, return_alias
+    ):
+        """Loop-body shadows expire before result definitions become visible."""
+        select_constant = constant_alias if take_then else not constant_alias
+        header = (
+            "for i, (carry,) in pl.range(2, init_values=(alias,)):"
+            if loop_kind == "for"
+            else "for (carry,) in pl.while_(init_values=(alias,)):"
+        )
+        condition = "                pl.cond(carry < 5)\n" if loop_kind == "while" else ""
+        result_name = "alias" if return_alias else "loop_result"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX]):
+        if {select_constant}:
+            alias = pl.yield_(pl.const(3, pl.INDEX))
+        else:
+            alias = pl.yield_(q)
+        if {take_then}:
+            result = pl.yield_(pl.tensor.read(x, [0]))
+        else:
+            {header}
+{condition}                alias = pl.const(5, pl.INDEX)
+                pl.tensor.write(x, [0], alias)
+                {result_name} = pl.yield_(carry + 1)
+            pl.tensor.write(x, [0], alias)
+            result = pl.yield_({result_name})
+        return result
+""")
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        loop, write, yielded = ir.flatten_to_stmts(dead_body)
+        assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+        assert isinstance(write, ir.EvalStmt) and isinstance(write.expr, ir.Call)
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[0] is loop.return_vars[0]
+        initial = loop.iter_args[0].initValue
+        if constant_alias:
+            assert isinstance(initial, ir.ConstInt) and initial.value == 3
+        else:
+            assert initial is func.params[1]
+        value = write.expr.args[-1]
+        if return_alias:
+            assert value is loop.return_vars[0]
+        elif constant_alias:
+            assert isinstance(value, ir.ConstInt) and value.value == 3
+        else:
+            assert value is func.params[1]
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_retained_dead_branch_preserves_loop_leak_mode(self, loop_kind):
+        """Pre-SSA loops without result variables keep body definitions visible afterward."""
+        header = "for i in pl.range(2):" if loop_kind == "for" else "while flag:"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+        if True:
+            alias = pl.yield_(pl.const(3, pl.INDEX))
+        else:
+            alias = pl.yield_(pl.const(4, pl.INDEX))
+        if True:
+            result = pl.yield_(pl.tensor.read(x, [0]))
+        else:
+            {header}
+                alias = pl.const(5, pl.INDEX)
+                pl.tensor.write(x, [0], alias)
+            result = pl.yield_(alias)
+        return result
+""")
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, Before)
+        after = passes.simplify()(Before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        assert outer.else_body is not None
+        loop, yielded = ir.flatten_to_stmts(outer.else_body)
+        assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+        assert not loop.return_vars
+        assignment = ir.flatten_to_stmts(loop.body)[0]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[0] is assignment.var
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("depth", [1, 8])
+    def test_retained_dead_branch_preserves_escaping_retyped_binder(self, take_then, depth):
+        """Result-free nested ifs expose rebuilt identities without exporting value aliases."""
+        nested = "\n".join(f"{' ' * (12 + 4 * i)}if True:" for i in range(depth))
+        assignment = f"{' ' * (12 + 4 * depth)}alias = view"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+        view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+        if {take_then}:
+            value = pl.yield_(pl.tensor.read(x, [0, 0]))
+        else:
+{nested}
+{assignment}
+            value = pl.yield_(pl.tensor.read(alias, [0, 0]))
+        return value
+""")
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        nested_if, yielded = ir.flatten_to_stmts(dead_body)
+        body = nested_if
+        for _ in range(depth):
+            assert isinstance(body, ir.IfStmt)
+            body = ir.flatten_to_stmts(body.then_body)[0]
+        assert isinstance(body, ir.AssignStmt)
+        assert isinstance(yielded, ir.YieldStmt) and isinstance(yielded.value[0], ir.Call)
+        assert yielded.value[0].args[0] is body.var
+        ir.assert_structural_equal(body.var.type, func.params[0].type)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("prior_definition", ["folded_constant", "folded_variable", "assignment"])
+    def test_retained_if_result_shadows_pre_ssa_value(self, take_then, prior_definition):
+        """A retained result definition replaces earlier aliases and analyzer bindings."""
+        old_value = "q" if prior_definition == "folded_variable" else "pl.const(3, pl.INDEX)"
+        prefix = (
+            "        result = pl.const(3, pl.INDEX)"
+            if prior_definition == "assignment"
+            else f"""        if {take_then}:
+            result = pl.yield_({old_value})
+        else:
+            result = pl.yield_(pl.const(4, pl.INDEX))"""
+        )
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX]):
+{prefix}
+        if {take_then}:
+            result = pl.yield_(pl.tensor.read(x, [0]))
+        else:
+            result = pl.yield_(q // pl.const(0, pl.INDEX))
+        return result
+""")
+        before = Before if take_then else _swap_if_branches(Before)
+        func = next(iter(before.functions.values()))
+        first, second, _ = ir.flatten_to_stmts(func.body)
+        assert isinstance(first, (ir.IfStmt, ir.AssignStmt))
+        assert isinstance(second, ir.IfStmt)
+        original = first.var if isinstance(first, ir.AssignStmt) else first.return_vars[0]
+        reused = second.return_vars[0]
+
+        class ReuseResult(ir.IRMutator):
+            def visit_var(self, op):
+                return original if op is reused else op
+
+        # Yield syntax normally creates distinct result identities; explicitly
+        # share one to exercise legal pre-SSA rebinding.
+        before = ReuseResult().visit_program(before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        # The DSL parser creates a fresh result Var for each yield, so this
+        # deliberately shared pre-SSA identity cannot roundtrip through text.
+        # Keep property verification enabled for the actual transform.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        statements = ir.flatten_to_stmts(func.body)
+        retained = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+        returned = statements[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        assert returned.value[0] is retained.return_vars[0]
+        assert retained.return_vars[0] is not func.params[1]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_multi_assignment_verifies_after_ssa(self, take_then):
+        """Shared pre-SSA binders are exempt from type symmetry until SSA splits them."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32], q: pl.Scalar[pl.INDEX]):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias = view
+                    pl.tensor.read(alias, [0, 0])
+                    alias = view
+                    bad = q // pl.const(0, pl.INDEX)
+                    result = pl.yield_(pl.tensor.read(alias, [bad, 0]))
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        func = next(iter(before.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        definitions = [
+            stmt.var
+            for stmt in ir.flatten_to_stmts(dead_body)
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "alias"
+        ]
+        assert len(definitions) == 2
+
+        class ReuseAlias(ir.IRMutator):
+            def visit_var(self, op):
+                return definitions[0] if op is definitions[1] else op
+
+        before = ReuseAlias().visit_program(before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        assert not passes.PropertyVerifierRegistry.verify(properties, after)
+        converted = passes.convert_to_ssa()(after)
+        properties.insert(passes.IRProperty.SSAForm)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, converted)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_parameter_rebind_keeps_sibling_identity(self, take_then):
+        """A parameter's entry definition prevents branch-local RHS retyping."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 4], pl.FP32],
+                p: pl.Tensor[[8, 4], pl.FP32, pl.TensorView(stride=[4, 1], layout=pl.TensorLayout.ND)],
+                q: pl.Scalar[pl.INDEX],
+            ):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    if q > 0:
+                        p = view
+                    else:
+                        pl.tensor.read(p, [0, 0])
+                    result = pl.yield_(pl.tensor.read(p, [0, 0]))
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        func = next(iter(before.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        nested = ir.flatten_to_stmts(dead_body)[0]
+        assert isinstance(nested, ir.IfStmt)
+        assignment = ir.flatten_to_stmts(nested.then_body)[0]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert assignment.var is func.params[1]
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        nested = ir.flatten_to_stmts(dead_body)[0]
+        assert isinstance(nested, ir.IfStmt) and nested.else_body is not None
+        assignment = ir.flatten_to_stmts(nested.then_body)[0]
+        assert isinstance(assignment, ir.AssignStmt) and assignment.var is func.params[1]
+        read = ir.flatten_to_stmts(nested.else_body)[0]
+        assert isinstance(read, ir.EvalStmt) and isinstance(read.expr, ir.Call)
+        assert read.expr.args[0] is func.params[1]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_remaps_rebuilt_loop_carry(self, take_then):
+        """Skipped arithmetic and dependent types must use the rebuilt loop binder."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, t: pl.Tensor[[2], pl.INDEX]):
+                for i, (carry,) in pl.range(2, init_values=(pl.const(1, pl.INDEX) + pl.const(1, pl.INDEX),)):
+                    if take_then:
+                        value = pl.yield_(pl.tensor.read(t, [i]))
+                    else:
+                        dead: pl.Tensor[[carry], pl.INDEX] = pl.tensor.create([carry], dtype=pl.INDEX)
+                        pl.tensor.read(dead, [0])
+                        value = pl.yield_(carry // pl.const(0, pl.INDEX))
+                    result = pl.yield_(value)
+                return result
+
+        # Swap the bodies for false so the selected yield always contains a call.
+        before = Before if take_then else _swap_if_branches(Before)
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+        func = next(iter(after.functions.values()))
+        loop = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.ForStmt))
+        branch = next(stmt for stmt in ir.flatten_to_stmts(loop.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        allocation = next(stmt for stmt in statements if isinstance(stmt, ir.AssignStmt))
+        assert isinstance(allocation.var.type, ir.TensorType)
+        assert allocation.var.type.shape[0].same_as(loop.iter_args[0])
+        yielded = next(stmt for stmt in statements if isinstance(stmt, ir.YieldStmt))
+        assert isinstance(yielded.value[0], ir.FloorDiv)
+        assert yielded.value[0].left.same_as(loop.iter_args[0])
+        assert isinstance(yielded.value[0].right, ir.ConstInt) and yielded.value[0].right.value == 0
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_propagates_retyped_aliases(self, take_then):
+        """An outer identity view changes the types of dead-branch alias chains."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias = view
+                    second = alias
+                    value = pl.yield_(pl.tensor.read(second, [0, 0]))
+                return value
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+                view: pl.Tensor[[8, 4], pl.FP32] = x
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias: pl.Tensor[[8, 4], pl.FP32] = view
+                    second: pl.Tensor[[8, 4], pl.FP32] = alias
+                    value = pl.yield_(pl.tensor.read(second, [0, 0]))
+                return value
+
+        before = Before if take_then else _swap_if_branches(Before)
+        expected = Expected if take_then else _swap_if_branches(Expected)
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.AssignTypeSymmetry,
+            passes.IRProperty.SSAForm,
+            passes.IRProperty.UseAfterDef,
+        ):
+            properties.insert(prop)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        ir.assert_structural_equal(pl.parse_program(ir.python_print(after)), after)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_remaps_distributed_window(self, take_then):
+        """A dead view must name the domain's rebuilt slot in its Var and Call types."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self, x: pl.Tensor[[1], pl.INDEX]):
+                buffer = pld.alloc_window_buffer(pl.const(128, pl.INDEX) + pl.const(128, pl.INDEX))
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value
+
+        before = Before if take_then else _swap_if_branches(Before)
+        # Materialization adds WindowBuffer identities shared by domain slots and
+        # view types. Simplify folds the size and must preserve that sharing even
+        # in a branch whose arithmetic is deliberately not visited.
+        instruments: list[passes.PassInstrument] = [
+            passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with passes.PassContext(instruments):
+            materialized = passes.materialize_comm_domain_scopes()(before)
+            after = passes.simplify()(materialized)
+        host = next(func for func in after.functions.values() if func.name == "host")
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        branch = next(stmt for stmt in ir.flatten_to_stmts(scope.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        view = next(stmt for stmt in ir.flatten_to_stmts(dead_body) if isinstance(stmt, ir.AssignStmt))
+        assert len(scope.slots) == 1
+        assert isinstance(scope.slots[0].size, ir.ConstInt) and scope.slots[0].size.value == 256
+        for view_type in (view.var.type, view.value.type):
+            assert isinstance(view_type, ir.DistributedTensorType)
+            assert view_type.window_buffer is scope.slots[0]
+
+    def test_unknown_condition_still_checks_else(self):
+        """An unproven branch remains potentially reachable and must be simplified."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]) -> pl.Scalar[pl.INDEX]:
+                if cond:
+                    owner: pl.Scalar[pl.INDEX] = query
+                else:
+                    owner = query // pl.const(0, pl.INDEX)
+                return owner
+
+        with pytest.raises(ValueError, match="Floor division by zero"):
+            passes.simplify()(Before)
+
+
 class TestConstantIfCollapse:
     def test_always_true_keeps_then_drops_else(self):
         """`if i < 100` with i ∈ [0, 8): analyzer proves true, then-body lifted."""
@@ -3154,6 +3959,118 @@ class TestDeadLoopCarryDCE:
 
 
 class TestDistributedWindowBufferRemap:
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_single_trip_view_preserves_enclosing_domain_slot(self, ssa):
+        """Fold B clones the view's definition, but captures its enclosing slot."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self):
+                buffer = pld.alloc_window_buffer(256)
+                for i in pl.range(1):
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self):
+                buffer = pld.alloc_window_buffer(256)
+                view = pld.window(buffer, [64], dtype=pl.FP32)
+                self.chip(view, device=0)
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            before = passes.convert_to_ssa()(Before) if ssa else Before
+            before = passes.materialize_comm_domain_scopes()(before)
+            expected = passes.materialize_comm_domain_scopes()(Expected)
+            after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+        host = after.get_function("host")
+        assert host is not None
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        view = next(
+            stmt
+            for stmt in ir.flatten_to_stmts(scope.body)
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.DistributedTensorType)
+        )
+        for value in (view.var, view.value):
+            assert isinstance(value.type, ir.DistributedTensorType)
+            assert value.type.window_buffer is scope.slots[0]
+
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_slot_size_resolves_body_defined_constants(self, ssa):
+        """Resolve scalar chains before DCE, including a view in a retained dead branch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self, x: pl.Tensor[[1], pl.INDEX]):
+                half: pl.Scalar[pl.INDEX] = 32
+                n: pl.Scalar[pl.INDEX] = half * 2
+                buffer = pld.alloc_window_buffer(n * 4)
+                if True:
+                    value = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            before = passes.convert_to_ssa()(Before) if ssa else Before
+            materialized = passes.materialize_comm_domain_scopes()(before)
+            after = passes.simplify()(materialized)
+        host = after.get_function("host")
+        assert host is not None
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        assert isinstance(scope.slots[0].size, ir.ConstInt)
+        assert scope.slots[0].size.value == 256
+        statements = ir.flatten_to_stmts(scope.body)
+        assert not any(
+            isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ScalarType)
+            for stmt in statements
+        )
+        branch = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+        assert branch.else_body is not None
+        view = next(stmt for stmt in ir.flatten_to_stmts(branch.else_body) if isinstance(stmt, ir.AssignStmt))
+        for value in (view.var, view.value):
+            assert isinstance(value.type, ir.DistributedTensorType)
+            assert value.type.window_buffer is scope.slots[0]
+
+    def test_symbolic_slot_size_keeps_its_scalar_definition(self):
+        """A domain slot is a live use even when its size has no body users."""
+        span = ir.Span.unknown()
+        scalar = ir.ScalarType(DataType.INDEX)
+        count = ir.Var("count", scalar, span)
+        size = ir.Var("size", scalar, span)
+        base = ir.Var("buffer", ir.PtrType(), span)
+        definition = ir.AssignStmt(
+            size, ir.Mul(count, ir.ConstInt(4, DataType.INDEX, span), DataType.INDEX, span), span
+        )
+        slot = ir.WindowBuffer(base, size)
+        scope = ir.CommDomainScopeStmt([0], [slot], "domain", body=definition, span=span)
+        before = ir.Program([ir.Function("host", [base, count], [], scope, span)], "P", span)
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.simplify()(before)
+        ir.assert_structural_equal(after, before)
+
     def test_window_buffer_remapped_in_lockstep_with_scope_slot(self):
         """Simplify folding a synthesized signal's window-buffer size
         (``world_size * 1 * 4`` → ``world_size * 4``) must remap the

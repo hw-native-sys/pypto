@@ -632,6 +632,24 @@ class TensorTypeDependencyCollector : public IRVisitor {
   }
 };
 
+/// Symbols recoverable from a tensor descriptor without a caller-side value.
+/// Keep this restricted to the wrapper's supported inverses: a bare symbol,
+/// +/- an integer constant, or multiplication by a nonzero integer constant.
+/// Floor division and multi-symbol expressions do not uniquely determine a Var.
+VarPtr DescriptorBoundSymbol(const ExprPtr& dim) {
+  if (auto symbol = AsVarLike(dim)) return symbol;
+  if (!As<Add>(dim) && !As<Sub>(dim) && !As<Mul>(dim)) return nullptr;
+  auto binary = As<BinaryExpr>(dim);
+  auto symbol = AsVarLike(binary->left_);
+  auto constant = As<ConstInt>(binary->right_);
+  if (!symbol || !constant) {
+    symbol = AsVarLike(binary->right_);
+    constant = As<ConstInt>(binary->left_);
+  }
+  if (!symbol || !constant || (As<Mul>(dim) && constant->value_ == 0)) return nullptr;
+  return symbol;
+}
+
 /**
  * @brief Collect the *upward-exposed* uses of a subtree — variables read
  *        before the subtree (re)defines them.
@@ -664,6 +682,45 @@ class UpwardExposedUseCollector : public IRVisitor {
   /// True when `var`'s value on entry to the visited subtree comes from
   /// outside it — i.e. the subtree captures rather than defines it.
   [[nodiscard]] bool IsExternal(const Var* var) const { return live_in_.count(var) > 0; }
+
+  /// Close the capture set over tensor shape dependencies. Preserve descriptor
+  /// extraction for supported invertible dimensions: a shape-only symbol may
+  /// have no caller-side scalar to pass. Other expressions (e.g. rows =
+  /// ceildiv(B, 16) * 16 + T * 4) need the original symbols passed explicitly.
+  void CaptureShapeDependencies(const std::unordered_set<const Var*>& runtime_bindings) {
+    std::unordered_set<const Var*> descriptor_bound;
+    var_collectors::VarDefUseCollector dependencies;
+    for (const Var* var : ordered) {
+      if (auto type = AsTensorTypeLike(var->GetType())) {
+        for (const auto& dim : type->shape_) {
+          if (auto symbol = DescriptorBoundSymbol(dim)) descriptor_bound.insert(symbol.get());
+          dependencies.VisitExpr(dim);
+        }
+      }
+    }
+    std::vector<const Var*> shape_params;
+    std::unordered_set<const Var*> shape_param_set;
+    for (const Var* var : dependencies.var_uses_ordered) {
+      if (!As<ScalarType>(var->GetType())) continue;
+      if (descriptor_bound.count(var) && !IsExternal(var)) continue;
+      RecordUse(var);
+      if (IsExternal(var)) {
+        CHECK_SPAN(runtime_bindings.count(var) > 0, var->span_)
+            << "Cannot capture dynamic shape symbol '" << var->name_hint_
+            << "': no caller-side runtime binding is available for this non-invertible shape. "
+               "Pass the symbol as an explicit scalar parameter or expose it as a bare tensor "
+               "parameter dimension";
+        shape_params.push_back(var);
+        shape_param_set.insert(var);
+      }
+    }
+    // Explicit scalar parameters must precede annotations that reference them
+    // in printable IR. Runtime dispatch still partitions tensors before scalars.
+    for (const Var* var : ordered) {
+      if (!shape_param_set.count(var)) shape_params.push_back(var);
+    }
+    ordered = std::move(shape_params);
+  }
 
  protected:
   // Var and IterArg are handled by separate overrides rather than a shared
@@ -767,12 +824,15 @@ class UpwardExposedUseCollector : public IRVisitor {
 
 ScopeOutliner::ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                              const std::unordered_map<const Var*, VarPtr>& var_objects,
-                             const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
-                             FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program,
+                             const std::unordered_set<std::string>& known_names,
+                             const std::unordered_set<const Var*>& runtime_bindings,
+                             ScopeKind target_scope_kind, FunctionType outlined_func_type,
+                             std::string name_suffix, ProgramPtr program,
                              std::shared_ptr<std::unordered_set<std::string>> reserved_func_names)
     : func_name_(std::move(func_name)),
       var_types_(var_types),
       var_objects_(var_objects),
+      runtime_bindings_(runtime_bindings),
       known_names_(known_names),
       target_scope_kind_(target_scope_kind),
       outlined_func_type_(outlined_func_type),
@@ -836,12 +896,14 @@ std::unordered_set<const Var*> ScopeOutliner::ComputeFallbackUsedAfter(const Sco
   if (!inside_nested_scope_body_) {
     var_collectors::VarDefUseCollector def_collector;
     def_collector.VisitStmt(scope->body_);
-    // Scalars are excluded from the defensive "export every definition"
-    // fallback. The runtime cannot return one, so exporting a scalar nobody
-    // asked for can only turn a harmless local into a hard error further down
-    // (the scalar-output hoist would have to lift it, or reject the scope).
+    // Scalars, tuple unpacking temporaries, and Reg values are not runtime
+    // outputs. Tuple projections already expose their tensor definitions;
+    // exporting the tuple too would create a nested terminal SPMD output.
+    // Actual live-out uses are handled by the explicit tail-use analysis.
     for (const Var* var : def_collector.var_defs) {
-      if (As<ScalarType>(var->GetType())) continue;
+      if (As<ScalarType>(var->GetType()) || As<TupleType>(var->GetType()) || As<RegType>(var->GetType())) {
+        continue;
+      }
       used_after.insert(var);
     }
   }
@@ -1576,6 +1638,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // substitution and the call-site lookup below.
   UpwardExposedUseCollector live_in;
   live_in.VisitStmt(scope_body);
+  live_in.CaptureShapeDependencies(runtime_bindings_);
 
   std::vector<VarPtr> input_vars;
   for (const Var* var_ptr : live_in.ordered) {
@@ -1818,6 +1881,8 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
   };
   TrackingSubstituteMutator subst_mutator(var_substitution_map);
+  // Remap annotations even for parameters that are only used through types.
+  for (const auto& input_var : input_vars) subst_mutator.VisitExpr(input_var);
   auto transformed_body = subst_mutator.VisitStmt(pre_sub_body);
 
   // Reconcile param/output Vars with any freshened versions created during

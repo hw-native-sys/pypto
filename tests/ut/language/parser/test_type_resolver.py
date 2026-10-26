@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, codegen, ir
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.parser.type_resolver import TypeResolver
@@ -2324,6 +2324,251 @@ def test_canonical_reg_annotation_resolves_without_captured_module():
     result = _make_resolver().resolve_type(annotation)
     assert isinstance(result, ir.RegType)
     assert result.kind == ir.RegKind.MaskReg
+
+
+@pytest.mark.parametrize("shape_expr", ["SHAPE", "[SHAPE[0], 16]"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_shape_alias_uses_local_dynamic_binding(shape_expr, initialized):
+    """A captured container must not retain another function's dimension Var."""
+    B = pl.dynamic("B")
+    original = ir.Var("B", ir.ScalarType(DataType.INDEX), ir.Span.unknown()) if initialized else None
+    B._ir_var = original
+    resolver = _make_resolver({"SHAPE": [B, 16]})
+    local = ir.Var("B", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    resolver.bind_local_dynamic_symbol("B", local)
+    ty = resolver.resolve_type(ast.parse(f"pl.Tensor[{shape_expr}, pl.FP32]", mode="eval").body)
+    assert isinstance(ty, ir.TensorType)
+    assert ty.shape[0].same_as(local)
+    assert B._ir_var is original
+
+
+@pytest.mark.parametrize("symbol_name", ["B", "rows"])
+def test_shape_alias_shadowing_is_local_to_each_function(symbol_name):
+    # The Python alias and DynVar name need not match. An earlier function
+    # populates the shared cache before the scalar parameter shadows the alias.
+    B = pl.dynamic(symbol_name)
+    SHAPE = [B, 16]
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def first(self, x: pl.Tensor[SHAPE, pl.FP32]) -> pl.Tensor[SHAPE, pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def second(self, B: pl.Scalar[pl.INDEX], x: pl.Tensor[SHAPE, pl.FP32]) -> pl.Tensor[SHAPE, pl.FP32]:
+            return x
+
+    first = Program.get_function("first")
+    second = Program.get_function("second")
+    assert first is not None and second is not None
+    first_type = first.params[0].type
+    second_type = second.params[1].type
+    return_type = second.return_types[0]
+    assert isinstance(first_type, ir.TensorType)
+    assert isinstance(second_type, ir.TensorType)
+    assert isinstance(return_type, ir.TensorType)
+    assert B._ir_var is not None
+    assert second_type.shape[0].same_as(second.params[0])
+    assert return_type.shape[0].same_as(second.params[0])
+    assert first_type.shape[0].same_as(B._ir_var)
+    assert not B._ir_var.same_as(second.params[0])
+    assert codegen.collect_tensor_shape_dyn_vars(second) == []
+
+
+@pytest.mark.parametrize("symbol_name", ["D", "B"])
+def test_dynamic_alias_shadow_matches_body_tensor_shape(symbol_name):
+    """Direct annotations and tensor construction must share the local scalar."""
+    D = pl.dynamic(symbol_name)
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def first(self, x: pl.Tensor[[D, 16], pl.FP32]) -> pl.Tensor[[D, 16], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Opaque)
+        def second(
+            self, D: pl.Scalar[pl.INDEX], x: pl.Tensor[[D, 16], pl.FP32]
+        ) -> pl.Tensor[[D, 16], pl.FP32]:
+            other = pl.create_tensor([D, 16], dtype=pl.FP32)
+            result = pl.add(x, other)
+            return result
+
+    first = Program.get_function("first")
+    second = Program.get_function("second")
+    assert first is not None and second is not None
+    first_type = first.params[0].type
+    second_type = second.params[1].type
+    assert isinstance(first_type, ir.TensorType)
+    assert isinstance(second_type, ir.TensorType)
+    assert second_type.shape[0].same_as(second.params[0])
+    assert not first_type.shape[0].same_as(second.params[0])
+    assert codegen.collect_tensor_shape_dyn_vars(second) == []
+    for stmt in _body_assigns(second):
+        assert isinstance(stmt.var.type, ir.TensorType)
+        assert stmt.var.type.shape[0].same_as(second.params[0])
+
+
+@pytest.mark.parametrize("symbol_name", ["B", "rows"])
+@pytest.mark.parametrize("extent", ["SHAPE[0] * 2", "(SHAPE[0] + 15) // 16 * 16", "-SHAPE[0] + 128"])
+def test_compound_shape_alias_uses_local_scalar(symbol_name, extent):
+    """Evaluated compound aliases must agree with shapes constructed in the body."""
+    body_extent = extent.replace("SHAPE[0]", "B")
+    program = pl.parse(f'''import pypto.language as pl
+B = pl.dynamic("{symbol_name}")
+SHAPE = [B, 16]
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def first(self, x: pl.Tensor[SHAPE, pl.FP32]) -> pl.Tensor[SHAPE, pl.FP32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def second(
+        self,
+        B: pl.Scalar[pl.INDEX],
+        x: pl.Tensor[[{extent}, 16], pl.FP32],
+    ) -> pl.Tensor[[{extent}, 16], pl.FP32]:
+        other = pl.create_tensor([{body_extent}, 16], dtype=pl.FP32)
+        result = pl.add(x, other)
+        return result
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def third(self, x: pl.Tensor[[{extent}, 16], pl.FP32]) -> pl.Tensor[[{extent}, 16], pl.FP32]:
+        return x
+''')
+    assert isinstance(program, ir.Program)
+    first = program.get_function("first")
+    second = program.get_function("second")
+    assert first is not None and second is not None
+    first_type = first.params[0].type
+    assert isinstance(first_type, ir.TensorType)
+    original = first_type.shape[0]
+    assert isinstance(original, ir.Var)
+    local_ids = {second.params[0].unique_id}
+    assert original.unique_id not in local_ids
+    third = program.get_function("third")
+    assert third is not None
+    third_type = third.params[0].type
+    assert isinstance(third_type, ir.TensorType)
+    assert {v.unique_id for v in codegen.collect_vars_from_shape_expr(third_type.shape[0])} == {
+        original.unique_id
+    }
+    types = [second.params[1].type, second.return_types[0], *[s.var.type for s in _body_assigns(second)]]
+    for ty in types:
+        assert isinstance(ty, ir.TensorType)
+        assert {v.unique_id for v in codegen.collect_vars_from_shape_expr(ty.shape[0])} == local_ids
+    assert codegen.collect_tensor_shape_dyn_vars(second) == []
+
+
+def test_local_shadow_keeps_unrelated_dynamic_symbols_shared():
+    """A fresh DynVar returned by a helper must still be interned program-wide."""
+    B = pl.dynamic("B")
+
+    def fresh_shape():
+        return [pl.dynamic("E"), 16]
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def first(
+            self, B: pl.Scalar[pl.INDEX], x: pl.Tensor[fresh_shape(), pl.FP32]
+        ) -> pl.Tensor[fresh_shape(), pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Opaque)
+        def second(self, x: pl.Tensor[fresh_shape(), pl.FP32]) -> pl.Tensor[fresh_shape(), pl.FP32]:
+            return self.first(pl.const(1, pl.INDEX), x)
+
+    first = Program.get_function("first")
+    second = Program.get_function("second")
+    assert first is not None and second is not None
+    first_type = first.params[1].type
+    second_type = second.params[0].type
+    assert isinstance(first_type, ir.TensorType)
+    assert isinstance(second_type, ir.TensorType)
+    assert first_type.shape[0].same_as(second_type.shape[0])
+    assert B._ir_var is None
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+@pytest.mark.parametrize("symbol_name", ["D", "rows"])
+def test_late_shadow_checks_cached_dynamic_alias(symbol_name, initialized):
+    """A fresh or stale alias cannot shadow a symbol already used by a parameter."""
+    original = pl.dynamic(symbol_name)
+    D = pl.dynamic(symbol_name)
+    if initialized:
+        D.unwrap()
+
+    with pytest.raises(ParserTypeError, match="earlier parameter"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def first(self, x: pl.Tensor[[original, 16], pl.FP32]):
+                return x
+
+            @pl.function(type=pl.FunctionType.Opaque)
+            def second(self, x: pl.Tensor[[D, 16], pl.FP32], D: pl.Scalar[pl.INDEX]):
+                return x
+
+
+def test_unshadowed_cached_alias_stays_canonical_in_compound_shapes():
+    """A shared-cache hit must also keep later DynVar arithmetic on that symbol."""
+    span = ir.Span.unknown()
+    original = ir.Var("E", ir.ScalarType(DataType.INDEX), span)
+    alias = pl.dynamic("E")
+    resolver = TypeResolver(ExprEvaluator({"Alias": alias}), dyn_var_cache={"E": original})
+    resolver.bind_local_dynamic_symbol("B", ir.Var("B", ir.ScalarType(DataType.INDEX), span))
+    bare = resolver.resolve_type(ast.parse("pl.Tensor[[Alias, 16], pl.FP32]", mode="eval").body)
+    compound = resolver.resolve_type(ast.parse("pl.Tensor[[Alias * 2, 16], pl.FP32]", mode="eval").body)
+    assert isinstance(bare, ir.TensorType)
+    assert isinstance(compound, ir.TensorType)
+    assert bare.shape[0].same_as(original)
+    assert {v.unique_id for v in codegen.collect_vars_from_shape_expr(compound.shape[0])} == {
+        original.unique_id
+    }
+
+
+@pytest.mark.parametrize("symbol_name", ["D", "B"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_body_dynamic_alias_does_not_leak_local_parameter(symbol_name, initialized):
+    """Reading a distinct same-name alias must not mutate it to a local parameter."""
+    D = pl.dynamic(symbol_name)
+    E = pl.dynamic(symbol_name)
+    if initialized:
+        E.unwrap()
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def first(self, x: pl.Tensor[[E, 16], pl.FP32]):
+            return x
+
+        @pl.function(type=pl.FunctionType.Opaque)
+        def second(self, D: pl.Scalar[pl.INDEX], x: pl.Tensor[[E, 16], pl.FP32]):
+            other = pl.create_tensor([E, 16], dtype=pl.FP32)
+            return pl.add(x, other)
+
+        @pl.function(type=pl.FunctionType.Opaque)
+        def third(self, x: pl.Tensor[[D, 16], pl.FP32]):
+            other = pl.create_tensor([E, 16], dtype=pl.FP32)
+            return pl.add(x, other)
+
+    first = Program.get_function("first")
+    second = Program.get_function("second")
+    third = Program.get_function("third")
+    assert first is not None and second is not None and third is not None
+    first_type = first.params[0].type
+    assert isinstance(first_type, ir.TensorType)
+    original = first_type.shape[0]
+    assert E._ir_var is not None and E._ir_var.same_as(original)
+    for func, expected in [(second, second.params[0]), (third, original)]:
+        for stmt in _body_assigns(func):
+            assert isinstance(stmt.var.type, ir.TensorType)
+            assert stmt.var.type.shape[0].same_as(expected)
+    assert codegen.collect_tensor_shape_dyn_vars(second) == []
 
 
 if __name__ == "__main__":

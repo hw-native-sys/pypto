@@ -306,23 +306,28 @@ class TestActiveChipWorkerLookup:
             )
 
 
-# ``_execute_on_device`` lives in ``device_runner`` which eagerly imports the
-# ``simpler`` package. The ChipWorker-only tests above mock just the
-# ``simpler.ChipWorker`` class via ``_SimplerWorker`` and do not need
-# ``device_runner`` loaded — but the tests in this class invoke
-# ``_execute_on_device`` directly, so they are skipped when ``simpler`` is not
-# installed (e.g. unit-tests CI).
-try:
-    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport] — presence probe
-except ImportError:
-    _has_simpler = False
-else:
-    _has_simpler = True
-
-
-@pytest.mark.skipif(not _has_simpler, reason="_execute_on_device requires the simpler package")
 class TestExecuteOnDeviceReuse:
     """Verify ``_execute_on_device`` reuses an active ChipWorker rather than constructing a new one."""
+
+    @pytest.fixture(autouse=True)
+    def mock_runtime_boundary(self, device_runner, monkeypatch):
+        """Exercise the real dispatch path without importing an installed native runtime."""
+        monkeypatch.setattr("pypto.runtime.runner._coerced_to_orch_args", MagicMock(name="pack_task_args"))
+
+    def test_kernel_mode_blocks_one_shot_before_worker_construction(self, kernel_env):
+        from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
+
+        kernel_env.state.ensure_worker(kernel_env.config)
+        with (
+            patch("pypto.runtime.device_runner.CallConfig", MagicMock),
+            patch("pypto.runtime.device_runner.Worker") as worker_cls,
+        ):
+            with pytest.raises(RuntimeError, match="already claimed kernel"):
+                _execute_on_device(
+                    MagicMock(), [], platform="a2a3", runtime_name="tensormap_and_ringbuffer", device_id=0
+                )
+        worker_cls.assert_not_called()
+        kernel_env.state.close()
 
     def test_reuse_skips_init_and_close(self, fake_simpler_worker):
         from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
@@ -512,6 +517,26 @@ class TestDeviceInitSerialisation:
 
         assert not overlapped, "two device-context opens ran at once"
         assert fake_simpler_worker.init.call_count == 4, "every worker still initialised"
+
+
+def test_kernel_mode_blocks_program_initialization(kernel_env, fake_simpler_worker):
+    kernel_env.state.ensure_worker(kernel_env.config)
+    with pytest.raises(RuntimeError, match="already claimed kernel"):
+        ChipWorker(config=RunConfig(platform="a2a3"))
+    fake_simpler_worker.init.assert_not_called()
+    kernel_env.state.close()
+
+
+def test_program_initialization_claims_mode_but_construction_does_not(kernel_env, fake_simpler_worker):
+    from pypto.runtime import _execution_mode  # noqa: PLC0415
+
+    program = ChipWorker(config=RunConfig(platform="a2a3"), auto_init=False)
+    assert _execution_mode._gate.mode is None
+    program.init()
+    with pytest.raises(RuntimeError, match="already claimed program"):
+        kernel_env.state.ensure_worker(kernel_env.config)
+    assert not kernel_env.calls.workers
+    program.close()
 
 
 if __name__ == "__main__":

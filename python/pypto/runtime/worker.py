@@ -283,6 +283,9 @@ class ChipWorker(Worker):
         # Transcribing ``_config``'s rings here would instead build an arena no
         # dispatch asks for. A per-call RunConfig that sizes the rings differently
         # rebuilds once, as before. No-op without a prebuilt arena.
+        from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+        claim_program_mode()
         try:
             with _device_init_lock:
                 self._impl.init(prewarm_config=_get_simpler_call_config_cls()())

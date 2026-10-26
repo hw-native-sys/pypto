@@ -37,8 +37,9 @@ mask = ir.RegType(64, DataType.BOOL, ir.RegKind.MaskReg)
 `pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`。这些描述符、无专属字段的
 `ir.RegScopeStmt(name_hint, body, span, leading_comments=[], attrs=None)` 和
 `ir.ForStmt.hardware_loop_policy` 属于 IR 基础设施，支持直接构造、visitor/mutator
-遍历、结构比较和二进制序列化。寄存器操作、`pl.reg_scope`、scope 完整 DSL 往返
-以及 VF 代码生成由后续改动实现。
+遍历、结构比较和二进制序列化。P0 寄存器操作和 `pl.reg_scope()` 支持经过验证的
+DSL 构造和文本往返；参见[寄存器操作](../language/06-register-operations.md)。
+VF 代码生成仍由 PR3 实现。
 
 `HardwareLoopPolicy.Auto` 是新循环及缺少该字段的旧序列化循环的默认值。
 `Require` 是持久化的语义字段，不能被静默重置为 Auto；未知序列化 policy

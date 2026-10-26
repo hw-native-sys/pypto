@@ -121,7 +121,9 @@ namespace {
           continue;
         }
       }
-      if (call->op_ && IsOp(call, "pld.tensor.all_to_all_v") && call->args_.size() > 1) {
+      if (call->op_ &&
+          (IsOp(call, "pld.tensor.all_to_all_v") || IsOp(call, "pld.tensor.indexed_all_to_all_v")) &&
+          call->args_.size() > 1) {
         if (auto tgt = AsVarLike(call->args_[1])) {
           cur = tgt.get();
           continue;

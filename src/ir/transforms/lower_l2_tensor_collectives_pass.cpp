@@ -105,7 +105,7 @@ namespace {
 
 using op_predicates::IsManagedTensorCollective;
 
-/// The one managed collective this rail lowers today.
+/// Continuous and indexed all-to-all-v share the managed task lowering.
 constexpr const char* kAllToAllV = "pld.tensor.all_to_all_v";
 
 /// A CHIP/L2 orchestration body. HOST orchestrators are excluded by level —
@@ -326,13 +326,14 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
 
  private:
   [[nodiscard]] static bool IsManagedCollective(const CallPtr& call) {
-    return call && call->op_ && IsOp(call, kAllToAllV);
+    return call && call->op_ && (IsOp(call, kAllToAllV) || IsOp(call, "pld.tensor.indexed_all_to_all_v"));
   }
 
   [[nodiscard]] CallPtr LowerCollective(const CallPtr& call) {
-    INTERNAL_CHECK_SPAN(call->args_.size() == 6, call->span_)
-        << "LowerL2TensorCollectives: " << call->op_->name_ << " must have 6 args, got "
-        << call->args_.size();
+    const bool indexed = IsOp(call, "pld.tensor.indexed_all_to_all_v");
+    INTERNAL_CHECK_SPAN(call->args_.size() == (indexed ? 7 : 6), call->span_)
+        << "LowerL2TensorCollectives: " << call->op_->name_
+        << " has an unexpected operand count: " << call->args_.size();
 
     // core_num (args_[5]) is the requested block limit L, carried as a
     // Scalar[INDEX] argument. It is consumed here and then dropped from the
@@ -344,7 +345,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     // computed in the emitted orchestration, plus a runtime `signal stride >= B`
     // check, and orchestration has no surface for raising that fatal today; the
     // HOST rail takes a runtime L because its entry runs on the host.
-    auto core_num_const = As<ConstInt>(call->args_[5]);
+    auto core_num_const = As<ConstInt>(call->args_.back());
     CHECK_SPAN(core_num_const != nullptr, call->span_)
         << "CHIP pld.tensor.all_to_all_v: a runtime core_num is not supported on this rail yet; pass a "
            "compile-time core_num (the HOST rail accepts a runtime value)";
@@ -381,7 +382,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(nranks >= 1 && signal_stride >= 1, call->span_)
         << "LowerL2TensorCollectives: pld.tensor.all_to_all_v signal [NR, S] must be positive, got ["
         << nranks << ", " << signal_stride << "]";
-    const int64_t launched_blocks = CalAllToAllVBlocks(nranks, requested_blocks);
+    const int64_t launched_blocks = indexed ? requested_blocks : CalAllToAllVBlocks(nranks, requested_blocks);
 
     // A stride narrower than the launched gang is a defect, not something the
     // kernel should clamp its way past (RFC #2521 §13.3). Compare against the
@@ -405,6 +406,21 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
            "composite path) is not supported on this rail";
 
     auto spec = MakeAllToAllVKernelSpec(target_type->dtype_, call->span_);
+    if (indexed) {
+      spec.function_name =
+          "__builtin_indexed_all_to_all_v__" + ResolveBuiltinDType(target_type->dtype_, call->span_).suffix;
+      auto template_dir =
+          OpRegistry::GetInstance().GetEntry("pld.tensor.indexed_all_to_all_v").GetTemplateDir();
+      if (!template_dir.has_value()) {
+        INTERNAL_CHECK_SPAN(false, call->span_) << "indexed_all_to_all_v declares no template_dir";
+      } else {
+        spec.template_dir = *template_dir;
+      }
+      spec.param_distributed[4] = false;  // Receive counts are written only locally.
+      spec.param_names.push_back("index");
+      spec.param_directions.push_back(ParamDirection::In);
+      spec.param_distributed.push_back(false);
+    }
     // One kernel per dtype, shared by every call site in the Program. The
     // kernel reads each extent from the runtime `Tensor` descriptor
     // (`target_tensor->shapes[]`, `ndims`), so shape is deliberately *not* part

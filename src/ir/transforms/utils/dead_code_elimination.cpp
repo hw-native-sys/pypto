@@ -277,6 +277,11 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
       if (auto spmd = std::dynamic_pointer_cast<const SpmdScopeStmt>(scope_stmt)) {
         collect_expr_refs(spmd->core_num_);
       }
+      // Slot sizes can retain symbolic body-defined scalars even when folding
+      // has removed their ordinary uses. Domain allocation still needs them.
+      if (auto comm = As<CommDomainScopeStmt>(scope_stmt)) {
+        for (const auto& slot : comm->slots_) collect_expr_refs(slot->size_);
+      }
       FindLiveRootsRecursiveImpl(FlattenBody(scope_stmt->body_), is_removable, live);
     }
   }

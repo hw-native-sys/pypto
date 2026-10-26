@@ -13,7 +13,7 @@ import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, codegen, ir, passes
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.language.parser.text_parser import parse as text_parse
@@ -4432,6 +4432,126 @@ class TestOutlineScalarOutputHoist:
 
         After = self._outline(Before)
         assert self._scalar_returns(self._func(After, "scaled")) == 0, python_print(After)
+
+
+@pytest.mark.parametrize("scope_suffix", ["", " as tid"])
+def test_compound_shape_capture_preserves_caller_and_callee_symbols(scope_suffix):
+    """Type-only B/T captures must be fresh in the callee and actuals in Call/Submit types."""
+    before = text_parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, b: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.INDEX]):
+        work = pl.create_tensor([(b + 15) // 16 * 16 + t * 4, 16], dtype=pl.FP32)
+        with pl.at(level=pl.Level.CORE_GROUP){scope_suffix}:
+            value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+            work = pl.store(value, [0, 0], work)
+        return work
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    kernel = after.get_function("main_incore_0")
+    main = after.get_function("main")
+    assert kernel is not None and main is not None
+    assert [p.name_hint.split("__ssa")[0] for p in kernel.params[:2]] == ["b", "t"]
+    assert all(isinstance(p.type, ir.ScalarType) for p in kernel.params[:2])
+    assert len(kernel.params) == 3
+
+    def symbols(ty):
+        return {v.unique_id for v in codegen.collect_vars_from_shape_expr(ty.shape[0])}
+
+    callee_symbols = {p.unique_id for p in kernel.params[:2]}
+    caller_symbols = {p.unique_id for p in main.params}
+    assert callee_symbols.isdisjoint(caller_symbols)
+    assert symbols(kernel.params[2].type) == callee_symbols
+    assert symbols(kernel.return_types[0]) == callee_symbols
+    calls = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(main.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, (ir.Call, ir.Submit))
+        and stmt.value.op.name == kernel.name
+    ]
+    assert len(calls) == 1
+    call = calls[0]
+    assert isinstance(call, ir.Submit) == bool(scope_suffix)
+    assert {a.unique_id for a in call.args[:2] if isinstance(a, ir.Var)} == caller_symbols
+    result_type = call.type.types[0] if isinstance(call.type, ir.TupleType) else call.type
+    assert symbols(result_type) == caller_symbols
+    printed = python_print(after, format=False)
+    assert "__FREE_VAR" not in printed
+    ir.assert_structural_equal(after, text_parse(printed))
+
+
+@pytest.mark.parametrize("loop_binding", [False, True])
+def test_compound_shape_capture_accepts_body_value_definitions(loop_binding):
+    """Local scalars and loop indices are real values even if only used in a type."""
+    binding = "for rows in pl.range(5, 10):" if loop_binding else "rows = size + 1"
+    indent = "    " if loop_binding else ""
+    statements = [
+        "work = pl.create_tensor([rows // 5, 16], dtype=pl.FP32)",
+        "with pl.at(level=pl.Level.CORE_GROUP):",
+        "    value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)",
+        "    work = pl.store(value, [0, 0], work)",
+    ]
+    body = "\n".join("        " + indent + line for line in statements)
+    before = text_parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, size: pl.Scalar[pl.INDEX]):
+        {binding}
+{body}
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    kernel = after.get_function("main_incore_0")
+    assert kernel is not None
+    assert isinstance(kernel.params[0].type, ir.ScalarType)
+    assert kernel.params[0].name_hint.startswith("rows")
+
+
+@pytest.mark.parametrize("source_type", ["pl.Tensor", "pld.DistributedTensor"])
+@pytest.mark.parametrize("scope_suffix", ["", " as tid"])
+def test_distributed_shape_capture_registers_unused_parameter_symbol(source_type, scope_suffix):
+    """The bare source need not be used when a distributed shape captures its symbol."""
+    before = text_parse(f"""import pypto.language as pl
+import pypto.language.distributed as pld
+B = pl.dynamic("B")
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        source: {source_type}[[B, 16], pl.INT32],
+        signal: pld.DistributedTensor[[B // 5, 16], pl.INT32],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"){scope_suffix}:
+            pld.system.wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    kernel = after.get_function("waiter")
+    main = after.get_function("main")
+    assert kernel is not None and main is not None
+    assert len(kernel.params) == 2
+    assert isinstance(kernel.params[0].type, ir.ScalarType)
+    assert isinstance(kernel.params[1].type, ir.DistributedTensorType)
+    assert {v.unique_id for v in codegen.collect_vars_from_shape_expr(kernel.params[1].type.shape[0])} == {
+        kernel.params[0].unique_id
+    }
+    calls = [
+        expr
+        for stmt in ir.flatten_to_stmts(main.body)
+        if isinstance(stmt, (ir.AssignStmt, ir.EvalStmt))
+        for expr in [stmt.value if isinstance(stmt, ir.AssignStmt) else stmt.expr]
+        if isinstance(expr, (ir.Call, ir.Submit)) and expr.op.name == kernel.name
+    ]
+    assert len(calls) == 1
+    assert isinstance(calls[0], ir.Submit) == bool(scope_suffix)
+    source_tensor_type = main.params[0].type
+    assert isinstance(source_tensor_type, (ir.TensorType, ir.DistributedTensorType))
+    assert calls[0].args[0].same_as(source_tensor_type.shape[0])
 
 
 if __name__ == "__main__":

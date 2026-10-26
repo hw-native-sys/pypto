@@ -180,3 +180,75 @@ schedule: every pair exchanges distinct data.
 - [04-debugging](04-debugging.md) — the canonical failure catalog for distributed programs
 - Next step: [21-putting_it_together](21-putting_it_together.md) — compose
   three collectives in one kernel
+
+## Indexed AllToAllV on A5 URMA
+
+```python
+target = pld.tensor.indexed_all_to_all_v(
+    input, target, signal, send_counts, recv_counts, index, core_num=2,
+)
+```
+
+The indexed variant reads original `input[Nmax,H]` rows directly, without a
+packed hidden send buffer. `index` is contiguous INT32 `[P,C]`, and
+`target` is a distinct receive window `[P*C,H]`. At destination `d`, source
+`s` writes `input_s[index_s[d,j]]` into `target_d[s*C+j]` for
+`j < send_counts_s[d]`. Repeated indices preserve repeated output slots.
+Unwritten tails retain their old contents; consume only `recv_counts[s,0]`
+rows of each source partition. MoE token-to-rank deduplication and expert
+expansion remain application operations.
+
+This API supports **A5 URMA with PER_PEER queues, L2 only**, with FP32 or
+INT8 payloads. L2 accepts
+local Tensor input/index and a local INT32 recv_counts `[P,1]` output.
+send_counts must be window-bound because peers read it. `signal`, `send_counts`
+and `recv_counts` must use pairwise distinct buffers. All views must be packed
+and full; shapes are static. HOST, InCore, remote MTE,
+and SHARED_POOL are unsupported.
+
+`core_num=B` is a positive exact launch width, subject to the runtime's AIV
+sync-start limit. For `B <= P`, AIV `b` handles destinations `b,b+B,...`.
+For `B > P`, only AIVs `0..P-1` submit URMA work, one writer per remote rank.
+All B AIVs divide local receive rows evenly. Each AIV submits its remote
+transfers, copies its local rows, then waits for the final remote completions. A hidden row is never split
+between AIVs. All B AIVs participate in the barriers, including empty local
+workers; signal is INT32 `[P,S]` with `S >= B`, initially zero. L2 requires a
+compile-time core count. All ranks must agree
+on geometry, launch width and collective order.
+
+Counts must be in `[0,C]`, and each valid index must be in `[0,Nmax)`.
+These are device-data preconditions; invalid values abort execution rather
+than being clamped into a different dispatch. Index tails are not read and
+may contain `-1`. A distributed run must be terminated as a group on failure.
+
+The kernel builds multi-SGE WRITE SQEs with SIMT: up to twelve complete rows
+per SQE, a fixed four-WQEBB slot, and NOPs in unused trailing WQEBBs. Each remote
+peer's entire transfer must fit its SQ: `ceil(send_counts[peer] / 12) * 4 <= sqDepth`;
+the kernel asserts this before posting. It rings a doorbell after each segment of
+at most 64 SQEs without waiting between segments. Only the transfer's final WRITE
+requests a strong-order fenced CQE, which is drained once after all segments are
+posted. SQ head counts WQEBBs; ISA submittedWqeCount increases once per nonempty
+remote peer transfer. All writes complete before the final barrier.
+Self uses direct TLOAD/TSTORE with an eight-stage ring of 8 KiB UB slots
+(64 KiB per local worker). Consecutive source indices are coalesced; scattered
+rows use the same pipeline across tokens. MTE2 waits only before reusing a slot,
+allowing loads of later tokens to overlap earlier MTE3 stores; all slots drain
+once at the end before publishing completion. It does not use synchronous TPUT
+per token. Remote payloads go directly through URMA. The runtime does not
+initialize a self-rank SQ/CQ for URMA loopback.
+
+This is a completion-tracked collective task, not an issue-only asynchronous
+handle. Producers of input/index/counts must precede it; consumers of target
+and recv_counts must follow it. Keep source buffers alive until task completion.
+Window reuse must also follow the previous local consumer. Callers must prevent
+concurrent exchanges from using the same URMA queues. Reusing the same signal
+creates an InOut dependency between calls, even with distinct payload windows;
+using independent signals requires an explicit task dependency. This API does
+not insert a global queue-ordering dependency.
+
+Synchronization uses SIMT global atomics for both notifications and polling,
+with backoff, rather than the scalar TNOTIFY/TWAIT implementation. The same
+signal lanes retain the two-round credit protocol. Receive counts use
+non-cacheable scalar stores, avoiding whole-cache-line writeback when control
+windows share a cache line. Persistent reuse with changed input is covered by
+the A5 system test; no full-payload cache sweep is added.

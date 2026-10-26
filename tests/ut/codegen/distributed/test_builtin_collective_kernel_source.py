@@ -303,5 +303,104 @@ def test_host_rail_still_emits_its_builtin_chip_dispatch(tmp_path):
     assert _variant_of("fp32") in next_levels, next_levels
 
 
+def _build_indexed_rail_program(*, host: bool, dtype_name: str):
+    dtype = _dtype_of(dtype_name)
+    input_bytes = 13 * SIZE * dtype.get_byte()
+    target_bytes = TOTAL * SIZE * dtype.get_byte()
+
+    @pl.program
+    class IndexedRail:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pld.DistributedTensor[[13, SIZE], dtype],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, NR], pl.INT32]],
+            counts: pld.DistributedTensor[[NR, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            index: pld.DistributedTensor[[NR, MAX_RECV], pl.INT32],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], dtype]:
+            return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=NR)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            inp_buf = pld.alloc_window_buffer(input_bytes)
+            data_buf = pld.alloc_window_buffer(target_bytes)
+            sig_buf = pld.alloc_window_buffer(NR * NR * 4)
+            counts_buf = pld.alloc_window_buffer(NR * 4)
+            recv_buf = pld.alloc_window_buffer(NR * 4)
+            index_buf = pld.alloc_window_buffer(NR * MAX_RECV * 4)
+            for r in pl.range(pld.world_size()):
+                inp = pld.window(inp_buf, [13, SIZE], dtype=dtype)
+                data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
+                sig = pld.window(sig_buf, [NR, NR], dtype=pl.INT32)
+                counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
+                index = pld.window(index_buf, [NR, MAX_RECV], dtype=pl.INT32)
+                self.chip_pipeline(inp, data, sig, counts, recv, index, device=r)
+
+    if not host:
+        return IndexedRail
+    # Keep the same windows/domain registration while moving the exchange to HOST.
+    source = ir.python_print(IndexedRail, format=False)
+    source, replacements = re.subn(
+        r"return pld\.tensor\.indexed_all_to_all_v\(inp, data, signal, counts, recv, index, core_num=2\)",
+        "return data",
+        source,
+    )
+    assert replacements == 1, source
+    # This registration dispatch only reads its windows after moving the exchange.
+    source = re.sub(r"pl\.InOut\[(pld\.DistributedTensor\[\[[^]]+\], pl\.\w+\])\]", r"\1", source)
+    # HOST windows must be defined outside the registration loop to stay in scope.
+    lines = source.splitlines()
+    windows = [
+        line[4:] for line in lines if line.startswith("            ") and " = pld.tensor.window(" in line
+    ]
+    lines = [
+        line for line in lines if not (line.startswith("            ") and " = pld.tensor.window(" in line)
+    ]
+    loop = next(i for i, line in enumerate(lines) if line.startswith("        for r in "))
+    lines[loop:loop] = windows
+    source = "\n".join(lines)
+    # The HOST call belongs inside host_orch, after its dispatch loop.
+    source = source.rstrip() + (
+        "\n        pld.tensor.indexed_all_to_all_v(inp, data, sig, counts, recv, index, core_num=2)\n"
+    )
+    return pl.parse_program(source)
+
+
+@pytest.mark.parametrize("dtype_name", ["fp32", "int8"])
+def test_indexed_l2_compiles_six_operand_kernel(tmp_path, dtype_name):
+    result = ir.compile(
+        _build_indexed_rail_program(host=False, dtype_name=dtype_name),
+        output_dir=str(tmp_path / dtype_name),
+        platform="a5",
+        skip_ptoas=True,
+        dump_passes=False,
+        distributed_config=DistributedConfig(device_ids=list(range(NR)), num_sub_workers=0),
+    )
+    kernel = (
+        result.output_dir
+        / "next_levels"
+        / "chip_pipeline"
+        / "kernels"
+        / "aiv"
+        / f"__builtin_indexed_all_to_all_v__{dtype_name}.cpp"
+    )
+    assert kernel.is_file()
+
+
+@pytest.mark.parametrize("dtype_name", ["fp32", "int8"])
+def test_indexed_rejects_host_call(tmp_path, dtype_name):
+    with pytest.raises(ValueError, match="L2 orchestration.*HOST is unsupported"):
+        ir.compile(
+            _build_indexed_rail_program(host=True, dtype_name=dtype_name),
+            output_dir=str(tmp_path / dtype_name),
+            platform="a5",
+            skip_ptoas=True,
+            distributed_config=DistributedConfig(device_ids=list(range(NR)), num_sub_workers=0),
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

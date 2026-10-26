@@ -315,3 +315,73 @@ def pass_verification_context(pass_verification_instruments):
     """Enable the configured checks for all pass executions."""
     with passes.PassContext(pass_verification_instruments):
         yield
+
+
+@pytest.fixture
+def kernel_env(monkeypatch, tmp_path):
+    """Isolate the process manager and mock only the Worker/device boundary."""
+    from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities  # noqa: PLC0415
+    from pypto.ir._artifact_metadata import ArtifactMetadata  # noqa: PLC0415
+    from pypto.ir.compiled_artifact import CompiledArtifact  # noqa: PLC0415
+    from pypto.runtime import _execution_mode  # noqa: PLC0415
+    from pypto.runtime.kernel import context  # noqa: PLC0415
+    from pypto.runtime.kernel.session import KernelConfig  # noqa: PLC0415
+
+    monkeypatch.setattr(_execution_mode, "_gate", _execution_mode._ModeGate())
+    calls = SimpleNamespace(workers=[], inits=[], prepares=[], closes=[])
+
+    class FakeWorker:
+        def __init__(self, config, state):
+            calls.workers.append(self)
+
+        def init(self, config):
+            calls.inits.append(config)
+
+        def check_context(self):
+            pass
+
+        def on_owner_thread(self):
+            return False
+
+        def prepare(self, callable_):
+            calls.prepares.append(callable_)
+            return object()  # Opaque handle; neither a slot nor convertible to int.
+
+        def wait(self, ticket):
+            ticket.wait()
+
+        def close(self):
+            calls.closes.append(self)
+
+    monkeypatch.setattr(context, "_BorrowedWorkerSession", FakeWorker)
+    state = context._ProcessKernelState()
+    monkeypatch.setattr(context, "_process", SimpleNamespace(state=state))
+
+    def artifact(key=b"kernel"):
+        meta = ArtifactMetadata(
+            (),
+            (),
+            0,
+            "a2a3",
+            BackendType.Ascend910,
+            (),
+            ExecutionCapabilities((ArtifactExecutionMode.KERNEL,)),
+        )
+        result = CompiledArtifact(tmp_path / key.hex(), "a2a3", meta)
+        monkeypatch.setattr(
+            result,
+            "_artifact_runtime",
+            SimpleNamespace(
+                load=lambda: {".": (key, "tensormap_and_ringbuffer", {})},
+                handle=SimpleNamespace(key=key),
+            ),
+        )
+        return result
+
+    return SimpleNamespace(
+        state=state,
+        config=KernelConfig("a2a3", "tensormap_and_ringbuffer", 0),
+        calls=calls,
+        worker_cls=FakeWorker,
+        artifact=artifact,
+    )

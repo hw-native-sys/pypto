@@ -22,6 +22,7 @@ instances during normal compilation) lands.
 """
 
 import pytest
+from pypto import ir
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
     ConstInt,
@@ -111,6 +112,39 @@ def test_mutator_preserves_host_staging_flags():
     assert isinstance(result, WindowBuffer)
     assert result.load_from_host is True
     assert result.store_to_host is True
+
+
+@pytest.mark.parametrize("kind", ["var", "iter_arg", "call", "submit"])
+def test_mutator_remaps_window_back_references_in_types(kind):
+    """Type-only links follow replacements across leaves and both call-like kinds."""
+    span = Span.unknown()
+    original = WindowBuffer(_ptr("buffer"), _const(64))
+    replacement = WindowBuffer(original.base, _const(128))
+    tensor_type = ir.DistributedTensorType([_const(16)], DataType.FP32, original)
+    if kind == "var":
+        expression = Var("view", tensor_type, span)
+    elif kind == "iter_arg":
+        expression = ir.IterArg("carry", tensor_type, Var("initial", tensor_type, span), span)
+    elif kind == "call":
+        expression = ir.Call(ir.GlobalVar("callee"), [], {}, tensor_type, span)
+    else:
+        # Submit results wrap data with the task id; recurse through that tuple.
+        result_type = ir.TupleType([tensor_type, ir.ScalarType(DataType.TASK_ID)])
+        expression = ir.Submit(ir.GlobalVar("callee"), [], [], result_type, span)
+
+    class ReplaceWindow(IRMutator):
+        def visit_window_buffer(self, op: WindowBuffer) -> ir.Expr:
+            return replacement if op is original else super().visit_window_buffer(op)
+
+    after = ReplaceWindow().visit_expr(expression)
+    assert type(after) is type(expression)
+    result_type = after.type
+    if isinstance(result_type, ir.TupleType):
+        result_type = result_type.types[0]
+    assert isinstance(result_type, ir.DistributedTensorType)
+    assert result_type.window_buffer is replacement
+    # With no replacement, mutation must remain copy-on-write.
+    assert IRMutator().visit_expr(expression) is expression
 
 
 if __name__ == "__main__":
