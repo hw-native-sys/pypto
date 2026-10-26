@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pypto.language as pl
+import pypto.torch as pypto_torch
 import pytest
 import torch
 from pypto.ir import DistributedConfig
@@ -31,6 +32,13 @@ from pypto.torch import _registration_state, register, registration
 from torch._dynamo.testing import CompileCounterWithBackend
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+from tests.ut.jit import test_kernel_eager
+from tests.ut.jit.test_kernel_eager import scale_eager
+from tests.ut.torch.test_interop import _tensor
+
+eager = test_kernel_eager.eager
+prepared = test_kernel_eager.prepared
 
 
 def _param(name="x", shape=(-1, 3), dtype=DataType.FP32, direction=ParamDirection.In):
@@ -706,6 +714,85 @@ def test_public_registration_rejects_invalid_names(name):
 def test_public_registration_requires_jit_function(registered_namespace, kernel):
     with pytest.raises(TypeError, match="@pl.jit"):
         registration.register(kernel, f"{registered_namespace}::plain")
+
+
+def test_prepared_registration_skips_jit_and_validates_each_device_call(
+    prepared, registered_namespace, monkeypatch
+):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    ready = pypto_torch.prepare(scale_eager, x, 2.0, out)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Prepared registration or execution entered JIT analysis")
+
+    monkeypatch.setattr(JITFunction, "specialize", forbidden)
+    monkeypatch.setattr(JITFunction, "_resolve_compiled", forbidden)
+    name = f"{registered_namespace}::prepared"
+    op = register(ready, name)
+    assert register(ready, name) is op
+    assert not prepared.frames
+    mutation = getattr(torch.ops, registered_namespace)._pypto_prepared_mutate.default
+    keys = torch._C.DispatchKeySet(torch._C.DispatchKey.PrivateUse1)
+    # Exercise the actual device callback on CPU storage with the existing NPU
+    # metadata fixture; native execution remains stubbed at the enqueue boundary.
+    assert mutation.redispatch(keys, x, 3.0, out) is None
+    assert prepared.frames[-1].alias_result() is out
+    assert prepared.frames[-1].scalars[0].value == 3.0
+    with pytest.raises(ValueError, match="shape"):
+        mutation.redispatch(keys, _tensor((8, 4)), 3.0, out)
+    assert len(prepared.frames) == 1
+    with pytest.raises(RuntimeError, match="missing value"):
+        op(x, 3.0)
+    prepared.state.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        mutation.redispatch(keys, x, 3.0, out)
+
+
+def test_prepared_registration_fake_meta_and_compile(prepared, registered_namespace):
+    ready = pypto_torch.prepare(scale_eager, _tensor((4, 4)), 2.0, _tensor((4, 4)))
+    op = register(ready, f"{registered_namespace}::prepared")
+    # Metadata is self-contained and does not depend on a live registration.
+    prepared.state.close()
+    meta_x, meta_out = torch.empty((4, 4), device="meta"), torch.empty((4, 4), device="meta")
+    assert op(x=meta_x, scale=2.0, out=meta_out) is meta_out
+    with FakeTensorMode():
+        fake_x, fake_out = torch.empty(4, 4), torch.empty(4, 4)
+        assert op(fake_x, 2.0, fake_out) is fake_out
+    assert not prepared.frames
+
+    def execute(x, scale, out):
+        out.copy_(x * scale)
+
+    _cpu_fixture(registered_namespace, "prepared", execute)
+
+    def call(x, scale, out):
+        return op(x, scale, out)
+
+    compiled = torch.compile(call, backend="aot_eager", fullgraph=True)
+    x, out = torch.ones(4, 4), torch.empty(4, 4)
+    assert compiled(x, 3.0, out) is out
+    torch.testing.assert_close(out, x * 3)
+
+
+@pytest.mark.parametrize("options", [{"constexpr": {}}, {"config": CompileOptions()}])
+def test_prepared_registration_rejects_new_specialization_options(prepared, registered_namespace, options):
+    ready = pypto_torch.prepare(scale_eager, _tensor((4, 4)), 2.0, _tensor((4, 4)))
+    with pytest.raises(ValueError, match="already freezes"):
+        register(ready, f"{registered_namespace}::prepared", **options)
+    assert not any(
+        name.startswith(registered_namespace + "::") for name in torch._C._dispatch_get_all_op_names()
+    )
+
+
+def test_prepared_registration_preserves_existing_definition(prepared, registered_namespace):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    ready = pypto_torch.prepare(scale_eager, x, 2.0, out)
+    other = pypto_torch.prepare(scale_eager, x, 3.0, out)
+    name = f"{registered_namespace}::prepared"
+    op = register(ready, name)
+    with pytest.raises(ValueError, match="different definition"):
+        register(other, name)
+    assert register(ready, name) is op
 
 
 if __name__ == "__main__":

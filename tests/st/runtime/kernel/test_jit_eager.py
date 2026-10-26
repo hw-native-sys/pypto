@@ -40,6 +40,48 @@ def add_constant(
     return out
 
 
+def _run_prepared(device, counts):
+    import torch  # noqa: PLC0415
+    import torch_npu  # noqa: PLC0415
+    from pypto.jit.decorator import JITFunction  # noqa: PLC0415
+    from pypto.torch import prepare, register  # noqa: PLC0415
+
+    x = torch.full((16, 16), 2.0, device=f"npu:{device}")
+    acc, out = torch.zeros_like(x), torch.zeros_like(x)
+    update = prepare(accumulate, x, 1.0, acc)
+    add = prepare(add_constant, x, out, value=5)
+    registered = register(add, "pypto_prepared_st::add")
+    assert counts == dict(compile=2, frontend=2, init=1, prepare=2)
+    torch.testing.assert_close(acc.cpu(), torch.zeros(16, 16))
+    torch.testing.assert_close(out.cpu(), torch.zeros(16, 16))
+
+    def forbidden_resolve(*args, **kwargs):
+        raise AssertionError("prepared calls must not resolve JIT specializations")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(JITFunction, "_resolve_compiled", forbidden_resolve)
+        for step in (1.0, 3.0):
+            stream = torch_npu.npu.Stream(device=device)
+            with torch_npu.npu.stream(stream):
+                fresh = torch.full_like(x, step)
+                acc, out = torch.zeros_like(fresh), torch.empty_like(fresh)
+                assert update(fresh, step, acc) is acc
+                assert registered(fresh, out) is out
+                torch.testing.assert_close(acc.cpu(), torch.full((16, 16), step * step))
+                torch.testing.assert_close(out.cpu(), torch.full((16, 16), step + 5))
+        graph = torch_npu.npu.NPUGraph()
+        with torch_npu.npu.graph(graph):
+            assert update(x, 3.0, acc) is acc
+            assert registered(x, out) is out
+        x.fill_(4.0)
+        acc.zero_()
+        graph.replay()
+        torch.testing.assert_close(acc.cpu(), torch.full((16, 16), 12.0))
+        torch.testing.assert_close(out.cpu(), torch.full((16, 16), 9.0))
+        graph.reset()
+    assert counts == dict(compile=2, frontend=2, init=1, prepare=2)
+
+
 def _run(case, device, directory):
     import torch  # noqa: PLC0415
     import torch_npu  # noqa: PLC0415
@@ -96,6 +138,10 @@ def _run(case, device, directory):
             assert state._worker is None and counts == dict(compile=0, frontend=0, init=0, prepare=0)
             init()
             assert counts == dict(compile=0, frontend=0, init=1, prepare=0)
+            if case == "prepared":
+                _run_prepared(device, counts)
+                state.drain()
+                return
             stream = torch_npu.npu.Stream(device=device)
             with torch_npu.npu.stream(stream):
                 x = torch.full((16, 16), 2.0, device=f"npu:{device}")
@@ -143,7 +189,9 @@ def _isolated(case, device, directory):
         result.close()
 
 
-@pytest.mark.parametrize("case,queue_enabled", [("eager", 0), ("eager", 1), ("program", 1)])
+@pytest.mark.parametrize(
+    "case,queue_enabled", [("eager", 0), ("eager", 1), ("prepared", 0), ("prepared", 1), ("program", 1)]
+)
 def test_jit_eager(test_config, tmp_path, monkeypatch, case, queue_enabled):
     if test_config.codegen_only or test_config.platform != "a2a3":
         pytest.skip("Requires an A2/A3 NPU and the optional torch adapter")

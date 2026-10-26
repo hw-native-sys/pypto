@@ -2226,7 +2226,7 @@ class TestRenamedGeneratedFunction:
         2**100,
         "",
         "a\n'b",
-        "中文",
+        "\u4e2d\u6587",
         0.0,
         -0.0,
         float("inf"),
@@ -2237,7 +2237,9 @@ class TestRenamedGeneratedFunction:
     ],
 )
 def test_constant_text_matches_ast_rendering(value):
-    expected = ast.unparse(_render_free_value(value))
+    rendered = _render_free_value(value)
+    assert rendered is not None
+    expected = ast.unparse(rendered)
     assert specializer.constant_source(value) == expected
     assert specializer.free_name_source("value", {"value": value}) == expected
 
@@ -2278,7 +2280,9 @@ def test_literal_subclass_keeps_existing_rendering():
             return "custom_integer"
 
     value = NamedInt(1)
-    assert specializer.constant_source(value) == ast.unparse(_render_free_value(value))
+    rendered = _render_free_value(value)
+    assert rendered is not None
+    assert specializer.constant_source(value) == ast.unparse(rendered)
     assert specializer.constant_source(value) != specializer.constant_source(1)
 
 

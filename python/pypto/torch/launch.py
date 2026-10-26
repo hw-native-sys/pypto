@@ -12,7 +12,7 @@
 import importlib
 import struct
 from collections.abc import Hashable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from pypto._kernel_abi import SCALAR_FORMATS, SIMPLER_KERNEL_REVISION, TENSOR_DTYPE_TAGS, KernelABI
@@ -53,8 +53,9 @@ def enqueue(registration: KernelRegistration, args: Sequence[Any]) -> Any:
     return _enqueue_frame(registration, frame)
 
 
-def _describe(abi: KernelABI, args: Sequence[Any]) -> CallFrame:
-    params = [
+def _signature_params(abi: KernelABI) -> tuple[ParamInfo, ...]:
+    """Decode the immutable ABI without retaining any invocation arguments."""
+    return tuple(
         ParamInfo(
             p.name,
             getattr(ParamDirection, p.direction),
@@ -63,13 +64,47 @@ def _describe(abi: KernelABI, args: Sequence[Any]) -> CallFrame:
             layout=p.layout,
         )
         for p in abi.parameters
-    ]
-    return CallSignature(params, return_aliases=abi.return_aliases, platform=abi.platform).describe_call(args)
+    )
 
 
-def describe_eager_call(abi: KernelABI, args: Sequence[Any], bound: "KernelConfig") -> CallFrame:
+def _call_signature(abi: KernelABI) -> CallSignature:
+    return CallSignature(_signature_params(abi), return_aliases=abi.return_aliases, platform=abi.platform)
+
+
+@dataclass(frozen=True)
+class _LaunchPlan:
+    """Address-free signature and native encoders for one frozen kernel ABI."""
+
+    abi: KernelABI
+    signature: CallSignature
+    tensor_dtypes: tuple[int, ...]
+    scalar_packers: tuple[struct.Struct, ...]
+
+    @classmethod
+    def from_abi(cls, abi: KernelABI) -> "_LaunchPlan":
+        return cls(
+            abi,
+            _call_signature(abi),
+            tuple(TENSOR_DTYPE_TAGS[p.dtype] for p in abi.parameters if p.shape is not None),
+            tuple(struct.Struct(f"<{SCALAR_FORMATS[p.dtype]}") for p in abi.parameters if p.shape is None),
+        )
+
+
+def _describe(abi: KernelABI, args: Sequence[Any]) -> CallFrame:
+    return _call_signature(abi).describe_call(args)
+
+
+def describe_eager_call(
+    abi: KernelABI,
+    args: Sequence[Any],
+    bound: "KernelConfig",
+    *,
+    signature: CallSignature | None = None,
+) -> CallFrame:
     """Validate against the target bound by ``pypto.torch.init`` before compilation or registration."""
-    frame = _describe(abi, args)
+    # A prepared call reuses only the ABI interpretation. Tensor metadata,
+    # stream/capture state and ownership are always captured for this invocation.
+    frame = _describe(abi, args) if signature is None else signature.describe_call(args)
     for tensor in frame.tensors:
         meta = tensor.metadata
         if not 1 <= len(meta.shape) <= 5 or any(
@@ -102,7 +137,9 @@ def invoke(
     return _enqueue_frame(registration, frame)
 
 
-def _enqueue_frame(registration: KernelRegistration, frame: CallFrame) -> Any:
+def _enqueue_frame(
+    registration: KernelRegistration, frame: CallFrame, *, plan: _LaunchPlan | None = None
+) -> Any:
     registration.require_live()
     if frame.device_index != registration.owner.config.device_id:
         raise ValueError("Kernel call device differs from its process Worker device")
@@ -112,10 +149,18 @@ def _enqueue_frame(registration: KernelRegistration, frame: CallFrame) -> Any:
         from .capture import install_capture  # noqa: PLC0415
 
         install_capture(registration.owner).notice(capture_id)
-    scalar_bits = [
-        int.from_bytes(struct.pack(f"<{SCALAR_FORMATS[str(s.dtype)]}", s.value), "little")
-        for s in frame.scalars
-    ]
+    if plan is None:
+        scalar_bits = [
+            int.from_bytes(struct.pack(f"<{SCALAR_FORMATS[str(s.dtype)]}", s.value), "little")
+            for s in frame.scalars
+        ]
+        tensor_dtypes = [TENSOR_DTYPE_TAGS[str(t.metadata.dtype)] for t in frame.tensors]
+    else:
+        scalar_bits = [
+            int.from_bytes(packer.pack(s.value), "little")
+            for packer, s in zip(plan.scalar_packers, frame.scalars, strict=True)
+        ]
+        tensor_dtypes = plan.tensor_dtypes
 
     # The native constructor copies metadata and holds native Tensor/Storage owners.
     # No Python object is captured by the eventual taskQueue callback.
@@ -124,7 +169,7 @@ def _enqueue_frame(registration: KernelRegistration, frame: CallFrame) -> Any:
             worker.native_launch_target,
             registration.handle,
             [t.tensor for t in frame.tensors],
-            [TENSOR_DTYPE_TAGS[str(t.metadata.dtype)] for t in frame.tensors],
+            tensor_dtypes,
             scalar_bits,
             frame.stream.stream_id,
             frame.device_index,

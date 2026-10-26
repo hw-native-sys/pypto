@@ -57,6 +57,58 @@ their existing memory-management behavior. Kernel calls return `None` or exactly
 the original tensor objects selected by the IR return aliases, without allocating
 outputs or running a warmup invocation.
 
+## Preparing a frozen eager callable
+
+Use `pypto.torch.prepare` to remove repeated specialization analysis from a hot
+loop. Preparation requires `init` and real sample NPU arguments, compiles and
+registers one specialization, and **does not execute the kernel**:
+
+```python
+ready = pypto.torch.prepare(op, x, 2.0, out)
+ready(x, 3.0, out)
+ready(out=out, x=x, scale=4.0)
+
+# Bind the same prepared entry to the dispatcher, including torch.compile.
+registered = pypto.torch.register(ready, "my_kernels::prepared_op")
+registered(x, 5.0, out)
+```
+
+The returned `PreparedKernel` freezes source and referenced constants, constexpr
+bindings, static dimensions, dtype/layout, and effective compilation settings.
+It caches the ABI signature and native dtype/scalar encoders. Calls skip JIT
+dependency discovery, source hashing, specialization-key construction, and
+signature reconstruction. Ordinary JIT calls keep their existing change-detection
+semantics. Prepare a new object to pick up changed source, constants or options.
+Diagnostic output and cache policy apply during preparation, not on hot calls.
+
+Sample arguments follow the JIT signature, including constexpr values. Prepared
+calls accept only the runtime parameters in compiled ABI order, positionally or
+by name; every slot is required, including scalar defaults and all Out/InOut
+buffers. For example, `prepare(add_constant, x, out, value=2)` freezes the
+constexpr `value`, and the returned object is called as `ready(x, out)`.
+Passing constexpr values or `config` to that object is an error.
+
+Only signature data is reused. Each call validates current tensor shape, dtype,
+layout, storage bounds, writable aliases, device, scalar ranges, and the bound
+Worker's PID/generation. It snapshots the current stream/capture and scalar
+values and retains native Tensor/Storage ownership through submission. Fresh
+allocations and sizes admitted by dynamic dimensions are supported; changing a
+static dimension requires another preparation. The prepared object retains no
+sample tensors, device addresses or prior call frames, and becomes unusable
+after Worker shutdown or fork.
+
+Preparation must run outside graph capture and publishes the same warmed
+registration used by direct JIT calls. The prepared callable and its registered
+operator can then use the existing graph capture/replay lifetime integration.
+As with ordinary captured calls, replay uses captured addresses and scalar values.
+
+`register(ready, name)` derives its schema from the frozen ABI without running
+JIT specialization. Its real-device implementation calls `ready` directly;
+Fake/Meta validation and the mutation-only decomposition used by `torch.compile`
+remain available even after Worker shutdown. Do not supply `constexpr` or
+`config` to this registration form. The same prepared object and name can be
+registered repeatedly; a different prepared object requires a different name.
+
 ## Kernel execution setup
 
 Execution information is process state, not a call argument:

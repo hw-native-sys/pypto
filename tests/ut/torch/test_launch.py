@@ -113,5 +113,30 @@ def test_missing_or_incompatible_optional_adapter(monkeypatch):
     assert launch._load_native() is native
 
 
+def test_prepared_plan_reuses_encoders_and_native_submission(dispatch, monkeypatch):
+    from pypto.torch import PreparedKernel  # noqa: PLC0415
+
+    registration, calls, stream = dispatch
+    ready = PreparedKernel(registration)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("A prepared launch reconstructed its fixed ABI metadata")
+
+    monkeypatch.setattr(launch, "_signature_params", unexpected)
+    monkeypatch.setattr(interop.CallSignature, "__init__", unexpected)
+    scalar = ctypes.c_float(1.25)
+    outputs = [_tensor(), _tensor()]
+    assert ready(_tensor(), scalar, outputs[0], -7) is outputs[0]
+    scalar.value = 2.5
+    stream.stream_id = 33
+    assert ready(_tensor(), scalar, outputs[1], 9) is outputs[1]
+    first, second = calls
+    assert first[2][1] is outputs[0] and second[2][1] is outputs[1]
+    assert tuple(first[3]) == (0, 0)
+    assert first[4] == [int.from_bytes(struct.pack("<f", 1.25), "little"), 2**32 - 7]
+    assert second[4] == [int.from_bytes(struct.pack("<f", 2.5), "little"), 9]
+    assert first[5:] == (12, 0) and second[5:] == (33, 0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
