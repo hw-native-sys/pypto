@@ -450,6 +450,9 @@ class OpRegistryEntry {
         << "Operator '" + name_ +
                "' has no argument definition. Use .add_argument() or .no_argument() to define arguments.";
 
+    CHECK(pointwise_validity_args_.empty() || *pointwise_validity_args_.rbegin() < GetArgumentCount())
+        << "Operator '" << name_ << "' declares a pointwise validity argument outside its schema";
+
     CHECK(deduce_type_.has_value() || validate_explicit_type_.has_value())
         << "Operator '" + name_ + "' has no type deduction function or explicit type validator. "
         << "Use .f_deduce_type(), or .f_validate_explicit_type() for an internal Buffer operator.";
@@ -1013,8 +1016,9 @@ class OpRegistryEntry {
   void ValidateIRStage() const;
   void ValidateCall(const std::vector<ExprPtr>& args, const TypePtr& result_type, const Span& span) const;
 
-  /// Declare argument `arg_index` to be compiler-supplied scratch: the hardware
-  /// writes it, but it carries no result the caller reads. This is what
+  /// Declare argument `arg_index` to be scratch: the hardware writes it, but it
+  /// carries no result the caller reads. Its storage may be supplied by the
+  /// caller or compiler; shape and dtype requirements still apply. This
   /// separates a legitimate workspace — `tile.gather_compare`'s `tmp`, which
   /// `ConvertTensorToTileOps` synthesizes — from a destination tile leaked into
   /// the argument list, which `ValidateMultiOutputOps()` rejects.
@@ -1022,6 +1026,18 @@ class OpRegistryEntry {
     workspace_args_.insert(arg_index);
     return *this;
   }
+
+  /// Data arguments read at corresponding element indices. Automatic splitting
+  /// checks their valid regions for broadcast compatibility. Packed predicates,
+  /// geometric operands and scratch are not members: their units or read
+  /// regions differ, and the operator's type deduction validates those contracts.
+  /// An empty group leaves validity entirely to type deduction.
+  inline OpRegistryEntry& set_pointwise_validity_args(std::set<size_t> arg_indices) {
+    pointwise_validity_args_ = std::move(arg_indices);
+    return *this;
+  }
+
+  [[nodiscard]] const std::set<size_t>& GetPointwiseValidityArgs() const { return pointwise_validity_args_; }
 
   /// True when this operator declared its per-argument effects. False means the
   /// operator has never been classified — an analysis that needs the answer must
@@ -1203,8 +1219,9 @@ class OpRegistryEntry {
   bool output_arity_declared_{false};
   std::map<size_t, BufferArgEffect> buffer_arg_effects_;
   std::map<size_t, BufferResultSpec> buffer_results_;
-  std::set<size_t> workspace_args_;          ///< Args written as scratch rather than as results
-  std::optional<std::string> template_dir_;  ///< Package resource for builtin templates.
+  std::set<size_t> workspace_args_;           ///< Args written as scratch rather than as results
+  std::set<size_t> pointwise_validity_args_;  ///< Data args sharing element-indexed validity
+  std::optional<std::string> template_dir_;   ///< Package resource for builtin templates.
 };
 
 /**

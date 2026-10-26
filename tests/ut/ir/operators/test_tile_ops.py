@@ -5906,6 +5906,56 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.sel" in ir_str
 
+    @pytest.mark.parametrize(
+        ("src_shape", "src_valid", "mask_valid", "error"),
+        [
+            ([8, 64], [8, 64], [7, 8], "mask carrier"),
+            ([8, 64], [8, 64], [8, 7], "packed bytes"),
+            ([2, 16, 64], [2, 8, 60], [1, 8, 8], "mask carrier"),
+            ([2, 16, 64], [2, 8, 60], [2, 7, 8], "mask carrier"),
+        ],
+        ids=["missing-row", "missing-packed-byte", "missing-nd-batch", "missing-nd-row"],
+    )
+    def test_tile_sel_rejects_insufficient_packed_mask_coverage(
+        self, src_shape, src_valid, mask_valid, error
+    ):
+        """An allocated mask tail cannot supply predicates outside its valid region."""
+        span = ir.Span.unknown()
+        mask = ir.Var(
+            "mask",
+            ir.TileType([*src_shape[:-1], 32], DataType.UINT8, tile_view=ir.TileView(valid_shape=mask_valid)),
+            span,
+        )
+        lhs = _partial_tile(src_shape, src_valid, name="lhs")
+        rhs = _partial_tile(src_shape, src_valid, name="rhs")
+        tmp = ir.Var("tmp", ir.TileType([1, 16], DataType.UINT32), span)
+
+        with pytest.raises(ValueError, match=error):
+            tile.sel(mask, lhs, rhs, tmp)
+
+    @pytest.mark.parametrize(("mask_dtype", "valid_carriers"), [(DataType.UINT8, 8), (DataType.UINT32, 2)])
+    def test_tile_sel_accepts_nd_packed_mask_coverage(self, mask_dtype, valid_carriers):
+        """Each ND row needs eight predicate bytes for 60 initialized data elements."""
+        span = ir.Span.unknown()
+        mask = ir.Var(
+            "mask",
+            ir.TileType(
+                [2, 16, 32],
+                mask_dtype,
+                tile_view=ir.TileView(valid_shape=[2, 8, valid_carriers]),
+            ),
+            span,
+        )
+        lhs = _partial_tile([2, 16, 64], [2, 8, 60], name="lhs")
+        rhs = _partial_tile([2, 16, 64], [2, 8, 60], name="rhs")
+        tmp = ir.Var("tmp", ir.TileType([1, 16], DataType.UINT32), span)
+
+        result = tile.sel(mask, lhs, rhs, tmp)
+
+        assert _tile_result_dtype(result) == DataType.FP32
+        assert _tile_result_shape(result) == [2, 16, 64]
+        assert _valid_of(result.type) == [2, 8, 60]
+
 
 class TestTileScalarOperandDtype:
     """A constant scalar operand of a tile x scalar op adopts the tile dtype.
@@ -8464,8 +8514,16 @@ class TestWriteValidRegionUnion:
         with pytest.raises(ValueError, match="dimensions 0 and 1 at once"):
             tile.assemble(target, source, [20, 0])
 
+    def test_assemble_column_append_requires_matching_valid_rows(self):
+        """A narrower row prefix leaves a hole below the appended columns."""
+        target = self._partial_tile([8, 64], [8, 32], name="dst")
+        source = self._partial_tile([8, 16], [6, 16], name="src")
+
+        with pytest.raises(ValueError, match="must provably equal the target valid extent"):
+            tile.assemble(target, source, [0, 32])
+
     def test_assemble_validates_the_physical_source_subview(self):
-        """``pto.tinsert`` copies the whole subview, so all of it must fit.
+        """Fallback lowering materializes the physical subview, so all of it must fit.
 
         The tensor.assemble counterpart accepts this same write, because a tensor
         transfer moves only the source's valid region.
@@ -8484,8 +8542,12 @@ class TestWriteValidRegionUnion:
         target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
         source = self._partial_tile([48, 128], [8, 128], name="src")
 
-        with pytest.raises(ValueError, match="copies the whole source subview"):
+        with pytest.raises(ValueError, match="writes past the end of dimension 0") as exc_info:
             tile.assemble(target, source, [56, 0])
+        message = str(exc_info.value)
+        assert "destination subview with the source's physical shape" in message
+        assert "allocation must fit" in message
+        assert "only the source's valid region is transferred" in message
 
     def test_assemble_keeps_the_target_layout_while_narrowing(self):
         """A partial union must not cost the target its layout metadata."""

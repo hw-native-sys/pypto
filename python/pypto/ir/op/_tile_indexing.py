@@ -338,7 +338,11 @@ def gather_compare(
     :class:`Call` whose result type is a ``TupleType{dst, cdst}``::
 
         dst  : TileType, [rows, out_cols], INT32  — gathered indices
-        cdst : TileType, [1, rows],        count_dtype — per-row match count
+        cdst : TileType, [1, aligned_rows], count_dtype — per-row match count
+
+    ``aligned_rows`` rounds the source's physical row count up to a 32-byte
+    count row (eight INT32/UINT32 elements). The count tile's valid shape is
+    ``[1, src_valid_rows]``; padding adds capacity, not additional counts.
 
     The DSL form ``d, c = pl.tile.gather_compare(src, kvalue, tmp, ...)`` is
     desugared by the parser into ``_tuple = call; d = _tuple[0]; c = _tuple[1]``.

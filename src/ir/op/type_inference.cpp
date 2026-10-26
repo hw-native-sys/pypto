@@ -365,6 +365,29 @@ ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
   return ProofResult::kUnknown;
 }
 
+bool BroadcastValidRegionsAgree(const TileType& lhs, const TileType& rhs) {
+  const auto left = tile_view_semantics::GetEffectiveTileView(lhs).valid_shape;
+  const auto right = tile_view_semantics::GetEffectiveTileView(rhs).valid_shape;
+  if (left.size() != lhs.shape_.size() || right.size() != rhs.shape_.size()) return false;
+  const auto rank = std::max(left.size(), right.size());
+  for (size_t offset = 0; offset < rank; ++offset) {
+    if (offset >= left.size() || offset >= right.size()) continue;
+    const auto l = left.size() - 1 - offset;
+    const auto r = right.size() - 1 - offset;
+    const auto left_dim = As<ConstInt>(lhs.shape_[l]);
+    const auto right_dim = As<ConstInt>(rhs.shape_[r]);
+    const bool left_singleton = left_dim && left_dim->value_ == 1;
+    const bool right_singleton = right_dim && right_dim->value_ == 1;
+    if (left_singleton && ProveValidExtentEqual(left[l], lhs.shape_[l]) != ProofResult::kTrue) return false;
+    if (right_singleton && ProveValidExtentEqual(right[r], rhs.shape_[r]) != ProofResult::kTrue) return false;
+    if (left_singleton || right_singleton) continue;
+    // Use the same proof as operator valid-shape checks. Equivalent expressions
+    // such as n and n + 0 need not have identical IR structure.
+    if (ProveValidExtentEqual(left[l], right[r]) != ProofResult::kTrue) return false;
+  }
+  return true;
+}
+
 ProofResult ProveValidExtentLessEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
   if (!AreComparableIntegerScalarExprs(lhs, rhs)) {
     return ProofResult::kUnknown;

@@ -314,21 +314,12 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
   auto [logical_row, logical_col] = codegen.GetCurrentResultTpopValidShapeOperands();
 
-  // PTO's Cube->Vector FIFO copies the physical consumer box, at EVERY split.
-  // pto-isa builds the GM slot view from the popped tile's compile-time
-  // rows/cols and the producer's box row pitch (a2a3 TPush.hpp
-  // popVecTileFromGMFiFo: gmValidR/gmValidC = ConsM/ConsN, gmStrideR = ProdN),
-  // then strides that view with the tile's RUNTIME validCol (TLoadGm2ubNd2nd:
-  // lenBurst = validCol, but gmGap = gStride3 - gShape4). A narrowed validCol
-  // therefore collapses the GM gap to zero and the pop reads one contiguous
-  // run instead of one box row per burst -- silently, since the matching
-  // PTO_ASSERT(validCol == gShape4) is compiled out in release builds. Give
-  // TPOP the full-box extent, mirroring the producer-side widening in
-  // EmitTpushTransportValidShape, then restore the logical result shape before
-  // any vector consumer sees it. Keep a statically empty pop empty: the
-  // dual-AIV no-split path uses such a replay only to balance the pipe, and a
-  // split lane whose localized valid extent is statically 0 must likewise
-  // move nothing.
+  // The Cube->Vector producer transports the physical column box, while the
+  // a2a3 FIFO pop derives its GM row pitch from runtime validCol (twice
+  // validCol for LEFT_RIGHT). Preserve that pitch independently of the logical
+  // valid_shape, then restore the logical result before vector consumers.
+  // Keep a statically empty pop empty: the dual-AIV no-split replay balances
+  // the pipe, and a split lane with zero localized extent must also move nothing.
   auto result_tile_type = codegen.GetCurrentResultTileType();
   bool statically_empty = false;
   bool has_static_logical_shape = false;
@@ -348,14 +339,9 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   // tile CAN carry a dynamic physical extent (ReshapeSplitAxis lowers a dynamic
   // split axis to floordiv(dim, 2)). Without this the pop would reach that
   // INTERNAL_CHECK instead of falling back to the direct-TPOP path.
-  // An ODD split is the one case that must NOT take the full-box path: the two
-  // lanes pop different extents (ceil / floor), and pto-isa derives lane 1's
-  // slot offset from the popped tile's own RUNTIME valid extents
-  // (TILE_UP_DOWN_ODD: subAIVOffset = subBlockId * (validRow + subBlockId) *
-  // validCol). Widening either lane to the box would place lane 1 one cell past
-  // the producer's band. Such a tile carries a per-lane (non-static) valid
-  // extent anyway, so this only makes the requirement explicit.
-  const bool use_full_box =
+  // Odd lanes have different valid extents and must retain their direct
+  // per-lane TPOP operands rather than a static metadata rebind.
+  const bool use_static_transport =
       std::string_view(target) == "aic" && !ir::IsOddSplitCode(split) && !logical_row.empty() &&
       !logical_col.empty() && has_static_logical_shape && !statically_empty && result_tile_type &&
       result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec && result_tile_type->shape_.size() >= 2 &&
@@ -367,16 +353,44 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
       << "Internal error: " << op_name
       << " with an odd split must carry per-lane valid_row / valid_col operands; the split-axis "
          "localization in LowerAutoVectorSplit produces them";
+  const int lane_stride = op->GetKwarg<int>("lane_stride", 0);
+  INTERNAL_CHECK_SPAN(!op->HasKwarg("lane_stride") || lane_stride > 0, op->span_)
+      << "Internal error: " << op_name << " requires a positive lane_stride when present";
   std::string transport_row = logical_row;
   std::string transport_col = logical_col;
-  if (use_full_box) {
-    transport_row = EmitIndexOperand(codegen, result_tile_type->shape_[0], "tpop transport row");
+  if (use_static_transport) {
+    ExprPtr transport_row_expr = result_tile_type->shape_[0];
+    if (split != ir::kSplitNone && lane_stride > 0) {
+      const auto axis = static_cast<size_t>(ir::SplitAxisFromSplitCode(split));
+      const auto capacity = As<ir::ConstInt>(result_tile_type->shape_[axis]);
+      INTERNAL_CHECK_SPAN(lane_stride <= capacity->value_, op->span_)
+          << "Internal error: " << op_name << " lane_stride exceeds the physical lane capacity";
+      // A hardware-split transport has already assigned the lane's box before
+      // TPOP; changing its valid extent cannot relocate that physical band.
+      CHECK_SPAN(!codegen.GetBackendHandler()->SplitsCubeToVectorTransportInHardware() ||
+                     lane_stride == capacity->value_,
+                 op->span_)
+          << op_name << ": lane_stride must equal the physical lane capacity for hardware split transport";
+      // The default step is physical capacity, not the logical valid extent.
+      // A rebalanced UP_DOWN partition explicitly overrides it: validRow sets
+      // lane 1's FIFO origin, while validCol must retain the producer's pitch.
+      // LEFT_RIGHT couples its step and row pitch through 2 * validCol, so a
+      // smaller step cannot represent the producer's physical column pitch.
+      CHECK_SPAN(axis != 1 || lane_stride == capacity->value_, op->span_)
+          << op_name
+          << ": LEFT_RIGHT lane_stride must equal the physical lane capacity to preserve "
+             "the producer's row pitch";
+      if (axis == 0) {
+        transport_row_expr = std::make_shared<ir::ConstInt>(lane_stride, DataType::INDEX, op->span_);
+      }
+    }
+    transport_row = EmitIndexOperand(codegen, transport_row_expr, "tpop transport row");
     transport_col = EmitIndexOperand(codegen, result_tile_type->shape_[1], "tpop transport col");
   }
 
   // A frontend tpop result is not itself a locally bound tile in PTOAS, so
   // pto.set_validshape cannot mutate it directly. When transport uses the
-  // full physical box, pop into a temporary and expose the logical result via
+  // static transport extents, pop into a temporary and expose the logical result via
   // pto.treshape. PTOAS has a dedicated zero-copy treshape-over-tpop lowering
   // that preserves the FIFO tile handle while rebuilding its static valid
   // metadata. A full-box pto.subview is not equivalent here: PTOAS lowers that
@@ -385,7 +399,7 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   // Treshape carries no valid-row/valid-col operands, so it can restore only
   // static logical extents. Keep the existing direct TPOP behavior for dynamic
   // valid shapes until PTO exposes a dynamic metadata rebind for pipe entries.
-  std::string transport_buf = use_full_box ? codegen.NewNamedTemp("tpop_transport") : result_buf;
+  std::string transport_buf = use_static_transport ? codegen.NewNamedTemp("tpop_transport") : result_buf;
   std::ostringstream oss;
   oss << transport_buf << " = pto.tpop_from_" << target;
   if (!transport_row.empty() || !transport_col.empty()) {
@@ -398,13 +412,10 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     oss << " -> " << result_type;
   }
   codegen.Emit(oss.str());
-  if (use_full_box) {
-    const auto& shape = result_tile_type->shape_;
-    INTERNAL_CHECK_SPAN(As<ir::ConstInt>(shape[0]) && As<ir::ConstInt>(shape[1]), op->span_)
-        << "Internal error: full-box tpop localization requires a compile-time constant physical shape";
+  if (use_static_transport) {
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
     INTERNAL_CHECK_SPAN(!logical_type.empty(), op->span_)
-        << "Internal error: full-box tpop localization requires a logical tile type";
+        << "Internal error: static tpop localization requires a logical tile type";
     std::string logical_buf = codegen.NewNamedTemp("tpop_logical");
     codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
                  logical_type);

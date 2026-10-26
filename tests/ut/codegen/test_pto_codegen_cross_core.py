@@ -964,76 +964,24 @@ class TestCrossCoreTpushTpopCodegen:
         producer_code = self._row_narrowed_acc_push_program(8, 128, ir.CompactMode.normal, split=1, rows=16)
         assert "pto.tpush_to_aiv" in producer_code
 
-    def test_split_acc_to_vec_pop_uses_full_box_for_tpop(self):
-        """A split C2V pop transports the full per-lane box, not the logical valid box.
-
-        pto-isa builds the GM slot view of a Cube->Vector pop from the popped
-        tile's compile-time rows/cols and the producer's box row pitch, but
-        strides it with the tile's runtime validCol
-        (``gmGap = gStride3 - gShape4``, ``lenBurst = validCol``). A narrowed
-        validCol therefore collapses the GM gap to zero and the lane reads one
-        contiguous run instead of one box row per burst — silent data loss in
-        the *valid* region, since the matching PTO_ASSERT is compiled out in
-        release. This is the consumer-side counterpart of the producer-side
-        widening already asserted by
-        ``test_split_tpush_uses_full_box_transport_dims``.
-        """
+    @staticmethod
+    def _static_acc_to_vec_pop_code(
+        shape, valid_shape, *, split=1, lane_stride=None, backend_type=BackendType.Ascend910
+    ):
+        """Generate a static C2V consumer without running the split-lowering passes."""
         span = ir.Span.unknown()
-        zero = ir.ConstInt(0, pl.INDEX, span)
-        rows = ir.ConstInt(16, pl.INDEX, span)
-        cols = ir.ConstInt(32, pl.INDEX, span)
-        half_rows = ir.ConstInt(8, pl.INDEX, span)
-        valid_cols = ir.ConstInt(24, pl.INDEX, span)
-        offsets = ir.MakeTuple([zero, zero], span)
-        shape = ir.MakeTuple([rows, cols], span)
-        valid_shape = ir.MakeTuple([rows, valid_cols], span)
-
-        src = ir.Var("src", ir.TensorType([16, 32], pl.FP32), span)
-        acc_memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), 16 * 32 * 4, 0)
-        acc_type = ir.TileType(
-            [rows, cols],
-            pl.FP32,
-            acc_memref,
-            ir.TileView(valid_shape=[rows, valid_cols]),
-            ir.MemorySpace.Acc,
-        )
-        acc_tile = ir.Var("acc_tile", acc_type, span)
-        load_call = ir.Call(
-            ir.Op("tile.load"),
-            [src, offsets, shape, valid_shape],
-            {"target_memory": ir.MemorySpace.Acc},
-            acc_type,
-            span,
-        )
-        push_call = ir.Call(
-            ir.Op("tile.tpush_to_aiv"),
-            [acc_tile],
-            {"split": 1},
-            ir.UnknownType(),
-            span,
-        )
-        producer = ir.Function(
-            "split_acc_producer",
-            [(src, ir.ParamDirection.In)],
-            [],
-            ir.SeqStmts(
-                [ir.AssignStmt(acc_tile, load_call, span), ir.EvalStmt(push_call, span)],
-                span,
-            ),
-            span,
-            ir.FunctionType.AIC,
-        )
-
-        # Per-lane consumer half of an UP_DOWN split: [8, 32] box, logical [8, 24].
-        vec_type = ir.TileType(
-            [half_rows, cols],
+        tile_type = ir.TileType(
+            [ir.ConstInt(dim, pl.INDEX, span) for dim in shape],
             pl.FP32,
             None,
-            ir.TileView(valid_shape=[half_rows, valid_cols]),
+            ir.TileView(valid_shape=[ir.ConstInt(dim, pl.INDEX, span) for dim in valid_shape]),
             ir.MemorySpace.Vec,
         )
-        popped = ir.Var("popped", vec_type, span)
-        pop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 1}, vec_type, span)
+        kwargs = {"split": split}
+        if lane_stride is not None:
+            kwargs["lane_stride"] = lane_stride
+        popped = ir.Var("popped", tile_type, span)
+        pop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], kwargs, tile_type, span)
         consumer = ir.Function(
             "split_vec_consumer",
             [],
@@ -1042,13 +990,24 @@ class TestCrossCoreTpushTpopCodegen:
             span,
             ir.FunctionType.AIV,
         )
-
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-        mlir_code = codegen.PTOCodegen().generate(
-            ir.Program([producer, consumer], "split_acc_to_vec_program", span)
-        )
-        consumer_code = _extract_func_section(mlir_code, "split_vec_consumer")
+        backend.set_backend_type(backend_type)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([consumer], "split_acc_to_vec_program", span))
+        return _extract_func_section(mlir_code, "split_vec_consumer")
+
+    def test_split_acc_to_vec_pop_uses_full_box_for_tpop(self):
+        """A split C2V pop transports the full per-lane box, not the logical valid box.
+
+        The pinned pto-isa derives its GM slot rows/cols from GetValidRow and
+        GetValidCol. Its GM row stride is validCol for UP_DOWN and twice
+        validCol for LEFT_RIGHT. Narrowing validCol therefore changes the
+        producer's physical row pitch and silently reads the wrong data.
+        TPOP must preserve that pitch before treshape restores logical validity.
+        This is the consumer-side counterpart of the producer-side widening in
+        ``test_split_tpush_uses_full_box_transport_dims``.
+        """
+        # Per-lane consumer half of an UP_DOWN split: [8, 32] box, logical [8, 24].
+        consumer_code = self._static_acc_to_vec_pop_code([8, 32], [8, 24])
         consumer_lines = [line.strip() for line in consumer_code.splitlines()]
 
         pop_index = next(i for i, line in enumerate(consumer_lines) if "pto.tpop_from_aic" in line)
@@ -1067,6 +1026,58 @@ class TestCrossCoreTpushTpopCodegen:
         assert "rows=8, cols=32, v_row=8, v_col=24" in consumer_lines[reshape_index], (
             f"the logical per-lane valid shape must be restored by treshape:\n{consumer_code}"
         )
+
+    @pytest.mark.parametrize(
+        ("split", "shape", "valid_shape", "stride_kind"),
+        [
+            (1, [32, 128], [20, 128], "default"),
+            (1, [32, 128], [20, 128], "capacity"),
+            (1, [32, 128], [20, 128], "logical"),
+            (1, [32, 128], [20, 96], "default"),
+            (1, [32, 128], [20, 96], "capacity"),
+            (1, [32, 128], [20, 96], "logical"),
+            (2, [32, 64], [32, 20], "default"),
+            (2, [32, 64], [32, 20], "capacity"),
+        ],
+    )
+    def test_split_acc_to_vec_pop_preserves_partition_stride(self, split, shape, valid_shape, stride_kind):
+        """Narrow valid extents do not change the default physical partition stride.
+
+        A balanced logical partition may instead carry an explicit smaller stride.
+        Widening that split-axis extent to capacity would move lane 1's FIFO read.
+        """
+        axis = split - 1
+        stride = {"default": None, "capacity": shape[axis], "logical": valid_shape[axis]}[stride_kind]
+        consumer_code = self._static_acc_to_vec_pop_code(shape, valid_shape, split=split, lane_stride=stride)
+        pop_line = next(line.strip() for line in consumer_code.splitlines() if "pto.tpop_from_aic" in line)
+        transport_shape = list(shape)
+        if stride_kind == "logical":
+            transport_shape[axis] = stride
+        rows, cols = transport_shape
+        assert f"pto.tpop_from_aic(%c{rows}_index, %c{cols}_index) {{split = {split}}}" in pop_line, (
+            f"the split-axis transport extent must preserve the partition stride:\n{consumer_code}"
+        )
+        reshape_lines = [line for line in consumer_code.splitlines() if "pto.treshape" in line]
+        assert len(reshape_lines) == 1, consumer_code
+        transport = re.search(r"^(%\w+) = pto\.tpop_from_aic", pop_line)
+        assert transport is not None
+        assert f"pto.treshape {transport.group(1)}" in reshape_lines[0], consumer_code
+        assert (
+            f"rows={shape[0]}, cols={shape[1]}, v_row={valid_shape[0]}, v_col={valid_shape[1]}"
+            in reshape_lines[0]
+        ), consumer_code
+
+    def test_left_right_acc_to_vec_pop_rejects_stride_smaller_than_physical_columns(self):
+        """LEFT_RIGHT cannot change its lane offset without also changing the GM row pitch."""
+        with pytest.raises(ValueError, match="LEFT_RIGHT.*lane_stride.*physical"):
+            self._static_acc_to_vec_pop_code([32, 64], [32, 20], split=2, lane_stride=20)
+
+    def test_hardware_split_acc_to_vec_pop_rejects_stride_smaller_than_physical_rows(self):
+        """A hardware split already places each lane at its physical row band."""
+        with pytest.raises(ValueError, match="lane_stride.*physical.*hardware"):
+            self._static_acc_to_vec_pop_code(
+                [32, 128], [20, 128], lane_stride=20, backend_type=BackendType.Ascend950
+            )
 
     @pytest.mark.parametrize(
         (

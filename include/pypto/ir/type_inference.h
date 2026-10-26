@@ -935,6 +935,17 @@ inline bool ValidExtentsEqual(const std::vector<ExprPtr>& lhs, const std::vector
 }
 
 /**
+ * @brief Whether element-indexed tile inputs have compatible valid regions under broadcasting.
+ *
+ * Axes align from the right, as in BroadcastShapes. A physical singleton may
+ * broadcast only if its element is valid; other aligned axes must have provably
+ * equal valid extents. Physical broadcast compatibility is checked separately
+ * by the operator's type deduction. Packed predicate carriers and insertion
+ * windows have different read contracts and must not use this comparison.
+ */
+bool BroadcastValidRegionsAgree(const TileType& lhs, const TileType& rhs);
+
+/**
  * @brief Whether `cond_type` is the packed predicate mask for a `mask_model`.
  *
  * `tile.select` accepts exactly one condition form: the `tile.cmp` / `tile.cmps`

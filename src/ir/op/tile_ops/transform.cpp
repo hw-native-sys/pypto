@@ -711,8 +711,9 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
   }
 
   // The result holds what the target already held plus what was just written.
-  // ``pto.tinsert`` copies the whole source subview rather than consulting its
-  // valid extent, so the *physical* source is what has to fit inside the target.
+  // TINSERT transfers the source's valid region. Fallback lowering creates a
+  // destination subview with the source's physical shape before moving that
+  // region, so the source allocation must still fit inside the target.
   // As for tensor.assemble, the union is derivable only when the source, the
   // offsets, and the target share one rank; a rank-mismatched write is a
   // reinterpreting one whose axes do not correspond, and keeps its previous result.
@@ -729,9 +730,8 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
         /*kind=*/WriteBoundsKind::kExactSubview,
         /*op_name=*/"tile.assemble",
         /*bounds_remedy=*/
-        "tile.assemble lowers to pto.tinsert, which copies the whole source subview rather than only "
-        "its valid region, so the source allocation itself has to fit -- unlike tensor.assemble, "
-        "which transfers only the valid extent",
+        "tile.assemble may create a destination subview with the source's physical shape, so that "
+        "allocation must fit even though only the source's valid region is transferred",
         /*span=*/args[0]->span_,
     });
   }

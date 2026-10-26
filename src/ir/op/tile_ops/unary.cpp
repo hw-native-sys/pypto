@@ -328,18 +328,18 @@ REGISTER_OP("tile.rsqrt")
         "Passing an optional second tmp tile activates the high-precision PTO path.")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("tmp", "Optional scratch tile for high-precision path (TileType)")
+    // A2/A3 initializes tmp before reading it; incoming contents and validity
+    // are not source data. Its physical shape and dtype remain deducer checks.
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_workspace_arg(1)
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
-    // The high-precision path reads both the input and the tmp scratch while
-    // writing the output, so the output must not share a buffer with either
-    // (same constraint as tile.recip).
+    // The output must not share a buffer with the input or scratch during the
+    // high-precision computation.
     .not_inplace_safe()
-    // NOT declared lane-invariant: DeduceTileRsqrtType requires tmp to match the
-    // input's rank and every dimension, so a full-width tmp beside a halved input
-    // is already rejected by the auto-split pass's type-consistency check. A
-    // declaration here could never be reached, and would read as a contract the
-    // operator itself does not grant.
+    // Workspace is not a lane-invariant capacity declaration: tmp must still
+    // match the input's rank and every physical dimension after splitting.
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRsqrtType(args, kwargs, "tile.rsqrt");
