@@ -3,6 +3,12 @@
 Pull a prebuilt image that already carries CANN, PyPTO, and the runtime, and run a kernel
 on a real Ascend card without assembling a toolchain.
 
+This guide's introductory commands and image facts describe the legacy ARM A2/A3
+`a3-dist` image with CANN 9.0.0. For the CANN 9.2 ARM A2/A3, ARM A5 and x86 A5
+images, use the tags, drivers and validation cases in
+[Maintaining published images in CI](#maintaining-published-images-in-ci).
+Those tags become available after their first successful publishing run.
+
 ## Concept
 
 [Installation](01-installation.md) builds PyPTO from source and gives you the **compiler
@@ -146,7 +152,9 @@ fails because it enumerates every board while only the cards you exposed are pre
 driver compatibility for AICPU initialization. A missing CANN interpreter or an ACL probe
 that cannot execute is a blocking doctor failure. When `version.info` is readable,
 doctor enforces the runtime's supported pairs: CANN `9.0.0` with driver `26.0.rc1`,
-or CANN `9.1.T500` with driver `25.6.rc1.b108`. Unknown pairs fail validation.
+or CANN `9.1.T500` with driver `25.6.rc1.b108`. CANN 9.2 also accepts the
+architecture-specific deployment configurations in the CI image table below;
+those still require hardware validation. Unknown pairs fail validation.
 `ASCEND_DRIVER_ROOT` overrides the default driver directory `/usr/local/Ascend/driver`.
 
 Then run a kernel on the card:
@@ -549,6 +557,9 @@ that maintainers approve only trusted sources and reviewed code, including workf
 changes. This repository-wide policy affects all external PR workflows; pending
 approval also prevents their configuration checks from running. It does not isolate
 approved code. See [GitHub's fork workflow approval settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories).
+Scheduled runs become active only after this workflow is merged into the default
+branch (`main`). A matching change merged into `main` also triggers an immediate
+build and publication; configure the SWR secrets before merging.
 PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
 Manual runs validate without publishing by default; publication also requires `main`.
 
@@ -564,6 +575,8 @@ The A5 base is `9.2.0-950-ubuntu22.04-py3.11-devel`, pinned separately to its AR
 and AMD64 manifests. Architecture labels select the matching native A5 runner.
 Doctor restricts each CANN 9.2 A5 driver pair to its configured host architecture.
 The `pr` label selects the x86 runner; it does not restrict the workflow event type.
+The remaining planned combination is `x86-a2a3`: it needs a native X64 A2/A3 runner,
+an AMD64 CANN base digest, a verified driver pair and single-/two-card validation.
 The A2/A3 preflight additionally requires runner `227-npu-a2a3-XP-1`.
 If that label pool grows, assign the host a dedicated label and update `runners`.
 Each runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker, Ascend Docker Runtime and
@@ -636,7 +649,8 @@ publication still requires strict doctor and both hardware tests to pass. They a
 not general compatibility guarantees for other hosts.
 
 Validation uses fresh containers without source/cache volumes and sets
-`PYPTO_BENCH=0` for correctness checks. Each image config selects a single-card
+`PYPTO_BENCH=0` for correctness checks. Login and successful-build hints select
+DeepSeek SWA for `a5` and Qwen3 decode for `a2a3`. Each image config selects a single-card
 `decode` script and a two-card `distributed` script; optional `distributed_args`
 are passed as individual arguments. A2/A3 uses Qwen3-14B decode and pypto-lib's
 all-reduce example. A5 uses `models/deepseek_v4_1_flash/decode_swa.py` for SWA,
@@ -669,6 +683,8 @@ image becomes current. Retrying the same digest preserves the previous version.
 The first publication creates only current; the second distinct publication
 creates previous. Temporary tags are removed by tag name, never by shared digest.
 Successful publication retains only these two tags for each configured image.
+Configuration validation reserves both current and generated `-previous` tags across
+all images, rejecting collisions before any native job is scheduled.
 
 Legacy tags such as `a3-dist` and `a3-dist-20260918` are neither updated nor deleted
 by this workflow. Keep them until two new builds have passed hardware validation,

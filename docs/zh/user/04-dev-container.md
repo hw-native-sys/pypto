@@ -2,6 +2,11 @@
 
 拉取一个已经装好 CANN、PyPTO 和运行时的镜像，不用自己拼工具链，直接在真实昇腾卡上跑内核。
 
+本指南开头的命令和镜像信息描述旧版 ARM A2/A3 `a3-dist` 镜像（CANN 9.0.0）。
+CANN 9.2 的 ARM A2/A3、ARM A5 和 x86 A5 镜像，请使用
+[在 CI 中维护发布镜像](#在-ci-中维护发布镜像)中的标签、驱动和验证用例。
+这些标签在首次成功发布后才可拉取。
+
 ## 概念
 
 [安装](01-installation.md)从源码构建 PyPTO，得到的是**编译器前端** —— 足够写内核、读它降级出的
@@ -134,7 +139,8 @@ warn  npu-smi: npu get board type failed. ret is -9005 — expected under --runt
 而容器里只有你暴露的那几张。`device access: aclrtSetDevice(0) ok` 确认设备访问正常，
 但不能证明驱动兼容 AICPU 初始化。缺少 CANN 解释器或 ACL 探测无法执行时，doctor 会报告阻塞性失败。
 如果可以读取 `version.info`，doctor 会校验运行时支持的组合：CANN `9.0.0` 配驱动 `26.0.rc1`，
-或 CANN `9.1.T500` 配驱动 `25.6.rc1.b108`；未知组合无法通过校验。
+或 CANN `9.1.T500` 配驱动 `25.6.rc1.b108`。CANN 9.2 还接受下文 CI 镜像表中按架构区分的
+部署配置，但仍须通过上板验证。未知组合无法通过校验。
 可以用 `ASCEND_DRIVER_ROOT` 覆盖默认驱动目录 `/usr/local/Ascend/driver`。
 
 然后在卡上跑一个内核：
@@ -490,6 +496,8 @@ PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用
 并确保维护者只批准可信来源和经过审查的代码，包括 workflow 修改。这是仓库级策略，会影响所有外部 PR workflow；
 等待批准时，配置检查也不会运行。该设置不会隔离已经批准执行的代码。
 参见 [GitHub fork workflow 审批设置](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories)。
+定时任务在 workflow 合并到默认分支 `main` 后生效。匹配路径的改动合并到 `main` 时，
+也会立即触发构建发布；请在合并前配置 SWR Secrets。
 PR 不发布镜像，也不获取 SWR 凭据。
 硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
 
@@ -504,6 +512,8 @@ PR 不发布镜像，也不获取 SWR 凭据。
 A5 基础镜像为 `9.2.0-950-ubuntu22.04-py3.11-devel`，分别固定到 ARM64 和 AMD64 manifest。
 架构标签确保 A5 任务调度到匹配的原生 runner。doctor 将 CANN 9.2 A5 的驱动组合限定到对应宿主机架构。
 `pr` 标签用于选择 x86 runner，不限制 workflow 的触发事件类型。
+原计划中尚缺 `x86-a2a3`：需要原生 X64 A2/A3 runner、AMD64 CANN 基础镜像 digest、
+经过验证的驱动组合及单卡、双卡验证。
 A2/A3 预检还要求 runner 名称为 `227-npu-a2a3-XP-1`；若该标签池扩大，
 应为宿主机分配专用标签并更新 `runners`。
 每个 runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
@@ -560,6 +570,7 @@ CI 选择 simpler 的 `build_package_<validation_platform>` 和 `build_package_s
 不代表对其他宿主机的通用兼容保证。
 
 验证使用全新容器，不挂载源码或缓存卷，并设置 `PYPTO_BENCH=0` 执行正确性检查。
+登录和构建成功后的提示会为 `a5` 选择 DeepSeek SWA，为 `a2a3` 选择 Qwen3 decode。
 每个镜像配置通过 `decode` 选择单卡脚本，通过 `distributed` 选择双卡脚本；
 可选的 `distributed_args` 列表按独立参数传入。A2/A3 使用 Qwen3-14B decode 和 pypto-lib 的 all-reduce 示例。
 A5 使用 `models/deepseek_v4_1_flash/decode_swa.py` 验证 SWA、KV cache 和 MXFP8，
@@ -584,6 +595,7 @@ A5 使用 `models/deepseek_v4_1_flash/decode_swa.py` 验证 SWA、KV cache 和 M
 先将现有 `arm-a2a3-cann9.2-dist` 移到 `arm-a2a3-cann9.2-dist-previous`，再更新为新镜像。
 对相同 digest 重试不会覆盖前一个版本。首次发布仅创建最新标签；第二次不同镜像发布才创建前一个标签。
 临时标签按名称删除，绝不删除共用 digest。成功发布后，每个配置的镜像只保留这两个标签。
+配置检查会跨镜像预留最新标签及生成的 `-previous` 标签，在调度原生 job 前拒绝名称冲突。
 
 workflow 不会更新或删除 `a3-dist`、`a3-dist-20260918` 等旧标签。
 等两个新构建均通过上板验证、完成上传，且最新与前一个标签均可用后，再单独清理旧标签。

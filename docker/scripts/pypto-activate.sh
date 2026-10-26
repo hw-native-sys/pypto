@@ -35,7 +35,9 @@ if [ -z "$PYPTO_PLATFORM" ]; then
 fi
 
 _pypto_model_command() {
-    if [ -n "${PYPTO_PLATFORM:-}" ]; then
+    if [ "${PYPTO_PLATFORM:-}" = a5 ]; then
+        echo '    python $PYPTO_LIB_SRC/models/deepseek_v4_1_flash/decode_swa.py -p a5 -d ${PYPTO_DEVICE:-0}'
+    elif [ -n "${PYPTO_PLATFORM:-}" ]; then
         printf '    python $PYPTO_LIB_SRC/models/qwen3_14b/decode_fwd.py -p %s -d ${PYPTO_DEVICE:-0}\n' "$PYPTO_PLATFORM"
     else
         echo '    Set PYPTO_PLATFORM=a2a3 or a5 for model commands.'

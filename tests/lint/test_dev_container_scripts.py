@@ -771,6 +771,10 @@ def test_activation_guidance_uses_current_platform(
     assert ("Image build revisions:" in result.stdout) == manifest
     if expected:
         assert f" -p {expected} " in result.stdout
+        model = "deepseek_v4_1_flash/decode_swa.py" if expected == "a5" else "qwen3_14b/decode_fwd.py"
+        assert f"$PYPTO_LIB_SRC/models/{model} -p {expected} -d ${{PYPTO_DEVICE:-0}}" in result.stdout
+        if expected == "a5":
+            assert "qwen3_14b" not in result.stdout
     else:
         assert "Set PYPTO_PLATFORM=a2a3 or a5" in result.stdout
         assert " -p a2a3 " not in result.stdout
@@ -795,6 +799,10 @@ def test_build_suggests_selected_platform(container: dict[str, str], platform: s
     assert result.returncode == 0, result.stderr
     if platform is not None:
         assert f" -p {platform} " in result.stdout
+        model = "deepseek_v4_1_flash/decode_swa.py" if platform == "a5" else "qwen3_14b/decode_fwd.py"
+        assert f"$PYPTO_LIB_SRC/models/{model} -p {platform} -d ${{PYPTO_DEVICE:-0}}" in result.stdout
+        if platform == "a5":
+            assert "qwen3_14b" not in result.stdout
     else:
         assert "Set PYPTO_PLATFORM=a2a3 or a5" in result.stdout
         assert " -p a2a3 " not in result.stdout

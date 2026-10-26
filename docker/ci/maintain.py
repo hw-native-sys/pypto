@@ -90,9 +90,10 @@ def load_config(path: Path = CONFIG) -> dict[str, Any]:
     tags: set[str] = set()
     for name, image in config["images"].items():
         validate_image(name, image)
-        if image["tag"] in tags or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", image["tag"]):
-            raise ValueError(f"Duplicate or invalid image tag: {image['tag']}")
-        tags.add(image["tag"])
+        image_tags = {image["tag"], f"{image['tag']}-previous"}
+        if tags.intersection(image_tags) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", image["tag"]):
+            raise ValueError(f"Duplicate or invalid image tag (including rollback tags): {image['tag']}")
+        tags.update(image_tags)
     return config
 
 

@@ -89,6 +89,21 @@ def test_invalid_configuration_fails_before_scheduling(
         ci.load_config(path)
 
 
+@pytest.mark.parametrize(
+    "first,second", [("shared", "shared"), ("shared", "shared-previous"), ("shared-previous", "shared")]
+)
+def test_configuration_rejects_current_and_rollback_tag_collisions(
+    ci: ModuleType, tmp_path: Path, first: str, second: str
+) -> None:
+    config = ci.load_config()
+    config["images"]["arm-a2a3"]["tag"] = first
+    config["images"]["arm-a5"]["tag"] = second
+    path = tmp_path / "images.json"
+    ci.save(path, config)
+    with pytest.raises(ValueError, match="rollback tags"):
+        ci.load_config(path)
+
+
 def test_disabled_future_architecture_is_not_scheduled(
     ci: ModuleType, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
