@@ -169,8 +169,10 @@ Dynamic dimension names emitted from Tile annotations must use assignable Python
 identifiers in normalized spelling, must not be Python keywords, and must not
 shadow the DSL aliases `pl` or `pld`.
 Inlining substitutes the caller's Tile without
-copying it, preserving its valid shape. Tile parameters remain limited to
-inline helpers and are not added to device dispatch interfaces.
+copying it, preserving its valid shape. Specialization also retains evaluable
+Tile annotations on non-inline functions. This preserves their declarations
+without adding Tile arguments to device dispatch interfaces; ordinary InCore
+entry points still reject Tile parameters.
 
 ### Compile options and diagnostic requests
 

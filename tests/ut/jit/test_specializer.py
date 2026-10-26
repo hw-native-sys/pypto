@@ -16,6 +16,7 @@ import types
 import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -2157,32 +2158,17 @@ class TestArrayParamAnnotation:
         assert "buf: pl.Array[4, pl.BF16]" in out
         assert "BFLOAT16" not in out
 
-    def test_array_with_module_alias_and_dtype_constant(self):
-        """Folded dtype names remain evaluable without an original ``pl`` binding."""
+    @pytest.mark.parametrize("shadowed", [False, True])
+    def test_array_with_module_alias_and_dtype_constant(self, shadowed):
+        """Original aliases work whether canonical ``pl`` is absent or shadowed."""
         src = """
             def kernel(buf: p.Array[4, DTYPE]):
                 return buf
         """
-        out = self._specialize_with_globals(
-            src,
-            ["buf"],
-            {},
-            py_globals={"p": pl, "DTYPE": pl.BF16},
-        )
-        assert "buf: pl.Array[4, pl.BF16]" in out
-
-    def test_array_module_alias_ignores_unrelated_pl_global(self):
-        """Evaluate DTYPE where written, before generated names use canonical ``pl``."""
-        src = """
-            def kernel(buf: p.Array[4, DTYPE]):
-                return buf
-        """
-        out = self._specialize_with_globals(
-            src,
-            ["buf"],
-            {},
-            py_globals={"p": pl, "pl": object(), "DTYPE": pl.BF16},
-        )
+        namespace: dict[str, Any] = {"p": pl, "DTYPE": pl.BF16}
+        if shadowed:
+            namespace["pl"] = object()
+        out = self._specialize_with_globals(src, ["buf"], {}, py_globals=namespace)
         assert "buf: pl.Array[4, pl.BF16]" in out
 
     def test_annotation_evaluation_respects_original_pl_binding(self):
@@ -2262,6 +2248,46 @@ class TestArrayParamAnnotation:
         assert "x: pl.Array" not in out
 
 
+def _annotation_function(
+    func: Any, annotations: dict[str, Any], annotation_globals: dict[str, Any] | None = None
+) -> types.FunctionType:
+    """Clone annotation bindings without mutating the defining module's globals."""
+    clone = types.FunctionType(
+        func.__code__, {**func.__globals__, **(annotation_globals or {})}, func.__name__
+    )
+    clone.__annotations__ = annotations
+    return clone
+
+
+def _inline_context(
+    func: Any,
+    *,
+    tensor_meta: dict[str, TensorMeta] | None = None,
+    constexpr_values: dict[str, str] | None = None,
+) -> SpecializeContext:
+    """Build an inline annotation context without unrelated caller metadata."""
+    return build_specialize_context(
+        func,
+        func.__name__,
+        "inline",
+        None,
+        tensor_meta or {},
+        {},
+        [],
+        auto_scope=False,
+        constexpr_values=constexpr_values,
+    )
+
+
+def _specialized_function(ctx: SpecializeContext, source: str | None = None) -> ir.Function:
+    """Parse generated annotation source and retrieve its typed function."""
+    program = pl.parse(source if source is not None else specialize("_TestClass", [ctx]))
+    assert isinstance(program, ir.Program)
+    func = program.get_function(ctx.func_name)
+    assert func is not None
+    return func
+
+
 class TestInlineTileParamAnnotations:
     """Explicit Tile parameters must survive JIT signature specialization."""
 
@@ -2291,12 +2317,11 @@ class TestInlineTileParamAnnotations:
 
         helper = keep_tile
         if postponed:
-            helper = types.FunctionType(
-                keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
+            helper = _annotation_function(
+                keep_tile, {"tile": "pl.Tile[[dimension, 64], pl.FP32]"}, {"dimension": dimension}
             )
-            helper.__annotations__ = {"tile": "pl.Tile[[dimension, 64], pl.FP32]"}
         with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
-            ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+            ctx = _inline_context(helper)
             specialize("_TestClass", [ctx])
 
     @pytest.mark.parametrize("label", ["class", "for", "__debug__"])
@@ -2308,15 +2333,14 @@ class TestInlineTileParamAnnotations:
         def keep_tile(tile, ROWS):
             return tile
 
-        helper = types.FunctionType(
-            keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
-        )
         component = (
             "[[ROWS, 64], pl.FP32, pl.TileView(valid_shape=[dimension, 64])]"
             if metadata
             else "[[ROWS, dimension], pl.FP32]"
         )
-        helper.__annotations__ = {"tile": f"pl.Tile{component}", "ROWS": "pl.constexpr"}
+        helper = _annotation_function(
+            keep_tile, {"tile": f"pl.Tile{component}", "ROWS": "pl.constexpr"}, {"dimension": dimension}
+        )
         with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
             tile_annotation_fingerprints(helper)
 
@@ -2331,13 +2355,10 @@ class TestInlineTileParamAnnotations:
         def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
             return tile
 
-        ctx = build_specialize_context(keep_tile, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        ctx = _inline_context(keep_tile)
         source = specialize("_TestClass", [ctx])
         assert f'{label} = pl.dynamic("{label}")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        helper = program.get_function("keep_tile")
-        assert helper is not None
+        helper = _specialized_function(ctx, source)
         tile_type = helper.params[0].type
         assert isinstance(tile_type, ir.TileType)
         assert isinstance(tile_type.shape[0], ir.Var)
@@ -2396,7 +2417,7 @@ class TestInlineTileParamAnnotations:
             return tile
 
         with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
-            build_specialize_context(keep_tile, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+            _inline_context(keep_tile)
 
     @pytest.mark.parametrize("literal", ["pl", "__debug__"])
     def test_tensor_alias_with_reserved_literal_keeps_its_safe_binding(self, literal):
@@ -2428,30 +2449,19 @@ class TestInlineTileParamAnnotations:
 
         helper = keep_tile
         if postponed:
-            helper = types.FunctionType(
-                keep_tile.__code__, {**keep_tile.__globals__, "ROWS": ROWS}, keep_tile.__name__
+            helper = _annotation_function(
+                keep_tile,
+                {
+                    "anchor": "pl.Tensor[[8, 64], pl.FP32]",
+                    "tile": "pl.Tile[[ROWS, 64], pl.FP32]",
+                    "other": "pl.Tile[[ROWS, 64], pl.FP32]",
+                },
+                {"ROWS": ROWS},
             )
-            helper.__annotations__ = {
-                "anchor": "pl.Tensor[[8, 64], pl.FP32]",
-                "tile": "pl.Tile[[ROWS, 64], pl.FP32]",
-                "other": "pl.Tile[[ROWS, 64], pl.FP32]",
-            }
-        ctx = build_specialize_context(
-            helper,
-            "keep_tile",
-            "inline",
-            None,
-            {"anchor": TensorMeta((8, 64), DataType.FP32)},
-            {},
-            [],
-            auto_scope=False,
-        )
+        ctx = _inline_context(helper, tensor_meta={"anchor": TensorMeta((8, 64), DataType.FP32)})
         source = specialize("_TestClass", [ctx])
         assert f'{symbol_name} = pl.dynamic("{symbol_name}")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         for param in func.params[1:]:
             tile_type = param.type
             assert isinstance(tile_type, ir.TileType)
@@ -2469,20 +2479,15 @@ class TestInlineTileParamAnnotations:
 
         helper = keep_tile
         if postponed:
-            helper = types.FunctionType(
-                keep_tile.__code__, {**keep_tile.__globals__, "tile": tile}, keep_tile.__name__
+            helper = _annotation_function(
+                keep_tile,
+                {"tile": "pl.Scalar[pl.INDEX]", "value": "pl.Tile[[tile, 64], pl.FP32]"},
+                {"tile": tile},
             )
-            helper.__annotations__ = {
-                "tile": "pl.Scalar[pl.INDEX]",
-                "value": "pl.Tile[[tile, 64], pl.FP32]",
-            }
-        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        ctx = _inline_context(helper)
         source = specialize("_TestClass", [ctx])
         assert 'tile = pl.dynamic("tile")' not in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         tile_type = func.params[1].type
         assert isinstance(tile_type, ir.TileType)
         assert ir.structural_equal(tile_type.shape[0], func.params[0])
@@ -2503,21 +2508,8 @@ class TestInlineTileParamAnnotations:
             def keep_tile(tile: pl.Tile[[M, 64], pl.FP32], ROWS: pl.constexpr):
                 return tile
 
-        ctx = build_specialize_context(
-            keep_tile,
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"ROWS": str(rows)},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        ctx = _inline_context(keep_tile, constexpr_values={"ROWS": str(rows)})
+        func = _specialized_function(ctx)
         tile_type = func.params[0].type
         assert isinstance(tile_type, ir.TileType)
         assert isinstance(tile_type.shape[0], ir.Var)
@@ -2535,23 +2527,9 @@ class TestInlineTileParamAnnotations:
 
         # This hygiene case requires a source-evaluable free operand. A
         # factory-only operand erased inside a product is diagnosed separately.
-        helper = types.FunctionType(keep_tile.__code__, {**keep_tile.__globals__, "M": M}, keep_tile.__name__)
-        helper.__annotations__ = keep_tile.__annotations__
-        ctx = build_specialize_context(
-            helper,
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"ROWS": "8"},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        helper = _annotation_function(keep_tile, keep_tile.__annotations__, {"M": M})
+        ctx = _inline_context(helper, constexpr_values={"ROWS": "8"})
+        func = _specialized_function(ctx)
         span = ir.Span.unknown()
         ir.assert_structural_equal(
             func.params[0].type,
@@ -2573,15 +2551,11 @@ class TestInlineTileParamAnnotations:
 
         helper = keep_tile
         if postponed:
-            helper = types.FunctionType(
-                keep_tile.__code__, {**keep_tile.__globals__, "M": M}, keep_tile.__name__
+            helper = _annotation_function(
+                keep_tile, {"tile": "pl.Scalar[pl.INDEX]", "value": "pl.Tile[[M, tile], pl.FP32]"}, {"M": M}
             )
-            helper.__annotations__ = {
-                "tile": "pl.Scalar[pl.INDEX]",
-                "value": "pl.Tile[[M, tile], pl.FP32]",
-            }
         with pytest.raises(ValueError, match="Free dynamic symbol 'tile'.*Scalar parameter"):
-            ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+            ctx = _inline_context(helper)
             specialize("_TestClass", [ctx])
 
     @pytest.mark.parametrize("postponed", [False, True])
@@ -2599,19 +2573,18 @@ class TestInlineTileParamAnnotations:
 
         helper = keep_tile
         if postponed:
-            helper = types.FunctionType(keep_tile.__code__, dict(keep_tile.__globals__), keep_tile.__name__)
-            helper.__annotations__ = {
-                "count": "pl.Scalar[pl.INDEX]",
-                "tile": "pl.Tile[[8, 64], pl.FP32, "
-                "pl.TileView(valid_shape=[count, 64], start_offset=count.unwrap())]",
-            }
-        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+            helper = _annotation_function(
+                keep_tile,
+                {
+                    "count": "pl.Scalar[pl.INDEX]",
+                    "tile": "pl.Tile[[8, 64], pl.FP32, "
+                    "pl.TileView(valid_shape=[count, 64], start_offset=count.unwrap())]",
+                },
+            )
+        ctx = _inline_context(helper)
         source = specialize("_TestClass", [ctx])
         assert 'count = pl.dynamic("count")' not in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         tile_type = func.params[1].type
         assert isinstance(tile_type, ir.TileType)
         assert tile_type.tile_view is not None
@@ -2630,56 +2603,27 @@ class TestInlineTileParamAnnotations:
         assert ast.unparse(node) == source
 
     @pytest.mark.parametrize("dtype", ["FP32", "BF16"])
-    def test_explicit_tile_annotation_preserved(self, dtype):
+    @pytest.mark.parametrize("func_type", ["inline", "incore"])
+    def test_explicit_tile_annotation_preserved(self, dtype, func_type):
         ctx = _make_ctx(
             "keep_tile",
             f"""
                 def keep_tile(tile: pl.Tile[[8, 64], pl.{dtype}, pl.MemorySpace.Vec]) -> pl.Tile:
                     return tile
             """,
-            func_type="inline",
+            func_type=func_type,
             param_names=["tile"],
             auto_scope=False,
         )
         ctx.py_globals = {"pl": pl}
 
-        source = specialize("_TestClass", [ctx])
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
-        # Canonical enum spelling may change; the parsed Tile contract must
-        # preserve its physical axes, dtype and explicit memory space.
+        func = _specialized_function(ctx)
+        assert func.func_type == (ir.FunctionType.Inline if func_type == "inline" else ir.FunctionType.InCore)
         assert len(func.params) == 1
-        tile_type = func.params[0].type
-        assert isinstance(tile_type, ir.TileType)
-        for dim, extent in zip(tile_type.shape, [8, 64], strict=True):
-            assert isinstance(dim, ir.ConstInt)
-            assert dim.value == extent
-        assert tile_type.dtype == getattr(DataType, dtype)
-        assert tile_type.memory_space == ir.MemorySpace.Vec
-
-    def test_module_and_closure_constants_folded(self):
-        ctx = _make_ctx(
-            "keep_tile",
-            """
-                def keep_tile(tile: pl.Tile[SHAPE, DTYPE, SPACE]):
-                    return tile
-            """,
-            func_type="inline",
-            param_names=["tile"],
-            auto_scope=False,
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([8, 64], getattr(DataType, dtype), memory_space=ir.MemorySpace.Vec),
         )
-        ctx.py_globals = {"pl": pl, "SHAPE": [8, 64], "DTYPE": pl.BF16, "SPACE": pl.Mem.Vec}
-
-        source = specialize("_TestClass", [ctx])
-
-        assert "tile: pl.Tile[[8, 64], pl.BF16, pl.Mem.Vec]" in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
-        assert isinstance(func.params[0].type, ir.TileType)
 
     @pytest.mark.parametrize(
         "tile_name,view_name,memref_name,space_name",
@@ -2718,10 +2662,7 @@ class TestInlineTileParamAnnotations:
         source = specialize("_TestClass", [ctx])
         assert "tile: pl.Tile[[8, 64], pl.BF16," in source
         assert "pl.TileView(" in source and "pl.MemRef(" in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         expected_type = ir.TileType(
             [8, 64],
             DataType.BF16,
@@ -2737,83 +2678,28 @@ class TestInlineTileParamAnnotations:
         )
         ir.assert_structural_equal(func.params[0].type, expected_type, enable_auto_mapping=True)
 
-    def test_constexpr_alias_annotation_ignores_unrelated_pl_global(self):
-        """Decode generated constexpr paths separately from the user's module bindings."""
-        ctx = _make_ctx(
-            "keep_tile",
-            """
-                def keep_tile(tile: p.Tile[[ROWS * 2, 64], DTYPE, SPACE],
-                              ROWS: p.constexpr, DTYPE: p.constexpr, SPACE: p.constexpr):
-                    return tile
-            """,
-            func_type="inline",
-            param_names=["tile", "ROWS", "DTYPE", "SPACE"],
-            auto_scope=False,
-        )
-        ctx.py_globals = {"p": pl, "pl": object(), "ROWS": 99, "DTYPE": pl.FP32, "SPACE": pl.Mem.Acc}
-        ctx.constexpr_values = {"ROWS": "4", "DTYPE": "pl.BF16", "SPACE": "pl.Mem.Vec"}
-
-        source = specialize("_TestClass", [ctx])
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
-        assert len(func.params) == 1
-        # Annotation evaluation folds 4 * 2; verify the resulting contract
-        # rather than requiring the original arithmetic spelling.
-        ir.assert_structural_equal(
-            func.params[0].type,
-            ir.TileType([8, 64], DataType.BF16, memory_space=ir.MemorySpace.Vec),
-        )
-
     @pytest.mark.parametrize("shadowed", [False, True])
     def test_eager_factory_annotation_keeps_original_local_value(self, monkeypatch, shadowed):
         """An annotation-only local cannot be recovered from globals or closure cells."""
 
         def factory(tile_rows):
-            def keep_tile(tile: pl.Tile[[tile_rows, 64], pl.FP32, pl.Mem.Vec]):
+            dtype = pl.BF16
+            allocation = pl.MemRef("tile_buffer", 64, 2048)
+            view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
+
+            def keep_tile(tile: pl.Tile[[tile_rows, 64], dtype, allocation, pl.Mem.Vec, view]):
                 return tile
 
             return keep_tile
 
         helper = factory(8)
-        assert "tile_rows" not in helper.__code__.co_freevars
+        assert not helper.__code__.co_freevars
         if shadowed:
             # A same-named module global must not replace the local value that
             # Python already used when it evaluated the eager annotation.
             monkeypatch.setitem(helper.__globals__, "tile_rows", 99)
-        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
-
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
-        ir.assert_structural_equal(
-            func.params[0].type,
-            ir.TileType([8, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
-        )
-
-    def test_eager_factory_annotation_retains_all_metadata(self):
-        """Factory-only aliases and metadata objects survive canonical fallback rendering."""
-
-        def factory():
-            rows = 8
-            dtype = pl.BF16
-            allocation = pl.MemRef("tile_buffer", 64, 2048)
-            view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
-
-            def keep_tile(tile: pl.Tile[[rows, 64], dtype, allocation, pl.Mem.Vec, view]):
-                return tile
-
-            return keep_tile
-
-        helper = factory()
-        assert not helper.__code__.co_freevars
-        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        ctx = _inline_context(helper)
+        func = _specialized_function(ctx)
         original = helper.__annotations__["tile"]
         expected = ir.TileType(
             original.shape,
@@ -2834,9 +2720,7 @@ class TestInlineTileParamAnnotations:
         def entry(src: pl.Tensor[[M, 64], pl.FP32]):
             return src
 
-        helper_ctx = build_specialize_context(
-            keep_tile, "keep_tile", "inline", None, {}, {}, [], auto_scope=False
-        )
+        helper_ctx = _inline_context(keep_tile)
         entry_ctx = build_specialize_context(
             entry,
             "entry",
@@ -2848,10 +2732,7 @@ class TestInlineTileParamAnnotations:
         )
         source = specialize("_TestClass", [helper_ctx, entry_ctx])
         assert 'M = pl.dynamic("M")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        helper = program.get_function("keep_tile")
-        assert helper is not None
+        helper = _specialized_function(helper_ctx, source)
         tile_type = helper.params[0].type
         assert isinstance(tile_type, ir.TileType)
         assert isinstance(tile_type.shape[0], ir.Var)
@@ -2884,10 +2765,7 @@ class TestInlineTileParamAnnotations:
 
         source = specialize("_TestClass", [ctx])
         assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        helper = program.get_function("keep_tile")
-        assert helper is not None
+        helper = _specialized_function(ctx, source)
         tile_type = helper.params[0].type
         assert isinstance(tile_type, ir.TileType)
         assert "TILE_ROWS" in ir.python_print_type(tile_type)
@@ -2906,43 +2784,51 @@ class TestInlineTileParamAnnotations:
 
         helper = factory()
         assert not helper.__code__.co_freevars
-        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        ctx = _inline_context(helper)
         source = specialize("_TestClass", [ctx])
         assert 'TILE_VALID_ROWS = pl.dynamic("TILE_VALID_ROWS")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         assert "TILE_VALID_ROWS" in ir.python_print_type(func.params[0].type)
 
-    def test_source_tile_aggregate_and_metadata_constants_are_canonical(self):
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_source_tile_aggregate_and_metadata_constants_are_canonical(self, dynamic):
         """Evaluated generic shapes and metadata cannot remain undefined aliases."""
-        dimension = pl.dynamic("TILE_ROWS")
+        dimension = pl.dynamic("TILE_ROWS") if dynamic else 8
         allocation = pl.MemRef("tile_buffer", 64, 4096)
         view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
         ctx = _make_ctx(
             "keep_tile",
             """
-                def keep_tile(tile: pl.Tile[SHAPE, pl.BF16, ALLOCATION, pl.Mem.Vec, VIEW]):
+                def keep_tile(tile: pl.Tile[SHAPE, DTYPE, ALLOCATION, SPACE, VIEW]):
                     return tile
             """,
             func_type="inline",
             param_names=["tile"],
             auto_scope=False,
         )
-        ctx.py_globals = {"pl": pl, "SHAPE": [dimension, 64], "ALLOCATION": allocation, "VIEW": view}
+        ctx.py_globals = {
+            "pl": pl,
+            "SHAPE": [dimension, 64],
+            "DTYPE": pl.BF16,
+            "ALLOCATION": allocation,
+            "SPACE": pl.Mem.Vec,
+            "VIEW": view,
+        }
 
         source = specialize("_TestClass", [ctx])
-        assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
-        assert "SHAPE" not in source and "ALLOCATION" not in source and "VIEW" not in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        helper = program.get_function("keep_tile")
-        assert helper is not None
+        if dynamic:
+            assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
+        assert not any(name in source for name in ("SHAPE", "DTYPE", "SPACE", "ALLOCATION", "VIEW"))
+        helper = _specialized_function(ctx, source)
+        shape = (
+            [dimension.unwrap(), ir.ConstInt(64, DataType.INDEX, ir.Span.unknown())]
+            if isinstance(dimension, pl.Scalar)
+            else [dimension, 64]
+        )
         ir.assert_structural_equal(
             helper.params[0].type,
             ir.TileType(
-                [dimension.unwrap(), ir.ConstInt(64, DataType.INDEX, ir.Span.unknown())],
+                shape,
                 DataType.BF16,
                 memref=allocation,
                 tile_view=view,
@@ -2971,10 +2857,7 @@ class TestInlineTileParamAnnotations:
         source = specialize("_TestClass", [ctx])
         assert 'ROWS = pl.dynamic("ROWS")' not in source
         assert "tile: pl.Tile[[ROWS, 64], pl.FP32]" in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        helper = program.get_function("keep_tile")
-        assert helper is not None
+        helper = _specialized_function(ctx, source)
         tile_type = helper.params[1].type
         assert isinstance(tile_type, ir.TileType)
         assert ir.structural_equal(tile_type.shape[0], helper.params[0])
@@ -2987,21 +2870,8 @@ class TestInlineTileParamAnnotations:
         def keep_tile(tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr):
             return tile
 
-        ctx = build_specialize_context(
-            keep_tile,
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"ROWS": str(rows)},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        ctx = _inline_context(keep_tile, constexpr_values={"ROWS": str(rows)})
+        func = _specialized_function(ctx)
         ir.assert_structural_equal(
             func.params[0].type,
             ir.TileType([rows, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
@@ -3048,21 +2918,8 @@ class TestInlineTileParamAnnotations:
 
         helper = factory(64)
         assert not helper.__code__.co_freevars
-        ctx = build_specialize_context(
-            helper,
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"ROWS": str(rows)},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        ctx = _inline_context(helper, constexpr_values={"ROWS": str(rows)})
+        func = _specialized_function(ctx)
         original = helper.__annotations__["tile"]
         ir.assert_structural_equal(
             func.params[0].type,
@@ -3088,13 +2945,7 @@ class TestInlineTileParamAnnotations:
             if position == "first":
 
                 def keep_tile(
-                    tile: pl.Tile[
-                        [rows, 64],
-                        pl.FP32,
-                        SPACE,
-                        allocation,
-                        view,
-                    ],
+                    tile: pl.Tile[[rows, 64], pl.FP32, SPACE, allocation, view],
                     SPACE: pl.constexpr,
                 ):
                     return tile
@@ -3102,13 +2953,7 @@ class TestInlineTileParamAnnotations:
             else:
 
                 def keep_tile(
-                    tile: pl.Tile[
-                        [rows, 64],
-                        pl.FP32,
-                        view,
-                        allocation,
-                        SPACE,
-                    ],
+                    tile: pl.Tile[[rows, 64], pl.FP32, view, allocation, SPACE],
                     SPACE: pl.constexpr,
                 ):
                     return tile
@@ -3117,21 +2962,8 @@ class TestInlineTileParamAnnotations:
 
         helper = factory(8)
         assert not helper.__code__.co_freevars
-        ctx = build_specialize_context(
-            helper,
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"SPACE": f"pl.Mem.{space.name}"},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        ctx = _inline_context(helper, constexpr_values={"SPACE": f"pl.Mem.{space.name}"})
+        func = _specialized_function(ctx)
         original = helper.__annotations__["tile"]
         ir.assert_structural_equal(
             func.params[0].type,
@@ -3156,28 +2988,12 @@ class TestInlineTileParamAnnotations:
         ):
             return tile
 
-        raw = types.FunctionType(
-            keep_tile.__code__, {**keep_tile.__globals__, "dimension": dimension}, keep_tile.__name__
-        )
-        raw.__annotations__ = keep_tile.__annotations__
+        raw = _annotation_function(keep_tile, keep_tile.__annotations__, {"dimension": dimension})
         raw.__globals__["dimension"] = pl.dynamic(symbol_name)
-        ctx = build_specialize_context(
-            raw,
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"VALID": "4"},
-        )
+        ctx = _inline_context(raw, constexpr_values={"VALID": "4"})
         source = specialize("_TestClass", [ctx])
         assert f'{symbol_name} = pl.dynamic("{symbol_name}")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         tile_type = func.params[0].type
         assert isinstance(tile_type, ir.TileType)
         assert tile_type.tile_view is not None
@@ -3201,17 +3017,7 @@ class TestInlineTileParamAnnotations:
 
             return keep_tile
 
-        ctx = build_specialize_context(
-            factory(8),
-            "keep_tile",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"USE_VIEW": "True"},
-        )
+        ctx = _inline_context(factory(8), constexpr_values={"USE_VIEW": "True"})
         with pytest.raises(ValueError, match="must retain its original MemorySpace kind, got TileView"):
             specialize("_TestClass", [ctx])
 
@@ -3234,17 +3040,7 @@ class TestInlineTileParamAnnotations:
         helper = factory(3)
         assert not helper.__code__.co_freevars
         with pytest.raises(ValueError, match="Cannot recover.*padding.*ROWS \\+ padding"):
-            build_specialize_context(
-                helper,
-                "keep_tile",
-                "inline",
-                None,
-                {},
-                {},
-                [],
-                auto_scope=False,
-                constexpr_values={"ROWS": "8"},
-            )
+            _inline_context(helper, constexpr_values={"ROWS": "8"})
 
     def test_eager_factory_axis_keeps_runtime_scalar_in_local_scope(self):
         """Replacing an ambient generic axis must not declare its obsolete symbol."""
@@ -3258,70 +3054,49 @@ class TestInlineTileParamAnnotations:
 
         helper = factory(64)
         assert not helper.__code__.co_freevars
-        ctx = build_specialize_context(helper, "keep_tile", "inline", None, {}, {}, [], auto_scope=False)
+        ctx = _inline_context(helper)
         source = specialize("_TestClass", [ctx])
         assert "AMBIENT_ROWS" not in source
         assert 'ROWS = pl.dynamic("ROWS")' not in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
+        func = _specialized_function(ctx, source)
         tile_type = func.params[1].type
         assert isinstance(tile_type, ir.TileType)
         assert ir.structural_equal(tile_type.shape[0], func.params[0])
         assert isinstance(tile_type.shape[1], ir.ConstInt)
         assert tile_type.shape[1].value == 64
 
-    @pytest.mark.parametrize("rows", [4, 8])
-    @pytest.mark.parametrize("shadowed", [False, True])
-    def test_constexpr_folded_before_annotation_evaluation(self, rows, shadowed):
+    @pytest.mark.parametrize(
+        "rows,alias,shadowed",
+        [(4, "pl", False), (4, "pl", True), (8, "pl", False), (8, "pl", True), (4, "p", True)],
+    )
+    def test_constexpr_folded_before_annotation_evaluation(self, rows, alias, shadowed):
+        """Call bindings override ambient values and decode separately from original DSL aliases."""
         ctx = _make_ctx(
             "keep_tile",
-            """
-                def keep_tile(tile: pl.Tile[[ROWS * 2, 64], DTYPE, SPACE],
-                              ROWS: pl.constexpr, DTYPE: pl.constexpr, SPACE: pl.constexpr):
+            f"""
+                def keep_tile(tile: {alias}.Tile[[ROWS * 2, 64], DTYPE, SPACE],
+                              ROWS: {alias}.constexpr, DTYPE: {alias}.constexpr, SPACE: {alias}.constexpr):
                     return tile
             """,
             func_type="inline",
             param_names=["tile", "ROWS", "DTYPE", "SPACE"],
             auto_scope=False,
         )
-        ctx.py_globals = {"pl": pl}
+        ctx.py_globals = {alias: pl}
         if shadowed:
             ctx.py_globals.update(ROWS=99, DTYPE=pl.FP32, SPACE=pl.Mem.Acc)
+        if alias == "p":
+            ctx.py_globals["pl"] = object()
         ctx.constexpr_values = {"ROWS": str(rows), "DTYPE": "pl.BF16", "SPACE": "pl.Mem.Vec"}
 
         source = specialize("_TestClass", [ctx])
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        func = program.get_function("keep_tile")
-        assert func is not None
-
+        func = _specialized_function(ctx, source)
         assert len(func.params) == 1
-        tile_type = func.params[0].type
-        assert isinstance(tile_type, ir.TileType)
-        for dim, extent in zip(tile_type.shape, [rows * 2, 64], strict=True):
-            assert isinstance(dim, ir.ConstInt)
-            assert dim.value == extent
-        assert tile_type.dtype == DataType.BF16
-        assert tile_type.memory_space == ir.MemorySpace.Vec
-        assert "ROWS" not in source and "DTYPE" not in source and "SPACE" not in source
-
-    def test_tile_annotation_retention_is_inline_only(self):
-        ctx = _make_ctx(
-            "kernel",
-            """
-                def kernel(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]):
-                    return tile
-            """,
-            func_type="incore",
-            param_names=["tile"],
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([rows * 2, 64], DataType.BF16, memory_space=ir.MemorySpace.Vec),
         )
-        ctx.py_globals = {"pl": pl}
-
-        source = specialize("_TestClass", [ctx])
-
-        assert "def kernel(self, tile):" in source
+        assert "ROWS" not in source and "DTYPE" not in source and "SPACE" not in source
 
 
 class TestTensorLayoutAnnotation:
@@ -3447,13 +3222,8 @@ class TestInlineTupleTileAnnotations:
         ):
             return pair[1]
 
-        ctx = build_specialize_context(
-            keep, "keep", "inline", None, {}, {}, [], auto_scope=False, constexpr_values={"ROWS": "16"}
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        function = program.get_function("keep")
-        assert function is not None
+        ctx = _inline_context(keep, constexpr_values={"ROWS": "16"})
+        function = _specialized_function(ctx)
         pair = function.params[0].type
         assert isinstance(pair, ir.TupleType)
         tensor = pair.types[0]
@@ -3488,21 +3258,8 @@ class TestInlineTupleTileAnnotations:
             ):
                 return pair[0]
 
-        ctx = build_specialize_context(
-            keep,
-            "keep",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"DTYPE": "pl.INDEX"},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        function = program.get_function("keep")
-        assert function is not None
+        ctx = _inline_context(keep, constexpr_values={"DTYPE": "pl.INDEX"})
+        function = _specialized_function(ctx)
         pair = function.params[0].type
         assert isinstance(pair, ir.TupleType)
         scalar = pair.types[1]
@@ -3512,15 +3269,14 @@ class TestInlineTupleTileAnnotations:
         def keep(pair, ROWS):
             return pair[1]
 
-        helper = types.FunctionType(
-            keep.__code__,
-            {**keep.__globals__, "VIEW": pl.TileView(valid_shape=[3, 64])},
-            keep.__name__,
+        helper = _annotation_function(
+            keep,
+            {
+                "pair": "pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[ROWS, 64], pl.FP32, VIEW]]",
+                "ROWS": "pl.constexpr",
+            },
+            {"VIEW": pl.TileView(valid_shape=[3, 64])},
         )
-        helper.__annotations__ = {
-            "pair": "pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[ROWS, 64], pl.FP32, VIEW]]",
-            "ROWS": "pl.constexpr",
-        }
         before = tile_annotation_fingerprints(helper)
         helper.__globals__["VIEW"] = pl.TileView(valid_shape=[2, 64])
         assert tile_annotation_fingerprints(helper) != before
@@ -3541,23 +3297,19 @@ class TestInlineTupleTileAnnotations:
 
         helper = keep
         if postponed:
-            helper = types.FunctionType(
-                keep.__code__,
-                {**keep.__globals__, "rows": rows, "view": view, "TupleAlias": pl.Tuple},
-                keep.__name__,
+            helper = _annotation_function(
+                keep,
+                {
+                    "pair": "TupleAlias[pl.Scalar[pl.INDEX], TupleAlias[pl.Tensor[[8, 64], pl.FP32], "
+                    "pl.Tile[[rows, 64], pl.FP32, pl.Mem.Vec, view]]]"
+                },
+                {"rows": rows, "view": view, "TupleAlias": pl.Tuple},
             )
-            helper.__annotations__ = {
-                "pair": "TupleAlias[pl.Scalar[pl.INDEX], TupleAlias[pl.Tensor[[8, 64], pl.FP32], "
-                "pl.Tile[[rows, 64], pl.FP32, pl.Mem.Vec, view]]]"
-            }
-        ctx = build_specialize_context(helper, "keep", "inline", None, {}, {}, [], auto_scope=False)
+        ctx = _inline_context(helper)
         source = specialize("_TestClass", [ctx])
         assert 'TUPLE_TILE_ROWS = pl.dynamic("TUPLE_TILE_ROWS")' in source
         assert 'TUPLE_VALID_ROWS = pl.dynamic("TUPLE_VALID_ROWS")' in source
-        program = pl.parse(source)
-        assert isinstance(program, ir.Program)
-        function = program.get_function("keep")
-        assert function is not None
+        function = _specialized_function(ctx, source)
         pair = function.params[0].type
         assert isinstance(pair, ir.TupleType)
         assert isinstance(pair.types[0], ir.ScalarType)
@@ -3591,21 +3343,8 @@ class TestInlineTupleTileAnnotations:
             return keep
 
         helper = factory(64)
-        ctx = build_specialize_context(
-            helper,
-            "keep",
-            "inline",
-            None,
-            {},
-            {},
-            [],
-            auto_scope=False,
-            constexpr_values={"FIRST": "16", "SECOND": "8", "SPACE": "pl.Mem.Vec"},
-        )
-        program = pl.parse(specialize("_TestClass", [ctx]))
-        assert isinstance(program, ir.Program)
-        function = program.get_function("keep")
-        assert function is not None
+        ctx = _inline_context(helper, constexpr_values={"FIRST": "16", "SECOND": "8", "SPACE": "pl.Mem.Vec"})
+        function = _specialized_function(ctx)
         pair = function.params[0].type
         assert isinstance(pair, ir.TupleType)
         nested = pair.types[1]
@@ -3624,12 +3363,11 @@ class TestInlineTupleTileAnnotations:
         def keep(pair):
             return pair[1]
 
-        helper = types.FunctionType(
-            keep.__code__,
-            {**keep.__globals__, "CONTRACT": pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[8, 64], pl.FP32]]},
-            keep.__name__,
+        helper = _annotation_function(
+            keep,
+            {"pair": "CONTRACT"},
+            {"CONTRACT": pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[8, 64], pl.FP32]]},
         )
-        helper.__annotations__ = {"pair": "CONTRACT"}
         before = tile_annotation_fingerprints(helper)
         helper.__globals__["CONTRACT"] = pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[16, 64], pl.FP32]]
         assert tile_annotation_fingerprints(helper) != before
@@ -3639,16 +3377,16 @@ class TestInlineTupleTileAnnotations:
             return pair[1]
 
         with pytest.raises(ValueError, match="Tuple annotation.*incomplete"):
-            build_specialize_context(keep, "keep", "inline", None, {}, {}, [], auto_scope=False)
+            _inline_context(keep)
 
     def test_unsupported_tensor_subclass_in_tuple_is_not_rendered_as_plain_tensor(self):
         def keep(pair: pl.Tuple[pld.DistributedTensor[[8, 64], pl.FP32], pl.Tile[[8, 64], pl.FP32]]):
             return pair[1]
 
         with pytest.raises(ValueError, match="Tuple annotation.*unsupported type.*path \\(0,\\)"):
-            build_specialize_context(keep, "keep", "inline", None, {}, {}, [], auto_scope=False)
+            _inline_context(keep)
 
-    def test_tuple_tile_annotation_remains_inline_only(self):
+    def test_tuple_tile_annotation_is_preserved_for_non_inline_function(self):
         ctx = _make_ctx(
             "keep",
             "def keep(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32]]):\n    return pair[0]",
@@ -3657,7 +3395,9 @@ class TestInlineTupleTileAnnotations:
             auto_scope=False,
         )
         ctx.py_globals = {"pl": pl}
-        assert "def keep(self, pair):" in specialize("_TestClass", [ctx])
+        func = _specialized_function(ctx)
+        assert func.func_type == ir.FunctionType.InCore
+        ir.assert_structural_equal(func.params[0].type, ir.TupleType([ir.TileType([8, 64], DataType.FP32)]))
 
 
 if __name__ == "__main__":
