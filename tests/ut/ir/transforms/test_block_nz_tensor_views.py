@@ -1969,6 +1969,16 @@ def test_rejects_acc_nz_store_on_a5(ascend_backend):
         passes.block_nz_tensor_views()(_nz_store_program())
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_isolated_auto_tiling_rejects_unsupported_nz_store_backend(ascend_backend):
+    """The isolated logical-NZ entry must diagnose an unsupported backend too."""
+    before = _wide_acc_nz_program()
+    for factory in _PREFIX[:-1]:
+        before = factory()(before)
+    with pytest.raises(ValueError, match="NZ tile.store is supported only on A2/A3"):
+        passes.auto_tile_matmul_l0()(before)
+
+
 @pytest.mark.usefixtures("ascend_backend")
 def test_rejects_acc_nz_store_with_unknown_column_offset():
     """An arbitrary INDEX parameter is neither aligned nor provably non-negative."""

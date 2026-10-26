@@ -128,7 +128,7 @@ GM 布局读取 `TensorType::tensor_view_`（省略时为 ND），片上配置�
 描述目标分区；`tile.slice(tile, shape, offsets, valid_shape)` 的第四项描述有效区域。
 不能仅凭参数数量判定布局或 pitch。
 
-`pypto/ir/transforms/utils/registered_call_utils.h` 中的
+`pypto/ir/transforms/utils/transform_utils.h` 中的
 `transform_utils::RebuildRegisteredCall(original, new_args, remap_expr)` 共享
 registry 类型推导和 Expr 元数据保留逻辑。调用方提供 SSA 替换回调，并决定哪些
 替换值是终点，避免沿新循环携带值的 initializer 回溯到自身。工具不根据参数位置

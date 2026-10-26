@@ -75,6 +75,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -90,22 +91,24 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/nz_store_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -515,12 +518,53 @@ class BlockNzMutator : public IRMutator {
   /// would lose the NZ column-block / row-fractal axes.
   std::vector<ExprPtr> BlockTileStoreArgs(const CallPtr& op, std::vector<ExprPtr> args,
                                           const std::vector<ExprPtr>& logical_shape) {
+    INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, op->span_)
+        << "Internal error: tile.store expects (tile, offsets, tensor[, shapes])";
     const auto* ctx = PassContext::Current();
     const backend::BackendHandler* handler = nullptr;
     if (backend::BackendConfig::IsConfigured()) {
       handler = ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
     }
-    const auto valid = nz_store_utils::CheckSourceAndAttrs(op, handler);
+    auto tile = As<TileType>(op->args_[0]->GetType());
+    auto tensor = AsTensorTypeLike(op->args_[2]->GetType());
+    INTERNAL_CHECK_SPAN(tile && tensor, op->span_)
+        << "Internal error: NZ tile.store requires a tile source and tensor destination";
+    CHECK_SPAN(tile->dtype_ == DataType::FP32 && tensor->dtype_ == DataType::FP32 &&
+                   tile->GetMemorySpace() == MemorySpace::Acc,
+               op->span_)
+        << "NZ tile.store supports only an FP32 Acc tile into an FP32 NZ tensor. "
+        << "Use an FP32 matmul accumulator, or store to pl.ND.";
+    CHECK_SPAN(handler && handler->GetAccToNzGmStoreMaxCols() > 0, op->span_)
+        << "NZ tile.store is supported only on A2/A3. Store to pl.ND on this backend.";
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    const auto& valid = view.valid_shape;
+    CHECK_SPAN(tile->shape_.size() == 2 && valid.size() == 2, op->span_)
+        << "NZ tile.store requires a two-dimensional Acc tile.";
+    CHECK_SPAN(view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major &&
+                   view.fractal == tile_view_semantics::kAccFractal,
+               op->span_)
+        << "NZ tile.store requires the ordinary NZ-boxed Acc layout.";
+    // Validate authoring semantics here, before choosing physical Acc tiles.
+    // N and L0C capacity may exceed one instruction until automatic tiling;
+    // M stays whole and must already fit TStoreAccNz2nz's 16-bit row field.
+    constexpr auto max_rows = std::numeric_limits<uint16_t>::max();
+    for (size_t axis = 0; axis < 2; ++axis) {
+      auto physical = As<ConstInt>(tile->shape_[axis]);
+      auto extent = As<ConstInt>(valid[axis]);
+      CHECK_SPAN(physical && extent && physical->value_ == extent->value_ && extent->value_ > 0 &&
+                     extent->value_ % 16 == 0 && (axis != 0 || extent->value_ <= max_rows),
+                 op->span_)
+          << "NZ tile.store requires a static, fully valid Acc tile with rows and columns divisible by 16, "
+          << "and rows <= " << max_rows << ". Partial or dynamic Acc tiles are not supported.";
+    }
+    CHECK_SPAN(op->GetKwarg<int>("atomic", 0) == static_cast<int>(AtomicType::kNone) &&
+                   !GetOptionalDoubleKwarg(op->kwargs_, "pre_quant").has_value() &&
+                   !op->GetKwarg<bool>("pre_relu", false),
+               op->span_)
+        << "NZ tile.store does not support atomic, pre_quant, or pre_relu. Use a plain FP32 writeback.";
+    CHECK_SPAN(IsValidSTPhase(op->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified))),
+               op->span_)
+        << "NZ tile.store st_phase must be STPhase.Unspecified or STPhase.Final.";
     auto offsets = As<MakeTuple>(args[1]);
     INTERNAL_CHECK_SPAN(offsets, op->span_) << "Internal error: tile.store offsets must be a MakeTuple";
     const size_t rank = logical_shape.size();
@@ -563,9 +607,24 @@ class BlockNzMutator : public IRMutator {
     } else {
       args.push_back(sizes);
     }
-    auto blocked_store =
-        std::make_shared<Call>(op->op_, args, op->kwargs_, op->attrs_, args[2]->GetType(), op->span_);
-    nz_store_utils::CheckBlockedPartition(blocked_store, valid);
+    // Check the already-proved/folded coordinates. Inspecting the authored
+    // expression instead could reject an SSA offset proven to equal zero.
+    // The ISA uses the partition height as its NZ column-block pitch, so each
+    // store must keep the complete parent row extent at row origin zero.
+    auto blocked_offsets = As<MakeTuple>(args[1]);
+    INTERNAL_CHECK_SPAN(
+        blocked_offsets && blocked_offsets->elements_.size() == tensor_view_semantics::kNzBlockedRank,
+        op->span_)
+        << "Internal error: blocked NZ store offsets must have rank 5";
+    auto row_offset = As<ConstInt>(blocked_offsets->elements_[2]);
+    auto parent_rows = As<ConstInt>(logical_shape[rank - 2]);
+    auto rows = As<ConstInt>(valid[0]);
+    CHECK_SPAN(
+        parent_rows && rows && parent_rows->value_ == rows->value_ && row_offset && row_offset->value_ == 0,
+        op->span_)
+        << "NZ tile.store must cover all rows of its destination at row offset 0: PTO-ISA's Acc NZ store "
+        << "uses the partition height as its column-block stride. Stack independent panels on a leading "
+        << "batch axis, or store to pl.ND.";
     return args;
   }
 

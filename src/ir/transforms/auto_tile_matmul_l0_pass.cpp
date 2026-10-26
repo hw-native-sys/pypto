@@ -197,8 +197,6 @@
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/nz_store_utils.h"
-#include "pypto/ir/transforms/utils/registered_call_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -1232,8 +1230,10 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     cfg.min_m = static_cast<int>(M);
     // This argument denotes the NZ full-row store contract, whose FIXPIPE
     // nSize field is 12 bits. The 16-column grid makes 4080 the largest tile.
-    constexpr int kMaxNzStoreColumns = static_cast<int>(nz_store_utils::kMaxStoreCols);
-    cfg.max_n = cfg.max_n == 0 ? kMaxNzStoreColumns : std::min(cfg.max_n, kMaxNzStoreColumns);
+    const int max_nz_store_columns = handler->GetAccToNzGmStoreMaxCols();
+    CHECK_SPAN(max_nz_store_columns > 0, assign->span_)
+        << "NZ tile.store is supported only on A2/A3. Store to pl.ND on this backend.";
+    cfg.max_n = cfg.max_n == 0 ? max_nz_store_columns : std::min(cfg.max_n, max_nz_store_columns);
     if (cfg.max_n_pipelined != 0) cfg.max_n_pipelined = std::min(cfg.max_n_pipelined, cfg.max_n);
     if (cfg.max_n_nested_pipelined != 0) {
       cfg.max_n_nested_pipelined = std::min(cfg.max_n_nested_pipelined, cfg.max_n);

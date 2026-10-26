@@ -67,8 +67,8 @@ class Ascend910BHandler : public BackendHandler {
   // A2/A3 store pipe supports bf16 atomic-add (pto-isa set_atomic_bf16).
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return true; }
 
-  // TStoreAccNz2nz enables channel split for FP32 NZ with C0=8.
-  [[nodiscard]] bool SupportsAccToNzGmStore() const override { return true; }
+  // TStoreAccNz2nz uses a 12-bit nSize field and channel split for FP32 C0=8.
+  [[nodiscard]] int GetAccToNzGmStoreMaxCols() const override { return (1 << 12) - 1; }
 
   // A2/A3 fix-pipe Acc->GM destination whitelist (pto-isa a2a3 CheckAcc2gm,
   // non-quant branch; ptoas rejects anything else at pto.tstore verification).

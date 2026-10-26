@@ -351,10 +351,10 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
 
-  /// Whether the backend implements the FP32 Acc -> FP32 NZ GM writeback
-  /// contract. Other dtypes and partial row windows are separately guarded;
-  /// a generic Acc -> GM dtype capability does not imply NZ support.
-  [[nodiscard]] virtual bool SupportsAccToNzGmStore() const { return false; }
+  /// Maximum logical columns in one FP32 Acc -> FP32 NZ GM store; zero means
+  /// unsupported. Tiling and final emission must use the same instruction bound.
+  /// Source dtype, layout and full-parent-row legality are checked separately.
+  [[nodiscard]] virtual int GetAccToNzGmStoreMaxCols() const { return 0; }
 
   /**
    * @brief Whether the cube fix-pipe may store an Acc-resident tile straight

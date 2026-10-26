@@ -62,6 +62,17 @@ ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, Exp
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map);
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map);
 
+/// Rebuild a registered, type-deducible operator from the caller's final args.
+///
+/// The caller owns SSA/geometry rewriting and supplies @p remap_expr for live
+/// expressions in kwargs/attrs. A Substitute-based callback must treat generated
+/// replacements as terminal references, rather than walking an IterArg's seed
+/// back into its own replacement chain. Re-deduce from the new args/kwargs, then
+/// preserve updated attrs and the original span. Never inherit the old result
+/// type/MemRef: aliases, windows and copy placement remain caller/op policy.
+CallPtr RebuildRegisteredCall(const CallPtr& original, const std::vector<ExprPtr>& rewritten_args,
+                              const std::function<ExprPtr(const ExprPtr&)>& remap_expr);
+
 /// Find the first YieldStmt inside a statement body (searches through SeqStmts).
 inline YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
   if (auto yield = As<YieldStmt>(body)) return yield;

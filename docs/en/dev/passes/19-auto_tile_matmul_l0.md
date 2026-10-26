@@ -140,7 +140,7 @@ partition; the fourth argument of `tile.slice(tile, shape, offsets, valid_shape)
 describes validity. Argument count alone identifies neither layout nor pitch.
 
 `transform_utils::RebuildRegisteredCall(original, new_args, remap_expr)`
-in `pypto/ir/transforms/utils/registered_call_utils.h` shares registry type
+in `pypto/ir/transforms/utils/transform_utils.h` shares registry type
 deduction and Expr-metadata preservation. The caller
 supplies its SSA substitution callback and decides which replacements are
 terminal, so a generated loop carry is not traversed back through its own

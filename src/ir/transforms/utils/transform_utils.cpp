@@ -26,7 +26,6 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/registered_call_utils.h"
 
 namespace pypto::ir::transform_utils {
 
