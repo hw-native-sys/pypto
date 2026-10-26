@@ -31,6 +31,11 @@
 
 namespace pypto::ir::nz_store_utils {
 
+// TStoreAccNz2nz encodes the logical row/column extents in 16/12-bit fields.
+// The tiler and final emitter must enforce the same per-instruction limits.
+inline constexpr int64_t kMaxStoreRows = 65535;
+inline constexpr int64_t kMaxStoreCols = 4095;
+
 /// Validate the deliberately narrow NZ writeback contract both before blocking
 /// and after later tiling/layout passes. The latter check is essential: a pass
 /// can split a previously full-row store into unsupported partial-row stores.
@@ -64,30 +69,14 @@ inline std::vector<ExprPtr> CheckSourceAndAttrs(const CallPtr& op, const backend
     auto physical = As<ConstInt>(tile->shape_[axis]);
     auto valid = As<ConstInt>(view.valid_shape[axis]);
     // C0=8 describes the GM bytes, but TStoreAccNz2nz still requires validCol
-    // divisible by 16. Its mSize/nSize fields have 16/12 bits respectively.
-    const int64_t limit = axis == 0 ? 65535 : 4095;
+    // divisible by 16. Every write must retain the full M extent, so its
+    // 16-bit row field applies here. The 12-bit column field and L0C capacity
+    // apply only to the physical tiles emitted after automatic N tiling.
     CHECK_SPAN(physical && valid && physical->value_ == valid->value_ && valid->value_ > 0 &&
-                   valid->value_ % 16 == 0 && valid->value_ <= limit,
+                   valid->value_ % 16 == 0 && (axis != 0 || valid->value_ <= kMaxStoreRows),
                op->span_)
         << "NZ tile.store requires a static, fully valid Acc tile with rows and columns divisible by 16, "
-        << "rows <= 65535 and columns <= 4095. Partial or dynamic Acc tiles are not supported.";
-  }
-  // NZ blocking adds rank-5 offsets and an explicit partition operand before
-  // AutoTileMatmulL0, whose direct-store matcher only accepts the 3-argument,
-  // 2-D form. Require this one source allocation to fit instead of accepting
-  // an oversized accumulator that the later tiler cannot split. The GM tensor
-  // may be larger: explicit column tiling can write it with several Acc tiles.
-  if (const auto bytes = utils::StaticPhysicalAllocationBytes(tile, MemorySpace::Acc, handler);
-      bytes.has_value()) {
-    const uint64_t capacity = handler->GetCapacityBytes(MemorySpace::Acc);
-    CHECK_SPAN(*bytes <= capacity, op->span_)
-        << "NZ tile.store requires one Acc tile to fit L0C: the source needs " << *bytes
-        << " bytes, but this backend's L0C capacity is " << capacity
-        << " bytes. Automatic M/N tiling of NZ stores is not supported; tile the output columns "
-        << "explicitly, or store to pl.ND.";
-  } else {
-    INTERNAL_CHECK_SPAN(false, op->span_)
-        << "Internal error: the physical footprint of a validated static NZ store source must be known";
+        << "and rows <= " << kMaxStoreRows << ". Partial or dynamic Acc tiles are not supported.";
   }
   CHECK_SPAN(op->GetKwarg<int>("atomic", 0) == static_cast<int>(AtomicType::kNone) &&
                  !GetOptionalDoubleKwarg(op->kwargs_, "pre_quant").has_value() &&
@@ -98,6 +87,36 @@ inline std::vector<ExprPtr> CheckSourceAndAttrs(const CallPtr& op, const backend
              op->span_)
       << "NZ tile.store st_phase must be STPhase.Unspecified or STPhase.Final.";
   return view.valid_shape;
+}
+
+/// Validate one concrete write after automatic tiling. Initial NZ blocking
+/// must allow an oversized logical matmul result: AutoTileMatmulL0 can replace
+/// its sole store with full-row column windows, each backed by a smaller Acc.
+/// Recheck at emission so unsupported consumers or later transformations can
+/// never bypass the actual instruction and allocation limits.
+inline std::vector<ExprPtr> CheckPhysicalSource(const CallPtr& op, const backend::BackendHandler* handler) {
+  auto valid = CheckSourceAndAttrs(op, handler);
+  auto tile = As<TileType>(op->args_[0]->GetType());
+  auto cols = As<ConstInt>(valid[1]);
+  INTERNAL_CHECK_SPAN(tile && cols, op->span_)
+      << "Internal error: validated NZ tile.store source must have a static TileType";
+  CHECK_SPAN(cols->value_ <= kMaxStoreCols, op->span_)
+      << "NZ tile.store requires each emitted Acc tile to have columns <= " << kMaxStoreCols << ". "
+      << "Use a matmul with a single direct store for automatic N tiling, tile the output columns "
+      << "explicitly, or store to pl.ND.";
+  if (const auto bytes = utils::StaticPhysicalAllocationBytes(tile, MemorySpace::Acc, handler);
+      bytes.has_value()) {
+    const uint64_t capacity = handler->GetCapacityBytes(MemorySpace::Acc);
+    CHECK_SPAN(*bytes <= capacity, op->span_)
+        << "NZ tile.store requires one Acc tile to fit L0C: the source needs " << *bytes
+        << " bytes, but this backend's L0C capacity is " << capacity
+        << " bytes. NZ writes must cover all destination rows; use a matmul with a single direct store "
+        << "for automatic N tiling, tile the output columns explicitly, or store to pl.ND.";
+  } else {
+    INTERNAL_CHECK_SPAN(false, op->span_)
+        << "Internal error: the physical footprint of a validated static NZ store source must be known";
+  }
+  return valid;
 }
 
 /// Recheck the physical partition at the final emission boundary. The ISA

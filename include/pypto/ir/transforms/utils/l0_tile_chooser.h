@@ -310,8 +310,11 @@ struct L0TileResult {
  *      lower-hidden-load aspect among MAD-bound (m,n)<->(n,m) ties.
  *   4. Pick the global minimum-wall point across all enumerated combinations.
  *      A-stationary / B-stationary require k == K (operand residency). dbC = 2
- *      additionally requires at least two full tiles on the moving inner axis,
- *      k == K, and that the single-L0C optimum already tiles. The (m, n) grid
+ *      additionally requires at least two full tiles on the moving inner axis
+ *      and k == K. Richer regimes are searched when the output-stationary
+ *      baseline tiles or is infeasible; an infeasible baseline must not reject
+ *      a legal enabled operand-stationary regime. An unsplit baseline keeps
+ *      its existing native geometry. The (m, n) grid
  *      is bounded by
  *      AlignUp(AlignUp(m, box_align_m), l0c_align_m) *
  *      AlignUp(n, box_align_n) <= C0 and the boxed operand caps, k by K/align_k:

@@ -58,6 +58,10 @@ STORE_M, STORE_K, STORE_N = 64, 64, 16
 STORE_COLUMNS = 64
 STORE_PANELS = 2
 STORE_GUARDED_PANELS = STORE_PANELS + 2
+AUTO_STORE_N, AUTO_STORE_K = 2048, 16
+AUTO_STORE_SPLIT_K, AUTO_STORE_K_TILE = 128, 32
+AUTO_STORE_PARENT_N = AUTO_STORE_N + 32
+AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N = 2048, 32
 
 # One 32-byte C0 line and a 16-row fractal are the two constants that define
 # pto-isa's NZ blocking; `c0` is the number of *elements* in that line, so it
@@ -308,6 +312,87 @@ def nz_store_batch_panels(
     return out
 
 
+@pl.jit.incore
+def _nz_auto_store_full_k_kernel(
+    x: pl.Tensor[[STORE_M, AUTO_STORE_K], pl.FP16],
+    w: pl.Tensor[[AUTO_STORE_K, AUTO_STORE_N], pl.FP16],
+    out: pl.Out[pl.Tensor[[STORE_M, AUTO_STORE_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, AUTO_STORE_N], pl.FP32, pl.NZ]:
+    """One logical 512 KiB Acc must become several legal full-row stores."""
+    xt = pl.load(x, [0, 0], [STORE_M, AUTO_STORE_K], target_memory=pl.Mem.Mat)
+    wt = pl.load(w, [0, 0], [AUTO_STORE_K, AUTO_STORE_N], target_memory=pl.Mem.Mat)
+    return pl.store(pl.matmul(xt, wt), [0, 0], out)
+
+
+@pl.jit
+def nz_auto_store_full_k(
+    x: pl.Tensor[[STORE_M, AUTO_STORE_K], pl.FP16],
+    w: pl.Tensor[[AUTO_STORE_K, AUTO_STORE_N], pl.FP16],
+    out: pl.Out[pl.Tensor[[STORE_M, AUTO_STORE_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, AUTO_STORE_N], pl.FP32, pl.NZ]:
+    return _nz_auto_store_full_k_kernel(x, w, out)
+
+
+@pl.jit
+def nz_auto_store_guarded_batches(
+    x: pl.Tensor[[STORE_PANELS * STORE_M, AUTO_STORE_K], pl.FP16],
+    w: pl.Tensor[[AUTO_STORE_K, AUTO_STORE_N], pl.FP16],
+    out: pl.InOut[pl.Tensor[[STORE_GUARDED_PANELS, STORE_M, AUTO_STORE_PARENT_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_GUARDED_PANELS, STORE_M, AUTO_STORE_PARENT_N], pl.FP32, pl.NZ]:
+    """Automatic N tiling composes with batch offsets and a nonzero C0 offset."""
+    for panel in pl.spmd(STORE_PANELS, name_hint="nz_auto_store_panel"):
+        xt = pl.load(x, [panel * STORE_M, 0], [STORE_M, AUTO_STORE_K], target_memory=pl.Mem.Mat)
+        wt = pl.load(w, [0, 0], [AUTO_STORE_K, AUTO_STORE_N], target_memory=pl.Mem.Mat)
+        pl.store(pl.matmul(xt, wt), [panel + 1, 0, 8], out)
+    return out
+
+
+@pl.jit
+def nz_auto_store_split_k(
+    x: pl.Tensor[[STORE_M, AUTO_STORE_SPLIT_K], pl.FP16],
+    w: pl.Tensor[[AUTO_STORE_SPLIT_K, AUTO_STORE_N], pl.FP16],
+    out: pl.InOut[pl.Tensor[[STORE_M, AUTO_STORE_PARENT_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[STORE_M, AUTO_STORE_PARENT_N], pl.FP32, pl.NZ]:
+    """Each automatically chosen column tile accumulates every source K panel.
+
+    A full 128x2048 weight tile would exceed L1. This explicit K pipeline is
+    the canonical create/reduce/store form; the compiler must place its N grid
+    outside the reduction rather than write partial sums or retain a 512 KiB Acc.
+    """
+    for _ in pl.spmd(1, name_hint="nz_auto_store_split_k"):
+        initial = pl.tile.create([STORE_M, AUTO_STORE_N], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+        for ko, (carry,) in pl.pipeline(
+            0, AUTO_STORE_SPLIT_K, AUTO_STORE_K_TILE, init_values=(initial,), stage=2
+        ):
+            xt = pl.load(x, [0, ko], [STORE_M, AUTO_STORE_K_TILE], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [ko, 0], [AUTO_STORE_K_TILE, AUTO_STORE_N], target_memory=pl.Mem.Mat)
+            current = pl.tile.matmul_acc(carry, xt, wt, ko == 0)
+            acc = pl.yield_(current)
+        pl.store(acc, [0, 8], out)
+    return out
+
+
+@pl.jit.incore
+def _nz_auto_store_stationary_a_kernel(
+    x: pl.Tensor[[AUTO_STORE_STATIONARY_M, AUTO_STORE_K], pl.FP16],
+    w: pl.Tensor[[AUTO_STORE_K, AUTO_STORE_STATIONARY_N], pl.FP16],
+    out: pl.Out[pl.Tensor[[AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N], pl.FP32, pl.NZ]:
+    """Only stationary-A keeps full M: Left fills 64 KiB and each Acc 128 KiB."""
+    xt = pl.load(x, [0, 0], [AUTO_STORE_STATIONARY_M, AUTO_STORE_K], target_memory=pl.Mem.Mat)
+    wt = pl.load(w, [0, 0], [AUTO_STORE_K, AUTO_STORE_STATIONARY_N], target_memory=pl.Mem.Mat)
+    return pl.store(pl.matmul(xt, wt), [0, 0], out)
+
+
+@pl.jit
+def nz_auto_store_stationary_a(
+    x: pl.Tensor[[AUTO_STORE_STATIONARY_M, AUTO_STORE_K], pl.FP16],
+    w: pl.Tensor[[AUTO_STORE_K, AUTO_STORE_STATIONARY_N], pl.FP16],
+    out: pl.Out[pl.Tensor[[AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N], pl.FP32, pl.NZ]],
+) -> pl.Tensor[[AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N], pl.FP32, pl.NZ]:
+    return _nz_auto_store_stationary_a_kernel(x, w, out)
+
+
 # ============================================================================
 # Cases
 # ============================================================================
@@ -365,11 +450,11 @@ def _nz_cases():
         )
 
 
-def _nz_store_inputs(rows: int, cols: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _nz_store_inputs(rows: int, cols: int, reduction: int = STORE_K) -> tuple[torch.Tensor, torch.Tensor]:
     """Nonzero integer products are exact FP32 values, including their sign."""
     generator = torch.Generator().manual_seed(3036)
-    x = torch.randint(1, 5, (rows, STORE_K), generator=generator).to(torch.float16)
-    w = torch.randint(-4, 0, (STORE_K, cols), generator=generator).to(torch.float16)
+    x = torch.randint(1, 5, (rows, reduction), generator=generator).to(torch.float16)
+    w = torch.randint(-4, 0, (reduction, cols), generator=generator).to(torch.float16)
     return x, w
 
 
@@ -445,6 +530,74 @@ def _nz_store_cases():
     )
 
 
+def _nz_auto_store_guarded_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    packed = tensors["out"].clone()
+    for panel in range(STORE_PANELS):
+        logical = _unpack_nz(packed[panel + 1])
+        x = tensors["x"][panel * STORE_M : (panel + 1) * STORE_M].float()
+        logical[:, 8 : 8 + AUTO_STORE_N] = x @ tensors["w"].float()
+        packed[panel + 1] = _pack_nz(logical)
+    return packed
+
+
+def _nz_auto_store_split_k_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    logical = _unpack_nz(tensors["out"]).clone()
+    logical[:, 8 : 8 + AUTO_STORE_N] = tensors["x"].float() @ tensors["w"].float()
+    return _pack_nz(logical)
+
+
+def _nz_auto_store_cases():
+    x, w = _nz_store_inputs(STORE_M, AUTO_STORE_N, AUTO_STORE_K)
+    yield st.case(
+        nz_auto_store_full_k,
+        x,
+        w,
+        torch.zeros((STORE_M, AUTO_STORE_N), dtype=torch.float32),
+        name="matmul_nz_auto_store_full_k_64x2048",
+        golden=_nz_store_full_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+    x, w = _nz_store_inputs(STORE_PANELS * STORE_M, AUTO_STORE_N, AUTO_STORE_K)
+    logical = torch.arange(STORE_GUARDED_PANELS * STORE_M * AUTO_STORE_PARENT_N, dtype=torch.float32).reshape(
+        STORE_GUARDED_PANELS, STORE_M, AUTO_STORE_PARENT_N
+    )
+    yield st.case(
+        nz_auto_store_guarded_batches,
+        x,
+        w,
+        torch.stack([_pack_nz(panel) for panel in logical + 1_000_000]),
+        name="matmul_nz_auto_store_guarded_batches_64x2048",
+        golden=_nz_auto_store_guarded_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+    x, w = _nz_store_inputs(STORE_M, AUTO_STORE_N, AUTO_STORE_SPLIT_K)
+    logical = torch.arange(STORE_M * AUTO_STORE_PARENT_N, dtype=torch.float32).reshape(
+        STORE_M, AUTO_STORE_PARENT_N
+    )
+    yield st.case(
+        nz_auto_store_split_k,
+        x,
+        w,
+        _pack_nz(logical + 1_000_000),
+        name="matmul_nz_auto_store_split_k_64x2048",
+        golden=_nz_auto_store_split_k_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+    x, w = _nz_store_inputs(AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N, AUTO_STORE_K)
+    yield st.case(
+        nz_auto_store_stationary_a,
+        x,
+        w,
+        torch.zeros((AUTO_STORE_STATIONARY_M, AUTO_STORE_STATIONARY_N), dtype=torch.float32),
+        name="matmul_nz_auto_store_stationary_a_2048x32",
+        golden=_nz_store_full_golden,
+        compare=_assert_nz_store_bytes_equal,
+    )
+
+
 @pytest.mark.parametrize("dtype, expected_c0", [(torch.int16, 16), (torch.float32, 8)])
 def test_pack_places_each_element_at_its_blocked_offset(dtype, expected_c0):
     """The host packer is this test's own premise, so pin it independently.
@@ -478,7 +631,7 @@ def test_matmul_nz(case_run):
 
 
 @pytest.mark.platforms("a2a3", "a2a3sim")
-@st.cases(*_nz_store_cases())
+@st.cases(*_nz_store_cases(), *_nz_auto_store_cases())
 def test_matmul_nz_store(case_run):
     """FP32 Acc writes native C0=8 NZ bytes and preserves all guard regions."""
     case_run.assert_passed()

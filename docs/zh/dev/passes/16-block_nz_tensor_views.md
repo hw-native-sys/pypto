@@ -135,8 +135,8 @@ store call 的返回值仍是目标 tensor 的别名。重建 call 时保留 kwa
 | ---- | ---------- |
 | 后端与 dtype | 仅 A2/A3、FP32 Acc 写 FP32 GM |
 | Tile shape 与有效区域 | 静态、正数、二维、全部有效；行列均为 16 的倍数 |
-| 硬件 extent 限制 | 行数最多 65535、列数最多 4095；结合对齐后实际最大为 65520 和 4080 |
-| 源分配大小 | Acc tile 的物理分配必须放入后端 L0C 容量（当前 A2/A3 为 128 KiB） |
+| 实际 store 的 extent 限制 | 行数最多 65535、列数最多 4095；结合对齐后实际最大为 65520 和 4080 |
+| 实际源分配大小 | 每个 Acc tile 的物理分配必须放入后端 L0C 容量（当前 A2/A3 为 128 KiB） |
 | 目标行窗口 | 覆盖父 tensor 的整个行轴，行偏移为 0 |
 | 前导轴 | 每条 store 只写一个 panel；允许非零 batch 偏移 |
 | 列偏移 | 非负，且可证明是 `c0 = 8` 的倍数 |
@@ -144,16 +144,24 @@ store call 的返回值仍是目标 tensor 的别名。重建 call 时保留 kwa
 | Atomic、`pre_quant`、`pre_relu` 或 dtype 转换 | 拒绝 |
 | A5、Vec/Mat 源、动态或部分有效 tile | 拒绝 |
 
-行列上限描述的是 ISA 字段，并不表示任意行列组合都能放入 L0C。源分配检查使用
-`PhysicalAllocationBytes` 与后端 handler 的 `GetCapacityBytes(MemorySpace::Acc)`，
-不在检查逻辑中写死字节上限。例如，有效区域完整的 `64 x 1024` FP32 源需要
-256 KiB，即使两个 extent 都符合 ISA 字段范围，也会被拒绝。该限制针对源 Acc
-tile，不限制 GM 目标 tensor 的总大小。
+初始逻辑源可以超过 L0C 容量或 store 指令的列数字段范围。`BlockNzTensorViews`
+校验静态、全部有效的 shape、属性以及完整父行几何，不要求这个逻辑值已经是一块
+可分配的物理存储。它仍然运行在 `AutoTileMatmulL0` 之前。
 
-这条 NZ 写回路径暂不支持自动 M/N tiling：`AutoTileMatmulL0` 的 direct-store
-匹配要求三个参数的二维 store，而 NZ 分块会补上第四个 rank-5 分区参数。应当显式
-计算并写回更小的列块，每块都覆盖目标的完整行轴。因此，一个 `[64, 1024]` GM
-目标可以用每块 64 KiB 的 `64 x 256` Acc 分块填充；GM 总大小不必放入 L0C。
+对于被唯一 NZ store 消费、且符合自动分块条件的 Mat-resident matmul，
+`AutoTileMatmulL0` 能识别 rank-5 分块分区，并且**只沿 N 拆分输出**，保持
+`m == M`；原有的 K 归约分块仍然可用。从 `ni` 开始的列块，在分块列偏移上增加
+`ni / 8`，其分区为 `[1, n / 8, M / 16, 16, 8]`。逻辑结果由更小的 Acc tile
+逐块计算和写回，不会先分配完整的超大 Acc。例如，`64 x 1024` FP32 输出总计
+256 KiB，但单个输出块可以放入 128 KiB L0C。逻辑 N 超过指令的 4095 上限时同理：
+拆分后每条实际 store 都必须满足该上限。
+
+最终发射时，每个实际源都会同时校验 ISA 字段上限，以及
+`StaticPhysicalAllocationBytes` / 后端 handler 的 `GetCapacityBytes(MemorySpace::Acc)`。
+这些检查约束的是每个实际 Acc tile，不是 GM tensor 的总大小。若固定完整 M 后
+找不到合法的 N/K tile，`AutoTileMatmulL0` 会立即报告专用编译诊断。无法自动拆分的
+生产者/使用模式仍受分配检查和最终 NZ store 检查约束，不能绕过物理限制。
+用户仍可显式按列分块；每块都必须覆盖目标的完整行轴。
 
 整行限制用于防护 A2/A3 pto-isa 的 `TStoreAccNz2nz` 实现限制。它从分区高度计算
 目标列块的间距，而没有使用父 tensor 的 stride：

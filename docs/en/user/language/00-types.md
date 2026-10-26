@@ -267,10 +267,14 @@ tile and an FP32 `pl.NZ` destination. Rows and columns must be multiples of 16; 
 must cover the destination's entire row axis at row offset 0. Each store writes one panel,
 with non-negative, provably aligned column and batch offsets. Stack independent panels as
 `[PANELS, R, C]` and write them separately. FP32 NZ uses C0=8; it does not change the tile's
-mathematical values. The physical source tile must fit the backend's L0C capacity
-(currently 128 KiB on A2/A3); the GM destination may be larger. This writeback path does
-not automatically split oversized M/N tiles: compute and store smaller column chunks
-explicitly, keeping every chunk's rows equal to the destination's full row axis.
+mathematical values. Supported matmul-to-store chains are automatically tiled along N
+while keeping the complete M axis; ordinary K reduction tiling remains available.
+The logical output can exceed L0C or a store instruction's column limit. Each emitted
+Acc tile must fit the backend's L0C capacity (currently 128 KiB on A2/A3) and have at most
+4095 columns. The GM destination may be larger. If no legal full-M plan exists, the
+automatic tiler reports a compile-time diagnostic. Producer/use patterns outside the
+supported rewrite retain the allocation and final store checks. Explicit column tiling
+is also supported, with each chunk spanning the destination's full row axis.
 Atomic stores, FIXPIPE epilogue options (`pre_quant`, `pre_relu`),
 dtype conversion, A5, Vec/Mat sources, and dynamic or partially valid tiles are rejected.
 The full scope and the underlying row-window restriction are documented in

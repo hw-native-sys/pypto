@@ -197,6 +197,8 @@
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/nz_store_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -846,11 +848,13 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 /// so which L0 tile shape to use.  Returns the tiling plan on success;
 /// otherwise nullopt and (when useful) appends a PerfHint.  The caller
 /// dispatches K-only vs M/N tiling on ``MatmulTiling::needs_mn_tiling()``.
+/// A nonzero fixed_output_m is the NZ direct-store constraint: preserve all
+/// parent rows and limit each emitted N tile to the NZ FIXPIPE field width.
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
     const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false,
-    const ForStmtPtr& source_reduction = nullptr) {
+    const ForStmtPtr& source_reduction = nullptr, int64_t fixed_output_m = 0) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1217,15 +1221,39 @@ std::optional<MatmulTiling> AnalyzeMatmul(
         N, std::max<int64_t>(cfg.min_n, work_extent(N, output_valid_shape[1], cfg.align_n))));
   }
 
+  if (fixed_output_m != 0) {
+    // An NZ Acc store must cover the entire parent row axis. Restrict the
+    // solver before selection, rather than rejecting its unconstrained M/N
+    // optimum and overlooking a legal N/K-only plan. All regimes share these
+    // bounds, including operand-stationary and double-buffered-C candidates.
+    INTERNAL_CHECK_SPAN(fixed_output_m == M && cfg.M == M, assign->span_)
+        << "Internal error: NZ output tiling must preserve the complete physical M extent";
+    cfg.min_m = static_cast<int>(M);
+    // This argument denotes the NZ full-row store contract, whose FIXPIPE
+    // nSize field is 12 bits. The 16-column grid makes 4080 the largest tile.
+    constexpr int kMaxNzStoreColumns = static_cast<int>(nz_store_utils::kMaxStoreCols);
+    cfg.max_n = cfg.max_n == 0 ? kMaxNzStoreColumns : std::min(cfg.max_n, kMaxNzStoreColumns);
+    if (cfg.max_n_pipelined != 0) cfg.max_n_pipelined = std::min(cfg.max_n_pipelined, cfg.max_n);
+    if (cfg.max_n_nested_pipelined != 0) {
+      cfg.max_n_nested_pipelined = std::min(cfg.max_n_nested_pipelined, cfg.max_n);
+    }
+  }
+
   utils::L0TileResult res;
   try {
     res = utils::ChooseL0Tile(cfg);
   } catch (const pypto::ValueError& e) {
+    CHECK_SPAN(fixed_output_m == 0, assign->span_)
+        << "NZ tile.store has no legal N/K tiling plan that preserves all " << M
+        << " destination rows. The full row extent must fit the L0A operand and a minimum-width L0C "
+        << "tile. Split independent matrices along a batch axis, or store to pl.ND. " << e.what();
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-005",
                        op_name + ": ChooseL0Tile rejected configuration — left untouched. " + e.what(),
                        assign->span_);
     return std::nullopt;
   }
+  INTERNAL_CHECK_SPAN(fixed_output_m == 0 || res.m == M, assign->span_)
+      << "Internal error: NZ output tiling selected a partial M tile";
 
   // Already L0-sized — nothing to do.
   if (res.m == M && res.n == N && res.k == K) return std::nullopt;
@@ -1326,6 +1354,81 @@ ExprPtr AddOffset(const ExprPtr& base, const ExprPtr& delta, const Span& sp) {
   return MakeAdd(base, delta, sp);
 }
 
+/// The direct-store forms whose output windows the grid can reconstruct.
+/// A nonzero full_m denotes NZ: its row axis is indivisible, while its GM
+/// coordinates may already be blocked by BlockNzTensorViews.
+struct DirectGmStoreInfo {
+  CallPtr call;
+  bool blocked_nz = false;
+  int64_t full_m = 0;
+
+  [[nodiscard]] bool is_nz() const { return full_m != 0; }
+};
+
+std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
+  if (!IsOp(call, "tile.store") || (call->args_.size() != 3 && call->args_.size() != 4)) {
+    return std::nullopt;
+  }
+  auto offsets = As<MakeTuple>(call->args_[1]);
+  auto output = AsVarLike(call->args_[2]);
+  auto tensor = output ? AsTensorTypeLike(output->GetType()) : nullptr;
+  if (!offsets || !tensor) return std::nullopt;
+  const bool is_nz = tensor->tensor_view_ && tensor->tensor_view_->layout == TensorLayout::NZ;
+  if (!is_nz) {
+    if (call->args_.size() != 3 || offsets->elements_.size() != 2) return std::nullopt;
+    return DirectGmStoreInfo{call};
+  }
+
+  auto source = As<TileType>(call->args_[0]->GetType());
+  if (!source || source->shape_.size() != 2 || source->dtype_ != DataType::FP32 ||
+      source->GetMemorySpace() != MemorySpace::Acc || tensor->dtype_ != DataType::FP32) {
+    return std::nullopt;
+  }
+  const auto view = tile_view_semantics::GetEffectiveTileView(*source);
+  if (view.valid_shape.size() != 2) return std::nullopt;
+  auto rows = As<ConstInt>(source->shape_[0]);
+  auto cols = As<ConstInt>(source->shape_[1]);
+  auto valid_rows = As<ConstInt>(view.valid_shape[0]);
+  auto valid_cols = As<ConstInt>(view.valid_shape[1]);
+  if (!rows || !cols || !valid_rows || !valid_cols || rows->value_ <= 0 || cols->value_ <= 0 ||
+      rows->value_ % 16 != 0 || cols->value_ % 16 != 0 || rows->value_ != valid_rows->value_ ||
+      cols->value_ != valid_cols->value_) {
+    return std::nullopt;
+  }
+
+  const bool blocked = tensor_view_semantics::IsBlockedNzShape(tensor->shape_, tensor->dtype_);
+  const size_t rank = tensor->shape_.size();
+  if (rank < 2 || offsets->elements_.size() != rank) return std::nullopt;
+  const size_t row_axis = blocked ? 2 : rank - 2;
+  auto parent_rows = As<ConstInt>(tensor->shape_[row_axis]);
+  auto row_offset = As<ConstInt>(offsets->elements_[row_axis]);
+  const int64_t expected_parent_rows = blocked ? rows->value_ / 16 : rows->value_;
+  if (!parent_rows || parent_rows->value_ != expected_parent_rows || !row_offset || row_offset->value_ != 0) {
+    return std::nullopt;
+  }
+
+  // Blocked NZ always carries its physical partition explicitly. Supporting
+  // the logical spelling too lets isolated-pass callers keep their natural
+  // 2-D coordinates; the production pipeline reaches the blocked arm.
+  if (blocked && call->args_.size() != 4) return std::nullopt;
+  if (call->args_.size() == 4) {
+    auto sizes = As<MakeTuple>(call->args_[3]);
+    if (!sizes || sizes->elements_.size() != rank) return std::nullopt;
+    std::vector<int64_t> expected(rank, 1);
+    if (blocked) {
+      expected = {1, cols->value_ / 8, rows->value_ / 16, 16, 8};
+    } else {
+      expected[rank - 2] = rows->value_;
+      expected[rank - 1] = cols->value_;
+    }
+    for (size_t axis = 0; axis < rank; ++axis) {
+      auto size = As<ConstInt>(sizes->elements_[axis]);
+      if (!size || size->value_ != expected[axis]) return std::nullopt;
+    }
+  }
+  return DirectGmStoreInfo{call, blocked, rows->value_};
+}
+
 /// Counts reads (uses) of every Var/IterArg across a statement list, excluding
 /// AssignStmt LHS defs.  Built once per SeqStmts (see ``BuildSiblingIndex``) so
 /// the M/N foldability check — "is the matmul result used exactly once?" — is
@@ -1373,8 +1476,9 @@ class SiblingUseCounter : public IRVisitor {
 /// One-shot index over a SeqStmts' children, built lazily on the first
 /// oversized matmul and reused for the rest so M/N folding stays O(N):
 ///   * ``use_counts[v]`` — number of reads of ``v`` (excluding defs).
-///   * ``store_of[v]`` — the top-level 2D ``tile.store`` whose source operand
+///   * ``store_of[v]`` — the top-level direct ``tile.store`` whose source operand
 ///     is ``v`` (its sole direct consumer when ``use_counts[v] == 1``).
+///     Includes ordinary 2-D stores and blocked rank-5 NZ partitions.
 /// Counts/sites reflect the original (pre-rewrite) siblings, which is what the
 /// foldability check needs (a matmul result is freshly defined; its uses do
 /// not change until we rewrite it).
@@ -1394,8 +1498,9 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
     if (!as) continue;
     auto call = As<Call>(as->value_);
     if (!call || !call->op_) continue;
-    // Record top-level 2D ``tile.store(src, offsets, out)`` by source operand.
-    if (IsOp(call, "tile.store") && call->args_.size() == 3) {
+    // Keep existing three-argument stores indexed, and additionally recognize
+    // the explicit rank-5 partition carried by an NZ direct store.
+    if (IsOp(call, "tile.store") && (call->args_.size() == 3 || AnalyzeDirectGmStore(call).has_value())) {
       if (auto src = AsVarLike(call->args_[0])) idx.store_of.emplace(src.get(), as.get());
     } else if (IsOp(call, "tile.cast") && !call->args_.empty()) {
       // Record ``cb = tile.cast(src, dtype)`` by source: a chained matmul whose
@@ -1444,19 +1549,15 @@ class SubtilePlacer {
                                        const ExprPtr& col_off, const VarPtr& chain_in, int step) = 0;
 };
 
-/// Direct-store placement: ``out = tile.store(sub, [base_r + mi, base_c + ni],
-/// out_prev)`` per sub-tile, chaining the DDR output tensor in SSA form.
+/// Direct-store placement, chaining the DDR output tensor in SSA form. ND
+/// adds the logical row/column origins; NZ keeps the complete parent rows and
+/// maps only the N origin into the original logical or blocked GM coordinates.
 class DirectGmPlacer : public SubtilePlacer {
  public:
-  DirectGmPlacer(ExprPtr base_r, ExprPtr base_c, VarPtr out_in,
-                 std::vector<std::pair<std::string, std::any>> store_kwargs,
-                 std::vector<std::pair<std::string, std::any>> store_attrs, Span span)
-      : base_r_(std::move(base_r)),
-        base_c_(std::move(base_c)),
-        out_in_(std::move(out_in)),
+  DirectGmPlacer(DirectGmStoreInfo store, Span span)
+      : store_(std::move(store)),
+        out_in_(AsVarLike(store_.call->args_[2])),
         out_base_(out_in_->name_hint_),
-        kwargs_(std::move(store_kwargs)),
-        attrs_(std::move(store_attrs)),
         sp_(std::move(span)) {}
 
   [[nodiscard]] VarPtr Init(std::vector<StmtPtr>& /*stmts*/) override { return out_in_; }
@@ -1464,21 +1565,72 @@ class DirectGmPlacer : public SubtilePlacer {
   [[nodiscard]] VarPtr PlaceAt(std::vector<StmtPtr>& stmts, const VarPtr& sub, const ExprPtr& row_off,
                                const ExprPtr& col_off, const VarPtr& chain_in, int step) override {
     auto& reg = OpRegistry::GetInstance();
-    auto offs = std::make_shared<MakeTuple>(
-        std::vector<ExprPtr>{AddOffset(base_r_, row_off, sp_), AddOffset(base_c_, col_off, sp_)}, sp_);
-    auto deduced = reg.Create("tile.store", {sub, offs, chain_in}, kwargs_, sp_);
-    auto scall = PreserveCallAttrs(attrs_, deduced);
+    auto base_offsets = As<MakeTuple>(store_.call->args_[1]);
+    INTERNAL_CHECK_SPAN(base_offsets, sp_) << "Internal error: direct-store offsets must remain a tuple";
+    CallPtr scall;
+    if (!store_.is_nz()) {
+      auto offs = std::make_shared<MakeTuple>(
+          std::vector<ExprPtr>{AddOffset(base_offsets->elements_[0], row_off, sp_),
+                               AddOffset(base_offsets->elements_[1], col_off, sp_)},
+          sp_);
+      auto deduced = reg.Create("tile.store", {sub, offs, chain_in}, store_.call->kwargs_, sp_);
+      scall = PreserveCallAttrs(store_.call, deduced);
+    } else {
+      auto tile = As<TileType>(sub->GetType());
+      auto rows = tile && tile->shape_.size() == 2 ? As<ConstInt>(tile->shape_[0]) : nullptr;
+      auto cols = tile && tile->shape_.size() == 2 ? As<ConstInt>(tile->shape_[1]) : nullptr;
+      INTERNAL_CHECK_SPAN(rows && cols && rows->value_ == store_.full_m && cols->value_ % 16 == 0, sp_)
+          << "Internal error: NZ output tiling must emit full-height, 16-column-aligned Acc tiles";
+      // The fixed-M chooser admits only one row origin, zero. The full-K
+      // emitter may still represent that one origin by a one-trip loop Var;
+      // retain the literal blocked row offset instead of manufacturing an
+      // unprovable row expression from that loop.
+      std::vector<ExprPtr> offsets = base_offsets->elements_;
+      ExprPtr column_delta = col_off;
+      if (store_.blocked_nz) {
+        // Only this generated N-grid offset is divided. The user's original
+        // offset remains in its already-proven blocked coordinates, so its
+        // arithmetic is never reassociated or changed in width.
+        if (auto constant = As<ConstInt>(col_off)) {
+          INTERNAL_CHECK_SPAN(constant->value_ % 8 == 0, sp_)
+              << "Internal error: NZ output column offset must be C0-aligned";
+          column_delta = MakeIndex(constant->value_ / 8, sp_);
+        } else {
+          column_delta = MakeFloorDiv(col_off, MakeIndex(8, sp_), sp_);
+        }
+        offsets[1] = AddOffset(offsets[1], column_delta, sp_);
+      } else {
+        offsets.back() = AddOffset(offsets.back(), column_delta, sp_);
+      }
+      std::vector<ExprPtr> args{sub, std::make_shared<MakeTuple>(std::move(offsets), sp_), chain_in};
+      if (store_.blocked_nz) {
+        args.push_back(MakeIndexTuple({1, cols->value_ / 8, rows->value_ / 16, 16, 8}, sp_));
+      } else if (store_.call->args_.size() == 4) {
+        std::vector<int64_t> window(base_offsets->elements_.size(), 1);
+        window[window.size() - 2] = rows->value_;
+        window.back() = cols->value_;
+        args.push_back(MakeIndexTuple(window, sp_));
+      }
+      const auto original_source = AsVarLike(store_.call->args_[0]);
+      INTERNAL_CHECK_SPAN(original_source, sp_) << "Internal error: direct-store source must be a variable";
+      const std::unordered_map<const Var*, VarPtr> replacements = {{original_source.get(), sub},
+                                                                   {out_in_.get(), chain_in}};
+      auto remapped = As<Call>(transform_utils::Substitute(store_.call, replacements));
+      INTERNAL_CHECK_SPAN(remapped, sp_) << "Internal error: direct-store substitution must preserve Call";
+      // Do not infer a new TileType from the rank-5 GM window. The source is
+      // still 2-D, and the result aliases the chained destination unchanged.
+      scall = std::make_shared<Call>(store_.call->op_, std::move(args), remapped->kwargs_, remapped->attrs_,
+                                     chain_in->GetType(), sp_);
+    }
     auto sv = std::make_shared<Var>(out_base_ + "_t" + std::to_string(step), scall->GetType(), sp_);
     stmts.push_back(std::make_shared<AssignStmt>(sv, scall, sp_));
     return sv;
   }
 
  private:
-  ExprPtr base_r_, base_c_;
+  DirectGmStoreInfo store_;
   VarPtr out_in_;
   std::string out_base_;
-  std::vector<std::pair<std::string, std::any>> kwargs_;
-  std::vector<std::pair<std::string, std::any>> attrs_;
   Span sp_;
 };
 
@@ -1722,12 +1874,12 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
   auto init_call = As<Call>(init->value_);
   auto store_call = As<Call>(store->value_);
   if (!init_call || !IsOp(init_call, "tile.create") || !store_call || !IsOp(store_call, "tile.store") ||
-      store_call->args_.size() != 3 || loop->iter_args_[0]->initValue_.get() != init->var_.get() ||
+      !AnalyzeDirectGmStore(store_call) || loop->iter_args_[0]->initValue_.get() != init->var_.get() ||
       store_call->args_[0].get() != loop->return_vars_[0].get()) {
     return std::nullopt;
   }
   auto store_offsets = As<MakeTuple>(store_call->args_[1]);
-  if (!store_offsets || store_offsets->elements_.size() != 2 || !AsVarLike(store_call->args_[2])) {
+  if (!store_offsets || !AsVarLike(store_call->args_[2])) {
     return std::nullopt;
   }
   auto init_use = use_counts.find(init->var_.get());
@@ -2055,6 +2207,9 @@ struct CanonicalSplitKFold {
 
 std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSplitKAccMatch& match,
                                                              std::vector<Diagnostic>& hints) {
+  const auto store_info = AnalyzeDirectGmStore(As<Call>(match.store->value_));
+  INTERNAL_CHECK_SPAN(store_info.has_value(), match.store->span_)
+      << "Internal error: matched canonical split-K store lost its direct-store geometry";
   const auto output_box_alignment = GetCanonicalOutputBoxAlignment(match);
   if (!output_box_alignment) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
@@ -2076,9 +2231,10 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   const auto* ctx = PassContext::Current();
   const auto planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
   const bool preserve_selected_k = planner != MemoryPlanner::PtoAS;
-  auto tiling = AnalyzeMatmul(
-      match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment,
-      /*direct_defs=*/nullptr, /*restrict_output_grid=*/false, preserve_selected_k ? match.loop : nullptr);
+  auto tiling =
+      AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment,
+                    /*direct_defs=*/nullptr, /*restrict_output_grid=*/false,
+                    preserve_selected_k ? match.loop : nullptr, store_info->full_m);
   if (!tiling || (!preserve_selected_k && !tiling->needs_mn_tiling())) return std::nullopt;
   if (preserve_selected_k) {
     INTERNAL_CHECK_SPAN(
@@ -2087,13 +2243,7 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
         << "Internal error: canonical reduction requires an output-stationary single-C plan";
   }
 
-  auto store_call = As<Call>(match.store->value_);
-  auto offsets = As<MakeTuple>(store_call->args_[1]);
-  auto out_in = AsVarLike(store_call->args_[2]);
-  INTERNAL_CHECK_SPAN(offsets && out_in, match.store->span_)
-      << "Internal error: matched canonical split-K store became invalid";
-  DirectGmPlacer placer(offsets->elements_[0], offsets->elements_[1], out_in, store_call->kwargs_,
-                        store_call->attrs_, match.store->span_);
+  DirectGmPlacer placer(*store_info, match.store->span_);
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
   const auto& shape_src = match.shape_source();
@@ -2478,7 +2628,7 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
   // K-loop+peel, so test k == K rather than the integer-division proxy K/k < 2.
   const bool full_k = t.k == t.K;
 
-  // Direct-store: the sole consumer is a 2D tile.store.  The grid is emitted
+  // Direct-store: the sole consumer is a 2D or blocked NZ tile.store. The grid is emitted
   // later at the store site, where the caller re-applies the then-current remap
   // — so a prior fold that redefined this output is rewritten correctly (a
   // stale-output SSA guard); resolving it here would miss folds emitted before
@@ -2487,17 +2637,20 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
     auto store_call = As<Call>(store_stmt->value_);
     INTERNAL_CHECK_SPAN(store_call, store_stmt->span_)
         << "Internal error: SiblingIndex store_of mapped a non-Call AssignStmt";
-    auto offs = As<MakeTuple>(store_call->args_[1]);
-    if (!offs || offs->elements_.size() != 2) {
-      return skip("tile.store offsets are not a 2D tuple — M/N fold not applicable; left untouched");
+    const auto store_info = AnalyzeDirectGmStore(store_call);
+    if (!store_info) {
+      return skip(
+          "tile.store does not have supported direct-store geometry — M/N fold not applicable; "
+          "left untouched");
     }
     auto out_in = AsVarLike(store_call->args_[2]);
     if (!out_in) {
       return skip(
           "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched");
     }
-    DirectGmPlacer placer(offs->elements_[0], offs->elements_[1], out_in, store_call->kwargs_,
-                          store_call->attrs_, sp);
+    INTERNAL_CHECK_SPAN(!store_info->is_nz() || (t.m == t.M && t.grid_m == t.M), sp)
+        << "Internal error: NZ direct-store fold requires an N/K-only tiling plan";
+    DirectGmPlacer placer(*store_info, sp);
     auto [stmts, last_out] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
     return MNFold{std::move(stmts), last_out, store_stmt->var_, store_stmt};
   }
@@ -2552,6 +2705,7 @@ struct MatmulOutputConsumer {
   const Var* extra_remap = nullptr;
   const AssignStmt* store_stmt = nullptr;
   bool supports_output_grid = false;
+  int64_t fixed_output_m = 0;  ///< NZ placement keeps all parent rows in every output tile.
 };
 
 std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmtPtr& assign,
@@ -2595,7 +2749,7 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
 
   if (plan.store_stmt && plan.result_uses == 1) {
     const auto store = As<Call>(plan.store_stmt->value_);
-    const auto offsets = store ? As<MakeTuple>(store->args_[1]) : nullptr;
+    const auto store_info = AnalyzeDirectGmStore(store);
     // Reconstructed bias loads may not move across an effect to the store.
     // A resident Bias operand needs no reload and retains its full-N minimum.
     const auto bias = IsOp(call, "tile.matmul_bias") && call->args_.size() == 3
@@ -2603,8 +2757,10 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
                           : nullptr;
     const bool bias_snapshot_safe = !IsOp(call, "tile.matmul_bias") || plan.store_stmt == next_effect ||
                                     (bias && bias->GetMemorySpace() == MemorySpace::Bias);
-    plan.supports_output_grid =
-        offsets && offsets->elements_.size() == 2 && AsVarLike(store->args_[2]) && bias_snapshot_safe;
+    if (store_info) {
+      plan.supports_output_grid = bias_snapshot_safe;
+      plan.fixed_output_m = store_info->full_m;
+    }
   }
   if (plan.result_uses >= 1 && plan.operand_uses == plan.result_uses &&
       backend::BackendConfig::IsConfigured()) {
@@ -3386,9 +3542,11 @@ class AutoTileMutator : public IRMutator {
         const Stmt* next_effect =
             next_non_load[i] < op->stmts_.size() ? op->stmts_[next_non_load[i]].get() : nullptr;
         const auto consumer = AnalyzeMatmulOutputConsumer(assign, sibling_index, next_effect);
-        if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                        consumer && consumer->supports_output_grid)) {
+        if (auto tiling =
+                AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
+                              /*output_box_alignment=*/std::nullopt, &direct_defs,
+                              consumer && consumer->supports_output_grid,
+                              /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only.  k < K here (k == K with
             // m == M, n == N needs no matmul tiling and was skipped by
@@ -3432,12 +3590,13 @@ class AutoTileMutator : public IRMutator {
           std::optional<MatmulTiling> os_tiling;
           const auto* ctx = PassContext::Current();
           const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
-          if (planner == MemoryPlanner::PyPTO &&
+          if (planner == MemoryPlanner::PyPTO && consumer->fixed_output_m == 0 &&
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
             os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
                                       /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                      consumer->supports_output_grid);
+                                      consumer->supports_output_grid, /*source_reduction=*/nullptr,
+                                      consumer->fixed_output_m);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
           if (auto ms = TryFoldMatScratch(*fold_tiling, result_uses, operand_uses, scratch_dtype, hints)) {

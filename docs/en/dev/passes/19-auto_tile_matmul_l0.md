@@ -87,6 +87,35 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
 The pass is a `ProgramPass` and walks each function with an `IRMutator`; functions are returned unchanged when no rewrite fires (no `MutableCopy` cost for matmul-free programs).
 
+## NZ GM destinations
+
+An FP32 NZ output uses the blocked, four-argument `tile.store` produced by
+[`BlockNzTensorViews`](16-block_nz_tensor_views.md#accumulator-stores). For a
+supported Mat-resident matmul whose result has exactly one such store
+consumer, the output grid keeps the complete M axis and tiles **N only**.
+This is a legality constraint on candidate selection: choosing an ordinary
+M/N optimum and then refusing its partial-row stores would miss legal
+full-M alternatives. Existing K tiling and enabled operand-stationary
+schedules remain available within that constraint. An infeasible
+output-stationary baseline does not prevent searching a legal enabled
+operand-stationary regime with a larger held-operand budget.
+
+For a column chunk at `ni`, the store retains its parent tensor and batch
+offset, adds `ni / 8` to its blocked column offset, and uses the explicit
+partition `[1, n / 8, M / 16, 16, 8]`. Each emitted Acc tile covers all parent
+rows at row offset 0. This avoids the A2/A3 NZ store's unsupported partial-row
+destination stride; a layout annotation alone cannot repair that stride.
+
+The initial logical output may exceed L0C or the store instruction's column
+field. Only the smaller emitted Acc tiles become allocations, and each must
+fit the backend's L0C capacity and have at most 4095 columns. N and every tail
+remain multiples of 16, so the effective aligned maximum is 4080 columns.
+The GM destination's total size is not bounded by L0C. If an M extent admits
+no legal N/K tile, analysis reports a dedicated compile-time diagnostic.
+Producer/use patterns outside the supported rewrite remain subject to
+allocation checks and the final NZ-store guard. Explicit column tiling is
+also supported; M splitting remains unavailable for NZ writes.
+
 ## Cost model & design space (`ChooseL0Tile`)
 
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:

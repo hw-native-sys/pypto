@@ -344,6 +344,68 @@ class TestL0TilingEdgeCases:
         assert _capacities_ok(result.m, result.n, result.k, cfg)
 
 
+@pytest.mark.parametrize(
+    ("M", "N", "fixed_axis", "stationarity", "dba", "dbb"),
+    [
+        (2048, 64, "m", "AStationary", False, True),
+        (64, 2048, "n", "BStationary", True, False),
+    ],
+)
+def test_operand_stationary_survives_an_infeasible_output_stationary_baseline(
+    M, N, fixed_axis, stationarity, dba, dbb
+):
+    """A fixed axis needs the full held-operand buffer, while OS only has half.
+
+    At K=16 the fixed 2048-element axis needs exactly 64 KiB of its operand
+    SRAM. Keeping that operand stationary is legal, and a 16-wide moving
+    axis makes the FP32 Acc fit exactly in 128 KiB. OS cannot form even the
+    minimum tile, so it must not prevent the enabled legal regime's search.
+    """
+    cfg = _default_config(M=M, N=N, K=16)
+    setattr(cfg, f"min_{fixed_axis}", M if fixed_axis == "m" else N)
+    setattr(cfg, f"allow_{stationarity[0].lower()}_stationary", True)
+
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+    assert (result.m, result.n, result.k) == ((2048, 16, 16) if fixed_axis == "m" else (16, 2048, 16))
+    assert result.stationarity == getattr(passes.l0_tile_chooser.Stationarity, stationarity)
+    assert not result.double_buffer_c
+    assert _capacities_ok(result.m, result.n, result.k, cfg, dba=dba, dbb=dbb)
+    assert not _capacities_ok(result.m, result.n, result.k, cfg)
+
+
+@pytest.mark.parametrize(("M", "N", "fixed_axis"), [(2048, 64, "m"), (64, 2048, "n")])
+@pytest.mark.parametrize("gate_mode", ["closed", "opposite", "independent"])
+def test_infeasible_baseline_does_not_enable_an_unrealizable_stationary_regime(M, N, fixed_axis, gate_mode):
+    """Fallback search must respect both explicit gates and the source schedule."""
+    cfg = _default_config(M=M, N=N, K=16)
+    setattr(cfg, f"min_{fixed_axis}", M if fixed_axis == "m" else N)
+    if gate_mode == "opposite":
+        setattr(cfg, "allow_b_stationary" if fixed_axis == "m" else "allow_a_stationary", True)
+    elif gate_mode == "independent":
+        cfg.allow_a_stationary = cfg.allow_b_stationary = True
+        cfg.independent_output_tiles = True
+
+    with pytest.raises(ValueError, match="capacity"):
+        passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+
+@pytest.mark.parametrize(("M", "N", "fixed_axis"), [(2048, 64, "m"), (64, 2048, "n")])
+def test_no_legal_tile_is_reported_after_all_enabled_regimes_are_searched(M, N, fixed_axis):
+    """A minimum K fits the full buffer, but held operands require the full K.
+
+    OS cannot fit K=16 at the fixed axis. Stationary can fit that minimum,
+    but requires K=32, which exceeds even the full operand SRAM. Exhausting
+    both searches must remain a user-facing error rather than a null result.
+    """
+    cfg = _default_config(M=M, N=N, K=32)
+    setattr(cfg, f"min_{fixed_axis}", M if fixed_axis == "m" else N)
+    cfg.allow_a_stationary = cfg.allow_b_stationary = True
+
+    with pytest.raises(ValueError, match=r"no legal \(m, n, k\) tile found"):
+        passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+
 # ---------------------------------------------------------------------------
 # Capacity / alignment invariants
 # ---------------------------------------------------------------------------

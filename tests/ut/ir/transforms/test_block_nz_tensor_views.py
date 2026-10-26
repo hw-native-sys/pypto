@@ -1374,20 +1374,207 @@ def test_acc_nz_store_accepts_exact_l0c_capacity(destination_cols, column_offset
 
 @pytest.mark.parametrize(("source_cols", "required_bytes"), [(528, 135168), (2048, 524288)])
 @pytest.mark.usefixtures("ascend_backend")
-def test_acc_nz_store_rejects_l0c_overflow_during_blocking(source_cols, required_bytes):
-    """Reject one impossible Acc before the blocked store bypasses automatic M/N tiling.
+def test_acc_nz_store_defers_capacity_until_the_physical_codegen_boundary(source_cols, required_bytes):
+    """Blocking accepts logical extents; an unretiled physical source is still refused.
 
-    528 columns exceeds capacity by one legal 16-column block; 2048 columns
-    reproduces the review case. Both satisfy all existing geometry checks.
+    This source is a Tile parameter, with no matmul producer for AutoTile to
+    split. The ordinary matmul tests below cover the supported producer path;
+    bypassing that tiler must not allow an oversized physical Acc to reach ISA.
     """
     before = _nz_store_program(tile_shape=(64, source_cols), output_shape=(64, source_cols), offsets=(0, 0))
+    blocked = passes.block_nz_tensor_views()(before)
+    assert _shape_values(_store_call(blocked).args[0]) == [64, source_cols]
     with pytest.raises(ValueError, match="NZ tile.store") as error:
-        passes.block_nz_tensor_views()(before)
+        codegen.PTOCodegen().generate(blocked, emit_tile_addr=True)
     message = str(error.value)
     assert "L0C" in message
     assert str(required_bytes) in message
     assert "131072" in message
     assert "pl.ND" in message
+
+
+def _wide_acc_nz_program(rows=64, cols=2048, column_offset=0, batch=None, split_k=False):
+    """A real producer lets the default pipeline legalize the oversized Acc."""
+    output_cols = cols + 32 if column_offset else cols
+    output_shape = [rows, output_cols] if batch is None else [3, rows, output_cols]
+    offsets = [0, column_offset] if batch is None else [batch, 0, column_offset]
+    reduction = 128 if split_k else 16
+
+    if split_k:
+
+        @pl.program
+        class SplitK:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[rows, reduction], pl.FP16],
+                w: pl.Tensor[[reduction, cols], pl.FP16],
+                out: pl.Tensor[output_shape, pl.FP32, pl.NZ],
+            ):
+                # Keep only one K-panel in L1; loading all 128x2048 weights at
+                # once would exceed L1 before the L0 tiler could help.
+                initial = pl.tile.create([rows, cols], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for ko, (carry,) in pl.pipeline(0, reduction, 32, init_values=(initial,), stage=2):
+                    lhs = pl.load(x, [0, ko], [rows, 32], target_memory=pl.Mem.Mat)
+                    rhs = pl.load(w, [ko, 0], [32, cols], target_memory=pl.Mem.Mat)
+                    current = pl.tile.matmul_acc(carry, lhs, rhs, ko == 0)
+                    acc = pl.yield_(current)
+                return pl.store(acc, offsets, out)
+
+        return SplitK
+
+    @pl.program
+    class FullK:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[rows, reduction], pl.FP16],
+            w: pl.Tensor[[reduction, cols], pl.FP16],
+            out: pl.Tensor[output_shape, pl.FP32, pl.NZ],
+        ):
+            lhs = pl.load(x, [0, 0], [rows, reduction], target_memory=pl.Mem.Mat)
+            rhs = pl.load(w, [0, 0], [reduction, cols], target_memory=pl.Mem.Mat)
+            return pl.store(pl.matmul(lhs, rhs, out_dtype=pl.FP32), offsets, out)
+
+    return FullK
+
+
+def _assert_nz_column_grid(program, rows, cols, column_offset=0, batch=0):
+    """Enumerate the generated static grid to check coverage without fixing its tile N.
+
+    These kernels have constant loop bounds. Evaluating only index arithmetic
+    and loop induction variables proves each C0 column is written once, even
+    when the chooser changes its tile width or uses a loop plus a boundary tail.
+    Numerical matmul and the physical byte layout are checked separately on NPU.
+    """
+    covered = [0] * (cols // 8)
+    bindings = {}
+    store_name = ir.get_op("tile.store").name
+
+    def value(expr):
+        if isinstance(expr, ir.ConstInt):
+            return expr.value
+        if isinstance(expr, ir.Var):
+            assert expr in bindings, f"unbound generated index {expr.name_hint}"
+            return bindings[expr]
+        if isinstance(expr, ir.Add):
+            return value(expr.left) + value(expr.right)
+        if isinstance(expr, ir.Sub):
+            return value(expr.left) - value(expr.right)
+        if isinstance(expr, ir.Mul):
+            return value(expr.left) * value(expr.right)
+        if isinstance(expr, ir.FloorDiv):
+            return value(expr.left) // value(expr.right)
+        raise AssertionError(f"unexpected generated index expression: {type(expr).__name__}")
+
+    def check_store(op):
+        assert len(op.args) == 4
+        source = op.args[0].type
+        assert isinstance(source, ir.TileType)
+        shape = _values(source.shape)
+        valid = _values(source.get_effective_tile_view().valid_shape)
+        assert shape == valid
+        assert shape[0] == rows and shape[1] % 16 == 0
+        assert shape[1] <= 4095 and shape[0] * shape[1] * 4 <= 131072
+        offsets = [value(expr) for expr in _elements(op.args[1])]
+        sizes = _values(_elements(op.args[3]))
+        assert offsets[0] == batch and offsets[2:] == [0, 0, 0]
+        assert sizes == [1, shape[1] // 8, rows // 16, 16, 8]
+        begin = offsets[1] - column_offset // 8
+        end = begin + sizes[1]
+        assert 0 <= begin < end <= len(covered)
+        for index in range(begin, end):
+            covered[index] += 1
+
+    def execute(op):
+        # Re-entering visit_stmt from a Python visit_for_stmt override leaves
+        # that nanobind trampoline active: a nested For falls back to the C++
+        # visitor, skips this evaluator's induction binding, and visits its
+        # body only once. Walk the statement structure directly so every loop
+        # is interpreted and index bindings retain their actual Var identity.
+        if isinstance(op, ir.SeqStmts):
+            for stmt in op.stmts:
+                execute(stmt)
+        elif isinstance(op, ir.ForStmt):
+            for index in range(value(op.start), value(op.stop), value(op.step)):
+                bindings[op.loop_var] = index
+                execute(op.body)
+            bindings.pop(op.loop_var, None)
+        elif isinstance(op, (ir.AssignStmt, ir.EvalStmt)):
+            expression = op.value if isinstance(op, ir.AssignStmt) else op.expr
+            if (
+                isinstance(op, ir.AssignStmt)
+                and isinstance(op.var.type, ir.ScalarType)
+                and op.var.type.dtype == DataType.INDEX
+            ):
+                bindings[op.var] = value(expression)
+            if isinstance(expression, ir.Call) and expression.op.name == store_name:
+                check_store(expression)
+        else:
+            assert isinstance(op, (ir.YieldStmt, ir.ReturnStmt)), type(op).__name__
+
+    for function in program.functions.values():
+        execute(function.body)
+    assert covered == [1] * len(covered), "the NZ output grid has a gap or overlapping writes"
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    passes.verify_properties(properties, program, "NZ automatic column tiling")
+
+
+@pytest.mark.parametrize(
+    ("cols", "column_offset", "batch"),
+    [(528, 0, None), (2048, 0, None), (4096, 0, None), (2048, 8, None), (2048, 8, 2)],
+    ids=["boundary-tail", "review-64x2048", "logical-4096-cols", "nonzero-col", "nonzero-batch-and-col"],
+)
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_automatically_tiles_only_columns(cols, column_offset, batch):
+    """Oversized logical Accs become legal full-row stores in blocked coordinates."""
+    before = _wide_acc_nz_program(cols=cols, column_offset=column_offset, batch=batch)
+    blocked = _run(before)
+    assert _shape_values(_store_call(blocked).args[0]) == [64, cols]
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
+    _assert_nz_column_grid(tiled, 64, cols, column_offset, 0 if batch is None else batch)
+    text = _emit_pto(before, BackendType.Ascend910B)
+    assert "#pto.layout<nz>" in text and "pto.tstore" in text
+    assert f"rows=64, cols={cols}," not in text, "the oversized physical Acc survived allocation"
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_automatically_tiles_canonical_split_k():
+    """The output grid encloses the complete K reduction, so partial sums never store."""
+    before = _wide_acc_nz_program(column_offset=8, split_k=True)
+    blocked = _run(before)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
+    _assert_nz_column_grid(tiled, 64, 2048, column_offset=8)
+    assert "pl.tile.matmul_acc(" in ir.python_print(tiled)
+    text = _emit_pto(before, BackendType.Ascend910B)
+    assert "#pto.layout<nz>" in text and "pto.tstore" in text
+    assert "rows=64, cols=2048," not in text
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_rejects_when_no_full_row_column_tile_fits():
+    """Even the minimum 16-column Acc exceeds L0C at 2064 complete rows."""
+    before = _wide_acc_nz_program(rows=2064, cols=16)
+    with pytest.raises(ValueError, match="NZ") as error:
+        _emit_pto(before, BackendType.Ascend910B)
+    message = str(error.value)
+    assert "row" in message.lower()
+    assert "pl.ND" in message
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_full_row_tiling_keeps_stationary_a_candidates():
+    """At M=2048 only stationary-A can keep full M while fitting a legal N tile."""
+    before = _wide_acc_nz_program(rows=2048, cols=32)
+    blocked = _run(before)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
+    _assert_nz_column_grid(tiled, 2048, 32)
+    assert "pto.tstore" in _emit_pto(before, BackendType.Ascend910B)
 
 
 @pytest.mark.usefixtures("ascend_backend")

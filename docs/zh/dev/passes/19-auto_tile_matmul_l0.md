@@ -86,6 +86,28 @@ program_tiled = l0_tile_pass(program)
 
 本 pass 是 `ProgramPass`，对每个函数走 `IRMutator`；当函数内没有触发任何改写时，返回原函数（不会发生 `MutableCopy` 开销）。
 
+## NZ GM 目标
+
+FP32 NZ 输出使用 [`BlockNzTensorViews`](16-block_nz_tensor_views.md#accumulator-写回)
+产生的四参数分块 `tile.store`。对于符合自动分块条件的 Mat-resident matmul，
+若其结果只被一个这样的 store 消费，输出网格会保留完整 M 轴，**只沿 N 分块**。
+这是候选选择时的合法性约束：不能先选普通 M/N 最优解，再拒绝它产生的行子窗口，
+否则可能错过合法的完整 M 方案。在此约束下，原有 K 分块与已启用的操作数常驻
+调度仍然可用。output-stationary 基线不可行时，仍会搜索已启用、常驻操作数预算
+更大的合法 operand-stationary 方案。
+
+从 `ni` 开始的列块保留父 tensor 与 batch 偏移，在分块列偏移上增加 `ni / 8`，
+并使用显式分区 `[1, n / 8, M / 16, 16, 8]`。每个实际 Acc tile 都从行偏移 0
+开始覆盖父 tensor 的全部行。这避免了 A2/A3 NZ store 无法表达的行子窗口目标
+stride；仅添加布局标注无法修复该 stride。
+
+初始逻辑输出可以超过 L0C 或 store 指令的列数字段范围。实际只分配拆分后更小的
+Acc tile，每块都必须放入后端 L0C 容量，列数不超过 4095。N 和每个尾块仍是
+16 的倍数，因此对齐后的实际列数上限为 4080。GM 目标总大小不受 L0C 容量限制。
+若某个 M 找不到合法的 N/K tile，分析阶段会立即报告专用编译诊断。
+不属于受支持改写的生产者/使用模式仍受分配检查和最终 NZ store 检查约束。
+用户也可显式按列分块；NZ 写回仍不能沿 M 拆分。
+
 ## Cost model & design space (`ChooseL0Tile`)
 
 `ChooseL0Tile` 通过**穷举式 roofline 搜索**挑选 L0 GEMM tile，而非闭式公式。对每个合法且对齐的 `(m, n, k)`（每维都是 `GetL0FractalAlignment()` 的倍数，L0C 预算按 `AlignUp(m, l0c_align_m) × n` 计算），它以核心 cycle 估算 wall-clock 并返回最小者：

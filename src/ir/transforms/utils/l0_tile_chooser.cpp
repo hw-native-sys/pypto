@@ -598,24 +598,33 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
                               << " is below the cube minimum tile dimension " << cfg.min_k;
   }
 
-  // 2. Baseline budgets for the always-present output-stationary / dbC=1 regime
-  //    (both operands double-buffered, one full L0C accumulator). The capacity
-  //    sanity checks use this most-constrained operand budget.
+  // 2. Baseline budgets for output-stationary / dbC=1 (both operands
+  //    double-buffered, one full L0C accumulator). A constrained output axis
+  //    may make this regime infeasible while an enabled operand-stationary
+  //    regime fits its held operand in the full buffer. Preliminary capacity
+  //    checks must therefore use the largest realizable operand budgets;
+  //    enumeration below still applies each regime's own exact capacities.
   const OperandDB os_db = DeriveOperandDB(Stationarity::kOutputStationary);
   const int64_t A0 = L0aBudget(cfg, os_db);
   const int64_t B0 = L0bBudget(cfg, os_db);
   const Regime base_regime;  // OS, dbC=1
   const int64_t C0_base = L0cBudget(cfg, base_regime);
+  const int64_t max_a0 = cfg.allow_a_stationary && !cfg.independent_output_tiles
+                             ? L0aBudget(cfg, DeriveOperandDB(Stationarity::kAStationary))
+                             : A0;
+  const int64_t max_b0 = cfg.allow_b_stationary && !cfg.independent_output_tiles
+                             ? L0bBudget(cfg, DeriveOperandDB(Stationarity::kBStationary))
+                             : B0;
 
   const auto min_boxed_m = BoxedExtent(cfg.min_m, cfg.box_align_m);
   const auto min_boxed_n = BoxedExtent(cfg.min_n, cfg.box_align_n);
   CHECK(min_boxed_m && *min_boxed_m <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
-        static_cast<int64_t>(*min_boxed_m) <= A0 / cfg.min_k)
-      << "ChooseL0Tile: L0a capacity " << A0 << " elements is too small to fit the minimum tile ("
+        static_cast<int64_t>(*min_boxed_m) <= max_a0 / cfg.min_k)
+      << "ChooseL0Tile: L0a capacity " << max_a0 << " elements is too small to fit the minimum tile ("
       << cfg.min_m << " x " << cfg.min_k << ")";
   CHECK(min_boxed_n && *min_boxed_n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
-        static_cast<int64_t>(*min_boxed_n) <= B0 / cfg.min_k)
-      << "ChooseL0Tile: L0b capacity " << B0 << " elements is too small to fit the minimum tile ("
+        static_cast<int64_t>(*min_boxed_n) <= max_b0 / cfg.min_k)
+      << "ChooseL0Tile: L0b capacity " << max_b0 << " elements is too small to fit the minimum tile ("
       << cfg.min_k << " x " << cfg.min_n << ")";
   const auto min_c_elements = CandidateL0cPhysicalElements(cfg.min_m, cfg.min_n, cfg);
   CHECK(min_c_elements && *min_c_elements <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
@@ -633,18 +642,14 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   std::optional<Candidate> best =
       EnumerateBest(cfg, base_regime, A0, B0, C0_base, /*require_inner_pair=*/false,
                     /*require_full_k=*/false);
-  CHECK(best) << "ChooseL0Tile: no legal (m, n, k) tile found for M=" << cfg.M << ", N=" << cfg.N
-              << ", K=" << cfg.K << ". This indicates the hardware capacity is below the configured "
-              << "minimum tile shape; check L0a/L0b/L0c bytes and min_m/min_n/min_k.";
-
-  // Explore the rest of the design space only when the baseline actually tiles
-  // the output. A full [M, N, K] tile that fits one L0C is "already L0-sized":
+  // Explore the rest of the design space when the baseline tiles or has no
+  // legal candidate. A full [M, N, K] tile that fits one L0C is "already L0-sized":
   // the caller skips tiling, so no richer algorithm (operand-stationary, dbC=2)
   // should turn it into a multi-tile grid for a marginal modelled gain the
   // lowering's loop/extract overhead would erase. Each enumerated regime is gated
   // by the realizable mask and adopted only on a STRICTLY lower wall (ties keep
   // the simpler, earlier regime -- the baseline first).
-  const bool is_tiled = !(best->m == cfg.M && best->n == cfg.N && best->k == cfg.K);
+  const bool is_tiled = !best || !(best->m == cfg.M && best->n == cfg.N && best->k == cfg.K);
   if (is_tiled && !cfg.independent_output_tiles) {
     std::vector<Stationarity> stats = {Stationarity::kOutputStationary};
     if (cfg.allow_a_stationary) stats.push_back(Stationarity::kAStationary);
@@ -672,10 +677,14 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
         // never displaces the already-scored output-stationary baseline. This is
         // a deterministic "prefer the simpler lowering" rule, not enumeration
         // order. (Within a regime, Better() applies the full lexicographic key.)
-        if (cand && cand->cost_cycles < best->cost_cycles) best = cand;
+        if (cand && (!best || cand->cost_cycles < best->cost_cycles)) best = cand;
       }
     }
   }
+
+  CHECK(best) << "ChooseL0Tile: no legal (m, n, k) tile found for M=" << cfg.M << ", N=" << cfg.N
+              << ", K=" << cfg.K << ". This indicates the hardware capacity is below the configured "
+              << "minimum tile shape; check L0a/L0b/L0c bytes and min_m/min_n/min_k.";
 
   L0TileResult result;
   result.m = best->m;
