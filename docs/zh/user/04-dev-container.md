@@ -493,15 +493,17 @@ PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用
 PR 不发布镜像，也不获取 SWR 凭据。
 硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
 
-当前启用两个原生 ARM64 镜像，均使用 CANN 9.2.0：
+当前启用三个原生镜像，均使用 CANN 9.2.0：
 
 | 镜像 | Runner 标签 | 宿主机驱动（`Version=`） | 发布标签 |
 | ---- | ----------- | ------------------------ | -------- |
 | `arm-a2a3` | `self-hosted`、`linux`、`ARM64`、`npu-xp` | `26.0.rc1` | `arm-a2a3-cann9.2-dist` |
 | `arm-a5` | `self-hosted`、`Linux`、`ARM64`、`npu-a5` | `25.6.rc2.b023` | `arm-a5-cann9.2-dist` |
+| `x86-a5` | `self-hosted`、`Linux`、`npu-a5`、`X64`、`pr` | `25.7.rc1.12` | `x86-a5-cann9.2-dist` |
 
-A5 基础镜像为 `9.2.0-950-ubuntu22.04-py3.11-devel`，固定到 ARM64 manifest。
-`ARM64` 标签确保 A5 任务不会调度到 x86 A5 runner。
+A5 基础镜像为 `9.2.0-950-ubuntu22.04-py3.11-devel`，分别固定到 ARM64 和 AMD64 manifest。
+架构标签确保 A5 任务调度到匹配的原生 runner。doctor 将 CANN 9.2 A5 的驱动组合限定到对应宿主机架构。
+`pr` 标签用于选择 x86 runner，不限制 workflow 的触发事件类型。
 A2/A3 预检还要求 runner 名称为 `227-npu-a2a3-XP-1`；若该标签池扩大，
 应为宿主机分配专用标签并更新 `runners`。
 每个 runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
@@ -530,8 +532,8 @@ SWR 认证与 manifest 操作直接连接，不使用代理。登录和推送子
 如果 Docker daemon 自身配置了代理，其 `NO_PROXY` 必须包含 SWR 主机名。
 
 首次构建前，确认配置中的 CANN 基础镜像可访问。默认 `cann_repository` 为 `quay.io/ascend/cann`；
-若 daemon 无法访问，将准确的 ARM64 镜像同步到允许匿名读取的 SWR 仓库，再修改该字段。
-首期已固定 ARM64 镜像 digest；切换仓库时，应将验证过的镜像仓库 digest 填入 `cann_digest`。
+若 daemon 无法访问，将对应架构的准确镜像同步到允许匿名读取的 SWR 仓库，再修改该字段。
+每种架构均固定镜像 digest；切换仓库时，应将验证过的镜像仓库 digest 填入 `cann_digest`。
 值为 null 时，每次拉取指定 tag 并解析 digest。
 两种模式都会使用解析后的 digest 构建并记录到产物中；旧缓存不能掩盖拉取失败。
 升级 CANN 时，应一起修改 tag、digest、驱动要求和发布标签。
@@ -596,7 +598,7 @@ Actions Summary 和保留 14 天的 artifacts 包含提交版本、digest、构�
 获取新快照时，拉取新镜像并创建新容器或源码卷。已有 named volume 会保留原来的源码。
 希望跟踪分支的开发者，需要显式处理 checkout 和本地补丁，然后再使用更新脚本。
 
-后续添加 `x86-a2a3` 或 `x86-a5` 时，新增配置项并指定匹配的原生 runner、CANN 基础镜像、
+后续添加 `x86-a2a3` 或其他 CANN 版本的镜像时，新增配置项并指定匹配的原生 runner、CANN 基础镜像、
 驱动和硬件验证路径；环境准备好前保持禁用。各组合独立发布标签；Docker 架构 manifest 无法按宿主机 NPU 选择镜像。
 
 ### 不装 Ascend Docker Runtime

@@ -121,11 +121,10 @@ def validate_image(name: str, image: dict[str, Any]) -> None:
     if image["patch"] and image["patch"] not in PATCH_FILES:
         raise ValueError(f"Unsupported runtime patch for {name}")
     if image["patch"] and (
-        not name.startswith("arm-")
-        or not image["cann_tag"].startswith("9.2.0-")
+        not image["cann_tag"].startswith("9.2.0-")
         or image["patch"] != f"cann92-{image['validation_platform']}-aicpu-class-memaccess"
     ):
-        raise ValueError(f"The CANN 9.2 patch must match the ARM image platform: {name}")
+        raise ValueError(f"The CANN 9.2 patch must match the image platform: {name}")
     validate_cases(name, image)
 
 

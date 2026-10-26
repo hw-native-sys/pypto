@@ -1847,22 +1847,28 @@ def test_doctor_warns_when_runtime_hides_driver_version(healthy_doctor: dict[str
 
 
 @pytest.mark.parametrize(
-    "driver,chip,valid",
+    "driver,chip,arch,valid",
     [
-        ("26.0.rc1", "a3", True),
-        ("26.0.rc1", "a2", True),
-        ("26.0.rc1", "950", False),
-        ("26.0.rc1", "unknown", False),
-        ("25.6.rc1.b108", "a3", False),
-        ("25.6.rc2.b023", "950", True),
-        ("25.6.rc2.b023", "a3", False),
-        ("25.6.rc1.b108", "950", False),
+        ("26.0.rc1", "a3", "aarch64", True),
+        ("26.0.rc1", "a2", "aarch64", True),
+        ("26.0.rc1", "950", "aarch64", False),
+        ("26.0.rc1", "unknown", "aarch64", False),
+        ("25.6.rc1.b108", "a3", "aarch64", False),
+        ("25.6.rc2.b023", "950", "aarch64", True),
+        ("25.6.rc2.b023", "a3", "aarch64", False),
+        ("25.6.rc1.b108", "950", "aarch64", False),
+        ("25.7.rc1.12", "950", "x86_64", True),
+        ("25.7.rc1.12", "950", "aarch64", False),
+        ("25.6.rc2.b023", "950", "x86_64", False),
+        ("25.7.rc1.12", "a3", "x86_64", False),
+        ("26.0.rc1", "950", "x86_64", False),
     ],
 )
 def test_doctor_cann92_uses_mounted_host_metadata(
-    healthy_doctor: dict[str, str], tmp_path: Path, driver: str, chip: str, valid: bool
+    healthy_doctor: dict[str, str], tmp_path: Path, driver: str, chip: str, arch: str, valid: bool
 ) -> None:
     env = healthy_doctor
+    executable(Path(env["PATH"].split(":")[0]) / "uname", f"echo {arch}")
     env["PYPTO_CANN_TAG"] = f"9.2.0-{chip}-ubuntu22.04-py3.11-devel"
     (Path(env["ASCEND_HOME_PATH"]) / "compiler/version.info").write_text("Version=9.2.0\n")
     host_metadata = tmp_path / "host-version.info"

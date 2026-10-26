@@ -93,8 +93,12 @@ def test_disabled_future_architecture_is_not_scheduled(
     ci: ModuleType, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = ci.load_config()
-    config["images"]["x86-a5"] = dict(
-        config["images"]["arm-a5"], enabled=False, platform="linux/amd64", patch="", tag="x86-a5-cann9.2-dist"
+    config["images"]["x86-a2a3"] = dict(
+        config["images"]["arm-a2a3"],
+        enabled=False,
+        platform="linux/amd64",
+        patch="",
+        tag="x86-a2a3-cann9.2-dist",
     )
     monkeypatch.setattr(ci, "load_config", lambda: config)
     original = sys.argv
@@ -104,8 +108,9 @@ def test_disabled_future_architecture_is_not_scheduled(
     finally:
         sys.argv = original
     result = json.loads(capsys.readouterr().out)
-    assert [item["name"] for item in result["include"]] == ["arm-a2a3", "arm-a5"]
+    assert [item["name"] for item in result["include"]] == ["arm-a2a3", "arm-a5", "x86-a5"]
     assert result["include"][1]["runners"] == ["self-hosted", "Linux", "ARM64", "npu-a5"]
+    assert result["include"][2]["runners"] == ["self-hosted", "Linux", "npu-a5", "X64", "pr"]
 
 
 def test_annotated_tag_resolves_to_commit(ci: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,7 +128,7 @@ def test_annotated_tag_resolves_to_commit(ci: ModuleType, monkeypatch: pytest.Mo
 @pytest.mark.parametrize(
     "event,pypto_ref", [("push", "main"), ("pull_request", "main"), ("pull_request", "4" * 40)]
 )
-@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
+@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5", "x86-a5"])
 def test_build_freezes_refs_and_base_digest(
     ci: ModuleType,
     tmp_path: Path,
@@ -136,7 +141,8 @@ def test_build_freezes_refs_and_base_digest(
     config["sources"]["pypto"]["ref"] = pypto_ref
     image = config["images"][image_name]
     image["cann_digest"] = "sha256:" + "3" * 64
-    monkeypatch.setattr(ci.platform, "machine", lambda: "aarch64")
+    architecture = image["platform"].split("/")[1]
+    monkeypatch.setattr(ci.platform, "machine", lambda: "x86_64" if architecture == "amd64" else "aarch64")
     monkeypatch.setattr(ci.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.delenv("RUNNER_NAME", raising=False)
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
@@ -166,7 +172,7 @@ def test_build_freezes_refs_and_base_digest(
         if argv[1:3] == ["image", "inspect"]:
             if "--format" in argv:
                 return "sha256:" + "4" * 64
-            return json.dumps([{"Os": "linux", "Architecture": "arm64", "RepoDigests": [base]}])
+            return json.dumps([{"Os": "linux", "Architecture": architecture, "RepoDigests": [base]}])
         return ""
 
     monkeypatch.setattr(ci, "run", command)
@@ -218,7 +224,7 @@ def test_pr_build_rejects_missing_or_invalid_repository_before_network(
 
 
 @pytest.mark.parametrize("case,devices", [("decode", "5"), ("distributed", "5,7")])
-@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
+@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5", "x86-a5"])
 def test_devices_expand_only_inside_queued_shell(
     ci: ModuleType, state: dict, tmp_path: Path, case: str, devices: str, image_name: str
 ) -> None:
@@ -248,7 +254,7 @@ def test_devices_expand_only_inside_queued_shell(
     assert "-d 0,1" in calls if case == "distributed" else "-d 0" in calls
     assert f"-p {state['image']['validation_platform']}" in calls
     assert "PYPTO_BENCH=0" in calls
-    if image_name == "arm-a5":
+    if state["image"]["validation_platform"] == "a5":
         script = "decode_moe.py --ep 2" if case == "distributed" else "decode_swa.py"
         assert f"/workspace/pypto-lib/models/deepseek_v4_1_flash/{script} -p a5" in calls
     else:
@@ -264,7 +270,7 @@ def test_devices_expand_only_inside_queued_shell(
 @pytest.mark.parametrize(
     "failure", ["decode-exit", "distributed-exit", "missing-pass", "reported-fail", "manifest"]
 )
-@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5"])
+@pytest.mark.parametrize("image_name", ["arm-a2a3", "arm-a5", "x86-a5"])
 def test_failed_validation_cannot_publish(
     ci: ModuleType,
     state: dict,

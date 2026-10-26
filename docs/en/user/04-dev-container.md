@@ -552,15 +552,18 @@ approved code. See [GitHub's fork workflow approval settings](https://docs.githu
 PRs do not publish or receive SWR credentials. Hardware builds run only in `hw-native-sys/pypto`.
 Manual runs validate without publishing by default; publication also requires `main`.
 
-The configuration enables two native ARM64 images, both using CANN 9.2.0:
+The configuration enables three native images, all using CANN 9.2.0:
 
 | Image | Runner labels | Host driver (`Version=`) | Published tag |
 | ----- | ------------- | ------------------------ | ------------- |
 | `arm-a2a3` | `self-hosted`, `linux`, `ARM64`, `npu-xp` | `26.0.rc1` | `arm-a2a3-cann9.2-dist` |
 | `arm-a5` | `self-hosted`, `Linux`, `ARM64`, `npu-a5` | `25.6.rc2.b023` | `arm-a5-cann9.2-dist` |
+| `x86-a5` | `self-hosted`, `Linux`, `npu-a5`, `X64`, `pr` | `25.7.rc1.12` | `x86-a5-cann9.2-dist` |
 
-The A5 base is `9.2.0-950-ubuntu22.04-py3.11-devel`, pinned to its ARM64
-manifest. The `ARM64` label prevents the A5 job from landing on an x86 A5 runner.
+The A5 base is `9.2.0-950-ubuntu22.04-py3.11-devel`, pinned separately to its ARM64
+and AMD64 manifests. Architecture labels select the matching native A5 runner.
+Doctor restricts each CANN 9.2 A5 driver pair to its configured host architecture.
+The `pr` label selects the x86 runner; it does not restrict the workflow event type.
 The A2/A3 preflight additionally requires runner `227-npu-a2a3-XP-1`.
 If that label pool grows, assign the host a dedicated label and update `runners`.
 Each runner needs the `pypto-toolchain` bundle with Python 3.10, Git, Docker, Ascend Docker Runtime and
@@ -595,8 +598,8 @@ if the Docker daemon has its own proxy, its `NO_PROXY` must include the SWR host
 
 Before the first build, make the configured CANN base accessible. The default
 `cann_repository` is `quay.io/ascend/cann`; if the daemon cannot reach it, mirror
-the exact ARM64 image to an anonymously readable SWR repository and update that
-field. The initial ARM64 digest is pinned; replace `cann_digest` with the verified
+the exact image for the configured architecture to an anonymously readable SWR repository and update that
+field. Each architecture digest is pinned; replace `cann_digest` with the verified
 mirror digest when changing repositories. A null digest
 means pull the configured tag and resolve its digest on every run. Both modes
 build from the resolved digest and record it in the artifact; a stale local cache
@@ -686,7 +689,7 @@ create a fresh container/source volume to consume a new snapshot. Existing named
 volumes keep their own source. Developers choosing to track branches must handle
 their checkout and any local patch explicitly before using the updater.
 
-To add `x86-a2a3` or `x86-a5`, add a configuration entry with matching
+To add `x86-a2a3` or images using another CANN version, add a configuration entry with matching
 native runner labels, CANN base, driver and hardware validation paths. Keep it
 disabled until that combination has been provisioned. Publish independent tags;
 Docker architecture manifests cannot select images based on the attached NPU.

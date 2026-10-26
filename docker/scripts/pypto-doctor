@@ -115,10 +115,12 @@ if [ -r "$driver_file" ]; then
     driver="$(sed -n 's/^Version=//p' "$driver_file" | head -1)"
     # Supported pairs from runtime/docs/install.md. compatible_version contains
     # internal V100R... identifiers, not public CANN release numbers.
-    case "$cann:$driver:${PYPTO_CANN_TAG:-}" in
+    case "$cann:$driver:${PYPTO_CANN_TAG:-}:$(uname -m)" in
         9.0.0:26.0.rc1:*|9.1.T500:25.6.rc1.b108:*)
             ok "host driver $driver matches supported CANN $cann" ;;
-        9.2.0:26.0.rc1:9.2.0-a[23]-*|9.2.0:25.6.rc2.b023:9.2.0-950-*)
+        9.2.0:26.0.rc1:9.2.0-a[23]-*:*|\
+        9.2.0:25.6.rc2.b023:9.2.0-950-*:aarch64|\
+        9.2.0:25.7.rc1.12:9.2.0-950-*:x86_64)
             # Deployment-specific pair; CI still requires ACL, decode and
             # a two-card case on the real host before publishing a 9.2 image.
             ok "host driver $driver matches CANN $cann image validation configuration" ;;
