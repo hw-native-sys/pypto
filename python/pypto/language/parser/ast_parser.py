@@ -19,7 +19,7 @@ from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 from pypto.ir.type import _merge_annotation_metadata  # noqa: PLC2701
 from pypto.language.distributed import op as _dsl_pld
-from pypto.language.typing.dynamic import DynVar
+from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.pypto_core import DataType, ir
 
 from ._dsl_invoker import invoke_dsl
@@ -283,9 +283,15 @@ class ASTParser:
                     f"the parameter"
                 ),
             )
-        declared._ir_var = param_var
-        declared.expr = param_var
+        # This is a function-local shadow, not a mutation of the program's
+        # DynVar. Sharing the replacement with another function would make its
+        # tensor annotation refer to this callee's scalar parameter (#3137).
+        local = dynamic(declared.name)
+        local._ir_var = param_var
+        local.expr = param_var
+        self.expr_evaluator.closure_vars = {**self.expr_evaluator.closure_vars, param_name: local}
         self.expr_evaluator.dynvar_cache[param_name] = param_var
+        self.type_resolver.bind_local_dynamic_symbol(param_name, param_var)
 
     def parse_function(
         self,

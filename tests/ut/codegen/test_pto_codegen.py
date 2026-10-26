@@ -2134,7 +2134,7 @@ class TestGenerateArgUnpacking:
         assert names == ["a", "b", "out", "BATCH"]
 
     def test_dynamic_tensor_affine_ops_extract(self):
-        """Shape dims var+const, var-const, var*const, var//const all invert back to var."""
+        """Injective affine dims can be inverted; floor division needs an explicit scalar."""
         span = ir.Span.unknown()
         idx = DataType.INDEX
         v_add = ir.Var("V_ADD", ir.ScalarType(idx), span)
@@ -2162,12 +2162,19 @@ class TestGenerateArgUnpacking:
             ib.return_stmt(ret)
         func = f.get_result()
 
+        # V_DIV=10 and V_DIV=11 both produce a descriptor extent of 2.
+        # Recovering V_DIV as extent*5 silently changed the kernel's semantics.
+        with pytest.raises(ValueError, match="V_DIV.*non-invertible"):
+            _generate_arg_unpacking(func)
+        func = ir.Function(
+            func.name, [v_div, *func.params], func.return_types, func.body, span, func.func_type
+        )
         code, names = _generate_arg_unpacking(func)
         assert "int64_t V_ADD = (static_cast<int64_t>(a_tensor->shapes[0]) - 2);" in code
         assert "int64_t V_SUB = (static_cast<int64_t>(b_tensor->shapes[0]) + 3);" in code
         assert "int64_t V_MUL = (static_cast<int64_t>(c_tensor->shapes[0]) / 4);" in code
-        assert "int64_t V_DIV = (static_cast<int64_t>(d_tensor->shapes[0]) * 5);" in code
-        assert names == ["a", "b", "c", "d", "out", "V_ADD", "V_SUB", "V_MUL", "V_DIV"]
+        assert "V_DIV_conv.u64 = args[5]" in code
+        assert names == ["a", "b", "c", "d", "out", "V_DIV", "V_ADD", "V_SUB", "V_MUL"]
 
     def test_dynamic_tensor_no_invertible_source_raises(self):
         """Regression: if a Var only appears in non-invertible shape expressions
@@ -4502,6 +4509,92 @@ class Program:
     operand = store.split()[1].rstrip(",")
     definitions = {line.split(" = ", 1)[0]: line for line in lines if " = " in line}
     assert definitions[operand].split(" loc(")[0].endswith(": index to i32")
+
+
+@pytest.mark.parametrize("compound", [False, True])
+def test_explicit_shape_scalar_is_forwarded_once(compound):
+    """A scalar used in both shape and body is one ABI slot, even for lossy shapes."""
+    span = ir.Span.unknown()
+    b = ir.Var("b", ir.ScalarType(DataType.INDEX), span)
+    extent = ir.floordiv(b, ir.ConstInt(5, DataType.INDEX, span), span) if compound else b
+    ty = ir.TensorType([extent, ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32)
+    work = ir.Var("work", ty, span)
+    read = tile.load(work, [0, 0], [1, 16], target_memory=ir.MemorySpace.Vec)
+    value = ir.Var("value", read.type, span)
+    result = ir.Var("result", ty, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(value, read, span),
+            ir.AssignStmt(result, tile.store(value, [0, b - b], work), span),
+            ir.ReturnStmt([result], span),
+        ],
+        span,
+    )
+    func = ir.Function("shape_scalar", [b, work], [ty], body, span, ir.FunctionType.InCore)
+    mlir = _generate_mlir(ir.Program([func], "ExplicitShapeScalar", span))
+    signature = _single_line(_get_mlir_lines(mlir), "func.func @shape_scalar")
+    assert signature.count("%arg") == 2, signature
+    unpacking, names = _generate_arg_unpacking(func)
+    assert names == ["work", "b"]
+    assert "b_conv.u64 = args[1]" in unpacking
+    assert "Extract dynamic dim" not in unpacking
+    assert "arith.subi %arg1, %arg1" in mlir
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+def test_compound_internal_tensor_scope_compiles(tmp_path, platform):
+    """#3137: B/T must cross the boundary although only work's type uses them."""
+    backend.reset_for_testing()
+    B = pl.dynamic("COMPOUND_B")
+    T = pl.dynamic("COMPOUND_T")
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(self, src: pl.Tensor[[B, T], pl.FP32], out: pl.Out[pl.Tensor[[1, 16], pl.FP32]]):
+            b = pl.tensor.dim(src, 0)
+            t = pl.tensor.dim(src, 1)
+            work = pl.create_tensor([(b + 15) // 16 * 16 + t * 4, 16], dtype=pl.FP32)
+            with pl.spmd(1):
+                worker = pl.tile.get_block_idx()
+                value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+                pl.store(value, [worker, 0], work)
+                copied = pl.load(work, [worker, 0], [1, 16])
+                pl.store(copied, [worker, 0], out)
+
+    ir.compile(
+        Repro,
+        output_dir=str(tmp_path),
+        platform=platform,
+        dump_passes=True,
+        skip_ptoas=find_ptoas_binary() is None,
+    )
+    kernels = list((tmp_path / "kernels").rglob("*.cpp"))
+    if find_ptoas_binary() is not None:
+        assert kernels
+        wrapper = "\n".join(path.read_text() for path in kernels)
+        assert "COMPOUND_B_conv.u64 = args[2]" in wrapper
+        assert "COMPOUND_T_conv.u64 = args[3]" in wrapper
+        assert "Extract dynamic dim: COMPOUND_" not in wrapper
+    orch = (tmp_path / "orchestration" / "main.cpp").read_text()
+    assert ".add_scalar(COMPOUND_B)" in orch
+    assert ".add_scalar(COMPOUND_T)" in orch
+
+
+@pytest.mark.parametrize("kind,limit", [("tensor", 32), ("scalar", 16)])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_wrapper_diagnoses_runtime_payload_capacity(kind, limit, overflow):
+    """Additional captured symbols must fail compilation instead of overrunning dispatch storage."""
+    span = ir.Span.unknown()
+    ty = ir.TensorType([1, 16], DataType.FP32) if kind == "tensor" else ir.ScalarType(DataType.INDEX)
+    params = [ir.Var(f"arg{i}", ty, span) for i in range(limit + int(overflow))]
+    func = ir.Function("capacity", params, [], ir.ReturnStmt([], span), span, ir.FunctionType.InCore)
+    if overflow:
+        with pytest.raises(ValueError, match=f"{kind} arguments.*at most {limit}"):
+            _generate_arg_unpacking(func)
+    else:
+        _, names = _generate_arg_unpacking(func)
+        assert len(names) == limit
 
 
 if __name__ == "__main__":

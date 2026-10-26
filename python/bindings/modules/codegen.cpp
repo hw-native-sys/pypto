@@ -116,6 +116,8 @@ void BindCodegen(nb::module_& m) {
                      "    expr: Tensor-shape expression (a dim from TensorType.shape).\n\n"
                      "Returns:\n"
                      "    list[Var]: Vars in first-seen DFS order, deduped within this single call.");
+  codegen_module.def("collect_tensor_shape_dyn_vars", &CollectTensorShapeDynVars, nb::arg("func"),
+                     "Return ordered trailing shape arguments, excluding explicit scalar parameters.");
 }
 
 }  // namespace python

@@ -665,6 +665,40 @@ class UpwardExposedUseCollector : public IRVisitor {
   /// outside it — i.e. the subtree captures rather than defines it.
   [[nodiscard]] bool IsExternal(const Var* var) const { return live_in_.count(var) > 0; }
 
+  /// Close the capture set over tensor shape dependencies. A bare dimension
+  /// is available from a captured descriptor; occurrence inside an expression
+  /// is not a binding (e.g. rows = ceildiv(B, 16) * 16 + T * 4 loses B and T).
+  /// Conservatively pass such symbols rather than attempting algebraic inversion.
+  void CaptureShapeDependencies() {
+    std::unordered_set<const Var*> descriptor_bound;
+    var_collectors::VarDefUseCollector dependencies;
+    for (const Var* var : ordered) {
+      if (auto type = AsTensorTypeLike(var->GetType())) {
+        for (const auto& dim : type->shape_) {
+          if (auto symbol = AsVarLike(dim)) descriptor_bound.insert(symbol.get());
+          dependencies.VisitExpr(dim);
+        }
+      }
+    }
+    std::vector<const Var*> shape_params;
+    std::unordered_set<const Var*> shape_param_set;
+    for (const Var* var : dependencies.var_uses_ordered) {
+      if (!As<ScalarType>(var->GetType())) continue;
+      if (descriptor_bound.count(var) && !IsExternal(var)) continue;
+      RecordUse(var);
+      if (IsExternal(var)) {
+        shape_params.push_back(var);
+        shape_param_set.insert(var);
+      }
+    }
+    // Explicit scalar parameters must precede annotations that reference them
+    // in printable IR. Runtime dispatch still partitions tensors before scalars.
+    for (const Var* var : ordered) {
+      if (!shape_param_set.count(var)) shape_params.push_back(var);
+    }
+    ordered = std::move(shape_params);
+  }
+
  protected:
   // Var and IterArg are handled by separate overrides rather than a shared
   // ``VisitVarLike_``, mirroring VarDefUseCollector: neither may descend to the
@@ -836,12 +870,12 @@ std::unordered_set<const Var*> ScopeOutliner::ComputeFallbackUsedAfter(const Sco
   if (!inside_nested_scope_body_) {
     var_collectors::VarDefUseCollector def_collector;
     def_collector.VisitStmt(scope->body_);
-    // Scalars are excluded from the defensive "export every definition"
-    // fallback. The runtime cannot return one, so exporting a scalar nobody
-    // asked for can only turn a harmless local into a hard error further down
-    // (the scalar-output hoist would have to lift it, or reject the scope).
+    // Scalars and tuple unpacking temporaries are not runtime outputs. The
+    // latter already expose their tensor projections as separate definitions;
+    // exporting both would produce a nested tuple at a terminal SPMD boundary.
+    // Actual live-out uses are handled by the explicit tail-use analysis.
     for (const Var* var : def_collector.var_defs) {
-      if (As<ScalarType>(var->GetType())) continue;
+      if (As<ScalarType>(var->GetType()) || As<TupleType>(var->GetType())) continue;
       used_after.insert(var);
     }
   }
@@ -1576,6 +1610,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // substitution and the call-site lookup below.
   UpwardExposedUseCollector live_in;
   live_in.VisitStmt(scope_body);
+  live_in.CaptureShapeDependencies();
 
   std::vector<VarPtr> input_vars;
   for (const Var* var_ptr : live_in.ordered) {
@@ -1818,6 +1853,8 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
   };
   TrackingSubstituteMutator subst_mutator(var_substitution_map);
+  // Remap annotations even for parameters that are only used through types.
+  for (const auto& input_var : input_vars) subst_mutator.VisitExpr(input_var);
   auto transformed_body = subst_mutator.VisitStmt(pre_sub_body);
 
   // Reconcile param/output Vars with any freshened versions created during

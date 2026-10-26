@@ -13,7 +13,7 @@ import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, codegen, ir, passes
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.language.parser.text_parser import parse as text_parse
@@ -4432,6 +4432,55 @@ class TestOutlineScalarOutputHoist:
 
         After = self._outline(Before)
         assert self._scalar_returns(self._func(After, "scaled")) == 0, python_print(After)
+
+
+@pytest.mark.parametrize("scope_suffix", ["", " as tid"])
+def test_compound_shape_capture_preserves_caller_and_callee_symbols(scope_suffix):
+    """Type-only B/T captures must be fresh in the callee and actuals in Call/Submit types."""
+    before = text_parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, b: pl.Scalar[pl.INDEX], t: pl.Scalar[pl.INDEX]):
+        work = pl.create_tensor([(b + 15) // 16 * 16 + t * 4, 16], dtype=pl.FP32)
+        with pl.at(level=pl.Level.CORE_GROUP){scope_suffix}:
+            value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+            work = pl.store(value, [0, 0], work)
+        return work
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    kernel = after.get_function("main_incore_0")
+    main = after.get_function("main")
+    assert kernel is not None and main is not None
+    assert [p.name_hint.split("__ssa")[0] for p in kernel.params[:2]] == ["b", "t"]
+    assert all(isinstance(p.type, ir.ScalarType) for p in kernel.params[:2])
+    assert len(kernel.params) == 3
+
+    def symbols(ty):
+        return {v.unique_id for v in codegen.collect_vars_from_shape_expr(ty.shape[0])}
+
+    callee_symbols = {p.unique_id for p in kernel.params[:2]}
+    caller_symbols = {p.unique_id for p in main.params}
+    assert callee_symbols.isdisjoint(caller_symbols)
+    assert symbols(kernel.params[2].type) == callee_symbols
+    assert symbols(kernel.return_types[0]) == callee_symbols
+    calls = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(main.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, (ir.Call, ir.Submit))
+        and stmt.value.op.name == kernel.name
+    ]
+    assert len(calls) == 1
+    call = calls[0]
+    assert isinstance(call, ir.Submit) == bool(scope_suffix)
+    assert {a.unique_id for a in call.args[:2] if isinstance(a, ir.Var)} == caller_symbols
+    result_type = call.type.types[0] if isinstance(call.type, ir.TupleType) else call.type
+    assert symbols(result_type) == caller_symbols
+    printed = python_print(after, format=False)
+    assert "__FREE_VAR" not in printed
+    ir.assert_structural_equal(after, text_parse(printed))
 
 
 if __name__ == "__main__":

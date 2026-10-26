@@ -389,6 +389,10 @@ class TypeResolver:
         self._window_buffers[identifier] = (signature, window)
         return window
 
+    def bind_local_dynamic_symbol(self, name: str, var: ir.Var) -> None:
+        """Shadow a dimension for this function without rebinding the shared cache."""
+        self._dyn_var_cache = {**self._dyn_var_cache, name: var}
+
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
 
