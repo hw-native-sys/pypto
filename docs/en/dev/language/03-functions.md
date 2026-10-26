@@ -7,6 +7,29 @@
 Function declaration forms, parameter directions, cross-module reuse, and how to
 print IR back to Python syntax.
 
+## JIT implementation structure
+
+The JIT implementation lives in `python/pypto/jit/`. The public `jit` object and
+`JITFunction` remain in `decorator.py`; private analysis modules supply metadata
+without owning compiled-object caches or dispatching kernels.
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `decorator.py` | Decorators, `JITFunction`, dependency discovery, cache ownership, and compile/execute entry points |
+| `_arguments.py` | Optional torch loading, tensor argument metadata, annotations, and signature/constexpr validation |
+| `_ast_analysis.py` | Shared read-only AST cache, source names, and declared dynamic dimensions |
+| `_call_binding.py` | Call-site argument mapping, constexpr variants, and dynamic-dimension propagation across dependencies |
+| `_tensor_meta.py` | Source-ordered local tensor metadata, branch/loop bindings, and recursive dependency-return inference |
+| `specializer.py` | Shared specialization types and generation of specialized program source |
+| `_source.py`, `cache.py`, `_persistent.py` | Request namespace snapshots, cache keys, and persistent artifact resolution |
+
+`JITFunction` owns the dependency-graph state, compiled-object caches, and their
+lock. Key construction and specialization continue to share one request's
+namespace snapshot. Metadata inference receives dependency discovery as an
+explicit callback and carries it through recursive return analysis, so it does
+not import the decorator at runtime. Shared helper lookups use their owning
+modules, keeping AST caches and test patch targets in one place.
+
 ## JIT constants and compilation reuse
 
 A `@pl.jit` body is parsed into `@pl.program` source and re-parsed in a namespace

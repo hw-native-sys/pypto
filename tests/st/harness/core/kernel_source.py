@@ -231,10 +231,10 @@ class JitKernel:
         ``param_names`` alone cannot tell the two apart.
         """
         if self._tensor_params is None:
-            from pypto.jit.decorator import _get_func_def  # noqa: PLC0415
+            from pypto.jit._ast_analysis import get_func_def  # noqa: PLC0415
             from pypto.jit.specializer import _classify_params  # noqa: PLC0415
 
-            self._tensor_params = set(_classify_params(_get_func_def(self.entry._func))[2])
+            self._tensor_params = set(_classify_params(get_func_def(self.entry._func))[2])
         return self._tensor_params
 
     def _bound_arguments(self) -> "dict[str, Any]":

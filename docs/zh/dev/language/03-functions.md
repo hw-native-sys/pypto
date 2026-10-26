@@ -6,6 +6,26 @@
 
 函数声明形式、参数方向、跨模块复用，以及如何把 IR 打印回 Python 语法。
 
+## JIT 实现结构
+
+JIT 实现位于 `python/pypto/jit/`。公开的 `jit` 对象和 `JITFunction` 保留在
+`decorator.py`；私有分析模块提供元数据，不持有编译对象缓存，也不负责调度 kernel。
+
+| 模块 | 职责 |
+| ---- | ---- |
+| `decorator.py` | 装饰器、`JITFunction`、依赖发现、缓存所有权，以及编译/执行入口 |
+| `_arguments.py` | 可选 torch 加载、张量实参元数据、注解和 signature/constexpr 校验 |
+| `_ast_analysis.py` | 共享只读 AST 缓存、源码名称和动态维声明 |
+| `_call_binding.py` | 调用点参数映射、constexpr 变体和跨依赖的动态维传播 |
+| `_tensor_meta.py` | 按源码顺序推导局部张量元数据、处理分支/循环绑定及递归依赖返回值 |
+| `specializer.py` | 共享专门化类型和特化程序源码生成 |
+| `_source.py`、`cache.py`、`_persistent.py` | 请求命名空间快照、缓存键和持久产物解析 |
+
+`JITFunction` 持有依赖图状态、编译对象缓存及其锁。缓存键构造与专门化继续共享
+同一次请求的命名空间快照（namespace snapshot）。元数据推导通过显式回调（callback）
+获取依赖，并将回调传入递归返回值分析，因此不需要在运行时导入装饰器模块。
+共享 helper 通过其所属模块查找，使 AST 缓存和测试替换目标保持唯一。
+
 ## JIT 常量与编译复用
 
 `@pl.jit` 的函数体会被转写成 `@pl.program` 源码，并在只含 `pl` 与 `pld` 的命名空间中

@@ -917,7 +917,7 @@ class TestGlobalDependencies:
 
         monkeypatch.setattr(entry, "_compute_static_source_hash", unexpected_recomputation)
         monkeypatch.setattr(
-            importlib.import_module("pypto.jit.decorator"), "_param_layouts", unexpected_recomputation
+            importlib.import_module("pypto.jit._arguments"), "param_layouts", unexpected_recomputation
         )
         with capture_namespaces():
             assert entry._get_source_hash() == initial_hash
@@ -984,7 +984,7 @@ class TestGlobalDependencies:
             "def implementation(x: 'not a valid expression'):\n    return pl.add(x, _CACHE_BLOCK)\n"
         ).body[0]
         monkeypatch.setattr(
-            importlib.import_module("pypto.jit.decorator"), "_get_func_def", lambda _: definition
+            importlib.import_module("pypto.jit._ast_analysis"), "get_func_def", lambda _: definition
         )
         kernel = pl.jit(implementation)
         assert kernel._get_source_hash() == kernel._get_source_hash()

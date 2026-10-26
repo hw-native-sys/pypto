@@ -24,25 +24,33 @@ import pytest
 from pypto import backend
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
-from pypto.jit.decorator import (
+from pypto.jit._arguments import (
+    extract_tensor_meta,
+    param_dtypes,
+)
+from pypto.jit._ast_analysis import (
+    scan_dynamic_dims,
+)
+from pypto.jit._call_binding import (
+    SlicedArg,
+    arg_ref,
+    build_param_mapping,
+    compute_per_func_dyndim_maps,
+    extract_call_args_for_dep,
+)
+from pypto.jit._tensor_meta import (
     _SYNTHESIZED_DYN_PREFIX,
+    extract_local_tensor_metas,
+    resolve_dep_call_metadata,
+    scan_dep_io,
+    synthesized_dyn_dim,
+)
+from pypto.jit.decorator import (
     JITFunction,
     _allocate_generated_names,
-    _arg_ref,
-    _build_param_mapping,
-    _compute_per_func_dyndim_maps,
     _discover_dep_bindings,
     _discover_deps,
-    _extract_call_args_for_dep,
-    _extract_local_tensor_metas,
-    _extract_tensor_meta,
-    _param_dtypes,
-    _resolve_dep_call_metadata,
     _rewrite_jit_error,
-    _scan_dep_io,
-    _scan_dynamic_dims,
-    _SlicedArg,
-    _synthesized_dyn_dim,
     jit,
 )
 from pypto.jit.specializer import DynDim, Specializer, TensorMeta
@@ -78,7 +86,7 @@ class TestJitDecoration:
         """Unannotated FP32 must not hit DataType.__eq__(None) via ``in``."""
         torch = pytest.importorskip("torch")
         t = torch.empty((4, 8), dtype=torch.float32)
-        meta = _extract_tensor_meta(t)
+        meta = extract_tensor_meta(t)
         assert meta.dtype == DataType.FP32
         assert meta.static_shape() == (4, 8)
 
@@ -87,7 +95,7 @@ class TestJitDecoration:
         torch = pytest.importorskip("torch")
         t = torch.empty((4,), dtype=torch.int64)
         # Even if a caller passes INDEX as expected_dtype, keep torch→INT64 ABI.
-        meta = _extract_tensor_meta(t, expected_dtype=DataType.INDEX)
+        meta = extract_tensor_meta(t, expected_dtype=DataType.INDEX)
         assert meta.dtype == DataType.INT64
         assert meta.static_shape() == (4,)
 
@@ -102,7 +110,7 @@ class TestJitDecoration:
         ):
             return idx, x, packed, e1m2
 
-        assert _param_dtypes(kernel) == {
+        assert param_dtypes(kernel) == {
             "packed": DataType.FP4E2M1X2,
             "e1m2": DataType.FP4E1M2X2,
         }
@@ -111,11 +119,11 @@ class TestJitDecoration:
     def test_packed_fp4_annotation_accepts_raw_byte_carriers(self, dtype):
         torch = pytest.importorskip("torch")
         data = torch.empty((8, 32), dtype=torch.uint8)
-        meta = _extract_tensor_meta(data, expected_dtype=dtype)
+        meta = extract_tensor_meta(data, expected_dtype=dtype)
         assert meta.dtype == dtype
         assert meta.static_shape() == (8, 32)
         # Untyped bytes keep their type; only the explicit annotation selects FP4.
-        assert _extract_tensor_meta(data).dtype == DataType.UINT8
+        assert extract_tensor_meta(data).dtype == DataType.UINT8
 
     def test_e1m2_rejects_torch_e2m1_format(self):
         torch = pytest.importorskip("torch")
@@ -123,7 +131,7 @@ class TestJitDecoration:
         if torch_dtype is None:
             pytest.skip("torch.float4_e2m1fn_x2 required")
         with pytest.raises(TypeError, match="pass torch.uint8 carriers"):
-            _extract_tensor_meta(torch.empty((8, 32), dtype=torch_dtype), expected_dtype=pl.fp4e1m2x2)
+            extract_tensor_meta(torch.empty((8, 32), dtype=torch_dtype), expected_dtype=pl.fp4e1m2x2)
 
     def test_torch_fp4_x2_inference_preserves_carrier_shape(self):
         """Native Torch x2 tensors use the same dtype and shape with or without an annotation."""
@@ -132,11 +140,11 @@ class TestJitDecoration:
         if fp4_dtype is None:
             pytest.skip("torch.float4_e2m1fn_x2 required")
         packed = torch.empty((128, 32), dtype=fp4_dtype)
-        meta = _extract_tensor_meta(packed)
+        meta = extract_tensor_meta(packed)
         assert meta.dtype == DataType.FP4E2M1X2
         assert meta.static_shape() == (128, 32)
 
-        meta_x2 = _extract_tensor_meta(packed, expected_dtype=DataType.FP4E2M1X2)
+        meta_x2 = extract_tensor_meta(packed, expected_dtype=DataType.FP4E2M1X2)
         assert meta_x2.dtype == DataType.FP4E2M1X2
         assert meta_x2.static_shape() == (128, 32)
 
@@ -147,7 +155,7 @@ class TestJitDecoration:
             pytest.skip("torch.float4_e2m1fn_x2 required")
         packed = torch.empty((128, 0), dtype=fp4_dtype)
         with pytest.raises(TypeError, match="positive runtime x2 carrier last dimension"):
-            _extract_tensor_meta(packed)
+            extract_tensor_meta(packed)
 
     def test_jit_incore_creates_jitfunction(self):
         @jit.incore
@@ -231,7 +239,9 @@ class TestFp4DependencyContracts:
 
         rows = DynDim(name="rows", literal="rows", static_bound=16)
         original = TensorMeta(shape=(rows, width), dtype=caller_dtype, layout=ir.TensorLayout.NZ)
-        metas, _ = _resolve_dep_call_metadata(dep, caller, {"src": original}, {}, {})
+        metas, _ = resolve_dep_call_metadata(
+            dep, caller, {"src": original}, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert metas["src"] == original
         assert metas["src"].shape[0] is rows
         assert original.shape == (rows, width)
@@ -289,8 +299,13 @@ class TestFp4DependencyContracts:
             dep(src)
 
         with pytest.raises(TypeError, match="cast explicitly to change formats"):
-            _resolve_dep_call_metadata(
-                dep, caller, {"src": TensorMeta(shape=(16, 32), dtype=caller_dtype)}, {}, {}
+            resolve_dep_call_metadata(
+                dep,
+                caller,
+                {"src": TensorMeta(shape=(16, 32), dtype=caller_dtype)},
+                {},
+                {},
+                discover_deps=_discover_dep_bindings,
             )
 
     @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
@@ -580,7 +595,7 @@ class TestHostDiscoversOrchestrationDep:
 
 
 class TestScanDepIo:
-    """_scan_dep_io records both Out and InOut params as output-like (so meta
+    """scan_dep_io records both Out and InOut params as output-like (so meta
     propagates to captured dep results), in declaration order."""
 
     def test_includes_inout_params_in_declaration_order(self):
@@ -592,7 +607,7 @@ class TestScanDepIo:
             out = sub(a, cache, out)
             return out
 
-        io = _scan_dep_io(caller)
+        io = scan_dep_io(caller, discover_deps=_discover_dep_bindings)
         assert "sub" in io
         param_names, output_params = io["sub"]
         assert param_names == ["a", "cache", "out"]
@@ -609,7 +624,7 @@ class TestScanDepIo:
             out = sub(a, out)
             return out
 
-        _, output_params = _scan_dep_io(caller)["sub"]
+        _, output_params = scan_dep_io(caller, discover_deps=_discover_dep_bindings)["sub"]
         assert output_params == ["out"]
 
 
@@ -773,7 +788,7 @@ class TestJitCaching:
             c = a
             return c
 
-        dims = _scan_dynamic_dims(ann_kernel._func, ann_kernel._param_names())
+        dims = scan_dynamic_dims(ann_kernel._func, ann_kernel._param_names())
         assert ("a", 0) in dims
         assert ("c", 0) in dims
         # Static dim (128) must stay static.
@@ -938,7 +953,7 @@ class TestAliasedDepCallName:
     def test_scan_dep_io_keyed_by_call_name(self):
         """``_dep_out_metas`` looks the entry up by the AST's ``ast.Name``."""
         entry, _ = self._aliased_entry()
-        io = _scan_dep_io(entry._func)
+        io = scan_dep_io(entry._func, discover_deps=_discover_dep_bindings)
         assert "kern" in io
         assert "copy_incore" not in io
         param_names, output_params = io["kern"]
@@ -952,7 +967,9 @@ class TestAliasedDepCallName:
             "a": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             "c": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
         }
-        dep_meta, _ = _resolve_dep_call_metadata(dep, entry._func, caller_meta, {}, {}, dep_call_name="kern")
+        dep_meta, _ = resolve_dep_call_metadata(
+            dep, entry._func, caller_meta, {}, {}, dep_call_name="kern", discover_deps=_discover_dep_bindings
+        )
         # Positional call-site mapping, not the name-based fallback: the dep's
         # own parameter names appear nowhere in the caller.
         assert dep_meta["src"].shape == (64, 64)
@@ -1084,15 +1101,16 @@ class TestAliasedDepCallName:
             out = kern(a, buf)
             return out
 
-        metas = _extract_local_tensor_metas(
+        metas = extract_local_tensor_metas(
             entry._func,
             seed_meta={
                 "a": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
                 "c": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             },
+            discover_deps=_discover_dep_bindings,
         )
         # ``out`` captures the dep's Out param, which the call site bound to
-        # ``buf`` — resolvable only if _scan_dep_io keyed the dep by "kern".
+        # ``buf`` — resolvable only if scan_dep_io keyed the dep by "kern".
         assert metas["out"].shape == (32, 16)
 
 
@@ -1518,7 +1536,7 @@ class TestMultiFuncIntegration:
 
 # Module-level @pl.jit.incore kernel reused by the metadata-tracking tests below.
 # Defined at module level (not inside a test method) so it can be imported by
-# the unit test for ``_extract_local_tensor_metas``; the integration tests
+# the unit test for ``extract_local_tensor_metas``; the integration tests
 # below redefine their own deps inside the method to keep each test isolated.
 @jit.incore
 def _relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
@@ -1530,7 +1548,7 @@ def _relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
 
 
 def _slice_then_dep_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
-    """Plain (undecorated) function used only by the _extract_local_tensor_metas unit test."""
+    """Plain (undecorated) function used only by the extract_local_tensor_metas unit test."""
     view = pl.slice(src, [16, 8], [0, 0])
     buf = pl.create_tensor([16, 8], dtype=pl.FP32)
     mid = _relu_kernel(view, buf)
@@ -1557,7 +1575,7 @@ def _annotated_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
 
 
 def _reshape_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
-    """Plain function for _extract_local_tensor_metas unit test: reshape tracking."""
+    """Plain function for extract_local_tensor_metas unit test: reshape tracking."""
     x_flat = pl.reshape(src, [128, 128])  # noqa: F841 — tracked by JIT AST metadata extraction
     out_flat = pl.reshape(out, [128, 128])
     return out_flat
@@ -1636,7 +1654,7 @@ def _mixed_pair_body(x: pl.Tensor, cfg: pl.Tensor) -> pl.Tensor:
 # --- Runtime-sized local extents (synthesized DynDim) ------------------------
 # Fixtures for the tests covering a local tensor whose extent is only known at
 # runtime: one decorated dep, then plain (undecorated) caller bodies fed straight
-# to ``_extract_local_tensor_metas`` / ``_resolve_dep_call_metadata``.
+# to ``extract_local_tensor_metas`` / ``resolve_dep_call_metadata``.
 
 
 @jit.incore
@@ -1727,7 +1745,7 @@ def _nested_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor
 
 
 def _subscript_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
-    """Plain function for _extract_local_tensor_metas unit test: subscript-slice
+    """Plain function for extract_local_tensor_metas unit test: subscript-slice
     sugar tracking (issue #1836). All locals are tracked by JIT AST metadata
     extraction, hence the noqa F841 on the unused names."""
     view = src[0:16, 0:8]  # static bounds → (16, 8)  # noqa: F841
@@ -1753,13 +1771,15 @@ class TestSliceAndDepReturnMetadata:
     results or @pl.jit.incore return-value tensor metadata")."""
 
     def test_extract_local_tensor_metas_slice_and_dep_return(self):
-        """``_extract_local_tensor_metas`` infers metas for pl.slice views,
+        """``extract_local_tensor_metas`` infers metas for pl.slice views,
         pl.create_tensor locals, and @pl.jit.incore call results."""
         seed = {
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_slice_then_dep_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _slice_then_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # pl.slice view: shape from the literal list, dtype inherited from src.
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         # pl.create_tensor: unchanged behaviour.
@@ -1776,7 +1796,9 @@ class TestSliceAndDepReturnMetadata:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 64), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(_runtime_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Runtime-scalar 2nd dim → falls back to src's dim 1 = 64; dtype from src.
         assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
 
@@ -1786,7 +1808,9 @@ class TestSliceAndDepReturnMetadata:
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_annotated_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _annotated_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
@@ -1885,7 +1909,9 @@ class TestSliceAndDepReturnMetadata:
             "x": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_tuple_dep_return_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _tuple_dep_return_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Each target takes the pl.create_tensor meta of the matching returned
         # name — including the dtype, which differs between the two.
         assert metas["a"] == TensorMeta(shape=(1, 8), dtype=DataType.FP32)
@@ -1958,7 +1984,9 @@ class TestSliceAndDepReturnMetadata:
         """A callee whose allocation is sized off a parameter resolves through
         the call site: the seed metas descend with the recursion."""
         seed = {"x": TensorMeta(shape=(4, 64), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(_param_sized_dep_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _param_sized_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # ``pl.create_tensor(..., dtype=pl.FP32)`` sized by ``pl.tensor.dim(src, 1)``
         # of the caller's ``x``.
         assert metas["wide"] == TensorMeta(shape=(2, 64), dtype=DataType.FP32)
@@ -1972,7 +2000,9 @@ class TestSliceAndDepReturnMetadata:
             "x": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
         }
-        metas = _extract_local_tensor_metas(_mixed_pair_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _mixed_pair_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # ``b`` still resolves from the callee's own pl.create_tensor ...
         assert metas["b"] == TensorMeta(shape=(4, 4), dtype=DataType.FP16)
         # ... while ``a`` drops its stale pre-call [16, 8] FP32 rather than
@@ -1984,7 +2014,9 @@ class TestSliceAndDepReturnMetadata:
         declined rather than mis-paired — the clear ``_build_params`` error
         beats a wrong shape."""
         seed = {"x": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_arity_mismatch_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _arity_mismatch_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert "only_one" not in metas
 
     def test_runtime_sized_slice_uses_static_parent_dim(self):
@@ -2084,12 +2116,14 @@ class TestSliceAndDepReturnMetadata:
         assert "missing inferred tensor metadata" not in str(excinfo.value)
 
     def test_extract_local_tensor_metas_reshape(self):
-        """``_extract_local_tensor_metas`` infers metas for pl.reshape results."""
+        """``extract_local_tensor_metas`` infers metas for pl.reshape results."""
         seed = {
             "src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
             "out": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
         }
-        metas = _extract_local_tensor_metas(_reshape_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _reshape_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # reshape changes rank but keeps element count; dtype inherited from src.
         expected = TensorMeta(shape=(128, 128), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
         assert metas["x_flat"] == expected
@@ -2105,7 +2139,7 @@ class TestSliceAndDepReturnMetadata:
             return flat, qualified
 
         seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=ir.TensorLayout.NZ)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         expected = TensorMeta(shape=(131072,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
         assert metas["flat"] == expected
         assert metas["qualified"] == expected
@@ -2127,7 +2161,9 @@ class TestSliceAndDepReturnMetadata:
             return consume(alias)
 
         seed = {"src": TensorMeta(shape=(16, 32), dtype=DataType.INT8, layout=source_layout)}
-        metas, scalar_dtypes = _resolve_dep_call_metadata(consume, caller, seed, {}, {})
+        metas, scalar_dtypes = resolve_dep_call_metadata(
+            consume, caller, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         # The helper's declaration must not turn raw one-dimensional storage
         # back into an NZ matrix when the caller metadata is specialized.
         assert metas["flat"] == TensorMeta(shape=(512,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
@@ -2152,7 +2188,7 @@ class TestSliceAndDepReturnMetadata:
             return flat
 
         seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=layout)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "flat" not in metas
 
     def test_nz_flatten_to_dynamic_dim_alias_has_no_metadata(self):
@@ -2168,7 +2204,9 @@ class TestSliceAndDepReturnMetadata:
                 shape=(DynDim(name="N", literal="N", static_bound=131072),), dtype=DataType.INT8
             ),
         }
-        assert "flat" not in _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "flat" not in extract_local_tensor_metas(
+            body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
 
     @staticmethod
     def _resolve_callsite_metadata(caller):
@@ -2176,12 +2214,8 @@ class TestSliceAndDepReturnMetadata:
             "src": TensorMeta(shape=(32,), dtype=DataType.FP32),
             "out": TensorMeta(shape=(4, 8), dtype=DataType.FP32),
         }
-        tensor_meta, scalar_dtypes = _resolve_dep_call_metadata(
-            _callsite_metadata_kernel,
-            caller,
-            seed,
-            {},
-            {},
+        tensor_meta, scalar_dtypes = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, caller, seed, {}, {}, discover_deps=_discover_dep_bindings
         )
         assert scalar_dtypes == {}
         return tensor_meta
@@ -2213,14 +2247,16 @@ class TestSliceAndDepReturnMetadata:
         assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_extract_local_tensor_metas_subscript_slice(self):
-        """``_extract_local_tensor_metas`` tracks subscript-slice sugar
+        """``extract_local_tensor_metas`` tracks subscript-slice sugar
         ``v = src[a:b, ...]`` the same way it tracks ``pl.slice`` (issue #1836):
         static extents, scalar-index rank reduction, and trailing implicit ``:``."""
         seed = {
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_subscript_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _subscript_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Two static slices → (stop - start) per dim; dtype inherited from src.
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         # Scalar index at dim 0 drops it (numpy-style rank reduction).
@@ -2241,7 +2277,9 @@ class TestSliceAndDepReturnMetadata:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 64), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(_subscript_runtime_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _subscript_runtime_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Runtime-scalar 2nd bound → falls back to src's dim 1 = 64; dtype from src.
         assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
 
@@ -2257,7 +2295,7 @@ class TestSliceAndDepReturnMetadata:
             view = src[:, 0:64]  # dim 0 full ``:`` keeps DynDim; dim 1 → 64  # noqa: F841
             return view
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"].shape == (m_dim, 64)
         assert metas["view"].dtype == DataType.BF16
 
@@ -2293,7 +2331,7 @@ class TestDynamicLocalTensorMetadata:
             nxt = pl.create_tensor([tokens, 128], dtype=pl.BF16)
             return current, nxt
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "current" in metas
         assert "nxt" in metas
         assert metas["current"].shape == (m_dim, 128)
@@ -2311,7 +2349,7 @@ class TestDynamicLocalTensorMetadata:
             buf = pl.create_tensor([4, hidden], dtype=pl.FP32)
             return buf
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["buf"].shape == (4, 128)
 
     def test_dynvar_in_create_tensor_substituted(self):
@@ -2384,7 +2422,7 @@ class TestDynamicLocalTensorMetadata:
             buf = pl.create_tensor([tokens, 128], dtype=pl.FP32)
             return buf
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         # ``tokens`` is no longer a clean dim alias, so the dim cannot be
         # statically resolved: it gets a synthesized placeholder. What must NOT
         # happen is inheriting the parent's ``M`` — that is the flow-insensitive
@@ -2446,7 +2484,7 @@ class TestDynamicLocalTensorMetadata:
             flat = pl.reshape(x, [128, tokens])
             return flat
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["flat"].shape == (128, t_dim)
         assert metas["flat"].dtype == DataType.BF16
 
@@ -2617,20 +2655,20 @@ _SCALAR_DTYPE = pl.INDEX
 
 
 class TestArgRef:
-    """Unit tests for ``_arg_ref`` — caller-side reference classification."""
+    """Unit tests for ``arg_ref`` — caller-side reference classification."""
 
     @staticmethod
     def _ref(expr_src: str):
-        return _arg_ref(ast.parse(expr_src, mode="eval").body)
+        return arg_ref(ast.parse(expr_src, mode="eval").body)
 
     def test_plain_name(self):
         assert self._ref("x") == "x"
 
     def test_single_integer_index_drops_one_dim(self):
-        assert self._ref("x[r]") == _SlicedArg("x", 1)
+        assert self._ref("x[r]") == SlicedArg("x", 1)
 
     def test_multi_integer_index_drops_each_dim(self):
-        assert self._ref("x[r, 0]") == _SlicedArg("x", 2)
+        assert self._ref("x[r, 0]") == SlicedArg("x", 2)
 
     def test_slice_index_keeps_dim(self):
         # ``x[r:r+1]`` selects a range — the dim survives, so drop == 0 → None.
@@ -2638,7 +2676,7 @@ class TestArgRef:
 
     def test_mixed_integer_and_slice_counts_only_integers(self):
         # One integer index (dropped) + one slice (kept) → drop == 1.
-        assert self._ref("x[r, 0:2]") == _SlicedArg("x", 1)
+        assert self._ref("x[r, 0:2]") == SlicedArg("x", 1)
 
     def test_literal_returns_none(self):
         assert self._ref("3") is None
@@ -2652,33 +2690,35 @@ class TestArgRef:
 
 
 class TestExtractCallArgsSlicedDispatch:
-    """``_extract_call_args_for_dep`` + ``_build_param_mapping`` must carry a
-    per-rank subscript (``x[r]``) through as a ``_SlicedArg``."""
+    """``extract_call_args_for_dep`` + ``build_param_mapping`` must carry a
+    per-rank subscript (``x[r]``) through as a ``SlicedArg``."""
 
     def test_sliced_positional_args_extracted(self):
-        call_args = _extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
+        call_args = extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
         assert call_args == [
-            (None, _SlicedArg("inputs", 1)),
-            (None, _SlicedArg("outputs", 1)),
+            (None, SlicedArg("inputs", 1)),
+            (None, SlicedArg("outputs", 1)),
         ]
 
     def test_param_mapping_pairs_sliced_args_by_position(self):
-        call_args = _extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
+        call_args = extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
         assert call_args is not None
-        mapping = _build_param_mapping(["data", "out"], call_args)
+        mapping = build_param_mapping(["data", "out"], call_args)
         assert mapping == {
-            "data": _SlicedArg("inputs", 1),
-            "out": _SlicedArg("outputs", 1),
+            "data": SlicedArg("inputs", 1),
+            "out": SlicedArg("outputs", 1),
         }
 
 
 class TestWindowLocalMetadata:
-    """``_extract_local_tensor_metas`` must infer metas for ``pld.window`` views
+    """``extract_local_tensor_metas`` must infer metas for ``pld.window`` views
     so a host orchestrator's per-rank window locals propagate into the chip
     orchestrator's ``pld.DistributedTensor`` parameters."""
 
     def test_window_view_meta_inferred(self):
-        metas = _extract_local_tensor_metas(_window_local_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _window_local_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         # Shape from the 2nd positional arg, dtype from the ``dtype=`` keyword.
         assert metas["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
         assert metas["signal"] == TensorMeta(shape=(1, 1), dtype=DataType.INT32)
@@ -2688,7 +2728,7 @@ class TestWindowLocalMetadata:
             data = pld.window(buf, [1, 256])  # no dtype= kw
             return data
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "data" not in metas
 
     def test_window_missing_shape_untracked(self):
@@ -2696,7 +2736,7 @@ class TestWindowLocalMetadata:
             data = pld.window(buf, dtype=pl.FP32)  # no shape arg
             return data
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "data" not in metas
 
 
@@ -2733,7 +2773,7 @@ class TestPldTensorRebindPreservesMetadata:
             "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["data"] == seed["data"]
 
     def test_broadcast_rebind_keeps_metadata(self):
@@ -2748,7 +2788,7 @@ class TestPldTensorRebindPreservesMetadata:
             "target": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["target"] == seed["target"]
 
     def test_fresh_name_rebind_gets_target_operand_metadata(self):
@@ -2771,7 +2811,7 @@ class TestPldTensorRebindPreservesMetadata:
             "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["result"] == seed["data"]
 
     def test_rebind_to_a_different_stale_name_gets_operand_metadata_not_the_stale_one(self):
@@ -2791,7 +2831,7 @@ class TestPldTensorRebindPreservesMetadata:
             "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
             "old": TensorMeta(shape=(32, 32), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["old"] == seed["window"]
 
     def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
@@ -2807,7 +2847,7 @@ class TestPldTensorRebindPreservesMetadata:
             return d
 
         seed = {"a": TensorMeta(shape=(64, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "d" not in metas
 
     def test_window_three_segment_form_gets_metadata(self):
@@ -2827,7 +2867,7 @@ class TestPldTensorRebindPreservesMetadata:
             "buf": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "win": TensorMeta(shape=(64, 64), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["win"] == TensorMeta(shape=(128, 128), dtype=DataType.FP32)
 
     def test_pl_tensor_slice_three_segment_form_gets_metadata(self):
@@ -2841,7 +2881,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_pl_tensor_reshape_three_segment_form_gets_metadata(self):
@@ -2854,7 +2894,7 @@ class TestPldTensorRebindPreservesMetadata:
             return flat
 
         seed = {"src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
 
     def test_alloc_window_buffer_does_not_preserve_stale_metadata(self):
@@ -2869,7 +2909,7 @@ class TestPldTensorRebindPreservesMetadata:
             return buf
 
         seed = {"buf": TensorMeta(shape=(64, 64), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "buf" not in metas
 
     def test_window_three_segment_form_missing_dtype_untracked(self):
@@ -2883,7 +2923,7 @@ class TestPldTensorRebindPreservesMetadata:
             win = pld.tensor.window(buf, [1, 256])  # no dtype= kw
             return win
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "win" not in metas
 
     def test_all_to_all_v_rebind_inside_a_for_loop_keeps_metadata(self):
@@ -2905,7 +2945,7 @@ class TestPldTensorRebindPreservesMetadata:
             "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["data"] == seed["data"]
 
     def test_call_rooted_attribute_chain_is_not_mistaken_for_a_qualified_call(self):
@@ -2918,7 +2958,7 @@ class TestPldTensorRebindPreservesMetadata:
             x = other().tensor.window([1, 1], dtype=pl.FP32)
             return x
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "x" not in metas
 
     def test_slice_with_drop_dims_declines_rather_than_advertise_the_wrong_rank(self):
@@ -2936,7 +2976,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "view" not in metas
 
     def test_slice_with_an_explicitly_empty_drop_dims_still_gets_metadata(self):
@@ -2950,7 +2990,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == seed["src"]
 
     def test_slice_with_a_closure_constant_empty_drop_dims_still_gets_metadata(self):
@@ -2968,7 +3008,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == seed["src"]
 
     def test_slice_with_a_name_bound_to_none_drop_dims_still_gets_metadata(self):
@@ -2984,7 +3024,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == seed["src"]
 
     def test_slice_with_a_constexpr_empty_drop_dims_still_gets_metadata(self):
@@ -2998,7 +3038,9 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed, constexpr_values={"dd": "[]"})
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, constexpr_values={"dd": "[]"}, discover_deps=_discover_dep_bindings
+        )
         assert metas["view"] == seed["src"]
 
     def test_slice_with_an_unresolvable_local_drop_dims_declines_rather_than_guess(self):
@@ -3015,7 +3057,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "view" not in metas
 
     def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
@@ -3032,7 +3074,7 @@ class TestPldTensorRebindPreservesMetadata:
             return sliced, flat
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["sliced"] == seed["src"]
         assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
@@ -3045,7 +3087,9 @@ class TestDtypeOperandResolution:
     metadata" — naming that dep, not the line that built the tensor."""
 
     def test_window_dtype_module_constant(self):
-        metas = _extract_local_tensor_metas(_window_dtype_constant_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _window_dtype_constant_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         assert metas["win"] == TensorMeta(shape=(1, 256), dtype=DataType.INT32)
 
     def test_create_tensor_dtype_closure_constant(self):
@@ -3055,7 +3099,7 @@ class TestDtypeOperandResolution:
             t = pl.create_tensor([4, 8], dtype=acc_dtype)
             return t
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16)
 
     def test_create_tensor_positional_dtype(self):
@@ -3063,18 +3107,22 @@ class TestDtypeOperandResolution:
             t = pl.create_tensor([4, 8], pl.BF16)
             return t
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16)
 
     def test_create_tensor_dtype_of_tracked_tensor(self):
         seed = {"src": TensorMeta(shape=(16, 16), dtype=DataType.INT8)}
-        metas = _extract_local_tensor_metas(_create_tensor_dtype_of_src_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _create_tensor_dtype_of_src_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.INT8)
 
     def test_local_shadowing_dtype_constant_untracked(self):
         # The specializer does not fold a name the body binds, so neither may
         # the walker: the parameter, not the module constant, is what it names.
-        metas = _extract_local_tensor_metas(_window_dtype_shadowed_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _window_dtype_shadowed_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         assert "win" not in metas
 
     def test_host_window_dtype_constant_reaches_nested_deps(self):
@@ -3121,7 +3169,9 @@ class TestShapeOperandResolution:
 
     def test_every_spelling_resolves_to_the_same_static_shape(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_shape_spellings_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _shape_spellings_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         expected = TensorMeta(shape=(4, 8), dtype=DataType.FP32)
         for name in (
             "by_keyword",
@@ -3140,19 +3190,25 @@ class TestShapeOperandResolution:
         # through by name instead of being replaced by a synthesized symbol.
         rows = DynDim(name="M", literal="M", static_bound=4)
         seed = {"src": TensorMeta(shape=(rows, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_shape_spellings_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _shape_spellings_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["by_unpacked_dims"].shape == (rows, 8)
         assert metas["by_src_shape"].shape == (rows, 8)
 
     def test_view_ops_accept_shape_constant_and_keywords(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(_shape_constant_views_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _shape_constant_views_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP16)
         assert metas["flat"] == TensorMeta(shape=(32,), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
         assert metas["win"] == TensorMeta(shape=(4, 8), dtype=DataType.INT32)
 
     def test_local_shadowing_extent_constant_is_runtime(self):
-        metas = _extract_local_tensor_metas(_shadowed_rows_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _shadowed_rows_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         leading = metas["t"].shape[0]
         assert isinstance(leading, DynDim) and leading.synthesized
 
@@ -3160,12 +3216,16 @@ class TestShapeOperandResolution:
         # Resolved when bound, not when used: reshaping ``src`` afterwards must
         # not turn ``rows`` into the reshaped tensor's leading dim.
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_rebound_source_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _rebound_source_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_loop_target_drops_bound_dim(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_loop_rebinds_dim_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _loop_rebinds_dim_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         rows, cols = metas["t"].shape
         assert isinstance(rows, DynDim) and rows.synthesized
         assert cols == 8
@@ -3190,7 +3250,9 @@ class TestShapeOperandResolution:
 
     def test_starred_unpack_binds_no_dim(self):
         seed = {"src": TensorMeta(shape=(2, 4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_starred_unpack_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _starred_unpack_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         cols = metas["t"].shape[1]
         assert isinstance(cols, DynDim) and cols.synthesized
 
@@ -3200,7 +3262,7 @@ class TestLayoutOperandResolution:
     ignored, so an NZ local reached a dep declaring no layout as ND, silently."""
 
     def test_layout_resolved_by_value(self):
-        metas = _extract_local_tensor_metas(_layout_body, seed_meta={})
+        metas = extract_local_tensor_metas(_layout_body, seed_meta={}, discover_deps=_discover_dep_bindings)
         nz = TensorMeta(shape=(16, 16), dtype=DataType.FP16, layout=ir.TensorLayout.NZ)
         assert metas["nz"] == nz
         assert metas["by_constant"] == nz
@@ -3209,7 +3271,9 @@ class TestLayoutOperandResolution:
 
     def test_unresolved_layout_untracked(self):
         # Claiming ND for a layout the walker cannot see would mis-declare deps.
-        metas = _extract_local_tensor_metas(_unresolved_layout_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _unresolved_layout_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         assert "t" not in metas
 
 
@@ -3218,15 +3282,21 @@ class TestConstexprOperandResolution:
     the folded value rather than to a synthesized runtime extent."""
 
     def test_constexpr_binding_folds_into_meta(self):
-        metas = _extract_local_tensor_metas(
-            _constexpr_sized_body, seed_meta={}, constexpr_values={"rows": "16", "acc_dtype": "pl.BF16"}
+        metas = extract_local_tensor_metas(
+            _constexpr_sized_body,
+            seed_meta={},
+            constexpr_values={"rows": "16", "acc_dtype": "pl.BF16"},
+            discover_deps=_discover_dep_bindings,
         )
         assert metas["t"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
 
     def test_constexpr_whole_shape_folds_into_slice(self):
         seed = {"src": TensorMeta(shape=(8, 8), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(
-            _constexpr_slice_body, seed_meta=seed, constexpr_values={"shp": "[4, 8]"}
+        metas = extract_local_tensor_metas(
+            _constexpr_slice_body,
+            seed_meta=seed,
+            constexpr_values={"shp": "[4, 8]"},
+            discover_deps=_discover_dep_bindings,
         )
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP16)
 
@@ -3297,7 +3367,7 @@ def test_scalar_param_dtype_constant_is_rendered_by_value():
 
 
 class TestSlicedDispatchMetadata:
-    """``_resolve_dep_call_metadata`` must give a per-rank chip orchestrator dep
+    """``resolve_dep_call_metadata`` must give a per-rank chip orchestrator dep
     the base tensor's meta with the subscripted leading dims removed, and the
     DynDim cascade must not flow through a dropped dim."""
 
@@ -3307,13 +3377,14 @@ class TestSlicedDispatchMetadata:
             "inputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
             "outputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
         }
-        tensor_meta, _ = _resolve_dep_call_metadata(
+        tensor_meta, _ = resolve_dep_call_metadata(
             _sliced_chip,
             _per_rank_dispatch_body,
             seed,
             {},
             {},
             caller_func_type="host",
+            discover_deps=_discover_dep_bindings,
         )
         assert tensor_meta["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
         assert tensor_meta["out"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
@@ -3325,13 +3396,14 @@ class TestSlicedDispatchMetadata:
             "inputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
             "outputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
         }
-        tensor_meta, _ = _resolve_dep_call_metadata(
+        tensor_meta, _ = resolve_dep_call_metadata(
             _sliced_chip,
             _per_rank_dispatch_body,
             seed,
             {},
             {},
             caller_func_type="host",
+            discover_deps=_discover_dep_bindings,
         )
         assert "data" not in tensor_meta
         assert "out" not in tensor_meta
@@ -3339,15 +3411,15 @@ class TestSlicedDispatchMetadata:
     def test_dyndim_cascade_skips_sliced_arg(self):
         # The dep declares a dynamic leading dim; the host reaches it via
         # ``_dyn_sliced_chip(inputs[r], ...)``. The DynDim must NOT cascade onto
-        # a ``_SlicedArg`` key — doing so would corrupt the caller's dim map with
+        # a ``SlicedArg`` key — doing so would corrupt the caller's dim map with
         # a non-string key (and is semantically wrong: the rank dim is dropped).
-        call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None] = {
+        call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | SlicedArg | None]] | None] = {
             (id(_per_rank_dispatch_body), "_dyn_sliced_chip"): [
-                (None, _SlicedArg("inputs", 1)),
-                (None, _SlicedArg("outputs", 1)),
+                (None, SlicedArg("inputs", 1)),
+                (None, SlicedArg("outputs", 1)),
             ]
         }
-        maps = _compute_per_func_dyndim_maps(
+        maps = compute_per_func_dyndim_maps(
             entry_func=_per_rank_dispatch_body,
             entry_param_names=["inputs", "outputs"],
             deps=[_dyn_sliced_chip],
@@ -3359,8 +3431,8 @@ class TestSlicedDispatchMetadata:
         assert maps[id(_dyn_sliced_chip._func)]["data"][0].literal == "M_SLICE"
         # The host map must only ever be keyed by parameter name strings.
         assert all(isinstance(key, str) for key in host_map)
-        assert _SlicedArg("inputs", 1) not in host_map
-        assert _SlicedArg("outputs", 1) not in host_map
+        assert SlicedArg("inputs", 1) not in host_map
+        assert SlicedArg("outputs", 1) not in host_map
 
 
 class TestInlineFuncIntegration:
@@ -3595,7 +3667,7 @@ class TestInlineFuncIntegration:
         @jit
         def entry_mixed(a: pl.Tensor, out: pl.Out[pl.Tensor]):
             # Positional ``a`` plus keyword ``out=out`` — the keyword binding
-            # used to be silently dropped by _extract_call_args_for_dep.
+            # used to be silently dropped by extract_call_args_for_dep.
             out = helper(a, out=out)
             return out
 
@@ -3759,7 +3831,7 @@ class TestInlineFuncIntegration:
     def test_inline_with_reshape_compiles(self):
         """Regression: @pl.jit.inline + pl.reshape in caller compiles.
 
-        Previously failed because ``_extract_local_tensor_metas`` did not track
+        Previously failed because ``extract_local_tensor_metas`` did not track
         ``pl.reshape``, so the specializer couldn't find metadata for the
         reshaped tensor passed to the inline dep.
         """
@@ -3797,7 +3869,7 @@ class TestInlineFuncIntegration:
         """Regression for #1836: a subscript-slice view ``src[a:b]`` forwarded into
         an @pl.jit.inline dep compiles.
 
-        Previously failed because ``_extract_local_tensor_metas`` did not track the
+        Previously failed because ``extract_local_tensor_metas`` did not track the
         subscript-slice sugar (an ``ast.Subscript``, unlike ``pl.slice``'s Call),
         so the inline dep's param got no inferred metadata and ``_build_params``
         raised ``missing inferred tensor metadata``. Mirrors
@@ -4656,7 +4728,9 @@ class TestRuntimeSizedLocalExtents:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_runtime_create_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_create_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "tmp")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4668,7 +4742,9 @@ class TestRuntimeSizedLocalExtents:
     def test_runtime_window_extent_synthesizes_dyn_dim(self):
         """pld.window sized by pld.world_size() gets a synthesized DynDim."""
         seed = {"out": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_runtime_window_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_window_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "win")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4681,7 +4757,9 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(DynDim(name="M", literal="M", static_bound=32), 8), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_dyn_arith_create_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _dyn_arith_create_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "tmp")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4692,7 +4770,9 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_slice_then_dep_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _slice_then_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         assert all(not isinstance(d, DynDim) for d in metas["buf"].shape)
 
@@ -4704,7 +4784,9 @@ class TestRuntimeSizedLocalExtents:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_runtime_reshape_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_reshape_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert "flat" not in metas
 
     def test_issue_3033_descriptor_reshape_chain_specializes(self):
@@ -4744,7 +4826,7 @@ class TestRuntimeSizedLocalExtents:
             signed = pl.reshape(src, [-(-rows)])
             return nested, signed
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         for name in ("nested", "signed"):
             dim = self._leading_dim(metas, name)
             assert isinstance(dim, DynDim) and dim.synthesized
@@ -4795,7 +4877,9 @@ class TestRuntimeSizedLocalExtents:
             "rebound_shape_alias": rebound_shape_alias,
             "rebound_source_shape_alias": rebound_source_shape_alias,
         }
-        metas = _extract_local_tensor_metas(bodies[source], seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            bodies[source], seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert "flat" not in metas
 
     @pytest.mark.parametrize(
@@ -4837,7 +4921,9 @@ class TestRuntimeSizedLocalExtents:
                 shape=(DynDim(name="PAGES", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
             )
         }
-        assert "flat" not in _extract_local_tensor_metas(entry._func, seed_meta=seed)
+        assert "flat" not in extract_local_tensor_metas(
+            entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         with pytest.raises(UnsupportedFeatureError, match=error):
             entry.specialize()
 
@@ -4870,7 +4956,7 @@ class TestRuntimeSizedLocalExtents:
         )
         entry = jit(body)
         seed = {"src": TensorMeta(shape=(1, 128), dtype=DataType.INT8)}
-        metas = _extract_local_tensor_metas(entry._func, seed_meta=seed)
+        metas = extract_local_tensor_metas(entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["flat"].shape == (128,)
         assert isinstance(entry.lower(), ir.Program)
 
@@ -4911,7 +4997,7 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
             "out": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
         }
-        metas = _extract_local_tensor_metas(entry._func, seed_meta=seed)
+        metas = extract_local_tensor_metas(entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"].shape == (1, 128)
         assert isinstance(entry.lower(), ir.Program)
 
@@ -4945,7 +5031,9 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
             "out": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
         }
-        assert _extract_local_tensor_metas(entry._func, seed_meta=seed)["view"].shape == (1, 128)
+        assert extract_local_tensor_metas(entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings)[
+            "view"
+        ].shape == (1, 128)
         assert isinstance(entry.lower(), ir.Program)
 
     def test_descriptor_reshape_static_shape_unary_plus_active_rename_rejected(self, monkeypatch):
@@ -4968,7 +5056,9 @@ class TestRuntimeSizedLocalExtents:
         )
         entry = jit(body)
         seed = {"src": TensorMeta(shape=(1, 128), dtype=DataType.INT8)}
-        assert "view" not in _extract_local_tensor_metas(entry._func, seed_meta=seed)
+        assert "view" not in extract_local_tensor_metas(
+            entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         with pytest.raises(UnsupportedFeatureError, match="Unsupported unary operator: UAdd"):
             entry.specialize()
 
@@ -4999,7 +5089,9 @@ class TestRuntimeSizedLocalExtents:
                 ),
                 "out": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
             }
-            metas = _extract_local_tensor_metas(entry._func, seed_meta=seed)
+            metas = extract_local_tensor_metas(
+                entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+            )
             flat_dim = self._leading_dim(metas, "flat")
             keys_dim = self._leading_dim(metas, "keys")
             assert isinstance(flat_dim, DynDim) and flat_dim.synthesized
@@ -5029,7 +5121,7 @@ class TestRuntimeSizedLocalExtents:
             result = pl.reshape(work, [saved])
             return square, another, independent, rebound, inline, work, result
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         square = metas["square"].shape
         another = metas["another"].shape
         assert isinstance(square[0], DynDim) and square[0].synthesized
@@ -5118,7 +5210,7 @@ class TestRuntimeSizedLocalExtents:
             unknown = pl.reshape(src, [total])
             return original, derived, unknown
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         for name in ("original", "derived"):
             dim = self._leading_dim(metas, name)
             assert isinstance(dim, DynDim) and dim.synthesized
@@ -5144,7 +5236,7 @@ class TestRuntimeSizedLocalExtents:
             arithmetic = pl.reshape(src, [extent])
             return original, rebound, constants, arithmetic
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["original"].shape == (32,)
         assert metas["rebound"].shape == (16, 2)
         assert metas["constants"].shape == (8, 4)
@@ -5272,7 +5364,7 @@ class TestRuntimeSizedLocalExtents:
             symbol_sized = pl.reshape(src, [symbol])
             return known, scalar_sized, read_sized, loop_sized, symbol_sized
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "known" in metas
         assert not {"scalar_sized", "read_sized", "loop_sized", "symbol_sized"} & metas.keys()
 
@@ -5301,7 +5393,7 @@ class TestRuntimeSizedLocalExtents:
             power_sized = pl.reshape(src, [alias])
             return zero_sized, modulo_sized, true_div_sized, power_sized
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert not {"zero_sized", "modulo_sized", "true_div_sized", "power_sized"} & metas.keys()
 
     def test_descriptor_reshape_alias_control_flow_stays_strict(self):
@@ -5320,7 +5412,7 @@ class TestRuntimeSizedLocalExtents:
             after_loop = pl.reshape(src, [extent])
             return after_branch, before_write, after_loop
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert not {"after_branch", "before_write", "after_loop"} & metas.keys()
 
     @pytest.mark.parametrize("scope_kind", ["if", "for"])
@@ -5350,7 +5442,9 @@ class TestRuntimeSizedLocalExtents:
             return out
 
         body = conditional_body if scope_kind == "if" else loop_body
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert dep_metas["x"] == TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=ir.TensorLayout.ND)
 
     def test_descriptor_reshape_alias_unrelated_condition_specializes(self):
@@ -5400,7 +5494,7 @@ class TestRuntimeSizedLocalExtents:
             return before_write, assigned
 
         body = conditional_body if scope_kind == "if" else loop_body
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         if scope_kind == "if":
             assert metas["before_write"].shape == (32,)
         else:
@@ -5427,8 +5521,8 @@ class TestRuntimeSizedLocalExtents:
             after = pl.reshape(src, [rows, 8])
             return out, after
 
-        decorator = importlib.import_module("pypto.jit.decorator")
-        get_func_def = decorator._get_func_def
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
         func_def = deepcopy(get_func_def(body))
         branch = func_def.body[1]
         assert isinstance(branch, ast.If)
@@ -5436,10 +5530,14 @@ class TestRuntimeSizedLocalExtents:
             branch.body = ast.parse("rows = 1").body
         if arm_kind == "elif":
             branch.orelse = [ast.If(test=ast.Name(id="other", ctx=ast.Load()), body=branch.orelse, orelse=[])]
-        monkeypatch.setattr(decorator, "_get_func_def", lambda f: func_def if f is body else get_func_def(f))
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        monkeypatch.setattr(
+            ast_analysis, "get_func_def", lambda f: func_def if f is body else get_func_def(f)
+        )
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "after" not in metas
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert dep_metas["x"] == TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=ir.TensorLayout.ND)
 
     @pytest.mark.parametrize("arm_kind", ["else", "elif"])
@@ -5514,7 +5612,7 @@ class TestRuntimeSizedLocalExtents:
                     view = pl.reshape(src, [rows, 8])
             return view
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "view" not in metas
 
     @pytest.mark.parametrize(
@@ -5540,8 +5638,8 @@ class TestRuntimeSizedLocalExtents:
                 out = _callsite_metadata_kernel(view, out)
             return out
 
-        decorator = importlib.import_module("pypto.jit.decorator")
-        get_func_def = decorator._get_func_def
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
         func_def = deepcopy(get_func_def(body))
         branch = func_def.body[1]
         assert isinstance(branch, ast.If)
@@ -5549,10 +5647,14 @@ class TestRuntimeSizedLocalExtents:
             branch.body = ast.parse("current = b").body
         if arm_kind == "elif":
             branch.orelse = [ast.If(test=ast.Name(id="other", ctx=ast.Load()), body=branch.orelse, orelse=[])]
-        monkeypatch.setattr(decorator, "_get_func_def", lambda f: func_def if f is body else get_func_def(f))
+        monkeypatch.setattr(
+            ast_analysis, "get_func_def", lambda f: func_def if f is body else get_func_def(f)
+        )
         # Historical collection includes the branch-local view; the call snapshot must match it.
-        collected = _extract_local_tensor_metas(body, seed_meta=seed)
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        collected = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert dep_metas["x"] == collected["view"]
         if dynamic:
             extent = dep_metas["x"].shape[0]
@@ -5619,7 +5721,9 @@ class TestRuntimeSizedLocalExtents:
             return out
 
         body = unknown_body if unknown else known_body
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert "x" not in dep_metas
 
     @pytest.mark.parametrize("dynamic", [False, True])
@@ -5645,9 +5749,11 @@ class TestRuntimeSizedLocalExtents:
             out = _callsite_metadata_kernel(selected, out)
             return out
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "selected" not in metas
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert "x" not in dep_metas
 
     @pytest.mark.parametrize(
@@ -5681,7 +5787,9 @@ class TestRuntimeSizedLocalExtents:
             out = _callsite_metadata_kernel(selected, out)
             return out
 
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         if replacement in ("equal", "nd_left", "nd_right"):
             assert dep_metas["x"] == (meta if replacement == "equal" else nd_meta)
             assert dep_metas["x"].shape[0] is rows
@@ -5690,7 +5798,9 @@ class TestRuntimeSizedLocalExtents:
         if replacement == "layout_conflict":
             # An omitted layout is the default ND, not a wildcard for NZ.
             seed["a"] = meta
-            dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+            dep_metas, _ = resolve_dep_call_metadata(
+                _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+            )
             assert "x" not in dep_metas
 
     @pytest.mark.parametrize(
@@ -5714,8 +5824,8 @@ class TestRuntimeSizedLocalExtents:
             out = _callsite_metadata_kernel(current, out)
             return out
 
-        decorator = importlib.import_module("pypto.jit.decorator")
-        get_func_def = decorator._get_func_def
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
         func_def = deepcopy(get_func_def(body))
         conditional = func_def.body[1]
         assert isinstance(conditional, ast.If)
@@ -5726,11 +5836,15 @@ class TestRuntimeSizedLocalExtents:
             )
         setattr(conditional, arm, ast.parse(statements).body)
         monkeypatch.setattr(
-            decorator, "_get_func_def", lambda func: func_def if func is body else get_func_def(func)
+            ast_analysis, "get_func_def", lambda func: func_def if func is body else get_func_def(func)
         )
-        metas = _extract_local_tensor_metas(body, seed_meta=seed, visible_only=True)
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
         assert metas["current"] == original
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert dep_metas["x"] == original
 
     @pytest.mark.parametrize("different", ["shape", "synthesized_identity"])
@@ -5759,9 +5873,13 @@ class TestRuntimeSizedLocalExtents:
             return out
 
         seed = {"a": original, "b": replacement, "out": original}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed, visible_only=True)
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
         assert "current" not in metas
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert "x" not in dep_metas
 
     @pytest.mark.parametrize("dynamic", [False, True])
@@ -5782,9 +5900,13 @@ class TestRuntimeSizedLocalExtents:
             return out
 
         seed = {"a": original, "out": original}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed, visible_only=True)
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
         assert metas["current"] == original
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         assert dep_metas["x"] == original
 
     @pytest.mark.parametrize("arm", ["body", "orelse"])
@@ -5852,8 +5974,12 @@ class TestRuntimeSizedLocalExtents:
             return out
 
         body = definite_body if inner_definite else partial_body
-        metas = _extract_local_tensor_metas(body, seed_meta=seed, visible_only=True)
-        dep_metas, _ = _resolve_dep_call_metadata(_callsite_metadata_kernel, body, seed, {}, {})
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         if inner_definite:
             assert metas["current"] == replacement
             assert dep_metas["x"] == replacement
@@ -5876,7 +6002,12 @@ class TestRuntimeSizedLocalExtents:
                 out = _callsite_metadata_kernel(src, out)
             return out
 
-        metas = _extract_local_tensor_metas(body, seed_meta={"src": meta, "out": meta}, visible_only=True)
+        metas = extract_local_tensor_metas(
+            body,
+            seed_meta={"src": meta, "out": meta},
+            visible_only=True,
+            discover_deps=_discover_dep_bindings,
+        )
         assert metas["out"] == meta
 
     def test_descriptor_reshape_tensor_distinct_allocations_return_independent_symbols(self):
@@ -5893,7 +6024,7 @@ class TestRuntimeSizedLocalExtents:
             saved, rebound = allocate(first, second)
             return saved, rebound
 
-        metas = _extract_local_tensor_metas(body, visible_only=True)
+        metas = extract_local_tensor_metas(body, visible_only=True, discover_deps=_discover_dep_bindings)
         saved = self._leading_dim(metas, "saved")
         rebound = self._leading_dim(metas, "rebound")
         assert isinstance(saved, DynDim) and saved.synthesized
@@ -5913,7 +6044,7 @@ class TestRuntimeSizedLocalExtents:
             flat = pl.reshape(src, [total])
             return flat
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "flat" not in metas
 
     def test_descriptor_reshape_static_dim_call_folds_axis_arithmetic(self):
@@ -5925,7 +6056,9 @@ class TestRuntimeSizedLocalExtents:
             return flat
 
         seed = {"src": TensorMeta((4, 128), DataType.FP32)}
-        assert _extract_local_tensor_metas(body, seed_meta=seed)["flat"].shape == (512,)
+        assert extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)[
+            "flat"
+        ].shape == (512,)
 
     @pytest.mark.parametrize(
         "expression",
@@ -5960,21 +6093,21 @@ class TestRuntimeSizedLocalExtents:
             flat = pl.reshape(src, [total])
             return flat
 
-        decorator = importlib.import_module("pypto.jit.decorator")
-        get_func_def = decorator._get_func_def
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
         func_def = deepcopy(get_func_def(body))
         assignment = func_def.body[0]
         assert isinstance(assignment, ast.Assign)
         assignment.value = ast.parse(expression, mode="eval").body
         monkeypatch.setattr(
-            decorator, "_get_func_def", lambda func: func_def if func is body else get_func_def(func)
+            ast_analysis, "get_func_def", lambda func: func_def if func is body else get_func_def(func)
         )
         seed = {
             "src": TensorMeta(
                 shape=(DynDim(name="ROWS", literal="ROWS", static_bound=4), 128), dtype=DataType.FP32
             )
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "flat" not in metas
 
     @pytest.mark.parametrize(
@@ -6032,7 +6165,11 @@ class TestRuntimeSizedLocalExtents:
             aliased = pl.reshape(src, [total])
             return direct, aliased
 
-        metas = _extract_local_tensor_metas(body if symbol_name == "PAGES" else renamed_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            body if symbol_name == "PAGES" else renamed_body,
+            seed_meta=seed,
+            discover_deps=_discover_dep_bindings,
+        )
         assert metas["direct"].shape == (dim, 128)
         derived = self._leading_dim(metas, "aliased")
         assert isinstance(derived, DynDim) and derived.synthesized
@@ -6061,7 +6198,7 @@ class TestRuntimeSizedLocalExtents:
             unknown = pl.reshape(src, [total])
             return augmented, snapshot, derived, prior_view, unknown
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert not {"augmented", "derived", "unknown"} & metas.keys()
         assert metas["snapshot"].shape == (16, 32)
         dim = self._leading_dim(metas, "prior_view")
@@ -6097,8 +6234,8 @@ class TestRuntimeSizedLocalExtents:
             return saved, view
 
         if same_line:
-            decorator = importlib.import_module("pypto.jit.decorator")
-            get_func_def = decorator._get_func_def
+            ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+            get_func_def = ast_analysis.get_func_def
             func_def = deepcopy(get_func_def(body))
             calls = [
                 node
@@ -6110,7 +6247,7 @@ class TestRuntimeSizedLocalExtents:
             calls[1].lineno = calls[0].lineno
             calls[1].col_offset = calls[0].col_offset + 80
             monkeypatch.setattr(
-                decorator, "_get_func_def", lambda func: func_def if func is body else get_func_def(func)
+                ast_analysis, "get_func_def", lambda func: func_def if func is body else get_func_def(func)
             )
 
         shapes = []
@@ -6123,7 +6260,7 @@ class TestRuntimeSizedLocalExtents:
                     shape=(DynDim(name="B", literal="B", static_bound=b_rows), 128), dtype=DataType.FP32
                 ),
             }
-            metas = _extract_local_tensor_metas(body, seed_meta=seed)
+            metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
             saved_dim = self._leading_dim(metas, "saved")
             current_dim = self._leading_dim(metas, "view")
             assert isinstance(saved_dim, DynDim) and saved_dim.synthesized
@@ -6185,7 +6322,7 @@ class TestRuntimeSizedLocalExtents:
             view = pl.reshape(b, [mb, 128])
             return saved, view
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["saved"].shape[0] is a_dim
         assert metas["view"].shape[0] is b_dim
 
@@ -6260,7 +6397,7 @@ class TestRuntimeSizedLocalExtents:
                     shape=(DynDim(name="B", literal="B", static_bound=b_rows), 128), dtype=DataType.FP32
                 ),
             }
-            metas = _extract_local_tensor_metas(body, seed_meta=seed)
+            metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
             assert metas["first"].shape == metas["first_alias"].shape
             assert metas["second"].shape == metas["second_alias"].shape
             first = self._leading_dim(metas, "first")
@@ -6290,7 +6427,7 @@ class TestRuntimeSizedLocalExtents:
             "a": TensorMeta(shape=(a_dim, 128), dtype=DataType.FP32),
             "b": TensorMeta(shape=(b_dim, 128), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["first"].shape[0] is a_dim
         assert metas["second"].shape[0] is b_dim
 
@@ -6340,7 +6477,7 @@ class TestRuntimeSizedLocalExtents:
             power_sized = pl.reshape(src, [rows**2])
             return scalar_sized, read_sized, direct_read_sized, modulo_sized, true_div_sized, power_sized
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert (
             not {
                 "scalar_sized",
@@ -6369,7 +6506,7 @@ class TestRuntimeSizedLocalExtents:
             nested_denominator = pl.reshape(src, [rows // (1 // 0)])
             return direct, folded, nested, nested_denominator
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert not {"direct", "folded", "nested", "nested_denominator"} & metas.keys()
 
     def test_static_reshape_size_mismatch_still_rejected(self):
@@ -6389,7 +6526,9 @@ class TestRuntimeSizedLocalExtents:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas, _ = _resolve_dep_call_metadata(_synth_dim_kernel, _runtime_create_then_dep, seed, {}, {})
+        metas, _ = resolve_dep_call_metadata(
+            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -6405,8 +6544,13 @@ class TestRuntimeSizedLocalExtents:
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
         dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
-        metas, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, dep_dyn_map
+        metas, _ = resolve_dep_call_metadata(
+            _synth_dim_kernel,
+            _runtime_create_then_dep,
+            seed,
+            {},
+            dep_dyn_map,
+            discover_deps=_discover_dep_bindings,
         )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)
@@ -6449,8 +6593,8 @@ class TestRuntimeSizedLocalExtents:
         """Two functions each holding a runtime-sized local of the same name get
         distinct symbols, so a dumped program never shows one name on two
         unrelated tensors."""
-        a = _synthesized_dyn_dim("host_entry", "tmp", 0)
-        b = _synthesized_dyn_dim("mid", "tmp", 0)
+        a = synthesized_dyn_dim("host_entry", "tmp", 0)
+        b = synthesized_dyn_dim("mid", "tmp", 0)
         assert a.name != b.name
         assert a.name.startswith(_SYNTHESIZED_DYN_PREFIX)
         assert b.name.startswith(_SYNTHESIZED_DYN_PREFIX)
@@ -6463,8 +6607,13 @@ class TestRuntimeSizedLocalExtents:
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
         dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
-        metas, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _dyn_alias_create_then_dep, seed, {}, dep_dyn_map
+        metas, _ = resolve_dep_call_metadata(
+            _synth_dim_kernel,
+            _dyn_alias_create_then_dep,
+            seed,
+            {},
+            dep_dyn_map,
+            discover_deps=_discover_dep_bindings,
         )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)

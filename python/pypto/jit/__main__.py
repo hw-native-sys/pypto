@@ -24,7 +24,8 @@ from pypto import CacheConfig, cache_stats
 from pypto._target import _parse_platform
 from pypto.runtime import RunConfig
 
-from .decorator import JITFunction, _torch_dtype_to_pypto
+from ._arguments import torch_dtype_to_pypto
+from .decorator import JITFunction
 
 
 def _object(value: Any, allowed: set[str], label: str) -> dict[str, Any]:
@@ -115,7 +116,7 @@ def _arguments(kernel: JITFunction, request: dict[str, Any]) -> dict[str, Any]:
 
     from pypto.language import Tensor  # noqa: PLC0415
 
-    from .decorator import _resolve_annotation  # noqa: PLC0415
+    from ._arguments import resolve_annotation  # noqa: PLC0415
     from .specializer import func_name_lookup  # noqa: PLC0415
 
     names = set(kernel.param_names)
@@ -126,7 +127,7 @@ def _arguments(kernel: JITFunction, request: dict[str, Any]) -> dict[str, Any]:
     args: dict[str, Any] = dict(scalars)
     signature = inspect.signature(kernel._func)
     annotations = {
-        name: _resolve_annotation(p.annotation, func_name_lookup(kernel._func))
+        name: resolve_annotation(p.annotation, func_name_lookup(kernel._func))
         for name, p in signature.parameters.items()
     }
     for name, scalar in scalars.items():
@@ -156,9 +157,7 @@ def _arguments(kernel: JITFunction, request: dict[str, Any]) -> dict[str, Any]:
         }
         if type(dtype) is not str or dtype not in dtypes:
             raise ValueError(f"Unsupported tensors.{name}.dtype: {dtype!r}; expected {sorted(dtypes)}")
-        annotation = _resolve_annotation(
-            signature.parameters[name].annotation, func_name_lookup(kernel._func)
-        )
+        annotation = resolve_annotation(signature.parameters[name].annotation, func_name_lookup(kernel._func))
         annotated_shape = cast("Sequence[int] | None", getattr(annotation, "shape", None))
         annotated_dtype = getattr(annotation, "dtype", None)
         if annotated_shape is not None and (
@@ -166,7 +165,7 @@ def _arguments(kernel: JITFunction, request: dict[str, Any]) -> dict[str, Any]:
             or any(type(dim) is int and dim != actual for dim, actual in zip(annotated_shape, shape))
         ):
             raise ValueError(f"Tensor metadata for {name} conflicts with its annotated shape")
-        if annotated_dtype is not None and annotated_dtype != _torch_dtype_to_pypto(dtypes[dtype]):
+        if annotated_dtype is not None and annotated_dtype != torch_dtype_to_pypto(dtypes[dtype]):
             raise ValueError(f"Tensor metadata for {name} conflicts with its annotated dtype")
         args[name] = torch.empty(shape, dtype=dtypes[dtype], device="meta")
     # The shared binder validates parameter kinds, required arguments, scalar
