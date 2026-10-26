@@ -403,7 +403,7 @@ def eager_env(monkeypatch):
         runs=[],
         buffers=[],
         workers=[],
-        bridges=[],
+        synchronized_streams=[],
         capture=False,
         queued=True,
         stream_id=7,
@@ -426,8 +426,18 @@ def eager_env(monkeypatch):
         NPUTensor
     )
 
+    def synchronize(stream_id):
+        env.events.append("synchronize")
+        env.synchronized_streams.append(stream_id)
+        run_queue()
+
     def stream():
-        return SimpleNamespace(stream_id=env.stream_id, device=SimpleNamespace(type="npu", index=env.device))
+        stream_id = env.stream_id
+        return SimpleNamespace(
+            stream_id=stream_id,
+            device=SimpleNamespace(type="npu", index=env.device),
+            synchronize=lambda: synchronize(stream_id),
+        )
 
     framework = SimpleNamespace(
         __version__="2.6.0.post2",
@@ -516,11 +526,12 @@ def eager_env(monkeypatch):
 
     class TaskArgs:
         def __init__(self):
-            self.tensors, self.scalars = [], []
+            self.tensors, self.scalars, self.transfers = [], [], []
 
         def add_tensor(self, tensor, tag, *, transfer):
             assert not self.scalars and transfer == "NONE"
             self.tensors.append((tensor, tag))
+            self.transfers.append(transfer)
 
         def add_scalar(self, scalar):
             self.scalars.append(scalar)
@@ -540,30 +551,22 @@ def eager_env(monkeypatch):
         while env.queue:
             env.queue.pop(0)()
 
-    class QueueTicket:
-        def __init__(self, tensors, stream_id, device):
-            self.tensors, self.stream_id, self.rts_stream = tensors, stream_id, env.rts_stream
-            env.bridges.append(self)
-
-        def enqueue(self, callback):
-            env.events.append("recordStream")
-            if env.enqueue_error:
-                raise env.enqueue_error
-            if env.queued:
-                env.queue.append(lambda: callback(self.rts_stream))
-            else:
-                callback(self.rts_stream)
-
-        def synchronize(self):
-            env.events.append("synchronize")
-            run_queue()
-
-        def release(self):
-            env.events.append("native.release")
-            self.tensors = []
+    def enqueue(tensors, stream_id, device, context, callback):
+        assert stream_id == env.stream_id and device == env.device and context == env.context
+        # Admission must already own the callback and frame before native enqueue.
+        assert env.state._submissions[-1]._callback is callback
+        assert env.state._submissions[-1]._owners
+        env.events.append("recordStream")
+        if env.enqueue_error:
+            raise env.enqueue_error
+        rts_stream = env.rts_stream
+        if env.queued:
+            env.queue.append(lambda: callback(rts_stream))
+        else:
+            callback(rts_stream)
 
     native = SimpleNamespace(
-        prepare=QueueTicket,
+        enqueue=enqueue,
         check_call=lambda stream, device: env.capture,
         borrow_context=lambda device: env.context,
         bind_context=lambda context: None,

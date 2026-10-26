@@ -12,7 +12,6 @@
 // Optional Torch queue bridge. Simpler execution is reached only through Python Worker.submit.
 #include <acl/acl.h>
 #include <nanobind/nanobind.h>
-#include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/vector.h>
 #include <torch/csrc/autograd/python_variable.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
@@ -21,13 +20,9 @@
 #include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 
-#include <atomic>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <unordered_set>
-#include <utility>
-#include <vector>
 
 #include "pypto/core/error.h"
 
@@ -67,95 +62,48 @@ c10_npu::NPUStream CallStream(int64_t stream_id, int32_t device_id) {
   return stream;
 }
 
-// The queue owns only C++ state. The pending Python ticket owns callback and
-// all of its Python captures before enqueue; queue-thread destruction must never
-// DECREF a Python object without the GIL. Tensor/Storage release is explicit and
-// occurs after RunHandle retirement, with failed submissions retained by Python.
-struct QueueState {
-  c10_npu::NPUStream stream;
-  uintptr_t context;
-  std::vector<at::Tensor> tensors;
-  std::vector<c10::Storage> storages;
-  std::atomic<bool> enqueued{false};
-
-  QueueState(c10_npu::NPUStream stream, uintptr_t context) : stream(stream), context(context) {}
-};
-
-class QueueTicket {
- public:
-  explicit QueueTicket(std::shared_ptr<QueueState> state) : state_(std::move(state)) {}
-
-  void Enqueue(nb::handle callback) {
-    Require(!state_->enqueued.exchange(true), "Kernel ticket can only be enqueued once");
-    Require(c10_npu::getCurrentNPUStream(state_->stream.device_index()) == state_->stream,
-            "Kernel call stream changed before enqueue");
-    Require(BorrowContext(state_->stream.device_index()) == state_->context,
-            "Kernel borrowed context changed before enqueue");
-    auto state = state_;
-    PyObject* borrowed_callback = callback.ptr();
-    // Protect allocator reuse even if enqueue only partially succeeds.
-    std::unordered_set<const c10::StorageImpl*> recorded;
-    for (const auto& storage : state->storages) {
-      if (recorded.insert(storage.unsafeGetStorageImpl()).second) {
-        c10_npu::NPUCachingAllocator::recordStream(storage.data_ptr(), state->stream);
-      }
-    }
-    // RunOpApiV2 may execute inline or enqueue. Release the caller GIL in both
-    // cases so a queue callback can acquire it even when the queue is full.
-    nb::gil_scoped_release release;
-    at_npu::native::OpCommand::RunOpApiV2("PyPTOKernel", [state, borrowed_callback]() -> int {
-      std::string error;
-      {
-        nb::gil_scoped_acquire gil;
-        try {
-          // The Python callback validates the session's captured context, calls
-          // public Worker.submit, and publishes its RunHandle or exception.
-          nb::borrow<nb::object>(borrowed_callback)(reinterpret_cast<uintptr_t>(state->stream.stream(false)));
-        } catch (nb::python_error& exc) {
-          // Never export a Python-owning exception into the framework queue.
-          // The original exception is already retained on the pending ticket.
-          error = exc.what();
-        }
-      }
-      if (!error.empty()) throw pypto::RuntimeError(error);
-      return 0;
-    });
-  }
-
-  void Synchronize() { state_->stream.synchronize(); }
-
-  void Release() {
-    // Python only calls this after RunHandle.wait successfully retires the run.
-    state_->tensors.clear();
-    state_->storages.clear();
-  }
-
- private:
-  std::shared_ptr<QueueState> state_;
-};
-
-std::shared_ptr<QueueTicket> Prepare(nb::list objects, int64_t stream_id, int32_t device_id) {
+// PendingTicket owns callback and all Tensor/Storage references before this
+// function is called. The queue captures only the native stream and a borrowed
+// callback pointer; no Python reference is destroyed on an arbitrary queue thread.
+void Enqueue(nb::list objects, int64_t stream_id, int32_t device_id, uintptr_t context, nb::handle callback) {
   auto stream = CallStream(stream_id, device_id);
-  auto state = std::make_shared<QueueState>(stream, BorrowContext(device_id));
+  Require(BorrowContext(device_id) == context, "Kernel borrowed context changed before enqueue");
+  std::unordered_set<const c10::StorageImpl*> recorded;
   for (auto object : objects) {
     Require(THPVariable_Check(object.ptr()), "Kernel arguments must be torch tensors");
-    at::Tensor tensor = THPVariable_Unpack(object.ptr());
+    const at::Tensor& tensor = THPVariable_Unpack(object.ptr());
     Require(tensor.device().type() == c10::DeviceType::PrivateUse1 && tensor.device().index() == device_id &&
                 tensor.is_contiguous(),
             "Kernel tensors must be contiguous on the current NPU device");
-    state->storages.push_back(tensor.storage());
-    state->tensors.push_back(std::move(tensor));
+    const auto& storage = tensor.storage();
+    if (recorded.insert(storage.unsafeGetStorageImpl()).second) {
+      c10_npu::NPUCachingAllocator::recordStream(storage.data_ptr(), stream);
+    }
   }
-  return std::make_shared<QueueTicket>(std::move(state));
+  PyObject* borrowed_callback = callback.ptr();
+  // Queue admission may block. Release the caller GIL so the queue can enter
+  // Python, both when callbacks execute inline and when taskQueue is enabled.
+  nb::gil_scoped_release release;
+  at_npu::native::OpCommand::RunOpApiV2("PyPTOKernel", [stream, borrowed_callback]() -> int {
+    std::string error;
+    {
+      nb::gil_scoped_acquire gil;
+      try {
+        nb::borrow<nb::object>(borrowed_callback)(reinterpret_cast<uintptr_t>(stream.stream(false)));
+      } catch (nb::python_error& exc) {
+        // The Python callback retains the original exception on PendingTicket.
+        // Destroy the Python-owning exception while the GIL is still held.
+        error = exc.what();
+      }
+    }
+    if (!error.empty()) throw pypto::RuntimeError(error);
+    return 0;
+  });
 }
 }  // namespace
 
 NB_MODULE(_torch_npu, m) {
-  nb::class_<QueueTicket>(m, "QueueTicket")
-      .def("enqueue", &QueueTicket::Enqueue)
-      .def("synchronize", &QueueTicket::Synchronize, nb::call_guard<nb::gil_scoped_release>())
-      .def("release", &QueueTicket::Release);
-  m.def("prepare", &Prepare);
+  m.def("enqueue", &Enqueue);
   m.def("framework_alive", &FrameworkAlive);
   m.def("borrow_context", &BorrowContext);
   m.def("bind_context", &BindContext);

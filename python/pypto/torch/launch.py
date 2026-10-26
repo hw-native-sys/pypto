@@ -76,18 +76,15 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
     capturing = check_frame(frame, config)
     state = get_process_kernel_state()
     native = _load_native()
-    if not callable(getattr(native, "prepare", None)):
-        raise NotImplementedError("Torch eager adapter requires prepare; rebuild the optional adapter")
+    if not callable(getattr(native, "enqueue", None)):
+        raise NotImplementedError("Torch eager adapter requires enqueue; rebuild the optional adapter")
     registration = (
         state.require_callable(artifact, config) if capturing else state.ensure_callable(artifact, config)
     )
 
     def prepare(session: Any) -> PendingTicket:
-        # Capture stream/context and native Tensor owners on the calling thread.
-        bridge = native.prepare(
-            [arg.tensor for arg in frame.tensors], frame.stream.stream_id, frame.device_index
-        )
         call_config = make_call_config(config, session._api.CallConfig)
+        tensors = [arg.tensor for arg in frame.tensors]
         arguments = BorrowedArguments(frame, session.sources, session.device_location)
 
         def enqueue(ticket: PendingTicket) -> None:
@@ -107,18 +104,14 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
             # Native callback state holds only a borrowed PyObject pointer. The
             # process pending set already owns this ticket, including on failure.
             ticket.retain_callback(submit)
-            bridge.enqueue(submit)
-
-        def release() -> None:
-            arguments.release()
-            bridge.release()
+            native.enqueue(tensors, frame.stream.stream_id, frame.device_index, session._context, submit)
 
         return PendingTicket(
             registration,
             enqueue=enqueue,
-            synchronize=bridge.synchronize,
-            release=release,
-            owners=(session, arguments, call_config, frame, bridge),
+            synchronize=frame.stream.synchronize,
+            release=arguments.release,
+            owners=(session, arguments, call_config, frame),
         )
 
     state.submit(registration, prepare)
