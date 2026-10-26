@@ -1,5 +1,11 @@
 # ConvertTensorToTileOps Pass
 
+`tensor.subview` 保留为普通 GM Tensor 描述符。转换前由共享上下文 verifier 证明
+严格包含、几何运算不溢出及只读调用者 GM 根；false/unknown 均拒绝。Affine
+`tensor.set_validshape` 别名也保留为 Tensor，只能缩小有效区。消费者
+`tensor.slice`/计算操作转换时，按描述符真实 pitch 加载；已有 slice 的物化语义不变。
+参见 [GM subview RFC](../ir/gm-subview-rfc.md)。
+
 将 InCore、AIC 和 AIV 函数中的 tensor 操作（张量操作）转换为 tile 操作（块操作），并更新编排函数的调用点。
 
 ## 概述

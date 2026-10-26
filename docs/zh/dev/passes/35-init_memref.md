@@ -1,5 +1,9 @@
 # InitMemRef Pass
 
+借用的 affine GM 描述符（`TensorAddressingKind.AffineSubview`）始终没有 MemRef，
+包括嵌套 subview 和 metadata 别名。它们不继承根分配包络，也不分配 GM/UB；只有
+物化的消费者 Tile 按普通规则获得存储。
+
 物化编译器负责的 PTO level3 scratch，为所有变量初始化内存引用 (MemRef)，并创建地址未分配的 alloc 操作。
 
 ## 概述

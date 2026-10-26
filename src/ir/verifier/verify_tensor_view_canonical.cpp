@@ -90,6 +90,19 @@ class TensorViewCanonicalVisitor : public IRVisitor {
     }
     const TensorView& view = *tensor_type->tensor_view_;
 
+    // Affine descriptors have deliberately noncanonical pitches (including
+    // strided inner axes). Their defining geometry/provenance is verified at
+    // TensorToTile and codegen entry, never by weakening canonical checks.
+    if (view.addressing_kind == TensorAddressingKind::AffineSubview) {
+      if (!As<TensorType>(tensor_type)) {
+        Emit(span, "Affine subviews require ordinary TensorType, not DistributedTensorType");
+      }
+      if (view.stride.size() != tensor_type->shape_.size()) {
+        Emit(span, "Affine subview stride rank must match shape rank");
+      }
+      return;
+    }
+
     // NZ is legal on a TensorType, but only in the blocked rank-5 form that
     // BlockNzTensorViews produces — that is the only shape for which the
     // row-major stride below actually describes the NZ byte order.

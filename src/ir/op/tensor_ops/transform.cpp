@@ -598,6 +598,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
 
   if (src_type->tensor_view_.has_value()) {
     const auto& src_view = src_type->tensor_view_.value();
+    new_view.addressing_kind = src_view.addressing_kind;
     if (has_shape && !has_explicit_valid_shape && !src_view.valid_shape.empty()) {
       bool is_fully_valid =
           src_view.valid_shape.size() == src_type->shape_.size() &&

@@ -290,6 +290,9 @@ MIGRATION_FAMILIES = (
             "tensor.read",
             "tensor.write",
             "tensor.view",
+            # Functional borrowed GM metadata; no Buffer IR recipe yet.
+            "tensor.subview",
+            "tensor.set_validshape",
             "tile.read",
             "tile.write",
             "tile.get_block_idx",

@@ -37,6 +37,12 @@ class Ascend910BHandler : public BackendHandler {
 
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a2a3"; }
   [[nodiscard]] const sync::ResourceCatalog& GetSyncResourceCatalog() const override;
+  [[nodiscard]] SubviewLoadLimits GetSubviewLoadLimits() const override {
+    // PTO-ISA TLoadGm2ubNd2nd: Rows < 4096, int shape/stride,
+    // uint32 byte gap. Require full 32-byte UB rows in this initial profile
+    // so the implementation's ubGap >> 5 cannot silently truncate a tail.
+    return {4095, INT32_MAX, UINT32_MAX, 32};
+  }
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_block_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a2a3sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a3"}; }

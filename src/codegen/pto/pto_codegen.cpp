@@ -50,6 +50,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -897,6 +898,9 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   inside_reg_scope_ = false;
   single_vf_function_ = program->functions_.size() == 1;
   VerifyVFInfrastructureCodegenPreconditions(program);
+  for (const auto& [gvar, function] : program->functions_) {
+    ir::VerifyTensorSubviews(function, GetBackendHandler());
+  }
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
   current_span_ = nullptr;

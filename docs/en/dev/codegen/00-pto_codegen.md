@@ -1,5 +1,13 @@
 # PTO Codegen
 
+GM `tensor.subview` uses existing PTO operations: `pto.addptr` adds this call's
+origin to the current parent pointer, then `pto.make_tensor_view` records the
+result shape and sampled pitch. Nested origins are applied once. Metadata
+`tensor.view`/`tensor.set_validshape` aliases reuse the current pointer. Codegen
+rechecks contextual subview proofs and backend Vec-load limits before emission.
+No new PTO dialect op or descriptor allocation is introduced; one emitted TLOAD
+alone does not prove one physical DMA. See the [worked example](../ir/gm-subview-worked-example.md).
+
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
 ## Design Principle: Strict 1-to-1 Mapping

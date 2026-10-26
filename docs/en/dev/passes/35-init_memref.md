@@ -1,5 +1,10 @@
 # InitMemRef Pass
 
+Borrowed affine GM descriptors (`TensorAddressingKind.AffineSubview`) remain
+without a MemRef, including nested subviews and metadata aliases. They neither
+inherit the root allocation envelope nor allocate GM/UB storage. Only the
+materialized consumer Tile receives storage under the normal rules.
+
 Materializes compiler-owned PTO level3 scratch, initializes MemRef for all variables, and creates alloc operations with unallocated addresses.
 
 ## Overview

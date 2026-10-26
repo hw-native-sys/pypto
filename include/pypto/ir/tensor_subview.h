@@ -1,0 +1,34 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#ifndef PYPTO_IR_TENSOR_SUBVIEW_H_
+#define PYPTO_IR_TENSOR_SUBVIEW_H_
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/type.h"
+namespace pypto::backend {
+class BackendHandler;
+}
+
+namespace pypto::ir {
+// This tag is an addressing contract, never proof of provenance or safety.
+inline bool IsAffineSubviewType(const TypePtr& type) {
+  // Also detect an invalid distributed tag so entry verification rejects it.
+  auto tensor = AsTensorTypeLike(type);
+  return tensor && tensor->tensor_view_ &&
+         tensor->tensor_view_->addressing_kind == TensorAddressingKind::AffineSubview;
+}
+// Recompute safety at conversion and emission entry; no cached proof survives
+// transformations. The backend profile is checked separately from containment.
+void VerifyTensorSubviews(const FunctionPtr& function,
+                          const backend::BackendHandler* backend_handler = nullptr);
+}  // namespace pypto::ir
+#endif  // PYPTO_IR_TENSOR_SUBVIEW_H_
