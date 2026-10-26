@@ -3222,6 +3222,7 @@ class _PersistentOrch:
     def __init__(self, worker: Any) -> None:
         self.worker = worker
         self.allocate_calls: list[dict[str, Any]] = []
+        self.reuse_calls: list[dict[str, Any]] = []
         self.copy_calls: list[tuple[_FakeBuffer, _FakeBuffer, bytes]] = []
         self.handles: list[_PersistentDomainHandle] = []
         self.resources: list[_PersistentRunResources] = []
@@ -3238,6 +3239,7 @@ class _PersistentOrch:
         self.worker._building_run_resources = None
         with resources.domain_lock:
             resources.retired = True
+            resources.live_domains.clear()
 
     def run(self, fn, *, before_retire=None, on_error=None):
         resources = self._begin_run()
@@ -3264,21 +3266,37 @@ class _PersistentOrch:
             self.worker._building_run_resources = None
         raise RuntimeError("run finalization abandoned")
 
-    def allocate_domain(self, **kwargs):
-        self.allocate_calls.append(kwargs)
+    def get_or_allocate_domain(self, **kwargs):
+        # Match Simpler's physical-size constraints so lifecycle tests cannot
+        # reach reset/reuse assertions with domains the real runtime rejects.
+        if kwargs["window_size"] % 64:
+            raise ValueError("domain window_size must be a multiple of 64 bytes")
+        for buffer in kwargs["buffers"]:
+            if buffer.nbytes % 64:
+                raise ValueError(
+                    f"domain buffer {buffer.name!r}: nbytes={buffer.nbytes} must be a multiple of 64 bytes"
+                )
+        self.reuse_calls.append(kwargs)
+        assert kwargs["retain_after_run"] is True
         resources = self.worker._building_run_resources
         assert isinstance(resources, _PersistentRunResources)
-        handle = _PersistentDomainHandle(
-            kwargs["name"],
-            list(kwargs["workers"]),
-            int(kwargs["window_size"]),
-            len(self.handles),
-            self.worker,
-            resources,
-            list(kwargs["buffers"]),
-        )
-        self.handles.append(handle)
-        self.worker._live_domains[handle.name] = handle
+        handle = self.worker._live_domains.get(kwargs["name"])
+        if handle is None:
+            self.allocate_calls.append(kwargs)
+            handle = _PersistentDomainHandle(
+                kwargs["name"],
+                list(kwargs["members"]),
+                int(kwargs["window_size"]),
+                len(self.handles),
+                self.worker,
+                resources,
+                list(kwargs["buffers"]),
+            )
+            self.handles.append(handle)
+            self.worker._live_domains[handle.name] = handle
+        # Public reuse registers the domain with each run and moves its
+        # release fence to the latest use; PyPTO must not remove this claim.
+        handle.owner = resources
         resources.live_domains[handle.name] = handle
         resources.requires_ordered_cleanup = True
         return handle
@@ -3346,21 +3364,16 @@ class TestPersistentDistributedWorker:
         with pytest.raises(ValueError, match="requires regenerated host orchestration"):
             DistributedWorker(compiled, persistent=True)
 
-    @pytest.mark.parametrize("attribute", ["_live_domains", "_building_run_resources"])
-    def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup, attribute):
+    def test_initialization_does_not_require_private_retention_hooks(self, patched_setup):
         m = patched_setup
-        if attribute == "_live_domains":
-            m["worker"]._live_domains = None
-        else:
-            del m["worker"]._building_run_resources
+        del m["worker"]._live_domains
+        del m["worker"]._building_run_resources
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
 
-        with pytest.raises(RuntimeError, match=attribute):
-            DistributedWorker(compiled, persistent=True)
-
-        m["worker"].init.assert_not_called()
-        m["worker"].close.assert_called_once_with()
+        rt = DistributedWorker(compiled, persistent=True)
+        m["worker"].init.assert_called_once()
+        rt.close()
 
     def test_request_run_fences_reuse_and_zero_domain_by_default(self, patched_setup):
         m = patched_setup
@@ -3385,16 +3398,21 @@ class TestPersistentDistributedWorker:
         orch = _PersistentOrch(m["worker"])
         submit_threads: list[int] = []
 
+        def assert_domain_owned_by_current_run() -> None:
+            resources = m["worker"]._building_run_resources
+            assert resources.live_domains == {"p0:comm_d0": orch.handles[0]}
+            assert orch.handles[0].owner is resources
+
         def worker_submit(fn):
             submit_threads.append(threading.get_ident())
-            orch.run(fn)
+            orch.run(fn, before_retire=assert_domain_owned_by_current_run)
             return _ImmediateNativeHandle()
 
         m["worker"].submit.side_effect = worker_submit
         seen_handles: list[Any] = []
-        window_size = (1 << 20) + 17
+        window_size = (1 << 20) + 64
         m["load_entry"].return_value = (
-            _persistent_entry(window_size, seen_handles, buffer_nbytes=(1 << 20, 17)),
+            _persistent_entry(window_size, seen_handles, buffer_nbytes=(1 << 20, 64)),
             None,
         )
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -3425,8 +3443,8 @@ class TestPersistentDistributedWorker:
         assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == [
             (0, 1 << 20),
             (1, 1 << 20),
-            (0, 17),
-            (1, 17),
+            (0, 64),
+            (1, 64),
         ]
         assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
         assert [src for _dst, src, _payload in orch.copy_calls] == [
@@ -3471,6 +3489,9 @@ class TestPersistentDistributedWorker:
         assert len(rt._active_dispatch_handles) == 2
         assert len(orch.allocate_calls) == 1
         assert seen_handles == [domain, domain, domain]
+        assert len(orch.reuse_calls) == 3
+        assert all(call["members"] == [0] for call in orch.reuse_calls)
+        assert domain.owner is orch.resources[-1]
 
         closer = threading.Thread(target=rt.close)
         closer.start()
@@ -3512,7 +3533,7 @@ class TestPersistentDistributedWorker:
         orch = _PersistentOrch(m["worker"])
         m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
         m["load_entry"].return_value = (
-            _persistent_entry(64, [], buffer_nbytes=(4,)),
+            _persistent_entry(128, [], buffer_nbytes=(64,)),
             None,
         )
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -3730,7 +3751,7 @@ class TestPersistentDistributedWorker:
                 name="comm_d0",
                 workers=[*range(world_size)],
                 window_size=64,
-                buffers=[SimpleNamespace(name="signal", dtype="opaque", count=4, nbytes=4)],
+                buffers=[SimpleNamespace(name="signal", dtype="opaque", count=64, nbytes=64)],
             ):
                 raise RuntimeError("persistent dispatch failed")
 
@@ -3775,7 +3796,8 @@ class TestPersistentDistributedWorker:
         handle = orch.handles[0]
         owner = orch.resources[0]
         assert not owner.retired
-        assert owner.live_domains == {}
+        # An unfinished run keeps its ownership claim until Simpler drains it.
+        assert owner.live_domains == {"p0:comm_d0": handle}
         assert owner.pending_release_domains == []
         assert handle.release_count == 0
         assert m["worker"]._live_domains == {"p0:comm_d0": handle}

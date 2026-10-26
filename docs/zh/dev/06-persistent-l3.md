@@ -82,9 +82,9 @@ program 仍须满足原有的 platform、runtime 和 device ID 兼容性检查�
 ## Runtime 依赖
 
 该实现不修改 Simpler。每个请求都使用公开的 `Worker.submit()` boundary，其
-native handle 会一直挂在 PyPTO 的有界 dispatch handle 上直到完成。PyPTO 会让
-retained CommDomain 脱离 Simpler 的 per-run release set，并在 prepared worker
-关闭时统一释放。目前该保留机制仍依赖 Simpler 私有的 Worker 级 live-domain
-registry 和当前 run-resource journal（`_live_domains` 和
-`_building_run_resources.live_domains`）；后续应由公开的 retention API 封装该
-lifecycle。
+native handle 会一直挂在 PyPTO 的有界 dispatch handle 上直到完成。每个请求通过
+`Orchestrator.get_or_allocate_domain(..., retain_after_run=True)` 获取通信域
+（CommDomain）。Simpler 在复用时验证配置，将通信域登记到当前运行的完成栅栏
+（completion fence），并在成功运行之间保留其分配。prepared worker 关闭时，
+PyPTO 等待所有 dispatch handle 完成后释放通信域；失败时由 Simpler 负责清理。
+PyPTO 不再修改私有的通信域 registry 或 run-resource journal。

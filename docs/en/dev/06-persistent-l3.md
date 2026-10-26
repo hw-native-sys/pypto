@@ -98,9 +98,10 @@ runs can actually overlap.
 
 This implementation does not modify Simpler. Each request uses the public
 `Worker.submit()` boundary, and its native handle remains attached to PyPTO's
-bounded dispatch handle until completion. PyPTO detaches retained CommDomains
-from Simpler's per-run release set and releases them when the prepared worker
-closes. That retention currently depends on Simpler's private Worker-level
-live-domain registry and active run-resource journal (`_live_domains` and
-`_building_run_resources.live_domains`); a future public retention API should
-encapsulate this lifecycle.
+bounded dispatch handle until completion. Each request acquires its domains
+through `Orchestrator.get_or_allocate_domain(..., retain_after_run=True)`.
+Simpler validates the configuration on reuse, registers the domain with the
+current run's completion fence, and retains its allocation across successful
+runs. PyPTO releases the domains after draining all dispatch handles when the
+prepared worker closes; Simpler owns cleanup on failure. No private domain
+registry or run-resource journal is modified by PyPTO.

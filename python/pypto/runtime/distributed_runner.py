@@ -2044,7 +2044,6 @@ class DistributedWorker(Worker):
             from .tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
 
             bind_tensor_arg_owner(self._w, self)
-            self._validate_persistent_runtime_hooks()
             for prog, chip_callables, sub_worker_fns in loaded:
                 sub_ids, chip_cids = _register_callables(self._w, sub_worker_fns, chip_callables)
                 self._states[prog]["sub_ids"] = sub_ids
@@ -2237,22 +2236,6 @@ class DistributedWorker(Worker):
             buffers,
         )
 
-    def _validate_persistent_runtime_hooks(self) -> None:
-        """Fail before worker initialization when Simpler cannot retain domains."""
-        if not self._persistent:
-            return
-        live_domains = getattr(self._w, "_live_domains", None)
-        missing: list[str] = []
-        if not isinstance(live_domains, dict):
-            missing.append("_live_domains")
-        if not hasattr(self._w, "_building_run_resources"):
-            missing.append("_building_run_resources")
-        if missing:
-            raise RuntimeError(
-                "persistent distributed execution requires Simpler's private retention hooks: "
-                + ", ".join(missing)
-            )
-
     def _reset_persistent_domains(
         self,
         orch: Any,
@@ -2321,38 +2304,6 @@ class DistributedWorker(Worker):
         if first_error is not None:
             raise first_error
 
-    def _detach_persistent_domain(self, handle: Any) -> None:
-        """Transfer one CommDomain from the current run to Worker ownership.
-
-        Simpler records a newly allocated domain in both the current
-        ``_RunResources.live_domains`` journal and ``Worker._live_domains``.
-        Remove only the run-local claim: the global entry must remain reachable
-        so ``Worker.close()`` can reclaim it if request finalization is
-        interrupted before the run is retired.
-        """
-        live_domains = getattr(self._w, "_live_domains", None)
-        resources = getattr(self._w, "_building_run_resources", None)
-        run_live_domains = getattr(resources, "live_domains", None)
-        domain_lock = getattr(resources, "domain_lock", None)
-        if (
-            not isinstance(live_domains, dict)
-            or not isinstance(run_live_domains, dict)
-            or domain_lock is None
-        ):
-            raise RuntimeError(
-                "persistent distributed execution requires Simpler's active per-run CommDomain journal"
-            )
-        live_domains = cast("dict[str, Any]", live_domains)
-        run_live_domains = cast("dict[str, Any]", run_live_domains)
-        with domain_lock:
-            if bool(getattr(resources, "retired", False)):
-                raise RuntimeError("persistent CommDomain cannot be retained from an already-retired run")
-            if live_domains.get(handle.name) is not handle or run_live_domains.get(handle.name) is not handle:
-                raise RuntimeError(
-                    "persistent distributed execution could not transfer the CommDomain's run-local ownership"
-                )
-            del run_live_domains[handle.name]
-
     def _release_persistent_domains(
         self,
         domains_by_program: dict[str, dict[str, tuple[tuple[Any, ...], Any]]],
@@ -2406,19 +2357,20 @@ class DistributedWorker(Worker):
                 program_domains = domains_by_program.setdefault(program_id, {})
                 spec = self._persistent_domain_spec(kwargs)
                 existing = program_domains.get(generated_name)
-                if existing is None:
-                    runtime_kwargs = dict(kwargs)
-                    runtime_kwargs["name"] = f"{program_id}:{generated_name}"
-                    handle = orch.allocate_domain(**runtime_kwargs)
-                    self._detach_persistent_domain(handle)
-                    program_domains[generated_name] = (spec, handle)
-                else:
-                    prior_spec, handle = existing
-                    if spec != prior_spec:
-                        raise ValueError(
-                            f"persistent CommDomain {generated_name!r} changed specification "
-                            f"for program {program_id}"
-                        )
+                if existing is not None and spec != existing[0]:
+                    raise ValueError(
+                        f"persistent CommDomain {generated_name!r} changed specification "
+                        f"for program {program_id}"
+                    )
+                # Reuse through the public API on every request: Simpler must
+                # attach the retained domain to this run's completion fence,
+                # including when its physical allocation already exists.
+                runtime_kwargs = dict(kwargs)
+                runtime_kwargs["name"] = f"{program_id}:{generated_name}"
+                runtime_kwargs["members"] = runtime_kwargs.pop("workers")
+                runtime_kwargs["retain_after_run"] = True
+                handle = orch.get_or_allocate_domain(**runtime_kwargs)
+                program_domains[generated_name] = (spec, handle)
                 return _RetainedDomainLease(handle)
 
             program_domains = domains_by_program.get(program_id)
