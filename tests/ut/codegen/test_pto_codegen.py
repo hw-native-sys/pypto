@@ -4068,7 +4068,11 @@ def test_pto_codegen_tensor_dim_in_parameter_shape(extent_kind, axis):
 def test_tensor_dim_unsigned_constant_extent_ptoas(tmp_path, dtype):
     """Unsigned constant extents must become INDEX without an invalid cast."""
     span = ir.Span.unknown()
-    tensor_type = ir.TensorType([ir.ConstInt(8, dtype, span), 16], DataType.FP32)
+    # The Expr overload requires every dimension to be an Expr, including the
+    # fixed trailing dimension; mixing a Python int selects neither overload.
+    tensor_type = ir.TensorType(
+        [ir.ConstInt(8, dtype, span), ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32
+    )
     ib = IRBuilder()
     with ib.function("unsigned_dim", type=ir.FunctionType.InCore) as f:
         source = f.param("source", tensor_type)

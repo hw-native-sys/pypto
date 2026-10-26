@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, Error, backend, codegen, ir, passes
+from pypto import DataType, backend, codegen, ir, passes
 
 SPAN = ir.Span("reg_test.py", 3, 1, 3, 10)
 
@@ -104,7 +104,7 @@ def test_explicit_incore_register_region_survives_outlining(kind, graph_ancestor
 
 @pytest.mark.parametrize("tuple_depth", [1, 2])
 @pytest.mark.parametrize("inside_region", [False, True])
-def test_terminal_scalar_tuple_output_respects_region_ownership(tuple_depth, inside_region):
+def test_terminal_scalar_tuple_is_not_a_fallback_output(tuple_depth, inside_region):
     value = integer(64)
     stmts = []
     for depth in range(tuple_depth):
@@ -127,12 +127,8 @@ def test_terminal_scalar_tuple_output_respects_region_ownership(tuple_depth, ins
     properties = passes.IRPropertySet()
     properties.insert(passes.IRProperty.RegScopeValid)
     assert passes.PropertyVerifierRegistry.verify(properties, program) == []
-    if not inside_region:
-        # Keep main's existing rejection of scalar tuple kernel returns outside
-        # RegScope; this fix must only filter region-owned fallback values.
-        with pytest.raises(Error, match="NoScalarKernelReturn"):
-            passes.outline_incore_scopes()(program)
-        return
+    # Main excludes all unused tuple temporaries from fallback outputs, whether
+    # they are defined inside RegScope or directly in the enclosing InCore scope.
     outlined = passes.outline_incore_scopes()(program)
     assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
     kernel = next(f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore)
