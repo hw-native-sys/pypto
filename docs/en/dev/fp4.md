@@ -209,3 +209,34 @@ public byte-alias planner restrictions, and other cast/scratch rules are unchang
 
 - [Types](../user/language/00-types.md) — public aliases and carrier ABI
 - [Operators / MX](ir/05-operators.md) — existing MXFP8 matrix paths
+
+## Opt-in padded NZ and MX L0 scheduling
+
+The per-compilation options `enable_fp4_nz_row_plus_one` and
+`enable_mx_l0_ping_pong` default to false and are independent. Pass them to
+`ir.compile(...)`, or wrap a JIT invocation in
+`passes.PassContext([], enable_fp4_nz_row_plus_one=True,
+enable_mx_l0_ping_pong=True)`. Nested dump/profiling contexts inherit both;
+JIT cache keys distinguish all four combinations. The emitted
+`compiler_options.json` records resolved requested options, not a claim that
+every operation was eligible.
+
+Padded NZ selection runs after vector splitting and final cross-core adapters.
+It applies only to A5 native E2M1x2-to-E4M3FN conversion with a full per-AIV
+`128x256` output and exactly one `tpush_to_aic` consumer. Other shapes,
+partial or dynamic valid extents, and additional consumers retain ordinary NZ.
+The logical tile remains `128x256`; `CompactMode.row_plus_one` reserves
+`129*256 = 33024` UB bytes. The producer, aliases and TPUSH retain this mode;
+TINSERT removes each extra panel row into the ordinary `256x256` L1/FIFO
+payload. Input carriers, numerical conversion, scales and FIFO size do not
+change.
+
+The option requires PTOAS direct-convert RowPlusOne verification and an ISA
+TCVT implementation with padded storage sizing. It is disabled by default
+while runtime dependency pins are brought forward. The independent MX option
+requests supported K128 L0 ping/pong lowering; it does not change NZ eligibility.
+
+Explicit RowPlusOne Tile descriptors validate static positive physical rows
+divisible by 16, columns divisible by 32, and padded offset bounds.
+Buffer IR and multi-buffer slot descriptors currently reject this mode;
+use independent Tile allocations. Automatic A5 kernels remain on Tile IR.

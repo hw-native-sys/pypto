@@ -867,5 +867,109 @@ def test_a2a3_still_rejects_packed_fp4_native_conversion():
         passes.legalize_tile_cast()(before)
 
 
+def _padded_push_program(shape=(128, 128), valid=None, extra_read=False):
+    source, _, nz, cast, move = _pair(
+        _tile(shape=shape, view=ir.TileView(valid_shape=valid) if valid else None)
+    )
+    push = tile_ops.tpush_to_aic(nz, split=1, span=SPAN)
+    statements = [cast, move, ir.EvalStmt(push, SPAN)]
+    if extra_read:
+        statements.append(ir.EvalStmt(nz, SPAN))
+    return _program(statements, [source])
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+@pytest.mark.parametrize("enabled", [False, True])
+def test_row_plus_one_selects_the_full_aiv_producer_and_same_tpush_type(planner, enabled):
+    before = _padded_push_program()
+    backend.set_backend_type(BackendType.Ascend950)
+    with passes.PassContext(
+        [], memory_planner=planner, enable_fp4_nz_row_plus_one=enabled, enable_buffer_ir=False
+    ):
+        after = passes.expand_mixed_kernel()(before)
+    (cast,) = _calls(after, "tile.cast_to_nz")
+    (push,) = _calls(after, "tile.tpush_to_aic")
+    mode = ir.CompactMode.row_plus_one if enabled else ir.CompactMode.null
+    assert cast.type.get_effective_tile_view().compact == mode
+    assert push.args[0].type.get_effective_tile_view().compact == mode
+    assert [dim.value for dim in cast.type.shape] == [128, 256]
+    ir.assert_structural_equal(cast.type, push.args[0].type)
+    _verify(after)
+
+
+@pytest.mark.parametrize(
+    "shape,valid,extra_read",
+    [
+        ((64, 128), None, False),
+        ((128, 256), None, False),
+        ((128, 128), [127, 128], False),
+        ((128, 128), [128, 127], False),
+        ((128, 128), None, True),
+    ],
+)
+def test_row_plus_one_unsupported_geometry_or_consumer_keeps_ordinary_nz(shape, valid, extra_read):
+    before = _padded_push_program(shape, valid, extra_read)
+    backend.set_backend_type(BackendType.Ascend950)
+    with passes.PassContext([], enable_fp4_nz_row_plus_one=True):
+        after = passes.expand_mixed_kernel()(before)
+    (cast,) = _calls(after, "tile.cast_to_nz")
+    assert cast.type.get_effective_tile_view().compact == ir.CompactMode.null
+    _verify(after)
+
+
+def test_row_plus_one_storage_reserves_all_panels_and_roundtrips():
+    backend.set_backend_type(BackendType.Ascend950)
+    gm = ir.Var("gm", ir.TensorType([128, 128], DataType.FP4E2M1X2), SPAN)
+    indices = ir.MakeTuple([_const(0), _const(0)], SPAN)
+    shape = ir.MakeTuple([_const(128), _const(128)], SPAN)
+    load = ir.create_op_call(
+        "tile.load", [gm, indices, shape, shape], {"target_memory": ir.MemorySpace.Vec}, SPAN
+    )
+    source = ir.Var("source", load.type, SPAN)
+    cast = ir.create_op_call("tile.cast_to_nz", [source], {**CAST, "compact": 2}, SPAN)
+    result = ir.Var("result", cast.type, SPAN)
+    before = _program(
+        [ir.AssignStmt(source, load, SPAN), ir.AssignStmt(result, cast, SPAN), ir.EvalStmt(result, SPAN)],
+        [gm],
+    )
+    # Both type serialization and printed IR must retain the padded descriptor;
+    # a Null consumer would read the wrong panel stride.
+    ir.assert_structural_equal(ir.deserialize(ir.serialize(before)), before)
+    ir.assert_structural_equal(pl.parse_program(ir.python_print(before)), before)
+    with passes.PassContext([], enable_buffer_ir=False):
+        after = passes.init_mem_ref()(before)
+        after = passes.materialize_semantic_aliases()(after)
+        after = passes.memory_reuse()(after)
+        after = passes.allocate_memory_addr()(after)
+    destinations = []
+
+    class CollectDestination(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op == ir.get_op("tile.cast_to_nz"):
+                # Allocation belongs to the bound SSA variable, not the
+                # operation's independently inferred result type.
+                assert op.var.type.tile_view.compact == ir.CompactMode.row_plus_one
+                destinations.append(op.var.type.memref)
+            super().visit_assign_stmt(op)
+
+    CollectDestination().visit_program(after)
+    (converted,) = _calls(after, "tile.cast_to_nz")
+    src = converted.args[0].type.memref
+    (dst,) = destinations
+    assert src is not None and dst is not None
+    assert (src.size_, dst.size_) == (16384, 33024)
+    assert (
+        src.byte_offset_.value + src.size_ <= dst.byte_offset_.value
+        or dst.byte_offset_.value + dst.size_ <= src.byte_offset_.value
+    )
+
+
+@pytest.mark.parametrize("valid", [[127, 128], [128, 127]])
+def test_explicit_row_plus_one_rejects_unproven_tail_contract(valid):
+    source = _tile(shape=(128, 128), view=ir.TileView(valid_shape=valid))
+    with pytest.raises(ValueError, match="currently requires full 128x256 output"):
+        ir.create_op_call("tile.cast_to_nz", [source], {**CAST, "compact": 2}, SPAN)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

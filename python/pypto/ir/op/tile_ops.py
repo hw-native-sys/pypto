@@ -1928,6 +1928,7 @@ def cast_to_nz(
     span: Span | None = None,
     *,
     saturation_mode: str | int | None = None,
+    compact: int = 0,
 ) -> Call:
     """Build the internal native FP4 to FP8 NZ operation for printed IR.
 
@@ -1944,9 +1945,12 @@ def cast_to_nz(
         saturation_mode: Optional destination saturation deviation.
 
     Returns:
-        Internal cast call with deduced NZ result type.
+        Internal cast call with deduced NZ result type. Compiler-internal
+        compact=2 spells RowPlusOne for the supported full 128x256 output.
     """
     kwargs: dict[str, Any] = {"target_type": target_type, "mode": resolve_cast_mode(mode)}
+    if compact:
+        kwargs["compact"] = compact
     deviation = resolve_saturation_deviation(saturation_mode, target_type)
     if deviation is not None:
         kwargs["saturation_mode"] = deviation

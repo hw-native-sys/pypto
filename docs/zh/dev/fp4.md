@@ -182,3 +182,32 @@ packed reshape 和 transpose 仍不支持。
 E1M2 到 FP8 仍通过现有 BF16/FP32 桥接路径。E2M1 到 E5M2 仍经
 BF16/FP32 中转并发出警告。A2/A3 packed 执行、公开字节别名的内存规划器
 限制和其他 cast/scratch 规则保持不变。
+
+
+## 可选的 NZ 错位写与 MX L0 双缓冲
+
+每次编译可独立设置 `enable_fp4_nz_row_plus_one` 和
+`enable_mx_l0_ping_pong`，两者默认均为 false。可以直接传给
+`ir.compile(...)`，也可以用
+`passes.PassContext([], enable_fp4_nz_row_plus_one=True,
+enable_mx_l0_ping_pong=True)` 包裹 JIT 调用。嵌套的转储和性能分析
+上下文会继承选项；JIT 缓存键区分四种组合。`compiler_options.json`
+记录实际请求的选项，不代表每个算子都满足优化条件。
+
+NZ 错位写选择在向量切分和跨核适配完成后进行，仅覆盖 A5 原生
+E2M1x2 到 E4M3FN 转换，且要求每个 AIV 的输出完整为
+`128x256`、唯一消费者为 `tpush_to_aic`。其他形状、部分或动态
+有效范围以及多消费者情形继续使用普通 NZ。逻辑形状保持
+`128x256`；`CompactMode.row_plus_one` 分配
+`129*256 = 33024` 字节 UB。生产者、别名和 TPUSH 保留该模式，
+TINSERT 在写入普通 `256x256` L1/FIFO 载荷时去除面板间的空行。
+输入载体、数值转换、scale 和 FIFO 大小均不变。
+
+该选项依赖 PTOAS 对直接转换 RowPlusOne 的校验，以及 ISA TCVT
+对错位存储容量的支持。在运行时依赖版本更新前默认关闭。
+独立的 MX 选项请求受支持的 K128 L0 双缓冲，不改变 NZ 选择条件。
+
+显式 RowPlusOne Tile 描述符要求物理形状为静态正数，行数为 16 的
+倍数、列数为 32 的倍数，且错位地址不越界。Buffer IR 和多槽缓冲区
+描述符当前拒绝该模式；应使用独立 Tile 分配。自动生成的 A5 内核
+继续使用 Tile IR。
