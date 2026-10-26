@@ -3478,6 +3478,67 @@ def test_tensor_dim_view_loop_compiles_without_folding(tmp_path):
     )
 
 
+def test_tensor_dim_in_outlined_local_type_lowers(tmp_path):
+    """A tensor referenced only by a scope-local result type must be captured."""
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, source: pl.Tensor[[8, 32], pl.FP32], out: pl.InOut[pl.Tensor[[8, 32], pl.FP32]]):
+            n = pl.tensor.dim(source, 0)
+            with pl.spmd(1):
+                block = pl.tile.get_block_idx()
+                view: pl.Tensor[
+                    [pl.tensor.dim(source, 0) * 2, 16],
+                    pl.FP32,
+                    pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND),
+                ] = pl.reshape(out, [n * 2, 16])
+                out = pl.assemble(out, pl.exp(pl.slice(view, [8, 16], [block * 8, 0])), [0, 0])
+            return out
+
+    # Exercise all IR passes and codegen. PTOAS currently rejects the dynamic
+    # reshape/subview valid-row combination independently of scope capture.
+    compiled = ir.compile(Repro, output_dir=str(tmp_path), platform="a2a3", skip_ptoas=True)
+    assert compiled.program is not None
+    assert "__FREE_VAR" not in ir.python_print(compiled.program)
+
+
+def test_nested_tensor_dim_does_not_rebind_tpop_result(tmp_path):
+    """A nested shape read must not replace the popped tile's SSA with an index."""
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(self, __gm_pipe_buffer: pl.Out[pl.Tensor[[4096], pl.FP32]]):
+            peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="consumer")
+            pl.aic_initialize_pipe(peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            source: pl.Tensor[[8, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            __gm_pipe_buffer: pl.Out[pl.Tensor[[4096], pl.FP32]],
+        ):
+            pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+            pl.aiv_initialize_pipe(dir_mask=1, slot_size=1024, c2v_consumer_buf=pipe_buf)
+            popped: pl.Tile[
+                [16, 16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.tensor.dim(source, 0), 16])
+            ] = pl.tpop_from_aic(split=0)
+            result = pl.store(popped, [0, 0], out)
+            return result
+
+    # Keep tensor.dim in the TileView: a simplifying pipeline could mask this
+    # codegen bug by folding the dimension read before the backend sees it.
+    mlir = _generate_mlir(Repro)
+    popped = re.search(r"(%\w+) = pto.tpop_from_aic", mlir)
+    assert popped is not None, mlir
+    assert f"pto.tstore ins({popped.group(1)} : !pto.tile_buf" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        cpp = pto_backend._compile_pto_module(mlir, "consumer", str(tmp_path))
+        assert "consumer" in cpp
+
+
 def test_pto_codegen_tensor_view_aliases_input_base_ptr():
     """tensor.view creates a view rooted at the input buffer and usable by downstream loads."""
     span = ir.Span.unknown()

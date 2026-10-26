@@ -803,10 +803,6 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
     shape_name = codegen.EmitCastToIndex(shape, codegen.GetExprAsCode(shape));
   }
   codegen.SetCurrentExprValue(shape_name);
-  auto target_var = codegen.GetCurrentResultVar();
-  if (target_var != nullptr && !shape_name.empty()) {
-    codegen.RegisterVarToMlir(target_var, shape_name);
-  }
 
   return "";
 }

@@ -16,6 +16,12 @@ This pass transforms `InCoreScopeStmt` nodes into separate `Function(InCore)` de
 
 **When to use**: Run after ConvertToSSA when you need to extract InCore computation regions into separate callable functions.
 
+Retained type expressions also contribute live-in tensors: this includes types
+of inputs, local definitions, and outputs, plus tensor/tile view metadata.
+For example, `tensor.dim(source, 0)` in a result annotation captures `source`
+even when no body operand reads it. The outlined signature uses the fresh
+parameter; the dispatch result type substitutes the caller's argument back in.
+
 ## API
 
 | C++ | Python | Level |

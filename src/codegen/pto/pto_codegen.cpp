@@ -2136,6 +2136,12 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
+  if (ir::IsOp(call, "tensor.dim")) {
+    // Bind only a standalone dimension read. A retained read nested in another
+    // operation's type must not overwrite that operation's result binding.
+    BindVarToMlir(op->var_, GetExprAsCode(call));
+    return;
+  }
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);

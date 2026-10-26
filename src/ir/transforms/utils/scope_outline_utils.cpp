@@ -47,6 +47,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -604,7 +605,7 @@ class StoreEvalToAssignMutator : public IRMutator {
   std::unordered_set<const Var*> claimed_;
 };
 
-/// Collect tensor operands in shape expressions without traversing their types.
+/// Collect tensor operands in type expressions without traversing their types.
 class TensorTypeDependencyCollector : public IRVisitor {
  public:
   std::vector<const Var*> tensors;
@@ -650,6 +651,11 @@ class UpwardExposedUseCollector : public IRVisitor {
   /// True when `var`'s value on entry to the visited subtree comes from
   /// outside it — i.e. the subtree captures rather than defines it.
   [[nodiscard]] bool IsExternal(const Var* var) const { return live_in_.count(var) > 0; }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    IRVisitor::VisitExpr(expr);
+    if (expr && !AsVarLike(expr)) RecordTypeUses(expr->GetType());
+  }
 
  protected:
   // Var and IterArg are handled by separate overrides rather than a shared
@@ -715,19 +721,34 @@ class UpwardExposedUseCollector : public IRVisitor {
       // A retained tensor.dim in a captured type names another tensor. Capture
       // that tensor before its dependent parameter so the outlined signature
       // is self-contained. Bare dimension symbols remain signature-bound.
-      if (auto type = AsTensorTypeLike(var->GetType())) {
-        TensorTypeDependencyCollector dependencies;
-        for (const auto& dim : type->shape_) dependencies.VisitExpr(dim);
-        for (const Var* dependency : dependencies.tensors) RecordUse(dependency);
-      }
+      RecordTypeUses(var->GetType());
       ordered.push_back(var);
     }
+  }
+
+  void RecordTypeUses(const TypePtr& type) {
+    if (!type) return;
+    auto [it, inserted] = type_dependencies_.try_emplace(type.get());
+    if (inserted) {
+      TensorTypeDependencyCollector dependencies;
+      var_collectors::VisitTypeExprFields(dependencies, type);
+      it->second = std::move(dependencies.tensors);
+    }
+    // Cache the scan, not the live-in decision: a shared type can occur on
+    // different branches with different definitions in scope. References to
+    // map elements survive rehashing during recursive dependency capture.
+    const auto& dependencies = it->second;
+    for (const Var* dependency : dependencies) RecordUse(dependency);
   }
 
   void Define(const VarPtr& var) { Define(var.get()); }
 
   void Define(const Var* var) {
-    if (var && defined_.insert(var).second) journal_.push_back(var);
+    if (!var) return;
+    // Locally defined values and scope outputs can retain tensor.dim solely
+    // in their types, including tensor/tile view metadata.
+    RecordTypeUses(var->GetType());
+    if (defined_.insert(var).second) journal_.push_back(var);
   }
 
   /// Visit `body`, then roll back every definition it introduced and return
@@ -744,6 +765,7 @@ class UpwardExposedUseCollector : public IRVisitor {
     return introduced;
   }
 
+  std::unordered_map<const Type*, std::vector<const Var*>> type_dependencies_;
   std::unordered_set<const Var*> live_in_;  ///< membership view of `ordered`
   std::unordered_set<const Var*> defined_;
   std::vector<const Var*> journal_;  ///< insertion order, for branch rollback
@@ -2219,7 +2241,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Determine call return type. When ``task_id_var`` is set, append the
   // TaskId element at the tail of the (already flat) return-type tuple so
   // the augmentation matches the ``pl.submit(...)`` shape.
-  std::vector<TypePtr> effective_return_types = return_types;
+  // Return metadata belongs to the caller at the dispatch site, including
+  // retained tensor.dim operands that were freshened into callee parameters.
+  std::vector<TypePtr> effective_return_types = DeduceCallReturnType(input_params, call_args, return_types);
   if (scope_task_id_var) {
     effective_return_types.push_back(std::make_shared<ScalarType>(DataType::TASK_ID));
   }

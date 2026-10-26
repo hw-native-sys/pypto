@@ -921,7 +921,8 @@ inline TypePtr MakeFreshTensorType(std::vector<ExprPtr> shape, DataType dtype,
  * corresponding metadata expressions in actual arg types, then substitutes
  * those Vars in each return type. Handles TensorType, DistributedTensorType,
  * TileType, and TupleType recursively, including expressions nested in shapes
- * and view metadata.
+ * and view metadata. Tensor parameter operands of retained tensor.dim calls
+ * are also replaced with the corresponding actual arguments.
  *
  * @param callee_params  Callee function parameter variables
  * @param args           Actual call argument expressions

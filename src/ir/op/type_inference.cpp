@@ -1717,6 +1717,11 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
   std::vector<CallTypeBindingConstraint> constraints;
   for (size_t i = 0; i < callee_params.size(); ++i) {
     if (!callee_params[i] || !args[i]) continue;
+    // Retained tensor.dim calls in return metadata name the tensor parameter
+    // itself, even when its shape contains no dynamic dimension variables.
+    if (AsTensorTypeLike(callee_params[i]->GetType())) {
+      var_map.emplace(callee_params[i].get(), args[i]);
+    }
     CollectCallTypeBindings(callee_params[i]->GetType(), args[i]->GetType(), "argument " + std::to_string(i),
                             var_map, constraints);
   }

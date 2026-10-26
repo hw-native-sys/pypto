@@ -4260,5 +4260,53 @@ class TestOutlineScalarOutputHoist:
         assert self._scalar_returns(self._func(After, "scaled")) == 0, python_print(After)
 
 
+@pytest.mark.parametrize(
+    "annotation, value",
+    [
+        (
+            "pl.Tensor[[8, 16], pl.FP32, pl.TensorView(valid_shape=[pl.tensor.dim(source, 0), 16], "
+            "stride=[16, 1], layout=pl.TensorLayout.ND)]",
+            "pl.reshape(out, [8, 16])",
+        ),
+        (
+            "pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[pl.tensor.dim(source, 1), 1], "
+            "layout=pl.TensorLayout.ND)]",
+            "pl.reshape(out, [8, 16])",
+        ),
+        (
+            "pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.tensor.dim(source, 0), 16])]",
+            "pl.load(out, [0, 0], [8, 16])",
+        ),
+        (
+            "pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec, pl.TileView(stride=[pl.tensor.dim(source, 1), 1])]",
+            "pl.load(out, [0, 0], [8, 16])",
+        ),
+        (
+            "pl.Tile[[8, 16], pl.FP32, pl.Mem.Vec, pl.TileView(start_offset=pl.tensor.dim(source, 0))]",
+            "pl.load(out, [0, 0], [8, 16])",
+        ),
+    ],
+    ids=["tensor-valid-shape", "tensor-stride", "tile-valid-shape", "tile-stride", "tile-start-offset"],
+)
+def test_outline_captures_tensor_referenced_only_by_local_view_metadata(annotation, value):
+    """Retained metadata on a local definition must use an outlined parameter."""
+    before = text_parse(f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, source: pl.Tensor[[8, 16], pl.FP32], out: pl.Tensor[[8, 16], pl.FP32]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            local: {annotation} = {value}
+        return {"local" if annotation.startswith("pl.Tensor") else "out"}
+""")
+    assert isinstance(before, ir.Program)
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    outlined = next(func for func in after.functions.values() if func.func_type == ir.FunctionType.InCore)
+    assert any(param.name_hint.startswith("source") for param in outlined.params), python_print(after)
+    assert "__FREE_VAR" not in python_print(after)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
