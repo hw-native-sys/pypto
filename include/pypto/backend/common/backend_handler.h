@@ -32,7 +32,8 @@ namespace backend {
 class Backend;
 
 // Validated native GM-subview load profile. Zero limits mean unsupported.
-// Limits are in elements except the explicitly byte-valued row alignment.
+// max_rows and max_index are element counts/indices; max_gap_bytes and
+// row_alignment_bytes are measured in bytes.
 struct SubviewLoadLimits {
   int64_t max_rows = 0;
   int64_t max_index = 0;
@@ -162,6 +163,8 @@ class BackendHandler {
   /// evidence that a particular installed assembler supports its lowering.
   [[nodiscard]] virtual bool SupportsRegType(const ir::RegType& /*type*/) const { return false; }
 
+  // Native load constraints used by the subview verifier before PTO emission.
+  // The default rejects native subviews until a backend profile is validated.
   [[nodiscard]] virtual SubviewLoadLimits GetSubviewLoadLimits() const { return {}; }
 
   /**

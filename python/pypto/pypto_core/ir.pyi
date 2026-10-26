@@ -452,8 +452,12 @@ class CompactMode(enum.Enum):
     """Compact valid-region layout."""
 
 class TensorAddressingKind(enum.Enum):
+    """Tensor addressing contract enumeration."""
+
     Canonical = ...
+    """Canonical tensor storage addressing."""
     AffineSubview = ...
+    """Borrowed affine GM descriptor created by tensor.subview."""
 
 class TensorView:
     """Tensor view representation with stride, layout, valid shape, and pad mode."""

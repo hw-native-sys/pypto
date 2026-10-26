@@ -373,8 +373,6 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 它携带显式的元素 stride，不拥有 `MemRef`。原点保留在定义调用中，
 不作为分配大小或类型中的指针。仅有标记不构成安全证明：转换与 PTO
 生成入口会重新校验来源、包含关系、严格缩小和索引边界。
-参见 [GM subview RFC](gm-subview-rfc.md) 及其
-[完整示例](gm-subview-worked-example.md)。
 
 #### Canonical TensorView 形式（RFC #1300）
 

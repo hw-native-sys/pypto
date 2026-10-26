@@ -16,11 +16,18 @@ window from an ordinary GM Tensor inside an InCore function. It preserves
 parent pitches and performs no load or allocation; `slice` still materializes
 its selected window during TensorToTile conversion. Every sampled coordinate
 must be provably inside the immediate parent's valid window, and at least one
-logical extent must be strictly smaller. False and unknown proofs are rejected.
+logical extent must be strictly smaller. Canonical `view` ancestors must also
+provably preserve their parent element count before they can supply a borrowed
+GM window. Unrelated ordinary views keep their existing contract. False and
+unknown proofs are rejected. A parent valid extent must also be provably within
+its physical shape.
 The initial executable profile is rank-2 ND BF16, unit inner stride, caller-owned
-GM roots, and Vec loads. Tile/DistributedTensor inputs, descriptor escape,
+GM roots, and Vec loads on Ascend910 (A2/A3). Native loads require at most 4095
+rows, signed 32-bit indices, 32-byte valid and physical rows, and a source gap
+that fits in an unsigned 32-bit byte count. `GetSubviewLoadLimits` supplies
+these target constraints; other backends reject subviews until their native
+load profile is validated. Tile/DistributedTensor inputs, descriptor escape,
 compiler-owned roots, and writes through the descriptor are rejected.
-See the [RFC](gm-subview-rfc.md) and [complete example](gm-subview-worked-example.md).
 
 `tensor.view` is a metadata-only zero-copy shape/layout reinterpret. It is registered as a `TensorOp` passthrough in `ConvertTensorToTileOps`; PTO in-core codegen lowers it to `pto.make_tensor_view` over the original base pointer. Targets require rank at least 1 (DN requires rank at least 2). Orchestration shape reinterpret is normally ND-only and cannot also change layout. FP8E8M0 dynamic scale storage additionally permits an equal-element-count shaped alias between packed ND and `MX_A_ZZ` or `MX_B_NN`; orchestration preserves the same runtime tensor without calling `reshape`. Shape reinterpretation of a partially valid source is limited to either a packed ND leading-dimension collapse to 2D or a contiguous-prefix linear collapse to `[1, product(shape)]`; both require an explicit target `valid_shape`. These forms preserve the source tensor kind and backing metadata.
 
