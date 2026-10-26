@@ -1023,9 +1023,8 @@ jobs:
       run:
         working-directory: codegen-checkout
     env:
-      # No PTOAS_ROOT: install-toolchain:false means setup-ci-job never
-      # assembles, so codegen-only needs no ptoas. pto-isa is resolved by
-      # simpler from runtime/pto_isa.pin, which this job never installs.
+      # Raw codegen needs no ptoas or pto-isa. The test step explicitly selects
+      # an empty PTOAS_ROOT so JIT cannot discover a runner-local assembler.
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -1065,6 +1064,9 @@ jobs:
         # under the base interpreter, which cannot see the venv-installed pypto.
         run: |
           source activate.sh
+          # Keep raw codegen independent of runner-local assemblers.
+          PTOAS_ROOT="$(mktemp -d "$RUNNER_TEMP/pypto-codegen-no-ptoas.XXXXXX")"
+          export PTOAS_ROOT
           python -m pytest tests/st/codegen -v --codegen-only \
             --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
