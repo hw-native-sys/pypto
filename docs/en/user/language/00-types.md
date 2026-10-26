@@ -267,7 +267,11 @@ tile and an FP32 `pl.NZ` destination. Rows and columns must be multiples of 16; 
 must cover the destination's entire row axis at row offset 0. Each store writes one panel,
 with non-negative, provably aligned column and batch offsets. Stack independent panels as
 `[PANELS, R, C]` and write them separately. FP32 NZ uses C0=8; it does not change the tile's
-mathematical values. Atomic stores, FIXPIPE epilogue options (`pre_quant`, `pre_relu`),
+mathematical values. The physical source tile must fit the backend's L0C capacity
+(currently 128 KiB on A2/A3); the GM destination may be larger. This writeback path does
+not automatically split oversized M/N tiles: compute and store smaller column chunks
+explicitly, keeping every chunk's rows equal to the destination's full row axis.
+Atomic stores, FIXPIPE epilogue options (`pre_quant`, `pre_relu`),
 dtype conversion, A5, Vec/Mat sources, and dynamic or partially valid tiles are rejected.
 The full scope and the underlying row-window restriction are documented in
 [BlockNzTensorViews](../../dev/passes/16-block_nz_tensor_views.md#accumulator-stores).

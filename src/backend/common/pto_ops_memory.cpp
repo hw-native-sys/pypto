@@ -234,8 +234,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     // partition here so such a split cannot silently use the wrong FIXPIPE
     // destination stride. Emission itself uses the ordinary rank-N path below.
     const auto* handler = codegen.GetBackendHandler();
-    const auto valid =
-        ir::nz_store_utils::CheckSourceAndAttrs(op, handler && handler->SupportsAccToNzGmStore());
+    const auto valid = ir::nz_store_utils::CheckSourceAndAttrs(op, handler);
     ir::nz_store_utils::CheckBlockedPartition(op, valid);
   }
 

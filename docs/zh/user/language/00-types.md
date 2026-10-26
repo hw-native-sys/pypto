@@ -213,7 +213,10 @@ batch 槽位。
 FP32 Acc tile 写入 FP32 `pl.NZ` 目标。行列均须为 16 的倍数；tile 必须从行偏移
 0 开始覆盖目标的整个行轴。每次 store 只写一个 panel，列偏移和 batch 偏移必须
 非负且可证明对齐。独立 panel 应写成 `[PANELS, R, C]`，逐个写回。FP32 NZ 的
-C0=8，不改变 tile 的数学值。Atomic store、FIXPIPE epilogue 选项（`pre_quant`、
+C0=8，不改变 tile 的数学值。源 tile 的物理分配必须放入后端 L0C 容量（当前
+A2/A3 为 128 KiB），GM 目标可以更大。这条写回路径不会自动拆分超大的 M/N tile：
+应显式计算并写回更小的列块，每块的行数仍须覆盖目标的完整行轴。
+Atomic store、FIXPIPE epilogue 选项（`pre_quant`、
 `pre_relu`）、dtype 转换、A5、Vec/Mat 源、动态或部分有效 tile 都会被拒绝。
 完整范围及底层行窗口限制见
 [BlockNzTensorViews](../../dev/passes/16-block_nz_tensor_views.md#accumulator-写回)。

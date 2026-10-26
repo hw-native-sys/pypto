@@ -1354,6 +1354,67 @@ def test_acc_nz_store_accepts_compact_full_tiles():
     assert _values(_elements(store.args[3])) == [1, 2, 4, 16, 8]
 
 
+@pytest.mark.parametrize(("destination_cols", "column_offset"), [(512, 0), (2048, 512)])
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_accepts_exact_l0c_capacity(destination_cols, column_offset):
+    """Capacity bounds the source Acc allocation, not the entire GM destination.
+
+    On A2/A3, 64*512*4 bytes exactly fills the 128 KiB L0C. The same tile
+    can write a column panel of a larger NZ tensor without a larger Acc.
+    """
+    before = _nz_store_program(
+        tile_shape=(64, 512), output_shape=(64, destination_cols), offsets=(0, column_offset)
+    )
+    store = _store_call(passes.block_nz_tensor_views()(before))
+    assert _shape_values(store.args[0]) == [64, 512]
+    assert _shape_values(store.args[2]) == [1, destination_cols // 8, 4, 16, 8]
+    assert _values(_elements(store.args[1])) == [0, column_offset // 8, 0, 0, 0]
+    assert _values(_elements(store.args[3])) == [1, 64, 4, 16, 8]
+
+
+@pytest.mark.parametrize(("source_cols", "required_bytes"), [(528, 135168), (2048, 524288)])
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_rejects_l0c_overflow_during_blocking(source_cols, required_bytes):
+    """Reject one impossible Acc before the blocked store bypasses automatic M/N tiling.
+
+    528 columns exceeds capacity by one legal 16-column block; 2048 columns
+    reproduces the review case. Both satisfy all existing geometry checks.
+    """
+    before = _nz_store_program(tile_shape=(64, source_cols), output_shape=(64, source_cols), offsets=(0, 0))
+    with pytest.raises(ValueError, match="NZ tile.store") as error:
+        passes.block_nz_tensor_views()(before)
+    message = str(error.value)
+    assert "L0C" in message
+    assert str(required_bytes) in message
+    assert "131072" in message
+    assert "pl.ND" in message
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_exact_l0c_capacity_codegen():
+    """The exact capacity boundary still compiles through the complete pipeline."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 16], pl.FP16],
+            w: pl.Tensor[[16, 512], pl.FP16],
+            out: pl.Tensor[[64, 512], pl.FP32, pl.NZ],
+        ):
+            lhs = pl.load(x, [0, 0], [64, 16], target_memory=pl.Mem.Mat)
+            rhs = pl.load(w, [0, 0], [16, 512], target_memory=pl.Mem.Mat)
+            return pl.store(pl.matmul(lhs, rhs, out_dtype=pl.FP32), [0, 0], out)
+
+    text = _emit_pto(Before, BackendType.Ascend910B)
+    tstore = next(line for line in text.splitlines() if "pto.tstore" in line)
+    assert "#pto.layout<nz>" in text
+    assert "loc=acc" in tstore
+    assert "rows=64, cols=512" in tstore
+    assert "!pto.partition_tensor_view<1x64x4x16x8xf32>" in tstore
+
+
 def _acc_nz_store_program():
     @pl.program
     class Before:

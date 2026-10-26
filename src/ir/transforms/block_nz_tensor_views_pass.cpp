@@ -520,7 +520,7 @@ class BlockNzMutator : public IRMutator {
     if (backend::BackendConfig::IsConfigured()) {
       handler = ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
     }
-    const auto valid = nz_store_utils::CheckSourceAndAttrs(op, handler && handler->SupportsAccToNzGmStore());
+    const auto valid = nz_store_utils::CheckSourceAndAttrs(op, handler);
     auto offsets = As<MakeTuple>(args[1]);
     INTERNAL_CHECK_SPAN(offsets, op->span_) << "Internal error: tile.store offsets must be a MakeTuple";
     const size_t rank = logical_shape.size();

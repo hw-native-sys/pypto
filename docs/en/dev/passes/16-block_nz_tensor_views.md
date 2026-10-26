@@ -147,12 +147,28 @@ The supported write scope is narrower than the read scope:
 | Backend and dtypes | A2/A3, FP32 Acc to FP32 GM only |
 | Tile shape and valid region | Static, positive, 2-D, fully valid; rows and columns are multiples of 16 |
 | Hardware extent limits | Rows at most 65535, columns at most 4095; alignment makes the effective maxima 65520 and 4080 |
+| Source allocation | Physical Acc tile allocation must fit the backend's L0C capacity (currently 128 KiB on A2/A3) |
 | Destination row window | Entire parent row axis, at row offset 0 |
 | Leading axes | Exactly one panel per store; a nonzero batch offset is allowed |
 | Column offset | Non-negative and provably a multiple of `c0 = 8` |
 | Unknown alignment or sign | Rejected; existing offset facts are reused rather than assuming validity |
 | Atomic, `pre_quant`, `pre_relu`, or dtype conversion | Rejected |
 | A5, Vec/Mat sources, dynamic or partially valid tiles | Rejected |
+
+The row/column limits describe ISA fields; they do not imply that every
+combination fits in L0C. The source allocation check uses
+`PhysicalAllocationBytes` and the backend handler's
+`GetCapacityBytes(MemorySpace::Acc)`, rather than hardcoding a byte limit.
+For example, a fully valid `64 x 1024` FP32 source requires 256 KiB and is
+rejected even though both extents fit the ISA fields. This limit applies to
+the source Acc tile, not the GM destination tensor.
+
+Automatic M/N tiling is not supported for this NZ writeback path:
+`AutoTileMatmulL0`'s direct-store matcher requires a three-argument 2-D store,
+while NZ blocking supplies the fourth, rank-5 partition argument. Explicitly
+compute and store smaller column chunks, each spanning the destination's
+complete row axis. A `[64, 1024]` GM destination can therefore be filled with
+`64 x 256` Acc chunks of 64 KiB each; its total GM size need not fit L0C.
 
 The full-row restriction protects against a limitation of A2/A3 pto-isa's
 `TStoreAccNz2nz`. It computes the destination column-block pitch from the

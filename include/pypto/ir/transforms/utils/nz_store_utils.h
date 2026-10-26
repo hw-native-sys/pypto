@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
@@ -24,6 +25,7 @@
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -34,7 +36,7 @@ namespace pypto::ir::nz_store_utils {
 /// can split a previously full-row store into unsupported partial-row stores.
 /// Memory-space inference cannot turn an unknown source into evidence of Acc;
 /// supported matmul producers already stamp their result with MemorySpace::Acc.
-inline std::vector<ExprPtr> CheckSourceAndAttrs(const CallPtr& op, bool backend_supports_nz_store) {
+inline std::vector<ExprPtr> CheckSourceAndAttrs(const CallPtr& op, const backend::BackendHandler* handler) {
   INTERNAL_CHECK_SPAN(op->args_.size() == 3 || op->args_.size() == 4, op->span_)
       << "Internal error: tile.store expects (tile, offsets, tensor[, shapes])";
   auto tile = As<TileType>(op->args_[0]->GetType());
@@ -46,7 +48,7 @@ inline std::vector<ExprPtr> CheckSourceAndAttrs(const CallPtr& op, bool backend_
              op->span_)
       << "NZ tile.store supports only an FP32 Acc tile into an FP32 NZ tensor. "
       << "Use an FP32 matmul accumulator, or store to pl.ND.";
-  CHECK_SPAN(backend_supports_nz_store, op->span_)
+  CHECK_SPAN(handler && handler->SupportsAccToNzGmStore(), op->span_)
       << "NZ tile.store is supported only on A2/A3. Store to pl.ND on this backend.";
 
   const TileView view = tile_view_semantics::GetEffectiveTileView(*tile);
@@ -69,6 +71,23 @@ inline std::vector<ExprPtr> CheckSourceAndAttrs(const CallPtr& op, bool backend_
                op->span_)
         << "NZ tile.store requires a static, fully valid Acc tile with rows and columns divisible by 16, "
         << "rows <= 65535 and columns <= 4095. Partial or dynamic Acc tiles are not supported.";
+  }
+  // NZ blocking adds rank-5 offsets and an explicit partition operand before
+  // AutoTileMatmulL0, whose direct-store matcher only accepts the 3-argument,
+  // 2-D form. Require this one source allocation to fit instead of accepting
+  // an oversized accumulator that the later tiler cannot split. The GM tensor
+  // may be larger: explicit column tiling can write it with several Acc tiles.
+  if (const auto bytes = utils::StaticPhysicalAllocationBytes(tile, MemorySpace::Acc, handler);
+      bytes.has_value()) {
+    const uint64_t capacity = handler->GetCapacityBytes(MemorySpace::Acc);
+    CHECK_SPAN(*bytes <= capacity, op->span_)
+        << "NZ tile.store requires one Acc tile to fit L0C: the source needs " << *bytes
+        << " bytes, but this backend's L0C capacity is " << capacity
+        << " bytes. Automatic M/N tiling of NZ stores is not supported; tile the output columns "
+        << "explicitly, or store to pl.ND.";
+  } else {
+    INTERNAL_CHECK_SPAN(false, op->span_)
+        << "Internal error: the physical footprint of a validated static NZ store source must be known";
   }
   CHECK_SPAN(op->GetKwarg<int>("atomic", 0) == static_cast<int>(AtomicType::kNone) &&
                  !GetOptionalDoubleKwarg(op->kwargs_, "pre_quant").has_value() &&
