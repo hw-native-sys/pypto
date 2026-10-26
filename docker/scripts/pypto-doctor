@@ -118,9 +118,9 @@ if [ -r "$driver_file" ]; then
     case "$cann:$driver:${PYPTO_CANN_TAG:-}" in
         9.0.0:26.0.rc1:*|9.1.T500:25.6.rc1.b108:*)
             ok "host driver $driver matches supported CANN $cann" ;;
-        9.2.0:26.0.rc1:*|9.2.0:25.6.rc2.b023:9.2.0-950-*)
+        9.2.0:26.0.rc1:9.2.0-a[23]-*|9.2.0:25.6.rc2.b023:9.2.0-950-*)
             # Deployment-specific pair; CI still requires ACL, decode and
-            # all-reduce on the real host before publishing a 9.2 image.
+            # a two-card case on the real host before publishing a 9.2 image.
             ok "host driver $driver matches CANN $cann image validation configuration" ;;
         9.0.0:*) bad "host driver ${driver:-unknown} is unsupported for CANN $cann; expected 26.0.rc1" ;;
         9.1.T500:*) bad "host driver ${driver:-unknown} is unsupported for CANN $cann; expected 25.6.rc1.b108" ;;

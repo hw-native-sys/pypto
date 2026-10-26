@@ -652,6 +652,12 @@ exceed the execution cap; the initial limits allow 3600 seconds total and 1800
 seconds of device execution for each case. Cleanup steps remove
 only this run's containers/tasks, without pruning shared caches.
 
+Before uploading and again immediately before promotion, publication verifies that
+the recipe commit is still the current upstream `main`. A stale rerun or an
+unavailable upstream check fails without changing current/previous. This check
+uses the recipe commit, so an explicitly pinned PyPTO source remains supported.
+To retry, build the latest `main`; rollback is a separate, explicit operation.
+
 After validation, the exact tested image ID is pushed to a temporary
 `arm-a2a3-cann9.2-dist-<run_id>-<attempt>` tag. Its manifest and config digest must
 match the tested local image before promotion. The current

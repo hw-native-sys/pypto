@@ -47,6 +47,7 @@ def state(ci: ModuleType, tmp_path: Path) -> dict:
         "image_id": "sha256:" + "a" * 64,
         "local": "pypto-ci:arm-a2a3-123-1",
         "pypto": "b" * 40,
+        "recipe": "f" * 40,
         "pypto_lib": "c" * 40,
         "registry": "registry.example",
         "unique": "registry.example/pypto:run-123-1",
@@ -348,6 +349,14 @@ def publication(
 
     def command(argv: list[str], *args: object, **kwargs: object) -> str:
         calls.append(argv)
+        if argv[0] == "git":
+            assert argv[1:] == [
+                "ls-remote",
+                "--exit-code",
+                "https://github.com/hw-native-sys/pypto.git",
+                "refs/heads/main",
+            ]
+            return f"{state['recipe']}\trefs/heads/main"
         if argv[1] == "push":
             assert kwargs.get("direct") is True
             tags[state["unique"].rsplit(":", 1)[1]] = candidate
@@ -357,6 +366,52 @@ def publication(
     return SimpleNamespace(
         tags=tags, calls=calls, mutations=mutations, registry=registry, candidate=candidate
     )
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+@pytest.mark.parametrize("failure", ["stale", "unreachable", "missing-branch"])
+def test_publication_preserves_retained_tags_when_main_cannot_be_verified(
+    ci: ModuleType,
+    state: dict,
+    tmp_path: Path,
+    publication: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: int,
+    failure: str,
+) -> None:
+    retained = {
+        state["rolling"].rsplit(":", 1)[1]: SimpleNamespace(digest="old", content=b"old"),
+        state["previous"].rsplit(":", 1)[1]: SimpleNamespace(digest="older", content=b"older"),
+    }
+    publication.tags.update(retained)
+    command = ci.run
+    checks = 0
+    logins = []
+    monkeypatch.setattr(ci, "login", logins.append)
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> str:
+        nonlocal checks
+        if argv[0] == "git":
+            checks += 1
+            if checks == stage:
+                if failure == "unreachable":
+                    raise RuntimeError("git failed: upstream unreachable")
+                return "" if failure == "missing-branch" else f"{'e' * 40}\trefs/heads/main"
+        return command(argv, *args, **kwargs)
+
+    monkeypatch.setattr(ci, "run", run)
+    with pytest.raises((ValueError, RuntimeError), match="upstream"):
+        ci.publish(tmp_path)
+    assert checks == stage
+    assert publication.tags == retained
+    assert not (tmp_path / "published.json").exists()
+    if stage == 1:
+        assert not logins
+        assert not publication.calls
+        assert not publication.mutations
+    else:
+        assert logins == [state["registry"]]
+        assert publication.mutations == [("DELETE", state["unique"].rsplit(":", 1)[1])]
 
 
 @pytest.mark.parametrize("existing", [False, True])

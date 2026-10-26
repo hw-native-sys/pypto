@@ -572,6 +572,11 @@ A5 使用 `models/deepseek_v4_1_flash/decode_swa.py` 验证 SWA、KV cache 和 M
 其中设备执行最多 1800 秒。清理步骤约束孤儿任务，
 只删除本次运行的容器和任务，不清理共享构建缓存。
 
+上传前及切换正式标签前，发布步骤都会确认构建配方提交仍为上游最新 `main`。
+旧运行重跑或无法查询上游时直接失败，不修改最新与前一个标签。
+检查使用配方提交，因此仍支持显式固定 PyPTO 源码版本。
+重试应构建最新 `main`；回滚需要单独显式执行。
+
 验证通过后，先将测试过的准确 image ID 推送到临时标签
 `arm-a2a3-cann9.2-dist-<run_id>-<attempt>`，核对 manifest 和 config digest 与测试镜像一致后才发布。
 先将现有 `arm-a2a3-cann9.2-dist` 移到 `arm-a2a3-cann9.2-dist-previous`，再更新为新镜像。

@@ -1850,6 +1850,9 @@ def test_doctor_warns_when_runtime_hides_driver_version(healthy_doctor: dict[str
     "driver,chip,valid",
     [
         ("26.0.rc1", "a3", True),
+        ("26.0.rc1", "a2", True),
+        ("26.0.rc1", "950", False),
+        ("26.0.rc1", "unknown", False),
         ("25.6.rc1.b108", "a3", False),
         ("25.6.rc2.b023", "950", True),
         ("25.6.rc2.b023", "a3", False),

@@ -389,6 +389,17 @@ def login(registry: str) -> None:
     )
 
 
+def require_current_recipe(recipe: str) -> None:
+    """Reject stale recipes and fail closed when upstream main cannot be verified."""
+    if not SHA.fullmatch(recipe):
+        raise ValueError(f"Invalid image recipe revision: {recipe!r}")
+    upstream = run(
+        ["git", "ls-remote", "--exit-code", "https://github.com/hw-native-sys/pypto.git", "refs/heads/main"]
+    ).split()
+    if upstream != [recipe, "refs/heads/main"]:
+        raise ValueError(f"Image recipe {recipe} is not the current upstream main; build the latest main")
+
+
 def publish(directory: Path) -> None:
     # Even direct script invocation cannot publish a build lacking both tests.
     state = json.loads((directory / "state.json").read_text())
@@ -400,6 +411,7 @@ def publish(directory: Path) -> None:
         or os.environ.get("GITHUB_REPOSITORY") != "hw-native-sys/pypto"
     ):
         raise ValueError("Publish is restricted to the upstream main branch")
+    require_current_recipe(state.get("recipe", ""))
     login(state["registry"])
     repository = state["rolling"].removeprefix(state["registry"] + "/").rsplit(":", 1)[0]
     registry = Registry(state["registry"], repository, os.environ["SWR_USERNAME"], os.environ["SWR_PASSWORD"])
@@ -422,6 +434,8 @@ def publish(directory: Path) -> None:
         local_digests = json.loads(run(["docker", "image", "inspect", state["unique"]]))[0]["RepoDigests"]
         if f"{state['registry']}/{repository}@{candidate.digest}" not in local_digests:
             raise ValueError("Published digest does not match the tested local image")
+        # Main may have advanced while the image was uploading.
+        require_current_recipe(state["recipe"])
         # Rerunning promotion for the same digest must not overwrite rollback.
         if current is None or current.digest != candidate.digest:
             if current is not None:
