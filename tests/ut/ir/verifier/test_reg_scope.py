@@ -9,8 +9,9 @@
 
 """Region validation must cover manually constructed IR as well as DSL."""
 
+import pypto.language as pl
 import pytest
-from pypto import DataType, backend, codegen, ir, passes
+from pypto import DataType, Error, backend, codegen, ir, passes
 
 SPAN = ir.Span("reg_test.py", 3, 1, 3, 10)
 
@@ -99,6 +100,73 @@ def test_explicit_incore_register_region_survives_outlining(kind, graph_ancestor
     kernels = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
     assert len(kernels) == 1
     assert isinstance(kernels[0].body, ir.RegScopeStmt)
+
+
+@pytest.mark.parametrize("tuple_depth", [1, 2])
+@pytest.mark.parametrize("inside_region", [False, True])
+def test_terminal_scalar_tuple_output_respects_region_ownership(tuple_depth, inside_region):
+    value = integer(64)
+    stmts = []
+    for depth in range(tuple_depth):
+        packed = ir.Var(f"packed_{depth}", ir.TupleType([value.type]), SPAN)
+        stmts.append(ir.AssignStmt(packed, ir.MakeTuple([value], SPAN), SPAN))
+        value = packed
+    local = stmts[0] if len(stmts) == 1 else sequence(*stmts)
+    scope_body = region(local) if inside_region else local
+    outer_stmts = [scope_body] if inside_region else stmts
+    outer_stmts.append(ir.EvalStmt(integer(0), SPAN))
+    function = ir.Function(
+        "kernel",
+        [],
+        [],
+        ir.InCoreScopeStmt(body=sequence(*outer_stmts), span=SPAN),
+        SPAN,
+        type=ir.FunctionType.Orchestration,
+    )
+    program = ir.Program([function], "RegTest", SPAN)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.RegScopeValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, program) == []
+    if not inside_region:
+        # Keep main's existing rejection of scalar tuple kernel returns outside
+        # RegScope; this fix must only filter region-owned fallback values.
+        with pytest.raises(Error, match="NoScalarKernelReturn"):
+            passes.outline_incore_scopes()(program)
+        return
+    outlined = passes.outline_incore_scopes()(program)
+    assert passes.PropertyVerifierRegistry.verify(properties, outlined) == []
+    kernel = next(f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore)
+    assert kernel.return_types == []
+
+
+def test_terminal_register_region_scalar_tuple_unpacking():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                with pl.reg_scope():
+                    _lo, _hi = (0, 64)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def main_incore_0(self):
+            with pl.reg_scope():
+                _lo, _hi = (0, 64)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self):
+            self.main_incore_0()
+
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.RegScopeValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, Before) == []
+    after = passes.outline_incore_scopes()(Before)
+    # Tuple unpacking creates a scalar-containing _tuple_tmp. Outlining must
+    # leave it local instead of introducing a return outside RegScope.
+    assert passes.PropertyVerifierRegistry.verify(properties, after) == []
+    ir.assert_structural_equal(after, Expected)
 
 
 def test_terminal_register_region_preserves_tile_output():

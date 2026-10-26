@@ -820,17 +820,18 @@ class UpwardExposedUseCollector : public IRVisitor {
   std::vector<const Var*> journal_;  ///< insertion order, for branch rollback
 };
 
-/// Reg values are confined to their RegScope and can never be outlined as
-/// function outputs. Recognize tuples containing a register recursively so the
-/// fallback cannot export an indirect register value either.
-bool ContainsRegValue(const TypePtr& type, std::unordered_map<const Type*, bool>& cache) {
+/// Registers cannot cross function boundaries; Scalars are additionally
+/// confined when defined inside RegScope. Each mode uses its own cache so
+/// shared tuple types are scanned once per mode, including negative results.
+bool ContainsRegionValue(const TypePtr& type, bool include_scalar,
+                         std::unordered_map<const Type*, bool>& cache) {
   if (auto found = cache.find(type.get()); found != cache.end()) {
     return found->second;
   }
-  bool result = As<RegType>(type) != nullptr;
+  bool result = As<RegType>(type) || (include_scalar && As<ScalarType>(type));
   if (auto tuple = As<TupleType>(type); tuple && !result) {
     for (const auto& element : tuple->types_) {
-      if (ContainsRegValue(element, cache)) {
+      if (ContainsRegionValue(element, include_scalar, cache)) {
         result = true;
         break;
       }
@@ -841,6 +842,23 @@ bool ContainsRegValue(const TypePtr& type, std::unordered_map<const Type*, bool>
   cache.emplace(type.get(), result);
   return result;
 }
+
+/// Track definitions rather than uses: a tuple captured from outside RegScope
+/// must retain the ordinary fallback behavior. Reuse the definition collector
+/// to include loop-carried and branch-result bindings as well as assignments.
+class RegScopeDefCollector : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> definitions;
+
+ protected:
+  void VisitStmt_(const RegScopeStmtPtr& op) override {
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(op->body_);
+    definitions.insert(collector.var_defs.begin(), collector.var_defs.end());
+    // The collector already walked this region, including nested statements.
+    // Do not recurse again: sibling regions then take a total linear walk.
+  }
+};
 
 }  // namespace
 
@@ -918,14 +936,23 @@ std::unordered_set<const Var*> ScopeOutliner::ComputeFallbackUsedAfter(const Sco
   if (!inside_nested_scope_body_) {
     var_collectors::VarDefUseCollector def_collector;
     def_collector.VisitStmt(scope->body_);
+    RegScopeDefCollector region_defs;
+    region_defs.VisitStmt(scope->body_);
     // Scalars, tuple unpacking temporaries, and Reg values are not runtime
     // outputs. Tuple projections already expose their tensor definitions;
     // exporting the tuple too would create a nested terminal SPMD output.
     // Actual live-out uses are handled by the explicit tail-use analysis.
     std::unordered_map<const Type*, bool> reg_types;
+    std::unordered_map<const Type*, bool> region_types;
     for (const Var* var : def_collector.var_defs) {
       if (As<ScalarType>(var->GetType()) || As<TupleType>(var->GetType()) ||
-          ContainsRegValue(var->GetType(), reg_types)) continue;
+          ContainsRegionValue(var->GetType(), false, reg_types)) continue;
+      // Scalar-containing tuples have the same ownership as direct Scalars
+      // inside RegScope. Exporting an unused tuple would introduce an illegal
+      // use in the generated return outside that region.
+      if (region_defs.definitions.count(var) && ContainsRegionValue(var->GetType(), true, region_types)) {
+        continue;
+      }
       used_after.insert(var);
     }
   }
