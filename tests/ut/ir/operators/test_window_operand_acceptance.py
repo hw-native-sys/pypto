@@ -96,6 +96,7 @@ NO_GM_OPERAND = _ops(
 
 #: Operators that reject a window on purpose. Each entry names the reason.
 WINDOW_REJECT_BY_DESIGN = {
+    ir.get_op("tensor.subview").name: "borrowed affine views currently accept ordinary Tensor only",
     # A window's storage is a comm-window slice; reinterpreting its dtype has no lowering
     # contract yet, and the deducer says so in its own message.
     ir.get_op(
@@ -320,6 +321,7 @@ PROBES.update(
         ir.get_op("tensor.slice").name: lambda: t.slice(W(), [8, 32], [0, 0]),
         ir.get_op("tensor.assemble").name: lambda: t.assemble(W(), T(shape=(8, 32)), [0, 0]),
         ir.get_op("tensor.view").name: lambda: t.view(W(), [16, 32]),
+        ir.get_op("tensor.subview").name: lambda: t.subview(W(), [8, 32], [0, 0]),
         ir.get_op("tensor.read").name: lambda: t.read(
             W(), [ir.ConstInt(0, I32, SPAN), ir.ConstInt(0, I32, SPAN)]
         ),
@@ -373,7 +375,7 @@ NO_PYTHON_ENTRY = _ops(
     "tensor.aic_gather",
 )
 
-_REJECT_MESSAGE = re.compile(r"DistributedTensorType")
+_REJECT_MESSAGE = re.compile(r"DistributedTensorType|tensor\.subview requires an ordinary Tensor source")
 
 
 def _rejects_window(name: str) -> tuple[bool, str]:

@@ -31,6 +31,15 @@ namespace backend {
 
 class Backend;
 
+// Validated native GM-subview load profile. Zero limits mean unsupported.
+// Limits are in elements except the explicitly byte-valued row alignment.
+struct SubviewLoadLimits {
+  int64_t max_rows = 0;
+  int64_t max_index = 0;
+  int64_t max_gap_bytes = 0;
+  int64_t row_alignment_bytes = 0;
+};
+
 /**
  * @brief The (src, dst) dtype pairs an architecture converts in one `pto.tcvt`.
  *
@@ -152,6 +161,8 @@ class BackendHandler {
   /// Logical VMI register capability. This is an IR/emitter capability, not
   /// evidence that a particular installed assembler supports its lowering.
   [[nodiscard]] virtual bool SupportsRegType(const ir::RegType& /*type*/) const { return false; }
+
+  [[nodiscard]] virtual SubviewLoadLimits GetSubviewLoadLimits() const { return {}; }
 
   /**
    * @brief Borrow this backend's immutable synchronization resource catalog.

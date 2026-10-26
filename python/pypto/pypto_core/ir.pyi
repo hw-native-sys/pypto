@@ -451,8 +451,15 @@ class CompactMode(enum.Enum):
     normal = ...
     """Compact valid-region layout."""
 
+class TensorAddressingKind(enum.Enum):
+    Canonical = ...
+    AffineSubview = ...
+
 class TensorView:
     """Tensor view representation with stride, layout, valid shape, and pad mode."""
+
+    addressing_kind: TensorAddressingKind
+    """Canonical storage or borrowed affine GM subview."""
 
     stride: Sequence[Expr]
     """Stride for each dimension."""
@@ -477,6 +484,7 @@ class TensorView:
         layout: TensorLayout | None = ...,
         valid_shape: Sequence[Expr | int | Scalar] | None = ...,
         pad: PadValue = ...,
+        addressing_kind: TensorAddressingKind = ...,
     ) -> None:
         """Create a tensor view with stride, layout, optional valid shape, and optional pad.
 
@@ -490,6 +498,7 @@ class TensorView:
             layout: Tensor layout type (ND, DN, or NZ)
             valid_shape: Valid shape for each dimension (optional, defaults to empty)
             pad: Pad mode for out-of-valid-shape accesses (defaults to PadValue.null)
+            addressing_kind: Canonical storage or compiler-verified borrowed affine addressing
         """
 
 class _TensorViewSemanticsModule:

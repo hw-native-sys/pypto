@@ -48,6 +48,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -748,6 +749,9 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   VerifyVFInfrastructureCodegenPreconditions(program);
+  for (const auto& [gvar, function] : program->functions_) {
+    ir::VerifyTensorSubviews(function, GetBackendHandler());
+  }
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
   current_span_ = nullptr;
