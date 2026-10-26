@@ -302,6 +302,8 @@ class PassContext {
    *        TensorMapAndRingBuffer). Passes that must legalize IR for a specific
    *        runtime switch on this rather than inspecting codegen options.
    * @param enable_buffer_ir Enable Buffer IR for supported whole kernels (default: true).
+   * @param enable_fp4_nz_row_plus_one Opt in to supported A5 padded NZ transport (default: false).
+   * @param enable_mx_l0_ping_pong Opt in to supported A5 MX L0 ping/pong (default: false).
    *        Unsupported kernels retain Tile IR; selected-kernel failures propagate.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
@@ -310,7 +312,8 @@ class PassContext {
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
-                       bool enable_buffer_ir = true);
+                       bool enable_buffer_ir = true, bool enable_fp4_nz_row_plus_one = false,
+                       bool enable_mx_l0_ping_pong = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -383,6 +386,12 @@ class PassContext {
   /// Whether supported whole kernels use Buffer IR.
   [[nodiscard]] bool GetEnableBufferIR() const;
 
+  /// Opt in to the proven full-tile A5 FP4-to-FP8 padded NZ transport.
+  [[nodiscard]] bool GetEnableFp4NZRowPlusOne() const;
+
+  /// Opt in to supported A5 MX K128 L0 ping/pong lowering.
+  [[nodiscard]] bool GetEnableMxL0PingPong() const;
+
   /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
@@ -415,6 +424,8 @@ class PassContext {
   bool enable_pypto_l0c_double_buffer_;
   RuntimeKind runtime_;
   bool enable_buffer_ir_;
+  bool enable_fp4_nz_row_plus_one_;
+  bool enable_mx_l0_ping_pong_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;
