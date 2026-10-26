@@ -226,8 +226,22 @@ TypePtr IRMutator::RemapTypeViaVisitor(const TypePtr& type) {
         << "MemRef to a non-MemRef expression — not supported)";
     new_memref_opt = as_memref;
   }
-  return CloneTypeWithMemRefAndRemapExprs(
+  auto new_type = CloneTypeWithMemRefAndRemapExprs(
       type, new_memref_opt, [this](const ExprPtr& e) { return ExprFunctor<ExprPtr>::VisitExpr(e); });
+  // A distributed view carries a pointer-identity link to its domain's window
+  // slot. Follow the same visitor used for slots, including when only that
+  // link changes. The shared shape/MemRef helper preserves this field verbatim.
+  if (auto distributed = As<DistributedTensorType>(new_type);
+      distributed && distributed->window_buffer_.has_value()) {
+    auto window = As<WindowBuffer>(ExprFunctor<ExprPtr>::VisitExpr(*distributed->window_buffer_));
+    INTERNAL_CHECK_SPAN(window, (*distributed->window_buffer_)->span_)
+        << "DistributedTensorType window buffer mutated to non-WindowBuffer";
+    if (window != *distributed->window_buffer_) {
+      return std::make_shared<DistributedTensorType>(distributed->shape_, distributed->dtype_,
+                                                     distributed->memref_, distributed->tensor_view_, window);
+    }
+  }
+  return new_type;
 }
 
 ExprPtr IRMutator::ResolveVarRemapHit(const Expr* key, ExprPtr remapped) {

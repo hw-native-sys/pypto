@@ -31,6 +31,18 @@ from .storage_test_utils import without_call_memrefs
 
 _OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
 
+
+def _swap_if_branches(program: ir.Program) -> ir.Program:
+    """Exercise the false polarity with the same live and dead branch bodies."""
+
+    class SwapBranches(ir.IRMutator):
+        def visit_if_stmt(self, op: ir.IfStmt) -> ir.Stmt:
+            assert op.else_body is not None
+            return ir.IfStmt(op.condition, op.else_body, op.then_body, op.return_vars, op.span)
+
+    return SwapBranches().visit_program(program)
+
+
 # ============================================================================
 # Pass metadata
 # ============================================================================
@@ -1916,6 +1928,352 @@ class TestScalarDCE:
 # ============================================================================
 # Fold A: collapse IfStmt when the analyzer can prove the condition.
 # ============================================================================
+
+
+class TestUnreachableBranchArithmetic:
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_inlined_zero_width_skips_division(self, ssa):
+        """Issue #3114: inlining exposes a zero divisor in an unreachable branch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def lookup(self, query: pl.Scalar[pl.INDEX], width: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                owner = pl.cast(pl.const(-1, pl.INT64), pl.INDEX)
+                if width > 0:
+                    owner = query // width
+                else:
+                    owner = pl.cast(pl.const(0, pl.INT64), pl.INDEX)
+                return owner
+
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                width = pl.cast(pl.const(0, pl.INT64), pl.INDEX)
+                owner = self.lookup(query, width)
+                return owner
+
+        if ssa:
+
+            @pl.program
+            class Expected:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                    return pl.const(0, pl.INDEX)
+
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                    # Pre-SSA multi-assignment bindings are deliberately not propagated.
+                    value: pl.Scalar[pl.INDEX] = -1
+                    value = 0
+                    owner: pl.Scalar[pl.INDEX] = value
+                    return owner
+
+        before = passes.inline_functions()(Before)
+        if ssa:
+            before = passes.convert_to_ssa()(before)
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_true_condition_skips_else_division(self, ssa):
+        """The unreachable else-body must be skipped just like an unreachable then-body."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    owner: pl.Scalar[pl.INDEX] = query
+                else:
+                    owner = query // pl.const(0, pl.INDEX)
+                return owner
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                owner: pl.Scalar[pl.INDEX] = query
+                return owner
+
+        before = passes.convert_to_ssa()(Before) if ssa else Before
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_false_condition_without_else_skips_modulo(self):
+        """An unreachable expression must not be folded even when it has no users."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if False:
+                    _unused: pl.Scalar[pl.INDEX] = query % pl.const(0, pl.INDEX)
+                return query
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                return query
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_loop_bounds_prove_division_unreachable(self):
+        """Reachability includes analyzer proofs, not just literal boolean conditions."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    if i < 0:
+                        bad: pl.Scalar[pl.INDEX] = i // pl.const(0, pl.INDEX)
+                        pl.tensor.write(out, [i], bad)
+                    pl.tensor.write(out, [i], i)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    pl.tensor.write(out, [i], i)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_outer_constraint_skips_nested_division(self):
+        """An unknown outer condition can still prove its inner branch unreachable."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if query > 0:
+                    if query <= 0:
+                        bad: pl.Scalar[pl.INDEX] = query // pl.const(0, pl.INDEX)
+                        pl.tensor.write(out, [0], bad)
+                    else:
+                        pl.tensor.write(out, [0], query)
+                else:
+                    pl.tensor.write(out, [0], pl.const(0, pl.INDEX))
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if 0 < query:
+                    pl.tensor.write(out, [0], query)
+                else:
+                    pl.tensor.write(out, [0], pl.const(0, pl.INDEX))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_reachable_zero_divisor_still_raises(self, take_then):
+        """Skipping a dead branch must not suppress errors in the surviving branch."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if take_then:
+                    owner: pl.Scalar[pl.INDEX] = query // pl.const(0, pl.INDEX)
+                else:
+                    owner = query % pl.const(0, pl.INDEX)
+                return owner
+
+        message = "Floor division by zero" if take_then else "Floor modulo by zero"
+        with pytest.raises(ValueError, match=message):
+            passes.simplify()(Before)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_effectful_yield_preserves_unvisited_branch(self, take_then):
+        """A retained IfStmt must keep both bodies even when only one is visited."""
+        if take_then:
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX], t: pl.Tensor[[1], pl.INDEX]):
+                    if True:
+                        value = pl.yield_(pl.tensor.read(t, [0]))
+                    else:
+                        value = pl.yield_(query // pl.const(0, pl.INDEX))
+                    return value
+
+        else:
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX], t: pl.Tensor[[1], pl.INDEX]):
+                    if False:
+                        value = pl.yield_(query // pl.const(0, pl.INDEX))
+                    else:
+                        value = pl.yield_(pl.tensor.read(t, [0]))
+                    return value
+
+        # Lifting the call would move its evaluation. Keep the IfStmt and leave
+        # the unreachable zero division untouched, rather than folding it.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_remaps_rebuilt_loop_carry(self, take_then):
+        """Skipped arithmetic and dependent types must use the rebuilt loop binder."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, t: pl.Tensor[[2], pl.INDEX]):
+                for i, (carry,) in pl.range(2, init_values=(pl.const(1, pl.INDEX) + pl.const(1, pl.INDEX),)):
+                    if take_then:
+                        value = pl.yield_(pl.tensor.read(t, [i]))
+                    else:
+                        dead: pl.Tensor[[carry], pl.INDEX] = pl.tensor.create([carry], dtype=pl.INDEX)
+                        pl.tensor.read(dead, [0])
+                        value = pl.yield_(carry // pl.const(0, pl.INDEX))
+                    result = pl.yield_(value)
+                return result
+
+        # Swap the bodies for false so the selected yield always contains a call.
+        before = Before if take_then else _swap_if_branches(Before)
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+        func = next(iter(after.functions.values()))
+        loop = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.ForStmt))
+        branch = next(stmt for stmt in ir.flatten_to_stmts(loop.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        allocation = next(stmt for stmt in statements if isinstance(stmt, ir.AssignStmt))
+        assert isinstance(allocation.var.type, ir.TensorType)
+        assert allocation.var.type.shape[0].same_as(loop.iter_args[0])
+        yielded = next(stmt for stmt in statements if isinstance(stmt, ir.YieldStmt))
+        assert isinstance(yielded.value[0], ir.FloorDiv)
+        assert yielded.value[0].left.same_as(loop.iter_args[0])
+        assert isinstance(yielded.value[0].right, ir.ConstInt) and yielded.value[0].right.value == 0
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_propagates_retyped_aliases(self, take_then):
+        """An outer identity view changes the types of dead-branch alias chains."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias = view
+                    second = alias
+                    value = pl.yield_(pl.tensor.read(second, [0, 0]))
+                return value
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+                view: pl.Tensor[[8, 4], pl.FP32] = x
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias: pl.Tensor[[8, 4], pl.FP32] = view
+                    second: pl.Tensor[[8, 4], pl.FP32] = alias
+                    value = pl.yield_(pl.tensor.read(second, [0, 0]))
+                return value
+
+        before = Before if take_then else _swap_if_branches(Before)
+        expected = Expected if take_then else _swap_if_branches(Expected)
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.AssignTypeSymmetry,
+            passes.IRProperty.SSAForm,
+            passes.IRProperty.UseAfterDef,
+        ):
+            properties.insert(prop)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        ir.assert_structural_equal(pl.parse_program(ir.python_print(after)), after)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_remaps_distributed_window(self, take_then):
+        """A dead view must name the domain's rebuilt slot in its Var and Call types."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self, x: pl.Tensor[[1], pl.INDEX]):
+                buffer = pld.alloc_window_buffer(pl.const(128, pl.INDEX) + pl.const(128, pl.INDEX))
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value
+
+        before = Before if take_then else _swap_if_branches(Before)
+        # Materialization adds WindowBuffer identities shared by domain slots and
+        # view types. Simplify folds the size and must preserve that sharing even
+        # in a branch whose arithmetic is deliberately not visited.
+        instruments: list[passes.PassInstrument] = [
+            passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with passes.PassContext(instruments):
+            materialized = passes.materialize_comm_domain_scopes()(before)
+            after = passes.simplify()(materialized)
+        host = next(func for func in after.functions.values() if func.name == "host")
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        branch = next(stmt for stmt in ir.flatten_to_stmts(scope.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        view = next(stmt for stmt in ir.flatten_to_stmts(dead_body) if isinstance(stmt, ir.AssignStmt))
+        assert len(scope.slots) == 1
+        assert isinstance(scope.slots[0].size, ir.ConstInt) and scope.slots[0].size.value == 256
+        for view_type in (view.var.type, view.value.type):
+            assert isinstance(view_type, ir.DistributedTensorType)
+            assert view_type.window_buffer is scope.slots[0]
+
+    def test_unknown_condition_still_checks_else(self):
+        """An unproven branch remains potentially reachable and must be simplified."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]) -> pl.Scalar[pl.INDEX]:
+                if cond:
+                    owner: pl.Scalar[pl.INDEX] = query
+                else:
+                    owner = query // pl.const(0, pl.INDEX)
+                return owner
+
+        with pytest.raises(ValueError, match="Floor division by zero"):
+            passes.simplify()(Before)
 
 
 class TestConstantIfCollapse:
