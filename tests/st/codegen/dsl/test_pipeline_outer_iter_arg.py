@@ -11,8 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import backend, passes
-from pypto.runtime import ExecutionMode, RunConfig
+from pypto import backend, ir, passes
 
 
 @pl.jit.inline(auto_scope=False)
@@ -104,17 +103,15 @@ def make_entry_no_pipeline(offset_for_step):
 @pytest.mark.parametrize("factory", [make_entry, make_entry_no_pipeline], ids=["pipeline", "range"])
 @pytest.mark.parametrize("offset", [conditional_offset, direct_offset], ids=["conditional", "direct"])
 def test_fifo_offset_compiles(factory, offset, tmp_path):
-    # Repeated stores only exercise compilation; this kernel is never executed.
-    compiled = factory(offset).compile(
-        config=RunConfig(
-            backend_type=backend.BackendType.Ascend910,
-            execution_mode=ExecutionMode.ONBOARD,
-            memory_planner=passes.MemoryPlanner.PYPTO,
-            dump_passes=True,
-            codegen_only=True,
-            save_kernels=True,
-            save_kernels_dir=str(tmp_path / "compiled"),
-        )
+    # Exercise every lowering pass and PTO emission without depending on the
+    # runner's PTOAS installation. Repeated stores are never executed.
+    compiled = ir.compile(
+        factory(offset).specialize(),
+        backend_type=backend.BackendType.Ascend910,
+        memory_planner=passes.MemoryPlanner.PYPTO,
+        dump_passes=True,
+        skip_ptoas=True,
+        output_dir=str(tmp_path / "compiled"),
     )
     assert compiled is not None
     assert list(tmp_path.rglob("*.pto"))
