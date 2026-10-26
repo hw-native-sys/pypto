@@ -119,6 +119,47 @@ loop iterations. Returning another tensor, or returning nothing, does not
 discard the GM write. `InOut` describes argument effects; it does not request an
 unconditional whole-tensor store at function exit.
 
+### GM Slice Descriptors for Explicit Loads
+
+An InCore `tensor.slice` remains a GM descriptor when it belongs to a chain of
+slices, `tensor.view` calls, and aliases rooted at a GM parameter and consumed
+by explicit `pl.load` calls. The slice advances the backing pointer and retains
+the source strides; it does not allocate a tile or copy the whole slice.
+
+```python
+@pl.jit.incore
+def load_pair(
+    x: pl.Tensor[[16, 512], pl.BF16],
+    out: pl.Out[pl.Tensor[[2, 512], pl.BF16]],
+):
+    span = pl.tensor.slice(x, [4, 512], [3, 0])
+    pitched = pl.tensor.view(span, [2, 1024])
+    pair = pl.load(pitched, [0, 0], [2, 512])
+    pl.store(pair, [0, 0], out)
+```
+
+This loads original rows 3 and 5. The view's row stride is 1024 elements, while
+the explicit load requests only 512 elements per row. The intermediate
+four-row span is metadata, so it does not require a four-row tile allocation.
+
+This path supports full-row slices of packed 2D ND tensors with byte-addressable
+dtypes, without `clamp` or an explicit `pad_value`. The column offset must be
+zero and the slice width must equal the source width. Row offsets and view shapes may
+use device-computed scalars, including inside branches and loops, provided
+each descriptor stays within its defining control-flow scope. The existing
+bounds contract still applies: callers must ensure dynamic windows are in
+bounds, for example with a device-side guard.
+
+A column slice would need to retain its parent's row pitch. For example,
+slicing `[4, 256]` from `[16, 512]` is not packed in GM. Such slices keep the
+existing materialization path and cannot feed a GM `tensor.view` in this scope.
+
+The chain may also be queried with `tensor.dim`, but may not feed tensor
+computation, writes, returns, branch yields, or loop-carried descriptors.
+Those cases keep the existing materialization behavior and restrictions;
+in particular, a subsequent GM `tensor.view` rejects a source lowered to a
+Tile. Ordinary slices used by tensor computation continue to materialize.
+
 ### GM Store Coherence Restriction
 
 An InCore function may not combine a bulk store (`tensor.assemble`, lowered to

@@ -50,6 +50,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -257,6 +258,147 @@ std::pair<int64_t, size_t> ResolveBoxedAxis(const CallPtr& call,
 bool IsPassthroughTensorOp(const CallPtr& call) {
   return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
 }
+
+/// Preserve only descriptor chains rooted at a GM parameter and consumed by
+/// explicit loads. Any computation, write, return, yield, or loop carry using
+/// a chain disqualifies it; ordinary slice materialization stays unchanged.
+/// The two backward worklists and forward definition walk visit each value
+/// and edge once. Var visits deliberately stop at SSA references, avoiding
+/// repeated traversal of IterArg initializers and symbolic type expressions.
+class GmSliceChainAnalysis : public IRVisitor {
+ public:
+  GmSliceChainAnalysis(const std::vector<VarPtr>& params, const StmtPtr& body) {
+    for (const auto& param : params) {
+      if (AsTensorTypeLike(param->GetType())) roots_[param.get()] = param.get();
+    }
+    VisitStmt(body);
+    std::vector<const Var*> blocked;
+    for (const auto& [var, source] : sources_) {
+      if (uses_[var] != allowed_uses_[var] || unsupported_.count(var)) blocked.push_back(var);
+    }
+    PropagateToSources(blocked, blocked_);
+    PropagateToSources(load_sources_, needed_);
+    for (const auto& assignment : definitions_) {
+      const auto* var = assignment->var_.get();
+      auto root = roots_.find(sources_.at(var));
+      if (!needed_.count(var) || blocked_.count(var) || root == roots_.end()) continue;
+      // Capture the root before insertion can rehash roots_.
+      const auto* root_var = root->second;
+      roots_[var] = root_var;
+      preserved_.insert(var);
+      if (auto call = As<Call>(assignment->value_); IsOp(call, "tensor.slice")) {
+        preserved_calls_.insert(call.get());
+      }
+    }
+  }
+
+  [[nodiscard]] bool Preserves(const Var* var) const { return preserved_.count(var) != 0; }
+  [[nodiscard]] bool Preserves(const CallPtr& call) const { return preserved_calls_.count(call.get()) != 0; }
+
+  /// Carry scope cache policy through the same proven aliases as addressing.
+  void ExtendCachePolicies(std::unordered_map<const Var*, int>* policies) const {
+    for (const auto* var : preserved_) {
+      auto found = policies->find(roots_.at(var));
+      if (found != policies->end()) {
+        const int policy = found->second;
+        policies->emplace(var, policy);
+      }
+    }
+  }
+
+ protected:
+  void VisitExpr_(const VarPtr& op) override { ++uses_[op.get()]; }
+  void VisitExpr_(const IterArgPtr& op) override { ++uses_[op.get()]; }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    auto source = AsVarLike(op->value_);
+    const auto call = As<Call>(op->value_);
+    const bool view = IsOp(call, "tensor.slice") || IsOp(call, "tensor.view");
+    if (view && !call->args_.empty()) source = AsVarLike(call->args_[0]);
+    if (source && AsTensorTypeLike(op->var_->GetType())) {
+      sources_[op->var_.get()] = source.get();
+      definitions_.push_back(op);
+      ++allowed_uses_[source.get()];
+      if (IsOp(call, "tensor.slice") && !SupportsSlice(call)) unsupported_.insert(op->var_.get());
+    }
+    // The LHS is a definition, not a use. Call attrs and every RHS operand are
+    // still visited by the normal visitor, so an extra hidden use disqualifies
+    // the descriptor just like an ordinary computation.
+    VisitExpr(op->value_);
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if ((IsOp(op, "tile.load") || IsOp(op, "tensor.dim")) && !op->args_.empty()) {
+      if (auto source = AsVarLike(op->args_[0])) {
+        ++allowed_uses_[source.get()];
+        if (IsOp(op, "tile.load")) load_sources_.push_back(source.get());
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // Init expressions are uses even though ordinary IterArg references do
+    // not recursively visit them. A descriptor carried by a loop is outside
+    // this lowering's contract; codegen otherwise binds it to its initializer.
+    for (const auto& iter : op->iter_args_) VisitExpr(iter->initValue_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& iter : op->iter_args_) VisitExpr(iter->initValue_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  static bool SupportsSlice(const CallPtr& call) {
+    auto source = AsTensorTypeLike(call->args_[0]->GetType());
+    auto result = AsTensorTypeLike(call->GetType());
+    if (!source || !result || source->shape_.size() != 2 || result->shape_.size() != 2 ||
+        source->dtype_.GetBit() < 8 || call->GetKwarg<bool>("clamp", false) || call->HasKwarg("pad_value")) {
+      return false;
+    }
+    // Functional slice types do not retain the parent's pitch for column
+    // windows. Preserve only full rows of packed ND storage, for which the
+    // inferred result pitch is already correct. Other slices must keep their
+    // existing materialization path, including computed inputs to gather.
+    auto offsets = As<MakeTuple>(call->args_[2]);
+    auto column_offset =
+        offsets && offsets->elements_.size() == 2 ? As<ConstInt>(offsets->elements_[1]) : nullptr;
+    if (!column_offset || column_offset->value_ != 0 ||
+        !tile_view_semantics::ShapeExprListsEquivalent({source->shape_[1]}, {result->shape_[1]})) {
+      return false;
+    }
+    if (!source->tensor_view_) return true;
+    const auto& view = *source->tensor_view_;
+    return view.layout == TensorLayout::ND &&
+           (view.stride.empty() ||
+            tile_view_semantics::ShapeExprListsEquivalent(
+                view.stride, tensor_view_semantics::BuildRowMajorStrides(source->shape_)));
+  }
+
+  void PropagateToSources(const std::vector<const Var*>& seeds, std::unordered_set<const Var*>& marked) {
+    std::vector<const Var*> worklist(seeds);
+    while (!worklist.empty()) {
+      const auto* var = worklist.back();
+      worklist.pop_back();
+      auto source = sources_.find(var);
+      if (source != sources_.end() && marked.insert(var).second) worklist.push_back(source->second);
+    }
+  }
+
+  std::vector<AssignStmtPtr> definitions_;
+  std::unordered_map<const Var*, const Var*> sources_;
+  std::unordered_map<const Var*, const Var*> roots_;
+  std::unordered_map<const Var*, size_t> uses_;
+  std::unordered_map<const Var*, size_t> allowed_uses_;
+  std::vector<const Var*> load_sources_;
+  std::unordered_set<const Var*> unsupported_;
+  std::unordered_set<const Var*> blocked_;
+  std::unordered_set<const Var*> needed_;
+  std::unordered_set<const Var*> preserved_;
+  std::unordered_set<const Call*> preserved_calls_;
+};
 
 /// Declared GM cache policy per source tensor, keyed by the param Var the
 /// declaration resolved to. ``CachePolicy`` stored as ``int``, the type the
@@ -736,7 +878,8 @@ class ConsumerSpaceCollector : public IRVisitor {
 /// whose GM storage or loaded tile values may be modified from load sharing.
 class TensorConversionAnalysis : public IRVisitor {
  public:
-  explicit TensorConversionAnalysis(const OpConversionRegistry& registry) : registry_(registry) {}
+  TensorConversionAnalysis(const OpConversionRegistry& registry, const GmSliceChainAnalysis& gm_slices)
+      : registry_(registry), gm_slices_(gm_slices) {}
 
   void Propagate() {
     // Yield edges can precede the tuple definitions in their branch/body.
@@ -800,7 +943,8 @@ class TensorConversionAnalysis : public IRVisitor {
       if (AsVarLike(op->value_) || As<TupleGetItemExpr>(op->value_)) {
         AddFlow(op->value_, op->var_);
       } else if (auto call = As<Call>(op->value_); call && registry_.Lookup(call->op_->name_)) {
-        if (IsOp(call, "tensor.write") || IsOp(call, "tensor.assemble")) {
+        if (gm_slices_.Preserves(op->var_.get()) || IsOp(call, "tensor.write") ||
+            IsOp(call, "tensor.assemble")) {
           AddFlow(call->args_[0], op->var_);
         } else if (IsOp(call, "tensor.expand_clone")) {
           AddFlow(call->args_[1], op->var_);
@@ -897,6 +1041,7 @@ class TensorConversionAnalysis : public IRVisitor {
   }
 
   const OpConversionRegistry& registry_;
+  const GmSliceChainAnalysis& gm_slices_;
   std::unordered_map<const Var*, ExprPtr> tuple_definitions_;
   std::unordered_map<const Expr*, ExprPtr> resolved_flow_sources_;
   std::vector<std::pair<ExprPtr, VarPtr>> projection_flows_;
@@ -1097,11 +1242,13 @@ class TensorToTileMutator : public TypePropagatingMutator {
  public:
   TensorToTileMutator(const OpConversionRegistry& conv_registry, const OpRegistry& op_registry,
                       const ConsumerSpaceCollector& consumer_collector,
-                      const TensorConversionAnalysis& tile_values, CachePolicyByParam cache_policies)
+                      const TensorConversionAnalysis& tile_values, const GmSliceChainAnalysis& gm_slices,
+                      CachePolicyByParam cache_policies)
       : conv_registry_(conv_registry),
         op_registry_(op_registry),
         consumer_collector_(consumer_collector),
         tile_values_(tile_values),
+        gm_slices_(gm_slices),
         cache_policies_(std::move(cache_policies)) {}
 
   /// A cached load is a compute operand, never an SSA replacement for its GM
@@ -1198,6 +1345,12 @@ class TensorToTileMutator : public TypePropagatingMutator {
             << "TensorOp \"" << call->op_->name_ << "\" has no registered tile conversion. "
             << "Add a conversion in src/ir/transforms/op_conversion_registry.cpp.";
       }
+      return HandlePassThroughAssign(op, new_value);
+    }
+
+    if (IsOp(call, "tensor.slice") && gm_slices_.Preserves(op->var_.get())) {
+      INTERNAL_CHECK_SPAN(AsTensorTypeLike(call->args_[0]->GetType()), call->span_)
+          << "Internal error: preserved GM slice lost its tensor source";
       return HandlePassThroughAssign(op, new_value);
     }
 
@@ -1316,6 +1469,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
     INTERNAL_CHECK_SPAN(assign, op->span_)
         << "Internal error: pass-through assignment must stay an assignment";
     RecordPackedTile(assign->var_, assign->value_);
+    if (auto policy = cache_policies_.find(op->var_.get()); policy != cache_policies_.end()) {
+      const int value = policy->second;
+      cache_policies_[assign->var_.get()] = value;
+    }
     return result;
   }
 
@@ -1747,12 +1904,13 @@ class TensorToTileMutator : public TypePropagatingMutator {
   const OpRegistry& op_registry_;
   const ConsumerSpaceCollector& consumer_collector_;
   const TensorConversionAnalysis& tile_values_;
+  const GmSliceChainAnalysis& gm_slices_;
   std::unordered_map<const Expr*, ExprPtr> preloaded_tiles_;
   ConversionContext conversion_context_;
   std::vector<bool> yield_tile_targets_;
   /// Declared GM cache policies of this function's params (empty when the
   /// function carries no ``pl.set_cache_policy`` declaration).
-  const CachePolicyByParam cache_policies_;
+  CachePolicyByParam cache_policies_;
 };
 
 bool ExprUsesVar(const ExprPtr& expr, const Var* target) {
@@ -2932,11 +3090,14 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // erased when the transformed function is rebuilt.
   auto cache_policies = BuildCachePolicyByParam(func);
 
-  TensorConversionAnalysis tile_values(conv_registry);
+  GmSliceChainAnalysis gm_slices(new_params, canonical_body);
+  gm_slices.ExtendCachePolicies(&cache_policies);
+  TensorConversionAnalysis tile_values(conv_registry, gm_slices);
   tile_values.VisitStmt(canonical_body);
   tile_values.Propagate();
 
-  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, tile_values, cache_policies);
+  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, tile_values, gm_slices,
+                              cache_policies);
 
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;
@@ -3623,7 +3784,8 @@ namespace {
  */
 class IncoreTileOpsVerifier : public IRVisitor {
  public:
-  explicit IncoreTileOpsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  IncoreTileOpsVerifier(std::vector<Diagnostic>& diagnostics, const GmSliceChainAnalysis& gm_slices)
+      : diagnostics_(diagnostics), gm_slices_(gm_slices) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
@@ -3662,6 +3824,7 @@ class IncoreTileOpsVerifier : public IRVisitor {
           AsTensorTypeLike(call->args_[0]->GetType())) {
         return;
       }
+      if (IsOp(call, "tensor.slice") && gm_slices_.Preserves(call)) return;
 
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "IncoreTileOps", 0,
@@ -3670,6 +3833,7 @@ class IncoreTileOpsVerifier : public IRVisitor {
   }
 
   std::vector<Diagnostic>& diagnostics_;
+  const GmSliceChainAnalysis& gm_slices_;
 };
 
 }  // namespace
@@ -3682,7 +3846,8 @@ class IncoreTileOpsPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!ShouldConvertTensorToTileOps(func)) continue;
-      IncoreTileOpsVerifier verifier(diagnostics);
+      GmSliceChainAnalysis gm_slices(func->params_, func->body_);
+      IncoreTileOpsVerifier verifier(diagnostics, gm_slices);
       verifier.VisitStmt(func->body_);
     }
   }

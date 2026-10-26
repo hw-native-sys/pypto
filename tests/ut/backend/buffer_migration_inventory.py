@@ -290,6 +290,7 @@ MIGRATION_FAMILIES = (
             "tensor.read",
             "tensor.write",
             "tensor.view",
+            "tensor.slice",
             "tile.read",
             "tile.write",
             "tile.get_block_idx",

@@ -4323,6 +4323,93 @@ def test_pto_codegen_tensor_view_with_tile_scalar_shape_default_pipeline():
     assert any(f"pto.partition_view {view_ssa}," in line for line in lines)
 
 
+def test_pto_codegen_gm_slice_view_load_advances_pointer_once():
+    """A nonzero GM origin survives view; no intermediate four-row tile is allocated."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[16, 512], pl.BF16], out: pl.Tensor[[2, 512], pl.BF16]):
+            span = pl.tensor.slice(x, [4, 512], [3, 0])
+            pitched = pl.tensor.view(span, [2, 1024])
+            pair = pl.load(pitched, [0, 0], [2, 512])
+            pl.store(pair, [0, 0], out)
+
+    mlir = _generate_default_mlir(Program)
+    shifted = re.findall(r"(%\w+) = pto.addptr", mlir)
+    assert len(shifted) == 1, mlir
+    assert mlir.count(f"pto.make_tensor_view {shifted[0]},") == 2, mlir
+    assert "arith.constant 1536 : index" in mlir
+    assert mlir.count("pto.tload ") == 1, mlir
+    allocations = _get_alloc_tile_lines(mlir)
+    assert len(allocations) == 1, mlir
+    assert "rows=2" in allocations[0] and "cols=512" in allocations[0], mlir
+
+
+def test_pto_codegen_gm_slice_view_nested_offsets():
+    """Each nested window advances the previous pointer, including through an alias."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[16, 512], pl.BF16], out: pl.Tensor[[2, 512], pl.BF16]):
+            outer = pl.tensor.slice(x, [8, 512], [3, 0])
+            alias = outer
+            span = pl.tensor.slice(alias, [4, 512], [2, 0])
+            pitched = pl.tensor.view(span, [2, 1024])
+            pair = pl.load(pitched, [0, 0], [2, 512])
+            pl.store(pair, [0, 0], out)
+
+    mlir = _generate_default_mlir(Program)
+    advances = re.findall(r"(%\w+) = pto.addptr (%\w+), (%\w+)", mlir)
+    assert len(advances) == 2, mlir
+    first, second = advances
+    assert second[1] == first[0], mlir
+    constants = dict(re.findall(r"(%\w+) = arith.constant (\d+) : index", mlir))
+    assert constants[first[2]] == "1536", mlir
+    assert constants[second[2]] == "1024", mlir
+    assert mlir.count("pto.tload ") == 1, mlir
+    assert mlir.count(f"pto.make_tensor_view {second[0]},") == 2, mlir
+
+
+def test_pto_codegen_gm_slice_view_device_pitch_in_branch():
+    """Offsets and strides remain device Scalars through the complete pass pipeline."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[32, 512], pl.BF16],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            out: pl.Tensor[[2, 512], pl.BF16],
+        ):
+            ids = pl.load(indices, [0, 0], [1, 16])
+            lo = pl.cast(pl.tile.read(ids, [0, 0]), pl.INDEX)
+            delta = pl.cast(pl.tile.read(ids, [0, 1]), pl.INDEX)
+            if lo >= 0 and delta > 0 and delta <= 16 and lo <= 32 - 2 * delta:
+                span = pl.tensor.slice(x, [2 * delta, 512], [lo, 0])
+                pitched = pl.tensor.view(span, [2, delta * 512])
+                pair = pl.load(pitched, [0, 0], [2, 512])
+                pl.store(pair, [0, 0], out)
+
+    mlir = _generate_default_mlir(Program)
+    assert "__FREE_VAR" not in mlir
+    assert mlir.count("pto.addptr ") == 1, mlir
+    assert mlir.count("pto.tload ") == 2, mlir
+    shifted = re.search(r"(%\w+) = pto.addptr", mlir)
+    assert shifted is not None
+    views = [line for line in mlir.splitlines() if f"pto.make_tensor_view {shifted[1]}," in line]
+    assert len(views) == 2, mlir
+    pitch = re.search(r"shape = \[%c2_index, (%\w+)\], strides = \[(%\w+), %c1_index\]", views[1])
+    assert pitch is not None, mlir
+    # Inline arithmetic may be emitted separately for shape and stride. Check
+    # the expression operands, not incidental temporary SSA name equality.
+    definitions = dict(re.findall(r"^\s*(%\w+) = (arith\.muli [^\n]+? : index)", mlir, re.MULTILINE))
+    assert pitch[1] in definitions and pitch[2] in definitions, mlir
+    assert definitions[pitch[1]] == definitions[pitch[2]], mlir
+
+
 def test_pto_codegen_tensor_write_dynamic_view_default_pipeline():
     """A GM write propagates dynamic view metadata through the default pipeline."""
 

@@ -628,6 +628,147 @@ class TestConvertTensorToTileOps:
         with pytest.raises(ValueError, match="result of an op lowered to Tile"):
             passes.convert_tensor_to_tile_ops()(Before)
 
+    def test_gm_slice_view_explicit_load_stays_tensor(self):
+        """The four-row span is metadata; only the requested two rows are loaded."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[16, 512], pl.BF16], out: pl.Out[pl.Tensor[[2, 512], pl.BF16]]
+            ) -> pl.Tensor[[2, 512], pl.BF16]:
+                span = pl.tensor.slice(x, [4, 512], [3, 0])
+                pitched = pl.tensor.view(span, [2, 1024])
+                pair = pl.tile.load(pitched, [0, 0], [2, 512])
+                pl.tile.store(pair, [0, 0], out)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_gm_slice_view_nested_alias_in_loop(self):
+        """A local descriptor chain may be rebuilt and consumed each iteration."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[16, 512], pl.BF16], out: pl.Out[pl.Tensor[[2, 512], pl.BF16]]
+            ) -> pl.Tensor[[2, 512], pl.BF16]:
+                for i in pl.range(2):
+                    outer = pl.tensor.slice(x, [8, 512], [i, 0])
+                    span = pl.tensor.slice(outer, [4, 512], [2, 0])
+                    alias = span
+                    pitched = pl.tensor.view(alias, [2, 1024])
+                    pair = pl.tile.load(pitched, [0, 0], [2, 512])
+                    pl.tile.store(pair, [0, 0], out)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_gm_slice_view_rejects_branch_escape(self):
+        """Different branch origins must not be rebound to one backing pointer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 512], pl.BF16], cond: pl.Scalar[pl.BOOL]):
+                if cond:
+                    left = pl.tensor.slice(x, [4, 512], [0, 0])
+                    span = pl.yield_(left)
+                else:
+                    right = pl.tensor.slice(x, [4, 512], [4, 0])
+                    span = pl.yield_(right)
+                pitched = pl.tensor.view(span, [2, 1024])
+                _pair = pl.tile.load(pitched, [0, 0], [2, 512])
+
+        with pytest.raises(ValueError, match="result of an op lowered to Tile"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_gm_slice_view_rejects_column_window(self):
+        """A column window must not be reinterpreted using a fictitious packed pitch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 512], pl.BF16]):
+                span = pl.tensor.slice(x, [4, 256], [3, 8])
+                pitched = pl.tensor.view(span, [2, 512])
+                _pair = pl.load(pitched, [0, 0], [2, 256])
+
+        with pytest.raises(ValueError, match="result of an op lowered to Tile"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_gm_slice_view_rejects_loop_carry(self):
+        """Loop-carried descriptors need pointer phi support and are not preserved."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 512], pl.BF16]):
+                span = pl.tensor.slice(x, [4, 512], [3, 0])
+                for i, (carried,) in pl.range(2, init_values=(span,)):
+                    pitched = pl.tensor.view(carried, [2, 1024])
+                    _pair = pl.load(pitched, [0, 0], [2, 512])
+                    _result = pl.yield_(carried)
+
+        with pytest.raises(ValueError, match="result of an op lowered to Tile"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_gm_slice_view_load_preserves_cache_policy(self):
+        """GM aliases inherit the root policy while per-load overrides still win."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 512], pl.BF16]):
+                pl.func_attr({"cache_policy": [(0, 1)]})
+                span = pl.tensor.slice(x, [4, 512], [3, 0])
+                alias = span
+                pitched = pl.tensor.view(alias, [2, 1024])
+                _inherited = pl.load(pitched, [0, 0], [2, 512])
+                _explicit = pl.load(pitched, [0, 0], [2, 512], cache=pl.CachePolicy.DEFAULT)
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        loads = _find_calls_to(_require_function(after, "kernel"), ir.get_op("tile.load").name)
+        assert [call.kwargs["cache"] for call in loads] == [
+            int(pl.CachePolicy.BYPASS),
+            int(pl.CachePolicy.DEFAULT),
+        ]
+
+    def test_gm_slice_view_rejects_mixed_compute_consumer(self):
+        """A slice shared with computation keeps the existing materialization path."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[4, 512], pl.BF16], out: pl.Tensor[[2, 512], pl.BF16]):
+                span = pl.tensor.slice(x, [4, 512], [0, 0])
+                _computed = pl.add(span, span)
+                pitched = pl.tensor.view(span, [2, 1024])
+                pair = pl.tile.load(pitched, [0, 0], [2, 512])
+                pl.tile.store(pair, [0, 0], out)
+
+        with pytest.raises(ValueError, match="result of an op lowered to Tile"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_gm_slice_view_rejects_computed_source(self):
+        """An explicit load cannot turn a computed value back into GM storage."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[4, 512], pl.BF16], out: pl.Tensor[[2, 512], pl.BF16]):
+                computed = pl.add(x, x)
+                span = pl.tensor.slice(computed, [4, 512], [0, 0])
+                pitched = pl.tensor.view(span, [2, 1024])
+                pair = pl.tile.load(pitched, [0, 0], [2, 512])
+                pl.tile.store(pair, [0, 0], out)
+
+        with pytest.raises(ValueError, match="result of an op lowered to Tile"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
     def test_reinterpret_view_auto_shape_lowers_to_tile(self):
         """Packed ND tensor reinterpret lowers 1:1 and keeps auto-shape semantics."""
         before, expected = _make_pair(

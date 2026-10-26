@@ -972,11 +972,16 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   // ``tile.load`` lookups via ``GetOrCreateTensorView`` find the LHS through
   // the ``RegisterTensorView`` call below. The LHS also aliases the input base
   // pointer and CommContext so later tensor or distributed ops address the
-  // original storage.
-  reg("tensor.view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  // original storage. A tensor.slice preserved by ConvertTensorToTileOps is
+  // a full-row packed ND window; it shares this emitter after advancing the
+  // base pointer by its row origin. Ordinary slices have already become tiles.
+  auto emit_gm_view = [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
-        << "tensor.view requires 1 to 3 args (input[, shape[, valid_shape]])";
+    const bool is_slice = ir::IsOp(op, "tensor.slice");
+    INTERNAL_CHECK_SPAN(is_slice ? op->args_.size() >= 3 && op->args_.size() <= 5
+                                 : op->args_.size() >= 1 && op->args_.size() <= 3,
+                        op->span_)
+        << "Internal error: invalid GM view argument count";
     auto input_var = AsVarLike(op->args_[0]);
     INTERNAL_CHECK_SPAN(input_var, op->span_) << "tensor.view input must be a Var/IterArg";
 
@@ -987,12 +992,15 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     INTERNAL_CHECK_SPAN(lhs_type, op->span_)
         << "tensor.view output must be TensorType or DistributedTensorType, got "
         << lhs_var->GetType()->TypeName();
-    INTERNAL_CHECK_SPAN(lhs_type->tensor_view_.has_value(), op->span_)
+    INTERNAL_CHECK_SPAN(is_slice || lhs_type->tensor_view_.has_value(), op->span_)
         << "Internal error: tensor.view output must have an explicit TensorView "
            "(set by DeduceTensorViewType + CanonicalizeView)";
 
     const size_t rank = lhs_type->shape_.size();
-    const auto& view = lhs_type->tensor_view_.value();
+    auto view = lhs_type->tensor_view_.value_or(ir::TensorView{});
+    if (view.stride.empty() && is_slice) {
+      view.stride = ir::tensor_view_semantics::BuildRowMajorStrides(lhs_type->shape_);
+    }
     INTERNAL_CHECK_SPAN(view.stride.size() == rank, op->span_)
         << "Internal error: tensor.view output stride rank " << view.stride.size()
         << " does not match shape rank " << rank;
@@ -1000,12 +1008,63 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     std::string result_buf = codegen.GetCurrentResultTarget();
     INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
     std::string input_base_ptr = codegen.GetTensorBasePtr(input_var);
-    codegen.RegisterBasePtr(lhs_var, input_base_ptr);
-    codegen.RegisterCommCtxFor(lhs_var, codegen.GetCommCtxSSAFor(input_var.get()));
 
     auto input_type = ir::AsTensorTypeLike(input_var->GetType());
     INTERNAL_CHECK_SPAN(input_type, op->span_)
         << "tensor.view input must be TensorType or DistributedTensorType";
+
+    auto emit_dim = [&](const ir::ExprPtr& dim) -> std::string {
+      if (auto c = As<ir::ConstInt>(dim)) {
+        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+      }
+      return codegen.EmitCastToIndex(dim, codegen.GetExprAsCode(dim));
+    };
+    if (is_slice) {
+      // The input pointer already includes any ancestor slice origin. Advance
+      // by this slice's offsets in the INPUT strides exactly once, then bind
+      // both the tensor view and future shape views to the shifted pointer.
+      auto offsets = As<ir::MakeTuple>(op->args_[2]);
+      INTERNAL_CHECK_SPAN(offsets && offsets->elements_.size() == 2 && input_type->shape_.size() == 2,
+                          op->span_)
+          << "Internal error: GM slice codegen requires a rank-2 window";
+      auto strides = input_type->tensor_view_ ? input_type->tensor_view_->stride : std::vector<ExprPtr>{};
+      if (strides.empty()) strides = ir::tensor_view_semantics::BuildRowMajorStrides(input_type->shape_);
+      INTERNAL_CHECK_SPAN(strides.size() == 2, op->span_)
+          << "Internal error: GM slice input stride rank must be 2";
+      std::string offset_ssa;
+      for (size_t i = 0; i < offsets->elements_.size(); ++i) {
+        const auto& offset = offsets->elements_[i];
+        if (auto constant = As<ir::ConstInt>(offset); constant && constant->value_ == 0) {
+          continue;
+        }
+        auto product = ir::tensor_view_semantics::MakeIndexMul(offset, strides[i], op->span_);
+        std::string term;
+        if (As<ir::ConstInt>(product)) {
+          term = emit_dim(product);
+        } else {
+          const auto offset_code = emit_dim(offset);
+          const auto stride_code = emit_dim(strides[i]);
+          term = codegen.NewTemp();
+          codegen.Emit(term + " = arith.muli " + offset_code + ", " + stride_code + " : index");
+        }
+        if (offset_ssa.empty()) {
+          offset_ssa = term;
+        } else {
+          const auto sum = codegen.NewTemp();
+          codegen.Emit(sum + " = arith.addi " + offset_ssa + ", " + term + " : index");
+          offset_ssa = sum;
+        }
+      }
+      if (!offset_ssa.empty()) {
+        const auto shifted = codegen.NewTemp();
+        const std::string ptr_type = "!pto.ptr<" + codegen.GetTypeString(input_type->dtype_) + ">";
+        codegen.Emit(shifted + " = pto.addptr " + input_base_ptr + ", " + offset_ssa + " : " + ptr_type +
+                     " -> " + ptr_type);
+        input_base_ptr = shifted;
+      }
+    }
+    codegen.RegisterBasePtr(lhs_var, input_base_ptr);
+    codegen.RegisterCommCtxFor(lhs_var, codegen.GetCommCtxSSAFor(input_var.get()));
 
     // The result SSA name (auto-allocated by VisitStmt_(AssignStmt) for the
     // backend-dispatched RHS Call) doubles as the tensor_view SSA name —
@@ -1016,12 +1075,6 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     codegen.RegisterVarToMlir(lhs_var, result_buf);
 
     // Materialize shape and stride SSA names.
-    auto emit_dim = [&](const ir::ExprPtr& dim) -> std::string {
-      if (auto c = As<ir::ConstInt>(dim)) {
-        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
-      }
-      return codegen.EmitCastToIndex(dim, codegen.GetExprAsCode(dim));
-    };
     std::vector<std::string> shape_dim_names(rank);
     for (size_t j = 0; j < rank; ++j) shape_dim_names[j] = emit_dim(lhs_type->shape_[j]);
     std::vector<std::string> stride_names(rank);
@@ -1064,7 +1117,9 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     }
     oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
     return oss.str();
-  });
+  };
+  reg("tensor.view", emit_gm_view);
+  reg("tensor.slice", emit_gm_view);
 
   reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileLoadCodegenPTO(op, codegen);

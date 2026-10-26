@@ -76,6 +76,46 @@ def _sole_line(mlir: str, needle: str) -> str:
     return strip_loc(lines[0])
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_gm_slice_view_dynamic_pitch_compiles(
+    tmp_path: Path, planner: passes.MemoryPlanner, enable_buffer_ir: bool
+):
+    """Dynamic GM descriptors reach native TLOAD without materializing the span."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[32, 512], pl.BF16],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            out: pl.Out[pl.Tensor[[2, 512], pl.BF16]],
+        ):
+            ids = pl.load(indices, [0, 0], [1, 16])
+            lo = pl.cast(pl.tile.read(ids, [0, 0]), pl.INDEX)
+            delta = pl.cast(pl.tile.read(ids, [0, 1]), pl.INDEX)
+            if lo >= 0 and delta > 0 and delta <= 16 and lo <= 32 - 2 * delta:
+                span = pl.tensor.slice(x, [2 * delta, 512], [lo, 0])
+                pitched = pl.tensor.view(span, [2, delta * 512])
+                pair = pl.load(pitched, [0, 0], [2, 512])
+                pl.store(pair, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enable_buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
+    generated = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    mlir = generated if isinstance(generated, str) else "".join(generated.values())
+    assert mlir.count("pto.tload ") == 2, mlir
+    assert mlir.count("pto.addptr ") == 1, mlir
+    cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+    assert cpp.count("TLOAD(") == 2, cpp
+
+
 def _tile_buf_types(op_line: str) -> list[str]:
     """Return every tile_buf type annotation carried by one PTO operation."""
     return re.findall(r"!pto\.tile_buf<[^>]+>", op_line)
