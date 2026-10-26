@@ -1393,7 +1393,7 @@ def test_acc_nz_store_defers_capacity_until_the_physical_codegen_boundary(source
     assert "pl.ND" in message
 
 
-def _wide_acc_nz_program(rows=64, cols=2048, column_offset=0, batch=None, split_k=False):
+def _wide_acc_nz_program(rows=64, cols=2048, column_offset=0, batch=None, split_k=False, layout=pl.NZ):
     """A real producer lets the default pipeline legalize the oversized Acc."""
     output_cols = cols + 32 if column_offset else cols
     output_shape = [rows, output_cols] if batch is None else [3, rows, output_cols]
@@ -1409,7 +1409,7 @@ def _wide_acc_nz_program(rows=64, cols=2048, column_offset=0, batch=None, split_
                 self,
                 x: pl.Tensor[[rows, reduction], pl.FP16],
                 w: pl.Tensor[[reduction, cols], pl.FP16],
-                out: pl.Tensor[output_shape, pl.FP32, pl.NZ],
+                out: pl.Tensor[output_shape, pl.FP32, layout],
             ):
                 # Keep only one K-panel in L1; loading all 128x2048 weights at
                 # once would exceed L1 before the L0 tiler could help.
@@ -1430,7 +1430,7 @@ def _wide_acc_nz_program(rows=64, cols=2048, column_offset=0, batch=None, split_
             self,
             x: pl.Tensor[[rows, reduction], pl.FP16],
             w: pl.Tensor[[reduction, cols], pl.FP16],
-            out: pl.Tensor[output_shape, pl.FP32, pl.NZ],
+            out: pl.Tensor[output_shape, pl.FP32, layout],
         ):
             lhs = pl.load(x, [0, 0], [rows, reduction], target_memory=pl.Mem.Mat)
             rhs = pl.load(w, [0, 0], [reduction, cols], target_memory=pl.Mem.Mat)
@@ -1553,6 +1553,76 @@ def test_acc_nz_store_automatically_tiles_canonical_split_k():
     text = _emit_pto(before, BackendType.Ascend910B)
     assert "#pto.layout<nz>" in text and "pto.tstore" in text
     assert "rows=64, cols=2048," not in text
+
+
+@pytest.mark.parametrize("representation", ["logical-nz-3", "logical-nz-4", "blocked-nz-4", "nd-3"])
+@pytest.mark.usefixtures("ascend_backend")
+def test_auto_tiled_direct_store_preserves_expression_attrs(representation):
+    """All supported spellings remap metadata to each new source and output chain.
+
+    Production reaches AutoTile with blocked NZ coordinates; isolated-pass
+    callers can still supply logical NZ coordinates, with or without an
+    explicit window. ND uses type deduction to retain its valid-region union.
+    A shared Call rebuild must preserve those representations and update Expr
+    metadata rather than retain references to the eliminated wide accumulator.
+    """
+    is_nz = representation != "nd-3"
+    batch = 2 if representation in ("logical-nz-4", "blocked-nz-4") else None
+    before = _wide_acc_nz_program(column_offset=8, batch=batch, layout=pl.NZ if is_nz else pl.ND)
+    for factory in _PREFIX[:-1]:
+        before = factory()(before)
+    if representation == "blocked-nz-4":
+        before = passes.block_nz_tensor_views()(before)
+    expected_arity = 4 if representation.endswith("-4") else 3
+    assert len(_store_call(before).args) == expected_arity
+
+    class AttachStoreMetadata(ir.IRMutator):
+        def visit_call(self, op):
+            if op.op.name != ir.get_op("tile.store").name:
+                return super().visit_call(op)
+            return ir.Call(
+                op.op,
+                op.args,
+                {**op.kwargs, "st_phase": int(pl.STPhase.Unspecified)},
+                {**op.attrs, "source_ref": op.args[0], "out_ref": op.args[2], "scalar_tag": 3036},
+                op.type,
+                op.span,
+            )
+
+    # These are synthetic compiler attributes, so skip printer round-tripping
+    # unknown metadata keys while retaining explicit SSA/UseAfterDef checks.
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        annotated = AttachStoreMetadata().visit_program(before)
+        original = _store_call(annotated)
+        tiled = passes.auto_tile_matmul_l0()(annotated)
+        stores = [
+            stmt.value
+            for function in tiled.functions.values()
+            for stmt in _walk(function.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.store").name
+        ]
+        assert stores
+        for call in stores:
+            assert len(call.args) == expected_arity
+            assert dict(call.kwargs) == dict(original.kwargs)
+            assert call.attrs["source_ref"].same_as(call.args[0])
+            assert call.attrs["out_ref"].same_as(call.args[2])
+            assert call.attrs["scalar_tag"] == 3036
+            assert not call.args[0].same_as(original.args[0])
+            ir.assert_structural_equal(call.type, call.args[2].type)
+            if representation == "logical-nz-4":
+                shape = _shape_values(call.args[0])
+                assert _values(_elements(call.args[3])) == [1, shape[0], shape[1]]
+        if is_nz:
+            blocked = passes.block_nz_tensor_views()(tiled)
+            _assert_nz_column_grid(blocked, 64, 2048, column_offset=8, batch=0 if batch is None else batch)
+        else:
+            properties = passes.IRPropertySet()
+            properties.insert(passes.IRProperty.SSAForm)
+            properties.insert(passes.IRProperty.UseAfterDef)
+            passes.verify_properties(properties, tiled, "ND direct-store metadata remapping")
 
 
 @pytest.mark.usefixtures("ascend_backend")

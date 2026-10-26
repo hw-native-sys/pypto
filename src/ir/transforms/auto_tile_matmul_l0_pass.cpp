@@ -1567,14 +1567,11 @@ class DirectGmPlacer : public SubtilePlacer {
     auto& reg = OpRegistry::GetInstance();
     auto base_offsets = As<MakeTuple>(store_.call->args_[1]);
     INTERNAL_CHECK_SPAN(base_offsets, sp_) << "Internal error: direct-store offsets must remain a tuple";
-    CallPtr scall;
+    std::vector<ExprPtr> offsets = base_offsets->elements_;
+    ExprPtr partition;
     if (!store_.is_nz()) {
-      auto offs = std::make_shared<MakeTuple>(
-          std::vector<ExprPtr>{AddOffset(base_offsets->elements_[0], row_off, sp_),
-                               AddOffset(base_offsets->elements_[1], col_off, sp_)},
-          sp_);
-      auto deduced = reg.Create("tile.store", {sub, offs, chain_in}, store_.call->kwargs_, sp_);
-      scall = PreserveCallAttrs(store_.call, deduced);
+      offsets[0] = AddOffset(offsets[0], row_off, sp_);
+      offsets[1] = AddOffset(offsets[1], col_off, sp_);
     } else {
       auto tile = As<TileType>(sub->GetType());
       auto rows = tile && tile->shape_.size() == 2 ? As<ConstInt>(tile->shape_[0]) : nullptr;
@@ -1585,7 +1582,6 @@ class DirectGmPlacer : public SubtilePlacer {
       // emitter may still represent that one origin by a one-trip loop Var;
       // retain the literal blocked row offset instead of manufacturing an
       // unprovable row expression from that loop.
-      std::vector<ExprPtr> offsets = base_offsets->elements_;
       ExprPtr column_delta = col_off;
       if (store_.blocked_nz) {
         // Only this generated N-grid offset is divided. The user's original
@@ -1602,26 +1598,33 @@ class DirectGmPlacer : public SubtilePlacer {
       } else {
         offsets.back() = AddOffset(offsets.back(), column_delta, sp_);
       }
-      std::vector<ExprPtr> args{sub, std::make_shared<MakeTuple>(std::move(offsets), sp_), chain_in};
       if (store_.blocked_nz) {
-        args.push_back(MakeIndexTuple({1, cols->value_ / 8, rows->value_ / 16, 16, 8}, sp_));
+        partition = MakeIndexTuple({1, cols->value_ / 8, rows->value_ / 16, 16, 8}, sp_);
       } else if (store_.call->args_.size() == 4) {
         std::vector<int64_t> window(base_offsets->elements_.size(), 1);
         window[window.size() - 2] = rows->value_;
         window.back() = cols->value_;
-        args.push_back(MakeIndexTuple(window, sp_));
+        partition = MakeIndexTuple(window, sp_);
       }
-      const auto original_source = AsVarLike(store_.call->args_[0]);
-      INTERNAL_CHECK_SPAN(original_source, sp_) << "Internal error: direct-store source must be a variable";
-      const std::unordered_map<const Var*, VarPtr> replacements = {{original_source.get(), sub},
-                                                                   {out_in_.get(), chain_in}};
-      auto remapped = As<Call>(transform_utils::Substitute(store_.call, replacements));
-      INTERNAL_CHECK_SPAN(remapped, sp_) << "Internal error: direct-store substitution must preserve Call";
-      // Do not infer a new TileType from the rank-5 GM window. The source is
-      // still 2-D, and the result aliases the chained destination unchanged.
-      scall = std::make_shared<Call>(store_.call->op_, std::move(args), remapped->kwargs_, remapped->attrs_,
-                                     chain_in->GetType(), sp_);
     }
+    std::vector<ExprPtr> args{sub, std::make_shared<MakeTuple>(std::move(offsets), sp_), chain_in};
+    if (partition) args.push_back(partition);
+    const auto original_source = AsVarLike(store_.call->args_[0]);
+    INTERNAL_CHECK_SPAN(original_source, sp_) << "Internal error: direct-store source must be a variable";
+    // These generated values already have their final types and definitions.
+    // Keep replacements terminal: walking chain_in's IterArg initializer back
+    // to out_in would otherwise substitute the new loop carry into its own seed.
+    const std::unordered_map<const Var*, VarPtr> replacements = {{original_source.get(), sub},
+                                                                 {out_in_.get(), chain_in},
+                                                                 {sub.get(), sub},
+                                                                 {chain_in.get(), chain_in}};
+    auto remapped = As<Call>(transform_utils::Substitute(store_.call, replacements));
+    INTERNAL_CHECK_SPAN(remapped, sp_) << "Internal error: direct-store substitution must preserve Call";
+    // Both layouts share metadata remapping and the store's type rules. An
+    // explicit partition preserves the destination type without turning the
+    // 2-D Acc into a rank-5 tile; ordinary ND stores retain valid-region union.
+    auto deduced = reg.Create("tile.store", args, remapped->kwargs_, sp_);
+    auto scall = PreserveCallAttrs(remapped, deduced);
     auto sv = std::make_shared<Var>(out_base_ + "_t" + std::to_string(step), scall->GetType(), sp_);
     stmts.push_back(std::make_shared<AssignStmt>(sv, scall, sp_));
     return sv;
@@ -1873,13 +1876,9 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
 
   auto init_call = As<Call>(init->value_);
   auto store_call = As<Call>(store->value_);
-  if (!init_call || !IsOp(init_call, "tile.create") || !store_call || !IsOp(store_call, "tile.store") ||
-      !AnalyzeDirectGmStore(store_call) || loop->iter_args_[0]->initValue_.get() != init->var_.get() ||
+  if (!init_call || !IsOp(init_call, "tile.create") || !AnalyzeDirectGmStore(store_call) ||
+      loop->iter_args_[0]->initValue_.get() != init->var_.get() ||
       store_call->args_[0].get() != loop->return_vars_[0].get()) {
-    return std::nullopt;
-  }
-  auto store_offsets = As<MakeTuple>(store_call->args_[1]);
-  if (!store_offsets || !AsVarLike(store_call->args_[2])) {
     return std::nullopt;
   }
   auto init_use = use_counts.find(init->var_.get());
@@ -2642,11 +2641,6 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
       return skip(
           "tile.store does not have supported direct-store geometry — M/N fold not applicable; "
           "left untouched");
-    }
-    auto out_in = AsVarLike(store_call->args_[2]);
-    if (!out_in) {
-      return skip(
-          "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched");
     }
     INTERNAL_CHECK_SPAN(!store_info->is_nz() || (t.m == t.M && t.grid_m == t.M), sp)
         << "Internal error: NZ direct-store fold requires an N/K-only tiling plan";
@@ -3595,8 +3589,7 @@ class AutoTileMutator : public IRMutator {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
             os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
                                       /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                      consumer->supports_output_grid, /*source_reduction=*/nullptr,
-                                      consumer->fixed_output_m);
+                                      consumer->supports_output_grid);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
           if (auto ms = TryFoldMatScratch(*fold_tiling, result_uses, operand_uses, scratch_dtype, hints)) {

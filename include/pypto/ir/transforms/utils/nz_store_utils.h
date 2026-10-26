@@ -104,18 +104,15 @@ inline std::vector<ExprPtr> CheckPhysicalSource(const CallPtr& op, const backend
       << "NZ tile.store requires each emitted Acc tile to have columns <= " << kMaxStoreCols << ". "
       << "Use a matmul with a single direct store for automatic N tiling, tile the output columns "
       << "explicitly, or store to pl.ND.";
-  if (const auto bytes = utils::StaticPhysicalAllocationBytes(tile, MemorySpace::Acc, handler);
-      bytes.has_value()) {
-    const uint64_t capacity = handler->GetCapacityBytes(MemorySpace::Acc);
-    CHECK_SPAN(*bytes <= capacity, op->span_)
-        << "NZ tile.store requires one Acc tile to fit L0C: the source needs " << *bytes
-        << " bytes, but this backend's L0C capacity is " << capacity
-        << " bytes. NZ writes must cover all destination rows; use a matmul with a single direct store "
-        << "for automatic N tiling, tile the output columns explicitly, or store to pl.ND.";
-  } else {
-    INTERNAL_CHECK_SPAN(false, op->span_)
-        << "Internal error: the physical footprint of a validated static NZ store source must be known";
-  }
+  const auto bytes = utils::StaticPhysicalAllocationBytes(tile, MemorySpace::Acc, handler);
+  INTERNAL_CHECK_SPAN(bytes.has_value(), op->span_)
+      << "Internal error: the physical footprint of a validated static NZ store source must be known";
+  const uint64_t capacity = handler->GetCapacityBytes(MemorySpace::Acc);
+  CHECK_SPAN(*bytes <= capacity, op->span_)
+      << "NZ tile.store requires one Acc tile to fit L0C: the source needs " << *bytes
+      << " bytes, but this backend's L0C capacity is " << capacity
+      << " bytes. NZ writes must cover all destination rows; use a matmul with a single direct store "
+      << "for automatic N tiling, tile the output columns explicitly, or store to pl.ND.";
   return valid;
 }
 
