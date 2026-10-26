@@ -43,6 +43,14 @@ program_inlined = inline_pass(program)
      - Wire up the callee's trailing return value according to the call-site form: `LHS = renamed_return` (single-return assign; omitted when `LHS` resolves to the same `Var` as the substituted value, to avoid a redundant SSA copy), per-element `TupleGetItemExpr` substitution instead of a `MakeTuple` binding (multi-return assign), a fresh `ReturnStmt` (`return inline_call(...)`), or a fresh `EvalStmt` when the value is discarded but its evaluation is observable (`EvalStmt` call site — see [Edge cases](#edge-cases)).
 4. **Drop** all Inline functions from the program.
 
+Tuple-element substitution applies the same identity-writeback rule as single
+returns: if `q, ready = helper(x, q)` produces `q = q`, the assignment is omitted
+before SSA conversion. This requires the exact same `Var` on both sides, not
+equal names, shapes, or backing buffers. Assignments between distinct variables
+(including returned views and loop-state snapshots) are preserved. Removing the
+self-assignment also avoids creating a redundant scope-local C++ Tensor alias
+when a caller consumes the result after a `pl.scope()` block.
+
 Graph ordering is linear in functions and call edges. Classification traverses each original and expanded analysis body once; its cost is measured against that materialized IR, which can be larger than the source program. A nested alias-only return therefore preserves the caller binding, while a nested fresh result still requires a local handle. Original syntactic definitions remain relevant even when analysis expansion removes a no-op assignment: a constant or computed argument must not be substituted into its assignment target.
 
 For names with a parsed auto-name role or version, `FreshName` inserts `inline<counter>` through `auto_name::AddQualifier`: `t__inline_arg_v0` becomes `t__inline7_inline_arg_v0`. This preserves the terminal role/version for `ConvertToSSA` through repeated inlining. Other names use a single-underscore (`_inline`) suffix because `__` is reserved by the IR's auto-naming convention (see `auto_name_utils.h`).

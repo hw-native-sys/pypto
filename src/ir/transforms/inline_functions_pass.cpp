@@ -835,6 +835,15 @@ class InlineCallsMutator : public IRMutator {
     auto value = VisitExpr(op->value_);
     auto var = As<Var>(VisitExpr(op->var_));
     if (!var) return IRMutator::VisitStmt_(op);  // MemRef definitions retain their descriptors.
+    // Tuple-return substitution can turn `q = result[0]` into `q = q`.
+    // Drop that identity writeback before SSA creates a redundant version,
+    // matching SpliceInlineCallAsAssign's single-return rule. Compare the
+    // Var identity, not its name or buffer: distinct aliases, views and
+    // loop-state snapshots must keep their assignments.
+    if (var.get() == value.get()) {
+      changed_ = true;
+      return SeqStmts::Flatten({}, op->span_);
+    }
     // Before SSA, one Var can be assigned repeatedly, including in different
     // branches. Keep its binding identity once defined: a branch-local valid
     // shape refinement must not redirect the other branch or the loop seed to

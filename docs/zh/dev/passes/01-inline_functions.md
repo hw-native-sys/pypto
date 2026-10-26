@@ -43,6 +43,13 @@ program_inlined = inline_pass(program)
      - 按调用点形态接线被内联函数的尾部返回值:`LHS = renamed_return`(单返回值赋值;当 `LHS` 与替换后的返回 `Var` 是同一个 `Var` 时省略该赋值,以避免冗余 SSA 拷贝)、逐元素替换 `TupleGetItemExpr` 而不发出 `MakeTuple` 绑定(多返回值赋值)、新的 `ReturnStmt`(`return inline_call(...)`),或者当返回值被丢弃但其求值可观测时发出新的 `EvalStmt`(`EvalStmt` 调用点 — 参见[边界情况](#边界情况))。
 4. **删除**所有 Inline 函数。
 
+元组元素替换也遵循单返回值的恒等回写（identity writeback）规则：如果
+`q, ready = helper(x, q)` 产生 `q = q`，就在 SSA 转换前省略该赋值。
+这要求左右两边是同一个 `Var` 对象，而不只是名称、形状或底层缓冲区相同。
+不同变量之间的赋值（包括返回的视图和循环状态快照）仍然保留。
+消除自赋值还可避免生成冗余的 C++ 块内 Tensor 别名，从而支持在
+`pl.scope()` 块之后继续使用原地返回的 Tensor。
+
 调用图排序的复杂度与函数数和调用边数呈线性关系。分类对每个原始函数体和展开后的分析体各遍历一次;其开销按这些物化 IR 的大小计算,该大小可能超过源程序。因此,嵌套调用仅返回别名时会保留调用方绑定,返回新值时仍需要局部句柄。即使分析展开消除了无效的自赋值,原始语法定义仍然重要:常量或计算得到的实参不能直接替换赋值目标。
 
 对于能解析出自动名角色(role)或版本(version)的名字,`FreshName` 通过 `auto_name::AddQualifier` 插入 `inline<counter>`:例如,`t__inline_arg_v0` 变为 `t__inline7_inline_arg_v0`。这样反复内联后,`ConvertToSSA` 仍能识别末尾的角色和版本。其他名字使用单下划线(`_inline`)后缀,因为 `__` 被 IR 自动命名约定保留(参见 `auto_name_utils.h`)。

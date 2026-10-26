@@ -2784,6 +2784,91 @@ class TestInlineReturnAndMultiReturn:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_tuple_unpack_drops_identity_writeback(self):
+        """Tuple returns must omit the same-Var writeback just like single returns.
+
+        Keeping ``q = q`` introduces a fresh SSA alias. Inside a runtime scope,
+        that alias becomes a C++ local which an outside consumer cannot name.
+        The distinct ``saved = k`` binding must still be preserved.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def write(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                q: pl.Tensor[[4], pl.FP32],
+                k: pl.Tensor[[4], pl.FP32],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q = pl.tensor.assemble(q, x, [0])
+                return q, k
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                q: pl.Tensor[[4], pl.FP32],
+                k: pl.Tensor[[4], pl.FP32],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q, saved = self.write(x, q, k)
+                return q, saved
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                q: pl.Tensor[[4], pl.FP32],
+                k: pl.Tensor[[4], pl.FP32],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q = pl.tensor.assemble(q, x, [0])
+                saved: pl.Tensor[[4], pl.FP32] = k
+                return q, saved
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_tuple_unpack_preserves_view_writeback(self):
+        """A returned view is a different value, even when assigned back to q."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def view(
+                self, q: pl.Tensor[[8], pl.FP32], k: pl.Tensor[[4], pl.FP32]
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                part = pl.tensor.slice(q, [4], [2])
+                return part, k
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8], pl.FP32],
+                q: pl.Tensor[[4], pl.FP32],
+                k: pl.Tensor[[4], pl.FP32],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q, saved = self.view(x, k)
+                return q, saved
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8], pl.FP32],
+                q: pl.Tensor[[4], pl.FP32],
+                k: pl.Tensor[[4], pl.FP32],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                part = pl.tensor.slice(x, [4], [2])
+                q: pl.Tensor[[4], pl.FP32] = part
+                saved: pl.Tensor[[4], pl.FP32] = k
+                return q, saved
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_tuple_unpack_inline_call_returning_tuple_temporary(self):
         """A tuple temporary returned by an inline helper is expanded before
         tuple-get-item substitution, so no MakeTuple reaches codegen."""
