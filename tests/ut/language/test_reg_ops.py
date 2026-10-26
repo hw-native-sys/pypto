@@ -190,5 +190,41 @@ def test_raw_same_dtype_convert_roundtrip():
     ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
 
 
+@pytest.mark.parametrize(
+    ("op_name", "kwargs"),
+    [("reg.add", {}), ("reg.index_gen", {"lanes": 64, "dtype": pl.INT32})],
+)
+def test_raw_create_op_defaults_roundtrip(op_name, kwargs):
+    """Public raw op construction applies the same register defaults as DSL calls."""
+    span = ir.Span.unknown()
+    scalar = ir.ConstFloat(1.0, pl.FP32, span)
+    value = ir.create_op_call("reg.broadcast", [scalar], {"lanes": 64, "dtype": pl.FP32}, span)
+    value_var = ir.Var("value", value.type, span)
+    args = [value_var, value_var] if op_name == "reg.add" else [ir.ConstInt(0, pl.INT32, span)]
+    raw = ir.create_op_call(op_name, args, kwargs, span)
+    result_var = ir.Var("result", raw.type, span)
+    body = ir.RegScopeStmt(
+        "",
+        ir.SeqStmts(
+            [ir.AssignStmt(value_var, value, span), ir.AssignStmt(result_var, raw, span)],
+            span,
+        ),
+        span,
+    )
+    function = ir.Function("kernel", [], [], body, span, type=ir.FunctionType.InCore)
+    printed = python_print(function, format=False)
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(function, restored, enable_auto_mapping=True)
+
+
+def test_raw_create_op_rejects_same_dtype_convert():
+    """Public raw construction rejects the DSL's operand-preserving no-op form."""
+    span = ir.Span.unknown()
+    scalar = ir.ConstFloat(1.0, pl.FP32, span)
+    value = ir.create_op_call("reg.broadcast", [scalar], {"lanes": 64, "dtype": pl.FP32}, span)
+    with pytest.raises(ValueError, match="same-dtype|no-op|canonical"):
+        ir.create_op_call("reg.convert", [value], {"dtype": pl.FP32}, span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
