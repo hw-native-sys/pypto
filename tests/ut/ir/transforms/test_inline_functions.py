@@ -734,25 +734,37 @@ class TestInlineTileArgumentContracts:
 
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 
-    def test_generic_dimensions_remain_independent_across_tile_arguments(self):
+    @pytest.mark.parametrize("affine", [False, True])
+    def test_generic_dimensions_remain_independent_across_tile_arguments(self, affine):
         """An inline placeholder describes each operand without equating separate buffers."""
         rows = pl.dynamic("TILE_CONTRACT_GENERIC_ROWS")
+        cols = pl.dynamic("TILE_CONTRACT_GENERIC_COLS")
+        formal_cols = rows + cols if affine else 64
+        first_cols, second_cols = (16, 40) if affine else (64, 64)
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.Inline)
-            def consume(self, first: pl.Tile[[rows, 64], pl.FP32], second: pl.Tile[[rows, 64], pl.FP32]):
+            def consume(
+                self,
+                first: pl.Tile[[rows, formal_cols], pl.FP32],
+                second: pl.Tile[[rows, formal_cols], pl.FP32],
+            ):
                 _first_doubled = pl.add(first, first)
                 _second_doubled = pl.add(second, second)
 
             @pl.function
-            def main(self, first: pl.Tile[[8, 64], pl.FP32], second: pl.Tile[[16, 64], pl.FP32]):
+            def main(
+                self, first: pl.Tile[[8, first_cols], pl.FP32], second: pl.Tile[[16, second_cols], pl.FP32]
+            ):
                 self.consume(first, second)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self, first: pl.Tile[[8, 64], pl.FP32], second: pl.Tile[[16, 64], pl.FP32]):
+            def main(
+                self, first: pl.Tile[[8, first_cols], pl.FP32], second: pl.Tile[[16, second_cols], pl.FP32]
+            ):
                 _first_doubled = pl.add(first, first)
                 _second_doubled = pl.add(second, second)
 
@@ -805,6 +817,44 @@ class TestInlineTileArgumentContracts:
         class Expected:
             @pl.function
             def main(self, tile: pl.Tile[[8, 64], pl.FP32], tensor: pl.Tensor[[tensor_rows, 64], pl.FP32]):
+                _tile_alias = tile
+                _tensor_alias = tensor
+
+        ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
+
+    @pytest.mark.parametrize("tensor_rows", [8, 16], ids=["matching", "conflicting"])
+    def test_external_void_inline_checks_final_wrapper_arguments(self, tensor_rows):
+        """An external void helper waits for the wrapper's concrete Tile/Tensor arguments."""
+        rows = pl.dynamic("EXTERNAL_VOID_ROWS")
+        tile_rows = pl.dynamic("EXTERNAL_WRAPPER_TILE_ROWS")
+        storage_rows = pl.dynamic("EXTERNAL_WRAPPER_STORAGE_ROWS")
+
+        @pl.function(type=pl.FunctionType.Inline)
+        def consume(tile: pl.Tile[[rows, 64], pl.FP32], tensor: pl.Tensor[[rows, 64], pl.FP32]):
+            _tile_alias = tile
+            _tensor_alias = tensor
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def forward(
+                self, tile: pl.Tile[[tile_rows, 64], pl.FP32], tensor: pl.Tensor[[storage_rows, 64], pl.FP32]
+            ):
+                consume(tile, tensor)
+
+            @pl.function
+            def main(self, tile: pl.Tile[[8, 64], pl.FP32], tensor: pl.Tensor[[tensor_rows, 64], pl.FP32]):
+                self.forward(tile, tensor)
+
+        if tensor_rows != 8:
+            with pytest.raises(ValueError, match="conflicting bindings"):
+                passes.inline_functions()(Before)
+            return
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, tile: pl.Tile[[8, 64], pl.FP32], tensor: pl.Tensor[[8, 64], pl.FP32]):
                 _tile_alias = tile
                 _tensor_alias = tensor
 
@@ -1734,11 +1784,22 @@ class TestInlineTileArgumentContracts:
         ir.assert_structural_equal(passes.inline_functions()(Before), Expected)
 
     @pytest.mark.parametrize(
-        "case", ["composite", "arithmetic", "repeated", "odd", "affine_consistent", "affine_conflicting"]
+        "case",
+        [
+            "composite",
+            "arithmetic",
+            "repeated",
+            "odd",
+            "affine_consistent",
+            "affine_conflicting",
+            "cross_axis",
+            "cross_axis_reverse",
+        ],
     )
     def test_physical_dimension_bindings(self, case):
         """Bind physical expressions per Tile, proving equality and integral, consistent solutions."""
         rows = pl.dynamic("TILE_CONTRACT_FORMAL_ROWS")
+        cols = pl.dynamic("TILE_CONTRACT_FORMAL_COLS")
         caller = pl.dynamic("TILE_CONTRACT_CALLER_ROWS")
         formal_rows, formal_cols, actual_rows, actual_cols, valid_rows = {
             "composite": (2 * rows, 64, 2 * caller, 64, caller),
@@ -1747,6 +1808,8 @@ class TestInlineTileArgumentContracts:
             "odd": (2 * rows, 64, 15, 64, 15),
             "affine_consistent": (2 * rows, 4 * rows, 16, 32, 16),
             "affine_conflicting": (2 * rows, 4 * rows, 16, 36, 16),
+            "cross_axis": (rows, rows + cols, 8, 16, 8),
+            "cross_axis_reverse": (rows + cols, cols, 24, 16, 24),
         }[case]
 
         @pl.program

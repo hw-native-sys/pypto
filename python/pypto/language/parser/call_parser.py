@@ -1056,11 +1056,14 @@ class CallParser:
         args = [self.callbacks.expression(arg) for arg in call.args]
 
         gvar = ir.GlobalVar(func_name)
+        return_types = self.effective_return_types(ext_func)
         return_types = ir.deduce_call_return_type(
             list(ext_func.params),
             args,
-            self.effective_return_types(ext_func),
-            is_inline=ext_func.func_type == ir.FunctionType.Inline,
+            return_types,
+            # Match method calls: void wrappers validate Tile contracts only
+            # after expansion supplies their final arguments. Format checks remain active.
+            is_inline=bool(return_types) and ext_func.func_type == ir.FunctionType.Inline,
         )
         return_types = self.inline_argument_return_types(ext_func, args, return_types)
         return self.make_call_with_return_type(gvar, args, return_types, span)

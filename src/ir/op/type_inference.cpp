@@ -1560,7 +1560,18 @@ struct CallTypeBindingConstraint {
   ExprPtr candidate;
   std::string context;
   bool tile_physical = false;
-  ExprPtr scalar_source = nullptr;  // Original expression before known Scalar values were substituted.
+  ExprPtr scalar_source = nullptr;  // Original expression before known dimensions were substituted.
+};
+
+struct CallPhysicalBindings {
+  TypeVarMap constants;
+  std::vector<const Var*> discovered;
+
+  void Record(const VarPtr& var, const ExprPtr& value) {
+    if (auto constant = As<ConstInt>(GeneralAnalyzer().Simplify(value))) {
+      if (constants.emplace(var.get(), constant).second) discovered.push_back(var.get());
+    }
+  }
 };
 
 struct CallAffineExpr {
@@ -1624,7 +1635,8 @@ std::optional<CallAffineExpr> ParseCallAffineExpr(const ExprPtr& expr) {
 }
 
 void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string& context, TypeVarMap& var_map,
-                     std::vector<CallTypeBindingConstraint>& constraints) {
+                     std::vector<CallTypeBindingConstraint>& constraints,
+                     CallPhysicalBindings* physical_bindings = nullptr) {
   // A callee placeholder can also appear verbatim in the caller's annotation.
   // Treat that as an uninformative unification constraint so a later concrete
   // actual can refine the placeholder.
@@ -1633,6 +1645,7 @@ void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string&
     return;
   }
 
+  if (physical_bindings) physical_bindings->Record(var, value);
   auto [it, inserted] = var_map.emplace(var.get(), value);
   if (inserted) return;
 
@@ -1641,7 +1654,8 @@ void BindCallTypeVar(const VarPtr& var, const ExprPtr& value, const std::string&
 
 bool BindConstantCallAffineExpr(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
                                 TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
-                                const ExprPtr& scalar_source = nullptr) {
+                                const ExprPtr& scalar_source = nullptr,
+                                CallPhysicalBindings* physical_bindings = nullptr) {
   auto constant = As<ConstInt>(value);
   if (!constant) constant = As<ConstInt>(GeneralAnalyzer().Simplify(value));
   if (!constant || !arith::detail::ConstIntFitsDtype(constant->value_, constant->dtype())) return false;
@@ -1661,9 +1675,9 @@ bool BindConstantCallAffineExpr(const ExprPtr& pattern, const ExprPtr& value, co
   const DataType dtype = GetScalarDtype(affine->var);
   if (!arith::detail::ConstIntFitsDtype(candidate, dtype)) return false;
   auto bound_value = std::make_shared<ConstInt>(candidate, dtype, value->span_);
-  BindCallTypeVar(affine->var, bound_value, context, var_map, constraints);
+  BindCallTypeVar(affine->var, bound_value, context, var_map, constraints, physical_bindings);
   if (scalar_source) {
-    // Preserve provenance after constant folding without introducing an
+    // Preserve substitution provenance after constant folding without introducing an
     // unevaluated competing value into numeric conflict checks.
     constraints.push_back({affine->var, bound_value, bound_value, context, false, scalar_source});
   }
@@ -1735,18 +1749,20 @@ bool CanDecomposeCallExprPattern(const ExprPtr& pattern, const ExprPtr& value,
 
 void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const std::string& context,
                              TypeVarMap& var_map, std::vector<CallTypeBindingConstraint>& constraints,
-                             bool allow_affine = false, const TypeVarMap* scalar_args = nullptr) {
+                             bool allow_affine = false, const TypeVarMap* scalar_args = nullptr,
+                             CallPhysicalBindings* physical_bindings = nullptr) {
   if (!pattern || !value) return;
   if (scalar_args && ReferencesCallScalar(pattern, *scalar_args)) {
-    auto expected = ResolveCallExpr(pattern, *scalar_args, var_map);
-    auto observed = ResolveCallExpr(value, *scalar_args, var_map);
+    const auto& known = physical_bindings ? physical_bindings->constants : var_map;
+    auto expected = ResolveCallExpr(pattern, *scalar_args, known);
+    auto observed = ResolveCallExpr(value, *scalar_args, known);
     if (structural_equal(expected, observed) ||
         ProveValidExtentEqual(expected, observed) == ProofResult::kTrue) {
       return;
     }
   }
   if (auto var = As<Var>(pattern)) {
-    BindCallTypeVar(var, value, context, var_map, constraints);
+    BindCallTypeVar(var, value, context, var_map, constraints, physical_bindings);
     return;
   }
 
@@ -1759,8 +1775,17 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   if (allow_affine) {
     auto affine_pattern = scalar_args ? SubstituteKnownCallScalars(pattern, *scalar_args) : pattern;
     auto scalar_source = affine_pattern.get() != pattern.get() ? pattern : nullptr;
-    if (BindConstantCallAffineExpr(affine_pattern, value, context, var_map, constraints, scalar_source)) {
+    if (BindConstantCallAffineExpr(affine_pattern, value, context, var_map, constraints, scalar_source,
+                                   physical_bindings)) {
       return;
+    }
+    if (physical_bindings) {
+      auto refined = SubstituteKnownCallScalars(affine_pattern, physical_bindings->constants);
+      if (refined.get() != affine_pattern.get() &&
+          BindConstantCallAffineExpr(refined, value, context, var_map, constraints, pattern,
+                                     physical_bindings)) {
+        return;
+      }
     }
   }
 
@@ -1771,21 +1796,22 @@ void CollectCallExprBindings(const ExprPtr& pattern, const ExprPtr& value, const
   // elsewhere still substitutes through differently-shaped return metadata.
   // A bound Scalar is an anchor, not a positional wildcard. Equivalent
   // reordered expressions are checked as a whole after all bindings exist.
-  if (!CanDecomposeCallExprPattern(pattern, value, scalar_args, &var_map)) return;
+  const auto& known = physical_bindings ? physical_bindings->constants : var_map;
+  if (!CanDecomposeCallExprPattern(pattern, value, scalar_args, &known)) return;
   auto pattern_binary = std::dynamic_pointer_cast<const BinaryExpr>(pattern);
   auto value_binary = std::dynamic_pointer_cast<const BinaryExpr>(value);
   if (pattern_binary && value_binary) {
     CollectCallExprBindings(pattern_binary->left_, value_binary->left_, context + " left operand", var_map,
-                            constraints, allow_affine, scalar_args);
+                            constraints, allow_affine, scalar_args, physical_bindings);
     CollectCallExprBindings(pattern_binary->right_, value_binary->right_, context + " right operand", var_map,
-                            constraints, allow_affine, scalar_args);
+                            constraints, allow_affine, scalar_args, physical_bindings);
     return;
   }
   auto pattern_unary = std::dynamic_pointer_cast<const UnaryExpr>(pattern);
   auto value_unary = std::dynamic_pointer_cast<const UnaryExpr>(value);
   if (pattern_unary && value_unary) {
     CollectCallExprBindings(pattern_unary->operand_, value_unary->operand_, context + " operand", var_map,
-                            constraints, allow_affine, scalar_args);
+                            constraints, allow_affine, scalar_args, physical_bindings);
   }
 }
 
@@ -1794,6 +1820,43 @@ void CollectCallExprVectorBindings(const std::vector<ExprPtr>& patterns, const s
                                    std::vector<CallTypeBindingConstraint>& constraints,
                                    bool allow_affine = false, const TypeVarMap* scalar_args = nullptr) {
   const size_t count = std::min(patterns.size(), values.size());
+  if (allow_affine) {
+    // Keep constants local to this shaped argument: separate inline Tiles
+    // may bind the same physical placeholder to different actual extents.
+    CallPhysicalBindings bindings;
+    std::vector<size_t> pending;
+    std::vector<bool> queued(count, true);
+    std::vector<std::unordered_set<const Var*>> missing(count);
+    std::unordered_map<const Var*, std::vector<size_t>> dependents;
+    for (size_t i = 0; i < count; ++i) {
+      pending.push_back(i);
+      var_collectors::VarDefUseCollector uses;
+      uses.VisitExpr(scalar_args ? SubstituteKnownCallScalars(patterns[i], *scalar_args) : patterns[i]);
+      missing[i] = std::move(uses.var_uses);
+      for (const auto* var : missing[i]) dependents[var].push_back(i);
+    }
+    size_t next = 0;
+    size_t notified = 0;
+    while (next < pending.size()) {
+      const size_t index = pending[next++];
+      queued[index] = false;
+      CollectCallExprBindings(patterns[index], values[index], context + "[" + std::to_string(index) + "]",
+                              var_map, constraints, true, scalar_args, &bindings);
+      while (notified < bindings.discovered.size()) {
+        const auto* var = bindings.discovered[notified++];
+        for (const size_t dependent : dependents[var]) {
+          missing[dependent].erase(var);
+          // Affine inversion needs at most one unknown. Each axis is visited
+          // initially, then at most when its missing count reaches one/zero.
+          if (dependent != index && missing[dependent].size() <= 1 && !queued[dependent]) {
+            queued[dependent] = true;
+            pending.push_back(dependent);
+          }
+        }
+      }
+    }
+    return;
+  }
   for (size_t i = 0; i < count; ++i) {
     CollectCallExprBindings(patterns[i], values[i], context + "[" + std::to_string(i) + "]", var_map,
                             constraints, allow_affine, scalar_args);

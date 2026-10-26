@@ -731,6 +731,31 @@ def test_call_return_type_solves_single_variable_integer_affine_extents(expressi
     ir.assert_structural_equal(deduced, ir.TileType([8, 64], pl.FP32))
 
 
+@pytest.mark.parametrize("is_inline", [False, True])
+@pytest.mark.parametrize("order", ["forward", "reverse", "chain"])
+def test_call_return_type_solves_affine_axes_from_the_same_tile(order, is_inline):
+    """Later axes can supply the constants needed to solve an earlier affine extent."""
+    span = ir.Span.unknown()
+    rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+    cols = ir.Var("N", ir.ScalarType(pl.INDEX), span)
+    tail = ir.Var("K", ir.ScalarType(pl.INDEX), span)
+
+    def add(left, right):
+        return ir.Add(left, right, pl.INDEX, span)
+
+    shape, actual_shape, expected_cols = {
+        "forward": ([rows, add(rows, cols)], [8, 16], 8),
+        "reverse": ([add(rows, cols), cols], [24, 16], 16),
+        "chain": ([add(rows, cols), add(cols, tail), tail], [32, 40, 16], 24),
+    }[order]
+    param = ir.Var("tile", ir.TileType(shape, pl.FP32), span)
+    actual = ir.Var("actual", ir.TileType(actual_shape, pl.FP32), span)
+    (deduced,) = ir.deduce_call_return_type(
+        [param], [actual], [ir.TileType([rows, cols], pl.FP32)], is_inline=is_inline
+    )
+    ir.assert_structural_equal(deduced, ir.TileType([8, expected_cols], pl.FP32))
+
+
 @pytest.mark.parametrize("expression", ["multiple_symbols", "nonlinear", "narrow_overflow"])
 def test_call_return_type_does_not_invent_unsafe_affine_bindings(expression):
     """Ambiguous, nonlinear, and out-of-range solutions leave the return symbol unbound."""
@@ -817,6 +842,23 @@ def test_external_inline_call_uses_independent_tile_dimension_deduction():
 
     (deduced,) = _user_call_types(Prog, "select_first")
     ir.assert_structural_equal(deduced, ir.TileType([16, 64], pl.FP32))
+
+
+@pytest.mark.parametrize("actual_dtype", [pl.FP4E2M1X2, pl.UINT8], ids=["other-fp4", "byte-carrier"])
+def test_external_void_inline_keeps_packed_format_checks(actual_dtype):
+    """Deferring generic Tile checks must still reject a known packed-format mismatch."""
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def consume(tile: pl.Tile[[8, 64], pl.FP4E1M2X2]):
+        return
+
+    with pytest.raises(ParserError, match="packed FP4 formats must match"):
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, tile: pl.Tile[[8, 64], actual_dtype]):
+                consume(tile)
 
 
 @pytest.mark.parametrize("extent", ["ROWS", "2 * ROWS"], ids=["plain", "affine"])
