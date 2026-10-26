@@ -45,6 +45,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/call_shape_binding.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -988,8 +989,16 @@ class TypePropagatingMutator : public IRMutator {
     new_return_vars.reserve(op->return_vars_.size());
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& rv = op->return_vars_[i];
-      if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
-        auto new_rv = std::make_shared<Var>(rv->name_hint_, yield_types[i], rv->span_);
+      auto result_type = i < yield_types.size() ? yield_types[i] : rv->GetType();
+      if (As<TileType>(result_type)) {
+        // A join inherits the converted value descriptor, not the chosen arm's
+        // allocation. In particular a pinned local producer must not turn an
+        // unbound result into an explicit binding to the then allocation.
+        // Preserve a binding only when the result itself already declared it.
+        result_type = CloneTypeWithMemRef(result_type, GetTypeMemRef(rv->GetType()));
+      }
+      if (result_type != rv->GetType()) {
+        auto new_rv = std::make_shared<Var>(rv->name_hint_, result_type, rv->span_);
         var_remap_[rv.get()] = new_rv;
         new_return_vars.push_back(new_rv);
       } else {

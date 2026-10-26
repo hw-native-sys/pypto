@@ -25,11 +25,16 @@ from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
+from .buffer_test_utils import TileHandleOrigins
+from .buffer_test_utils import statements as storage_statements
 from .storage_test_utils import without_call_memrefs
 
 # Tile-producing reads from GM. Built through the getter so a renamed operator fails at import
 # rather than silently dropping out of the membership test below.
 _LOAD_LIKE_OPS = frozenset({ir.get_op("tile.load").name, ir.get_op("tile.read").name})
+_LOOP_INPUT_CONFLICT = (
+    "independently live loop input without a same-space copy|independently observed older value version"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +71,16 @@ def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, 
 
     _RangeCollector().visit_stmt(function.body)
     return ranges
+
+
+def _assert_allocated_tiles_disjoint(program: ir.Program, first: str, second: str) -> None:
+    """Check physical byte ranges for values that must be live simultaneously."""
+    ranges = _collect_allocated_tile_ranges(program)
+    first_start, first_size = ranges[first]
+    second_start, second_size = ranges[second]
+    assert first_start + first_size <= second_start or second_start + second_size <= first_start, (
+        f"simultaneously live tiles {first!r} and {second!r} overlap: {ranges[first]} and {ranges[second]}"
+    )
 
 
 def _collect_named_tile_memrefs(program: ir.Program, names: set[str]) -> dict[str, ir.MemRef]:
@@ -133,6 +148,29 @@ def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
 
 
 _TILE_MOVE_OP = ir.get_op("tile.move").name
+
+
+def _collect_op_calls(program: ir.Program, op_name: str) -> list[ir.Call]:
+    """Find calls independently of whether the exact printer emits dump syntax."""
+    calls: list[ir.Call] = []
+
+    class CallCollector(ir.IRVisitor):
+        def visit_call(self, op):
+            if op.op.name == op_name:
+                calls.append(op)
+            super().visit_call(op)
+
+    collector = CallCollector()
+    for function in program.functions.values():
+        collector.visit_stmt(function.body)
+    return calls
+
+
+def _assert_no_same_space_tile_moves(program: ir.Program) -> None:
+    for call in _collect_op_calls(program, _TILE_MOVE_OP):
+        source_type, result_type = call.args[0].type, call.type
+        assert isinstance(source_type, ir.TileType) and isinstance(result_type, ir.TileType)
+        assert source_type.memory_space != result_type.memory_space
 
 
 def _carry_memref(expr):
@@ -1123,8 +1161,8 @@ def _divergent_acc_phi_program() -> ir.Program:
 
     The accumulator coalescer must decline this shape (``pre`` runs
     unconditionally, so retargeting it onto ``prev`` would clobber the
-    accumulator), leaving a divergent Acc carry that YieldFixup must reject.
-    Shared by the tests that assert each half of that contract.
+    accumulator). The result instead selects the independent source handles.
+    Shared by tests for the missing repair copy and the original seed storage.
     """
 
     @pl.program
@@ -1689,14 +1727,11 @@ class TestInplaceOps:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    def test_move_output_must_not_alias_input(self):
-        """tile.move's output must get a buffer distinct from its input.
-
-        The TMOV intrinsic cannot execute with src == dst. ``tile.move`` is
-        registered ``.not_inplace_safe()`` so MemoryReuse cannot colocate its
-        output with the input; baked-address codegen rejects any explicit alias
-        that bypasses memory planning.
-        """
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    def test_identical_move_is_removed_instead_of_emitting_an_aliased_tmov(
+        self, buffer_ir, pass_verification_instruments
+    ):
+        """A dead source and its identical copy can share storage once the TMOV is erased."""
 
         @pl.program
         class Before:
@@ -1713,12 +1748,25 @@ class TestInplaceOps:
                 result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
                 return result
 
-        After = _run_pipeline(Before)
-        bases = _collect_tile_memref_bases(After)
-        assert bases["tile_b"] != bases["tile_a"], (
-            "move output must not reuse its input's buffer (tile.move is not in-place safe); "
-            f"both bound to {bases['tile_a']}"
-        )
+        with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
+            After = _run_pipeline(Before)
+        assert not _collect_op_calls(After, _TILE_MOVE_OP)
+        assert len(_collect_op_calls(After, ir.get_op("tile.alloc").name)) == 1
+        source = _collect_named_tile_memrefs(After, {"tile_a"})["tile_a"]
+        observed: list[ir.MemRef] = []
+
+        class StoreCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.store").name:
+                    stored_type = op.value.args[0].type
+                    assert isinstance(stored_type, ir.TileType) and stored_type.memref is not None
+                    observed.append(stored_type.memref)
+                super().visit_assign_stmt(op)
+
+        function = After.get_function("main")
+        assert function is not None
+        StoreCollector().visit_stmt(function.body)
+        assert len(observed) == 1 and _same_base_address(source, observed[0])
 
     def test_inplace_unsafe_op_allows_non_producer_consumer_reuse(self):
         """tile.recip output must never share a buffer with its input.
@@ -2338,19 +2386,8 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    def test_if_phi_arm_yielding_iter_arg_still_copies_into_the_phi_buffer(self):
-        """Every arm of an if-phi must write the phi's buffer, IterArg arms included.
-
-        ``tile.mrgsort_format1`` is ``.not_inplace_safe()`` and reads
-        ``tile_iter``, so the retargeter declines to place ``merged`` on the
-        carry buffer (see ``test_retargeter_declines_for_not_inplace_safe_op``)
-        and the phi lands on its own ``mem_vec_6``.  The ``else`` arm yields the
-        loop's ``tile_iter`` unchanged -- an ``IterArg``, which has its own
-        ObjectKind and is *not* matched by ``As<Var>``.  Skipping it left
-        ``mem_vec_6`` unwritten whenever the ``else`` arm ran, and the carry
-        writeback below then copied that stale buffer back onto the carry,
-        silently destroying the loop-carried value.
-        """
+    def test_if_phi_iter_arg_else_arm_preserves_result_and_carry_storage(self):
+        """Both incoming edges write the selected result, including an unchanged IterArg edge."""
 
         @pl.program
         class Before:
@@ -2385,75 +2422,15 @@ class TestYieldFixup:
                 out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
                 return out_val
 
-        # sorted_tile/tile_iter/result live on the carry buffer mem_vec_5; the
-        # phi lives on mem_vec_6.  Both arms write mem_vec_6 -- the then arm
-        # through mrgsort, the else arm through tile_iter_mv -- before phi_mv
-        # copies it back onto the carry.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                src_tensor: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_0", 0, 8192)],
-                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
-                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
-            ) -> pl.Tensor[[1, 2048], pl.FP32]:
-                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[
-                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
-                ] = pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
-                    pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                )
-                sorted_tile: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.sort32(src_tile, idx_tile)
-                )
-                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
-                    if i >= 1:
-                        merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.mrgsort(tile_iter, block_len=64)
-                        )
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(merged)
-                        )
-                    else:
-                        tile_iter_mv: pl.Tile[
-                            [1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec
-                        ] = pl.tile.move(tile_iter, target_memory=pl.Mem.Vec)
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_iter_mv)
-                        )
-                    phi_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(phi, target_memory=pl.Mem.Vec)
-                    )
-                    result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(phi_mv)
-                    )
-                vals: pl.Tile[
-                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
-                ] = pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
-                out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
-                    vals, [0, 0], val_output
-                )
-                return out_val
-
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_if_phi_arms_write_the_phi_buffer(After)
+        _assert_carry_yield_lands_in_its_buffer(After)
+        memrefs = _collect_named_tile_memrefs(After, {"sorted_tile", "merged"})
+        assert not ir.MemRef.may_alias(memrefs["sorted_tile"], memrefs["merged"])
+        assert len(_collect_op_calls(After, ir.get_op("tile.alloc").name)) == 3
 
-    def test_if_phi_arm_yielding_iter_arg_makes_the_carry_buffer_canonical(self):
-        """Mirror of the test above: the *then* arm is the one yielding the IterArg.
-
-        YieldFixup only ever inserts its reconciling move into the ``else`` arm,
-        so the then arm's buffer is the canonical one.  When that arm yields the
-        carry unchanged the phi lands on the carry buffer itself, the ``else``
-        arm's producer is copied into it, and the loop-carry writeback drops out
-        because the phi already is the carry.  Skipping the IterArg arm instead
-        put the phi on the else arm's buffer and left it unwritten whenever the
-        then arm ran.
-        """
+    def test_if_phi_iter_arg_then_arm_preserves_result_and_carry_storage(self):
+        """Reversing which arm yields the IterArg preserves result writes and carry writeback."""
 
         @pl.program
         class Before:
@@ -2488,58 +2465,12 @@ class TestYieldFixup:
                 out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
                 return out_val
 
-        # The phi shares the carry buffer mem_vec_5, so `merged` is copied into
-        # it and no separate carry writeback is emitted before the loop yield.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                src_tensor: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_0", 0, 8192)],
-                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
-                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
-            ) -> pl.Tensor[[1, 2048], pl.FP32]:
-                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[
-                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
-                ] = pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
-                    pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                )
-                sorted_tile: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.sort32(src_tile, idx_tile)
-                )
-                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
-                    if i < 1:
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_iter)
-                        )
-                    else:
-                        merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.mrgsort(tile_iter, block_len=64)
-                        )
-                        merged_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.move(merged, target_memory=pl.Mem.Vec)
-                        )
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(merged_mv)
-                        )
-                    result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(phi)
-                    )
-                vals: pl.Tile[
-                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
-                ] = pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
-                out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
-                    vals, [0, 0], val_output
-                )
-                return out_val
-
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_if_phi_arms_write_the_phi_buffer(After)
+        _assert_carry_yield_lands_in_its_buffer(After)
+        memrefs = _collect_named_tile_memrefs(After, {"sorted_tile", "merged"})
+        assert not ir.MemRef.may_alias(memrefs["sorted_tile"], memrefs["merged"])
+        assert len(_collect_op_calls(After, ir.get_op("tile.alloc").name)) == 3
 
     def test_carry_writebacks_run_before_they_are_overwritten(self):
         """A carry rename must be read before a sibling carry overwrites its buffer.
@@ -2908,14 +2839,8 @@ class TestYieldFixup:
         _assert_carry_yield_lands_in_its_buffer(After)
         _assert_carry_writebacks_do_not_clobber(After)
 
-    def test_carries_sharing_one_buffer_are_rejected(self):
-        """Two carries seeded from one tile share a buffer, which no order can save.
-
-        ``prev`` and ``cur`` are both initialised from ``seed``, so both carries
-        *are* ``seed``'s buffer and one iteration cannot preserve both. Report it
-        against the loop, where the carries still have names, rather than leaving
-        codegen to reject the degenerate self-copy it eventually produces.
-        """
+    def test_repeated_initializer_isolates_the_two_mutable_carries(self):
+        """Repeated Vec initializers can be copied into independent history slots."""
 
         @pl.program
         class Before:
@@ -2934,19 +2859,74 @@ class TestYieldFixup:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
                 return result
 
-        with pytest.raises(ValueError, match="share the same on-chip buffer"):
-            _run_pipeline(Before)
+        after = _run_pipeline(Before)
+        function = after.get_function("main")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        definitions = {op.var.unique_id: op for op in function.body.stmts if isinstance(op, ir.AssignStmt)}
+        seed = next(op.var for op in definitions.values() if op.var.name_hint == "seed")
+        loop = next(op for op in function.body.stmts if isinstance(op, ir.ForStmt))
+        first, second = [_carry_memref(argument) for argument in loop.iter_args]
+        assert first is not None and second is not None
+        assert not ir.MemRef.may_alias(first, second), "independent mutable carries must not overlap"
+        for argument in loop.iter_args:
+            initial = argument.initValue
+            while not initial.same_as(seed):
+                assert isinstance(initial, ir.Var)
+                definition = definitions[initial.unique_id]
+                source = definition.value
+                if isinstance(source, ir.Call):
+                    assert source.op.name == _TILE_MOVE_OP
+                    source = source.args[0]
+                assert isinstance(source, ir.Var)
+                initial = source
+        _assert_carry_yield_lands_in_its_buffer(after)
+        _assert_carry_writebacks_do_not_clobber(after)
 
-    def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
-        """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
+        def window(value):
+            memory = _carry_memref(value)
+            assert memory is not None and isinstance(memory.byte_offset_, ir.ConstInt)
+            assert memory.size_ == 64 * 64 * 4
+            return memory.base_.unique_id, memory.byte_offset_.value
 
-        The divergent phi cannot be safely coalesced because one seed is
-        produced before the branch. Reject it before codegen rather than emit a
-        type-correct ``tile.move`` that PTOAS cannot lower for distinct L0C
-        buffers.
-        """
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(_divergent_acc_phi_program())
+        # Evaluate the emitted reads and writes with a scalar payload per tile.
+        # This checks the recurrence and the old-cur store independently of how
+        # producers, entry copies, and parallel writebacks were arranged.
+        memory = {window(argument): 1 for argument in loop.iter_args}
+        body = loop.body.stmts if isinstance(loop.body, ir.SeqStmts) else [loop.body]
+        expected_cur, expected_prev = 1, 1
+        for _ in range(4):
+            old_reads = []
+            for op in body:
+                if not isinstance(op, ir.AssignStmt):
+                    continue
+                value = op.value
+                if isinstance(value, ir.Var):
+                    assert window(op.var) == window(value), "a bare alias cannot copy a value"
+                elif isinstance(value, ir.Call) and value.op.name == ir.get_op("tile.store").name:
+                    old_reads.append(memory[window(value.args[0])])
+                elif isinstance(op.var.type, ir.TileType):
+                    assert isinstance(value, ir.Call)
+                    if value.op.name == _TILE_MOVE_OP:
+                        memory[window(op.var)] = memory[window(value.args[0])]
+                    else:
+                        assert value.op.name == ir.get_op("tile.add").name
+                        memory[window(op.var)] = sum(memory[window(arg)] for arg in value.args)
+            assert old_reads == [expected_cur], "the store after grown must still observe old cur"
+            expected_cur, expected_prev = expected_cur + expected_prev, expected_cur
+            assert [memory[window(argument)] for argument in loop.iter_args] == [expected_cur, expected_prev]
+        final_store = next(op.value for op in definitions.values() if op.var.name_hint == "result")
+        assert isinstance(final_store, ir.Call) and final_store.op.name == ir.get_op("tile.store").name
+        assert memory[window(final_store.args[0])] == 5
+
+    def test_divergent_acc_phi_selects_handles_without_acc_to_acc_move(self):
+        """Selecting independently placed Acc handles needs no payload copy."""
+        after = _run_pipeline(_divergent_acc_phi_program())
+        function = after.get_function("main")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+        assert isinstance(branch.return_vars[0].type, ir.TileType)
+        assert branch.return_vars[0].type.memref is None
+        _assert_no_same_space_tile_moves(after)
 
 
 class TestNestedCarryLifetimeCarrier:
@@ -3006,12 +2986,11 @@ class TestNestedCarryLifetimeCarrier:
 class TestControlFlow:
     """Tests for correct lifetime analysis across control flow boundaries."""
 
-    def test_var_used_in_nested_if_shares_iter_arg_buffer(self):
-        """The original seed stays fixed while the private carry advances.
+    def test_nested_if_keeps_the_recurring_initializer_read_independent(self):
+        """Updating acc must preserve the original tile_a on every iteration.
 
-        For input X the first two iterations compute 2X, then 3X. Sharing the
-        seed with acc would compute 4X, so preserve the full expected IR with
-        an entry copy and a distinct carry allocation.
+        Starting from X, the first two iterations compute 2X then 3X. Sharing
+        the unchanged seed with the advancing carry would instead compute 4X.
         """
 
         @pl.program
@@ -3035,50 +3014,61 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
                 return result
 
-        # Keep tile_a on mem_vec_2 and the complete loop result chain on the
-        # private carry buffer. Only the loop-entry copy reads the old seed into
-        # that buffer; there is no copy back into tile_a after either branch.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_carry_input_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_tensor, [0, 0], [64, 64], [64, 64]
-                )
-                carry_input_1: pl.Tile[
-                    [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                ] = pl.tile.move(tile_a, target_memory=pl.Mem.Vec)
-                for i, (acc,) in pl.range(4, init_values=(carry_input_1,)):
-                    if i < 2:
-                        tile_c: pl.Tile[
-                            [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                        ] = pl.tile.add(acc, tile_a)
-                        if_result: pl.Tile[
-                            [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                        ] = pl.yield_(tile_c)
-                    else:
-                        if_result: pl.Tile[
-                            [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                        ] = pl.yield_(acc)
-                    loop_out: pl.Tile[
-                        [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                    ] = pl.yield_(if_result)
-                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                    loop_out, [0, 0], output
-                )
-                return result
-
-        After = _run_pipeline(Before)
-        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
-        refs = _collect_named_tile_memrefs(After, {"tile_a", "carry_input_1", "tile_c"})
-        assert not ir.MemRef.may_alias(refs["tile_a"], refs["carry_input_1"])
-        assert _same_base_address(refs["carry_input_1"], refs["tile_c"])
+        after = _run_pipeline(Before)
+        main = after.get_function("main")
+        assert main is not None and isinstance(main.body, ir.SeqStmts)
+        definitions = {op.var.unique_id: op for op in main.body.stmts if isinstance(op, ir.AssignStmt)}
+        tile_a = next(op.var for op in definitions.values() if op.var.name_hint == "tile_a")
+        old_memory = _carry_memref(tile_a)
+        assert old_memory is not None
+        loop = next(op for op in main.body.stmts if isinstance(op, ir.ForStmt))
+        assert isinstance(loop.body, ir.SeqStmts)
+        branch = next(op for op in loop.body.stmts if isinstance(op, ir.IfStmt))
+        then_body = ir.flatten_to_stmts(branch.then_body)
+        producer = next(
+            op for op in then_body if isinstance(op, ir.AssignStmt) and op.var.name_hint == "tile_c"
+        )
+        assert isinstance(producer.value, ir.Call) and producer.value.op.name == ir.get_op("tile.add").name
+        assert producer.value.args[0].same_as(loop.iter_args[0])
+        assert producer.value.args[1].same_as(tile_a), "each iteration must add the unchanged initializer"
+        family: list[ir.Expr] = [loop.iter_args[0], loop.return_vars[0], branch.return_vars[0], producer.var]
+        assert branch.else_body is not None
+        for body in (branch.then_body, branch.else_body):
+            yielded = ir.get_last_yield_stmt(body)
+            assert yielded is not None
+            family.extend(yielded.value)
+        for value in family:
+            memory = _carry_memref(value)
+            assert memory is not None and not ir.MemRef.may_alias(memory, old_memory), (
+                "a carry/phi write must not turn acc + initial into acc + acc on the next iteration"
+            )
+            tile_type = value.type
+            assert isinstance(tile_type, ir.TileType)
+            assert tile_type.shape == [64, 64] and tile_type.dtype == DataType.FP32
+            assert tile_type.memory_space == ir.MemorySpace.Vec and memory.size_ == old_memory.size_ == 16384
+        initial = loop.iter_args[0].initValue
+        assert isinstance(initial, ir.Var)
+        entry = definitions[initial.unique_id]
+        assert isinstance(entry.value, ir.Call) and entry.value.op.name == _TILE_MOVE_OP
+        assert entry.value.args[0].same_as(tile_a), "the private carry must start with the original input"
+        _assert_if_phi_arms_write_the_phi_buffer(after)
+        _assert_carry_yield_lands_in_its_buffer(after)
+        # A direct producer can already fill the carry without an edge copy.
+        # Otherwise validate the ordering of every explicit carry writeback.
+        writes = _collect_op_calls(after, _TILE_MOVE_OP)
+        carry_windows = [_carry_memref(argument) for argument in loop.iter_args]
+        has_writeback = False
+        for move in writes:
+            source = _carry_memref(move.args[0])
+            if source is not None and any(
+                target is not None and _same_base_address(source, target) for target in carry_windows
+            ):
+                has_writeback = True
+        if has_writeback:
+            _assert_carry_writebacks_do_not_clobber(after)
+        saved = next(op.value for op in definitions.values() if op.var.name_hint == "result")
+        assert isinstance(saved, ir.Call) and saved.op.name == ir.get_op("tile.store").name
+        assert saved.args[0].same_as(loop.return_vars[0])
 
     def test_different_if_branches_can_share(self):
         """Variables in different IfStmt branches CAN share MemRef (non-overlapping lifetimes)."""
@@ -3440,8 +3430,7 @@ class TestControlFlow:
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_branch_local_var_does_not_leak(self):
-        """A variable defined and consumed entirely inside one IfStmt branch
-        has a short lifetime and does not block reuse after the IfStmt."""
+        """A branch-local producer and the selected result reuse storage after the old value dies."""
 
         @pl.program
         class Before:
@@ -3464,65 +3453,17 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
                 return result
 
-        # tile_a → mem_vec_2 (and tile_e reuses it). tile_b → mem_vec_3
-        # (in then-branch), unified with else-branch via tile.move on tile_a.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-                cond_param: pl.Scalar[pl.INDEX],
-                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_tensor, [0, 0], [64, 64], [64, 64]
-                )
-                if cond_param < 2:
-                    tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.add(tile_a, tile_a)
-                    )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
-                else:
-                    tile_a_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(tile_a, target_memory=pl.Mem.Vec)
-                    )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_a_mv)
-                    )
-                tile_e: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(
-                    if_result, if_result
-                )
-                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                    tile_e, [0, 0], output
-                )
-                return result
-
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
+        _assert_if_phi_arms_write_the_phi_buffer(After)
+        memrefs = _collect_named_tile_memrefs(After, {"tile_a", "tile_b", "tile_e"})
+        assert _same_base_address(memrefs["tile_a"], memrefs["tile_b"])
+        assert _same_base_address(memrefs["tile_b"], memrefs["tile_e"])
+        assert len(_collect_op_calls(After, ir.get_op("tile.alloc").name)) == 1
+        assert not _collect_op_calls(After, _TILE_MOVE_OP)
+        passes.allocate_memory_addr()(After)
 
     def test_if_phi_read_after_branch_blocks_reuse(self):
-        """An scf.if return_var (phi) read *after* the branch keeps its buffer
-        live; a later temporary must not be packed onto it.
-
-        Regression test for issue #1821: the lifetime analyzer did not track
-        IfStmt return_vars, so reads of a phi after the if were dropped and its
-        buffer's live range collapsed at the yield.  A later temporary (`e`) was
-        then packed onto the still-live phi buffer, corrupting the value `f`
-        reads (manifested as ~17.5% wrong output in the dsv4 prefill_sparse_attn
-        merge_norm kernel).
-
-        Here `a` stays live across the whole body (used by `e` and `g`), so its
-        buffer is occupied and `e` would otherwise fall back onto the phi's
-        buffer.  Pre-fix, `e` took the phi buffer `mem_vec_3` (clobbering `r`
-        before `f = r + e` read it); post-fix, `e` gets its own `mem_vec_6`.  The
-        branch-local sources `b`/`c` still share one buffer (`mem_vec_3`),
-        proving the fix keeps legitimate mutually-exclusive branch sharing.
-        """
+        """A live if result and an independently live old input block a post-if temporary (#1821)."""
 
         @pl.program
         class Before:
@@ -3546,43 +3487,15 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(g, [0, 0], output)
                 return result
 
-        # a → mem_vec_2 (live to the end). b/c/r (phi) share mem_vec_3. e must
-        # NOT take mem_vec_3 (the phi is live until f reads it) → e gets mem_vec_6.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-                cond_param: pl.Scalar[pl.INDEX],
-                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_a, [0, 0], [64, 64], [64, 64]
-                )
-                if cond_param < 2:
-                    b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(
-                        a, a
-                    )
-                    r: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.yield_(b)
-                else:
-                    c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.mul(
-                        a, a
-                    )
-                    r: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.yield_(c)
-                e: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = pl.tile.add(a, a)
-                f: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(r, e)
-                g: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(a, f)
-                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                    g, [0, 0], output
-                )
-                return result
-
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
+        _assert_if_phi_arms_write_the_phi_buffer(After)
+        memrefs = _collect_named_tile_memrefs(After, {"a", "b", "c", "e"})
+        assert _same_base_address(memrefs["b"], memrefs["c"])
+        for first, second in (("b", "e"), ("a", "b"), ("a", "e")):
+            assert not ir.MemRef.may_alias(memrefs[first], memrefs[second]), (
+                f"simultaneously live tiles {first!r} and {second!r} must remain disjoint"
+            )
+        assert len(_collect_op_calls(After, ir.get_op("tile.alloc").name)) == 3
 
     def test_loop_return_var_blocks_init_memref_reuse(self):
         """Return_var used after loop must block reuse of initValue's MemRef.
@@ -4120,12 +4033,11 @@ class TestTopDownRetargeter:
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_failed_if_retarget_rolls_back_successful_sibling_arm(self):
-        """A declined branch must not leak rewrites planned for its sibling.
+        """A failed opaque incoming edge must roll back the sibling producer's rewrite.
 
-        The ``then`` add can write directly into the loop-carry buffer. The
-        ``else`` reshape is an inherit-input view and deliberately refuses
-        direct retargeting. The enclosing if-retarget therefore fails as a
-        unit, and the add must retain its original allocation.
+        Legacy external handles may lack physical storage until codegen. Such
+        an edge cannot prove a direct retarget or an early physical copy, so the
+        speculative then-arm retarget must not survive the transaction.
         """
 
         @pl.program
@@ -4134,6 +4046,7 @@ class TestTopDownRetargeter:
             def kernel(
                 self,
                 inp: pl.Tensor[[16, 16], pl.FP32],
+                external: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
                 cond: pl.Scalar[pl.INDEX],
                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
@@ -4144,12 +4057,37 @@ class TestTopDownRetargeter:
                         retargetable = pl.tile.add(source, source)
                         merged = pl.yield_(retargetable)
                     else:
-                        blocked = pl.tile.reshape(source, [16, 16])
-                        merged = pl.yield_(blocked)
+                        merged = pl.yield_(external)
                     loop_result = pl.yield_(merged)
                 return pl.tile.store(loop_result, [0, 0], out)
 
-        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        initialized = passes.init_mem_ref()(Before)
+
+        class OpaqueExternalStorage(ir.IRMutator):
+            def __init__(self):
+                super().__init__()
+                self.variables = {}
+
+            def visit_var(self, op):
+                if op.name_hint != "external":
+                    return op
+                if op.unique_id not in self.variables:
+                    tile_type = op.type
+                    assert isinstance(tile_type, ir.TileType)
+                    self.variables[op.unique_id] = ir.Var(
+                        op.name_hint,
+                        ir.TileType(
+                            tile_type.shape, tile_type.dtype, None, tile_type.tile_view, ir.MemorySpace.Vec
+                        ),
+                        op.span,
+                    )
+                return self.variables[op.unique_id]
+
+        before = OpaqueExternalStorage().visit_program(initialized)
+        function = before.get_function("kernel")
+        assert function is not None and isinstance(function.params[1].type, ir.TileType)
+        assert function.params[1].type.memref is None
+        after = passes.materialize_semantic_aliases()(before)
         bases = _collect_tile_memref_bases(after)
         assert bases["retargetable"] != bases["initial"], (
             "the successful then-arm rewrite leaked after the else-arm declined"
@@ -4228,19 +4166,32 @@ class SharedSuffix:
 """
 
         before = passes.init_mem_ref()(pl.parse_program(source))
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            passes.memory_reuse()(passes.materialize_semantic_aliases()(before))
+        after = passes.memory_reuse()(passes.materialize_semantic_aliases()(before))
+        ranges = _collect_named_tile_memrefs(
+            after, {"accumulated", *[f"seed_{i}" for i in range(chain_length)]}
+        )
+        for i in range(chain_length):
+            assert not ir.MemRef.may_alias(ranges["accumulated"], ranges[f"seed_{i}"])
 
-    def test_gating_vec_inplace_if_phi_is_not_acc_coalesced(self):
-        """Gating: the accumulator coalescer is Acc-scoped. A structurally
-        identical if-phi in Vec space -- ``else`` is an in-place
-        ``fillpad_inplace`` (reuses input, output aliases it), ``then`` a fresh
-        seed on a different Vec buffer -- must NOT be coalesced by the seed
-        retarget. ``IsInplaceAccumulatorProducer`` returns true for the Vec
-        branch, but the ``MemorySpace::Acc`` gate skips it, so the existing
-        ``YieldFixupMutator`` reconciles it with a legal Vec->Vec ``tile.move``
-        (Vec->Vec is a legal tmov pair, unlike Acc->Acc). Two Vec buffers survive.
-        """
+        class ReferenceChecker(ir.IRVisitor):
+            count = 0
+
+            def visit_if_stmt(self, op):
+                assert len(op.return_vars) == 1
+                assert isinstance(op.return_vars[0].type, ir.TileType)
+                assert op.return_vars[0].type.memref is None
+                self.count += 1
+                super().visit_if_stmt(op)
+
+        checker = ReferenceChecker()
+        function = after.get_function("kernel")
+        assert function is not None
+        checker.visit_stmt(function.body)
+        assert checker.count == chain_length
+        _assert_no_same_space_tile_moves(after)
+
+    def test_generic_vec_branch_planning_preserves_writeback_and_old_read(self):
+        """Generic Vec reuse preserves the original read and required writeback contracts."""
 
         @pl.program
         class Before:
@@ -4249,14 +4200,15 @@ class SharedSuffix:
                 self,
                 x: pl.Tensor[[64, 64], pl.FP32],
                 cond: pl.Scalar[pl.INDEX],
-                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
                 base: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
                     x, [0, 0], [64, 64], target_memory=pl.Mem.Vec
                 )
                 prev: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad_inplace(
                     base, pad_value=pl.PadValue.zero
                 )
+                previous_saved = pl.store(prev, [64, 0], out)
                 if cond < 1:
                     # Fresh, non-in-place producer (tile.fillpad, not _inplace) so the
                     # seed is NOT an accumulator, while still carrying a tile_view to
@@ -4270,17 +4222,40 @@ class SharedSuffix:
                         prev, pad_value=pl.PadValue.max
                     )
                     phi: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(acc)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(phi, [0, 0], out)
+                result: pl.Tensor[[128, 64], pl.FP32] = pl.store(phi, [0, 0], previous_saved)
                 return result
 
-        After = _run_pipeline(Before)
-        bases = {b for b in _collect_tile_memref_bases(After).values() if "vec" in b}
-        # Not acc-coalesced: the two branch buffers survive and the existing path
-        # inserts a (legal, Vec->Vec) tile.move to reconcile the phi.
-        assert len(bases) == 2, f"Vec accumulator-shaped phi must not be acc-coalesced; bases={sorted(bases)}"
-        assert "tile.move" in ir.python_print(After), (
-            f"expected the pre-existing Vec->Vec move (coalescer must skip non-Acc):\n{ir.python_print(After)}"
+        materialized = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        memrefs = _collect_named_tile_memrefs(materialized, {"base", "prev", "seed", "acc"})
+        assert _same_base_address(memrefs["base"], memrefs["prev"])
+        assert _same_base_address(memrefs["prev"], memrefs["acc"])
+        main = materialized.get_function("main")
+        assert main is not None and isinstance(main.body, ir.SeqStmts)
+        branch = next(op for op in main.body.stmts if isinstance(op, ir.IfStmt))
+        old_store = next(
+            op
+            for op in main.body.stmts
+            if isinstance(op, ir.AssignStmt) and op.var.name_hint == "previous_saved"
         )
+        assert (
+            isinstance(old_store.value, ir.Call) and old_store.value.op.name == ir.get_op("tile.store").name
+        )
+        assert main.body.stmts.index(old_store) < main.body.stmts.index(branch)
+        old_value = _carry_memref(old_store.value.args[0])
+        assert old_value is not None and _same_base_address(old_value, memrefs["prev"])
+        fresh = _collect_op_calls(materialized, ir.get_op("tile.fillpad").name)
+        inplace = _collect_op_calls(materialized, ir.get_op("tile.fillpad_inplace").name)
+        assert len(fresh) == 1 and len(inplace) == 2
+        for call in [*fresh, *inplace]:
+            tile_type = call.type
+            assert isinstance(tile_type, ir.TileType) and tile_type.memory_space == ir.MemorySpace.Vec
+            assert tile_type.shape == [64, 64] and tile_type.dtype == DataType.FP32
+        _assert_if_phi_arms_write_the_phi_buffer(materialized)
+        After = passes.memory_reuse()(materialized)
+        _assert_if_phi_arms_write_the_phi_buffer(After)
+        assert len(_collect_op_calls(After, ir.get_op("tile.alloc").name)) == 1
+        assert not _collect_op_calls(After, _TILE_MOVE_OP)
+        passes.allocate_memory_addr()(After)
 
     def test_pre_if_acc_seed_not_coalesced_onto_accumulator(self):
         """Branch-locality guard: the accumulator coalescer must only retarget a
@@ -4291,14 +4266,13 @@ class SharedSuffix:
         into ``prev``. Coalescing would retarget ``pre`` onto ``prev``'s buffer,
         writing it before the ``if`` and clobbering the accumulator that the else
         branch reads. Branch exclusivity does NOT hold for a pre-if producer, so
-        the coalescer must skip this phi (leaving it to YieldFixup) and keep
-        ``pre`` and ``prev`` on distinct buffers.
+        the coalescer must select the source handles and keep ``pre`` and
+        ``prev`` on distinct buffers.
         """
-        # Branch-locality correctly prevents unsafe coalescing. Because Acc->Acc
-        # tile.move is unsupported, YieldFixup must then fail loudly instead of
-        # emitting invalid IR for this unlowerable control-flow shape.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(_divergent_acc_phi_program())
+        after = _run_pipeline(_divergent_acc_phi_program())
+        memory = _collect_named_tile_memrefs(after, {"pre", "prev", "acc"})
+        assert not ir.MemRef.may_alias(memory["pre"], memory["prev"])
+        assert _same_base_address(memory["acc"], memory["prev"])
 
     def test_pre_if_accumulator_loop_is_not_treated_as_branch_local(self):
         """A loop result defined before an if cannot justify branch-exclusive reuse."""
@@ -4331,12 +4305,28 @@ class SharedSuffix:
                 result = pl.tile.store(merged, [0, 0], out)
                 return bypass_result, result
 
-        # The pre-if loop result remains live after the if. Treating it as a
-        # branch-local accumulator would retarget the sibling seed onto its
-        # buffer and clobber bypass_result on that path. Decline and fail closed
-        # because the remaining divergent Acc phi has no legal repair move.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(Before)
+        # The bypass keeps the pre-if loop result live. Select its handle or
+        # the independent sibling seed, preserving the bypass on both paths.
+        after = _run_pipeline(Before)
+        function = after.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        loop = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.ForStmt))
+        branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+        assert isinstance(branch.return_vars[0].type, ir.TileType)
+        assert branch.return_vars[0].type.memref is None
+        incoming = ir.get_last_yield_stmt(branch.then_body)
+        assert incoming is not None and incoming.value[0].same_as(loop.return_vars[0])
+        bypass = next(
+            stmt
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "bypass_result"
+        )
+        assert isinstance(bypass.value, ir.Call)
+        assert bypass.value.args[0].same_as(loop.return_vars[0])
+        seed = _collect_named_tile_memrefs(after, {"seed"})["seed"]
+        carried_memory = _carry_memref(loop.return_vars[0])
+        assert carried_memory is not None and not ir.MemRef.may_alias(seed, carried_memory)
+        _assert_no_same_space_tile_moves(after)
 
     def test_branch_local_accumulator_loop_preserves_external_seed_after_if(self):
         """A branch-local accumulator loop cannot donate an externally live buffer.
@@ -4374,10 +4364,10 @@ class SharedSuffix:
                 result = pl.tile.store(merged, [0, 0], out)
                 return bypass_result, result
 
-        # Retargeting ``seed`` onto ``initial`` is unsafe because ``initial``
-        # remains independently observable after the if on the else path. The
-        # remaining divergent Acc phi has no legal Acc-to-Acc repair move.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        # The original Acc value is independently observed after the update.
+        # Neither an entry copy nor a selected handle can preserve those bytes
+        # across the native accumulator update.
+        with pytest.raises(ValueError, match=_LOOP_INPUT_CONFLICT):
             _run_pipeline(Before)
 
     def test_direct_accumulator_phi_preserves_reused_input_after_if(self):
@@ -4409,7 +4399,7 @@ class SharedSuffix:
                 result = pl.tile.store(merged, [0, 0], out)
                 return bypass_result, result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        with pytest.raises(ValueError, match="independently observed older value version"):
             _run_pipeline(Before)
 
     def test_direct_accumulator_phi_preserves_stale_bare_alias_after_if(self):
@@ -4475,7 +4465,7 @@ class SharedSuffix:
                 return super().visit_var(op)
 
         drifted = _DriftBareAlias().visit_program(initialized)
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        with pytest.raises(ValueError, match="independently observed older value version"):
             passes.memory_reuse()(passes.materialize_semantic_aliases()(drifted))
 
     def test_direct_accumulator_phi_tracks_iter_arg_initializer_after_if(self):
@@ -4509,7 +4499,8 @@ class SharedSuffix:
                 result = pl.tile.store(loop_result, [0, 0], out)
                 return result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        # Preserve the old initializer before an update; Acc cannot make the entry copy.
+        with pytest.raises(ValueError, match=_LOOP_INPUT_CONFLICT):
             _run_pipeline(Before)
 
     def test_direct_accumulator_phi_preserves_metadata_alias_after_if(self):
@@ -4542,7 +4533,7 @@ class SharedSuffix:
                 result = pl.tile.store(merged, [0, 0], out)
                 return bypass_result, result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+        with pytest.raises(ValueError, match="independently observed older value version"):
             _run_pipeline(Before)
 
     def test_accumulator_if_phi_same_base_disjoint_windows_are_coalesced(self):
@@ -4567,28 +4558,54 @@ class SharedSuffix:
                 mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
                 mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
                 mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 8192)
+                mem_left_6: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 2048)
+                mem_right_7: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 8192)
+                mem_acc_8: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
                     lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
                 )
                 sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
                     rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
                 )
+                left: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_left_6, 0, 2048), pl.Mem.Left] = pl.tile.move(
+                    sa, target_memory=pl.Mem.Left
+                )
+                right: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_right_7, 0, 8192), pl.Mem.Right] = (
+                    pl.tile.move(sb, target_memory=pl.Mem.Right)
+                )
                 prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
-                    sa, sb
+                    left, right
                 )
                 if cond < 1:
                     seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 4096, 4096), pl.Mem.Acc] = (
-                        pl.tile.matmul(sa, sb)
+                        pl.tile.matmul(left, right)
                     )
-                    phi = pl.yield_(seed)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_8, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        seed
+                    )
                 else:
                     acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
-                        pl.tile.matmul_acc(prev, sa, sb)
+                        pl.tile.matmul_acc(prev, left, right)
                     )
-                    phi = pl.yield_(acc)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_8, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        acc
+                    )
                 return pl.tile.store(phi, [0, 0], out)
 
-        after = passes.memory_reuse()(Before)
+        # Preserve the native source windows and initialize the logical result
+        # explicitly; InitMemRef would recreate the deliberate shared layout.
+        original = _collect_named_tile_memrefs(Before, {"prev", "seed"})
+        assert ir.MemRef.same_allocation(original["prev"], original["seed"])
+        assert isinstance(original["prev"].byte_offset_, ir.ConstInt)
+        assert isinstance(original["seed"].byte_offset_, ir.ConstInt)
+        assert original["prev"].byte_offset_.value == 0 and original["seed"].byte_offset_.value == 4096
+        before_main = Before.get_function("kernel")
+        assert before_main is not None
+        before_if = next(op for op in ir.flatten_to_stmts(before_main.body) if isinstance(op, ir.IfStmt))
+        request = _carry_memref(before_if.return_vars[0])
+        assert request is not None and not request.is_pinned_
+        assert not ir.MemRef.same_allocation(request, original["prev"])
+        after = passes.memory_reuse()(passes.materialize_semantic_aliases()(Before))
         ranges = _collect_allocated_tile_ranges(after)
         for name in ("prev", "seed", "acc"):
             assert ranges[name] == (0, 4096), f"{name} did not use the canonical Acc window: {ranges}"
@@ -4610,8 +4627,8 @@ class SharedSuffix:
         _IfReturnCollector().visit_stmt(main.body)
         assert phi_ranges == [(0, 4096)]
 
-    def test_divergent_bare_acc_alias_fails_closed(self):
-        """An alias with a stale MemRef cannot select the accumulator target."""
+    def test_divergent_bare_acc_alias_is_normalized_before_accumulator_planning(self):
+        """A bare alias follows its real accumulator before the If result is planned."""
 
         @pl.program
         class Before:
@@ -4628,30 +4645,94 @@ class SharedSuffix:
                 mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 mem_acc_6: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 mem_acc_7: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                mem_left_8: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 2048)
+                mem_right_9: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 8192)
+                mem_acc_10: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
                     lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
                 )
                 sb: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_4, 0, 8192), pl.Mem.Mat] = pl.tile.load(
                     rhs, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat
                 )
+                left: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_left_8, 0, 2048), pl.Mem.Left] = pl.tile.move(
+                    sa, target_memory=pl.Mem.Left
+                )
+                right: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_right_9, 0, 8192), pl.Mem.Right] = (
+                    pl.tile.move(sb, target_memory=pl.Mem.Right)
+                )
                 prev: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
-                    sa, sb
+                    left, right
                 )
                 if cond < 1:
                     seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_7, 0, 4096), pl.Mem.Acc] = (
-                        pl.tile.matmul(sa, sb)
+                        pl.tile.matmul(left, right)
                     )
-                    phi = pl.yield_(seed)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_10, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        seed
+                    )
                 else:
                     acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
-                        pl.tile.matmul_acc(prev, sa, sb)
+                        pl.tile.matmul_acc(prev, left, right)
                     )
                     stale_alias: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_6, 0, 4096), pl.Mem.Acc] = acc
-                    phi = pl.yield_(stale_alias)
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_10, 0, 4096), pl.Mem.Acc] = pl.yield_(
+                        stale_alias
+                    )
                 return pl.tile.store(phi, [0, 0], out)
 
-        with pytest.raises(InternalError, match="cannot align the accumulator branch"):
-            passes.materialize_semantic_aliases()(Before)
+        original = _collect_named_tile_memrefs(Before, {"acc", "stale_alias"})
+        assert not ir.MemRef.same_allocation(original["acc"], original["stale_alias"])
+        # The native fixture already supplies all operand storage and an
+        # independent result request. Preserve its deliberately stale alias
+        # until Materialize performs the semantic normalization under test.
+        after = passes.materialize_semantic_aliases()(Before)
+        memories = _collect_named_tile_memrefs(after, {"prev", "seed", "acc", "stale_alias"})
+        target = memories["prev"]
+        for name, memory in memories.items():
+            assert _same_base_address(memory, target), f"{name} did not follow the accumulator"
+            assert memory.size_ == target.size_ == 4096
+            assert memory.slot_count_ == target.slot_count_
+        _assert_if_phi_arms_write_the_phi_buffer(after)
+        for move in _collect_op_calls(after, _TILE_MOVE_OP):
+            source, destination = move.args[0].type, move.type
+            assert isinstance(source, ir.TileType) and isinstance(destination, ir.TileType)
+            assert (source.memory_space, destination.memory_space) != (ir.MemorySpace.Acc, ir.MemorySpace.Acc)
+        main = after.get_function("kernel")
+        assert main is not None and isinstance(main.body, ir.SeqStmts)
+        branch = next(op for op in main.body.stmts if isinstance(op, ir.IfStmt))
+        phi = branch.return_vars[0]
+        phi_memory = _carry_memref(phi)
+        assert phi_memory is not None and _same_base_address(phi_memory, target)
+        assert phi_memory.size_ == target.size_
+        values = [phi]
+        for body in (main.body, branch.then_body, branch.else_body):
+            assert body is not None
+            body_statements = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+            values.extend(
+                op.var
+                for op in body_statements
+                if isinstance(op, ir.AssignStmt) and op.var.name_hint in memories
+            )
+        for value in values:
+            tile_type = value.type
+            assert isinstance(tile_type, ir.TileType)
+            assert tile_type.shape == [16, 64] and tile_type.dtype == DataType.FP32
+            assert tile_type.memory_space == ir.MemorySpace.Acc
+            view = tile_type.tile_view
+            valid = view.valid_shape if view is not None and view.valid_shape else tile_type.shape
+            assert [dimension.value for dimension in valid if isinstance(dimension, ir.ConstInt)] == [16, 64]
+        # The source program returns a tile.store directly, which may remain a
+        # ReturnStmt call or be assigned a temporary by normalization.
+        returned = main.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        stored = returned.value[0]
+        if isinstance(stored, ir.Var):
+            definition = next(
+                op for op in main.body.stmts if isinstance(op, ir.AssignStmt) and op.var.same_as(stored)
+            )
+            stored = definition.value
+        assert isinstance(stored, ir.Call) and stored.op.name == ir.get_op("tile.store").name
+        assert stored.args[0].same_as(phi)
 
     def test_seed_branch_write_only_clobber_blocks_acc_coalesce(self):
         """Safety gate for the accumulator-if-phi coalescer's branch-tail
@@ -4668,10 +4749,10 @@ class SharedSuffix:
         a later read (``SubtreeReadsBase`` alone misses the write-only clobber
         because the read collector skips the LHS definition of each stmt).
 
-        Authored in fully-lowered form (explicit allocs + MemRefs) and run through
-        ``memory_reuse`` alone: the clobbering alias is a specific buffer layout
-        that only surfaces after allocation, so it cannot be expressed through the
-        high-level ``init_mem_ref`` path (which hands every tile a distinct base).
+        Authored as initialized native IR (explicit allocs + MemRefs), with one
+        independent request added for the unannotated result. Reinitializing the
+        entire program would erase the deliberately shared clobber/accumulator
+        window, so only that missing result request is supplied here.
         The required safety decline leaves divergent Acc buffers. Because no
         legal Acc->Acc move exists, YieldFixup must reject this unlowerable shape.
         """
@@ -4690,6 +4771,7 @@ class SharedSuffix:
                 mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
                 mem_acc_5: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 mem_acc_6: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                _mem_acc_7: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
                 sa: pl.Tile[[16, 64], pl.BF16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = pl.tile.load(
                     lhs, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Mat
                 )
@@ -4712,23 +4794,52 @@ class SharedSuffix:
                     _clob: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
                         pl.tile.matmul(sa, sb)
                     )
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_6, 0, 4096), pl.Mem.Acc] = pl.yield_(
-                        seed
-                    )
+                    phi = pl.yield_(seed)
                 else:
                     acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
                         pl.tile.matmul_acc(prev, sa, sb)
                     )
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
-                        acc
-                    )
+                    phi = pl.yield_(acc)
                 result: pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)] = pl.tile.store(
                     phi, [0, 0], out
                 )
                 return result
 
+        function = Before.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+        phi = branch.return_vars[0]
+        phi_type = phi.type
+        assert isinstance(phi_type, ir.TileType) and phi_type.memref is None
+        request_base = next(
+            stmt.var
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "_mem_acc_7"
+        )
+        result = ir.Var(
+            phi.name_hint,
+            ir.TileType(
+                phi_type.shape,
+                phi_type.dtype,
+                ir.MemRef(request_base, 0, 4096),
+                phi_type.tile_view,
+                phi_type.memory_space,
+            ),
+            phi.span,
+        )
+
+        class InitializeResultRequest(ir.IRMutator):
+            def visit_var(self, op):
+                return result if op.same_as(phi) else op
+
+        initialized = InitializeResultRequest().visit_program(Before)
+        windows = _collect_named_tile_memrefs(initialized, {"prev", "seed", "_clob", "acc"})
+        assert _same_base_address(windows["_clob"], windows["prev"])
+        assert _same_base_address(windows["acc"], windows["prev"])
+        assert not ir.MemRef.same_allocation(windows["seed"], windows["prev"])
+        assert not any(memory.is_pinned_ for memory in windows.values())
         with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            passes.memory_reuse()(Before)
+            passes.materialize_semantic_aliases()(initialized)
 
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate
@@ -4803,21 +4914,7 @@ class SharedSuffix:
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_retargeter_declines_when_read_after_nested_if(self):
-        """Regression test for the ancestor-walking liveness check.
-
-        The yield producer (``tile_c``) sits inside an IfStmt branch, but
-        a subsequent op reads ``acc_0`` *after* the IfStmt in the
-        enclosing loop body.  An innermost-branch-only liveness check
-        would miss this read and incorrectly retype ``tile_c`` onto
-        ``acc_0``'s buffer, clobbering the iter_arg before the post-
-        IfStmt read runs.  The ancestor-walking check sees the read and
-        declines.
-
-        The post-IfStmt read is expressed as ``pl.store(acc_0, ...)``
-        directly rather than via an intermediate ``side = op(acc_0)`` so
-        the assertion is not muddied by any lifetime-coalescing that
-        could place ``side`` and ``if_result`` in the same buffer.
-        """
+        """An old carry read after an if survives its selected producer and precedes carry writeback."""
 
         @pl.program
         class Before:
@@ -4842,59 +4939,39 @@ class SharedSuffix:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
                 return result
 
-        # acc_0/init_0 share mem_vec_2.  tile_c stays on mem_vec_3 (NOT
-        # retargeted onto mem_vec_2) because the liveness check detects
-        # the post-IfStmt read of acc_0.  YieldFixup then inserts a
-        # tile.move to unify if_result to the iter_arg buffer at the yield.
-        #
-        # The else arm yields the iter_arg, which lives on mem_vec_2 while the
-        # phi is on mem_vec_3, so it needs its own tile.move into the phi
-        # buffer -- without it mem_vec_3 is unwritten on that path and the
-        # carry writeback below copies stale data back onto acc_0.
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(
-                self,
-                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                init_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                    input_tensor, [0, 0], [64, 64], [64, 64]
-                )
-                for i, (acc_0,) in pl.range(4, init_values=(init_0,)):
-                    if i < 2:
-                        tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.add(acc_0, acc_0)
-                        )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_c)
-                        )
-                    else:
-                        acc_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.move(acc_0, target_memory=pl.Mem.Vec)
-                        )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(acc_0_mv)
-                        )
-                    _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                        acc_0, [0, 0], output
-                    )
-                    if_result_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(if_result, target_memory=pl.Mem.Vec)
-                    )
-                    loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(if_result_mv)
-                    )
-                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                    loop_out, [0, 0], output
-                )
-                return result
-
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
+        _assert_if_phi_arms_write_the_phi_buffer(After)
+        _assert_carry_yield_lands_in_its_buffer(After)
+        memrefs = _collect_named_tile_memrefs(After, {"init_0", "tile_c"})
+        assert not ir.MemRef.may_alias(memrefs["init_0"], memrefs["tile_c"])
+        source = memrefs["init_0"]
+        saw_old_read = False
+        saw_writeback = False
+
+        class CarryOrderChecker(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                nonlocal saw_old_read, saw_writeback
+                if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.store").name:
+                    stored = _carry_memref(op.value.args[0])
+                    if stored is not None and _same_base_address(stored, source):
+                        saw_old_read = True
+                written = _carry_memref(op.var)
+                if (
+                    isinstance(op.value, ir.Call)
+                    and op.value.op.name == _TILE_MOVE_OP
+                    and written is not None
+                    and _same_base_address(written, source)
+                ):
+                    assert saw_old_read, "carry storage is overwritten before its independent old-value read"
+                    saw_writeback = True
+                super().visit_assign_stmt(op)
+
+        function = After.get_function("main")
+        assert function is not None
+        assert isinstance(function.body, ir.SeqStmts)
+        loop = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.ForStmt))
+        CarryOrderChecker().visit_stmt(loop.body)
+        assert saw_old_read and saw_writeback
 
     def test_retargeter_declines_for_not_inplace_safe_op(self):
         """Regression test for the not_inplace_safe check.
@@ -5349,8 +5426,19 @@ class Before:
         observed = bounds == "2" or (observe_result and bounds != "0")
         if observed:
             assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+        elif TileHandleOrigins(after).references_allocation(refs["seed"]):
+            # Reference origins currently retain full-function occupancy even
+            # when this particular forwarding result has no payload consumer.
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
+        for transfer in _collect_op_calls(after, _TILE_MOVE_OP):
+            source_type, target_type = transfer.args[0].type, transfer.type
+            assert isinstance(source_type, ir.TileType) and isinstance(target_type, ir.TileType)
+            assert (
+                source_type.memory_space != ir.MemorySpace.Mat
+                or target_type.memory_space != ir.MemorySpace.Mat
+            )
 
     @pytest.mark.parametrize("effect", ["write", "read", "read_write"])
     def test_operand_effect_controls_old_payload_observation(self, effect):
@@ -5418,9 +5506,16 @@ class Before:
         refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
         if trips > 1 and read_handle != "carry":
             assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+        elif TileHandleOrigins(after).references_allocation(refs["seed"]):
+            # A no-copy carry can select the native replacement allocation;
+            # keeping its seed protected is the documented conservative path.
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
             _assert_carry_yield_lands_in_its_buffer(after)
+        assert not _collect_op_calls(after, _TILE_MOVE_OP), (
+            "Acc carry selection must not insert payload copies"
+        )
 
     @pytest.mark.parametrize("inner_trips", [1, 2])
     def test_nested_identity_loop_follows_isolated_carry(self, inner_trips):
@@ -5689,15 +5784,15 @@ class Before:
         observed = _carry_memref(original_store.value.args[0])
         assert observed is not None and _same_base_address(observed, seed)
 
-    def test_nested_mat_carry_preserves_old_value_read_after_reload(self):
-        """Reaching an inner For must not bypass its existing old-value liveness check."""
+    def test_nested_mat_carry_rejects_reloading_its_previous_iterations_storage(self):
+        """A distinct initial buffer does not preserve a later carried instance."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                pool: pl.Tensor[[16, 32], pl.FP16],
+                pool: pl.Tensor[[48, 32], pl.FP16],
                 waves: pl.Scalar[pl.INDEX],
                 out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
             ) -> pl.Tensor[[16, 32], pl.FP16]:
@@ -5705,18 +5800,20 @@ class Before:
                 for (wave,) in pl.while_(init_values=(0,)):
                     pl.cond(wave < waves)
                     for _i, (carry,) in pl.range(2, init_values=(seed,)):
-                        replacement = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                        replacement = pl.tile.load(
+                            pool, [(_i + 1) * 16, 0], [16, 32], target_memory=pl.Mem.Mat
+                        )
                         _old = pl.tile.extract(carry, 0, 0, [16, 32], target_memory=pl.Mem.Left)
                         result = pl.yield_(replacement)
                     _used = pl.tile.extract(result, 0, 0, [16, 32], target_memory=pl.Mem.Left)
                     _wave_out = pl.yield_(wave + 1)
                 return out
 
-        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
-        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
-        assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), (
-            "the reload would overwrite the old carry before its extract"
-        )
+        # On the second iteration carry names replacement's previous payload.
+        # Reloading its one physical slot before extracting carry destroys that
+        # old payload even if seed and replacement have independent storage.
+        with pytest.raises(ValueError, match="independently observed older value version"):
+            passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
 
     def test_simultaneously_live_nested_mat_carries_remain_distinct(self):
         """Two carried results consumed after the inner For need independent storage."""
@@ -5855,13 +5952,20 @@ class Before:
             _used = pl.tile.store(viewed, [0, 0], out)
         return out
 """)
-        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
-        refs = _collect_named_tile_memrefs(after, {"initial", "fresh"})
         if bounds == "2":
-            assert not ir.MemRef.may_alias(refs["initial"], refs["fresh"]), after.as_python()
-        else:
-            assert _same_base_address(refs["initial"], refs["fresh"]), after.as_python()
-            _assert_if_phi_arms_write_the_phi_buffer(after)
+            # The accumulating arm mutates initial itself; separating fresh
+            # cannot preserve the original initial read on the next iteration.
+            with pytest.raises(ValueError, match="independently observed older value version"):
+                passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+            return
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        if bounds == "0, 1, -1":
+            assert not _collect_op_calls(after, ir.get_op("tile.matmul_acc").name)
+            assert len(_collect_op_calls(after, ir.get_op("tile.matmul").name)) == 1
+            return
+        refs = _collect_named_tile_memrefs(after, {"initial", "fresh"})
+        assert _same_base_address(refs["initial"], refs["fresh"]), after.as_python()
+        _assert_if_phi_arms_write_the_phi_buffer(after)
 
     @pytest.mark.parametrize("nested_for", [False, True], ids=["direct_phi", "for_carry_phi"])
     @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
@@ -5961,30 +6065,20 @@ class Before:
                         return replacements[op.unique_id]
 
                 initialized = _DriftAliasDescriptor().visit_program(initialized)
-            if buffer_ir and not recreated:
-                # Acc has no same-space copy to preserve the independently live
-                # old value: either loop-input isolation or phi legalization
-                # must reject the unsupported transfer before it can clobber it.
-                message = (
-                    "cannot preserve an independently live loop input"
-                    if nested_for
-                    else "divergent Acc branch results to be coalesced"
-                )
-                with pytest.raises(ValueError, match=message):
+            if not recreated:
+                # Recreating only a handle does not recreate the payload: the
+                # accumulating arm destroys the external previous value that
+                # the next outer iteration's snapshot must still observe.
+                with pytest.raises(ValueError, match="independently observed older value version"):
                     passes.materialize_semantic_aliases()(initialized)
                 return
             after = passes.materialize_semantic_aliases()(initialized)
 
         refs = _collect_named_tile_memrefs(after, {"previous", "old_value", "fresh", "accumulated"})
         assert _same_base_address(refs["previous"], refs["old_value"])
-        if recreated:
-            for name in ("fresh", "accumulated"):
-                assert _same_base_address(refs["previous"], refs[name]), after.as_python()
-            _assert_if_phi_arms_write_the_phi_buffer(after)
-        else:
-            assert not ir.MemRef.may_alias(refs["previous"], refs["fresh"]), (
-                f"the fresh branch would clobber next iteration's old-value read:\n{after.as_python()}"
-            )
+        for name in ("fresh", "accumulated"):
+            assert _same_base_address(refs["previous"], refs[name]), after.as_python()
+        _assert_if_phi_arms_write_the_phi_buffer(after)
 
     @pytest.mark.parametrize("read_initial", [False, True], ids=["carry_only", "independent_initial_read"])
     def test_while_carry_tracks_initializer_alias_family(self, read_initial):
@@ -6023,16 +6117,17 @@ class Before:
             _final, _wave_out = pl.yield_(merged, wave + 1)
         return out
 """)
+        if read_initial:
+            # The native accumulator update itself writes initial's bytes,
+            # before the independently named old initial is observed here.
+            with pytest.raises(ValueError, match="independently observed older value version"):
+                passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+            return
         after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
         refs = _collect_named_tile_memrefs(after, {"initial", "fresh", "accumulated"})
-        if read_initial:
-            assert not ir.MemRef.may_alias(refs["initial"], refs["fresh"]), (
-                f"the fresh branch would overwrite the independently read initializer:\n{after.as_python()}"
-            )
-        else:
-            for name in ("fresh", "accumulated"):
-                assert _same_base_address(refs["initial"], refs[name]), after.as_python()
-            _assert_if_phi_arms_write_the_phi_buffer(after)
+        for name in ("fresh", "accumulated"):
+            assert _same_base_address(refs["initial"], refs[name]), after.as_python()
+        _assert_if_phi_arms_write_the_phi_buffer(after)
 
 
 class TestStructuralShapeEquality:
@@ -6788,6 +6883,47 @@ class TestAscend910BLoadTpopHazard:
             "Ascend910 split-AIV: tile.add output must NOT reuse the tile.load buffer "
             f"(load+tpop_from_aic hazard), but both bind to {bases['down_prev']}"
         )
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    @pytest.mark.parametrize("producer_then", [True, False], ids=["then_producer", "else_producer"])
+    def test_if_result_borrowing_preserves_the_load_tpop_hazard(self, enable_buffer_ir, producer_then):
+        """Choosing an incoming phi window must retain the split-AIV load/tpop separation."""
+        producer = (
+            "            down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = "
+            "pl.tile.add(down_prev, pipe_chunk)\n"
+            "            selected = pl.yield_(down_next)"
+        )
+        unchanged = "            selected = pl.yield_(down_prev)"
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV, attrs={{"split": pl.SplitMode.UP_DOWN}})
+    def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+             flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[16, 128], pl.FP32]:
+        mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+        mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+        mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+        down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = pl.tile.load(
+            down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec)
+        pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)
+        if {"flag" if producer_then else "not flag"}:
+{producer if producer_then else unchanged}
+        else:
+{unchanged if producer_then else producer}
+        return pl.tile.store(selected, [0, 0], down)
+""")
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        try:
+            with passes.PassContext([], enable_buffer_ir=enable_buffer_ir):
+                after = passes.memory_reuse()(
+                    passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+                )
+                _assert_if_phi_arms_write_the_phi_buffer(after)
+                allocated = passes.allocate_memory_addr()(after)
+        finally:
+            backend.reset_for_testing()
+        _assert_allocated_tiles_disjoint(allocated, "down_prev", "down_next")
 
     def test_dsa_rp_ascend910b_split_aiv_physically_separates_load_buffer(self):
         """DSA-RP exports the load+tpop target hazard as an unrelaxable edge."""
@@ -8974,7 +9110,6 @@ class TestAliasingOutputPropagation:
                 out: pl.Out[pl.Tensor[[8, 64], pl.FP16, pl.MemRef("mem_out", 0, 1024)]],
             ) -> pl.Tensor[[8, 64], pl.FP16]:
                 current: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
-                _stale: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
                 seed: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = pl.tile.load(
                     pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat
                 )
@@ -8991,12 +9126,13 @@ class TestAliasingOutputPropagation:
 
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
             after = passes.materialize_semantic_aliases()(Before)
-            # BufferIR also removes the now-unused stale allocation.
-            expected = passes.materialize_semantic_aliases()(Expected) if buffer_ir else Expected
-            ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(expected))
+            # Unused stale storage is removed on both planning paths.
+            ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
             memrefs = _collect_named_tile_memrefs(after, {"seed", "gathered", "transposed", "reshaped"})
             for name, memref in memrefs.items():
                 assert _same_base_address(memref, memrefs["seed"]), name
+                assert memref.size_ == memrefs["seed"].size_ == 1024
+            assert not _collect_op_calls(after, _TILE_MOVE_OP), "Mat metadata repair must not add a Mat copy"
             # Re-derivation must be stable instead of accumulating old absolute offsets.
             ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
 
@@ -9320,35 +9456,41 @@ class TestAliasingOutputPropagation:
 
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
             after = passes.memory_reuse()(passes.materialize_semantic_aliases()(input_program))
-        _assert_if_phi_arms_write_the_phi_buffer(after)
-        memrefs = _collect_named_tile_memrefs(
-            after, {"seed", "first", "viewed", "renamed", "second", "final_view"}
-        )
-
-        class _AliasWindowChecker(ir.IRVisitor):
-            def visit_assign_stmt(self, stmt):  # type: ignore[override]
-                value = stmt.value
-                if isinstance(value, ir.Var):
-                    source = value
-                elif isinstance(value, ir.Call) and value.op.name in {
-                    ir.get_op("tile.gather_row").name,
-                    ir.get_op("tile.reshape").name,
-                }:
-                    source = value.args[0]
-                else:
-                    return super().visit_assign_stmt(stmt)
-                output_memref, source_memref = _carry_memref(stmt.var), _carry_memref(source)
-                assert output_memref is not None and source_memref is not None
-                assert _same_base_address(output_memref, source_memref), stmt.var.name_hint
-                super().visit_assign_stmt(stmt)
-
-        function = after.get_function("kernel")
-        assert function is not None
-        _AliasWindowChecker().visit_stmt(function.body)
-        if not buffer_ir:
-            for name, memref in memrefs.items():
-                assert _same_base_address(memref, memrefs["seed"]), f"{name} left the written L1 buffer"
-        assert "pl.tile.move(" not in after.as_python(), "phi repair emitted an unlowerable Mat->Mat move"
+        origins = TileHandleOrigins(after)
+        original_values = TileHandleOrigins(input_program).values
+        target = _carry_memref(origins.values["seed"])
+        assert target is not None
+        for name in ("seed", "first", "phi", "viewed", "renamed", "second", "result", "final_view"):
+            value = origins.values[name]
+            origins.assert_window(value, target)
+            origins.assert_descriptor(value, original_values[name])
+        required_inputs = {
+            "first": "seed",
+            "viewed": "phi",
+            "renamed": "viewed",
+            "second": "renamed",
+            "final_view": "result",
+        }
+        for statement in storage_statements(after):
+            if isinstance(statement, ir.IfStmt):
+                assert statement.else_body is not None
+                for arm in (statement.then_body, statement.else_body):
+                    yielded = ir.get_last_yield_stmt(arm)
+                    assert yielded is not None
+                    assert len(yielded.value) == len(statement.return_vars)
+                    for value in yielded.value:
+                        origins.assert_window(value, target)
+            elif isinstance(statement, ir.AssignStmt):
+                if isinstance(statement.value, ir.Call):
+                    assert statement.value.op.name != _TILE_MOVE_OP
+                expected_input = required_inputs.get(statement.var.name_hint)
+                if expected_input is None:
+                    continue
+                source = statement.value.args[0] if isinstance(statement.value, ir.Call) else statement.value
+                assert isinstance(source, (ir.Var, ir.IterArg))
+                assert source.unique_id == origins.values[expected_input].unique_id
+                origins.assert_window(source, target)
+                origins.assert_window(statement.var, target)
 
 
 class TestChainedInPlaceIfPhis:
@@ -9418,6 +9560,824 @@ class TestChainedInPlaceIfPhis:
         assert not re.search(r"pto\.tmov ins\([^)]*loc=mat[^)]*\) outs\([^)]*loc=mat[^)]*\)", pto), (
             f"codegen emitted a same-space Mat->Mat pto.tmov:\n{pto}"
         )
+
+
+@pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+class TestIfResultLiveness:
+    """An if result occupies the storage written by its selected incoming edge."""
+
+    @pytest.fixture(autouse=True)
+    def if_result_context(
+        self, buffer_ir, legacy_storage_context, ascend_backend, pass_verification_instruments
+    ):
+        with passes.PassContext(
+            pass_verification_instruments,
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            enable_buffer_ir=buffer_ir,
+        ):
+            yield
+
+    @staticmethod
+    def _swap_arms(program: ir.Program) -> ir.Program:
+        """Preserve program behavior while reversing every sibling traversal order."""
+
+        class ArmSwapper(ir.IRMutator):
+            def visit_if_stmt(self, op):
+                assert op.else_body is not None
+                # Each nested if needs its own active trampoline override.
+                then_body = ArmSwapper().visit_stmt(op.else_body)
+                else_body = ArmSwapper().visit_stmt(op.then_body)
+                return ir.IfStmt(
+                    ir.Not(op.condition, DataType.BOOL, op.span),
+                    then_body,
+                    else_body,
+                    op.return_vars,
+                    op.span,
+                )
+
+        return ArmSwapper().visit_program(program)
+
+    @staticmethod
+    def _allocate(program: ir.Program) -> ir.Program:
+        reused = _run_pipeline(program)
+        _assert_if_phi_arms_write_the_phi_buffer(reused)
+        return passes.allocate_memory_addr()(reused)
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_branch_gather_fits_vec_capacity(self, swap_arms):
+        """Issue #3035: all aliases in the nested gather chain belong to one edge."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 512], pl.BF16],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[64, 512], pl.BF16]],
+                state: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 512], pl.BF16], pl.Tensor[[64, 256], pl.FP32]]:
+                first = pl.tile.full([32, 256], dtype=pl.FP32, value=0.0)
+                second = pl.tile.full([32, 256], dtype=pl.FP32, value=0.0)
+                flag = pl.tensor.read(flags, [0])
+                for i, (s0, s1) in pl.range(2, init_values=(first, second)):
+                    seed = pl.tile.full([64, 512], dtype=pl.BF16, value=0.0)
+                    if flag != 0:
+                        filled = pl.tile.gather_row(seed, pool, [0, 0], [0, 0], [64, 512])
+                        selected = filled
+                    else:
+                        fresh = pl.tile.full([64, 512], dtype=pl.BF16, value=0.0)
+                        for j, (carry,) in pl.range(64, init_values=(fresh,)):
+                            if j < flag:
+                                next_value = pl.tile.gather_row(carry, pool, [j, 0], [j, 0], [1, 512])
+                            else:
+                                next_value = carry
+                            gathered = pl.yield_(next_value)
+                        selected = gathered
+                    _saved = pl.tile.store(selected, [0, 0], out)
+                    next0 = pl.tile.add(s0, 1.0)
+                    next1 = pl.tile.add(s1, 2.0)
+                    result0, result1 = pl.yield_(next0, next1)
+                state0 = pl.tile.store(result0, [0, 0], state)
+                state1 = pl.tile.store(result1, [32, 0], state0)
+                return out, state1
+
+        ssa = passes.convert_to_ssa()(Before)
+        if swap_arms:
+            ssa = self._swap_arms(ssa)
+        reused = _run_pipeline(ssa)
+        _assert_if_phi_arms_write_the_phi_buffer(reused)
+        _assert_carry_yield_lands_in_its_buffer(reused)
+        allocated = passes.allocate_memory_addr()(reused)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges and max(offset + size for offset, size in ranges.values()) <= 188416
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_conditional_reset_fits_vec_capacity(self, swap_arms):
+        """Issue #3035: an old value read only on one edge can share its replacement."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 256], pl.FP32],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
+                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+                flag = pl.tensor.read(flags, [0])
+                if flag != 0:
+                    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+                    selected = reset
+                else:
+                    selected = current
+                saved = pl.tile.store(selected, [0, 0], out)
+                result = pl.tile.store(held, [64, 0], saved)
+                return result
+
+        ssa = passes.convert_to_ssa()(Before)
+        if swap_arms:
+            ssa = self._swap_arms(ssa)
+        allocated = self._allocate(ssa)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges and max(offset + size for offset, size in ranges.values()) <= 188416
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_sibling_only_old_read_shares_storage_without_a_tile_phi(self, swap_arms):
+        """Branch exclusivity permits reuse independently of tile-result families or capacity."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 64], target_memory=pl.Mem.Vec)
+                old = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                if flag:
+                    fresh = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
+                    _then_saved = pl.tile.store(fresh, [0, 0], out)
+                else:
+                    _else_saved = pl.tile.store(old, [0, 0], out)
+                result = pl.tile.store(held, [64, 0], out)
+                return result
+
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = passes.allocate_memory_addr()(_run_pipeline(program))
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges["old"] == ranges["fresh"], "sibling-only uses must permit the same physical window"
+        _assert_allocated_tiles_disjoint(allocated, "held", "fresh")
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_conservative_nested_observations_preserve_live_storage(self, swap_arms):
+        """Nested observations stay correct even when conservative analysis declines optional reuse."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 64], pl.FP32],
+                outer: pl.Scalar[pl.BOOL],
+                inner: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 64], target_memory=pl.Mem.Vec)
+                old = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                if outer:
+                    if inner:
+                        _inner_read = pl.tile.store(old, [0, 0], out)
+                    else:
+                        fresh = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
+                        _writer_saved = pl.tile.store(fresh, [0, 0], out)
+                else:
+                    _outer_read = pl.tile.store(old, [0, 0], out)
+                result = pl.tile.store(held, [64, 0], out)
+                return result
+
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = passes.allocate_memory_addr()(_run_pipeline(program))
+        # Reusing old for fresh is safe here, but is not required of the planner.
+        _assert_allocated_tiles_disjoint(allocated, "held", "fresh")
+        _assert_allocated_tiles_disjoint(allocated, "held", "old")
+        old_memref = _collect_named_tile_memrefs(allocated, {"old"})["old"]
+        old_reads = [
+            call.args[0]
+            for call in _collect_op_calls(allocated, ir.get_op("tile.store").name)
+            if isinstance(call.args[0], ir.Var) and call.args[0].name_hint == "old"
+        ]
+        assert len(old_reads) == 2, "both nested observations of the old value must remain"
+        for old_read in old_reads:
+            read_memref = _carry_memref(old_read)
+            assert read_memref is not None
+            assert _same_base_address(read_memref, old_memref), "an old-value read was redirected"
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_safe_incoming_window_reuse_is_independent_of_arm_order(self, swap_arms):
+        """An unobserved live-in can hold either its unchanged value or a safe branch-local update."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                incoming = pl.tile.load(pool, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+                if flag:
+                    doubled = pl.tile.add(incoming, incoming)
+                    selected = pl.yield_(doubled)
+                else:
+                    selected = pl.yield_(incoming)
+                return pl.tile.store(selected, [0, 0], out)
+
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = self._allocate(program)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges["incoming"] == ranges["doubled"], (
+            "the selected result should reuse its dead incoming value"
+        )
+        assert len(_collect_op_calls(allocated, ir.get_op("tile.alloc").name)) == 1
+        assert not _collect_op_calls(allocated, _TILE_MOVE_OP)
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_incoming_window_reuse_preserves_an_earlier_phi_observer(self, swap_arms):
+        """A prior logical result sharing the incoming window can still observe its old value."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 64], pl.FP32],
+                first_flag: pl.Scalar[pl.BOOL],
+                second_flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                incoming = pl.tile.load(pool, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+                if first_flag:
+                    earlier = pl.yield_(incoming)
+                else:
+                    earlier = pl.yield_(incoming)
+                if second_flag:
+                    doubled = pl.tile.add(incoming, incoming)
+                    selected = pl.yield_(doubled)
+                else:
+                    selected = pl.yield_(incoming)
+                observed = pl.tile.store(earlier, [16, 0], out)
+                return pl.tile.store(selected, [0, 0], observed)
+
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = self._allocate(program)
+        _assert_allocated_tiles_disjoint(allocated, "incoming", "doubled")
+        function = next(iter(allocated.functions.values()))
+        assert isinstance(function.body, ir.SeqStmts)
+        first_branch = next(
+            statement for statement in function.body.stmts if isinstance(statement, ir.IfStmt)
+        )
+        earlier = first_branch.return_vars[0]
+        earlier_memref = _carry_memref(earlier)
+        assert earlier_memref is not None
+        incoming_memref = _collect_named_tile_memrefs(allocated, {"incoming"})["incoming"]
+        assert _same_base_address(earlier_memref, incoming_memref), (
+            "the earlier result must expose the old window"
+        )
+        old_reads = [
+            call
+            for call in _collect_op_calls(allocated, ir.get_op("tile.store").name)
+            if isinstance(call.args[0], ir.Var) and call.args[0].same_as(earlier)
+        ]
+        assert len(old_reads) == 1, "the independent observer of the earlier result must remain"
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    @pytest.mark.parametrize("while_loop", [False, True], ids=["for_loop", "while_loop"])
+    def test_incoming_window_reuse_preserves_a_loop_preheader_value(self, swap_arms, while_loop):
+        """A preheader input is read afresh on the next iteration even without a post-if observer."""
+        header = (
+            "for (index,) in pl.while_(init_values=(0,)):\n            pl.cond(index < 2)"
+            if while_loop
+            else "for index in pl.range(2):"
+        )
+        advance = "            _index_result = pl.yield_(index + 1)\n" if while_loop else ""
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, pool: pl.Tensor[[16, 64], pl.FP32], flag: pl.Scalar[pl.BOOL],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        incoming = pl.tile.load(pool, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+        {header}
+            if flag:
+                doubled = pl.tile.add(incoming, incoming)
+                selected = pl.yield_(doubled)
+            else:
+                selected = pl.yield_(incoming)
+            _saved = pl.tile.store(selected, [0, 0], out)
+{advance}        return out
+""")
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = self._allocate(program)
+        _assert_allocated_tiles_disjoint(allocated, "incoming", "doubled")
+
+    def test_result_storage_survives_branch_tail_and_post_if_temporary(self):
+        """The result buffer is occupied before its yield and until its final consumer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                if flag:
+                    value = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                    tail = pl.tile.full([64, 64], dtype=pl.FP32, value=7.0)
+                    _observed = pl.tile.store(tail, [0, 0], out)
+                    selected = pl.yield_(value)
+                else:
+                    alternate = pl.tile.load(pool, [64, 0], [64, 64], target_memory=pl.Mem.Vec)
+                    selected = pl.yield_(alternate)
+                selected_alias = selected
+                later = pl.tile.full([64, 64], dtype=pl.FP32, value=3.0)
+                saved = pl.tile.store(later, [64, 0], out)
+                result = pl.tile.store(selected_alias, [0, 0], saved)
+                return result
+
+        allocated = self._allocate(Before)
+        _assert_allocated_tiles_disjoint(allocated, "value", "tail")
+        _assert_allocated_tiles_disjoint(allocated, "selected_alias", "later")
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    @pytest.mark.parametrize("column_offset", [0, 32], ids=["prefix_window", "offset_window"])
+    def test_branch_window_transfer_extracts_from_the_wide_root(self, swap_arms, column_offset):
+        """A narrow phi consumes dense storage even when one incoming value inherits a wider pitch."""
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, pool: pl.Tensor[[2, 128], pl.FP32], flag: pl.Scalar[pl.BOOL],
+               out: pl.Out[pl.Tensor[[1, 128], pl.FP32]]) -> pl.Tensor[[1, 128], pl.FP32]:
+        wide = pl.tile.load(pool, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+        dense = pl.tile.load(pool, [1, 0], [1, 64], target_memory=pl.Mem.Vec)
+        if flag:
+            window = pl.tile.slice(wide, [1, 64], [0, {column_offset}])
+            window_alias = window
+            selected = pl.yield_(window_alias)
+        else:
+            selected = pl.yield_(dense)
+        saved = pl.tile.store(selected, [0, 0], out)
+        return pl.tile.store(dense, [0, 64], saved)
+""")
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = self._allocate(program)
+        function = next(iter(allocated.functions.values()))
+        assert isinstance(function.body, ir.SeqStmts)
+        branch = next(statement for statement in function.body.stmts if isinstance(statement, ir.IfStmt))
+        destination = _carry_memref(branch.return_vars[0])
+        assert destination is not None
+        memrefs = _collect_named_tile_memrefs(allocated, {"wide", "dense"})
+        extract_op, move_op = ir.get_op("tile.extract").name, _TILE_MOVE_OP
+        transfers: dict[str, ir.Call] = {}
+        for body in (branch.then_body, branch.else_body):
+            assert isinstance(body, ir.SeqStmts)
+            yielded = ir.get_last_yield_stmt(body)
+            assert yielded is not None and len(yielded.value) == 1
+            transfer = next(
+                statement
+                for statement in body.stmts
+                if isinstance(statement, ir.AssignStmt) and statement.var.same_as(yielded.value[0])
+            )
+            assert isinstance(transfer.value, ir.Call)
+            assert transfer.value.op.name in (extract_op, move_op)
+            target = _carry_memref(transfer.var)
+            assert target is not None and _same_base_address(target, destination)
+            transfers[transfer.value.op.name] = transfer.value
+
+        assert set(transfers) == {extract_op, move_op}, (
+            "window and dense edges need different transfer operators"
+        )
+        extract = transfers[extract_op]
+        source_type = extract.args[0].type
+        assert isinstance(source_type, ir.TileType) and len(source_type.shape) == 2
+        assert [dimension.value for dimension in source_type.shape if isinstance(dimension, ir.ConstInt)] == [
+            1,
+            128,
+        ], "the extraction source must retain its original physical pitch"
+        assert isinstance(extract.args[1], ir.ConstInt) and extract.args[1].value == 0
+        assert isinstance(extract.args[2], ir.ConstInt) and extract.args[2].value == column_offset
+        shape = extract.args[3]
+        assert isinstance(shape, ir.MakeTuple) and len(shape.elements) == 2
+        assert [dimension.value for dimension in shape.elements if isinstance(dimension, ir.ConstInt)] == [
+            1,
+            64,
+        ]
+        source = _carry_memref(extract.args[0])
+        assert source is not None and _same_base_address(source, memrefs["wide"])
+        dense_source = _carry_memref(transfers[move_op].args[0])
+        assert dense_source is not None and _same_base_address(dense_source, memrefs["dense"])
+        assert not ir.MemRef.may_alias(destination, memrefs["dense"]), (
+            "the later dense-input observation must survive"
+        )
+        pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=True)
+        assert "pto.textract" in pto, pto
+
+    def test_copy_preserves_a_source_observed_after_an_inplace_destination_update(self):
+        """Coalescing a copy must not make a later destination write overwrite the old source."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                source = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                copied = pl.tile.move(source, target_memory=pl.Mem.Vec)
+                updated = pl.tile.gather_row(copied, pool, [0, 0], [64, 0], [64, 64])
+                saved = pl.tile.store(updated, [0, 0], out)
+                result = pl.tile.store(source, [64, 0], saved)
+                return result
+
+        reused = _run_pipeline(Before)
+        assert _collect_op_calls(reused, _TILE_MOVE_OP)
+        allocated = passes.allocate_memory_addr()(reused)
+        _assert_allocated_tiles_disjoint(allocated, "source", "updated")
+
+    @pytest.mark.parametrize("copy_source", ["p", "q"], ids=["parameter", "parameter_view"])
+    def test_copy_does_not_coalesce_an_independently_observed_tile_parameter(self, copy_source):
+        """A body-local view does not turn borrowed parameter storage into a dead copy source."""
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, p: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec],
+               pool: pl.Tensor[[64, 64], pl.FP32],
+               out: pl.Out[pl.Tensor[[192, 64], pl.FP32]]) -> pl.Tensor[[192, 64], pl.FP32]:
+        q = pl.tile.reshape(p, [64, 64])
+        observed = pl.tile.store(q, [0, 0], out)
+        copied = pl.tile.move({copy_source}, target_memory=pl.Mem.Vec)
+        updated = pl.tile.gather_row(copied, pool, [0, 0], [0, 0], [64, 64])
+        saved = pl.tile.store(updated, [64, 0], observed)
+        result = pl.tile.store(p, [128, 0], saved)
+        return result
+""")
+        reused = _run_pipeline(Before)
+        assert _collect_op_calls(reused, _TILE_MOVE_OP)
+        memrefs = _collect_named_tile_memrefs(reused, {"q", "updated"})
+        assert not ir.MemRef.may_alias(memrefs["q"], memrefs["updated"]), (
+            "the destination update must not overwrite the independently observed parameter"
+        )
+
+    @pytest.mark.parametrize("yield_views", [False, True], ids=["direct_parameter", "parameter_views"])
+    @pytest.mark.parametrize("temporary_before", [False, True], ids=["temporary_after", "temporary_before"])
+    @pytest.mark.parametrize("temporary_rows", [16, 64], ids=["smaller_temporary", "larger_temporary"])
+    def test_if_result_preserves_parameter_storage_across_temporary_placement(
+        self, yield_views, temporary_before, temporary_rows
+    ):
+        """A borrowed result window stays external regardless of body packing order."""
+        temporary = (
+            f"        temporary = pl.tile.full([{temporary_rows}, 128], dtype=pl.FP32, value=0.0)\n"
+            "        scratch_saved = pl.tile.store(temporary, [0, 0], scratch)\n"
+        )
+        then_yield = (
+            "            then_view = pl.tile.reshape(p, [32, 128])\n"
+            "            selected = pl.yield_(then_view)\n"
+            if yield_views
+            else "            selected = pl.yield_(p)\n"
+        )
+        else_yield = (
+            "            else_view = pl.tile.reshape(p, [32, 128])\n"
+            "            selected = pl.yield_(else_view)\n"
+            if yield_views
+            else "            selected = pl.yield_(p)\n"
+        )
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, p: pl.Tile[[32, 128], pl.FP32, pl.Mem.Vec],
+               flag: pl.Scalar[pl.BOOL],
+               out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+               scratch: pl.Out[pl.Tensor[[{temporary_rows}, 128], pl.FP32]]) -> tuple[
+                   pl.Tensor[[64, 128], pl.FP32], pl.Tensor[[{temporary_rows}, 128], pl.FP32]]:
+        body_view = pl.tile.reshape(p, [32, 128])
+        observed = pl.tile.store(body_view, [0, 0], out)
+{temporary if temporary_before else ""}        if flag:
+{then_yield}        else:
+{else_yield}{"" if temporary_before else temporary}        saved = pl.tile.store(selected, [0, 0], observed)
+        result = pl.tile.store(p, [32, 0], saved)
+        return result, scratch_saved
+""")
+        initialized = passes.init_mem_ref()(Before)
+        initial_function = next(iter(initialized.functions.values()))
+        initial_parameter = _carry_memref(initial_function.params[0])
+        assert initial_parameter is not None
+
+        reused = passes.memory_reuse()(passes.materialize_semantic_aliases()(initialized))
+        reused_function = next(iter(reused.functions.values()))
+        parameter = _carry_memref(reused_function.params[0])
+        assert parameter is not None
+        assert _same_base_address(initial_parameter, parameter), "borrowed parameter storage was relocated"
+        memrefs = _collect_named_tile_memrefs(reused, {"body_view", "temporary"})
+        assert _same_base_address(parameter, memrefs["body_view"])
+        assert not ir.MemRef.may_alias(parameter, memrefs["temporary"]), (
+            "packing a temporary must not overwrite the parameter subsequently read through the result and p"
+        )
+        _assert_if_phi_arms_write_the_phi_buffer(reused)
+
+    def test_layout_changing_move_is_not_treated_as_an_identity_copy(self):
+        """A move that changes the tile descriptor must remain a real, non-aliasing operation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                source = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                reordered = pl.tile.move(
+                    source,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                result = pl.tile.store(reordered, [0, 0], out)
+                return result
+
+        reused = _run_pipeline(Before)
+        assert _collect_op_calls(reused, _TILE_MOVE_OP)
+        allocated = passes.allocate_memory_addr()(reused)
+        _assert_allocated_tiles_disjoint(allocated, "source", "reordered")
+
+    def test_divergent_mat_phi_retargets_a_branch_local_alias_group(self):
+        """A branch-local view must not force an unsupported Mat-to-Mat reconciliation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP16],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+            ) -> pl.Tensor[[64, 16], pl.FP32]:
+                if flag:
+                    first = pl.tile.load(pool, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    first_alias = pl.tile.reshape(first, [32, 64])
+                    selected = pl.yield_(first_alias)
+                else:
+                    second = pl.tile.load(pool, [32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    selected = pl.yield_(second)
+                transposed = pl.tile.transpose_view(selected)
+                rhs = pl.tile.load(pool, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+                left = pl.tile.move(transposed, target_memory=pl.Mem.Left)
+                right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.tile.matmul(left, right)
+                result = pl.tile.store(product, [0, 0], out)
+                return result
+
+        allocated = self._allocate(Before)
+        pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=True)
+        assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in pto.splitlines()), pto
+
+    def test_duplicate_mat_result_slots_preserve_their_shared_destination(self):
+        """Slots yielding the same incoming windows through aliases need no Mat copy."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP16],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 16], pl.FP32]],
+            ) -> pl.Tensor[[128, 16], pl.FP32]:
+                if flag:
+                    first = pl.tile.load(pool, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    first_alias = pl.tile.reshape(first, [32, 64])
+                    selected_first, selected_second = pl.yield_(first, first_alias)
+                else:
+                    second = pl.tile.load(pool, [32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    second_alias = pl.tile.reshape(second, [32, 64])
+                    selected_first, selected_second = pl.yield_(second, second_alias)
+                first_result_alias = selected_first
+                second_result_alias = selected_second
+                first_transposed = pl.tile.transpose_view(first_result_alias)
+                second_transposed = pl.tile.transpose_view(second_result_alias)
+                rhs = pl.tile.load(pool, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+                right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+                first_left = pl.tile.move(first_transposed, target_memory=pl.Mem.Left)
+                first_product = pl.tile.matmul(first_left, right)
+                saved = pl.tile.store(first_product, [0, 0], out)
+                second_left = pl.tile.move(second_transposed, target_memory=pl.Mem.Left)
+                second_product = pl.tile.matmul(second_left, right)
+                result = pl.tile.store(second_product, [64, 0], saved)
+                return result
+
+        allocated = self._allocate(Before)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges["first_result_alias"] == ranges["second_result_alias"]
+        pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=True)
+        assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in pto.splitlines()), pto
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_nested_mat_result_graph_reaches_one_outer_destination(self, swap_arms):
+        """An outer result destination propagates through both incoming edges of its nested phi."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(
+                self,
+                pool: pl.Tensor[[96, 64], pl.FP16],
+                outer: pl.Scalar[pl.BOOL],
+                inner: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+            ) -> pl.Tensor[[64, 16], pl.FP32]:
+                if outer:
+                    if inner:
+                        first = pl.tile.load(pool, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                        nested = pl.yield_(first)
+                    else:
+                        second = pl.tile.load(pool, [32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                        nested = pl.yield_(second)
+                    selected = pl.yield_(nested)
+                else:
+                    third = pl.tile.load(pool, [64, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    selected = pl.yield_(third)
+                transposed = pl.tile.transpose_view(selected)
+                rhs = pl.tile.load(pool, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+                left = pl.tile.move(transposed, target_memory=pl.Mem.Left)
+                right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.tile.matmul(left, right)
+                result = pl.tile.store(product, [0, 0], out)
+                return result
+
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = self._allocate(program)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges["first"] == ranges["second"] == ranges["third"]
+        pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=True)
+        assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in pto.splitlines()), pto
+
+    def test_result_does_not_clobber_an_independent_old_view(self):
+        """A phi edge cannot erase an independently observed pre-if storage alias."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                old = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                old_view = pl.tile.reshape(old, [64, 64])
+                if flag:
+                    replacement = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
+                    selected = pl.yield_(replacement)
+                else:
+                    selected = pl.yield_(old)
+                saved = pl.tile.store(old_view, [64, 0], out)
+                result = pl.tile.store(selected, [0, 0], saved)
+                return result
+
+        allocated = self._allocate(Before)
+        _assert_allocated_tiles_disjoint(allocated, "old_view", "replacement")
+
+    def test_result_producer_preserves_a_same_arm_tail_read(self):
+        """Sibling exclusivity does not remove a later read within the writing arm."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                old = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                if flag:
+                    replacement = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
+                    _observed = pl.tile.store(old, [64, 0], out)
+                    selected = pl.yield_(replacement)
+                else:
+                    selected = pl.yield_(old)
+                result = pl.tile.store(selected, [0, 0], out)
+                return result
+
+        allocated = self._allocate(Before)
+        _assert_allocated_tiles_disjoint(allocated, "old", "replacement")
+
+    def test_result_producer_preserves_an_old_value_across_the_backedge(self):
+        """A value consumed at the next iteration's head survives the selected producer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                old = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                for i in pl.range(2):
+                    observed = pl.tile.store(old, [64, 0], out)
+                    if flag:
+                        replacement = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
+                        selected = pl.yield_(replacement)
+                    else:
+                        selected = pl.yield_(old)
+                    _saved = pl.tile.store(selected, [0, 0], observed)
+                return out
+
+        allocated = self._allocate(Before)
+        _assert_allocated_tiles_disjoint(allocated, "old", "replacement")
+
+    def test_result_producer_preserves_an_old_value_across_a_while_backedge(self):
+        """While recurrence keeps an old input live even when its final lexical read is early."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                old = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                for (index,) in pl.while_(init_values=(0,)):
+                    pl.cond(index < 2)
+                    observed = pl.tile.store(old, [64, 0], out)
+                    if flag:
+                        replacement = pl.tile.full([64, 64], dtype=pl.FP32, value=0.0)
+                        selected = pl.yield_(replacement)
+                    else:
+                        selected = pl.yield_(old)
+                    _saved = pl.tile.store(selected, [0, 0], observed)
+                    _index_result = pl.yield_(index + 1)
+                return out
+
+        allocated = self._allocate(Before)
+        _assert_allocated_tiles_disjoint(allocated, "old", "replacement")
+
+    def test_multiple_result_slots_remain_independently_live(self):
+        """Two phi slots selecting a permutation must not collapse into one buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                first = pl.tile.load(pool, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                second = pl.tile.load(pool, [64, 0], [64, 64], target_memory=pl.Mem.Vec)
+                if flag:
+                    left, right = pl.yield_(first, second)
+                else:
+                    left, right = pl.yield_(second, first)
+                left_alias = left
+                right_alias = right
+                saved = pl.tile.store(left_alias, [0, 0], out)
+                result = pl.tile.store(right_alias, [64, 0], saved)
+                return result
+
+        allocated = self._allocate(Before)
+        _assert_allocated_tiles_disjoint(allocated, "left_alias", "right_alias")
+
+    @pytest.mark.parametrize("swap_arms", [False, True], ids=["then_first", "else_first"])
+    def test_near_capacity_result_permutation_preserves_independent_slots(self, swap_arms):
+        """Two 32 KiB results and a held 48 KiB tile stay distinct under Vec pressure."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[112, 256], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[112, 256], pl.FP32]],
+            ) -> pl.Tensor[[112, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [48, 256], target_memory=pl.Mem.Vec)
+                first = pl.tile.load(pool, [0, 0], [32, 256], target_memory=pl.Mem.Vec)
+                second = pl.tile.load(pool, [32, 0], [32, 256], target_memory=pl.Mem.Vec)
+                if flag:
+                    left, right = pl.yield_(first, second)
+                else:
+                    left, right = pl.yield_(second, first)
+                left_alias = left
+                right_alias = right
+                saved_left = pl.tile.store(left_alias, [0, 0], out)
+                saved_right = pl.tile.store(right_alias, [32, 0], saved_left)
+                result = pl.tile.store(held, [64, 0], saved_right)
+                return result
+
+        program = self._swap_arms(Before) if swap_arms else Before
+        allocated = self._allocate(program)
+        _assert_allocated_tiles_disjoint(allocated, "left_alias", "right_alias")
+        _assert_allocated_tiles_disjoint(allocated, "held", "left_alias")
+        _assert_allocated_tiles_disjoint(allocated, "held", "right_alias")
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert max(offset + size for offset, size in ranges.values()) <= 188416
 
 
 if __name__ == "__main__":

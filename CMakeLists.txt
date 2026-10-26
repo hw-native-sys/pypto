@@ -203,6 +203,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/memory_reuse/packing.cpp
     src/ir/transforms/memory_reuse/semantic_aliases.cpp
     src/ir/transforms/memory_reuse/storage.cpp
+    src/ir/transforms/memory_reuse/storage_references.cpp
     src/ir/transforms/memory_reuse/yield_fixup.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp

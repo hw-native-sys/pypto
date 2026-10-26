@@ -33,10 +33,13 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/storage_reference_analysis.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -45,7 +48,10 @@ namespace pypto::ir {
 namespace {
 
 bool SameWindow(const TileTypePtr& lhs, const TileTypePtr& rhs) {
-  if (!lhs || !rhs || lhs->GetMemorySpace() != rhs->GetMemorySpace()) return false;
+  if (!lhs || !rhs || !lhs->memref_ || !*lhs->memref_ || !rhs->memref_ || !*rhs->memref_ ||
+      lhs->GetMemorySpace() != rhs->GetMemorySpace()) {
+    return false;
+  }
   const auto a = GetDefinedMemRef(lhs);
   const auto b = GetDefinedMemRef(rhs);
   return MemRef::SameAllocation(a, b) && a->size_ == b->size_ &&
@@ -63,6 +69,7 @@ class TileStorageVisitor : public IRVisitor {
 
   void VisitFunction(const FunctionPtr& function) override {
     function_name_ = function->name_;
+    references_ = AnalyzeStorageReferences(function->body_, function->params_);
     IRVisitor::VisitFunction(function);
   }
 
@@ -103,10 +110,22 @@ class TileStorageVisitor : public IRVisitor {
     CheckDestinations(targets, branch->span_, /*allow_identical=*/true);
     for (const auto& body : {std::optional<StmtPtr>(branch->then_body_), branch->else_body_}) {
       const auto yield = body ? transform_utils::GetLastYieldStmt(*body) : nullptr;
+      if (!targets.empty() && (!yield || yield->value_.size() != branch->return_vars_.size())) {
+        Error("Every tile branch arm must yield every declared result", branch->span_);
+      }
       for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
         auto target = CheckTile(branch->return_vars_[i]);
         if (!target) continue;
         auto source = yield && i < yield->value_.size() ? CheckTile(yield->value_[i]) : nullptr;
+        // A proven selector yields a handle rather than writing a canonical
+        // destination. Its incoming origins are validated by the shared graph
+        // analysis; concrete II results retain the existing same-window check.
+        if (IsReference(branch->return_vars_[i])) {
+          if (!CompatibleReferenceDescriptor(source, target)) {
+            Error("Tile reference branch inputs must match the declared physical descriptor", branch->span_);
+          }
+          continue;
+        }
         if (!SameWindow(source, target)) {
           Error("Every tile branch arm must yield its declared storage", branch->span_);
         }
@@ -125,7 +144,17 @@ class TileStorageVisitor : public IRVisitor {
       // Allocated TMOV requires distinct, nonoverlapping addresses, including
       // when source and destination name exactly the same storage window.
       if (source && target) {
-        CheckDestinations({source, target}, statement->span_, /*allow_identical=*/false);
+        if ((IsReference(call->args_[0]) || IsReference(statement->var_)) &&
+            source->GetMemorySpace() == target->GetMemorySpace()) {
+          // Different memory spaces prove disjointness without resolving a
+          // selected origin. Within one space there is no singleton source
+          // window to compare; retain the Buffer verifier's conservative bound
+          // until a graph disjointness certificate is available.
+          Error("Allocated tile transfers involving selected references require proven disjoint storage",
+                statement->span_);
+        } else {
+          CheckDestinations({source, target}, statement->span_, /*allow_identical=*/false);
+        }
       }
     }
     IRVisitor::VisitStmt_(statement);
@@ -146,6 +175,10 @@ class TileStorageVisitor : public IRVisitor {
     }
     auto tile = As<TileType>(value->GetType());
     if (!tile) return nullptr;
+    // Missing allocation metadata alone is never permission to bypass storage
+    // verification. Only selectors, carries and aliases closed over concrete
+    // origins by AnalyzeStorageReferences have reference semantics.
+    if (IsReference(value) && tile->GetMemorySpace().has_value()) return tile;
     if (!tile->memref_.has_value() || !*tile->memref_ || !(*tile->memref_)->base_ ||
         !tile->GetMemorySpace().has_value() || !(*tile->memref_)->byte_offset_ ||
         (*tile->memref_)->size_ == 0) {
@@ -159,6 +192,34 @@ class TileStorageVisitor : public IRVisitor {
       }
     }
     return tile;
+  }
+
+  bool IsReference(const ExprPtr& value) const {
+    const auto var = AsVarLike(value);
+    return var && references_.references.count(var.get());
+  }
+
+  bool CompatibleReferenceDescriptor(const TileTypePtr& source, const TileTypePtr& target) {
+    if (!source || !target || !source->GetMemorySpace() ||
+        source->GetMemorySpace() != target->GetMemorySpace()) {
+      return false;
+    }
+    const auto descriptor = [this](const TileTypePtr& tile) -> TypePtr {
+      if (const auto found = reference_descriptors_.find(tile.get()); found != reference_descriptors_.end()) {
+        return found->second;
+      }
+      auto normalized = MutableCopy(tile);
+      normalized->memref_ = std::nullopt;
+      auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+      // Yield may rebind the declared result's valid extents through a typed
+      // descriptor view. It cannot relayout storage, change element types or
+      // invent a different padding contract merely by selecting a handle.
+      view.valid_shape.clear();
+      normalized->tile_view_ = std::move(view);
+      reference_descriptors_.emplace(tile.get(), normalized);
+      return normalized;
+    };
+    return structural_equal(descriptor(source), descriptor(target));
   }
 
   bool ContainsTile(const TypePtr& type) {
@@ -176,6 +237,13 @@ class TileStorageVisitor : public IRVisitor {
                  const StmtPtr& body, const Span& span) {
     auto yield = transform_utils::GetLastYieldStmt(body);
     for (const auto& result : results) CheckTile(result);
+    const bool tile_carry = std::any_of(arguments.begin(), arguments.end(), [](const IterArgPtr& argument) {
+      return argument && As<TileType>(argument->GetType());
+    });
+    if (tile_carry &&
+        (results.size() != arguments.size() || !yield || yield->value_.size() != arguments.size())) {
+      Error("Tile loops must yield and return every declared carry", span);
+    }
     std::vector<TileTypePtr> targets;
     for (size_t i = 0; i < arguments.size(); ++i) {
       VisitExpr(arguments[i]->initValue_);
@@ -185,6 +253,16 @@ class TileStorageVisitor : public IRVisitor {
       auto initial = CheckTile(arguments[i]->initValue_);
       auto yielded = yield && i < yield->value_.size() ? CheckTile(yield->value_[i]) : nullptr;
       auto result = i < results.size() ? CheckTile(results[i]) : nullptr;
+      if (IsReference(arguments[i])) {
+        if (!CompatibleReferenceDescriptor(initial, target) ||
+            !CompatibleReferenceDescriptor(yielded, target) ||
+            !CompatibleReferenceDescriptor(result, target) || !IsReference(results[i])) {
+          Error(
+              "Tile reference carries must have matching physical initializer, yield and result descriptors",
+              span);
+        }
+        continue;
+      }
       if (!SameWindow(initial, target) || !SameWindow(yielded, target) || !SameWindow(result, target)) {
         Error("Tile loop initializer, iter_arg, yield and result must share canonical storage", span);
       }
@@ -202,6 +280,9 @@ class TileStorageVisitor : public IRVisitor {
     };
     std::map<Key, std::vector<TileTypePtr>, KeyLess> groups;
     for (const auto& tile : tiles) {
+      // Reference handles have no destination window to overlap. Their
+      // concrete origins are allocated and checked independently.
+      if (!tile->memref_ || !*tile->memref_) continue;
       auto memref = GetDefinedMemRef(tile);
       const auto memory_space = tile->GetMemorySpace();
       if (!memory_space) {
@@ -249,6 +330,8 @@ class TileStorageVisitor : public IRVisitor {
   std::string function_name_;
   std::unordered_set<const Var*> checked_;
   std::unordered_map<const Type*, bool> contains_tile_;
+  std::unordered_map<const Type*, TypePtr> reference_descriptors_;
+  StorageReferenceAnalysis references_;
 };
 
 class TileStoragePropertyVerifier : public PropertyVerifier {

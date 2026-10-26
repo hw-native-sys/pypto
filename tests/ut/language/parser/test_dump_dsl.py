@@ -485,5 +485,147 @@ def test_dumps_rejected_on_plain_call() -> None:
         _ = P
 
 
+@pytest.mark.parametrize("while_loop", [False, True], ids=["for", "while"])
+@pytest.mark.parametrize("validity", ["reference", "static", "dynamic"])
+def test_dump_loop_init_preserves_the_carry_type_and_actual_seed(while_loop: bool, validity: str) -> None:
+    view = {
+        "reference": "",
+        "static": ", pl.TileView(valid_shape=[8, 16])",
+        "dynamic": ", pl.TileView(valid_shape=[count, 16])",
+    }[validity]
+    carry = f"pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat{view}]"
+    initializer = f"pl._dump.loop_init(seed, {carry})"
+    header = (
+        f"for (current,) in pl.while_(init_values=({initializer},)):\n            pl.cond(flag)"
+        if while_loop
+        else f"for index, (current,) in pl.range(2, init_values=({initializer},)):"
+    )
+    parsed = pl.parse_program(f"""
+@pl.program
+class TypedLoopDump:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, seed: pl.Tile[[16, 16], pl.FP16, pl.MemRef("seed_storage", 0, 512), pl.Mem.Mat],
+             count: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+        {header}
+            result = pl.yield_(current)
+        return
+""")
+    function = next(iter(parsed.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    loop = function.body.stmts[0]
+    assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+    argument = loop.iter_args[0]
+    assert argument.initValue.same_as(function.params[0])
+    assert isinstance(argument.initValue.type, ir.TileType) and argument.initValue.type.memref is not None
+    assert isinstance(argument.type, ir.TileType) and argument.type.memref is None
+    if validity != "reference":
+        assert argument.type.tile_view is not None
+        valid_rows = argument.type.tile_view.valid_shape[0]
+        if validity == "static":
+            assert isinstance(valid_rows, ir.ConstInt) and valid_rows.value == 8
+        else:
+            assert valid_rows.same_as(function.params[1])
+
+
+@pytest.mark.parametrize("while_loop", [False, True], ids=["for", "while"])
+def test_dump_loop_type_metadata_can_refer_to_a_later_scalar_carry(while_loop: bool) -> None:
+    carry = "pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat, pl.TileView(valid_shape=[rows, 16])]"
+    initializer = f"pl._dump.loop_init(seed, {carry}), count"
+    header = (
+        f"for (current, rows) in pl.while_(init_values=({initializer})):\n            pl.cond(flag)"
+        if while_loop
+        else f"for index, (current, rows) in pl.range(2, init_values=({initializer})):"
+    )
+    parsed = pl.parse_program(f"""
+@pl.program
+class CarryMetadataDump:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, seed: pl.Tile[[16, 16], pl.FP16, pl.MemRef("seed_storage", 0, 512), pl.Mem.Mat],
+             count: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+        {header}
+            result, rows_result = pl.yield_(current, rows)
+        return
+""")
+    function = next(iter(parsed.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    loop = function.body.stmts[0]
+    assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+    current, rows = loop.iter_args
+    assert current.initValue.same_as(function.params[0])
+    assert rows.initValue.same_as(function.params[1])
+    assert isinstance(current.type, ir.TileType) and current.type.tile_view is not None
+    assert current.type.tile_view.valid_shape[0].same_as(rows)
+
+
+@pytest.mark.parametrize("while_loop", [False, True], ids=["for", "while"])
+def test_dump_loop_init_types_belong_to_slots_that_share_one_seed(while_loop: bool) -> None:
+    full = "pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat]"
+    narrow = "pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat, pl.TileView(valid_shape=[8, 16])]"
+    initializers = f"pl._dump.loop_init(seed, {full}), pl._dump.loop_init(seed, {narrow})"
+    header = (
+        f"for (first, second) in pl.while_(init_values=({initializers})):\n            pl.cond(flag)"
+        if while_loop
+        else f"for index, (first, second) in pl.range(2, init_values=({initializers})):"
+    )
+    parsed = pl.parse_program(f"""
+@pl.program
+class SharedLoopSeed:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, seed: pl.Tile[[16, 16], pl.FP16, pl.MemRef("seed_storage", 0, 512), pl.Mem.Mat],
+             flag: pl.Scalar[pl.BOOL]):
+        {header}
+            first_result, second_result = pl.yield_(first, second)
+        return
+""")
+    function = next(iter(parsed.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    loop = function.body.stmts[0]
+    assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+    first, second = loop.iter_args
+    assert first.initValue.same_as(function.params[0]) and second.initValue.same_as(function.params[0])
+    assert isinstance(first.type, ir.TileType) and first.type.memref is None
+    assert isinstance(second.type, ir.TileType) and second.type.memref is None
+    assert not ir.structural_equal(first.type, second.type)
+
+
+@pytest.mark.parametrize("while_loop", [False, True], ids=["for", "while"])
+@pytest.mark.parametrize(
+    "initializer",
+    [
+        "pl._dump.loop_init(seed)",
+        "pl._dump.loop_init(seed, pl.Scalar[pl.INDEX], seed)",
+        "pl._dump.loop_init(seed, type=pl.Scalar[pl.INDEX])",
+    ],
+)
+def test_dump_loop_init_rejects_malformed_markers(while_loop: bool, initializer: str) -> None:
+    header = (
+        f"for (current,) in pl.while_(init_values=({initializer},)):\n            pl.cond(flag)"
+        if while_loop
+        else f"for index, (current,) in pl.range(2, init_values=({initializer},)):"
+    )
+    with pytest.raises(ParserSyntaxError, match="loop_init requires an initializer and a carry type"):
+        pl.parse_program(f"""
+@pl.program
+class BadLoopDump:
+    @pl.function
+    def main(self, seed: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+        {header}
+            result = pl.yield_(current)
+        return
+""")
+
+
+def test_dump_loop_init_is_rejected_outside_init_values() -> None:
+    with pytest.raises(ParserSyntaxError, match="Unknown IR dump expression.*loop_init"):
+        pl.parse_program("""
+@pl.program
+class BadLoopDump:
+    @pl.function
+    def main(self, seed: pl.Scalar[pl.INDEX]):
+        value = pl._dump.loop_init(seed, pl.Scalar[pl.INDEX])
+        return
+""")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

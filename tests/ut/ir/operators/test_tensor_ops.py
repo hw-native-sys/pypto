@@ -5362,8 +5362,8 @@ class TestTensorAssembleValidRegionUnion:
     def test_only_the_source_valid_region_has_to_fit(self):
         """A padded source transfers its real extent, not its whole allocation.
 
-        The counterpart tile.assemble rejects this same write, because
-        ``pto.tinsert`` copies the physical subview rather than the valid one.
+        The counterpart tile.assemble rejects this same write because its bounds
+        contract requires the complete physical source box to fit in the target.
         """
         span = ir.Span.unknown()
         target = ir.Var("dst", ir.TensorType([64, 128], DataType.FP32), span)

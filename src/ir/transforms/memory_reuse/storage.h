@@ -14,19 +14,23 @@
 
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
@@ -42,6 +46,44 @@ bool SamePhysicalWindow(const MemRefPtr& lhs, const MemRefPtr& rhs);
 // Equal unresolved annotations cannot prove that two tiles occupy the same
 // hardware memory space, even when their MemRef windows match.
 bool SameKnownTileMemorySpace(const TileTypePtr& lhs, const TileTypePtr& rhs);
+
+bool SameTransferDescriptor(const TileTypePtr& source, const TileTypePtr& target);
+bool SameStorageDescriptor(const TileTypePtr& source, const TileTypePtr& target);
+
+// Path-compressed equivalence classes for physical windows and parallel copies.
+size_t FindSet(std::vector<size_t>& parent, size_t value);
+void UnionSets(std::vector<size_t>& parent, size_t lhs, size_t rhs);
+
+// Number the same lexical statements with else before then. Together with the
+// ordinary order this distinguishes mutually exclusive branch observations.
+class ReverseBranchOrderVisitor : public IRVisitor {
+ public:
+  std::map<const Stmt*, size_t> stmt_order;
+  std::map<const Stmt*, size_t> stmt_end_order;
+
+  void Run(const StmtPtr& body) { VisitStmt(body); }
+
+ protected:
+  // IterArg initializers are expressions, not additional lexical statements.
+  void VisitExpr(const ExprPtr&) override {}
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!stmt) return;
+    stmt_order.emplace(stmt.get(), next_order_++);
+    IRVisitor::VisitStmt(stmt);
+    stmt_end_order.emplace(stmt.get(), next_order_ - 1);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+    VisitStmt(op->then_body_);
+    for (const auto& return_var : op->return_vars_) VisitExpr(return_var);
+  }
+
+ private:
+  size_t next_order_ = 0;
+};
 
 // One collection and a monotonically increasing suffix avoid repeated name
 // scans when fanout transfers share a source or reconciliation runs after reuse.
@@ -79,6 +121,22 @@ class StorageNameSupply : public IRVisitor {
  private:
   std::set<std::string> names_;
   size_t counter_ = 0;
+};
+
+// Bind composed dynamic slice coordinates at their lexical definitions so
+// boundary transfers and assemble snapshots can use one dominating root view.
+class BufferWindowGeometry {
+ public:
+  BufferWindowGeometry(const BufferViewAnalysis& views, StorageNameSupply& names)
+      : views_(views), names_(names) {}
+
+  std::vector<ExprPtr> RootOffsets(const BufferViewAnalysis::View& view, const Span& span) const;
+  StmtPtr Index(const AssignStmtPtr& assign, const CallPtr& call);
+
+ private:
+  const BufferViewAnalysis& views_;
+  StorageNameSupply& names_;
+  std::unordered_map<const Call*, std::vector<ExprPtr>> root_offsets_;
 };
 
 // Cache each carry at its binding, including unchanged carries. The general

@@ -445,6 +445,12 @@ tile 调用 `set_validshape`。
 | `DSA_RP` | 运行 `MaterializeSemanticAliases` + `AllocateMemoryAddr`；跳过 `MemoryReuse` | 发射进程内 canonical-greedy DSA-RP 的 `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
 | `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
+区域存储引用独立于地址规划方式。选择已有 Mat 存储的 if 结果，以及传递该选择的
+carry，发射为类型为 `!pto.tile_buf` 的真实 `scf` 结果；它们不拥有 allocation，也不
+请求 Mat 到 Mat 传输。PYPTO 和 DSA_RP 仅为真实来源分配地址，PTOAS 自行放置来源。
+可迁移的分支内 producer 保留共同目标快路径。运行时句柄不能代替 `MemRef.base_`，
+后者仍是 allocation 身份，而非运行时指针。
+
 内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
 （循环累加器、原地算子）归一到同一 MemRef；**`MemoryReuse`** 只做**机会性**的、
 基于生命周期的独立 buffer 合并，仅供 `PYPTO` 使用。`DSA_RP` 跳过该合并，

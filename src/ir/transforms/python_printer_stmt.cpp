@@ -35,6 +35,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/python_printer.h"
@@ -247,7 +248,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     stream_ << ", init_values=(";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (i > 0) stream_ << ", ";
-      VisitExpr(op->iter_args_[i]->initValue_);
+      PrintLoopInitializer(op->iter_args_[i]);
     }
     // Add trailing comma for single-element tuple
     if (op->iter_args_.size() == 1) stream_ << ",";
@@ -289,6 +290,16 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   DecreaseIndent();
 }
 
+void IRPythonPrinter::PrintLoopInitializer(const IterArgPtr& argument) {
+  // A selected carry can have an allocation-free descriptor while its entry
+  // value owns concrete storage. Preserve that binding without introducing a
+  // new value or changing the ordinary authoring syntax for inferred carries.
+  const bool explicit_type = !structural_equal(argument->GetType(), argument->initValue_->GetType());
+  if (explicit_type) stream_ << prefix_ << "._dump.loop_init(";
+  VisitExpr(argument->initValue_);
+  if (explicit_type) stream_ << ", " << Print(argument->GetType()) << ")";
+}
+
 void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
   // Check if this is SSA-style (with iter_args) or natural style
   if (op->iter_args_.empty()) {
@@ -316,7 +327,7 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
     // Add init_values for iter_args
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (i > 0) stream_ << ", ";
-      VisitExpr(op->iter_args_[i]->initValue_);
+      PrintLoopInitializer(op->iter_args_[i]);
     }
     // Add trailing comma for single-element tuple
     if (op->iter_args_.size() == 1) stream_ << ",";

@@ -493,6 +493,15 @@ three modes, so must-alias buffers survive. In `PTOAS` mode, ptoas `PlanMemory`
 (which `level2` requires, rejecting any `addr` operand) performs lifetime reuse
 and address assignment.
 
+Region storage references are independent of that placement choice. An if result
+that selects existing Mat storage, or a carry forwarding such a selection, is
+emitted as a real `scf` result of `!pto.tile_buf` type. It owns no allocation and
+does not request a Mat-to-Mat transfer. PYPTO and DSA_RP provide addresses only
+for its actual source allocations; PTOAS places those sources itself. Eligible
+branch-local producers retain the existing common-destination fast path. A
+runtime handle must not be substituted into `MemRef.base_`, which remains an
+allocation identity rather than a runtime pointer.
+
 > **Caveat:** `PTOAS` mode skips the Ascend910 `load + tpop_from_aic` in-place
 > hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution
 > (`AllocateMemoryAddr`); those are deferred to ptoas. `compile()` emits a

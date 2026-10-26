@@ -52,6 +52,7 @@
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -150,6 +151,14 @@ BufferTypePtr StorageDescriptor(const TileTypePtr& tile, const Span& span) {
   return DenseDescriptor(tile, span);
 }
 
+BufferTypePtr ReferenceDescriptor(const TileTypePtr& tile, const Span& span) {
+  // A selected view has its own immutable valid extents. Unlike an owning Vec
+  // allocation, one dynamic dimension does not require mutable metadata for
+  // both dimensions: its explicit subview operands type them independently.
+  if (tile->GetMemorySpace() == MemorySpace::Vec) return WindowDescriptor(tile, span);
+  return StorageDescriptor(tile, span);
+}
+
 /// Planned members retain their descriptors; storage is represented once.
 struct StorageMember {
   TileTypePtr tile;  // Null for a write view that no Tile variable names.
@@ -176,8 +185,15 @@ class StorageIndex : public IRVisitor {
     auto variable = AsVarLike(expr);
     if (auto tile = variable ? As<TileType>(variable->GetType()) : nullptr;
         tile && !windows.count(tile.get()) && types_.insert(tile.get()).second) {
-      auto memory = GetDefinedMemRef(tile);
-      CHECK_SPAN(memory && memory->base_ && !memory->is_pinned_ && memory->slot_count_ == 1 &&
+      auto memory = tile->memref_.value_or(nullptr);
+      // A normalized reference result selects an existing handle and owns no
+      // allocation. Its region definition is lowered below, rather than being
+      // indexed as an additional storage request.
+      if (!memory) {
+        IRVisitor::VisitExpr(expr);
+        return;
+      }
+      CHECK_SPAN(memory->base_ && !memory->is_pinned_ && memory->slot_count_ == 1 &&
                      !memory->slot_index_.has_value(),
                  expr->span_)
           << "LowerTileToBuffer: tile storage must be planned; multi-slot storage needs its own recipe";
@@ -254,7 +270,10 @@ class StorageIndex : public IRVisitor {
     auto view = std::make_shared<BufferType>(
         descriptor->shape_, descriptor->dtype_, descriptor->memory_space_, product, descriptor->blayout_,
         descriptor->slayout_, descriptor->fractal_, descriptor->pad_, descriptor->compact_);
-    auto memory = GetDefinedMemRef(accumulator);
+    auto memory = accumulator->memref_.value_or(nullptr);
+    // A runtime-selected accumulator gets its product-shaped view at the
+    // write site, where the selected handle dominates the alias.
+    if (!memory) return;
     INTERNAL_CHECK_SPAN(memory && memory->base_, call->span_)
         << "Internal error: tile.matmul_acc accumulator storage must be planned";
     roots[memory->base_.get()].members.push_back({nullptr, memory, view, call->span_, call.get()});
@@ -594,7 +613,7 @@ class LocalAccumulatorIndex : public IRVisitor {
   void VisitVarLike_(const VarPtr& var) override {
     auto tile = As<TileType>(var->GetType());
     if (!tile || tile->GetMemorySpace() != MemorySpace::Acc) return;
-    auto memory = GetDefinedMemRef(tile);
+    auto memory = tile->memref_.value_or(nullptr);
     if (!memory || !memory->base_) return;
     auto [entry, inserted] = uses_.try_emplace(memory->base_.get(), Use{region_, statement_});
     if (!inserted && entry->second.region != region_) entry->second.region = nullptr;
@@ -690,6 +709,12 @@ class TileToBufferMutator : public IRMutator {
     if (As<TileType>(assign->var_->GetType())) {
       auto source = AsVarLike(assign->value_);
       if (source) {
+        if (IsReferenceTile(assign->var_)) {
+          // An SSA rename forwards the selected handle. Key this mapping by
+          // Var identity: equal descriptors do not identify equal references.
+          reference_handles_[assign->var_.get()] = Handle(source);
+          return Empty(assign->span_);
+        }
         const auto deferred = deferred_windows_.find(As<TileType>(source->GetType()).get());
         if (deferred != deferred_windows_.end()) {
           deferred_windows_[As<TileType>(assign->var_->GetType()).get()] = deferred->second;
@@ -727,6 +752,14 @@ class TileToBufferMutator : public IRMutator {
           << "LowerTileToBuffer: distributed tensor branch results require a separate conversion recipe";
     }
     auto condition = VisitExpr(branch->condition_);
+    for (const auto& result : branch->return_vars_) {
+      if (IsReferenceTile(result)) {
+        reference_handles_[result.get()] = std::make_shared<Var>(
+            result->name_hint_, ReferenceDescriptor(As<TileType>(result->GetType()), result->span_),
+            result->span_);
+        region_reference_handles_.insert(reference_handles_.at(result.get()).get());
+      }
+    }
     YieldContext then_context(branch->return_vars_);
     auto then_body = LowerRegion(branch->then_body_, then_context);
     YieldContext else_context(branch->return_vars_);
@@ -735,7 +768,10 @@ class TileToBufferMutator : public IRMutator {
     std::vector<VarPtr> results;
     for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
       const auto& result = branch->return_vars_[i];
-      if (As<TileType>(result->GetType())) continue;
+      if (As<TileType>(result->GetType())) {
+        if (IsReferenceTile(result)) results.push_back(Handle(result));
+        continue;
+      }
       if (As<TensorType>(result->GetType())) {
         CHECK_SPAN(
             then_context.tensor_values[i] && then_context.tensor_values[i] == else_context.tensor_values[i],
@@ -755,19 +791,29 @@ class TileToBufferMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(yield->value_.size() == yield_context_->results.size(), yield->span_)
         << "Internal error: device region yield/result arity mismatch";
     std::vector<ExprPtr> values;
+    std::vector<StmtPtr> aliases;
     for (size_t i = 0; i < yield->value_.size(); ++i) {
       const auto& result = yield_context_->results[i];
       const auto& value = yield->value_[i];
       if (As<TileType>(result->GetType())) {
-        INTERNAL_CHECK_SPAN(Handle(value) == Handle(result), yield->span_)
-            << "Internal error: Tile storage legalization left an implicit region transfer";
+        if (IsReferenceTile(result)) {
+          // A reference phi selects the incoming handle. Descriptor aliases
+          // remain local to this arm and never copy the selected payload.
+          values.push_back(MatchReferenceDescriptor(value, result, aliases));
+        } else {
+          INTERNAL_CHECK_SPAN(Handle(value) == Handle(result), yield->span_)
+              << "Internal error: Tile storage legalization left an implicit region transfer";
+        }
       } else if (As<TensorType>(result->GetType())) {
         yield_context_->tensor_values[i] = VisitExpr(value);
       } else {
         values.push_back(VisitExpr(value));
       }
     }
-    return std::make_shared<YieldStmt>(values, yield->span_, yield->leading_comments_);
+    auto lowered = std::make_shared<YieldStmt>(values, yield->span_, yield->leading_comments_);
+    if (aliases.empty()) return lowered;
+    aliases.push_back(lowered);
+    return std::make_shared<SeqStmts>(std::move(aliases), yield->span_);
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& loop) override { return LowerLoop(loop); }
@@ -801,6 +847,7 @@ class TileToBufferMutator : public IRMutator {
     }
     lowered->iter_args_.clear();
     lowered->return_vars_.clear();
+    std::vector<StmtPtr> entry_aliases;
     std::vector<ExprPtr> initial_values(loop->iter_args_.size());
     for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
       const auto& argument = loop->iter_args_[i];
@@ -813,8 +860,28 @@ class TileToBufferMutator : public IRMutator {
       auto initial = VisitExpr(argument->initValue_);
       initial_values[i] = initial;
       if (As<TileType>(argument->GetType())) {
-        INTERNAL_CHECK_SPAN(initial == Handle(argument) && initial == Handle(result), loop->span_)
-            << "Internal error: Tile storage legalization left an implicit loop entry transfer";
+        if (IsReferenceTile(argument)) {
+          INTERNAL_CHECK_SPAN(IsReferenceTile(result), loop->span_)
+              << "Internal error: a reference carry must retain a reference loop result";
+          const auto descriptor = ReferenceDescriptor(As<TileType>(argument->GetType()), argument->span_);
+          CHECK_SPAN(structural_equal(descriptor,
+                                      ReferenceDescriptor(As<TileType>(result->GetType()), result->span_)),
+                     loop->span_)
+              << "LowerTileToBuffer: reference loop carries require one compatible physical descriptor";
+          auto handle = std::make_shared<IterArg>(
+              argument->name_hint_, descriptor,
+              MatchReferenceDescriptor(argument->initValue_, argument, entry_aliases), argument->span_);
+          auto returned = std::make_shared<Var>(result->name_hint_, handle->GetType(), result->span_);
+          reference_handles_[argument.get()] = handle;
+          reference_handles_[result.get()] = returned;
+          region_reference_handles_.insert(handle.get());
+          region_reference_handles_.insert(returned.get());
+          lowered->iter_args_.push_back(std::move(handle));
+          lowered->return_vars_.push_back(std::move(returned));
+        } else {
+          INTERNAL_CHECK_SPAN(initial == Handle(argument) && initial == Handle(result), loop->span_)
+              << "Internal error: Tile storage legalization left an implicit loop entry transfer";
+        }
       } else if (As<TensorType>(argument->GetType())) {
         tensor_aliases_[argument.get()] = initial;
       } else {
@@ -843,14 +910,26 @@ class TileToBufferMutator : public IRMutator {
       }
       var_remap_.erase(argument.get());
     }
-    return lowered;
+    if (entry_aliases.empty()) return lowered;
+    entry_aliases.push_back(lowered);
+    return std::make_shared<SeqStmts>(std::move(entry_aliases), loop->span_);
   }
 
   static StmtPtr Empty(const Span& span) { return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span); }
 
+  static bool IsReferenceTile(const ExprPtr& value) {
+    const auto tile = As<TileType>(value->GetType());
+    return tile && !tile->memref_.has_value();
+  }
+
   VarPtr Handle(const ExprPtr& value) {
     auto tile = As<TileType>(value->GetType());
     INTERNAL_CHECK_SPAN(tile, value->span_) << "Internal error: Buffer conversion expected a Tile operand";
+    if (const auto variable = AsVarLike(value)) {
+      if (auto selected = reference_handles_.find(variable.get()); selected != reference_handles_.end()) {
+        return selected->second;
+      }
+    }
     if (auto deferred = deferred_windows_.find(tile.get()); deferred != deferred_windows_.end()) {
       auto found = use_windows_.find(tile.get());
       if (found != use_windows_.end()) return found->second;
@@ -868,6 +947,48 @@ class TileToBufferMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(found != storage_.handles.end(), value->span_)
         << "Internal error: missing indexed storage view for a Tile operand";
     return found->second;
+  }
+
+  VarPtr MatchReferenceDescriptor(const ExprPtr& value, const ExprPtr& result,
+                                  std::vector<StmtPtr>& aliases) {
+    auto source = Handle(value);
+    const auto tile = As<TileType>(result->GetType());
+    const auto descriptor = ReferenceDescriptor(tile, result->span_);
+    const auto original = As<TileType>(value->GetType());
+    INTERNAL_CHECK_SPAN(original, value->span_)
+        << "Internal error: a selected reference must originate from a Tile value";
+    const auto expected_view = tile_view_semantics::GetEffectiveTileView(*tile);
+    const auto source_view = tile_view_semantics::GetEffectiveTileView(*original);
+    const bool matching_valid = source_view.valid_shape.size() == expected_view.valid_shape.size() &&
+                                std::equal(source_view.valid_shape.begin(), source_view.valid_shape.end(),
+                                           expected_view.valid_shape.begin(),
+                                           [](const ExprPtr& source_extent, const ExprPtr& result_extent) {
+                                             return structural_equal(source_extent, result_extent);
+                                           });
+    if (structural_equal(source->GetType(), descriptor) && matching_valid &&
+        source_view.pad == expected_view.pad) {
+      return source;
+    }
+    const auto source_descriptor = As<BufferType>(source->GetType());
+    INTERNAL_CHECK_SPAN(source_descriptor && source_descriptor->memory_space_ == descriptor->memory_space_,
+                        result->span_)
+        << "Internal error: a reference descriptor cannot change its selected memory space";
+    const bool selected_source = region_reference_handles_.count(source.get());
+    CHECK_SPAN(!selected_source || !HasDynamicValid(descriptor), result->span_)
+        << "PTOAS v0.67 cannot change runtime valid extents on a selected storage reference; "
+           "keep the same descriptor or prepare each concrete incoming value's metadata before selecting";
+    if (!selected_source && descriptor->memory_space_ == MemorySpace::Vec &&
+        source_descriptor->shape_ == descriptor->shape_ && source_descriptor->dtype_ == descriptor->dtype_) {
+      return DefineWindow(source->name_hint_ + "_result_view", source, ZeroOffsets(result->span_), descriptor,
+                          Valid(result), aliases, result->span_);
+    }
+    auto handle = std::make_shared<Var>(source->name_hint_ + "_result_view", descriptor, result->span_);
+    aliases.push_back(std::make_shared<AssignStmt>(
+        handle,
+        OpRegistry::GetInstance().CreateInternal("buffer.reshape", {source}, {}, descriptor, result->span_),
+        result->span_));
+    if (selected_source) region_reference_handles_.insert(handle.get());
+    return handle;
   }
 
   // The Tile's own valid extents: constants for a static descriptor, the
@@ -888,6 +1009,14 @@ class TileToBufferMutator : public IRMutator {
   }
 
   StmtPtr LowerDefinition(const CallPtr& call, const VarPtr& result) {
+    if (result && IsReferenceTile(result)) {
+      if (auto reused = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+        // Registered writebacks retain the selected reference, rather than
+        // inventing an allocation for the new logical value version. Earlier
+        // legalization has already proved that the write preserves old values.
+        reference_handles_[result.get()] = Handle(call->args_[*reused]);
+      }
+    }
     if (!guarded_valid_) return WithValidState(call, result, LowerCall(call, result));
     if (result && IsOp(call, "tile.slice") && NeedsRuntimeBufferValid(result->GetType())) {
       // Remember immutable scalar operands, not a branch-local Buffer handle.
@@ -959,6 +1088,7 @@ class TileToBufferMutator : public IRMutator {
         handle, OpRegistry::GetInstance().CreateInternal("buffer.subview", args, {}, descriptor, span),
         span));
     window_origins_[handle.get()] = {source, offsets};
+    if (region_reference_handles_.count(source.get())) region_reference_handles_.insert(handle.get());
     return handle;
   }
 
@@ -1026,6 +1156,19 @@ class TileToBufferMutator : public IRMutator {
       (void)Handle(result);
       return Empty(call->span_);
     }
+    if (result && IsReferenceTile(result) &&
+        (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") ||
+         IsOp(call, "tile.transpose_view") || IsOp(call, "tile.set_validshape"))) {
+      // A view of a selected reference must be defined after the selection.
+      // Static aliases carry their own descriptor and do not mutate either
+      // incoming handle's metadata. Runtime metadata setters need a separate
+      // ownership/version recipe and remain outside this conversion contract.
+      CHECK_SPAN(!NeedsRuntimeBufferValid(result->GetType()), call->span_)
+          << "LowerTileToBuffer: reference views require static valid extents";
+      std::vector<StmtPtr> aliases;
+      reference_handles_[result.get()] = MatchReferenceDescriptor(call->args_[0], result, aliases);
+      return std::make_shared<SeqStmts>(std::move(aliases), call->span_);
+    }
     if (IsOp(call, "tile.slice")) {
       // A slice aliases its source at (possibly runtime) offsets, keeping the
       // source's row pitch. It is defined here, where its offsets are in scope.
@@ -1041,6 +1184,7 @@ class TileToBufferMutator : public IRMutator {
       window_handles_[tile.get()] =
           DefineWindow(result->name_hint_, Handle(call->args_[0]), Offsets(call->args_[2]),
                        WindowDescriptor(tile, call->span_), Valid(result), out, call->span_);
+      if (IsReferenceTile(result)) reference_handles_[result.get()] = window_handles_.at(tile.get());
       return std::make_shared<SeqStmts>(out, call->span_);
     }
     if ((IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) && result &&
@@ -1270,20 +1414,50 @@ class TileToBufferMutator : public IRMutator {
              "same planned storage";
       // A wider accumulator is written through its product-shaped view.
       const auto view = storage_.write_views.find(call.get());
-      const std::vector<ExprPtr> operands{Handle(call->args_[1]), Handle(call->args_[2]),
-                                          view == storage_.write_views.end() ? destination : view->second};
-      if (call->args_.size() == 3) return Operation("buffer.matmul_acc", operands, call->span_);
+      auto write_destination = view == storage_.write_views.end() ? destination : view->second;
+      std::vector<StmtPtr> aliases;
+      if (IsReferenceTile(result)) {
+        const auto descriptor = As<BufferType>(destination->GetType());
+        const auto lhs = As<BufferType>(Handle(call->args_[1])->GetType());
+        const auto rhs = As<BufferType>(Handle(call->args_[2])->GetType());
+        const std::vector<int64_t> product{lhs->valid_shape_[0], rhs->valid_shape_[1]};
+        if (product != descriptor->valid_shape_) {
+          auto product_descriptor =
+              std::make_shared<BufferType>(descriptor->shape_, descriptor->dtype_, descriptor->memory_space_,
+                                           product, descriptor->blayout_, descriptor->slayout_,
+                                           descriptor->fractal_, descriptor->pad_, descriptor->compact_);
+          write_destination =
+              std::make_shared<Var>(result->name_hint_ + "_product_view", product_descriptor, call->span_);
+          aliases.push_back(std::make_shared<AssignStmt>(
+              write_destination,
+              OpRegistry::GetInstance().CreateInternal("buffer.reshape", {destination}, {},
+                                                       product_descriptor, call->span_),
+              call->span_));
+        }
+      }
+      const std::vector<ExprPtr> operands{Handle(call->args_[1]), Handle(call->args_[2]), write_destination};
+      auto with_aliases = [&](const StmtPtr& operation) -> StmtPtr {
+        if (aliases.empty()) return operation;
+        aliases.push_back(operation);
+        return std::make_shared<SeqStmts>(std::move(aliases), call->span_);
+      };
+      if (call->args_.size() == 3) {
+        return with_aliases(Operation("buffer.matmul_acc", operands, call->span_));
+      }
       // init_cond overwrites instead of accumulating. A literal selects one
       // form; a runtime predicate selects between both explicit writes.
       const auto& init = call->args_[3];
       std::optional<bool> literal;
       if (auto value = As<ConstInt>(init)) literal = value->value_ != 0;
       if (auto value = As<ConstBool>(init)) literal = value->value_;
-      if (literal) return Operation(*literal ? "buffer.matmul" : "buffer.matmul_acc", operands, call->span_);
-      return std::make_shared<IfStmt>(
+      if (literal) {
+        return with_aliases(
+            Operation(*literal ? "buffer.matmul" : "buffer.matmul_acc", operands, call->span_));
+      }
+      return with_aliases(std::make_shared<IfStmt>(
           VisitExpr(init), Operation("buffer.matmul", operands, call->span_),
           std::optional<StmtPtr>(Operation("buffer.matmul_acc", operands, call->span_)),
-          std::vector<VarPtr>{}, call->span_);
+          std::vector<VarPtr>{}, call->span_));
     }
     if (IsOp(call, "tile.move")) {
       INTERNAL_CHECK_SPAN(result && !call->args_.empty(), call->span_)
@@ -1305,6 +1479,12 @@ class TileToBufferMutator : public IRMutator {
   const LocalAccumulatorIndex* local_accumulators_;
   std::unordered_map<const Stmt*, std::vector<StmtPtr>> local_definitions_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
+  // Runtime-selected handles are logical SSA references, not allocation/type
+  // identities. Their mappings must survive enclosing region conversion.
+  std::unordered_map<const Var*, VarPtr> reference_handles_;
+  // PTOAS can pass these handles through SCF, but its pinned metadata-view
+  // lowering cannot recover a concrete address for runtime re-views of them.
+  std::unordered_set<const Var*> region_reference_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;
   YieldContext* yield_context_ = nullptr;
   // Input SSA uses distinct identities for branch-local definitions. Retaining

@@ -43,8 +43,10 @@ parameter. Both branch arms must resolve a GM result to the same parameter;
 loop backedges must preserve the initial GM alias. For loops require an INDEX
 induction variable and a provably positive constant step. Dynamic/negative steps,
 changing GM aliases, region-local returns, unsigned scalar arithmetic and device
-helper calls remain outside the default contract. Tile carry copies are planned
-before lowering; scalar yields assign simultaneously, including swaps in Torch
+helper calls remain outside the default contract. Concrete Tile carry copies are planned
+before lowering. Runtime-selected Tile references retain Buffer-valued region
+results and carries, so their yields select handles without copying payloads.
+Scalar yields assign simultaneously, including swaps in Torch
 numerical debugging. Block and subblock queries use their existing Buffer recipes.
 
 Vec slices with static or runtime offsets, including nested slices, keep their parent's row pitch.
@@ -76,7 +78,8 @@ The ordinary cube path uses GM -> Mat -> Left/Right -> Acc -> GM, with
 operands accumulate in FP32; INT8 operands accumulate in INT32. Literal and
 runtime `init_cond` select initializing or accumulating writes. Wider Acc valid
 regions use a product-shaped descriptor over the same storage. Matrix region
-carries must preserve one storage alias; arbitrary matrix carry copies, MX,
+values may select compatible typed handles from different allocations; loop
+entry and backedges retain that selection, including zero-trip loops. Arbitrary matrix carry copies, MX,
 FIFO, slots, scaled/quantized writeback and workspace operations remain excluded.
 Torch debugging models fractal layouts and shared addressed matrix storage,
 including transpose relabels and product views. Only complete untouched Acc
@@ -124,7 +127,8 @@ An extent may be zero: allocation metadata is updated, but load/store/arithmetic
 execute only when both valid extents are positive. Dynamic-valid subviews are
 materialized at their guarded consumers, so the empty path never constructs an
 empty native subview. Constant-empty operations are removed before constructing
-Buffer calls. Views never escape the guard, and no Buffer-valued phi is introduced.
+Buffer calls. These guarded dynamic-valid views never escape the guard or
+introduce a Buffer-valued phi; supported static reference regions remain explicit.
 This does not initialize data when valid extents grow. Nonzero runtime extents
 must still fit the physical window, and reads must refer to initialized data.
 
@@ -188,8 +192,9 @@ write a destination return `VoidType`; allocation returns the handle.
 
 ## Conversion contract
 
-An indexed traversal collects storage from Tile variables, whose MemRefs have
-been planned. Producer calls retain logical deduced types and do not establish
+An indexed traversal collects storage from allocation-backed Tile variables,
+whose MemRefs have been planned. A normalized Tile reference without a MemRef
+owns no storage and is excluded from this allocation index. Producer calls retain logical deduced types and do not establish
 additional allocation identities. A second traversal replaces each Tile use
 with its Buffer handle and rewrites supported calls. The maps remain private to
 the pass; the output IR contains no conversion side table.
@@ -210,6 +215,63 @@ verifies its output and is idempotent. Failed conversion leaves the input
 program unchanged. No functional Tile pass should run after this boundary.
 
 Synthetic allocations inherit the source location of their indexed Tile handle when the original allocation has no location. This keeps native allocation diagnostics tied to the user source.
+
+### Reference region results
+
+When storage legalization cannot safely make incoming values share one window,
+an if result selects an existing handle. Conversion retains that result as a
+`BufferType` SSA variable and yields each arm's typed handle. The result creates
+no allocation, has no independent address, and requires no `buffer.copy`.
+
+```text
+# Both inputs are already live in Mat memory.
+selected: Buffer[[32,64], FP16, Mat] = if flag:
+    yield first_buffer
+else:
+    yield second_buffer
+buffer.copy(selected, left_buffer)  # Legal Mat -> Left transfer.
+```
+
+Static descriptor aliases are defined where the selected handle dominates them;
+they preserve shape, valid extents, layout and padding without rebinding either
+incoming allocation. Equal descriptors alone do not identify references: the
+conversion maps each logical SSA variable independently.
+
+A reference entering a For/While loop becomes a Buffer-valued `IterArg`, result
+and backedge yield. The initializer supplies the zero-trip result; iterations
+may select another compatible handle. Concrete same-window carries keep the
+existing elimination path. Registered in-place results retain their selected
+reference only after storage legalization has protected independently observed
+old values. Explicitly normalized Vec reference results can retain runtime valid
+extents through per-axis descriptors and explicit subview operands. This does
+not widen default selection for user control flow with dynamic valid state;
+runtime-valid reference relabels and metadata setters still require a separate
+conversion recipe.
+
+The declared result descriptor owns its validity. Each incoming edge creates an
+independent metadata view when the result extents differ from the selected
+source, including when both runtime types print the same `?` dimensions. The
+view uses the result's extent expressions and leaves the original full source
+handle unchanged for subsequent reads. Legacy reference emission uses the same
+contract when preparing each native `scf.yield`.
+
+PTOAS v0.67 can create runtime-valid metadata views on concrete local owners,
+and can forward an already selected reference with unchanged runtime metadata.
+It cannot change runtime valid extents through a new view of an SCF
+result/iter-argument; both conversion and legacy codegen diagnose that boundary
+before native emission. Prepare the required metadata views on the concrete
+incoming values before selecting instead. Static result metadata uses a plain
+full-span reshape and remains supported after selection, including when the
+source metadata is dynamic; the original source handle stays unchanged.
+
+Participating concrete source allocation groups conservatively retain occupancy
+for the complete function under PYPTO and DSA_RP, and are excluded from optional
+PYPTO reuse. This protection can increase memory consumption; logical per-value
+liveness remains separate. A selected handle does not receive a fabricated root
+or byte range. The Buffer verifier accepts permitted same-handle in-place use
+and distinct memory spaces, but rejects distinct same-space alias-sensitive
+pairs when no graph disjointness certificate is available. Reference selection
+therefore does not bypass a consumer's storage-separation contract.
 
 ## Planned storage views
 
@@ -352,8 +414,9 @@ view of the same storage (another addressed allocation, or a PTOAS
 `buffer.reshape`), because PTOAS requires a native matmul destination to match
 the product. This is the same native write as the legacy emitter; whole
 fractal boxes outside the product keep their data, the rest of a partially
-covered box does not. `tile.transpose_view`
-needs no call: storage indexing has already declared the relabelled window.
+covered box does not. An allocation-backed `tile.transpose_view` needs no call:
+storage indexing has already declared the relabelled window. A transpose view
+of a selected reference becomes a local `buffer.reshape` alias.
 Acc stores drain through the fix-pipe with its unscaled conversions only;
 `pre_quant`/`pre_relu`, atomic and phased stores, and cache-policy loads still
 fail explicitly until their transfer recipes exist.
@@ -365,10 +428,11 @@ explicit conversion contract.
 
 ## Branches
 
-Storage legalization has already selected one destination window for each Tile
-branch result and placed all required transfers in the arms. Final conversion
-removes those Tile results and yield operands. It preserves scalar results in
-their original relative order, so native `scf.if` carries only real scalar SSA.
+For a Tile branch result with one selected destination window, storage
+legalization has placed the required transfers in the arms. Final conversion
+removes that result and its yield operands. A runtime-selected reference instead
+remains a Buffer result, as described above. Buffer and scalar results retain
+their original relative order in native `scf.if`.
 
 ```text
 # Input: (chosen_tile, selected_offset) = if flag:
@@ -393,14 +457,14 @@ copy to repair a region. Branch and yield source comments are preserved.
 
 ## Loops
 
-For and While conversion removes Tile initializers, iter_args, results and
+For and While conversion removes concrete Tile initializers, iter_args, results and
 backedge yields after verifying that they name the same legalized storage.
 Entry copies already run before the loop, so zero iterations preserve the
 initial value. Swap and fanout snapshots are ordinary Buffer writes in the
 body; final conversion creates no scratch or copy.
 
-Only scalar iter_args remain in native control flow, in their original relative
-order. While conditions use the rewritten scalar bindings. GM carries disappear
+Scalar and reference Buffer iter_args remain in native control flow, in their original relative
+order. While conditions use the rewritten carry bindings. GM carries disappear
 when their initial value and backedge resolve to the same parameter; a changing
 GM selection requires a separate recipe and is diagnosed. Nested loops and
 branches use distinct yield contexts, and each initializer is traversed only

@@ -70,10 +70,10 @@
 | **NoRedundantBlocks** | NoRedundantBlocks | 无单子节点或嵌套的 `SeqStmts` |
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 `InCoreScopeStmt` 节点 |
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
-| **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
+| **HasMemRefs** | HasMemRefs | Tile 分配拥有者已初始化 MemRef；经过证明的 SSA 存储引用无需独立分配 |
 | **BufferIR** | BufferIR | 显式设备 buffer 表示、注册调用和逐元素配方窗口约束；组合 SSA、定义支配关系及赋值类型对称性 |
-| **TileStorageLegalized** | TileStorageLegalized | 设备区域边界使用统一的符号存储，同时存活的循环 carry 窗口互不重叠 |
-| **TileStorageAllocated** | TileStorageAllocated | 区域存储统一，并按实际地址检查同时存活的目标窗口及显式复制的重叠 |
+| **TileStorageLegalized** | TileStorageLegalized | 具体区域边界使用统一存储，引用边界具有经过证明的兼容来源 |
+| **TileStorageAllocated** | TileStorageAllocated | 区域存储合法，并按实际地址检查具体同时存活目标窗口及显式复制的重叠 |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut 参数未被张量创建操作重新赋值 |
 | **NoNestedInCore** | NoNestedInCore | 无嵌套 InCore 作用域（`InCoreScopeStmt` 内含 `InCoreScopeStmt`） |
@@ -215,9 +215,10 @@ Orchestration 函数不在其检查范围内。
 值，以及 `tile.*`/`pld.tile.*` 调用。GM tensor 类型中内嵌的 MemRef 仍然合法。
 Buffer 句柄来自函数参数，或声明了分配、别名、借用结果行为的已注册 buffer
 算子。Tuple 投影保留这些显式结果契约；普通句柄赋值和将已有句柄打包的
-`MakeTuple` 会被拒绝。Buffer 不能经函数返回逃逸，也不能经过 `return_vars`、
-循环 `iter_args` 或 yield 传递。标量控制流结果仍然合法，区域内算子可以通过
-显式 buffer 操作数直接写入外层存储。
+`MakeTuple` 会被拒绝。Buffer 不能经函数返回逃逸。物理描述符匹配且区域签名完整的
+直接 Buffer 引用可以经过 If/For/While 结果、iter_args 和 yield 传递；元组包装的
+句柄仍需先展平。动态引用保留未知窗口来源，不虚构 allocation 拥有者，也不为
+别名敏感算子证明互不重叠。区域内算子也可以通过显式 buffer 操作数直接写入外层存储。
 传入的 buffer 参数（包括含句柄的 tuple）不能通过赋值重新定义；通过这些句柄
 写入存储仍然合法。
 
@@ -263,10 +264,13 @@ WindowBuffer 直接出现在表达式中时（包括 `EvalStmt` 和调用参数�
 ### Tile 存储属性
 
 `TileStorageLegalized` 在共享存储协调后检查 `InCore`、`AIC` 和 `AIV` 函数。
-每个 tile 变量都需要已定义的 MemRef 和内存空间。分支的 tile yield 必须指向
-结果声明的存储窗口。`ForStmt` 和 `WhileStmt` 的初始值、iter_arg、yield 和结果
-必须指向同一窗口，同时存活的 carry 窗口不能重叠。标量和 GM 值保持原有语义，
-嵌套的 tile 元组必须先展平。
+分配拥有者和静态视图必须具有 MemRef 与内存空间。引用结果、carry 和必要别名
+只有在共享 SSA 引用分析证明来源合法时才能省略 MemRef。引用边必须保留兼容的
+物理描述符，每个区域必须提供完整结果列表；这些边选择已有句柄，不要求来源共址。
+下述统一窗口要求适用于静态物化边界，而非动态引用边界。
+静态分支的 tile yield 必须指向结果声明的存储窗口。静态 `ForStmt` 和 `WhileStmt`
+初始值、iter_arg、yield 和结果必须指向同一窗口，同时存活的静态 carry 目标窗口不能
+重叠。标量和 GM 值保持原有语义，嵌套的 tile 元组必须先展平。
 
 `pass::VerifyTileStorage()` / `passes.verify_tile_storage()` 会显式验证并产生该
 属性，即使关闭自动验证也会执行。开发阶段的 `enable_buffer_ir=True` 流水线

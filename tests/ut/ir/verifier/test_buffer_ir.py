@@ -493,7 +493,7 @@ def test_make_tuple_cannot_hide_buffer_aliases():
 
 @pytest.mark.parametrize("kind", ["if", "for", "while"])
 @pytest.mark.parametrize("nested", [False, True])
-def test_control_flow_buffer_slots_are_rejected(kind, nested):
+def test_control_flow_buffer_slots_preserve_reference_types(kind, nested):
     type_ = ir.TupleType([_buffer_type()]) if nested else _buffer_type()
     source, result = _var("source", type_), _var("result", type_)
     condition = ir.ConstBool(True, SPAN)
@@ -517,7 +517,12 @@ def test_control_flow_buffer_slots_are_rejected(kind, nested):
             )
         else:
             body = ir.WhileStmt(condition, [carry], yield_stmt, [result], SPAN)
-    _assert_error(_program(body, [source]), "return_vars")
+    # Direct references are native region values. Tuple-wrapped handles still
+    # require flattening and must not bypass the region descriptor contract.
+    if nested:
+        _assert_error(_program(body, [source]), "return_vars")
+    else:
+        assert _verify(_program(body, [source])) == []
 
 
 def test_buffer_yield_is_rejected_without_return_vars():

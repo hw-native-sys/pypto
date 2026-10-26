@@ -11,6 +11,7 @@
 
 #include "pypto/backend/common/buffer_view_semantics.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -158,6 +159,23 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
 void ValidateBufferReshape(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
   INTERNAL_CHECK(args.size() == 1 && args[0]) << "Internal error: buffer.reshape requires exactly one source";
   auto matrix_source = ir::As<ir::BufferType>(args[0]->GetType());
+  if (matrix_source && matrix_source->memory_space_ == ir::MemorySpace::Vec &&
+      std::any_of(matrix_source->valid_shape_.begin(), matrix_source->valid_shape_.end(),
+                  [](int64_t extent) { return extent < 0; })) {
+    const auto destination = StaticViewDescriptor(result, "buffer.reshape");
+    // A selected handle can retain runtime validity while its region result
+    // declares static extents. TRESHAPE creates that independent descriptor;
+    // it must not reinterpret bytes, change row pitch or relayout storage.
+    CHECK(matrix_source->shape_ == destination->shape_ && matrix_source->dtype_ == destination->dtype_ &&
+          matrix_source->memory_space_ == destination->memory_space_ &&
+          matrix_source->blayout_ == destination->blayout_ &&
+          matrix_source->slayout_ == destination->slayout_ &&
+          matrix_source->fractal_ == destination->fractal_ && matrix_source->pad_ == destination->pad_ &&
+          matrix_source->compact_ == destination->compact_)
+        << "buffer.reshape from runtime validity requires the same physical descriptor and static result "
+           "valid extents";
+    return;
+  }
   if (matrix_source && IsMatrixBufferSpace(matrix_source->memory_space_)) {
     ValidateMatrixReshape(matrix_source, ir::As<ir::BufferType>(result));
     return;

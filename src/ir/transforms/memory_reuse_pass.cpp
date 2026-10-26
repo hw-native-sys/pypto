@@ -35,8 +35,10 @@
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
+#include "pypto/ir/transforms/utils/storage_reference_analysis.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 
 namespace pypto {
@@ -64,8 +66,11 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // MaterializeSemanticAliases pass, so the body here is already retargeted.
   StmtPtr new_body = func->body_;
 
+  // MaterializeSemanticAliases has already settled every if-result target
+  // for all planners. Placement changes allocation locations, not result classes.
+
   // Step 1: Compute lifetimes by walking full IR tree
-  auto analysis_result = AnalyzeAllocationLifetimes(new_body);
+  auto analysis_result = AnalyzeAllocationLifetimes(func);
 
   if (analysis_result.lifetimes.empty()) {
     LOG_DEBUG << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
@@ -77,8 +82,11 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
+  const auto transfers = memory_reuse::CollectCoalescibleTransfers(new_body, analysis_result, func->params_);
+  auto planning_function = MutableCopy(func);
+  planning_function->body_ = new_body;
   const AllocationConstraintAnalysis constraint_analysis =
-      AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+      AnalyzeAllocationConstraints(planning_function, analysis_result, "MemoryReuse", transfers.definitions);
   const memory_reuse::HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
   const memory_reuse::ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
 
@@ -100,14 +108,29 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  const std::set<const Var*>& pinned_bases = constraint_analysis.declared_allocation_bases;
+  auto pinned_bases = constraint_analysis.declared_allocation_bases;
+  // Runtime-selected handles retain the identity of each concrete origin.
+  // Their conservative lifetimes protect address placement; excluding their
+  // bases here also prevents optional copy coalescing and subrange packing
+  // from introducing an occupant whose bytes would invalidate that handle.
+  const auto references = AnalyzeStorageReferences(new_body, func->params_);
+  pinned_bases.insert(references.source_bases.begin(), references.source_bases.end());
+  // Tile parameters borrow caller-owned storage. Body-local aliases and if
+  // results must not let the packer move that storage or add new occupants.
+  // Keep declaration validation separate: parameters are fixed by the ABI,
+  // rather than by a user-declared allocation in this function.
+  for (const auto& parameter : func->params_) {
+    if (auto tile = GetTileTypeWithMemRef(parameter->GetType())) {
+      pinned_bases.insert(GetDefinedMemRef(tile)->base_.get());
+    }
+  }
 
   std::vector<Diagnostic> hints;
   auto reuse_map = memory_reuse::IdentifyReuseOpportunities(
-      analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
-      analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
+      analysis_result.lifetimes, hazard, forbid_alias, transfers.subrange_separation,
+      analysis_result.var_sharing_groups, analysis_result.pipeline_membership,
       analysis_result.pipeline_load_tiles, analysis_result.subrange_unsafe_groups, reserved_end_by_space,
-      pinned_bases, func, &hints);
+      pinned_bases, planning_function, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");
@@ -121,52 +144,38 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     // vars but leaves loop-carry nodes stale; for nested pipelined accumulators
     // that split chain would otherwise force YieldFixupMutator to emit invalid
     // acc->acc tile.move ops (#1352).
-    const auto* context = PassContext::Current();
-    if (context != nullptr && context->GetEnableBufferIR()) {
-      new_body = memory_reuse::RefreshStorageTypes(new_body);
-    } else {
-      new_body = memory_reuse::AlignLoopCarriesToInit(new_body);
-    }
+    new_body = memory_reuse::RefreshStorageTypes(new_body);
   }
 
-  // Step 3.75: Coalesce peeled loop-carried accumulator if-phis so YieldFixupMutator
-  // does not reconcile them with an illegal Acc->Acc tile.move.  See
-  // TopDownRetargeter::CoalesceAccumulatorIfPhis.  Must run after all ForStmt-carry
-  // coalescing (Steps 0/3/3.5) so the accumulator branch is on its final buffer, and
-  // before YieldFixupMutator (Step 4) so it observes one buffer per phi.  A no-op when
-  // no accumulator if-phi exists (e.g. non-pipelined kernels).
-  new_body = memory_reuse::CoalesceAccumulatorIfPhis(new_body);
-
-  // Step 3.9 / 4.5: Reconcile bare-Var SSA identity copies whose buffers diverged
+  // Reconcile bare-Var SSA identity copies whose buffers diverged
   // from the value they rename.  No-op when no mismatch exists.
   //
   // This runs on both sides of YieldFixup because both sides create such a
   // divergence, from opposite directions:
   //
-  //  - before, because Step 3.75's accumulator-if-phi retarget leaves a rename
+  //  - before, because placement or carry alignment leaves a rename
   //    stranded on the pre-coalesce buffer, and because a carry rename such as
   //    `lag2 = lag1` only lands on lag1's buffer here. YieldFixup has to see the
   //    settled buffer to order the carry writebacks against each other: against
   //    the pre-normalization buffers every rename still sits on a buffer of its
   //    own, so no conflict is visible and a shift register silently collapses
   //    ([#2481]).
-  //  - after, because YieldFixup's own IfStmt fixup repoints a phi return_var
-  //    onto the canonical branch buffer, which strands that phi's downstream
-  //    `c = c_phi` rename in exactly the same way.
+  //  - after, because boundary reconciliation introduces typed handles for
+  //    transfers and loop results. Their downstream renames must follow the
+  //    settled windows without choosing a different if-result destination.
   //
   // The mutator is idempotent, so the second run is a no-op whenever the first
   // already settled everything.
+  new_body = memory_reuse::RemoveIdentityStorageTransfers(new_body, pinned_bases);
   new_body = memory_reuse::NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
   const auto* ctx = PassContext::Current();
-  // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
-  // like every other allocation, and Step 5 below keeps it because it is in use.
-  new_body =
-      memory_reuse::FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true,
-                                /*canonical_branch_storage=*/ctx != nullptr && ctx->GetEnableBufferIR());
+  // Include any scratch allocation needed by the canonical loop-copy scheduler.
+  new_body = memory_reuse::FixupYields(new_body, func->params_,
+                                       /*canonical_loop_copies=*/ctx != nullptr && ctx->GetEnableBufferIR());
 
-  // Step 4.5: the second half of the bracket described at Step 3.9.
+  // Step 4.5: the second half of the bracket described at the pre-boundary normalization.
   new_body = memory_reuse::NormalizeIdentityCopyBuffers(new_body);
 
   // Step 5: Remove alloc statements for MemRefs no longer in use

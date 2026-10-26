@@ -1,32 +1,27 @@
 # MaterializeSemanticAliases Pass
 
-Forces buffers that the program *semantics require* to be the same allocation to
-share one MemRef, by propagating each loop-carried `iter_arg`/`initValue` MemRef
-down the yield/producer chain.
+Establishes semantic storage relations and one representation plan for every tile-valued
+`IfStmt` result before any memory planner runs.
 
 ## Overview
 
-Memory planning distinguishes two kinds of buffer sharing:
+Concrete loop carries and registered in-place results require shared storage. A
+reference carry instead passes a selected handle between iterations. An if result
+instead selects one of two incoming SSA values; that selection does not make the
+two sources mandatory aliases. This pass resolves those relations and materializes
+the materializable edge transfers. When a fixed destination cannot safely realize
+the selection, compatible results retain reference control flow without payload
+copies. Opportunistic lifetime reuse remains the planner's job.
 
-- **Must-alias (semantics-required):** a loop-carried accumulator, or an in-place
-  op result, *has* to live in one buffer — writing the "next" value must update
-  the carried buffer, or the loop does not accumulate. This is correctness, not
-  optimization.
-- **May-alias (opportunistic):** two independent buffers with non-overlapping
-  lifetimes *may* share storage to save memory. This is optimization.
+Run after [`InitMemRef`](35-init_memref.md). All three planners consume the same
+normalized control-flow storage:
 
-This pass handles only the **must-alias** case. It was split out of
-[`MemoryReuse`](37-memory_reuse.md) (it is that pass's former "Step 0") so that
-the opportunistic lifetime coalescing can be skipped independently:
+- `PYPTO` follows with [`MemoryReuse`](37-memory_reuse.md).
+- `DSA_RP` places the resulting allocation identities in
+  [`AllocateMemoryAddr`](38-allocate_memory_addr.md).
+- `PTOAS` leaves lifetime reuse and address assignment to ptoas.
 
-- `MemoryPlanner.DSA_RP` keeps independent allocation identities for the
-  in-process DSA-RP solver.
-- `MemoryPlanner.PTOAS` leaves lifetime reuse and address assignment to ptoas.
-
-**When to use**: Run after [`InitMemRef`](35-init_memref.md) (which creates the
-MemRefs) and before the selected memory planner. It always runs. `PYPTO` follows
-it with [`MemoryReuse`](37-memory_reuse.md); `DSA_RP` consumes its allocation
-identities in [`AllocateMemoryAddr`](38-allocate_memory_addr.md).
+The pass skips orchestration-like functions, including graph bodies.
 
 ## API
 
@@ -42,271 +37,342 @@ program = passes.materialize_semantic_aliases()(program)
 
 ## Algorithm
 
-`InitMemRef` already gives the loop-carried `iter_arg` and `return_var` the same
-MemRef as the `initValue` (the accumulator buffer), but the *producer* of the
-yielded value — e.g. the `tile.add` that computes `acc_next` — is still assigned
-its own fresh MemRef. This pass closes that gap:
+Before concrete destination planning, normalize SSA storage references. Eligible
+branch-local producers keep the destination path below. Incoming external values,
+or local windows that cannot safely be redirected, may instead retain reference
+results in spaces such as Mat and Acc that lack same-space copies. Vec and other
+spaces with supported same-space copies retain their existing concrete-copy and
+coalescing path. Explicit raw reference SSA remains graph-validated independently
+of that optimization policy. Normalization removes their provisional MemRefs and follows required
+aliases, views and loop boundaries; final unused-allocation cleanup removes the
+abandoned requests. Explicit fixed result bindings remain concrete obligations.
+Native accumulator continuations produced inside an incoming arm retain the
+existing canonical coalescing proof. A registered `matmul_acc` update is a new
+value version of its carry, rather than an arbitrary old-value selection; generic
+reference-version bounds must not replace its branch-aware continuation proof.
 
-1. **Top-down retarget** (`TopDownRetargeter`): for each `ForStmt`, take each
-   `iter_arg`'s canonical MemRef as the target and push it onto the yielded value
-   and its producer chain (following in-place `output-reuses-input` ops and
-   view inputs). `IfStmt` return values are retargeted into both branch yields,
-   then the collected type rewrites are applied. The traversal descends through
-   `WhileStmt` bodies, so an enclosing scalar while does not hide nested For
-   carries from the existing retargeting and liveness checks. Before changing a
-   producer's destination, check independent reads of the target's physical
-   window that can recur through an enclosing loop, including reads outside the
-   inner For's lexical lifetime. This includes the same For's backedge when a
-   body read names the original pre-loop initializer; reads through the advancing
-   carry itself are excluded by its loop-header definition. Binding a loop initializer to a carry is not
-   itself an independent data observation. For an actually observed For/While
-   carry, record its initializer's payload read at the binding header. A worklist
-   propagates these entry observations through nested carry bindings, preserving
-   intermediate versions across intervening loops. Body reads retain the carry's
-   current definition: its own backedge advances the value rather than rereading
-   the original seed. Header reads exclude their own loop from recurrence, while
-   enclosing loops still protect repeated initialization. This distinction also
-   preserves accumulator-phi coalescing through metadata-view yields.
-   Consuming a possibly zero-trip For/While result also observes its initializer
-   at entry, even when the body never reads the carry. Constant For bounds that
-   prove at least one iteration exclude this zero-trip observation; unknown
-   bounds remain conservative. Result observations participate in the same
-   worklist, including results used to initialize another observed loop carry.
-   Bare SSA assignments, zero-copy view sources, and bare-variable yields are
-   forwarding bindings, not payload reads. Both alias and physical recurrence
-   indexes and Buffer IR loop-input isolation share the activated payload
-   observations; ordinary access indexes still
-   retain all forwarding uses. Only when an alias, branch/loop result, or later
-   iteration actually consumes the value does the worklist activate its source
-   observations. Constant For bounds disable body-result edges for zero trips
-   and backedge edges for at most one trip. Ordinary body observations are also
-   excluded for proven zero-trip For loops and constant-false While conditions.
-   A For with at most one iteration contributes no recurrence interval, though
-   enclosing repeating loops still protect its actual reads. Registered
-   write-only operands do not observe old payloads; reads, read-modify-writes,
-   computed arguments and reference attributes retain their observations.
-   Unknown bounds and conditions remain conservative. This also preserves
-   consumed forwarding results of nonempty loops, without making unused Acc
-   carries falsely block retargeting and require an unsupported Acc-to-Acc copy.
-   Buffer IR also avoids private loop-input storage for proven zero-trip loops
-   and when the complete body only
-   yields every carry unchanged, its initializer, or an immutable full-window
-   alias of that initializer: these bindings cannot overwrite input payloads.
-   Immutable alias roots are cached during the existing definition walk;
-   mutating outputs and partial windows do not establish identity.
-   Zero-trip body canonicalization applies only to Tile carry boundaries;
-   Tensor/DistributedTensor-only loops retain their descriptor writebacks and
-   body structure, handled by tensor boundary normalization.
-   Legacy Vec carries also use the shared isolation analysis for recurring
-   independent seed reads: an entry copy lets the carry advance in private
-   storage while preserving the original seed. Incoming-parameter, post-loop
-   and overlapping-input policies remain specific to Buffer IR; unsupported
-   copy spaces retain the retarget guard and existing explicit copy diagnostic.
-2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
-   post-order and recognize both direct in-place accumulator producers and
-   branch-local loops carried by an accumulator seeded outside that branch.
-   When exactly one branch is the accumulator continuation, retarget the other
-   branch's local seed, the phi result, aliases, and nested loop carry onto the
-   reused input's canonical `Acc` allocation. Both the accumulator loop and the
-   sibling seed must be local to their respective branches, and the target must
-   be dead in the remainder of the seed branch. Whether the continuation is a
-   direct `tile.matmul_acc` or a branch-local loop, its reused input and every
-   bare/metadata alias must have no independent post-`if` read; otherwise the
-   sibling branch would clobber an observable value on the path where the
-   continuation does not execute. This post-order traversal also descends through
-   `WhileStmt` bodies. For/While carry arguments and results belong to their
-   initializer's alias family, so reading an initializer cannot bypass this
-   check through a carry name. Reads before the `if` also block coalescing when
-   an enclosing loop can repeat them after the branch. The recurrence index
-   considers loops entered after the read handle's definition; an accumulator
-   recreated inside the loop can still be coalesced safely. These queries use
-   precomputed alias and loop-interval indexes, retaining O(N log N) analysis.
-3. **Normalize semantic identity chains**
-   (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
-   after retargeting, rather than repairing one producer in isolation. Bare SSA
-   aliases follow their source, registered `output_reuses_input` results follow
-   the specified writeback input, and registered first-input buffer-aliasing
-   operations follow their current first input. A single forward walk substitutes
-   each repaired result into downstream uses, so a writeback result followed by
-   `transpose_view`, `reshape`, or `slice` stays on the correct storage throughout
-   the chain; no fixed-point iteration is needed. This closes lowering-created
-   type drift before any memory planner observes lifetimes or PTOAS emits tile
-   handles.
+1. **Collect mandatory storage constraints.** Concrete For/While carries use their
+   initializer's storage, including on zero-trip loops. Preserve registered
+   writeback contracts and collect compatible accumulator continuation targets
+   before selecting if destinations. Guarded coalescing can redirect a local
+   `matmul` seed onto a continuing `matmul_acc` buffer; an Acc-to-Acc copy is
+   never the default way to realize that relation. All planners use common loop
+   entry isolation and `RetypeApplier`'s scoped For/While binding rewrites. `In` parameters protect
+   the caller's old value; `InOut`/`Out` parameters require isolation when an
+   independent old-value observation inside the function proves it necessary.
+   Isolation first indexes actual native, registered and workspace writes plus
+   possible yield writebacks. Independently mutable carry slots with overlapping
+   windows require isolation; otherwise an old-value observation requires a copy
+   only when the iteration may write the window. A non-overlapping read-only
+   For/While pass-through, including SSA aliases and same-source if results,
+   retains its original window without introducing a Mat/Acc copy.
+   Old-read, recurrence and readonly-caller queries retain actual and projected
+   byte windows and pipeline slots. A read from disjoint bytes or a different
+   proven slot does not require entry isolation. Old handles are activated by
+   definition age, and reachable reads must satisfy both branch-order bounds
+   within the same indexed subset; unrelated reads from mutually exclusive
+   paths cannot combine their positions to manufacture an observation.
+   Isolation and if-result mutability use the same frozen native/registered-write
+   and possible-backedge-transfer proof. Loop entry alone is not a data write.
+   Later writes follow mandatory storage aliases through readonly loop returns;
+   an actual isolation copy cuts that chain. Logical value versions still remain
+   distinct for old-value reads and lifetime analysis.
+   Reinserting a complete updated carry result into the same source slice
+   does not read that slot's old bytes only when its valid shape covers the
+   complete physical shape. Vec insertion otherwise writes only valid elements;
+   retargeting a full-box producer could corrupt the preserved invalid region.
+   A byte/slot/layout/coordinate proof excludes only that producing slot from
+   the target's preserved-outside read. Partial-valid results and independent
+   old-row or whole-target observations retain their ordinary protection.
+2. **Record each if result and its incoming edges.** A pass-local `IfInfo` records
+   the owning `IfStmt`, result slot, result SSA variable, and the then/else source
+   variables. Tile results require both legal yields. `IterArg` sources retain
+   their own identity instead of being replaced by their initializer. An outer
+   edge can reference an inner result without flattening the inner alternatives.
+   Result identity never comes from a variable name or a MemRef address.
+3. **Plan destinations once.** `InitMemRef` gives an unbound result its own
+   unplaced request, sized from the result's physical layout and alignment.
+   Inferred result types retain shape, dtype and view metadata without inheriting
+   a source MemRef; explicit result bindings remain constraints. For each if,
+   reserve all slots' required targets and legal common incoming windows first.
+   Only then consider optional incoming-storage borrowing or independent requests
+   for the remaining slots. Yields pass values simultaneously, so slot order
+   cannot displace another slot's common window. Required loop/Acc targets
+   reference their actual SSA storage owner and resolve its current window when
+   consumed. They retain byte offsets, extents and pipeline slots as an outer
+   result moves; explicit fixed bindings remain fixed. The owner metadata follows
+   the same transaction rollback and bounded replay as its producer rewrites.
+   Borrowing must preserve old-value observations, loop recurrence, operator
+   no-alias rules, pipeline separation and protected storage. The other arm may
+   write the borrowed destination directly or use a supported edge transfer;
+   producer retargeting is not a prerequisite for borrowing.
+   Identical incoming windows can also retain a native mutable continuation,
+   provided independently observed old values and read-only caller inputs remain
+   protected. Being writable alone does not require a new destination. Optional
+   duplicate-result sharing keeps its stricter read-only rule.
+   Pipeline membership prevents borrowing or moving a different allocation;
+   it does not prohibit keeping the exact common byte/slot window. Workspace
+   and load/tpop hardware hazards still forbid creating a mutable continuation.
+   Recheck the same common-window proof after earlier slots retarget their
+   producers, because a later result's two inputs can become common then.
+   Publish each settled live destination to incremental byte/slot indexes before
+   selecting the next result. A mutable candidate cannot overlap any live peer;
+   a readonly candidate cannot overlap a mutable peer. The same proof applies
+   to preferred, equivalent and borrowed windows, in either result-slot order.
+   Incompatible mandatory destinations are rejected instead of silently sharing.
+   Future-clobber checks use both sibling orders, each with its own last read
+   and proven terminal-writeback boundary. Only possible clobber in both orders
+   rejects sharing.
+4. **Apply the plan.** Planning uses a frozen IR snapshot and pending rewrites;
+   apply the chosen result and producer destinations together, then close their
+   required aliases. Eligible branch-local producer families can write the
+   destination directly. Nested destinations may be forwarded only with a proof
+   of complete equal-extent windows in the same memory space. Distinct result
+   slots remain distinct logical values even when their sources or windows match.
+   Full/short descriptors retain their own metadata; an edge requirement never
+   changes another source value's shape or valid extent.
+5. **Realize and validate if-edge transfers.** Each arm supplies its result slot
+   directly or through a legal transfer into the selected destination. Parallel
+   yields preserve all source values before any conflicting write, using
+   explicit scratch when needed. Equivalent source/destination windows and
+   descriptors may share a transfer; conflicting values targeting the same
+   constrained bytes are rejected. Loop carries retain independent target slots.
+   A required result target can be filled by an edge copy after the branch's old
+   reads finish, provided no old target observation remains after the merge.
+   Otherwise keep the result independent until the enclosing boundary. A
+   concrete target in a space without legal same-space transfers requires direct
+   producer retargeting. A compatible unconstrained result may instead select
+   the incoming references, with no target allocation or edge transfer.
+6. **Finish if planning before lifetime packing.** Close aliases, validate the
+   materializable incoming edges and remove unused requests and allocations.
+   Discard the planning snapshot.
+   Later packing may relocate allocation groups and close their aliases, but
+   must not infer new result classes or choose another arm as the destination.
+   Legacy `PYPTO` retains loop-copy scheduling after packing and before address
+   assignment, using the already established carry targets.
 
-These rules cover shaped results with MemRefs, including tile and tensor
-writebacks. Bare SSA renames follow the complete source type without copying
-data; call-result retyping preserves result shape, dtype, view/distribution
-metadata. An explicit `output_reuses_input` contract takes precedence over
-first-input inheritance. The first-input buffer-alias predicate requires both
-`OutputMemoryInheritsInput()` and `IsInplaceSafe()`; inheriting the memory space
-alone does not establish a buffer alias.
-Writeback results inherit the current writeback input's exact MemRef window.
-First-input aliases retain their result extent and derive their window from the
-current input allocation and byte offset plus the operation's relative view
-offset, applied once; they also inherit the input's pipeline slot identity and,
-for tile results, memory space. Recomputing the relative offset from the
-operation, rather than adding it to a stale absolute offset, makes normalization
-idempotent and handles changes within the same allocation as well as changes of
-allocation. Buffer aliasing is a storage contract: `tile.assemble` also follows
-its first input even though it writes data. Real non-in-place `tile.transpose` and independent
-`tile.extract` results keep their own storage.
+An independent request does not imply an extra physical buffer: common windows
+can be retained, producers can write the chosen destination directly, and unused
+requests disappear before capacity calculation. If independently live values or
+hardware constraints prevent materialization, reference selection can retain
+their existing allocations without adding a destination.
 
-In both legacy Tile and Buffer IR modes, `TensorType`/`DistributedTensorType`
-For/While arguments and returns are mutable views of the current initializer.
-Normalization aligns their storage while preserving each boundary result's
-shape, view metadata, and distributed-window identity, including on zero-trip
-loops. Independently produced yielded tensors keep their own storage. Tile
-carries retain their separate canonical-buffer and yield-fixup rules, including
-explicit transfers when a yielded tile needs to reach the carry buffer.
+Destination selection uses three fixed walks over the result slots. The snapshot
+and indexed control-flow analyses use map/index lookups, with O(N log N) work
+and storage. The immutable storage-access index queries byte windows and
+pipeline slots; its time envelopes conservatively report possible overlap.
+Old-value queries first activate only handles defined before the if, then check
+reads after it in both sibling orders. An enclosing mutually exclusive arm is
+therefore excluded; a loop backedge retains a virtual read for external values
+needed on the next iteration. Read windows stay distinct even if an unused
+whole-allocation handle covers them both. Already relocated values use a
+monotone byte/slot observation index, with fixed-width sparse range trees,
+so incremental planning does not collapse independent windows or scan earlier
+results. No persistent planning table is attached to the public IR.
 
-The pre-yield-fixup form of normalization seeds unresolved `IfStmt` results and
-propagates that status through bare aliases, writeback results, and first-input
-aliases, including through tensor loop arguments and returns. None of the
-dependent calls is anchored to that provisional window.
-Once the control-flow boundary is resolved, the following normalization walk
-repairs the whole chain. Buffer IR also uses this deferred form before indexing
-old-value observations and after loop-entry isolation, while branch storage is
-still provisional; normalization after boundary resolution needs no deferred
-seed. See [MemoryReuse step 6](37-memory_reuse.md#algorithm) for the normalization
-walks around yield fixup.
+## Reference results and creation location
 
-The pass skips orchestration-like functions, including graph bodies. In other
-functions, alias normalization still runs when `Compute` returns no retargeting
-rewrites; it can repair existing type drift independently.
+For spaces without same-space copies, creation location follows the storage producer, not a variable name. A rename,
+reshape or other required alias created inside an arm still refers to external
+storage when its source was created outside that arm.
+
+| Then / else storage producer | Concrete fast path | Reference path |
+| ---------------------------- | ------------------ | -------------- |
+| Internal / internal | Both eligible producer families write one destination | Select their handles if either family cannot move safely |
+| Internal / external | Retarget the local producer into the external window only when old observations are protected | Select the local and external handles |
+| External / internal | Symmetric borrowing proof | Select the external and local handles |
+| External / external | Retain an already identical complete window | Select distinct existing handles |
+
+```text
+a = load(A) : Tile[..., Mat, MemRef(a_storage)]
+b = load(B) : Tile[..., Mat, MemRef(b_storage)]
+r = if condition: yield a; else: yield b  # Tile[..., Mat], no MemRef
+read(a)
+read(b)
+read(r)
+```
+
+The result owns no allocation and performs no Mat-to-Mat transfer. Legacy PTO
+codegen emits a typed `scf.if` result; final Buffer conversion retains a
+`BufferType` region result. Reference For/While carries likewise pass the handle,
+including entry and backedges, and return the initializer on zero trips. Scalar
+and reference yields remain simultaneous.
+
+When loop-entry isolation would otherwise need an unsupported same-space copy,
+the pass can seed reference normalization on the original concrete carry graph.
+This is a bounded representation choice, rather than an attempted copy followed
+by a retry. Zero-trip entry and later backedges select their existing handles;
+native writes still undergo the shared old-value observation proof.
+
+Each consumer rebuilds the allocation/alias/view/selection/carry graph from SSA
+definitions. Graph traversal marks references and their concrete source bases;
+it does not flatten an ever-growing candidate set at every nested selection.
+The initial protection conservatively keeps every participating concrete source
+live for the complete function under PYPTO and DSA_RP. Only actual owners are
+placed, so a selector contributes no phantom allocation or capacity. PTOAS
+receives the explicit reference control flow and derives its handle aliases.
+
+Caller-provided intermediate Tile parameters without a MemRef and registered
+TPop results can supply existing storage when reached by a proven reference graph.
+Before final PTO emission, the full pipeline must inline such Tile parameters or
+bind them to supported storage. Standalone `tile_buf` function-parameter ABI
+support is outside this change. Native if/for/while validation uses concrete
+allocations defined in the function body.
+
+Selecting a reference does not authorize destroying an independently observed
+old value. Registered writes still require the shared ownership/old-observation
+proof; a remaining requirement to preserve and partially modify a Mat value can
+need an unavailable copy and is diagnosed at that write obligation. Fixed result
+destinations cannot be silently replaced with arbitrary references. Descriptor
+and view support remains subject to the conversion and target contracts.
+
+After destination planning, the value-version guard also checks concrete Acc
+if-result components before edge fixup. Carries connected to those results are
+covered by the same component. Standalone concrete loops retain their precise
+byte/slot and updated-row overwrite proofs. All actual storage references,
+including reference loop carries, retain the reference write guard.
+
+## Loop payload observations
+
+Storage bindings and payload observations are distinct. Bare SSA assignments,
+zero-copy views and bare-variable yields forward a value without reading its
+payload. A worklist activates their source dependencies only when an alias,
+if/loop result or later iteration actually consumes the value. Registered
+write-only operands do not observe the old payload; reads, read-modify-writes,
+computed arguments and reference attributes retain their observations. Ordinary
+access indexes still retain forwarding uses for storage and effect checks.
+
+An observed For/While carry records its initializer's payload observation at
+the binding header. These entry observations propagate through nested carry
+bindings and preserve intermediate versions across intervening loops. Body
+reads use the carry's current definition: its own backedge advances that value,
+while an enclosing loop can repeat initialization from an older value. Reading
+the original pre-loop seed inside the body remains an independent old-value
+observation. Traversals enter While bodies, and condition payload reads recur
+at the While header, so an outer scalar While cannot hide nested retargeting or
+old-value protection.
+
+Consuming a possibly zero-trip loop result also observes the initializer at
+entry, including when the body never reads its carry. Constant For bounds that
+prove a nonempty loop remove this zero-trip dependency; body-result and
+backedge dependencies follow the proven trip count. Proven zero-trip For and
+constant-false While bodies contribute no payload observations or writes.
+A For with at most one iteration adds no recurrence of its own, while enclosing
+repeating loops still protect actual reads. Unknown bounds remain conservative.
+
+These activated observations feed the shared byte/slot indexes used by loop
+isolation and producer/Acc retargeting. Unused forwarding results and immutable
+full-window pass-throughs do not require private Mat/Acc entry copies. Mutating
+outputs and partial windows do not establish value identity. Zero-trip Tile
+boundary normalization leaves Tensor/DistributedTensor-only loop bodies and
+their descriptor writebacks to tensor boundary normalization.
+
+## Alias and view contracts
+
+Bare SSA aliases follow their source. Registered `output_reuses_input` results
+follow the specified writeback operand. Registered first-input buffer aliases
+follow that input's allocation, offset and pipeline slot, adding the operation's
+relative view offset once while retaining their own extent. Memory-space
+inheritance alone is not a buffer-alias contract: the predicate also requires
+`IsInplaceSafe()`. Independent `tile.extract` and non-in-place `tile.transpose`
+results keep their own storage.
+
+Call-result retyping preserves shape, dtype, view and distribution metadata.
+`TensorType`/`DistributedTensorType` loop boundaries follow their initializer's
+window without retargeting independently produced yielded tensors. Metadata-only
+views do not read their first operand's data, but their other arguments and
+registered effects are still visited. Writing aliases such as `tile.assemble`
+produce a new logical value version even when storage is shared. Before the
+destination plan is resolved, normalization
+must not anchor a dependent writeback onto a result's temporary request.
+
+Source windows retain their physical root, pitch and offsets independently of
+their logical tile shape and value version. Projected windows follow partial
+views, if results and loops without losing byte offsets or pipeline slots.
+Known GM writes retain their actual windows, including aliases of typed DDR
+Tiles. Unknown GM/scalar storage does not become an opaque on-chip write;
+unknown pointer effects remain conservative. Supported narrowed Vec transfers use `tile.extract`
+from that root into the selected destination; dense transfers remain ordinary
+moves. Runtime slice coordinates are captured once at their definitions.
+For/While window provenance follows entry storage through carries and results,
+including zero-trip loops. Unproven bindings keep a conservative window marker
+without inventing source coordinates.
+
+Transparent `SplitAivScopeStmt` and `RuntimeScopeStmt` wrappers retain transfers
+immediately before their own trailing yield. Nested control-flow yields belong
+to their own result records.
 
 ## Relationship to codegen
 
-### Staged Buffer IR pipeline
+### Common planner boundary
 
-`PassContext(enable_buffer_ir=True)` enables the storage-legalization portion of
-the Buffer IR migration. The option defaults to true. `SelectBufferIRFunctions` records whole-kernel
-support before this pass; only selected functions receive Buffer-specific
-rewrites. Unsupported functions keep the Tile storage path. The C++ accessor is `GetEnableBufferIR()` and the
-Python accessor is `get_enable_buffer_ir()`. Compilation, IR dumping and
-profiling preserve the active option, and JIT cache keys distinguish its value
-for every memory planner.
+Both legacy Tile kernels and selected Buffer kernels pass through the same if
+destination planning. `PassContext(enable_buffer_ir=True)` additionally enables
+whole-kernel selection and Buffer-specific storage legalization; unsupported
+kernels remain on Tile IR. The option is preserved by compilation, IR dumping,
+profiling and JIT cache keys.
 
-With this option, `MaterializeSemanticAliases` also establishes explicit branch
-destinations before `PYPTO`, `DSA_RP`, or `PTOAS` performs memory planning:
+Every planner receives concrete materialized if-edge obligations together with
+graph-proven references that select existing storage. These known references
+require no payload transfer or additional allocation. Legacy opaque tile sources without MemRefs retain their recorded
+incoming SSA edges but defer lowering to the existing handle/codegen path; no
+source coordinates or copies are invented. A selected Buffer function instead
+rejects an unknown input that is neither materialized nor a proven reference. `MemoryReuse` does not repeat
+resolved result selection, and codegen does not choose an alternative allocation
+for those resolved results. Same-descriptor whole-root copies may disappear
+after legal placement makes their windows identical; a retained copy must still
+have disjoint windows. Fixed caller-owned and declared storage retain their
+address-validation requirements.
 
-1. If both arms already yield the same physical window, retain that window.
-2. Otherwise allocate an independent canonical destination for the result. An
-   input yielded from outside a branch keeps its original storage, including
-   when it remains live after the `IfStmt`.
-3. A direct branch-local producer with unaliased, unpinned output storage may
-   write the new destination when its registered operation contract allows it.
-   Views and operations with a required input/output alias retain their storage.
-4. Insert explicit `tile.move` operations in each remaining arm before its
-   yield. Remove allocations made unused by producer retargeting. Branch copies
-   and the existing For-carry fixups run before all three planners; `PYPTO`
-   reconciles any new mismatch after reuse, retaining the declared phi target.
+### Typed handles
 
-Branch planning propagates required aliases in the same forward walk between
-successive phi storage choices, so later phis see current windows rather than
-abandoned ones. For/While carries follow their current initializers before the
-body is visited, and loop results follow those canonical carries afterward,
-including the zero-iteration path. Handle counts follow planned allocation
-changes and rollback, keeping optional producer retargeting conservative.
+A physical window includes allocation identity, byte offset, extent and pipeline
+slot metadata. Sharing only the base does not make sibling windows identical.
+PTOAS keeps the same-window alias behavior and the typed, dominating-handle
+rules from [#3029](https://github.com/hw-native-sys/pypto/pull/3029): a handle
+must match the required SSA descriptor and dominate its use. A branch-local
+handle cannot escape merely because its address matches the result's address.
+Different logical descriptors may therefore need distinct typed handles for one
+physical window.
+The result's validity and padding belong to its own handle, even when dynamic
+valid extents print as the same type. Initialize its metadata view at the if
+boundary without changing the canonical allocation's metadata. Full-span reshape
+aliases already carry the same bytes and need no identity transfer; subviews
+retain distinct origins.
 
-Trailing yields inside transparent `SplitAivScopeStmt` and `RuntimeScopeStmt`
-wrappers are supported. Transfers stay inside the same scope immediately before
-the yield; yields belonging to nested control-flow regions are left unchanged.
-
-For example, `if flag: yield a; else: yield b` with `a` and `b` still live after
-the branch receives a separate result allocation and one copy in each arm.
-Two independent branch-local elementwise producers can instead write that same
-result allocation directly, without a copy. PTOAS therefore receives explicit
-branch transfers and does not need codegen to select destinations or add them.
-
-The added branch analysis uses fixed IR walks and indexed lookups, with
-O(N log N) work and O(N) storage. No persistent alias table is attached to IR.
-Accumulator branches still use the existing guarded coalescing; a remaining
-divergent `Acc` branch is rejected because Acc-to-Acc copying is unsupported.
-Loop-input isolation, parallel transfers, While carries, and post-reuse storage
-verification are described below. These establish canonical storage boundaries;
-complete initialization and asynchronous lifetime verification remain separate.
-
-### Default pipeline
-
-PTO codegen renders variables that resolve to the *same* physical MemRef window
-(`base` + `byte_offset` + `size` + pipeline-slot metadata) as a single
-`tile_buf` handle, so after this
-pass a loop-carried accumulator emits an in-place `pto.tadd ins(%acc, %t)
-outs(%acc)` rather than writing to a distinct `%acc_next` buffer. Under
-`memory_planner=DSA_RP`, each resulting allocation identity becomes one DSA
-buffer; under `memory_planner=PTOAS`, codegen emits that identity without a
-physical address for ptoas `PlanMemory`. See
+`DSA_RP` consumes symbolic allocation identities; under `PTOAS`, codegen omits
+their physical addresses for ptoas `PlanMemory`. See
 [PTO Codegen — Who plans memory](../codegen/00-pto_codegen.md).
+
+## Example
+
+```python
+if flag:
+    r = pl.yield_(a)
+else:
+    r = pl.yield_(b)
+use(r)
+use(a)
+```
+
+The later observation of `a` can prevent using its storage as the result's
+destination. Choose independent storage or another proven-safe destination;
+write it on each incoming edge without overwriting old `a`. If both arms contain
+independent local producers, those producers may write the same destination
+directly and need no copies.
 
 ## Notes
 
-- Views/partial-views keep their distinct `byte_offset`/`size` metadata. Under
-  `DSA_RP`, all members that share one `base` belong to one physical allocation;
-  placement moves that allocation as a unit and writeback preserves each
-  member's relative offset. Sharing only the `base` is not enough to establish a
-  must-alias relation: disjoint byte windows and different pipeline slots remain
-  distinct until the producer is safely retargeted to the exact canonical
-  window.
-- In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
-  behavior of the former single `MemoryReuse` pass.
-- `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
-  may undo a must-alias relation established by this pass.
-- On the legacy `PTOAS` path, if both branches yield the same tile byte window
-  (allocation, offset, size, slot count, and slot index), and both yields and the
-  result have the same known memory space, the merged result retains that window
-  without a copy. Semantic aliases follow the repaired result while preserving
-  their type/view metadata. Registered views rebase their relative byte offset
-  onto the repaired source, preserving their own extent and inheriting its
-  pipeline slot identity;
-  subsequent whole-window writeback results follow that view. Reusing an existing
-  mixed-type codegen handle additionally requires matching its declared SSA type,
-  both yields' window and current binding, and scope dominance. If an earlier
-  merge selected a new dominating handle, later merges use that common yielded
-  binding even when the identity map still names a rejected sibling handle.
-  Distinct branch windows keep their existing handling.
-- Accumulator-phi normalization runs for every memory planner before lifetime
-  planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
-  reuse can introduce a fresh carry/phi mismatch.
-- The preferred spelling for new matmul accumulators is a single
-  `tile.matmul_acc(..., init_cond=...)`. Peeled `matmul`/`matmul_acc` branches
-  remain supported for existing hand-written kernels and are normalized by this
-  pass.
-
-The staged pipeline runs `VerifyTileStorage` after shared and post-reuse storage
-reconciliation, before address placement. See the [storage property contracts](99-verifier.md#tile-storage-properties)
-for symbolic closure and the separate allocated-address overlap check.
-
-### Explicit loop and branch transfers
-
-With `enable_buffer_ir=True`, shared legalization first isolates loop inputs
-that remain independently observable. A read through the original input or a
-metadata alias can require an entry copy; the copy runs before a `ForStmt` or
-`WhileStmt`, preserving zero-iteration behavior. Overlapping initial carry
-windows receive independent storage. Metadata-only views do not read data.
-A read can recur across iterations only in an enclosing loop entered after the
-read handle's logical definition. Indexed recurrence intervals protect such
-reads, including those before an inner loop or in a sibling branch. A seed
-recreated inside each outer iteration does not need isolation merely because it
-was read earlier in that iteration; bare aliases and metadata views inherit the
-seed's definition. Reads outside a repeating region cannot recur within it.
-Forward observations still use both branch orders to exclude mutually exclusive
-sibling arms. The analysis remains O(N log N) without ancestor walks.
-
-For and While initializers, iter_args, results, and result views are aligned
-before producers are retargeted. Branch and loop yields use the same parallel
-transfer scheduler: every source that may overlap a destination is snapshotted
-before any destination write. This handles swaps, cycles, fanout, and partial
-source overlap with O(N log N) indexed queries; scratch allocations are explicit
-before placement. Post-reuse reconciliation repeats the same scheduling, and
-address placement cannot add new scratch or transfers.
-
-Storage requiring a same-space copy that the target cannot implement is rejected
-before any entry copy, yield transfer, or snapshot is synthesized. Same-space
-Mat, Left, Right, and Acc transfers receive an early diagnostic; a live Acc input cannot be preserved
-by an Acc-to-Acc move. The existing guarded accumulator producer coalescing
-remains available for compatible carries. Ambiguous view addresses and
-simultaneously overlapping destination windows must be resolved before final
-Buffer lowering. Unselected kernels and explicit Off mode retain their previous Tile behavior.
-
-The default Buffer rollout selects complete supported kernels before storage
-legalization; see [whole-kernel selection](55-lower_tile_to_buffer.md#default-whole-kernel-selection).
+- Loop-entry copies execute before the loop, preserving zero-trip behavior.
+  Indexed old-value observations and recurrence checks distinguish an enclosing
+  loop's next iteration from a seed recreated in the current iteration.
+- Resolve copy legality after mandatory producer/carry constraints. Fresh local
+  Acc producers can write a destination directly; reject a remaining unsupported
+  Acc-to-Acc transfer at the boundary that actually requires it.
+- Prefer `tile.matmul_acc(..., init_cond=...)` for new accumulator code. Existing
+  peeled `matmul`/`matmul_acc` forms retain guarded support.
+- Address placement cannot add an unplanned scratch allocation or edge transfer.
+  Symbolic edge closure and allocated-address overlap are separate checks; see
+  [storage property contracts](99-verifier.md#tile-storage-properties).
+- The Buffer rollout selects complete supported kernels before lowering; see
+  [whole-kernel selection](55-lower_tile_to_buffer.md#default-whole-kernel-selection).

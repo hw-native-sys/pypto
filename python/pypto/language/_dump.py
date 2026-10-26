@@ -19,6 +19,8 @@ fields. ``call`` accepts any result type supported by the type parser.
 ``submit(pl.submit(...), result_type)`` preserves a Submit result descriptor.
 Multi-result ``yield_(..., types=[...])`` preserves each region result's type,
 including allocation metadata that differs from the yielded operands.
+``loop_init(value, carry_type)`` is accepted only as an ``init_values`` element;
+it preserves a loop carry's exact descriptor without changing its initializer.
 """
 
 import re

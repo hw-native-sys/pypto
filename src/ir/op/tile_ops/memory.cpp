@@ -1276,6 +1276,9 @@ REGISTER_OP("tile.write")
     // tile-local write, not one of the GM store paths the mixed-store
     // diagnostic orders against each other.
     .set_arg_effect(0, ArgEffect::ReadWrite)
+    // The native instruction updates its input storage and returns its new
+    // logical value version; no independent result allocation is produced.
+    .set_output_reuses_input(0)
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -1328,6 +1331,7 @@ REGISTER_OP("tile.read")
     .set_description("Read a scalar value from a tile at given indices")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .functional_execution_memory_access()
     .set_input_memory(0, MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

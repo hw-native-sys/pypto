@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <climits>
 #include <cstddef>
@@ -28,6 +29,8 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -51,6 +54,8 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/storage_access_index.h"
+#include "pypto/ir/transforms/utils/storage_reference_analysis.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
@@ -78,36 +83,54 @@ bool LoopMayExecute(const StmtPtr& statement, bool after_first) {
 
 namespace {
 
-// ============================================================================
-// Top-down target retargeting
-//
-// Walks nested control flow (ForStmt -> IfStmt -> branches) and, for each
-// ForStmt's iter_arg / return_var chain, pushes the canonical target MemRef
-// (= initValue's MemRef, established by InitMemRef) down through the yield
-// graph. Producers along the chain are rewritten to land on the target:
-//
-//   - Unconstrained producers (plain matmul, move, etc.): retyped to write
-//     directly to the target MemRef.
-//   - Pinned producers (set_output_reuses_input, e.g. matmul_acc): we cannot
-//     change their output MemRef, so we recurse onto the pinned-input var
-//     and try to place that upstream.
-//   - IfStmt return_vars: recurse into both branches' yield values with the
-//     same target, and retype the return_var itself.
-//
-// Liveness check: one analysis walk numbers statements twice, once with each
-// IfStmt's then arm first and once with its else arm first. A statement can
-// execute after a definition iff it is later in both orderings; sibling arms
-// are later in exactly one and are therefore excluded. Read/write events are
-// indexed by overlapping physical-window component, so each query is O(log N)
-// and the complete retargeting analysis remains O(N log N).
-// ============================================================================
+class VarUseCollector : public IRVisitor {
+ public:
+  std::set<VarPtr> used_vars;
+
+  void VisitVarLike_(const VarPtr& var) override { used_vars.insert(var); }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+};
+
+std::optional<size_t> DataWritebackArgIndex(const OpPtr& op, size_t argument_count) {
+  if (const auto index = op_predicates::BuiltinWritebackArgIndex(op, argument_count)) {
+    return index;
+  }
+  const auto* entry = LookupOpEntry(op);
+  if (argument_count != 0 && entry && entry->GetIRStage() == OpIRStage::Functional &&
+      op_predicates::IsBufferAliasingViewOp(op->name_) && entry->MayWriteArg(0)) {
+    return 0;
+  }
+  return std::nullopt;
+}
+
+bool WritesTileResult(const CallPtr& call) {
+  return call && call->op_ &&
+         (DataWritebackArgIndex(call->op_, call->args_.size()) ||
+          !op_predicates::IsBufferAliasingViewOp(call->op_->name_));
+}
+
+/// Visit every operand through which a functional operation may write data.
+/// Explicit writeback bindings also cover operators without argument effects.
+template <typename Callback>
+void ForEachWrittenArgument(const OpPtr& op, const std::vector<ExprPtr>& arguments,
+                            const Callback& callback) {
+  const auto writeback = op_predicates::BuiltinWritebackArgIndex(op, arguments.size());
+  const auto* entry = LookupOpEntry(op);
+  for (size_t i = 0; i < arguments.size(); ++i) {
+    if ((writeback && *writeback == i) ||
+        (entry && entry->GetIRStage() == OpIRStage::Functional && entry->MayWriteArg(i))) {
+      callback(i);
+    }
+  }
+}
 
 // Preserve an assemble source before its destination can overwrite the same
 // storage family. The copy is explicit before planning, so every planner sees
 // its lifetime, capacity and no-alias constraints. Exact self-writes stay views.
 class SnapshotAssembleSources : public IRMutator {
  public:
-  explicit SnapshotAssembleSources(const FunctionPtr& function) : views_(function->body_) {
+  explicit SnapshotAssembleSources(const FunctionPtr& function)
+      : views_(function->body_), geometry_(views_, names_) {
     names_.Collect(function->body_, function->params_);
   }
 
@@ -118,7 +141,7 @@ class SnapshotAssembleSources : public IRMutator {
 
   StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
     const auto call = As<Call>(assign->value_);
-    if (call && IsOp(call, "tile.slice")) return IndexWindowOffsets(assign, call);
+    if (call && IsOp(call, "tile.slice")) return geometry_.Index(assign, call);
     if (!call || !IsOp(call, "tile.assemble")) return assign;
     const auto target = GetTileTypeWithMemRef(call->args_[0]->GetType());
     const auto source = AsVarLike(call->args_[1]);
@@ -148,7 +171,7 @@ class SnapshotAssembleSources : public IRMutator {
         names_.Fresh("assemble_source_"));
     std::vector<StmtPtr> statements{copy};
     if (view.window) {
-      const auto offsets = RootOffsets(view, call->span_);
+      const auto offsets = geometry_.RootOffsets(view, call->span_);
       const auto valid = tile_view_semantics::GetEffectiveTileView(*source_type).valid_shape;
       auto window_call = OpRegistry::GetInstance().Create(
           "tile.slice",
@@ -180,44 +203,6 @@ class SnapshotAssembleSources : public IRMutator {
   }
 
  private:
-  std::vector<ExprPtr> RootOffsets(const BufferViewAnalysis::View& view, const Span& span) const {
-    if (view.offsets) {
-      return {std::make_shared<ConstInt>((*view.offsets)[0], DataType::INDEX, span),
-              std::make_shared<ConstInt>((*view.offsets)[1], DataType::INDEX, span)};
-    }
-    const auto found = root_offsets_.find(view.slice.get());
-    INTERNAL_CHECK_SPAN(found != root_offsets_.end(), span)
-        << "Internal error: runtime window offsets must dominate their snapshot";
-    return found->second;
-  }
-
-  StmtPtr IndexWindowOffsets(const AssignStmtPtr& assign, const CallPtr& call) {
-    const auto view = views_.Get(assign->var_);
-    if (view.offsets || !view.root) return assign;
-    const auto parent = RootOffsets(views_.Get(call->args_[0]), call->span_);
-    const auto offsets = As<MakeTuple>(call->args_[2]);
-    INTERNAL_CHECK_SPAN(offsets && offsets->elements_.size() == 2, call->span_)
-        << "Internal error: rank-2 slice offsets required";
-    std::vector<StmtPtr> statements;
-    std::vector<ExprPtr> cumulative;
-    for (size_t axis = 0; axis < 2; ++axis) {
-      auto offset = offsets->elements_[axis];
-      if (GetScalarDtype(offset) != DataType::INDEX) offset = MakeCast(offset, DataType::INDEX);
-      auto sum = AddByteOffsets(parent[axis], offset);
-      if (!As<ConstInt>(sum) && !AsVarLike(sum)) {
-        // Bind once at the slice's lexical definition. Descendants refer to
-        // this SSA scalar instead of repeatedly expanding their ancestor tree.
-        auto var = std::make_shared<Var>(names_.Fresh("window_offset_"), sum->GetType(), call->span_);
-        statements.push_back(std::make_shared<AssignStmt>(var, sum, call->span_));
-        sum = var;
-      }
-      cumulative.push_back(sum);
-    }
-    root_offsets_.emplace(call.get(), std::move(cumulative));
-    statements.push_back(assign);
-    return std::make_shared<SeqStmts>(statements, assign->span_);
-  }
-
   bool HasDisjointWindows(const CallPtr& call, const TileTypePtr& source_type,
                           const BufferViewAnalysis::View& source) const {
     const auto target = views_.Get(call->args_[0]);
@@ -261,24 +246,36 @@ class SnapshotAssembleSources : public IRMutator {
 
   BufferViewAnalysis views_;
   StorageNameSupply names_;
-  std::unordered_map<const Call*, std::vector<ExprPtr>> root_offsets_;
+  BufferWindowGeometry geometry_;
 };
 
 /// Describes where a TileType Var is defined.
 struct VarDef {
-  enum Kind { kAssign, kIfReturn, kForReturn, kWhileReturn, kIterArg, kUnknown };
+  enum Kind { kAssign, kIfReturn, kLoopReturn, kIterArg, kUnknown };
   Kind kind = kUnknown;
   StmtPtr assign_stmt;   // AssignStmt (for kAssign)
-  StmtPtr control_stmt;  // IfStmt/ForStmt/WhileStmt defining a control-flow result
+  StmtPtr control_stmt;  // IfStmt/ForStmt/WhileStmt (for kIfReturn/kLoopReturn)
   StmtPtr definition_stmt;
-  ForStmtPtr nearest_for;
-  size_t return_idx = 0;  // index into control-flow return_vars_ or iter_args_
+  StmtPtr nearest_loop;
+  size_t return_idx = 0;  // index into return_vars_ (for kIfReturn/kLoopReturn)
   IterArgPtr iter_arg;    // for kIterArg
   size_t order = 0;       // lexical statement order of the definition
 };
 
-// Known bounds exclude dead bodies and loops without a backedge. Unknown
-// conditions remain conservative; widen arithmetic before advancing a For.
+/// Data-flow facts for one immutable IfStmt snapshot. Slot identity is
+/// (owner, result index), never a MemRef: equal windows can contain different
+/// SSA values, and one incoming value can feed several result slots.
+struct IfResultInfo {
+  VarPtr result;
+  std::array<VarPtr, 2> incoming;  // Then, Else. IterArgs keep their own identity.
+};
+
+struct IfInfo {
+  IfStmtPtr owner;
+  std::array<StmtPtr, 2> bodies;
+  std::array<YieldStmtPtr, 2> exits;
+  std::vector<IfResultInfo> results;
+};
 
 /// Walks the IR once to build definitions, lexical statement intervals and
 /// per-statement VarLike accesses. Definitions keep only their nearest loop;
@@ -290,24 +287,25 @@ class DefMapVisitor : public IRVisitor {
   std::map<const Stmt*, size_t> stmt_end_order;
   std::map<const Stmt*, std::set<VarPtr>> reads;
   std::map<const Stmt*, std::set<VarPtr>> writes;
+  std::map<const Stmt*, std::set<VarPtr>> data_writes;
+  std::map<const IfStmt*, IfInfo> if_results;
+  std::set<VarPtr> mutable_inputs;
+  std::map<VarPtr, size_t> value_last_use;
+  std::map<VarPtr, std::set<const Stmt*>> recurring_reads;
+  struct WritebackUse {
+    VarPtr target;
+    std::set<VarPtr> other_inputs;
+    const Stmt* statement;
+  };
+  std::vector<WritebackUse> writeback_uses;
   std::map<const Stmt*, std::set<VarPtr>> condition_reads;
   std::map<const Stmt*, std::set<VarPtr>> observation_reads;
   using BindingReads = std::map<VarPtr, std::vector<std::pair<const Stmt*, VarPtr>>>;
   BindingReads binding_reads;
-  std::vector<StmtPtr> loops;  // ForStmt/WhileStmt in lexical preorder
+  std::vector<StmtPtr> loops;  // For/While in lexical preorder.
   StmtPtr root;
 
-  void Run(const StmtPtr& body) {
-    root = body;
-    VisitStmt(body);
-    for (auto& [var, def] : defs) {
-      (void)var;
-      if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn ||
-          def.kind == VarDef::kWhileReturn) {
-        def.order = stmt_end_order.at(def.control_stmt.get());
-      }
-    }
-  }
+  void Run(const StmtPtr& body);
 
  protected:
   void VisitStmt(const StmtPtr& stmt) override {
@@ -330,10 +328,13 @@ class DefMapVisitor : public IRVisitor {
       d.kind = VarDef::kAssign;
       d.assign_stmt = op;
       d.definition_stmt = op;
-      d.nearest_for = for_stack_.empty() ? nullptr : for_stack_.back();
+      d.nearest_loop = loop_stack_.empty() ? nullptr : loop_stack_.back();
       d.order = stmt_order.at(op.get());
       defs[op->var_] = d;
       writes[op.get()].insert(op->var_);
+      if (payload_reachable_ && WritesTileResult(As<Call>(op->value_))) {
+        data_writes[op.get()].insert(op->var_);
+      }
     }
     // Renames and zero-copy views bind storage without reading its payload.
     // Keep shape/offset operands as ordinary reads; defer only the source.
@@ -370,18 +371,27 @@ class DefMapVisitor : public IRVisitor {
 
   void VisitStmt_(const IfStmtPtr& op) override {
     VisitExpr(op->condition_);
+    const auto then_yield = transform_utils::GetLastYieldStmt(op->then_body_);
+    const auto else_yield = op->else_body_ ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
+    IfInfo info{op, {op->then_body_, op->else_body_.value_or(nullptr)}, {then_yield, else_yield}, {}};
+    info.results.reserve(op->return_vars_.size());
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& rv = op->return_vars_[i];
+      info.results.push_back(
+          {rv,
+           {then_yield && i < then_yield->value_.size() ? AsVarLike(then_yield->value_[i]) : nullptr,
+            else_yield && i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr}});
       if (!As<TileType>(rv->GetType())) continue;
       VarDef d;
       d.kind = VarDef::kIfReturn;
       d.control_stmt = op;
       d.definition_stmt = op;
-      d.nearest_for = for_stack_.empty() ? nullptr : for_stack_.back();
+      d.nearest_loop = loop_stack_.empty() ? nullptr : loop_stack_.back();
       d.return_idx = i;
       d.order = stmt_order.at(op.get());
       defs[rv] = d;
     }
+    if_results.emplace(op.get(), std::move(info));
     binding_stack_.push_back(op);
     VisitStmt(op->then_body_);
     if (op->else_body_.has_value()) VisitStmt(op->else_body_.value());
@@ -389,25 +399,66 @@ class DefMapVisitor : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    loops.push_back(op);
     VisitExpr(op->loop_var_);
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
-    VisitLoopInitializers(op);
+    VisitLoop(op);
+  }
 
-    RegisterLoopBindings(op, VarDef::kForReturn, op);
-    for_stack_.push_back(op);
-    binding_stack_.push_back(op);
+  void VisitExpr_(const IterArgPtr& argument) override { VisitVarLike_(argument); }
+
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& loop) {
+    loops.push_back(loop);
+    for (const auto& argument : loop->iter_args_) {
+      reading_initializer_ = AsVarLike(argument->initValue_) != nullptr;
+      VisitExpr(argument->initValue_);
+    }
+    reading_initializer_ = false;
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      if (!As<TileType>(argument->GetType())) continue;
+      VarDef definition;
+      definition.kind = VarDef::kIterArg;
+      definition.control_stmt = loop;
+      definition.definition_stmt = loop;
+      definition.nearest_loop = loop;
+      definition.return_idx = i;
+      definition.iter_arg = argument;
+      definition.order = stmt_order.at(loop.get());
+      defs[argument] = definition;
+    }
+    for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
+      const auto& result = loop->return_vars_[i];
+      if (!As<TileType>(result->GetType())) continue;
+      VarDef definition;
+      definition.kind = VarDef::kLoopReturn;
+      definition.control_stmt = loop;
+      definition.definition_stmt = loop;
+      definition.nearest_loop = loop;
+      definition.return_idx = i;
+      definition.order = stmt_order.at(loop.get());
+      defs[result] = definition;
+    }
+    loop_stack_.push_back(loop);
+    if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) {
+      reading_condition_ = true;
+      VisitExpr(loop->condition_);
+      reading_condition_ = false;
+    }
+    binding_stack_.push_back(loop);
     const bool saved_reachable = payload_reachable_;
-    payload_reachable_ = payload_reachable_ && LoopMayExecute(op, false);
-    VisitStmt(op->body_);
+    payload_reachable_ = payload_reachable_ && LoopMayExecute(loop, false);
+    VisitStmt(loop->body_);
     payload_reachable_ = saved_reachable;
     binding_stack_.pop_back();
-    for_stack_.pop_back();
+    loop_stack_.pop_back();
   }
 
   void VisitExpr_(const CallPtr& call) override {
+    const auto assignment = As<AssignStmt>(current_stmt_);
+    RecordInputWrites(call->op_, call->args_, assignment && assignment->value_ == call);
     auto& registry = OpRegistry::GetInstance();
     const auto* entry =
         call->op_ && registry.IsRegistered(call->op_->name_) ? &registry.GetEntry(call->op_->name_) : nullptr;
@@ -428,26 +479,39 @@ class DefMapVisitor : public IRVisitor {
     }
   }
 
-  void VisitExpr_(const IterArgPtr& argument) override {
-    // The initializer is read at loop entry. A bound carry reads the current
-    // iteration's value, not its initializer's old logical version again.
-    VisitVarLike_(argument);
+  void VisitExpr_(const SubmitPtr& submit) override {
+    RecordInputWrites(submit->op_, submit->args_);
+    IRVisitor::VisitExpr_(submit);
   }
 
-  void VisitStmt_(const WhileStmtPtr& loop) override {
-    loops.push_back(loop);
-    VisitLoopInitializers(loop);
-    RegisterLoopBindings(loop, VarDef::kWhileReturn, for_stack_.empty() ? nullptr : for_stack_.back());
-    reading_condition_ = true;
-    VisitExpr(loop->condition_);
-    reading_condition_ = false;
-    binding_stack_.push_back(loop);
-    const bool saved_reachable = payload_reachable_;
-    payload_reachable_ = payload_reachable_ && LoopMayExecute(loop, false);
-    VisitStmt(loop->body_);
-    payload_reachable_ = saved_reachable;
-    binding_stack_.pop_back();
+  void RecordInputWrites(const OpPtr& op, const std::vector<ExprPtr>& arguments,
+                         bool direct_assignment = false) {
+    if (!payload_reachable_) return;
+    const auto mark = [&](size_t index) {
+      if (index >= arguments.size()) return;
+      if (const auto value = AsVarLike(arguments[index])) {
+        mutable_inputs.insert(value);
+        if (current_stmt_) {
+          writes[current_stmt_.get()].insert(value);
+          data_writes[current_stmt_.get()].insert(value);
+        }
+      }
+    };
+    ForEachWrittenArgument(op, arguments, mark);
+    if (const auto index = DataWritebackArgIndex(op, arguments.size())) {
+      if (direct_assignment && *index < arguments.size()) {
+        if (const auto target = AsVarLike(arguments[*index])) {
+          VarUseCollector others;
+          for (size_t i = 0; i < arguments.size(); ++i) {
+            if (i != *index) others.VisitExpr(arguments[i]);
+          }
+          writeback_uses.push_back({target, std::move(others.used_vars), current_stmt_.get()});
+        }
+      }
+    }
   }
+
+  void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
 
   void VisitStmt_(const YieldStmtPtr& op) override {
     for (size_t i = 0; i < op->value_.size(); ++i) {
@@ -499,50 +563,12 @@ class DefMapVisitor : public IRVisitor {
   }
 
  private:
-  template <typename LoopPtr>
-  void VisitLoopInitializers(const LoopPtr& loop) {
-    for (const auto& argument : loop->iter_args_) {
-      reading_initializer_ = AsVarLike(argument->initValue_) != nullptr;
-      VisitExpr(argument->initValue_);
-    }
-    reading_initializer_ = false;
-  }
-
-  template <typename LoopPtr>
-  void RegisterLoopBindings(const LoopPtr& loop, VarDef::Kind return_kind, const ForStmtPtr& nearest_for) {
-    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
-      const auto& argument = loop->iter_args_[i];
-      if (!As<TileType>(argument->GetType())) continue;
-      VarDef def;
-      def.kind = VarDef::kIterArg;
-      def.control_stmt = loop;
-      def.definition_stmt = loop;
-      def.nearest_for = nearest_for;
-      def.return_idx = i;
-      def.iter_arg = argument;
-      def.order = stmt_order.at(loop.get());
-      defs[argument] = def;
-    }
-    for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
-      const auto& result = loop->return_vars_[i];
-      if (!As<TileType>(result->GetType())) continue;
-      VarDef def;
-      def.kind = return_kind;
-      def.control_stmt = loop;
-      def.definition_stmt = loop;
-      def.nearest_for = nearest_for;
-      def.return_idx = i;
-      def.order = stmt_order.at(loop.get());
-      defs[result] = def;
-    }
-  }
-
-  StmtPtr current_stmt_;
   bool payload_reachable_ = true;
   bool reading_condition_ = false;
   bool reading_initializer_ = false;
-  std::vector<ForStmtPtr> for_stack_;
   std::vector<StmtPtr> binding_stack_;
+  StmtPtr current_stmt_;
+  std::vector<StmtPtr> loop_stack_;
   size_t next_order_ = 0;
 };
 
@@ -557,9 +583,8 @@ std::map<const Stmt*, std::set<VarPtr>> BuildPayloadObservations(
   auto observe_loop_value = [&](const VarPtr& var) {
     const auto def = defs.find(var);
     if (def != defs.end() &&
-        (def->second.kind == VarDef::kIterArg || def->second.kind == VarDef::kForReturn ||
-         def->second.kind == VarDef::kWhileReturn || def->second.kind == VarDef::kIfReturn ||
-         binding_reads.count(var) != 0) &&
+        (def->second.kind == VarDef::kIterArg || def->second.kind == VarDef::kLoopReturn ||
+         def->second.kind == VarDef::kIfReturn || binding_reads.count(var) != 0) &&
         observed_loop_values.insert(var).second) {
       pending_loop_values.push_back(var);
     }
@@ -581,24 +606,23 @@ std::map<const Stmt*, std::set<VarPtr>> BuildPayloadObservations(
     }
     const auto& def = defs.at(value);
     IterArgPtr argument = def.iter_arg;
-    if (def.kind == VarDef::kForReturn) {
-      auto loop = As<ForStmt>(def.control_stmt);
-      if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
-      auto start = As<ConstInt>(loop->start_);
-      auto stop = As<ConstInt>(loop->stop_);
-      auto step = As<ConstInt>(loop->step_);
-      // Compare bounds directly: computing stop-start or a trip count could
-      // overflow. Unknown bounds conservatively retain the zero-trip path.
-      if (start && stop && step &&
-          ((step->value_ > 0 && start->value_ < stop->value_) ||
-           (step->value_ < 0 && start->value_ > stop->value_))) {
-        continue;
+    if (def.kind == VarDef::kLoopReturn) {
+      if (auto loop = As<ForStmt>(def.control_stmt)) {
+        if (def.return_idx >= loop->iter_args_.size()) continue;
+        auto start = As<ConstInt>(loop->start_);
+        auto stop = As<ConstInt>(loop->stop_);
+        auto step = As<ConstInt>(loop->step_);
+        // Widen neither a difference nor trip count: compare bounds directly.
+        if (start && stop && step &&
+            ((step->value_ > 0 && start->value_ < stop->value_) ||
+             (step->value_ < 0 && start->value_ > stop->value_))) {
+          continue;
+        }
+        argument = loop->iter_args_[def.return_idx];
+      } else if (auto loop = As<WhileStmt>(def.control_stmt)) {
+        if (def.return_idx >= loop->iter_args_.size()) continue;
+        argument = loop->iter_args_[def.return_idx];
       }
-      argument = loop->iter_args_[def.return_idx];
-    } else if (def.kind == VarDef::kWhileReturn) {
-      auto loop = As<WhileStmt>(def.control_stmt);
-      if (!loop || def.return_idx >= loop->iter_args_.size()) continue;
-      argument = loop->iter_args_[def.return_idx];
     }
     if (!argument) continue;
     if (auto initial = AsVarLike(argument->initValue_)) {
@@ -609,103 +633,129 @@ std::map<const Stmt*, std::set<VarPtr>> BuildPayloadObservations(
   return effective_observations;
 }
 
-/// A second lexical numbering with every IfStmt's arms visited in reverse.
-/// In structured control flow, statement A can execute before statement B iff
-/// A precedes B in both this ordering and DefMapVisitor's then-first ordering.
-class ReverseBranchOrderVisitor : public IRVisitor {
- public:
-  std::map<const Stmt*, size_t> stmt_order;
-  std::map<const Stmt*, size_t> stmt_end_order;
-
-  void Run(const StmtPtr& body) { VisitStmt(body); }
-
- protected:
-  // Expressions contain no lexical statements; in particular, do not expand
-  // an IterArg's initializer tree while computing statement-only numbering.
-  void VisitExpr(const ExprPtr&) override {}
-
-  void VisitStmt(const StmtPtr& stmt) override {
-    if (!stmt) return;
-    stmt_order.emplace(stmt.get(), next_order_++);
-    IRVisitor::VisitStmt(stmt);
-    stmt_end_order.emplace(stmt.get(), next_order_ - 1);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    VisitExpr(op->condition_);
-    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
-    VisitStmt(op->then_body_);
-    for (const auto& return_var : op->return_vars_) VisitExpr(return_var);
-  }
-
- private:
-  size_t next_order_ = 0;
-};
-
-/// Visits a stmt subtree and collects the MemRef base Ptrs of every *read*
-/// of a TileType Var.  Writes (the LHS of an AssignStmt) are intentionally
-/// excluded; every other stmt/expression kind dispatches through the default
-/// IRVisitor traversal, so new stmt types are covered automatically.
-class ExprReadBaseCollector : public IRVisitor {
- public:
-  std::set<const Var*> bases;
-
-  void VisitVarLike_(const VarPtr& var) override {
-    if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
-      bases.insert(GetDefinedMemRef(tile)->base_.get());
-    }
-    IRVisitor::VisitVarLike_(var);
-  }
-
-  void VisitExpr_(const IterArgPtr& argument) override {
-    const auto* context = PassContext::Current();
-    if (context && context->GetEnableBufferIR()) {
-      VisitVarLike_(argument);
-    } else {
-      IRVisitor::VisitExpr_(argument);
+// Resolve forwarding demand once, then index only payload reads. The same
+// facts feed loop isolation, exact window observations and future liveness.
+void DefMapVisitor::Run(const StmtPtr& body) {
+  root = body;
+  VisitStmt(body);
+  for (auto& [var, def] : defs) {
+    (void)var;
+    if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kLoopReturn) {
+      def.order = stmt_end_order.at(def.control_stmt.get());
     }
   }
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    // Skip op->var_ — the LHS is a definition, not a read.
-    if (op->value_) VisitExpr(op->value_);
+  reads = BuildPayloadObservations(defs, observation_reads, binding_reads);
+  std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;
+  ordered_reads.reserve(reads.size());
+  for (const auto& [statement, values] : reads) {
+    ordered_reads.emplace_back(stmt_order.at(statement), &values);
   }
-};
+  std::sort(ordered_reads.begin(), ordered_reads.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  std::vector<std::pair<size_t, const Stmt*>> active_loops;
+  size_t next_loop = 0;
+  for (const auto& [position, values] : ordered_reads) {
+    // A loop initializer is outside its own backedge. Conditions are added
+    // separately below because While re-evaluates them at its own header.
+    while (next_loop < loops.size() && stmt_order.at(loops[next_loop].get()) < position) {
+      const auto& loop = loops[next_loop++];
+      if (!LoopMayExecute(loop, true)) continue;
+      const size_t begin = stmt_order.at(loop.get());
+      while (!active_loops.empty() && stmt_end_order.at(active_loops.back().second) < begin) {
+        active_loops.pop_back();
+      }
+      active_loops.emplace_back(begin, loop.get());
+    }
+    while (!active_loops.empty() && stmt_end_order.at(active_loops.back().second) < position) {
+      active_loops.pop_back();
+    }
+    for (const auto& value : *values) {
+      value_last_use[value] = std::max(value_last_use[value], position);
+      const auto definition = defs.find(value);
+      const auto loop =
+          definition == defs.end()
+              ? active_loops.begin()
+              : std::upper_bound(active_loops.begin(), active_loops.end(), definition->second.order,
+                                 [](size_t order, const auto& candidate) { return order < candidate.first; });
+      if (loop != active_loops.end()) recurring_reads[value].insert(loop->second);
+    }
+  }
+  for (const auto& [loop, values] : condition_reads) {
+    const auto* condition = static_cast<const WhileStmt*>(loop);
+    if (const auto constant = As<ConstBool>(condition->condition_); constant && !constant->value_) {
+      continue;
+    }
+    for (const auto& value : values) {
+      const auto definition = defs.find(value);
+      if (definition == defs.end() || definition->second.order < stmt_order.at(loop)) {
+        recurring_reads[value].insert(loop);
+      }
+    }
+  }
+  for (const auto& [value, enclosing] : recurring_reads) {
+    for (const auto* loop : enclosing) {
+      value_last_use[value] = std::max(value_last_use[value], stmt_end_order.at(loop));
+    }
+  }
+}
 
 /// Range-maximum index over events (primary lexical order, reverse-branch
 /// lexical order). A query succeeds when an event lies in the primary interval
 /// and is also after the lower bound in the reverse ordering.
 class ReachableEventIndex {
  public:
-  void Build(std::vector<std::pair<size_t, size_t>> events, bool active = true) {
+  struct Event {
+    size_t primary;
+    size_t reverse;
+    const Var* excluded_slot = nullptr;
+  };
+
+  void Build(const std::vector<std::pair<size_t, size_t>>& events, bool active = true) {
+    std::vector<Event> tagged;
+    tagged.reserve(events.size());
+    for (const auto& event : events) tagged.push_back({event.first, event.second});
+    Build(std::move(tagged), active);
+  }
+
+  void Build(std::vector<Event> events, bool active = true) {
+    primary_.clear();
+    summaries_.clear();
+    size_ = 0;
     if (events.empty()) return;
-    std::sort(events.begin(), events.end());
-    events.erase(std::unique(events.begin(), events.end()), events.end());
+    std::sort(events.begin(), events.end(),
+              [](const Event& lhs, const Event& rhs) { return lhs.primary < rhs.primary; });
+    for (const auto& event : events) {
+      if (primary_.empty() || primary_.back() != event.primary) primary_.push_back(event.primary);
+    }
     size_ = 1;
-    while (size_ < events.size()) size_ *= 2;
-    primary_.reserve(events.size());
-    max_reverse_.assign(size_ * 2, 0);
-    for (size_t i = 0; i < events.size(); ++i) {
-      primary_.push_back(events[i].first);
-      max_reverse_[size_ + i] = active ? events[i].second + 1 : 0;
+    while (size_ < primary_.size()) size_ *= 2;
+    summaries_.assign(size_ * 2, Summary{});
+    if (active) {
+      size_t position = 0;
+      for (const auto& event : events) {
+        while (primary_[position] < event.primary) ++position;
+        auto& leaf = summaries_[size_ + position];
+        leaf = Merge(leaf, {event.reverse + 1, event.excluded_slot, true});
+      }
     }
     for (size_t i = size_; i-- > 1;) {
-      max_reverse_[i] = std::max(max_reverse_[i * 2], max_reverse_[i * 2 + 1]);
+      summaries_[i] = Merge(summaries_[i * 2], summaries_[i * 2 + 1]);
     }
   }
 
   // Activate observations in logical-definition order for loop-entry queries.
-  void Activate(size_t primary, size_t reverse) {
+  void Activate(size_t primary, size_t reverse, const Var* excluded_slot = nullptr) {
     size_t node = size_ + static_cast<size_t>(std::lower_bound(primary_.begin(), primary_.end(), primary) -
                                               primary_.begin());
-    max_reverse_[node] = std::max(max_reverse_[node], reverse + 1);
+    summaries_[node] = Merge(summaries_[node], {reverse + 1, excluded_slot, true});
     while (node > 1) {
       node /= 2;
-      max_reverse_[node] = std::max(max_reverse_[node * 2], max_reverse_[node * 2 + 1]);
+      summaries_[node] = Merge(summaries_[node * 2], summaries_[node * 2 + 1]);
     }
   }
 
-  [[nodiscard]] bool HasAfter(size_t primary_begin, size_t primary_end, size_t reverse_lower) const {
+  [[nodiscard]] bool HasAfter(size_t primary_begin, size_t primary_end, size_t reverse_lower,
+                              const Var* excluded_slot = nullptr) const {
     if (primary_.empty() || primary_begin > primary_end) return false;
     size_t left = static_cast<size_t>(std::lower_bound(primary_.begin(), primary_.end(), primary_begin) -
                                       primary_.begin());
@@ -713,95 +763,181 @@ class ReachableEventIndex {
                                        primary_.begin());
     left += size_;
     right += size_;
-    size_t maximum = 0;
+    Summary summary;
     while (left < right) {
-      if (left & 1U) maximum = std::max(maximum, max_reverse_[left++]);
-      if (right & 1U) maximum = std::max(maximum, max_reverse_[--right]);
+      if (left & 1U) summary = Merge(summary, summaries_[left++]);
+      if (right & 1U) summary = Merge(summary, summaries_[--right]);
       left /= 2;
       right /= 2;
     }
-    return maximum > reverse_lower + 1;
+    return summary.maximum > reverse_lower + 1 &&
+           !(excluded_slot && summary.uniform && summary.excluded_slot == excluded_slot);
   }
 
  private:
+  struct Summary {
+    size_t maximum = 0;
+    const Var* excluded_slot = nullptr;
+    bool uniform = true;
+  };
+
+  static Summary Merge(const Summary& lhs, const Summary& rhs) {
+    if (lhs.maximum == 0) return rhs;
+    if (rhs.maximum == 0) return lhs;
+    return {std::max(lhs.maximum, rhs.maximum), lhs.excluded_slot,
+            lhs.uniform && rhs.uniform && lhs.excluded_slot == rhs.excluded_slot};
+  }
+
   std::vector<size_t> primary_;
-  std::vector<size_t> max_reverse_;
+  std::vector<Summary> summaries_;
   size_t size_ = 0;
 };
 
-/// Range-minimum index over read events and their logical definition versions.
+/// Spatially filtered reads with correlated primary/reverse reachability.
+/// Fixed-width byte routing visits O(65) payloads per interval, each containing
+/// the existing tagged temporal index. Build and definition-ordered activation
+/// cost O(N log N); queries cost O(log N), including allocation/slot lookup.
+class WindowedReachableEventIndex {
+ public:
+  struct Event {
+    MemRefPtr window;
+    size_t primary;
+    size_t reverse;
+    const Var* excluded_slot = nullptr;
+  };
+
+  void Build(const std::vector<Event>& events, bool active = true) {
+    windows_.Clear();
+    for (const auto& event : events) {
+      windows_.UpdateWindow(event.window, [&](Payload& payload) {
+        payload.events.push_back({event.primary, event.reverse, event.excluded_slot});
+      });
+    }
+    windows_.ForEachPayload(
+        [&](Payload& payload) { payload.index.Build(std::move(payload.events), active); });
+  }
+
+  void Activate(const Event& event) {
+    // Every activation uses a window supplied to Build, so spatial routing is
+    // frozen while the temporal indexes advance through definition versions.
+    windows_.UpdateWindow(event.window, [&](Payload& payload) {
+      payload.index.Activate(event.primary, event.reverse, event.excluded_slot);
+    });
+  }
+
+  [[nodiscard]] bool HasAfter(const MemRefPtr& window, size_t primary_begin, size_t primary_end,
+                              size_t reverse_lower, const Var* excluded_slot = nullptr) const {
+    return windows_.Any(window, [&](const Payload& payload) {
+      return payload.index.HasAfter(primary_begin, primary_end, reverse_lower, excluded_slot);
+    });
+  }
+
+ private:
+  struct Payload {
+    std::vector<ReachableEventIndex::Event> events;
+    ReachableEventIndex index;
+  };
+  StorageWindowIndex<Payload> windows_;
+};
+
+/// Reachable read events filtered by their logical definition versions.
 /// Aliases can share a physical allocation while naming different values over
 /// time (notably an IterArg's initializer and the corresponding ForStmt
 /// return). A post-If read is an independent observation of the old value only
 /// when the handle being read was defined before that IfStmt.
 ///
-/// These queries begin after the complete IfStmt subtree, where primary lexical
-/// order alone proves reachability (both arms precede the suffix in either
-/// branch ordering). The index therefore stores the minimum handle-definition
-/// order per primary interval. Build is O(N log N), each query is O(log N), and
-/// the complete pass remains O(N log N).
+/// A forward suffix can include an enclosing if's mutually exclusive sibling.
+/// Each immutable definition version therefore indexes primary positions with
+/// their maximum reverse position. Build uses O(N log N) time/storage and each
+/// query costs O(log N), without scanning the handles in a storage family.
 class VersionedReachableEventIndex {
  public:
   struct Event {
     size_t primary;
     size_t definition;
+    size_t reverse;
   };
 
   void Build(std::vector<Event> events) {
+    primary_.clear();
+    versions_.clear();
+    nodes_.assign(1, Node{});
     if (events.empty()) return;
-    std::sort(events.begin(), events.end(), [](const Event& lhs, const Event& rhs) {
-      return std::tie(lhs.primary, lhs.definition) < std::tie(rhs.primary, rhs.definition);
-    });
-
     primary_.reserve(events.size());
-    std::vector<size_t> leaf_minimum;
-    leaf_minimum.reserve(events.size());
+    for (const auto& event : events) primary_.push_back(event.primary);
+    std::sort(primary_.begin(), primary_.end());
+    primary_.erase(std::unique(primary_.begin(), primary_.end()), primary_.end());
+    std::sort(events.begin(), events.end(), [](const Event& lhs, const Event& rhs) {
+      return std::tie(lhs.definition, lhs.primary) < std::tie(rhs.definition, rhs.primary);
+    });
+    size_t root = 0;
     for (size_t i = 0; i < events.size();) {
-      primary_.push_back(events[i].primary);
-      size_t minimum = events[i].definition;
-      size_t j = i + 1;
-      while (j < events.size() && events[j].primary == events[i].primary) {
-        minimum = std::min(minimum, events[j].definition);
-        ++j;
-      }
-      leaf_minimum.push_back(minimum);
-      i = j;
-    }
-
-    size_ = 1;
-    while (size_ < primary_.size()) size_ *= 2;
-    minimum_definition_.assign(size_ * 2, std::numeric_limits<size_t>::max());
-    for (size_t i = 0; i < leaf_minimum.size(); ++i) {
-      minimum_definition_[size_ + i] = leaf_minimum[i];
-    }
-    for (size_t i = size_; i-- > 1;) {
-      minimum_definition_[i] = std::min(minimum_definition_[i * 2], minimum_definition_[i * 2 + 1]);
+      const auto definition = events[i].definition;
+      do {
+        const auto& event = events[i];
+        const auto position = static_cast<size_t>(
+            std::lower_bound(primary_.begin(), primary_.end(), event.primary) - primary_.begin());
+        root = Update(root, 0, primary_.size(), position, event.reverse + 1);
+        ++i;
+      } while (i < events.size() && events[i].definition == definition);
+      versions_.push_back({definition, root});
     }
   }
 
   [[nodiscard]] bool HasAfterFromHandleDefinedBefore(size_t primary_begin, size_t primary_end,
-                                                     size_t definition_upper) const {
+                                                     size_t definition_upper, size_t reverse_lower) const {
     if (primary_.empty() || primary_begin > primary_end) return false;
-    size_t left = static_cast<size_t>(std::lower_bound(primary_.begin(), primary_.end(), primary_begin) -
-                                      primary_.begin());
-    size_t right = static_cast<size_t>(std::upper_bound(primary_.begin(), primary_.end(), primary_end) -
-                                       primary_.begin());
-    left += size_;
-    right += size_;
-    size_t minimum = std::numeric_limits<size_t>::max();
-    while (left < right) {
-      if (left & 1U) minimum = std::min(minimum, minimum_definition_[left++]);
-      if (right & 1U) minimum = std::min(minimum, minimum_definition_[--right]);
-      left /= 2;
-      right /= 2;
-    }
-    return minimum < definition_upper;
+    auto version =
+        std::lower_bound(versions_.begin(), versions_.end(), definition_upper,
+                         [](const Version& entry, size_t upper) { return entry.definition < upper; });
+    if (version == versions_.begin()) return false;
+    --version;  // Only handles strictly older than this region are active.
+    const auto left = static_cast<size_t>(std::lower_bound(primary_.begin(), primary_.end(), primary_begin) -
+                                          primary_.begin());
+    const auto right = static_cast<size_t>(std::upper_bound(primary_.begin(), primary_.end(), primary_end) -
+                                           primary_.begin());
+    return Query(version->root, 0, primary_.size(), left, right) > reverse_lower + 1;
   }
 
  private:
+  struct Node {
+    size_t left = 0;
+    size_t right = 0;
+    size_t maximum = 0;
+  };
+  struct Version {
+    size_t definition;
+    size_t root;
+  };
+
+  size_t Update(size_t previous, size_t begin, size_t end, size_t position, size_t reverse) {
+    const auto node = nodes_.size();
+    nodes_.push_back(nodes_[previous]);
+    nodes_[node].maximum = std::max(nodes_[node].maximum, reverse);
+    if (end - begin > 1) {
+      const auto middle = begin + (end - begin) / 2;
+      if (position < middle) {
+        const auto child = Update(nodes_[node].left, begin, middle, position, reverse);
+        nodes_[node].left = child;
+      } else {
+        const auto child = Update(nodes_[node].right, middle, end, position, reverse);
+        nodes_[node].right = child;
+      }
+    }
+    return node;
+  }
+
+  [[nodiscard]] size_t Query(size_t node, size_t begin, size_t end, size_t left, size_t right) const {
+    if (node == 0 || right <= begin || end <= left) return 0;
+    if (left <= begin && end <= right) return nodes_[node].maximum;
+    const auto middle = begin + (end - begin) / 2;
+    return std::max(Query(nodes_[node].left, begin, middle, left, right),
+                    Query(nodes_[node].right, middle, end, left, right));
+  }
+
   std::vector<size_t> primary_;
-  std::vector<size_t> minimum_definition_;
-  size_t size_ = 0;
+  std::vector<Version> versions_;
+  std::vector<Node> nodes_;
 };
 
 /// Index old-value observations before selecting private loop-entry storage.
@@ -815,47 +951,95 @@ class LoopInputIsolation : public IRVisitor {
   std::map<const IterArg*, VarPtr> initializers;
   std::map<const Stmt*, std::vector<StmtPtr>> entries;
   std::vector<StmtPtr> allocations;
+  std::set<VarPtr> reference_carries;
 
-  void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool recurrence_only = false) {
-    recurrence_only_ = recurrence_only;
-    names_.Collect(body, parameters);
+  /// Collect one immutable snapshot of actual writes and possible carry
+  /// writebacks. The same proof drives isolation and result mutability; merely
+  /// entering a loop does not write its initializer. Use a fresh instance for
+  /// each snapshot, since projected windows and value versions belong to it.
+  void AnalyzeEffects(const StmtPtr& body) {
     DefMapVisitor demand;
     demand.Run(body);
-    payload_observations_ =
-        BuildPayloadObservations(demand.defs, demand.observation_reads, demand.binding_reads);
+    payload_observations_ = std::move(demand.reads);
+    views_ = std::make_unique<BufferViewAnalysis>(body);
+    const auto collect_pinned = [&](const StmtPtr& statement) {
+      if (const auto base = GetPinnedAllocBase(statement)) pinned_bases_.insert(base.get());
+    };
+    if (const auto sequence = As<SeqStmts>(body)) {
+      for (const auto& statement : sequence->stmts_) collect_pinned(statement);
+    } else {
+      collect_pinned(body);
+    }
     ReverseBranchOrderVisitor reverse;
     reverse.Run(body);
     reverse_order_ = std::move(reverse.stmt_order);
-    for (const auto& parameter : parameters) {
-      if (auto tile = GetTileTypeWithMemRef(parameter->GetType())) {
-        incoming_bases_.insert(GetDefinedMemRef(tile)->base_.get());
+    VisitStmt(body);
+    writes_index_.Build(write_events_);
+  }
+
+  [[nodiscard]] std::set<VarPtr> WrittenLoopInitializers() const {
+    std::set<VarPtr> written;
+    const auto collect = [&](const auto& loop) {
+      if (!LoopMayExecute(loop, false)) return;
+      for (const auto& argument : loop->iter_args_) {
+        if (!GetTileTypeWithMemRef(argument->GetType())) continue;
+        const auto initial = AsVarLike(argument->initValue_);
+        if (!initial) continue;
+        ForEachStorageWindow(initial, [&](const MemRefPtr& window) {
+          if (MayWriteInLoop(loop, window)) written.insert(initial);
+        });
+      }
+    };
+    for (const auto& statement : loops_) {
+      if (const auto loop = As<ForStmt>(statement)) collect(loop);
+      if (const auto loop = As<WhileStmt>(statement)) collect(loop);
+    }
+    return written;
+  }
+
+  void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters,
+            const std::vector<ParamDirection>& directions) {
+    names_.Collect(body, parameters);
+    AnalyzeEffects(body);
+    std::vector<StorageAccessIndex::Event> incoming_windows;
+    for (size_t i = 0; i < parameters.size(); ++i) {
+      // Read-only inputs belong to the caller. Out/InOut storage may be a
+      // deliberate continuation; independent old-value uses still isolate it.
+      if (directions.at(i) != ParamDirection::In) continue;
+      if (const auto window = GetTypeMemRef(parameters[i]->GetType()); window && *window) {
+        incoming_windows.push_back({*window, 1, 1});
+      } else if (As<TileType>(parameters[i]->GetType())) {
+        // An opaque incoming tile cannot prove separation from a written carry.
+        incoming_windows.push_back({nullptr, 1, 1});
       }
     }
-    VisitStmt(body);
+    incoming_storage_.Build(incoming_windows);
     struct Observation {
-      const Var* base;
-      size_t position;
-      size_t reverse;
+      WindowedReachableEventIndex::Event event;
       size_t definition;
     };
     std::vector<Observation> observations;
-    std::map<const Var*, std::vector<std::pair<size_t, size_t>>> reachable_events;
-    std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
-    for (const auto& [var, loop] : recurring_reads_) {
-      const auto* base = GetDefinedMemRef(GetTileTypeWithMemRef(var->GetType()))->base_.get();
-      recurring_events[base].emplace_back(positions_.at(loop), loop_ends_.at(loop));
+    std::vector<WindowedReachableEventIndex::Event> reachable_events;
+    std::vector<WindowedReachableEventIndex::Event> recurring_events;
+    for (const auto& read : recurring_reads_) {
+      const auto begin = positions_.at(read.loop);
+      const auto end = loop_ends_.at(read.loop);
+      ForEachStorageWindow(read.value, [&](const MemRefPtr& window) {
+        recurring_events.push_back({window, begin, end, read.excluded_slot});
+      });
     }
-    for (const auto& [position, var] : reads_) {
-      const auto tile = GetTileTypeWithMemRef(var->GetType());
-      auto definition = definitions_.find(var.get());
-      const auto* base = GetDefinedMemRef(tile)->base_.get();
+    for (const auto& read : reads_) {
+      auto definition = definitions_.find(read.value.get());
       const size_t version = definition == definitions_.end() ? 0 : definition->second;
-      const size_t reverse = read_reverse_.at(position);
-      reachable_events[base].emplace_back(position, reverse);
-      observations.push_back({base, position, reverse, version});
+      const size_t reverse = read_reverse_.at(read.position);
+      ForEachStorageWindow(read.value, [&](const MemRefPtr& window) {
+        WindowedReachableEventIndex::Event event{window, read.position, reverse, read.excluded_slot};
+        reachable_events.push_back(event);
+        observations.push_back({std::move(event), version});
+      });
     }
-    for (auto& [base, values] : recurring_events) recurring_indexes_[base].Build(std::move(values));
-    for (auto& [base, values] : reachable_events) reachable_indexes_[base].Build(std::move(values), false);
+    recurring_index_.Build(recurring_events);
+    reachable_index_.Build(reachable_events, false);
     std::sort(observations.begin(), observations.end(),
               [](const auto& a, const auto& b) { return a.definition < b.definition; });
     size_t next = 0;
@@ -864,7 +1048,7 @@ class LoopInputIsolation : public IRVisitor {
       // A range maximum then tests both branch orderings in O(log N).
       while (next < observations.size() && observations[next].definition < positions_.at(loop.get())) {
         const auto& event = observations[next++];
-        reachable_indexes_[event.base].Activate(event.position, event.reverse);
+        reachable_index_.Activate(event.event);
       }
       if (auto for_loop = As<ForStmt>(loop)) PlanLoop(for_loop);
       if (auto while_loop = As<WhileStmt>(loop)) PlanLoop(while_loop);
@@ -887,38 +1071,109 @@ class LoopInputIsolation : public IRVisitor {
   }
   void VisitStmt_(const AssignStmtPtr& statement) override {
     auto source = AsVarLike(statement->value_);
-    bool identity = source != nullptr;
-    if (auto call = As<Call>(statement->value_); call && call->op_ && !call->args_.empty() &&
-                                                 op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-      source = AsVarLike(call->args_[0]);
-      const auto input = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
-      const auto output = GetTileTypeWithMemRef(statement->var_->GetType());
-      identity = input && output && SameKnownTileMemorySpace(input, output) &&
-                 SamePhysicalWindow(GetDefinedMemRef(input), GetDefinedMemRef(output)) &&
-                 OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
-                     ExecutionMemoryAccessEvidence::NoAccess;
+    const auto call = As<Call>(statement->value_);
+    const auto writeback =
+        call ? op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()) : std::nullopt;
+    const bool view = call && call->op_ && !writeback && !call->args_.empty() &&
+                      op_predicates::IsBufferAliasingViewOp(call->op_->name_);
+    if (view) source = AsVarLike(call->args_[0]);
+    if (writeback) {
+      if (const auto input = AsVarLike(call->args_[*writeback])) {
+        storage_windows_[statement->var_.get()] = StorageWindow(input);
+      }
     }
     if (source && GetTileTypeWithMemRef(source->GetType())) {
-      // Metadata views do not read data. Their later readers observe the same
-      // logical version, including a view created inside a loop from old input.
-      auto origin = definitions_.find(source.get());
-      definitions_[statement->var_.get()] = origin == definitions_.end() ? 0 : origin->second;
-      // Flatten immutable renames/full-window views once in definition order.
-      // Mutating aliases and partial windows do not establish value identity.
-      if (identity) identity_roots_[statement->var_.get()] = IdentityRoot(source);
-      // Visit the expression through the demand filter: non-source operands
-      // and reference attributes can be real observations even for a view.
-      VisitExpr(statement->value_);
-      return;
+      const bool metadata_only = !WritesTileResult(call);
+      if (metadata_only) {
+        // Only data-preserving aliases inherit their source's value version.
+        // A writing alias retains storage but defines a new data value.
+        auto origin = definitions_.find(source.get());
+        definitions_[statement->var_.get()] = origin == definitions_.end() ? 0 : origin->second;
+      }
+      const auto output_tile = GetTileTypeWithMemRef(statement->var_->GetType());
+      const auto source_tile = GetTileTypeWithMemRef(source->GetType());
+      if (SameKnownTileMemorySpace(output_tile, source_tile)) {
+        const auto input_window = StorageWindow(source);
+        const auto output_window =
+            view ? MakeAliasingMemRef(input_window, ComputeViewByteOffset(call, source_tile),
+                                      GetDefinedMemRef(output_tile)->size_, statement->var_->span_)
+                 : input_window;
+        // Partial views retain their projected byte/slot window even though
+        // they do not denote the same complete value as their source.
+        storage_windows_[statement->var_.get()] = output_window;
+        if (metadata_only && SamePhysicalWindow(output_window, input_window)) {
+          value_origins_[statement->var_.get()] = ValueOrigin(source);
+        }
+      }
+      if (metadata_only) {
+        // The first operand supplies metadata. Other arguments can still have
+        // data reads or nested Call/Submit effects and must be visited. Later
+        // demanded consumers observe this view's inherited value version and
+        // exact projected window, without a whole-parent read at its binding.
+        if (call) {
+          RecordInputWrites(call->op_, call->args_);
+          for (size_t i = 1; i < call->args_.size(); ++i) VisitExpr(call->args_[i]);
+          for (const auto& [key, value] : call->attrs_) {
+            (void)key;
+            ForEachAttrExpr(value, [this](const ExprPtr& expression) { VisitExpr(expression); });
+          }
+        }
+        return;
+      }
     }
     definitions_[statement->var_.get()] = current_;
+    if (WritesTileResult(call) || As<Submit>(statement->value_)) RecordWrite(statement->var_);
     VisitExpr(statement->value_);
   }
   void VisitStmt_(const IfStmtPtr& branch) override {
     VisitExpr(branch->condition_);
     VisitStmt(branch->then_body_);
     if (branch->else_body_) VisitStmt(*branch->else_body_);
-    for (const auto& result : branch->return_vars_) definitions_[result.get()] = ++order_;
+    const auto then_yield = transform_utils::GetLastYieldStmt(branch->then_body_);
+    const auto else_yield =
+        branch->else_body_ ? transform_utils::GetLastYieldStmt(*branch->else_body_) : nullptr;
+    for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
+      const auto& result = branch->return_vars_[i];
+      definitions_[result.get()] = ++order_;
+      const auto tile = GetTileTypeWithMemRef(result->GetType());
+      if (!tile) continue;
+      const auto target = GetDefinedMemRef(tile);
+      const bool fixed = target->is_pinned_ || pinned_bases_.count(target->base_.get());
+      const auto lhs =
+          then_yield && i < then_yield->value_.size() ? AsVarLike(then_yield->value_[i]) : nullptr;
+      const auto rhs =
+          else_yield && i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr;
+      const auto lhs_tile = lhs ? GetTileTypeWithMemRef(lhs->GetType()) : nullptr;
+      const auto rhs_tile = rhs ? GetTileTypeWithMemRef(rhs->GetType()) : nullptr;
+      const bool same_value = lhs_tile && rhs_tile && ValueOrigin(lhs) == ValueOrigin(rhs) &&
+                              SameKnownTileMemorySpace(tile, lhs_tile) &&
+                              SameKnownTileMemorySpace(tile, rhs_tile);
+      // This is a value-version projection for effect queries, not a physical
+      // result binding. Pure renames/views retain their origin; native writers
+      // start fresh origins and cannot make an updated/unchanged join a no-op.
+      if (same_value && (!fixed || SamePhysicalWindow(target, StorageWindow(lhs)))) {
+        const auto origin = ValueOrigin(lhs);
+        value_origins_[result.get()] = origin;
+        const auto lhs_definition = definitions_.find(lhs.get());
+        const auto rhs_definition = definitions_.find(rhs.get());
+        definitions_[result.get()] =
+            std::min(lhs_definition == definitions_.end() ? 0 : lhs_definition->second,
+                     rhs_definition == definitions_.end() ? 0 : rhs_definition->second);
+      }
+      const bool common = same_value && SamePhysicalWindow(StorageWindow(lhs), StorageWindow(rhs));
+      if (common && (!fixed || SamePhysicalWindow(target, StorageWindow(lhs)))) {
+        storage_windows_[result.get()] = StorageWindow(lhs);
+      }
+      if (fixed) {
+        for (const auto& yield : {then_yield, else_yield}) {
+          const auto input = yield && i < yield->value_.size() ? AsVarLike(yield->value_[i]) : nullptr;
+          const auto input_tile = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
+          if (!input_tile || !SamePhysicalWindow(target, StorageWindow(input))) {
+            if (yield) RecordWrite(result, positions_.at(yield.get()), reverse_order_.at(yield.get()) + 1);
+          }
+        }
+      }
+    }
   }
   void VisitStmt_(const ForStmtPtr& loop) override {
     VisitExpr(loop->start_);
@@ -927,12 +1182,44 @@ class LoopInputIsolation : public IRVisitor {
     VisitLoop(loop);
   }
   void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
+  void VisitExpr_(const CallPtr& call) override {
+    RecordInputWrites(call->op_, call->args_);
+    const auto excluded_slot = AssembleOverwrittenCarry(call);
+    if (!excluded_slot) {
+      IRVisitor::VisitExpr_(call);
+      return;
+    }
+    // Assemble reads its old target only outside the inserted source window.
+    // Keep that read for every other carry and retain every source/attr read.
+    RecordRead(AsVarLike(call->args_[0]), excluded_slot);
+    for (size_t i = 1; i < call->args_.size(); ++i) VisitExpr(call->args_[i]);
+    for (const auto& [key, value] : call->attrs_) {
+      (void)key;
+      ForEachAttrExpr(value, [this](const ExprPtr& expression) { VisitExpr(expression); });
+    }
+  }
+  void VisitExpr_(const SubmitPtr& submit) override {
+    RecordInputWrites(submit->op_, submit->args_);
+    IRVisitor::VisitExpr_(submit);
+  }
   void VisitExpr_(const IterArgPtr& value) override { VisitVarLike_(value); }
-  void VisitVarLike_(const VarPtr& value) override {
+  void VisitVarLike_(const VarPtr& value) override { RecordRead(value, nullptr); }
+
+ private:
+  const Stmt* current_statement_ = nullptr;
+  bool effects_reachable_ = true;
+  std::map<const Stmt*, std::set<VarPtr>> payload_observations_;
+
+  [[nodiscard]] bool MayWriteInLoop(const StmtPtr& loop, const MemRefPtr& window) const {
+    return writes_index_.MayOverlapAfter(window, positions_.at(loop.get()), reverse_order_.at(loop.get()),
+                                         loop_ends_.at(loop.get()));
+  }
+
+  void RecordRead(const VarPtr& value, const Var* excluded_slot) {
     const auto observation = payload_observations_.find(current_statement_);
     if (observation == payload_observations_.end() || observation->second.count(value) == 0) return;
     if (GetTileTypeWithMemRef(value->GetType())) {
-      reads_.emplace_back(current_, value);
+      reads_.push_back({current_, value, excluded_slot});
       read_reverse_[current_] = current_reverse_;
       const auto definition = definitions_.find(value.get());
       const size_t version = definition == definitions_.end() ? 0 : definition->second;
@@ -941,27 +1228,126 @@ class LoopInputIsolation : public IRVisitor {
       const auto loop =
           std::upper_bound(loop_stack_.begin(), loop_stack_.end(), version,
                            [](size_t position, const auto& entry) { return position < entry.first; });
-      if (loop != loop_stack_.end()) recurring_reads_.emplace_back(value, loop->second);
+      if (loop != loop_stack_.end()) recurring_reads_.push_back({value, loop->second, excluded_slot});
     }
   }
 
- private:
-  bool recurrence_only_ = false;
-  const Stmt* current_statement_ = nullptr;
-  std::map<const Stmt*, std::set<VarPtr>> payload_observations_;
-  std::map<const Var*, VarPtr> identity_roots_;
+  /// A whole carry result replaces precisely its original slice of the target.
+  /// Only that producing slot can ignore the target's preserved outside bytes;
+  /// this is not a declaration that the whole target has stopped being read.
+  /// A slot may reserve extra capacity: the proof concerns its typed value,
+  /// not a promise that every reserved byte was written. Independent reads of
+  /// padding, other slices or the whole old target retain their ordinary tag.
+  /// The complete typed value must also be valid: Vec insertion writes only
+  /// valid elements, whereas a redirected loop producer can write its full box.
+  [[nodiscard]] const Var* AssembleOverwrittenCarry(const CallPtr& call) const {
+    if (!call || !IsOp(call, "tile.assemble") || call->args_.size() != 3) return nullptr;
+    const auto target = AsVarLike(call->args_[0]);
+    const auto source = AsVarLike(call->args_[1]);
+    if (!target || !source) return nullptr;
+    const auto found = returned_slots_.find(ValueOrigin(source).get());
+    if (found == returned_slots_.end()) return nullptr;
+    const auto& slot = found->second;
+    const auto source_tile = GetTileTypeWithMemRef(source->GetType());
+    const auto target_tile = GetTileTypeWithMemRef(target->GetType());
+    const auto slot_tile = GetTileTypeWithMemRef(slot->GetType());
+    const auto source_window = StorageWindow(source);
+    if (!source_tile || !target_tile || !slot_tile || !SameStorageDescriptor(source_tile, slot_tile) ||
+        !SamePhysicalWindow(source_window, StorageWindow(slot))) {
+      return nullptr;
+    }
+    const auto full_valid = [](const std::shared_ptr<const TileType>& tile) {
+      const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+      if (view.valid_shape.size() != tile->shape_.size()) return false;
+      for (size_t i = 0; i < tile->shape_.size(); ++i) {
+        if (!structural_equal(view.valid_shape[i], tile->shape_[i])) return false;
+      }
+      return true;
+    };
+    if (!full_valid(source_tile) || !full_valid(slot_tile)) return nullptr;
+    const auto slice = views_->Get(source).slice;
+    if (!slice || slice->args_.size() < 3 || !structural_equal(call->args_[2], slice->args_[2])) {
+      return nullptr;
+    }
+    const auto parent = AsVarLike(slice->args_[0]);
+    const auto parent_tile = parent ? GetTileTypeWithMemRef(parent->GetType()) : nullptr;
+    const auto slice_tile = As<TileType>(slice->GetType());
+    // A narrowed type alone does not retain its root's row pitch. Coordinate
+    // equality needs the same value/view lineage, not just coincident bytes.
+    if (!parent_tile || !slice_tile || ValueOrigin(parent) != ValueOrigin(target) ||
+        !SameStorageDescriptor(parent_tile, target_tile) || !SameStorageDescriptor(slice_tile, source_tile) ||
+        !SamePhysicalWindow(StorageWindow(parent), StorageWindow(target))) {
+      return nullptr;
+    }
+    const auto inserted = MakeAliasingMemRef(StorageWindow(target), ComputeViewByteOffset(slice, parent_tile),
+                                             source_window->size_, call->span_);
+    return SamePhysicalWindow(inserted, source_window) ? slot.get() : nullptr;
+  }
 
-  [[nodiscard]] VarPtr IdentityRoot(const VarPtr& value) const {
-    auto root = identity_roots_.find(value.get());
-    return root == identity_roots_.end() ? value : root->second;
+  [[nodiscard]] MemRefPtr StorageWindow(const VarPtr& value) const {
+    const auto found = storage_windows_.find(value.get());
+    if (found != storage_windows_.end() && found->second) return found->second;
+    const auto tile = GetTileTypeWithMemRef(value->GetType());
+    return tile ? GetDefinedMemRef(tile) : nullptr;
+  }
+  [[nodiscard]] VarPtr ValueOrigin(const VarPtr& value) const {
+    const auto found = value_origins_.find(value.get());
+    return found == value_origins_.end() ? value : found->second;
+  }
+  template <typename Callback>
+  void ForEachStorageWindow(const ExprPtr& value, Callback&& callback) const {
+    const auto tile = GetTileTypeWithMemRef(value->GetType());
+    if (!tile) return;
+    const auto original = GetDefinedMemRef(tile);
+    callback(original);
+    if (const auto variable = AsVarLike(value)) {
+      const auto projected = StorageWindow(variable);
+      if (projected && !SamePhysicalWindow(original, projected)) callback(projected);
+    }
+  }
+  void RecordWrite(const VarPtr& value, size_t primary, size_t reverse) {
+    if (!effects_reachable_) return;
+    ForEachStorageWindow(value, [&](const MemRefPtr& window) {
+      write_events_.push_back({window, primary, reverse});
+      ++write_generations_[window->base_.get()];
+    });
+  }
+  void RecordWrite(const VarPtr& value) { RecordWrite(value, current_, current_reverse_); }
+  void RecordInputWrites(const OpPtr& op, const std::vector<ExprPtr>& arguments) {
+    if (!effects_reachable_) return;
+    ForEachWrittenArgument(op, arguments, [&](size_t index) {
+      const auto value = AsVarLike(arguments[index]);
+      if (!value) return;
+      if (GetTileTypeWithMemRef(value->GetType())) {
+        RecordWrite(value);
+      } else if (const auto window = GetTypeMemRef(value->GetType()); window && *window) {
+        // Known GM writes retain their window, including typed DDR aliases.
+        write_events_.push_back({*window, current_, current_reverse_});
+        ++write_generations_[(*window)->base_.get()];
+      } else if (As<PtrType>(value->GetType())) {
+        // An unbound written pointer may alias any carried allocation. Unknown
+        // GM/scalar values do not imply such an on-chip pointer write.
+        write_events_.push_back({nullptr, current_, current_reverse_});
+        ++opaque_write_generation_;
+      }
+    });
   }
 
   template <typename LoopPtr>
   void VisitLoop(const LoopPtr& loop) {
     loops_.push_back(loop);
+    const size_t opaque_generation = opaque_write_generation_;
+    std::vector<size_t> generations;
     for (const auto& argument : loop->iter_args_) {
       VisitExpr(argument->initValue_);
       definitions_[argument.get()] = current_;
+      const auto initial = AsVarLike(argument->initValue_);
+      if (initial) {
+        storage_windows_[argument.get()] = StorageWindow(initial);
+        value_origins_[argument.get()] = ValueOrigin(initial);
+      }
+      const auto window = initial ? StorageWindow(initial) : nullptr;
+      generations.push_back(window ? write_generations_[window->base_.get()] : 0);
     }
     // Initializers execute once at entry, outside this loop's recurrence.
     const bool repeats = LoopMayExecute(loop, true);
@@ -971,7 +1357,37 @@ class LoopInputIsolation : public IRVisitor {
       current_ = ++order_;
       VisitExpr(loop->condition_);
     }
+    const bool saved_reachable = effects_reachable_;
+    const bool may_enter = LoopMayExecute(loop, false);
+    effects_reachable_ = effects_reachable_ && may_enter;
     VisitStmt(loop->body_);
+    effects_reachable_ = saved_reachable;
+    const auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+    std::vector<bool> unchanged_values;
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      const auto source = yield && i < yield->value_.size() ? AsVarLike(yield->value_[i]) : nullptr;
+      const bool unchanged = !may_enter || (source && ValueOrigin(source) == ValueOrigin(argument));
+      unchanged_values.push_back(unchanged);
+      if (!unchanged && yield) {
+        RecordWrite(argument, positions_.at(yield.get()), reverse_order_.at(yield.get()) + 1);
+      }
+    }
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto initial = AsVarLike(loop->iter_args_[i]->initValue_);
+      if (initial && i < loop->return_vars_.size()) {
+        const auto& result = loop->return_vars_[i];
+        const auto window = StorageWindow(initial);
+        storage_windows_[result.get()] = window;
+        returned_slots_[result.get()] = loop->iter_args_[i];
+        // A changing nested loop still names its entry storage for effect
+        // queries, but its produced value is not a pass-through initializer.
+        if (unchanged_values[i] && window && opaque_generation == opaque_write_generation_ &&
+            generations[i] == write_generations_[window->base_.get()]) {
+          value_origins_[result.get()] = ValueOrigin(initial);
+        }
+      }
+    }
     if (repeats) loop_stack_.pop_back();
     loop_ends_[loop.get()] = order_;
     for (const auto& result : loop->return_vars_) definitions_[result.get()] = ++order_;
@@ -979,88 +1395,51 @@ class LoopInputIsolation : public IRVisitor {
 
   template <typename LoopPtr>
   void PlanLoop(const LoopPtr& loop) {
-    // A loop that cannot enter returns its initializer without modifying it.
-    // Even independently observed inputs need no private copy on that path.
     if (!LoopMayExecute(loop, false)) return;
-    auto body = loop->body_;
-    if (auto sequence = As<SeqStmts>(body); sequence && sequence->stmts_.size() == 1) {
-      body = sequence->stmts_[0];
-    }
-    if (auto yield = As<YieldStmt>(body); yield && yield->value_.size() == loop->iter_args_.size()) {
-      bool unchanged = true;
-      for (size_t i = 0; i < yield->value_.size(); ++i) {
-        const auto source = AsVarLike(yield->value_[i]);
-        const auto& argument = loop->iter_args_[i];
-        const auto initial = AsVarLike(argument->initValue_);
-        unchanged = unchanged && source &&
-                    (source == argument || (initial && IdentityRoot(source) == IdentityRoot(initial)));
-      }
-      // Forwarding a carry, its initializer, or an immutable alias of that
-      // initializer cannot overwrite input payloads,
-      // even when another handle observes that input after this loop. Such a
-      // binding needs no private buffer (and no unsupported Acc-to-Acc copy).
-      if (unchanged) return;
-    }
     const auto position = positions_.at(loop.get());
     std::set<size_t> isolate;
-    std::map<const Var*, std::vector<std::pair<int64_t, size_t>>> windows;
-    std::set<const Var*> unknown_bases;
+    std::vector<StorageAccessIndex::Event> carry_windows;
     for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      if (!GetTileTypeWithMemRef(loop->iter_args_[i]->GetType())) continue;
+      ForEachStorageWindow(loop->iter_args_[i]->initValue_,
+                           [&](const MemRefPtr& window) { carry_windows.push_back({window, i + 1, 1}); });
+    }
+    StorageAccessIndex other_carries;
+    other_carries.Build(carry_windows);
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      // A reference carry changes its handle on the backedge. It has no
+      // destination window to isolate or to copy into; actual native writes
+      // through that handle are checked by storage-reference validation.
+      if (!GetTileTypeWithMemRef(loop->iter_args_[i]->GetType())) continue;
       const auto& initial = loop->iter_args_[i]->initValue_;
       auto tile = GetTileTypeWithMemRef(initial->GetType());
       if (!tile) continue;
-      const auto memref = GetDefinedMemRef(tile);
-      const auto* base = memref->base_.get();
-      const auto reachable = reachable_indexes_.find(base);
-      const auto recurring = recurring_indexes_.find(base);
-      // Recurrence intervals use (loop begin, loop end) in the range-maximum
-      // index: some begin <= position must have end >= position. A read outside
-      // all such loops cannot observe this carry on a later iteration.
-      const bool nested_observation =
-          recurring != recurring_indexes_.end() && recurring->second.HasAfter(0, position, position - 1);
-      if (recurrence_only_) {
-        // Legacy fixup copies yields back into the carry. Preserve independently
-        // read seed payloads with a private carry when a legal entry copy exists;
-        // unsupported spaces retain the retarget guard and explicit copy error.
-        const auto memory = tile->GetMemorySpace();
-        if (nested_observation && memory && IsTileMoveEverSupported(*memory, *memory)) isolate.insert(i);
-        continue;
-      }
-      if (incoming_bases_.count(base) != 0 || nested_observation ||
-          (reachable != reachable_indexes_.end() &&
-           reachable->second.HasAfter(position + 1, order_, reverse_order_.at(loop.get())))) {
-        isolate.insert(i);
-      }
-      auto offset = As<ConstInt>(memref->byte_offset_);
-      windows[base].emplace_back(offset ? offset->value_ : 0, i);
-      if (!offset) unknown_bases.insert(base);
-    }
-    for (auto& [base, ranges] : windows) {
-      if (ranges.size() < 2) continue;
-      if (unknown_bases.count(base) != 0) {
-        for (const auto& [offset, index] : ranges) {
-          (void)offset;
-          isolate.insert(index);
+      // Before binding closure, a phi/view can still name a provisional
+      // allocation while denoting its source's storage. Reads, writes and
+      // queries must use the same two windows, including for nested loops.
+      ForEachStorageWindow(initial, [&](const MemRefPtr& window) {
+        // Loop slots are independent mutable bindings, even when the present
+        // body passes them through. A later consumer may update just one result.
+        if (other_carries.MayOverlapAfter(window, 0, 0, i) ||
+            other_carries.MayOverlapAfter(window, i + 1, 0)) {
+          isolate.insert(i);
         }
-        continue;
-      }
-      std::sort(ranges.begin(), ranges.end());
-      __int128 end = 0;
-      size_t owner = ranges.front().second;
-      bool first = true;
-      for (const auto& [offset, index] : ranges) {
-        auto tile = GetTileTypeWithMemRef(loop->iter_args_[index]->initValue_->GetType());
-        if (!first && offset < end) {
-          isolate.insert(owner);
-          isolate.insert(index);
+        // Old observers matter only when an iteration can change this window.
+        // Native writes and implicit changed-yield copies use the same index;
+        // read-only nested loops and metadata aliases require no entry copy.
+        if (!MayWriteInLoop(loop, window)) {
+          return;
         }
-        const auto next_end = static_cast<__int128>(offset) + GetDefinedMemRef(tile)->size_;
-        if (first || next_end > end) {
-          end = next_end;
-          owner = index;
+        // Recurrence intervals use (loop begin, loop end) in the range-maximum
+        // index: some begin <= position must have end >= position. A read outside
+        // all such loops cannot observe this carry on a later iteration.
+        const auto* slot = loop->iter_args_[i].get();
+        const bool nested_observation = recurring_index_.HasAfter(window, 0, position, position - 1, slot);
+        if (incoming_storage_.MayOverlapAfter(window, 0, 0) || nested_observation ||
+            reachable_index_.HasAfter(window, position + 1, order_, reverse_order_.at(loop.get()), slot)) {
+          isolate.insert(i);
         }
-        first = false;
-      }
+      });
     }
     for (const auto index : isolate) {
       const auto& argument = loop->iter_args_[index];
@@ -1068,6 +1447,16 @@ class LoopInputIsolation : public IRVisitor {
       CHECK_SPAN(source, loop->span_) << "Buffer IR loop initializers must be storage variables";
       const auto tile = GetTileTypeWithMemRef(source->GetType());
       const auto memory = tile->GetMemorySpace();
+      if (memory && !IsTileMoveEverSupported(*memory, *memory)) {
+        // Entry isolation need not copy a read-only initializer into a mutable
+        // destination. A carry can instead select its initializer at entry and
+        // independently produced storage on each backedge. Actual writes
+        // through this handle still require the shared old-version proof;
+        // turning the binding into a reference cannot authorize clobbering an
+        // independently observed initializer or previous carried version.
+        reference_carries.insert(argument);
+        continue;
+      }
       CHECK_SPAN(memory && IsTileMoveEverSupported(*memory, *memory), loop->span_)
           << "Buffer IR cannot preserve an independently live loop input without a same-space copy; "
              "produce an independent initial tile for this carry";
@@ -1091,105 +1480,286 @@ class LoopInputIsolation : public IRVisitor {
   size_t current_reverse_ = 0;
   std::map<const Stmt*, size_t> reverse_order_;
   std::map<size_t, size_t> read_reverse_;
-  std::map<const Var*, ReachableEventIndex> reachable_indexes_;
+  WindowedReachableEventIndex reachable_index_;
   std::vector<std::pair<size_t, const Stmt*>> loop_stack_;
   std::map<const Stmt*, size_t> loop_ends_;
-  std::vector<std::pair<VarPtr, const Stmt*>> recurring_reads_;
-  std::map<const Var*, ReachableEventIndex> recurring_indexes_;
+  struct RecurringRead {
+    VarPtr value;
+    const Stmt* loop;
+    const Var* excluded_slot;
+  };
+  std::vector<RecurringRead> recurring_reads_;
+  WindowedReachableEventIndex recurring_index_;
   StorageNameSupply names_;
   std::map<const Stmt*, size_t> positions_;
   std::map<const Var*, size_t> definitions_;
-  std::vector<std::pair<size_t, VarPtr>> reads_;
+  struct Read {
+    size_t position;
+    VarPtr value;
+    const Var* excluded_slot;
+  };
+  std::vector<Read> reads_;
   std::vector<StmtPtr> loops_;
-  std::set<const Var*> incoming_bases_;
+  StorageAccessIndex incoming_storage_;
+  std::set<const Var*> pinned_bases_;
+  // Effect proofs only: storage windows project pending bindings, while value
+  // tokens distinguish changed results from aliases. Neither relation rewrites
+  // SSA identity or determines an if result's eventual destination.
+  std::map<const Var*, MemRefPtr> storage_windows_;
+  std::map<const Var*, VarPtr> value_origins_;
+  std::map<const Var*, IterArgPtr> returned_slots_;
+  std::unique_ptr<BufferViewAnalysis> views_;
+  // A base-wide generation conservatively prevents forwarding a changed loop
+  // result as its initializer. Actual isolation uses byte/slot-sensitive events.
+  std::map<const Var*, size_t> write_generations_;
+  std::vector<StorageAccessIndex::Event> write_events_;
+  size_t opaque_write_generation_ = 0;
+  StorageAccessIndex writes_index_;
 };
 
 /// Plans top-down retypes. Produces (old Var -> new Type) map.
 class TopDownRetargeter {
  public:
-  /// Runs the analysis. Returns map: old VarPtr -> new Type (with target MemRef).
-  std::map<VarPtr, TypePtr> Compute(const StmtPtr& func_body) {
-    BuildAnalysis(func_body);
-    VisitForStmts(func_body);
-    return std::move(rewrites_);
-  }
-
-  /// Coalesce peeled loop-carried accumulator if-phis.
-  ///
-  /// DIRECTION OF TRAVEL (long horizon — do not act on this without a migration).
-  /// The shape this repairs is the *hand-peeled* split-K idiom:
-  ///
-  ///     if k == 0: acc = tile.matmul(a, b)          // fresh Acc buffer
-  ///     else:      acc = tile.matmul_acc(acc, a, b) // in-place, another buffer
-  ///
-  /// It gives one logical value two producers on two L0C buffers, which the
-  /// machine cannot represent — there is no Acc->Acc copy, so this repair exists
-  /// only to rewrite buffer identity after the fact.  The predicated spelling
-  /// says the same thing on one buffer and needs no repair:
-  ///
-  ///     acc = tile.matmul_acc(acc, a, b, init_cond=(k == 0))
-  ///
-  /// `AutoTileMatmulL0` already *generates* the predicated form (and head-peels
-  /// the bias K-loop, which has no `init_cond` operand), so no compiler-generated
-  /// IR reaches this function any more — every remaining caller is a peel in the
-  /// author's own source.  We keep repairing those: existing kernels written with
-  /// the peel must keep compiling, and pypto-lib alone has 95 such sites.
-  ///
-  /// Retiring this repair is therefore a *long-horizon* intent, not a near-term
-  /// plan. It would need the source-level migration to land first. Until then,
-  /// prefer `init_cond` in new code and leave existing peels alone.
-  ///
-  /// LowerPipelineLoops peels a stage=2 K-loop into an epilogue IfStmt whose live
-  /// branch is an in-place accumulator (matmul_acc, output aliasing input on the
-  /// accumulator buffer) and whose dead `if k==0` branch is a fresh matmul seed on a
-  /// *different* buffer.  Left alone, YieldFixupMutator reconciles the two by copying
-  /// the accumulator onto the seed's buffer via an Acc->Acc tile.move — both a second
-  /// co-live L0C buffer (overflow) and an op TMovOp::verify rejects on every target
-  /// (there is no legal Acc->Acc tmov pair).  We instead retarget the seed producer
-  /// onto the accumulator buffer so both branches share it and no move is emitted,
-  /// matching mad_acc's shared-%dst in-place semantics.
-  ///
-  /// The seed retype bypasses the *global* dead-at-assign check (the accumulator
-  /// buffer is legitimately live at the post-if phi consumer, which the global
-  /// check would treat as a conflict), but only after `TryCoalesceAccIfPhi`
-  /// verifies the two preconditions branch exclusivity actually needs: (a) the
-  /// seed producer is lexically inside the branch, and (b) a branch-scoped
-  /// liveness scan (`IsTargetDeadAtAssign(..., stop_at=if)`) finds no same-branch
-  /// tail read of the accumulator buffer. For both a direct `matmul_acc` and a
-  /// branch-local loop seeded outside the IfStmt, an alias-aware post-if scan
-  /// proves that no external handle to the reused input remains observable
-  /// independently of the phi. When any condition fails, that phi is left to
-  /// YieldFixup instead of being coalesced.
-  /// Returns the rewrite map (apply via RetypeApplier).  A needed-but-declined
-  /// retarget (after the preconditions hold) is a hard error — no legal Acc->Acc
-  /// move exists to fall back to.
-  std::map<VarPtr, TypePtr> CoalesceAccumulatorIfPhis(const StmtPtr& func_body) {
-    BuildAnalysis(func_body);
-    VisitIfPhisForAccumulator(func_body);
-    return std::move(rewrites_);
-  }
-
-  /// Give divergent branch results independent destinations before planning.
-  /// Direct, unaliased branch-local producers may write these fresh destinations;
-  /// the shared YieldFixup materializes the remaining arm transfers afterwards.
-  std::map<VarPtr, TypePtr> CanonicalizeBranchStorage(const StmtPtr& func_body,
-                                                      std::vector<StmtPtr>* allocations) {
+  /// Plan the complete function against one immutable SSA snapshot. Loop and
+  /// accumulator requirements are collected before optional if-result choices;
+  /// no IR is rewritten until the caller applies the returned map. All memory
+  /// planners consume the same settled result/edge contract.
+  std::map<VarPtr, TypePtr> PlanStorage(const FunctionPtr& function, const StmtPtr& func_body,
+                                        std::vector<StmtPtr>* allocations) {
     BuildAnalysis(func_body, /*index_branch_storage=*/true);
+    auto protection = CollectBranchStorageProtection(function, func_body);
+    immovable_branch_bases_ = std::move(protection.immovable_bases);
+    no_mutable_alias_branch_bases_ = std::move(protection.no_mutable_alias_bases);
+    // A reference may still read any incoming allocation after this selection.
+    // Keep its actual owners stable while planning other branch destinations;
+    // this is protection, not mandatory coalescing of the source allocations.
+    const auto references = AnalyzeStorageReferences(func_body, function->params_);
+    reference_source_bases_ = references.source_bases;
+    immovable_branch_bases_.insert(references.source_bases.begin(), references.source_bases.end());
+    std::vector<StorageAccessIndex::Event> readonly_caller_windows;
+    for (size_t i = 0; i < function->params_.size(); ++i) {
+      const auto& parameter = function->params_[i];
+      if (const auto memory = GetTypeMemRef(parameter->GetType());
+          function->param_directions_[i] == ParamDirection::In && memory && *memory) {
+        readonly_caller_windows.push_back({*memory, 1, 1});
+      }
+      // A Ptr ABI parameter can name a directly supplied result window. Its
+      // binding is caller-owned, just like the storage of a Tile parameter.
+      if (As<PtrType>(parameter->GetType())) {
+        pinned_branch_bases_.insert(parameter.get());
+      }
+      if (auto tile = GetTileTypeWithMemRef(parameter->GetType())) {
+        const auto* base = GetDefinedMemRef(tile)->base_.get();
+        pinned_branch_bases_.insert(base);
+      }
+    }
+    readonly_caller_storage_.Build(readonly_caller_windows);
     // InitMemRef clears MemRef::is_pinned_; the hoisted alloc then carries the
     // authoritative declaration contract. Preserve those output bindings.
     if (auto body = As<SeqStmts>(func_body)) {
       for (const auto& stmt : body->stmts_) {
-        if (auto base = GetPinnedAllocBase(stmt)) pinned_branch_bases_.insert(base.get());
+        if (auto base = GetPinnedAllocBase(stmt)) {
+          pinned_branch_bases_.insert(base.get());
+          fixed_branch_bases_.insert(base.get());
+        }
+        if (auto assign = As<AssignStmt>(stmt); assign && IsOp(As<Call>(assign->value_), "tile.alloc")) {
+          owned_branch_bases_.insert(assign->var_.get());
+        }
+      }
+    }
+    for (const auto& [node, info] : if_results_) {
+      (void)node;
+      for (const auto& slot : info.results) {
+        if (const auto memory = GetTypeMemRef(slot.result->GetType());
+            memory && *memory && (*memory)->is_pinned_) {
+          pinned_branch_bases_.insert((*memory)->base_.get());
+        }
+      }
+    }
+    VisitLoopConstraints(func_body);
+    VisitIfPhisForAccumulator(func_body);
+    RememberRequiredTargets();
+    VisitBranchStorage(func_body, nullptr, /*select_results=*/false);
+    IndexFutureWrites();
+    // Backward loop propagation is a candidate optimization, not permission
+    // to destroy a logical result. Validate against all pending writes before
+    // committing it. A bounded retry can only reuse the first candidate's
+    // producer destinations (or their original storage), never invent new ones.
+    for (const auto& [value, type] : rewrites_) {
+      const auto definition = defs_.find(value);
+      if (definition != defs_.end() && definition->second.kind == VarDef::kIfReturn &&
+          MayClobberResult(As<IfStmt>(definition->second.control_stmt), value,
+                           GetDefinedMemRef(GetTileTypeWithMemRef(type)))) {
+        blocked_branch_results_.insert(value.get());
+      }
+    }
+    if (!blocked_branch_results_.empty()) {
+      for (const auto& [value, type] : rewrites_) {
+        if (const auto tile = GetTileTypeWithMemRef(type)) {
+          replay_targets_[value.get()] = GetDefinedMemRef(tile);
+        }
+      }
+      RollbackRewrites(0);
+      BuildAnalysis(func_body, /*index_branch_storage=*/true);
+      replaying_ = true;
+      VisitLoopConstraints(func_body);
+      VisitIfPhisForAccumulator(func_body);
+      RememberRequiredTargets();
+      VisitBranchStorage(func_body, nullptr, /*select_results=*/false);
+      replaying_ = false;
+      IndexFutureWrites();
+      for (const auto& [value, type] : rewrites_) {
+        const auto definition = defs_.find(value);
+        if (definition != defs_.end() && definition->second.kind == VarDef::kIfReturn) {
+          CHECK_SPAN(!MayClobberResult(As<IfStmt>(definition->second.control_stmt), value,
+                                       GetDefinedMemRef(GetTileTypeWithMemRef(type))),
+                     value->span_)
+              << "Cannot preserve an if result across conflicting required storage writes";
+        }
       }
     }
     VisitBranchStorage(func_body, allocations);
+    for (auto& [var, type] : rewrites_) {
+      (void)var;
+      auto tile = GetTileTypeWithMemRef(type);
+      auto original = GetDefinedMemRef(tile);
+      auto destination = ResolveBranchTarget(original);
+      if (destination != original) type = CloneTypeWithMemRef(type, destination, tile->GetMemorySpace());
+    }
     return std::move(rewrites_);
   }
 
  private:
+  void RememberRequiredTargets() {
+    required_branch_targets_.clear();
+    for (const auto& [var, type] : rewrites_) {
+      const auto definition = defs_.find(var);
+      if (definition != defs_.end() && definition->second.kind == VarDef::kIfReturn) {
+        const auto window = GetDefinedMemRef(GetTileTypeWithMemRef(type));
+        const auto original = GetTypeMemRef(var->GetType()).value_or(nullptr);
+        const bool fixed =
+            original && (original->is_pinned_ || fixed_branch_bases_.count(original->base_.get()));
+        const auto owner = required_target_owners_.find(var.get());
+        required_branch_targets_.emplace(
+            var.get(),
+            RequiredBranchTarget{fixed || owner == required_target_owners_.end() ? nullptr : owner->second,
+                                 window});
+      }
+    }
+  }
+
+  void IndexFutureWrites() {
+    std::vector<StorageAccessIndex::Event> future_writes;
+    for (const auto& [statement, values] : data_writes_) {
+      for (const auto& value : values) {
+        const bool tile = As<TileType>(value->GetType()) != nullptr;
+        auto memory = tile ? CurrentMemRef(value) : GetTypeMemRef(value->GetType()).value_or(nullptr);
+        // Keep known GM writes: typed DDR tiles can share their allocation.
+        // Unknown GM/scalar storage is not an opaque on-chip write, whereas
+        // an untyped pointer effect can still reach a tile allocation.
+        if (!tile && !memory && !As<PtrType>(value->GetType())) continue;
+        // An unplaced fresh result cannot clobber an existing allocation.
+        // Opaque externally supplied written operands remain conservative.
+        const auto definition = defs_.find(value);
+        if (!memory && definition != defs_.end() && definition->second.kind == VarDef::kAssign) continue;
+        future_writes.push_back({memory, stmt_order_.at(statement), reverse_stmt_order_.at(statement)});
+      }
+    }
+    for (const auto& [node, info] : if_results_) {
+      (void)node;
+      for (const auto& slot : info.results) {
+        const auto tile = CurrentTileType(slot.result);
+        if (!tile) continue;
+        const auto original = GetTypeMemRef(slot.result->GetType()).value_or(GetDefinedMemRef(tile));
+        const auto required = required_branch_targets_.find(slot.result.get());
+        if (required == required_branch_targets_.end() && !original->is_pinned_ &&
+            !fixed_branch_bases_.count(original->base_.get())) {
+          continue;
+        }
+        const auto destination =
+            required == required_branch_targets_.end() ? original : ResolveRequiredTarget(required->second);
+        for (size_t arm = 0; arm < slot.incoming.size(); ++arm) {
+          const auto source = slot.incoming[arm];
+          if (info.exits[arm] && (!source || !SamePhysicalWindow(CurrentMemRef(source), destination))) {
+            future_writes.push_back({destination, stmt_order_.at(info.exits[arm].get()),
+                                     reverse_stmt_order_.at(info.exits[arm].get())});
+            if (source) {
+              const auto producer = defs_.find(ResolveAliasRoot(source));
+              if (producer != defs_.end() && IsInside(producer->second.definition_stmt, info.bodies[arm])) {
+                const auto* statement = producer->second.definition_stmt.get();
+                future_writes.push_back(
+                    {destination, stmt_order_.at(statement), reverse_stmt_order_.at(statement)});
+              }
+            }
+          }
+        }
+      }
+    }
+    for (const auto& [value, definition] : defs_) {
+      if (definition.kind != VarDef::kIterArg) continue;
+      const auto loop_for = As<ForStmt>(definition.control_stmt);
+      const auto loop_while = As<WhileStmt>(definition.control_stmt);
+      const auto body = loop_for ? loop_for->body_ : loop_while ? loop_while->body_ : nullptr;
+      const auto yield = body ? transform_utils::GetLastYieldStmt(body) : nullptr;
+      if (!yield || definition.return_idx >= yield->value_.size()) continue;
+      const auto source = AsVarLike(yield->value_[definition.return_idx]);
+      const auto target = CurrentMemRef(value);
+      if (target && (!source || !SamePhysicalWindow(CurrentMemRef(source), target))) {
+        future_writes.push_back({target, stmt_order_.at(yield.get()), reverse_stmt_order_.at(yield.get())});
+      }
+    }
+    future_writes_.Build(future_writes);
+    for (auto& event : future_writes) std::swap(event.primary, event.reverse);
+    reverse_future_writes_.Build(future_writes);
+    std::vector<StorageAccessIndex::Event> accesses;
+    for (const auto& [statement, values] : accesses_) {
+      for (const auto& value : values) {
+        if (const auto memory = CurrentMemRef(value)) {
+          accesses.push_back({memory, stmt_order_.at(statement), reverse_stmt_order_.at(statement)});
+        }
+      }
+    }
+    future_accesses_.Build(accesses);
+    access_index_ready_ = true;
+  }
+
+  [[nodiscard]] bool CanReplayTarget(const VarPtr& value, const MemRefPtr& target) const {
+    if (!replaying_ || SamePhysicalWindow(GetTypeMemRef(value->GetType()).value_or(nullptr), target)) {
+      return true;
+    }
+    const auto accepted = replay_targets_.find(value.get());
+    return accepted != replay_targets_.end() && SamePhysicalWindow(accepted->second, target);
+  }
+
   struct RewriteJournalEntry {
     VarPtr var;
     std::optional<TypePtr> previous;
+    std::optional<VarPtr> previous_required_owner;
+    const Var* added_mutable_base = nullptr;
+  };
+
+  // A loop requirement follows its IterArg; an accumulator requirement follows
+  // its native reused-input value. The owner names the complete actual window,
+  // including a view's relative byte origin and declared slot. Explicit result
+  // bindings use only the captured window and never follow another owner.
+  struct RequiredBranchTarget {
+    VarPtr owner;
+    MemRefPtr captured_window;
+  };
+
+  class RequiredTargetScope {
+   public:
+    RequiredTargetScope(TopDownRetargeter& planner, VarPtr owner)
+        : planner_(planner), previous_(std::move(planner.required_target_owner_)) {
+      planner_.required_target_owner_ = std::move(owner);
+    }
+    ~RequiredTargetScope() { planner_.required_target_owner_ = std::move(previous_); }
+    RequiredTargetScope(const RequiredTargetScope&) = delete;
+    RequiredTargetScope& operator=(const RequiredTargetScope&) = delete;
+
+   private:
+    TopDownRetargeter& planner_;
+    VarPtr previous_;
   };
 
   class RewriteTransaction {
@@ -1210,7 +1780,49 @@ class TopDownRetargeter {
     bool committed_ = false;
   };
 
+  struct IncomingValues {
+    std::array<const Var*, 2> values;
+    TypePtr descriptor;  // Result requirements, without its provisional address.
+  };
+  struct IncomingHash {
+    size_t operator()(const IncomingValues& key) const {
+      size_t hash = structural_hash(key.descriptor);
+      for (const auto* value : key.values) {
+        hash ^= std::hash<const Var*>{}(value) + (hash << 6) + (hash >> 2);
+      }
+      return hash;
+    }
+  };
+  struct IncomingEqual {
+    bool operator()(const IncomingValues& lhs, const IncomingValues& rhs) const {
+      return lhs.values == rhs.values && structural_equal(lhs.descriptor, rhs.descriptor);
+    }
+  };
+
   std::map<VarPtr, VarDef> defs_;
+  std::map<const IfStmt*, IfInfo> if_results_;
+  std::map<const Var*, RequiredBranchTarget> required_branch_targets_;
+  std::map<const Var*, VarPtr> required_target_owners_;
+  VarPtr required_target_owner_;
+  std::map<const Var*, MemRefPtr> replay_targets_;
+  std::set<const Var*> blocked_branch_results_;
+  bool replaying_ = false;
+  StorageAccessIndex future_writes_;
+  StorageAccessIndex reverse_future_writes_;
+  StorageAccessIndex future_accesses_;
+  bool access_index_ready_ = false;
+  std::map<const Stmt*, std::set<VarPtr>> accesses_;
+  std::map<const Stmt*, std::set<VarPtr>> data_writes_;
+  std::map<VarPtr, VarPtr> identity_roots_;
+  std::map<VarPtr, VarPtr> value_origins_;
+  std::map<const Var*, size_t> result_last_use_;
+  std::map<const Var*, size_t> result_reverse_last_use_;
+  std::set<const Var*> last_use_is_writeback_;
+  std::set<const Var*> reverse_last_use_is_writeback_;
+  std::set<const Var*> mutable_branch_bases_;
+  // Logical result mutability is separate from a physical allocation's flags:
+  // moving another value onto its bytes must not change this SSA obligation.
+  std::set<const Var*> mutable_branch_results_;
   std::map<const Stmt*, size_t> stmt_order_;
   std::map<const Stmt*, size_t> stmt_end_order_;
   std::map<const Stmt*, size_t> reverse_stmt_order_;
@@ -1224,51 +1836,174 @@ class TopDownRetargeter {
   std::set<VarPtr> non_accumulator_producers_;
   std::map<const MemRef*, size_t> memref_component_;
   std::map<size_t, ReachableEventIndex> physical_access_index_;
+  StorageAccessIndex physical_read_index_;
+  StorageAccessIndex reverse_physical_read_index_;
   std::map<const Var*, VersionedReachableEventIndex> alias_read_index_;
-  std::map<const Var*, ReachableEventIndex> recurring_alias_read_index_;
-  std::map<size_t, ReachableEventIndex> recurring_physical_read_index_;
+  WindowedReachableEventIndex recurring_access_index_;
   std::map<VarPtr, TypePtr> rewrites_;
   std::vector<RewriteJournalEntry> rewrite_journal_;
   std::set<VarPtr> visiting_;  // cycle guard
-  std::map<const Var*, size_t> storage_handle_counts_;
+  std::map<const Var*, std::vector<VarPtr>> storage_handles_;
+  std::map<const Var*, std::set<VarPtr>> phi_storage_handles_;
+  std::map<const Var*, const Var*> phi_handle_bases_;
+  std::map<const Var*, const Var*> result_request_owners_;
+  std::set<const Var*> ambiguous_result_requests_;
+  std::map<const Var*, std::pair<IfStmtPtr, MemRefPtr>> canonical_branch_destinations_;
+  std::map<const Var*, MemRefPtr> branch_target_redirects_;
+  std::set<const Var*> nonuniform_storage_bases_;
   std::map<const Var*, const Var*> branch_storage_handle_bases_;
+  std::map<const Var*, std::pair<size_t, size_t>> storage_definition_bounds_;
+  std::set<const Var*> changed_storage_bases_;
+  std::set<const Var*> changed_observer_bases_;
+  // Relocated definitions supplement the immutable physical indexes with a
+  // conservative read envelope in both orders. Unmoved handles use the index.
+  StorageObserverIndex planned_storage_observers_;
   std::set<const Var*> pinned_branch_bases_;
+  StorageAccessIndex readonly_caller_storage_;
+  std::set<const Var*> fixed_branch_bases_;
+  std::set<const Var*> owned_branch_bases_;
+  std::set<const Var*> immovable_branch_bases_;
+  std::set<const Var*> no_mutable_alias_branch_bases_;
+  std::set<const Var*> reference_source_bases_;
+  std::vector<size_t> branch_loop_headers_;
+  std::unique_ptr<BufferViewAnalysis> input_views_;
   uint64_t branch_storage_counter_ = 0;
 
   void BuildAnalysis(const StmtPtr& func_body, bool index_branch_storage = false) {
-    storage_handle_counts_.clear();
+    required_branch_targets_.clear();
+    required_target_owners_.clear();
+    required_target_owner_.reset();
+    access_index_ready_ = false;
+    identity_roots_.clear();
+    value_origins_.clear();
+    result_last_use_.clear();
+    result_reverse_last_use_.clear();
+    last_use_is_writeback_.clear();
+    reverse_last_use_is_writeback_.clear();
+    mutable_branch_bases_.clear();
+    mutable_branch_results_.clear();
+    storage_handles_.clear();
+    phi_storage_handles_.clear();
+    phi_handle_bases_.clear();
+    result_request_owners_.clear();
+    ambiguous_result_requests_.clear();
+    canonical_branch_destinations_.clear();
+    branch_target_redirects_.clear();
+    nonuniform_storage_bases_.clear();
     branch_storage_handle_bases_.clear();
+    storage_definition_bounds_.clear();
+    changed_storage_bases_.clear();
+    changed_observer_bases_.clear();
+    planned_storage_observers_.Clear();
+    branch_loop_headers_.clear();
     DefMapVisitor def_v;
     def_v.Run(func_body);
     defs_ = std::move(def_v.defs);
+    if_results_ = std::move(def_v.if_results);
     stmt_order_ = std::move(def_v.stmt_order);
     stmt_end_order_ = std::move(def_v.stmt_end_order);
     analysis_root_ = def_v.root;
+    input_views_ = std::make_unique<BufferViewAnalysis>(func_body);
 
     ReverseBranchOrderVisitor reverse_v;
     reverse_v.Run(func_body);
     reverse_stmt_order_ = std::move(reverse_v.stmt_order);
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
-    BuildAccessIndexes(def_v.reads, def_v.writes);
-    BuildRecurringReadIndexes(def_v.condition_reads, def_v.observation_reads, def_v.binding_reads,
-                              def_v.loops);
+    LoopInputIsolation loop_effects;
+    loop_effects.AnalyzeEffects(func_body);
+    const auto written_initializers = loop_effects.WrittenLoopInitializers();
+    def_v.mutable_inputs.insert(written_initializers.begin(), written_initializers.end());
+    for (const auto& value : def_v.mutable_inputs) {
+      // A later write also makes a pass-through loop's initializer mutable.
+      // Follow mandatory storage aliases here, not logical value versions:
+      // LoopReturn/IterArg versions remain distinct for all old-value reads.
+      // An actual isolation copy owns separate storage and stops this walk.
+      const auto root = ResolveAliasRoot(value);
+      const auto definition = defs_.find(root);
+      if (definition != defs_.end() && definition->second.kind == VarDef::kIfReturn) {
+        if (auto tile = GetTileTypeWithMemRef(root->GetType())) {
+          mutable_branch_bases_.insert(GetDefinedMemRef(tile)->base_.get());
+          mutable_branch_results_.insert(root.get());
+        }
+      }
+    }
+    for (const auto& [value, last] : def_v.value_last_use) {
+      const auto root = ValueOrigin(value);
+      result_last_use_[root.get()] = std::max(result_last_use_[root.get()], last);
+    }
+    for (const auto& [statement, values] : def_v.reads) {
+      const auto point = reverse_stmt_order_.at(statement);
+      for (const auto& value : values) {
+        const auto root = ValueOrigin(value);
+        result_reverse_last_use_[root.get()] = std::max(result_reverse_last_use_[root.get()], point);
+      }
+    }
+    for (const auto& [value, loops] : def_v.recurring_reads) {
+      const auto root = ValueOrigin(value);
+      for (const auto* loop : loops) {
+        result_reverse_last_use_[root.get()] =
+            std::max(result_reverse_last_use_[root.get()], reverse_stmt_end_order_.at(loop));
+      }
+    }
+    for (const auto& use : def_v.writeback_uses) {
+      const auto root = ValueOrigin(use.target);
+      const bool other_read = std::any_of(use.other_inputs.begin(), use.other_inputs.end(),
+                                          [&](const VarPtr& input) { return ValueOrigin(input) == root; });
+      if (other_read) continue;
+      if (result_last_use_[root.get()] == stmt_order_.at(use.statement)) {
+        last_use_is_writeback_.insert(root.get());
+      }
+      if (result_reverse_last_use_[root.get()] == reverse_stmt_order_.at(use.statement)) {
+        reverse_last_use_is_writeback_.insert(root.get());
+      }
+    }
+    data_writes_ = std::move(def_v.data_writes);
+    accesses_ = def_v.reads;
+    for (const auto& [statement, values] : def_v.writes) {
+      accesses_[statement].insert(values.begin(), values.end());
+    }
+    BuildAccessIndexes(def_v.reads, def_v.writes, def_v.recurring_reads);
     if (!index_branch_storage) return;
 
-    // Count distinct storage handles once, including incoming handles with no
-    // local definition. If-phi handles are consumers of branch storage rather
-    // than independently observable aliases. Other aliases conservatively block
-    // producer retargeting. This fixed walk avoids per-phi subtree/use scans.
+    // Index each allocation's handles and definition bounds once. If results
+    // consume branch storage; every independently observable alias must remain
+    // in the index. Whole-window local families can then be retargeted together
+    // without per-result subtree scans.
     std::set<VarPtr> counted;
     auto count_storage = [&](const VarPtr& var) {
       if (!counted.insert(var).second) return;
       auto def = defs_.find(var);
-      if (def != defs_.end() && def->second.kind == VarDef::kIfReturn) return;
       auto tile = GetTileTypeWithMemRef(var->GetType());
       if (tile) {
         const auto* base = GetDefinedMemRef(tile)->base_.get();
-        ++storage_handle_counts_[base];
+        // Uses through a logical if result observe that result, not its
+        // provisional input allocation. Keep these handles for propagation,
+        // while excluding them from proof of independent source ownership.
+        auto root = defs_.find(ResolveAliasRoot(var));
+        if (root != defs_.end() && root->second.kind == VarDef::kIfReturn) {
+          phi_storage_handles_[base].insert(var);
+          phi_handle_bases_[var.get()] = base;
+          const auto [owner, inserted] = result_request_owners_.emplace(base, root->first.get());
+          if (!inserted && owner->second != root->first.get()) ambiguous_result_requests_.insert(base);
+          return;
+        }
+        auto& handles = storage_handles_[base];
+        if (!handles.empty() &&
+            !SamePhysicalWindow(GetTypeMemRef(handles.front()->GetType()).value(), GetDefinedMemRef(tile))) {
+          nonuniform_storage_bases_.insert(base);
+        }
+        handles.push_back(var);
         branch_storage_handle_bases_[var.get()] = base;
+        auto [bounds, inserted] =
+            storage_definition_bounds_.try_emplace(base, std::numeric_limits<size_t>::max(), size_t{0});
+        (void)inserted;
+        if (def == defs_.end() || !def->second.definition_stmt) {
+          bounds->second = {0, std::numeric_limits<size_t>::max()};
+        } else {
+          bounds->second.first = std::min(bounds->second.first, def->second.order);
+          bounds->second.second = std::max(bounds->second.second, def->second.order);
+        }
       }
     };
     for (const auto& [var, def] : defs_) {
@@ -1281,32 +2016,166 @@ class TopDownRetargeter {
     }
   }
 
-  void RetargetBranchProducer(const VarPtr& var, const StmtPtr& branch, const MemRefPtr& target,
-                              std::optional<MemorySpace> memory) {
-    auto def = defs_.find(var);
-    if (def == defs_.end() || def->second.kind != VarDef::kAssign ||
-        !IsInside(def->second.definition_stmt, branch) || rewrites_.count(var) != 0) {
-      return;
+  bool RetargetBranchProducer(const VarPtr& var, const StmtPtr& branch, const MemRefPtr& target,
+                              std::optional<MemorySpace> memory, const Stmt* live_target_boundary = nullptr) {
+    auto source_tile = CurrentTileType(var);
+    auto window = source_tile ? GetDefinedMemRef(source_tile) : nullptr;
+    if (window && source_tile->GetMemorySpace() == memory && SamePhysicalWindow(window, target)) return true;
+    // Protect both ends before the canonical-result shortcut as well as the
+    // ordinary producer path. Redirecting an inner result moves its entire
+    // alias family, including hidden workspace writes and pipeline storage.
+    if (immovable_branch_bases_.count(target->base_.get()) ||
+        (window && immovable_branch_bases_.count(window->base_.get()))) {
+      return false;
     }
-    auto tile = GetTileTypeWithMemRef(var->GetType());
-    if (!tile || pinned_branch_bases_.count(GetDefinedMemRef(tile)->base_.get()) != 0 ||
-        storage_handle_counts_[GetDefinedMemRef(tile)->base_.get()] != 1) {
-      return;
+    if (window && source_tile->GetMemorySpace() == memory) {
+      auto owner = canonical_branch_destinations_.find(window->base_.get());
+      if (owner != canonical_branch_destinations_.end() && IsInside(owner->second.first, branch) &&
+          SamePhysicalWindow(window, owner->second.second) && window->size_ == target->size_ &&
+          (!live_target_boundary ||
+           !future_accesses_.MayOverlapAfter(target, stmt_order_.at(owner->second.first.get()),
+                                             reverse_stmt_order_.at(owner->second.first.get()),
+                                             stmt_end_order_.at(live_target_boundary)))) {
+        // An inner result already owns an independent destination. Push the
+        // outer result's requirement through that destination in one step; a
+        // final indexed rewrite updates its producers without rescanning them.
+        branch_target_redirects_[window->base_.get()] = target;
+        if (mutable_branch_bases_.count(window->base_.get())) {
+          mutable_branch_bases_.insert(target->base_.get());
+        }
+        return true;
+      }
     }
-    auto assign = As<AssignStmt>(def->second.assign_stmt);
-    auto call = assign ? As<Call>(assign->value_) : nullptr;
-    const auto& registry = OpRegistry::GetInstance();
-    if (!call || !call->op_ || !registry.IsRegistered(call->op_->name_)) return;
-    const auto& entry = registry.GetEntry(call->op_->name_);
-    // Reusing an input, including a metadata view, is an existing storage
-    // contract. Do not walk that producer chain onto a fresh phi allocation.
-    if (entry.OutputMemoryInheritsInput() ||
-        op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()).has_value()) {
-      return;
+    auto root = ResolveAliasRoot(var);
+    auto def = defs_.find(root);
+    auto tile = CurrentTileType(root);
+    if (def == defs_.end() || def->second.kind != VarDef::kAssign || !tile ||
+        !SamePhysicalWindow(CurrentMemRef(var), GetDefinedMemRef(tile))) {
+      return false;
     }
-    // The target is freshly allocated and the producer is branch-local, so it
-    // has no pre-existing live contents. Retain every operation-legality check.
-    RetargetAssign(var, def->second, target, memory, /*check_liveness=*/false);
+    const auto* base = GetDefinedMemRef(tile)->base_.get();
+    auto bounds = storage_definition_bounds_.find(base);
+    if (pinned_branch_bases_.count(base) || immovable_branch_bases_.count(base) ||
+        changed_storage_bases_.count(base) || nonuniform_storage_bases_.count(base) ||
+        bounds == storage_definition_bounds_.end() || bounds->second.first < stmt_order_.at(branch.get()) ||
+        bounds->second.second > stmt_end_order_.at(branch.get())) {
+      return false;
+    }
+    if (live_target_boundary && (immovable_branch_bases_.count(base) ||
+                                 !IsTargetDeadAfterDefinition(def->second, target, live_target_boundary))) {
+      return false;
+    }
+    // All handles belong to this arm and denote the complete same window. Move
+    // the producer and its required aliases together; no external observer can
+    // retain the old allocation. A borrowed target additionally passed the
+    // branch-scoped old-value check above.
+    RewriteTransaction transaction(*this);
+    if (!RetargetAssign(root, def->second, target, memory, /*check_liveness=*/false)) return false;
+    std::vector<VarPtr> phi_handles;
+    if (auto phis = phi_storage_handles_.find(base); phis != phi_storage_handles_.end()) {
+      for (const auto& handle : phis->second) {
+        if (SamePhysicalWindow(CurrentMemRef(handle), GetDefinedMemRef(tile)) &&
+            SamePhysicalWindow(CurrentMemRef(ResolveAliasRoot(handle)), GetDefinedMemRef(tile))) {
+          phi_handles.push_back(handle);
+        }
+      }
+    }
+    for (const auto& handle : storage_handles_.at(base)) {
+      if (handle != root) PlanRewrite(handle, target, memory);
+    }
+    // Existing inner results still on this window follow the family. A result
+    // already assigned its own destination is an independent value and stays put.
+    for (const auto& handle : phi_handles) PlanRewrite(handle, target, memory);
+    transaction.Commit();
+    return true;
+  }
+
+  /// Original and already relocated old values must not observe an overwrite.
+  [[nodiscard]] bool HasIndependentOldStorageObserver(const IfStmtPtr& branch,
+                                                      const MemRefPtr& target) const {
+    const auto end = stmt_end_order_.at(branch.get());
+    const auto reverse_end = reverse_stmt_end_order_.at(branch.get());
+    if (planned_storage_observers_.MayObserveAfter(target, end, reverse_end)) return true;
+    // Reversing definition coordinates makes a strict suffix contain exactly
+    // handles older than this If. Each read keeps its actual byte/slot window;
+    // an unused whole-allocation handle cannot bridge independent observations.
+    const auto before_definition =
+        stmt_end_order_.at(analysis_root_.get()) + 1 - stmt_order_.at(branch.get());
+    return physical_read_index_.MayOverlapAfter(target, before_definition, end) &&
+           reverse_physical_read_index_.MayOverlapAfter(target, before_definition, reverse_end);
+  }
+
+  void RecordPlannedStorageObserver(const VarPtr& value) {
+    const auto memory = CurrentMemRef(value);
+    const auto original = GetTypeMemRef(value->GetType()).value_or(nullptr);
+    const auto root = ValueOrigin(value).get();
+    const auto last = result_last_use_.find(root);
+    const auto reverse_last = result_reverse_last_use_.find(root);
+    if (memory && !SamePhysicalWindow(memory, original) && last != result_last_use_.end()) {
+      planned_storage_observers_.Observe(memory, last->second,
+                                         reverse_last == result_reverse_last_use_.end()
+                                             ? reverse_stmt_end_order_.at(analysis_root_.get())
+                                             : reverse_last->second);
+    }
+  }
+
+  /// Prefer an incoming live-in window when no older value can observe its
+  /// overwrite. The other arm can produce directly into it or use a legal
+  /// boundary copy. Failed proofs retain the independent result request.
+  bool TryBorrowBranchStorage(const IfInfo& info, const IfResultInfo& slot, size_t arm,
+                              const TileTypePtr& result_tile, const std::set<const Var*>& reserved,
+                              const StorageAccessIndex& peer_writes, MemRefPtr* destination) {
+    const auto& branch = info.owner;
+    const auto& incoming = slot.incoming[arm];
+    const auto& other = slot.incoming[1 - arm];
+    const auto& other_body = info.bodies[1 - arm];
+    auto incoming_tile = CurrentTileType(incoming);
+    auto other_tile = CurrentTileType(other);
+    auto root = ResolveAliasRoot(incoming);
+    auto definition = defs_.find(root);
+    auto root_tile = CurrentTileType(root);
+    if (!incoming_tile || !other_tile || !root_tile || definition == defs_.end() ||
+        definition->second.order >= stmt_order_.at(branch.get())) {
+      return false;
+    }
+    const auto target_memory = incoming_tile->GetMemorySpace();
+    const auto source_memory = other_tile->GetMemorySpace();
+    if (!target_memory) return false;
+    const auto original = GetTypeMemRef(slot.result->GetType()).value_or(GetDefinedMemRef(result_tile));
+    if (no_mutable_alias_branch_bases_.count(original->base_.get())) return false;
+    const auto target = GetDefinedMemRef(incoming_tile);
+    const auto* base = target->base_.get();
+    const auto handles = storage_handles_.find(base);
+    if (handles == storage_handles_.end() || handles->second.empty()) return false;
+    const auto owner_tile = CurrentTileType(ResolveAliasRoot(handles->second.front()));
+    if (!owner_tile || !SamePhysicalWindow(target, GetDefinedMemRef(owner_tile)) ||
+        !SameStorageDescriptor(incoming_tile, owner_tile) || input_views_->IsWindow(incoming)) {
+      return false;
+    }
+    // An allocation produced before an enclosing loop can be observed again
+    // on its next iteration, including through a phi created inside the loop.
+    const auto bounds = storage_definition_bounds_.find(base);
+    if (!branch_loop_headers_.empty() &&
+        (bounds == storage_definition_bounds_.end() || bounds->second.first <= branch_loop_headers_.back())) {
+      return false;
+    }
+    if (!SameKnownTileMemorySpace(incoming_tile, result_tile) ||
+        !SamePhysicalWindow(target, GetDefinedMemRef(root_tile)) ||
+        target->size_ < std::max(GetDefinedMemRef(result_tile)->size_, GetDefinedMemRef(other_tile)->size_) ||
+        reserved.count(base) || pinned_branch_bases_.count(base) || changed_storage_bases_.count(base) ||
+        changed_observer_bases_.count(base) || nonuniform_storage_bases_.count(base) ||
+        immovable_branch_bases_.count(base) || mutable_branch_bases_.count(base) ||
+        MayClobberResult(branch, slot.result, target) || peer_writes.MayOverlapAfter(target, 0, 0) ||
+        !SameStorageDescriptor(other_tile, result_tile)) {
+      return false;
+    }
+    if (HasIndependentOldStorageObserver(branch, target)) return false;
+    if (!RetargetBranchProducer(other, other_body, target, target_memory, branch.get()) &&
+        (!source_memory || !IsTileMoveEverSupported(*source_memory, *target_memory))) {
+      return false;
+    }
+    *destination = target;
+    return true;
   }
 
   /// Keep required aliases current between successive phi decisions. Waiting
@@ -1327,90 +2196,354 @@ class TopDownRetargeter {
   }
 
   template <typename LoopPtr>
-  void VisitBranchStorageLoop(const LoopPtr& loop, std::vector<StmtPtr>* allocations) {
+  void VisitBranchStorageLoop(const LoopPtr& loop, std::vector<StmtPtr>* allocations, bool select_results) {
     for (const auto& argument : loop->iter_args_) {
       FollowBranchStorageAlias(argument, AsVarLike(argument->initValue_));
+      // An IterArg is a distinct value version. Its initializer's last read
+      // ends at the header and cannot stand in for reads inside the body.
+      if (select_results) RecordPlannedStorageObserver(argument);
     }
-    VisitBranchStorage(loop->body_, allocations);
+    if (LoopMayExecute(loop, false)) {
+      branch_loop_headers_.push_back(stmt_order_.at(loop.get()));
+      VisitBranchStorage(loop->body_, allocations, select_results);
+      branch_loop_headers_.pop_back();
+    }
     for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
       // A zero-trip loop returns its initializer, not its body's yield storage.
       FollowBranchStorageAlias(loop->return_vars_[i], loop->iter_args_[i]);
+      if (select_results) RecordPlannedStorageObserver(loop->return_vars_[i]);
     }
   }
 
-  void VisitBranchStorage(const StmtPtr& stmt, std::vector<StmtPtr>* allocations) {
+  void VisitBranchStorage(const StmtPtr& stmt, std::vector<StmtPtr>* allocations,
+                          bool select_results = true) {
     if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& child : seq->stmts_) VisitBranchStorage(child, allocations);
+      for (const auto& child : seq->stmts_) VisitBranchStorage(child, allocations, select_results);
     } else if (auto assign = As<AssignStmt>(stmt)) {
       auto source = alias_source_.find(assign->var_);
       if (source != alias_source_.end()) {
         FollowBranchStorageAlias(assign->var_, source->second, As<Call>(assign->value_));
       }
+      if (select_results) RecordPlannedStorageObserver(assign->var_);
     } else if (auto loop = As<ForStmt>(stmt)) {
-      VisitBranchStorageLoop(loop, allocations);
+      VisitBranchStorageLoop(loop, allocations, select_results);
     } else if (auto loop = As<WhileStmt>(stmt)) {
-      VisitBranchStorageLoop(loop, allocations);
+      VisitBranchStorageLoop(loop, allocations, select_results);
     } else if (auto scope = As<ScopeStmt>(stmt)) {
-      VisitBranchStorage(scope->body_, allocations);
+      VisitBranchStorage(scope->body_, allocations, select_results);
     } else if (auto branch = As<IfStmt>(stmt)) {
-      VisitBranchStorage(branch->then_body_, allocations);
+      VisitBranchStorage(branch->then_body_, allocations, select_results);
       const auto else_body = branch->else_body_;
-      if (else_body) VisitBranchStorage(*else_body, allocations);
-      auto then_yield = transform_utils::GetLastYieldStmt(branch->then_body_);
-      auto else_yield = else_body ? transform_utils::GetLastYieldStmt(*else_body) : nullptr;
-      for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
-        auto result = branch->return_vars_[i];
-        auto result_tile = CurrentTileType(result);
-        if (!result_tile) continue;
-        CHECK_SPAN(else_body.has_value() && then_yield && else_yield && i < then_yield->value_.size() &&
-                       i < else_yield->value_.size(),
-                   branch->span_)
-            << "Buffer IR storage legalization requires both arms to yield every tile result";
-        auto then_var = AsVarLike(then_yield->value_[i]);
-        auto else_var = AsVarLike(else_yield->value_[i]);
-        auto then_tile = then_var ? CurrentTileType(then_var) : nullptr;
-        auto else_tile = else_var ? CurrentTileType(else_var) : nullptr;
-        CHECK_SPAN(then_tile && else_tile, branch->span_)
-            << "Buffer IR storage legalization requires tile branch yields to be storage variables";
-        auto then_memref = GetDefinedMemRef(then_tile);
-        auto else_memref = GetDefinedMemRef(else_tile);
-        if (SamePhysicalWindow(then_memref, else_memref)) {
-          PlanRewrite(result, then_memref, then_tile->GetMemorySpace());
-          continue;
+      if (else_body) {
+        VisitBranchStorage(*else_body, allocations, select_results);
+      }
+      if (select_results) PlanBranchResults(if_results_.at(branch.get()), allocations);
+    }
+  }
+
+  /// Resolve only pure SSA renames for optional duplicate-result sharing.
+  /// IterArgs, views and writeback results remain distinct logical values.
+  VarPtr IdentityValue(const VarPtr& value) { return ResolveValueOrigin(value, false); }
+  VarPtr ValueOrigin(const VarPtr& value) { return ResolveValueOrigin(value, true); }
+
+  VarPtr ResolveValueOrigin(const VarPtr& value, bool include_views) {
+    auto& cache = include_views ? value_origins_ : identity_roots_;
+    if (const auto found = cache.find(value); found != cache.end()) {
+      return found->second;
+    }
+    std::vector<VarPtr> path;
+    std::set<const Var*> visited;
+    auto current = value;
+    while (true) {
+      INTERNAL_CHECK_SPAN(visited.insert(current.get()).second, value->span_)
+          << "Internal error: cycle in SSA value aliases";
+      if (const auto found = cache.find(current); found != cache.end()) {
+        current = found->second;
+        break;
+      }
+      const auto definition = defs_.find(current);
+      if (definition == defs_.end() || definition->second.kind != VarDef::kAssign) break;
+      const auto assignment = As<AssignStmt>(definition->second.assign_stmt);
+      auto source = assignment ? AsVarLike(assignment->value_) : nullptr;
+      if (!source && assignment && include_views) {
+        const auto call = As<Call>(assignment->value_);
+        if (call && call->op_ && !call->args_.empty() &&
+            op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !WritesTileResult(call)) {
+          source = AsVarLike(call->args_[0]);
         }
-        auto memory = result_tile->GetMemorySpace();
-        CHECK_SPAN(memory.has_value() && *memory != MemorySpace::Acc, branch->span_)
-            << "Buffer IR storage legalization requires divergent Acc branch results to be "
-               "coalesced; Acc-to-Acc transfers are unsupported";
-        auto base = std::make_shared<Var>("mem_branch_result_" + std::to_string(branch_storage_counter_++),
-                                          GetPtrType(), result->span_);
-        const auto size =
-            std::max({GetDefinedMemRef(result_tile)->size_, then_memref->size_, else_memref->size_});
-        auto target = std::make_shared<MemRef>(base, static_cast<int64_t>(0), size, result->span_);
-        allocations->push_back(CreateAllocStatement(target, *memory));
-        PlanRewrite(result, target, memory);
-        RetargetBranchProducer(then_var, branch->then_body_, target, memory);
-        RetargetBranchProducer(else_var, *else_body, target, memory);
+      }
+      if (!source) break;
+      path.push_back(current);
+      current = source;
+    }
+    for (const auto& member : path) cache[member] = current;
+    cache[value] = current;
+    return current;
+  }
+
+  [[nodiscard]] bool MayClobberResult(const IfStmtPtr& branch, const VarPtr& result,
+                                      const MemRefPtr& target) const {
+    const auto last = result_last_use_.find(result.get());
+    const auto reverse_last = result_reverse_last_use_.find(result.get());
+    const auto end = stmt_end_order_.at(branch.get());
+    const auto reverse_end = reverse_stmt_end_order_.at(branch.get());
+    auto last_read = last == result_last_use_.end() ? end : std::max(end, last->second);
+    auto reverse_last_read = reverse_last == result_reverse_last_use_.end()
+                                 ? reverse_end
+                                 : std::max(reverse_end, reverse_last->second);
+    // An actual writeback target is consumed before its final in-place write.
+    // Each lexical order has its own final read; an opposite-arm pass-through
+    // yield can be last in one order while the consuming update is last in the
+    // other. Other operands/workspaces retain the inclusive boundary.
+    if (last_read > end && last_use_is_writeback_.count(result.get())) --last_read;
+    if (reverse_last_read > reverse_end && reverse_last_use_is_writeback_.count(result.get())) {
+      --reverse_last_read;
+    }
+    // A reachable clobber must precede some read in both sibling orderings.
+    // Either negative query proves safety; independent conservative envelopes
+    // may still decline reuse, but cannot hide an actual clobber.
+    return future_writes_.MayOverlapAfter(target, end, reverse_end, last_read) &&
+           reverse_future_writes_.MayOverlapAfter(target, reverse_end, end, reverse_last_read);
+  }
+
+  MemRefPtr RequiredResultTarget(const IfResultInfo& slot) {
+    if (const auto required = required_branch_targets_.find(slot.result.get());
+        required != required_branch_targets_.end()) {
+      return ResolveRequiredTarget(required->second);
+    }
+    const auto original = GetTypeMemRef(slot.result->GetType()).value_or(nullptr);
+    return original && (original->is_pinned_ || fixed_branch_bases_.count(original->base_.get())) ? original
+                                                                                                  : nullptr;
+  }
+
+  MemRefPtr ResolveRequiredTarget(const RequiredBranchTarget& required) {
+    if (!required.owner) return required.captured_window;
+    auto current = CurrentMemRef(required.owner);
+    INTERNAL_CHECK_SPAN(current, required.owner->span_)
+        << "Internal error: required storage owner lost its window";
+    return current;
+  }
+
+  IncomingValues IncomingKey(const IfResultInfo& slot, const TileTypePtr& result,
+                             const std::array<TileTypePtr, 2>& inputs) {
+    return {{IdentityValue(slot.incoming[0]).get(), IdentityValue(slot.incoming[1]).get()},
+            std::make_shared<TupleType>(std::vector<TypePtr>{CloneTypeWithoutMemRef(result),
+                                                             CloneTypeWithoutMemRef(inputs[0]),
+                                                             CloneTypeWithoutMemRef(inputs[1])})};
+  }
+
+  void PlanBranchResults(const IfInfo& info, std::vector<StmtPtr>* allocations) {
+    std::set<const Var*> reserved;
+    std::map<const Var*, MemRefPtr> preferred;
+    std::unordered_map<IncomingValues, MemRefPtr, IncomingHash, IncomingEqual> equivalent;
+    std::vector<StorageAccessIndex::Event> peer_events;
+    std::vector<StorageAccessIndex::Event> live_peer_windows;
+    std::vector<StorageAccessIndex::Event> mutable_peer_windows;
+    for (size_t i = 0; i < info.results.size(); ++i) {
+      const auto& slot = info.results[i];
+      const auto target = RequiredResultTarget(slot);
+      const auto tile = CurrentTileType(slot.result);
+      if (!tile) continue;
+      std::array<TileTypePtr, 2> inputs;
+      for (size_t arm = 0; arm < slot.incoming.size(); ++arm) {
+        inputs[arm] = slot.incoming[arm] ? CurrentTileType(slot.incoming[arm]) : nullptr;
+      }
+      const auto last = result_last_use_.find(slot.result.get());
+      if (last != result_last_use_.end() && last->second > stmt_end_order_.at(info.owner.get())) {
+        auto peer = target;
+        if (!peer && inputs[0] && inputs[1] && SameKnownTileMemorySpace(tile, inputs[0]) &&
+            SameKnownTileMemorySpace(tile, inputs[1]) &&
+            SamePhysicalWindow(GetDefinedMemRef(inputs[0]), GetDefinedMemRef(inputs[1]))) {
+          peer = GetDefinedMemRef(inputs[0]);
+        }
+        if (peer) {
+          live_peer_windows.push_back({peer, i + 1, 1});
+          if (mutable_branch_results_.count(slot.result.get())) {
+            mutable_peer_windows.push_back({peer, i + 1, 1});
+          }
+        }
+      }
+      if (!target) continue;
+      preferred.emplace(slot.result.get(), target);
+      reserved.insert(target->base_.get());
+      const bool written = !inputs[0] || !inputs[1] ||
+                           !SamePhysicalWindow(GetDefinedMemRef(inputs[0]), target) ||
+                           !SamePhysicalWindow(GetDefinedMemRef(inputs[1]), target);
+      if (written) peer_events.push_back({target, 1, 1});
+      if (inputs[0] && inputs[1] && !mutable_branch_results_.count(slot.result.get()) &&
+          !mutable_branch_bases_.count(target->base_.get())) {
+        equivalent.emplace(IncomingKey(slot, tile, inputs), target);
+      }
+    }
+    // Yield slots are simultaneous. A free result cannot borrow a peer's
+    // incompatible fixed write destination; equal incoming-value pairs may
+    // intentionally share its one transfer instead.
+    StorageAccessIndex peer_writes;
+    peer_writes.Build(peer_events);
+    StorageAccessIndex live_peers;
+    live_peers.Build(live_peer_windows);
+    StorageAccessIndex mutable_peers;
+    mutable_peers.Build(mutable_peer_windows);
+    // Reservations cover known future slots. These incremental indexes also
+    // cover destinations created while earlier slots settle their producers.
+    // A result of this If cannot later redirect as an inner owner of its own
+    // arm, and changed producer families cannot move again, so publication is
+    // monotone. No later slot may undo a live peer's isolation proof.
+    StorageObserverIndex settled_live_peers;
+    StorageObserverIndex settled_mutable_peers;
+    const auto overlaps_peer = [&](size_t index, const MemRefPtr& candidate, bool mutable_result) {
+      const auto& reserved_peers = mutable_result ? live_peers : mutable_peers;
+      const auto& settled_peers = mutable_result ? settled_live_peers : settled_mutable_peers;
+      return reserved_peers.MayOverlapAfter(candidate, 0, 0, index) ||
+             reserved_peers.MayOverlapAfter(candidate, index + 1, 0) ||
+             settled_peers.MayObserveAfter(candidate, 0, 0);
+    };
+    auto common_destination = [&](size_t index, const IfResultInfo& slot, const TileTypePtr& result_tile,
+                                  const std::array<TileTypePtr, 2>& inputs) -> MemRefPtr {
+      if (!inputs[0] || !inputs[1]) return nullptr;
+      auto source = GetDefinedMemRef(inputs[0]);
+      if (!SameKnownTileMemorySpace(inputs[0], result_tile) ||
+          !SameKnownTileMemorySpace(inputs[1], result_tile) ||
+          !SamePhysicalWindow(source, GetDefinedMemRef(inputs[1]))) {
+        return nullptr;
+      }
+      const auto original = GetTypeMemRef(slot.result->GetType()).value_or(GetDefinedMemRef(result_tile));
+      const bool mutable_result = mutable_branch_results_.count(slot.result.get());
+      const bool mutable_common = mutable_result || mutable_branch_bases_.count(source->base_.get());
+      // Independent mutable outputs must preserve every live peer. Readonly
+      // duplicate values can share a window, including after a prior slot has
+      // retargeted both incoming producer families onto one destination.
+      // Retaining these exact incoming bytes moves no pipeline allocation.
+      // Hardware hazards still prohibit making their original bytes mutable.
+      if (overlaps_peer(index, source, mutable_result) ||
+          (mutable_common && (readonly_caller_storage_.MayOverlapAfter(source, 0, 0) ||
+                              no_mutable_alias_branch_bases_.count(source->base_.get()) ||
+                              no_mutable_alias_branch_bases_.count(original->base_.get()) ||
+                              HasIndependentOldStorageObserver(info.owner, source))) ||
+          peer_writes.MayOverlapAfter(source, 0, 0) || MayClobberResult(info.owner, slot.result, source)) {
+        return nullptr;
+      }
+      return source;
+    };
+    // Establish every legal common window before considering optional reuse.
+    // In (a, a)/(b, a), the second result still needs a on both paths. Borrowing
+    // a for the first result before seeing that slot would destroy its value.
+    // Reserving all preferred windows makes this priority independent of slot
+    // order, while readonly overlapping views can retain their own descriptors.
+    for (size_t i = 0; i < info.results.size(); ++i) {
+      const auto& slot = info.results[i];
+      const auto result_tile = CurrentTileType(slot.result);
+      if (!result_tile || preferred.count(slot.result.get())) continue;
+      std::array<TileTypePtr, 2> inputs;
+      for (size_t arm = 0; arm < slot.incoming.size(); ++arm) {
+        inputs[arm] = slot.incoming[arm] ? CurrentTileType(slot.incoming[arm]) : nullptr;
+      }
+      if (const auto source = common_destination(i, slot, result_tile, inputs)) {
+        preferred.emplace(slot.result.get(), source);
+        reserved.insert(source->base_.get());
+        if (!mutable_branch_results_.count(slot.result.get()) &&
+            !mutable_branch_bases_.count(source->base_.get())) {
+          equivalent.emplace(IncomingKey(slot, result_tile, inputs), source);
+        }
+      }
+    }
+    for (size_t i = 0; i < info.results.size(); ++i) {
+      const auto& slot = info.results[i];
+      auto result_tile = CurrentTileType(slot.result);
+      if (!result_tile) continue;
+      std::array<TileTypePtr, 2> inputs;
+      for (size_t arm = 0; arm < slot.incoming.size(); ++arm) {
+        CHECK_SPAN(info.bodies[arm] && slot.incoming[arm], info.owner->span_)
+            << "If storage planning requires both arms to yield every tile result";
+        inputs[arm] = CurrentTileType(slot.incoming[arm]);
+      }
+      // Incomplete external storage is not evidence for borrowing or identity.
+      // Keep it for the existing unknown-storage legalization path.
+      if (!inputs[0] || !inputs[1]) continue;
+      std::array<MemRefPtr, 2> sources{GetDefinedMemRef(inputs[0]), GetDefinedMemRef(inputs[1])};
+      const auto memory = result_tile->GetMemorySpace();
+      CHECK_SPAN(memory.has_value(), info.owner->span_)
+          << "If storage planning requires a known result memory space";
+      const auto key = IncomingKey(slot, result_tile, inputs);
+      const auto required = RequiredResultTarget(slot);
+      const bool fixed = required != nullptr;
+      // Equal values are only a sharing opportunity. A later mutable consumer
+      // keeps its own destination so sharing cannot undo entry isolation.
+      const bool read_only = !mutable_branch_results_.count(slot.result.get());
+      MemRefPtr target;
+      if (const auto found = preferred.find(slot.result.get()); found != preferred.end()) {
+        const auto candidate = required ? required : found->second;
+        const bool peer_conflict = overlaps_peer(i, candidate, !read_only);
+        if (required) {
+          CHECK_SPAN(!peer_conflict, info.owner->span_)
+              << "Required if-result storage overlaps an independently live mutable result";
+        }
+        if (!peer_conflict) target = candidate;
+      } else {
+        // Earlier slots may have moved their complete alias families. Recheck
+        // actual incoming windows with the same proof used for reservation;
+        // sharing their new common window does not merge distinct SSA values.
+        target = common_destination(i, slot, result_tile, inputs);
+      }
+      if (!target && read_only) {
+        if (const auto found = equivalent.find(key);
+            found != equivalent.end() && !mutable_branch_bases_.count(found->second->base_.get()) &&
+            !overlaps_peer(i, found->second, false) &&
+            !MayClobberResult(info.owner, slot.result, found->second)) {
+          target = found->second;
+        }
+      }
+      for (size_t arm = 0; !target && arm < slot.incoming.size(); ++arm) {
+        // Borrowing can retarget a producer, so reject peer conflicts before
+        // entering its transaction, while this incoming window is unchanged.
+        if (overlaps_peer(i, GetDefinedMemRef(inputs[arm]), !read_only)) continue;
+        TryBorrowBranchStorage(info, slot, arm, result_tile, reserved, peer_writes, &target);
+      }
+      if (!target) {
+        // InitMemRef creates an independent, correctly sized request per r.
+        // Raw IR can still supply an inherited window: use it as a request
+        // only when this function owns it and neither source occupies it.
+        auto request = GetDefinedMemRef(result_tile);
+        if (owned_branch_bases_.count(request->base_.get()) && !reserved.count(request->base_.get()) &&
+            !overlaps_peer(i, request, !read_only) &&
+            !ambiguous_result_requests_.count(request->base_.get()) &&
+            result_request_owners_.count(request->base_.get()) &&
+            result_request_owners_.at(request->base_.get()) == slot.result.get() &&
+            !storage_handles_.count(request->base_.get()) && !MemRef::SameAllocation(request, sources[0]) &&
+            !MemRef::SameAllocation(request, sources[1])) {
+          target = request;
+        } else {
+          auto base = std::make_shared<Var>("mem_branch_result_" + std::to_string(branch_storage_counter_++),
+                                            GetPtrType(), slot.result->span_);
+          target = std::make_shared<MemRef>(base, int64_t{0}, request->size_, slot.result->span_);
+          allocations->push_back(CreateAllocStatement(target, *memory));
+        }
+        canonical_branch_destinations_[target->base_.get()] = {info.owner, target};
+      }
+      PlanRewrite(slot.result, target, memory);
+      reserved.insert(target->base_.get());
+      for (size_t arm = 0; arm < slot.incoming.size(); ++arm) {
+        if (SameStorageDescriptor(inputs[arm], result_tile)) {
+          RetargetBranchProducer(slot.incoming[arm], info.bodies[arm], target, memory, info.owner.get());
+        }
+      }
+      if (!fixed && read_only && !mutable_branch_bases_.count(target->base_.get())) {
+        equivalent.emplace(key, target);
+      }
+      RecordPlannedStorageObserver(slot.result);
+      const auto last = result_last_use_.find(slot.result.get());
+      if (last != result_last_use_.end() && last->second > stmt_end_order_.at(info.owner.get())) {
+        // Both orders are outside this If for a live result. Unit timestamps
+        // express presence only; geometry remains byte/slot precise.
+        settled_live_peers.Observe(target, 1, 1);
+        if (!read_only) settled_mutable_peers.Observe(target, 1, 1);
       }
     }
   }
 
-  static size_t FindSet(std::vector<size_t>& parent, size_t value) {
-    while (parent[value] != value) {
-      parent[value] = parent[parent[value]];
-      value = parent[value];
-    }
-    return value;
-  }
-
-  static void UnionSets(std::vector<size_t>& parent, size_t lhs, size_t rhs) {
-    lhs = FindSet(parent, lhs);
-    rhs = FindSet(parent, rhs);
-    if (lhs != rhs) parent[rhs] = lhs;
-  }
-
   void BuildAccessIndexes(const std::map<const Stmt*, std::set<VarPtr>>& reads,
-                          const std::map<const Stmt*, std::set<VarPtr>>& writes) {
+                          const std::map<const Stmt*, std::set<VarPtr>>& writes,
+                          const std::map<VarPtr, std::set<const Stmt*>>& recurring_reads) {
     memref_component_.clear();
     physical_access_index_.clear();
     alias_read_index_.clear();
@@ -1494,11 +2627,16 @@ class TopDownRetargeter {
     }
 
     std::map<size_t, std::vector<std::pair<size_t, size_t>>> physical_events;
+    std::vector<StorageAccessIndex::Event> physical_reads;
+    std::vector<StorageAccessIndex::Event> reverse_physical_reads;
+    std::vector<WindowedReachableEventIndex::Event> recurring_accesses;
     std::map<const Var*, std::vector<VersionedReachableEventIndex::Event>> alias_events;
-    auto record = [&](const Stmt* stmt, const VarPtr& var, bool is_read) {
-      auto primary = stmt_order_.find(stmt);
-      auto reverse = reverse_stmt_order_.find(stmt);
-      if (primary == stmt_order_.end() || reverse == reverse_stmt_order_.end()) return;
+    auto record = [&](const Stmt* stmt, const VarPtr& var, bool is_read, bool recurrence = false) {
+      const auto& primary_orders = recurrence ? stmt_end_order_ : stmt_order_;
+      const auto& reverse_orders = recurrence ? reverse_stmt_end_order_ : reverse_stmt_order_;
+      auto primary = primary_orders.find(stmt);
+      auto reverse = reverse_orders.find(stmt);
+      if (primary == primary_orders.end() || reverse == reverse_orders.end()) return;
       if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
         auto component = memref_component_.find(GetDefinedMemRef(tile).get());
         if (component != memref_component_.end()) {
@@ -1510,8 +2648,14 @@ class TopDownRetargeter {
         // Function inputs and other externally defined handles predate every
         // statement in the analysed body.
         const size_t definition = def == defs_.end() ? 0 : def->second.order;
+        if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
+          const auto before_definition = stmt_end_order_.at(analysis_root_.get()) + 1 - definition;
+          const auto window = GetDefinedMemRef(tile);
+          physical_reads.push_back({window, before_definition, primary->second});
+          reverse_physical_reads.push_back({window, before_definition, reverse->second});
+        }
         alias_events[ResolveAliasRoot(var).get()].push_back(
-            VersionedReachableEventIndex::Event{primary->second, definition});
+            VersionedReachableEventIndex::Event{primary->second, definition, reverse->second});
       }
     };
     for (const auto& [stmt, vars] : reads) {
@@ -1520,103 +2664,25 @@ class TopDownRetargeter {
     for (const auto& [stmt, vars] : writes) {
       for (const auto& var : vars) record(stmt, var, false);
     }
-    for (auto& [component, events] : physical_events) {
-      physical_access_index_[component].Build(std::move(events));
+    // A value defined before a repeated loop can be observed again on its
+    // backedge. Preserve its handle version while placing that virtual read at
+    // the loop end in both orders, including in the physical access index.
+    for (const auto& [value, loops] : recurring_reads) {
+      for (const auto* loop : loops) {
+        record(loop, value, true, true);
+        if (const auto tile = GetTileTypeWithMemRef(value->GetType())) {
+          recurring_accesses.push_back(
+              {GetDefinedMemRef(tile), stmt_order_.at(loop), stmt_end_order_.at(loop) + 1});
+        }
+      }
     }
+    for (auto& [component, events] : physical_events) {
+      physical_access_index_[component].Build(events);
+    }
+    physical_read_index_.Build(physical_reads);
+    reverse_physical_read_index_.Build(reverse_physical_reads);
+    recurring_access_index_.Build(recurring_accesses);
     for (auto& [root, events] : alias_events) alias_read_index_[root].Build(std::move(events));
-  }
-
-  /// A read of an older handle can repeat after an IfStmt through an enclosing
-  /// loop's backedge, even when that read lexically precedes the IfStmt. Sweep
-  /// the read sites and preorder loop intervals once, then binary-search the
-  /// active loop stack for the outermost loop entered after each handle's
-  /// definition. Each loop is pushed/popped once; event indexing and queries
-  /// remain O(N log N), with no per-phi subtree or ancestor scans.
-  void BuildRecurringReadIndexes(const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
-                                 const std::map<const Stmt*, std::set<VarPtr>>& observation_reads,
-                                 const DefMapVisitor::BindingReads& binding_reads,
-                                 const std::vector<StmtPtr>& loops) {
-    recurring_alias_read_index_.clear();
-    recurring_physical_read_index_.clear();
-    // A carry's value advances on its own backedge, but re-entering its
-    // binding from an outer loop consumes the initializer again. Attribute an
-    // observed carry's entry read to that binding header, not to every use in
-    // its body. Propagate observed bindings once along initializer chains so
-    // intermediate carry versions survive intervening loops as well.
-    // A consumed loop result also observes the initializer on a zero-trip
-    // path. Definitely nonempty For results need no such entry observation.
-    // Unused bindings remain non-observing; this worklist stays O(N log N).
-    auto effective_observations = BuildPayloadObservations(defs_, observation_reads, binding_reads);
-    std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;
-    ordered_reads.reserve(effective_observations.size());
-    for (const auto& [stmt, vars] : effective_observations) {
-      ordered_reads.emplace_back(stmt_order_.at(stmt), &vars);
-    }
-    std::sort(ordered_reads.begin(), ordered_reads.end(),
-              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-
-    // Half-open lexical intervals [begin, end) of the currently enclosing loops.
-    std::vector<std::pair<size_t, size_t>> loop_stack;
-    std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
-    std::map<size_t, std::vector<std::pair<size_t, size_t>>> physical_events;
-    auto record_physical = [&](const VarPtr& var, const std::pair<size_t, size_t>& interval) {
-      // Semantic aliases may still carry stale physical metadata before the
-      // first normalization. Protect their canonical allocation as well.
-      for (const auto& handle : {var, ResolveAliasRoot(var)}) {
-        if (auto tile = GetTileTypeWithMemRef(handle->GetType())) {
-          auto component = memref_component_.find(GetDefinedMemRef(tile).get());
-          if (component != memref_component_.end()) physical_events[component->second].push_back(interval);
-        }
-      }
-    };
-    size_t next_loop = 0;
-    for (const auto& [position, vars] : ordered_reads) {
-      // A loop's own initializer is evaluated outside its recurrence. Its
-      // header reads therefore see only loops with strictly earlier headers.
-      while (next_loop < loops.size() && stmt_order_.at(loops[next_loop].get()) < position) {
-        const auto& current_loop = loops[next_loop++];
-        if (!LoopMayExecute(current_loop, true)) continue;
-        const auto* loop = current_loop.get();
-        const size_t begin = stmt_order_.at(loop);
-        while (!loop_stack.empty() && loop_stack.back().second <= begin) loop_stack.pop_back();
-        loop_stack.emplace_back(begin, stmt_end_order_.at(loop) + 1);
-      }
-      while (!loop_stack.empty() && loop_stack.back().second <= position) loop_stack.pop_back();
-      for (const auto& var : *vars) {
-        const auto def = defs_.find(var);
-        const auto recurring =
-            def == defs_.end()
-                ? loop_stack.begin()  // Incoming handles predate even a root loop at order zero.
-                : std::upper_bound(
-                      loop_stack.begin(), loop_stack.end(), def->second.order,
-                      [](size_t definition, const auto& interval) { return definition < interval.first; });
-        if (recurring != loop_stack.end()) {
-          recurring_events[ResolveAliasRoot(var).get()].push_back(*recurring);
-          // Alias and physical recurrence must share payload demand. Unused
-          // forwarding bindings belong only to the ordinary access indexes.
-          record_physical(var, *recurring);
-        }
-      }
-    }
-    // While conditions, unlike initializers, are evaluated again at the same
-    // header. Preserve observations of older handles on that loop's backedge.
-    for (const auto& [loop, vars] : condition_reads) {
-      const size_t begin = stmt_order_.at(loop);
-      for (const auto& var : vars) {
-        const auto def = defs_.find(var);
-        if (def == defs_.end() || def->second.order < begin) {
-          const auto interval = std::make_pair(begin, stmt_end_order_.at(loop) + 1);
-          recurring_events[ResolveAliasRoot(var).get()].push_back(interval);
-          record_physical(var, interval);
-        }
-      }
-    }
-    for (auto& [root, events] : recurring_events) {
-      recurring_alias_read_index_[root].Build(std::move(events));
-    }
-    for (auto& [component, events] : physical_events) {
-      recurring_physical_read_index_[component].Build(std::move(events));
-    }
   }
 
   [[nodiscard]] bool IsInside(const StmtPtr& inner, const StmtPtr& outer) const {
@@ -1645,17 +2711,13 @@ class TopDownRetargeter {
         }
         continue;
       }
-      if (def.kind == VarDef::kForReturn) {
-        auto loop = As<ForStmt>(def.control_stmt);
-        if (loop && def.return_idx < loop->iter_args_.size()) {
-          alias_source_[var] = std::static_pointer_cast<const Var>(loop->iter_args_[def.return_idx]);
-        }
-        continue;
-      }
-      if (def.kind == VarDef::kWhileReturn) {
-        auto loop = As<WhileStmt>(def.control_stmt);
-        if (loop && def.return_idx < loop->iter_args_.size()) {
-          alias_source_[var] = std::static_pointer_cast<const Var>(loop->iter_args_[def.return_idx]);
+      if (def.kind == VarDef::kLoopReturn) {
+        if (const auto loop = As<ForStmt>(def.control_stmt);
+            loop && def.return_idx < loop->iter_args_.size()) {
+          alias_source_[var] = loop->iter_args_[def.return_idx];
+        } else if (const auto loop = As<WhileStmt>(def.control_stmt);
+                   loop && def.return_idx < loop->iter_args_.size()) {
+          alias_source_[var] = loop->iter_args_[def.return_idx];
         }
         continue;
       }
@@ -1734,31 +2796,35 @@ class TopDownRetargeter {
   }
 
   // Walk IR, calling Propagate for each ForStmt we encounter.
-  void VisitForStmts(const StmtPtr& stmt) {
+  void VisitLoopConstraints(const StmtPtr& stmt) {
     if (!stmt) return;
     if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& s : seq->stmts_) VisitForStmts(s);
+      for (const auto& s : seq->stmts_) VisitLoopConstraints(s);
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
-      PropagateFromForStmt(for_stmt);
-      VisitForStmts(for_stmt->body_);
-    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-      VisitForStmts(while_stmt->body_);
+      if (!LoopMayExecute(for_stmt, false)) return;
+      PropagateFromLoop(for_stmt);
+      VisitLoopConstraints(for_stmt->body_);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      if (!LoopMayExecute(loop, false)) return;
+      PropagateFromLoop(loop);
+      VisitLoopConstraints(loop->body_);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
-      VisitForStmts(if_stmt->then_body_);
-      if (if_stmt->else_body_.has_value()) VisitForStmts(if_stmt->else_body_.value());
+      VisitLoopConstraints(if_stmt->then_body_);
+      if (if_stmt->else_body_.has_value()) VisitLoopConstraints(if_stmt->else_body_.value());
     } else if (auto scope = As<ScopeStmt>(stmt)) {
-      VisitForStmts(scope->body_);
+      VisitLoopConstraints(scope->body_);
     }
   }
 
-  void PropagateFromForStmt(const ForStmtPtr& for_stmt) {
+  template <typename LoopPtr>
+  void PropagateFromLoop(const LoopPtr& for_stmt) {
     if (for_stmt->iter_args_.empty()) return;
     auto yield = FindYieldStmt(for_stmt->body_);
     if (!yield) return;
 
     for (size_t i = 0; i < for_stmt->iter_args_.size() && i < yield->value_.size(); ++i) {
       auto ia = for_stmt->iter_args_[i];
-      // If a prior PropagateFromForStmt (an enclosing ForStmt) already retyped
+      // If a prior PropagateFromLoop (an enclosing ForStmt) already retyped
       // this iter_arg, use the planned new TileType so we don't push a stale
       // target down the chain.
       auto ia_var_key = std::static_pointer_cast<const Var>(ia);
@@ -1772,6 +2838,7 @@ class TopDownRetargeter {
       auto yield_var = AsVarLike(yield->value_[i]);
       if (!yield_var) continue;
 
+      RequiredTargetScope requirement(*this, ia_var_key);
       TryRetargetVar(yield_var, target_memref, target_memory);
     }
   }
@@ -1782,9 +2849,11 @@ class TopDownRetargeter {
     if (auto seq = As<SeqStmts>(stmt)) {
       for (const auto& s : seq->stmts_) VisitIfPhisForAccumulator(s);
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
+      if (!LoopMayExecute(for_stmt, false)) return;
       VisitIfPhisForAccumulator(for_stmt->body_);
-    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-      VisitIfPhisForAccumulator(while_stmt->body_);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      if (!LoopMayExecute(loop, false)) return;
+      VisitIfPhisForAccumulator(loop->body_);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
       // Coalesce nested accumulator phis before their enclosing K-window phi.
       // Otherwise a later child rewrite can overwrite the outer target and
@@ -1879,13 +2948,24 @@ class TopDownRetargeter {
   std::optional<AccumulatorTarget> FindExternallySeededAccumulatorLoop(const VarPtr& var,
                                                                        const IfStmtPtr& branch_scope) {
     auto it = defs_.find(var);
-    if (it == defs_.end() || it->second.kind != VarDef::kForReturn) return std::nullopt;
-    auto loop = As<ForStmt>(it->second.control_stmt);
-    if (!loop || it->second.return_idx >= loop->iter_args_.size()) return std::nullopt;
+    if (it == defs_.end() || it->second.kind != VarDef::kLoopReturn) return std::nullopt;
+    if (const auto loop = As<ForStmt>(it->second.control_stmt)) {
+      return FindSeededAccumulatorLoop(var, it->second, loop, branch_scope);
+    }
+    if (const auto loop = As<WhileStmt>(it->second.control_stmt)) {
+      return FindSeededAccumulatorLoop(var, it->second, loop, branch_scope);
+    }
+    return std::nullopt;
+  }
 
+  template <typename LoopPtr>
+  std::optional<AccumulatorTarget> FindSeededAccumulatorLoop(const VarPtr& var, const VarDef& definition,
+                                                             const LoopPtr& loop,
+                                                             const IfStmtPtr& branch_scope) {
+    if (definition.return_idx >= loop->iter_args_.size()) return std::nullopt;
     if (!IsInside(loop, branch_scope)) return std::nullopt;
 
-    auto init = AsVarLike(loop->iter_args_[it->second.return_idx]->initValue_);
+    auto init = AsVarLike(loop->iter_args_[definition.return_idx]->initValue_);
     auto init_tile = init ? CurrentTileType(init) : nullptr;
     if (!init || !CurrentTileType(var) || !init_tile) return std::nullopt;
 
@@ -1895,9 +2975,9 @@ class TopDownRetargeter {
     }
 
     auto body_yield = FindYieldStmt(loop->body_);
-    if (!body_yield || it->second.return_idx >= body_yield->value_.size()) return std::nullopt;
-    auto yielded = AsVarLike(body_yield->value_[it->second.return_idx]);
-    auto iter_arg = std::static_pointer_cast<const Var>(loop->iter_args_[it->second.return_idx]);
+    if (!body_yield || definition.return_idx >= body_yield->value_.size()) return std::nullopt;
+    auto yielded = AsVarLike(body_yield->value_[definition.return_idx]);
+    auto iter_arg = std::static_pointer_cast<const Var>(loop->iter_args_[definition.return_idx]);
     if (!yielded || !IsInplaceChainRootedAt(yielded, iter_arg)) return std::nullopt;
     return AccumulatorTarget{GetDefinedMemRef(init_tile), init_tile->GetMemorySpace(), init};
   }
@@ -1905,7 +2985,7 @@ class TopDownRetargeter {
   // For an IfStmt whose branches yield an in-place accumulator on one side and a
   // fresh seed on the other (a different L0C buffer), retarget the seed onto the
   // accumulator buffer.  Scoped to Acc — the ISA case with no legal reconciling
-  // move.  A declined retarget is a hard error (see CoalesceAccumulatorIfPhis).
+  // move.  A declined retarget is a hard error (see TryCoalesceAccIfPhi).
   void TryCoalesceAccIfPhi(const IfStmtPtr& if_stmt) {
     if (!if_stmt->else_body_.has_value() || if_stmt->return_vars_.empty()) return;
     auto then_yield = FindYieldStmt(if_stmt->then_body_);
@@ -1914,6 +2994,10 @@ class TopDownRetargeter {
 
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
       if (i >= then_yield->value_.size() || i >= else_yield->value_.size()) continue;
+      // A selected handle is already a complete representation plan. Native
+      // accumulator coalescing must not resurrect its abandoned destination
+      // or overwrite one of the independent selected source allocations.
+      if (!GetTileTypeWithMemRef(if_stmt->return_vars_[i]->GetType())) continue;
       auto then_var = AsVarLike(then_yield->value_[i]);
       auto else_var = AsVarLike(else_yield->value_[i]);
       if (!then_var || !else_var) continue;
@@ -1928,6 +3012,17 @@ class TopDownRetargeter {
       const VarPtr& acc_var = then_acc ? then_var : else_var;
       const VarPtr& seed_var = then_acc ? else_var : then_var;
       const AccumulatorTarget& target = then_acc ? *then_target : *else_target;
+      if (blocked_branch_results_.count(if_stmt->return_vars_[i].get()) ||
+          !CanReplayTarget(if_stmt->return_vars_[i], target.memref)) {
+        continue;
+      }
+
+      const auto result_memory = GetTypeMemRef(if_stmt->return_vars_[i]->GetType());
+      if (result_memory && *result_memory &&
+          ((*result_memory)->is_pinned_ || fixed_branch_bases_.count((*result_memory)->base_.get())) &&
+          !SamePhysicalWindow(*result_memory, target.memref)) {
+        continue;  // An accumulator requirement cannot override an explicit binding.
+      }
 
       auto seed_tile = CurrentTileType(seed_var);
       if (!seed_tile) continue;
@@ -1970,6 +3065,7 @@ class TopDownRetargeter {
       // a later decline must not leak that partial family into the pass-wide
       // rewrite map.
       RewriteTransaction transaction(*this);
+      RequiredTargetScope requirement(*this, target.reused_input);
 
       // Align any alias/ForReturn wrapper on the accumulator side with the
       // canonical producer target before using it as the phi's allocation.
@@ -1993,7 +3089,7 @@ class TopDownRetargeter {
           } else {
             continue;
           }
-        } else if (seed_def->second.kind == VarDef::kForReturn) {
+        } else if (seed_def->second.kind == VarDef::kLoopReturn) {
           ok = TryRetargetVar(seed_var, target.memref, target.memory_space);
         } else {
           continue;
@@ -2013,10 +3109,32 @@ class TopDownRetargeter {
     }
   }
 
+  // Canonical destinations are created at byte offset zero. Redirecting an
+  // inner result to an enclosing result preserves every member's own window.
+  MemRefPtr ResolveBranchTarget(const MemRefPtr& memory) {
+    auto redirect = branch_target_redirects_.find(memory->base_.get());
+    if (redirect == branch_target_redirects_.end()) return memory;
+    std::vector<const Var*> path;
+    MemRefPtr target;
+    while (redirect != branch_target_redirects_.end()) {
+      path.push_back(redirect->first);
+      target = redirect->second;
+      redirect = branch_target_redirects_.find(target->base_.get());
+    }
+    for (const auto* base : path) branch_target_redirects_[base] = target;
+    auto offset = As<ConstInt>(memory->byte_offset_);
+    if (memory->size_ == target->size_ && offset && offset->value_ == 0) return target;
+    return MakeAliasingMemRef(target, memory->byte_offset_, memory->size_, memory->span_);
+  }
+
   TileTypePtr CurrentTileType(const VarPtr& var) {
     auto it = rewrites_.find(var);
     auto type = (it != rewrites_.end()) ? it->second : var->GetType();
-    return GetTileTypeWithMemRef(type);
+    auto tile = GetTileTypeWithMemRef(type);
+    if (!tile) return nullptr;
+    auto original = GetDefinedMemRef(tile);
+    auto destination = ResolveBranchTarget(original);
+    return destination == original ? tile : As<TileType>(CloneTypeWithMemRef(type, destination));
   }
 
   MemRefPtr CurrentMemRef(const VarPtr& var) {
@@ -2034,8 +3152,14 @@ class TopDownRetargeter {
   /// Attempts to rewrite `var`'s MemRef to `target` by walking its producer chain.
   /// Returns true if var already has target MemRef or a rewrite was planned.
   bool TryRetargetVar(const VarPtr& var, const MemRefPtr& target, std::optional<MemorySpace> target_memory) {
+    if (As<TileType>(var->GetType()) && !GetTileTypeWithMemRef(var->GetType())) return false;
+    if (blocked_branch_results_.count(var.get()) || !CanReplayTarget(var, target)) return false;
     if (SamePhysicalWindow(CurrentMemRef(var), target)) return true;  // already aligned
-    if (!visiting_.insert(var).second) return false;                  // cycle
+    if (auto source = CurrentMemRef(var);
+        source && (source->is_pinned_ || pinned_branch_bases_.count(source->base_.get()))) {
+      return false;
+    }
+    if (!visiting_.insert(var).second) return false;  // cycle
     struct Guard {
       std::set<VarPtr>* s;
       VarPtr v;
@@ -2053,8 +3177,8 @@ class TopDownRetargeter {
       retargeted = RetargetAssign(var, def, target, target_memory);
     } else if (def.kind == VarDef::kIfReturn) {
       retargeted = RetargetIfReturn(var, def, target, target_memory);
-    } else if (def.kind == VarDef::kForReturn) {
-      retargeted = RetargetForReturn(var, def, target, target_memory);
+    } else if (def.kind == VarDef::kLoopReturn) {
+      retargeted = RetargetLoopReturn(var, def, target, target_memory);
     } else if (def.kind == VarDef::kIterArg) {
       retargeted = RetargetIterArg(var, def, target, target_memory);
     }
@@ -2062,16 +3186,34 @@ class TopDownRetargeter {
     return retargeted;
   }
 
+  [[nodiscard]] static bool FitsTargetStorage(const TileTypePtr& tile, const MemRefPtr& target,
+                                              std::optional<MemorySpace> memory) {
+    if (!tile || !target || !memory) return false;
+    const auto* context = PassContext::Current();
+    const auto* handler = backend::BackendConfig::IsConfigured()
+                              ? (context ? context->GetBackendHandler() : backend::GetBackend()->GetHandler())
+                              : nullptr;
+    const auto required = utils::StaticPhysicalAllocationBytes(tile, *memory, handler);
+    return required && *required <= target->size_;
+  }
+
   /// Retype a Var defined by an AssignStmt.
   ///
-  /// `check_liveness` gates the general dead-at-assign check (IsTargetDeadAtAssign).
-  /// It is true for the normal loop-carry retarget path.  It is set false only by
-  /// CoalesceAccumulatorIfPhis: coalescing an IfStmt phi's two branch yields onto one
-  /// buffer is always safe (the phi is redefined by exactly one branch at runtime, so
-  /// the branches are mutually exclusive and the target's downstream liveness cannot be
-  /// violated by a branch-local producer).  The op-legality checks below still apply.
+  /// The normal loop-carry path checks target liveness. Branch storage may
+  /// bypass that check only after proving the whole source family is local and
+  /// the destination has no observable prior contents on that path. Accumulator
+  /// coalescing supplies its separate branch-scoped safety proof. Operation
+  /// legality checks always apply.
   bool RetargetAssign(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
                       std::optional<MemorySpace> target_memory, bool check_liveness = true) {
+    if (!CanReplayTarget(var, target)) return false;
+    const auto tile = CurrentTileType(var);
+    if (!FitsTargetStorage(tile, target, target_memory)) return false;
+    if (auto source = CurrentMemRef(var);
+        source && !SamePhysicalWindow(source, target) &&
+        (source->is_pinned_ || pinned_branch_bases_.count(source->base_.get()))) {
+      return false;
+    }
     auto assign = As<AssignStmt>(def.assign_stmt);
     INTERNAL_CHECK_SPAN(assign, var->span_) << "Internal error: kAssign VarDef must carry an AssignStmt";
     auto call = As<Call>(assign->value_);
@@ -2132,7 +3274,7 @@ class TopDownRetargeter {
     //      write there, so retyping the LHS would only mint IR that claims a
     //      Vec-only op produces DDR.  Declining leaves the carry yielding a
     //      different buffer than its init, which YieldFixupMutator reconciles
-    //      with a real move (see AlignLoopCarriesToInitMutator's contract).
+    //      with a real move (see RetypeApplier's scoped loop-binding contract).
     //      Same-space targets are unaffected: only the MemRef base moves.
     if (entry.OutputMemoryInheritsInput()) {
       // Most view ops can carry a sub-region offset, so retargeting their LHS
@@ -2155,17 +3297,36 @@ class TopDownRetargeter {
       PlanRewrite(var, target, target_memory);
       return true;
     }
+    // Existing selected owners can retain native required aliases on their
+    // current windows. A new producer cannot become an additional occupant of
+    // such a window: the handle may still select its original value later.
+    // Apply this at the actual producer, not at forwarding If/loop wrappers,
+    // whose existing common-window and old-observer proofs remain authoritative.
+    if (reference_source_bases_.count(target->base_.get()) &&
+        !SamePhysicalWindow(CurrentMemRef(var), target)) {
+      return false;
+    }
     if (HasKwarg(*call, "target_memory") && !TargetMemoryKwargMatches(*call, target_memory)) {
       return false;
     }
     if (FixedOutputMemoryConflicts(entry, *call, target_memory)) return false;
-    if (!entry.IsInplaceSafe()) {
-      const size_t read_arg_count = IsA5Prelu(call) ? 2 : call->args_.size();
-      if (CallReadsBase(*call, target->base_.get(), read_arg_count)) return false;
-    }
-    if (op_predicates::CastRequiresDisjointSource(call, !IsA5Target()) &&
-        CallReadsBase(*call, target->base_.get(), 1)) {
-      return false;
+    const auto& forbidden_args = entry.ForbidOutputAliasArgs();
+    const std::set<size_t> forbidden(forbidden_args.begin(), forbidden_args.end());
+    const bool disjoint_cast = op_predicates::CastRequiresDisjointSource(call, !IsA5Target());
+    const size_t read_arg_count = IsA5Prelu(call) ? 2 : call->args_.size();
+    for (size_t i = 0; i < std::min(read_arg_count, call->args_.size()); ++i) {
+      VarUseCollector reads;
+      reads.VisitExpr(call->args_[i]);
+      for (const auto& input : reads.used_vars) {
+        auto input_tile = CurrentTileType(input);
+        if (!input_tile) continue;
+        auto input_memref = GetDefinedMemRef(input_tile);
+        if (input_memref->base_ != target->base_) continue;
+        if (!entry.IsInplaceSafe() || forbidden.count(i) || (disjoint_cast && i == 0) ||
+            !SamePhysicalWindow(input_memref, target) || input_views_->IsWindow(input)) {
+          return false;
+        }
+      }
     }
 
     // Unconstrained: check liveness, then plan retype.  (Skipped for if-phi
@@ -2173,17 +3334,6 @@ class TopDownRetargeter {
     if (check_liveness && !IsTargetDeadAtAssign(def, target)) return false;
     PlanRewrite(var, target, target_memory);
     return true;
-  }
-
-  /// True if any argument of the call is a TileType Var whose MemRef base
-  /// is `target_base`.  Used to detect would-be in-place execution before
-  /// we retype the output onto the same buffer.
-  static bool CallReadsBase(const Call& call, const Var* target_base, size_t arg_count) {
-    ExprReadBaseCollector c;
-    for (size_t i = 0; i < std::min(arg_count, call.args_.size()); ++i) {
-      c.VisitExpr(call.args_[i]);
-    }
-    return c.bases.count(target_base) > 0;
   }
 
   static bool HasKwarg(const Call& call, const std::string& key) {
@@ -2225,19 +3375,32 @@ class TopDownRetargeter {
     return fixed.has_value() && *fixed != *target_memory;
   }
 
-  /// Retype an IfStmt return_var: recurse into both branches' yield values.
+  /// Bind the result independently of whether each producer can write directly.
+  /// A legal edge copy can meet the same destination after the branch's old
+  /// reads complete. Unsupported-copy spaces still require producer retargeting.
   bool RetargetIfReturn(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
                         std::optional<MemorySpace> target_memory) {
     auto if_stmt = As<IfStmt>(def.control_stmt);
     if (!if_stmt) return false;
     size_t idx = def.return_idx;
+    const auto result_tile = CurrentTileType(var);
+    // Producer-local old reads can finish before its yield, allowing a late
+    // transfer. Old target reads after the merge still forbid that transfer:
+    // the enclosing loop may not update its carry until its own final yield.
+    const bool allow_edge_copy = result_tile && result_tile->GetMemorySpace() == target_memory &&
+                                 FitsTargetStorage(result_tile, target, target_memory) &&
+                                 IsTargetDeadAfterDefinition(def, target);
 
     auto visit_branch = [&](const StmtPtr& body) -> bool {
       auto y = FindYieldStmt(body);
       if (!y || idx >= y->value_.size()) return false;
       auto yv = AsVarLike(y->value_[idx]);
       if (!yv) return false;
-      return TryRetargetVar(yv, target, target_memory);
+      if (TryRetargetVar(yv, target, target_memory)) return true;
+      const auto source_tile = CurrentTileType(yv);
+      const auto source_memory = source_tile ? source_tile->GetMemorySpace() : std::nullopt;
+      if (!allow_edge_copy || !source_memory || !target_memory) return false;
+      return IsTileMoveEverSupported(*source_memory, *target_memory);
     };
 
     bool then_ok = visit_branch(if_stmt->then_body_);
@@ -2254,11 +3417,31 @@ class TopDownRetargeter {
   /// init.  After all recursive PlanRewrites, the iter_arg's MemRef will
   /// match the target, and YieldFixupMutator's PatchIterArgsAndReturnVars
   /// finalises iter_arg/return_var TileType updates.
-  bool RetargetForReturn(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
-                         std::optional<MemorySpace> target_memory) {
-    auto for_stmt = As<ForStmt>(def.control_stmt);
-    if (!for_stmt) return false;
+  bool RetargetLoopReturn(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
+                          std::optional<MemorySpace> target_memory) {
+    if (const auto loop = As<ForStmt>(def.control_stmt)) {
+      return RetargetLoopResult(var, def, loop, target, target_memory);
+    }
+    if (const auto loop = As<WhileStmt>(def.control_stmt)) {
+      return RetargetLoopResult(var, def, loop, target, target_memory);
+    }
+    return false;
+  }
+
+  template <typename LoopPtr>
+  bool RetargetLoopResult(const VarPtr& var, const VarDef& def, const LoopPtr& for_stmt,
+                          const MemRefPtr& target, std::optional<MemorySpace> target_memory) {
     size_t idx = def.return_idx;
+
+    if (!LoopMayExecute(for_stmt, false)) {
+      if (idx >= for_stmt->iter_args_.size()) return false;
+      const auto& argument = for_stmt->iter_args_[idx];
+      const auto initial = AsVarLike(argument->initValue_);
+      if (!initial || !TryRetargetVar(initial, target, target_memory)) return false;
+      PlanRewrite(argument, target, target_memory);
+      PlanRewrite(var, target, target_memory);
+      return true;
+    }
 
     auto y = FindYieldStmt(for_stmt->body_);
     if (!y || idx >= y->value_.size()) return false;
@@ -2297,17 +3480,28 @@ class TopDownRetargeter {
   /// Keep optional branch-producer eligibility conservative as aliases move.
   /// Each handle contributes once, even when its original descriptor was stale.
   void UpdateBranchStorageHandle(const VarPtr& var, const TypePtr& type) {
+    if (auto phi = phi_handle_bases_.find(var.get()); phi != phi_handle_bases_.end()) {
+      const auto* base = GetDefinedMemRef(GetTileTypeWithMemRef(type))->base_.get();
+      if (base != phi->second) {
+        // Physical read indexes describe the original IR. Moving a logical
+        // result can introduce an independent observer on its new allocation;
+        // keep later optional borrowing conservative without rescanning users.
+        changed_observer_bases_.insert(phi->second);
+        changed_observer_bases_.insert(base);
+        phi_storage_handles_[phi->second].erase(var);
+        phi_storage_handles_[base].insert(var);
+        phi->second = base;
+      }
+      return;
+    }
     auto tracked = branch_storage_handle_bases_.find(var.get());
     if (tracked == branch_storage_handle_bases_.end()) return;
     auto tile = GetTileTypeWithMemRef(type);
     if (!tile) return;
     const auto* base = GetDefinedMemRef(tile)->base_.get();
     if (base == tracked->second) return;
-    auto& previous_count = storage_handle_counts_[tracked->second];
-    INTERNAL_CHECK_SPAN(previous_count > 0, var->span_)
-        << "Internal error: branch storage handle count must remain positive";
-    --previous_count;
-    ++storage_handle_counts_[base];
+    changed_storage_bases_.insert(tracked->second);
+    changed_storage_bases_.insert(base);
     tracked->second = base;
   }
 
@@ -2319,12 +3513,32 @@ class TopDownRetargeter {
   /// declines, RollbackRewrites restores all entries written since that
   /// attempt's checkpoint, including successful nested attempts.
   void PlanRewrite(const VarPtr& var, const MemRefPtr& target, std::optional<MemorySpace> target_memory) {
+    const auto previous = rewrites_.find(var);
+    const auto previous_owner = required_target_owners_.find(var.get());
+    RewriteJournalEntry entry{
+        var, previous == rewrites_.end() ? std::nullopt : std::optional<TypePtr>(previous->second),
+        previous_owner == required_target_owners_.end() ? std::nullopt
+                                                        : std::optional<VarPtr>(previous_owner->second)};
+    const auto definition = defs_.find(var);
+    if (required_target_owner_ && definition != defs_.end() && definition->second.kind == VarDef::kIfReturn) {
+      // Alias-root equality would make a result depend on a carry initialized
+      // from itself. Keep that captured constraint instead of creating a cycle.
+      if (ResolveAliasRoot(required_target_owner_) != var &&
+          SamePhysicalWindow(CurrentMemRef(required_target_owner_), target)) {
+        required_target_owners_[var.get()] = required_target_owner_;
+      } else {
+        required_target_owners_.erase(var.get());
+      }
+    }
+    if (const auto tile = CurrentTileType(var);
+        tile && mutable_branch_bases_.count(GetDefinedMemRef(tile)->base_.get()) &&
+        mutable_branch_bases_.insert(target->base_.get()).second) {
+      entry.added_mutable_base = target->base_.get();
+    }
     auto new_type = CloneTypeWithMemRef(var->GetType(), target, target_memory);
     UpdateBranchStorageHandle(var, new_type);
-    auto previous = rewrites_.find(var);
-    rewrite_journal_.push_back(RewriteJournalEntry{
-        var, previous == rewrites_.end() ? std::nullopt : std::optional<TypePtr>(previous->second)});
-    rewrites_[var] = new_type;
+    rewrite_journal_.push_back(std::move(entry));
+    rewrites_[var] = std::move(new_type);
   }
 
   void RollbackRewrites(size_t checkpoint) {
@@ -2333,6 +3547,12 @@ class TopDownRetargeter {
       auto entry = std::move(rewrite_journal_.back());
       rewrite_journal_.pop_back();
       UpdateBranchStorageHandle(entry.var, entry.previous.value_or(entry.var->GetType()));
+      if (entry.previous_required_owner) {
+        required_target_owners_[entry.var.get()] = *entry.previous_required_owner;
+      } else {
+        required_target_owners_.erase(entry.var.get());
+      }
+      if (entry.added_mutable_base) mutable_branch_bases_.erase(entry.added_mutable_base);
       if (entry.previous.has_value()) {
         rewrites_[entry.var] = *entry.previous;
       } else {
@@ -2341,9 +3561,10 @@ class TopDownRetargeter {
     }
   }
 
-  /// True when the reused input is independently observed after the IfStmt,
-  /// either in its lexical suffix or on a later enclosing-loop iteration.
-  /// Retargeting the fresh branch must not add a write visible to that observer.
+  /// True when a branch-local accumulator loop's external seed is read after
+  /// the enclosing IfStmt through a path other than the IfStmt return value.
+  /// Such a read observes the pre-loop value on the sibling path, so placing
+  /// that sibling's producer in the seed's window would be a clobber.
   bool HasIndependentExternalUseAfterIf(const IfStmtPtr& if_stmt, const VarPtr& if_return,
                                         const AccumulatorTarget& target) {
     if (!target.reused_input) return false;
@@ -2354,51 +3575,50 @@ class TopDownRetargeter {
     if (primary_end == stmt_end_order_.end() || root_end == stmt_end_order_.end()) {
       return true;
     }
-    const auto* alias_root = ResolveAliasRoot(target.reused_input).get();
+    auto reads = alias_read_index_.find(ResolveAliasRoot(target.reused_input).get());
+    if (reads == alias_read_index_.end()) return false;
     auto if_begin = stmt_order_.find(if_stmt.get());
     if (if_begin == stmt_order_.end()) return true;
-    auto recurring = recurring_alias_read_index_.find(alias_root);
-    if (recurring != recurring_alias_read_index_.end() &&
-        recurring->second.HasAfter(0, if_begin->second, if_begin->second)) {
-      return true;
-    }
-    auto reads = alias_read_index_.find(alias_root);
-    return reads != alias_read_index_.end() &&
-           reads->second.HasAfterFromHandleDefinedBefore(primary_end->second + 1, root_end->second,
-                                                         if_begin->second);
+    return reads->second.HasAfterFromHandleDefinedBefore(primary_end->second + 1, root_end->second,
+                                                         if_begin->second,
+                                                         reverse_stmt_end_order_.at(if_stmt.get()));
   }
 
-  /// Is target's physical window untouched after the definition, including
-  /// observations reached through an enclosing-loop backedge? Check recurrence
-  /// before the nearest-loop/branch suffix so For-carry retargeting cannot
-  /// overwrite old values before the accumulator-phi coalescer runs. The dual
-  /// lexical ordering excludes mutually exclusive sibling arms.
+  /// Is target's physical window untouched after the definition and before the
+  /// nearest loop (or caller-supplied branch boundary) completes? The dual
+  /// lexical ordering excludes mutually exclusive sibling arms without walking
+  /// ancestor chains or rescanning subtrees.
   bool IsTargetDeadAfterDefinition(const VarDef& def, const MemRefPtr& target,
                                    const Stmt* stop_at = nullptr) {
     if (!target || !def.definition_stmt) return false;
+    // A later enclosing iteration can observe the old value beyond the
+    // nearest inner-loop/branch boundary. Check those demanded recurrence
+    // intervals first, retaining exact byte/slot geometry and event pairing.
+    if (recurring_access_index_.HasAfter(target, 0, def.order, def.order)) return false;
+    if (access_index_ready_) {
+      const Stmt* boundary = stop_at            ? stop_at
+                             : def.nearest_loop ? def.nearest_loop.get()
+                                                : analysis_root_.get();
+      const bool region_result = def.kind == VarDef::kIfReturn || def.kind == VarDef::kLoopReturn;
+      const auto primary = region_result ? stmt_end_order_.at(def.definition_stmt.get()) : def.order;
+      const auto reverse = region_result ? reverse_stmt_end_order_.at(def.definition_stmt.get())
+                                         : reverse_stmt_order_.at(def.definition_stmt.get());
+      return !future_accesses_.MayOverlapAfter(target, primary, reverse, stmt_end_order_.at(boundary));
+    }
     auto component = memref_component_.find(target.get());
     if (component == memref_component_.end()) return false;
-    // Include every recurrence interval spanning this producer, including its
-    // own For: a handle defined before that For can observe the old seed on
-    // the next iteration. Reads of the advancing carry itself already exclude
-    // its own loop when the recurrence index compares logical definitions.
-    auto recurring = recurring_physical_read_index_.find(component->second);
-    if (recurring != recurring_physical_read_index_.end() &&
-        recurring->second.HasAfter(0, def.order, def.order)) {
-      return false;
-    }
     auto accesses = physical_access_index_.find(component->second);
     if (accesses == physical_access_index_.end()) return true;
 
     const Stmt* boundary = stop_at;
-    if (!boundary && def.nearest_for) boundary = def.nearest_for.get();
+    if (!boundary && def.nearest_loop) boundary = def.nearest_loop.get();
     if (!boundary && analysis_root_) boundary = analysis_root_.get();
     auto boundary_end = stmt_end_order_.find(boundary);
     auto reverse_definition = reverse_stmt_order_.find(def.definition_stmt.get());
     if (boundary_end == stmt_end_order_.end() || reverse_definition == reverse_stmt_order_.end()) {
       return false;
     }
-    if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn || def.kind == VarDef::kWhileReturn) {
+    if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kLoopReturn) {
       auto reverse_end = reverse_stmt_end_order_.find(def.definition_stmt.get());
       if (reverse_end == reverse_stmt_end_order_.end()) return false;
       return !accesses->second.HasAfter(def.order + 1, boundary_end->second, reverse_end->second);
@@ -2422,6 +3642,15 @@ class RetypeApplier : public IRMutator {
       : rewrites_(std::move(rewrites)),
         initializers_(std::move(initializers)),
         entries_(std::move(entries)) {}
+
+  std::set<const Var*> RemapReferenceCarries(const std::set<VarPtr>& carries) const {
+    std::set<const Var*> result;
+    for (const auto& carry : carries) {
+      const auto found = var_substitution_.find(carry);
+      result.insert(found == var_substitution_.end() ? carry.get() : found->second.get());
+    }
+    return result;
+  }
 
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = var_substitution_.find(op);
@@ -2546,31 +3775,6 @@ class RetypeApplier : public IRMutator {
 
   template <typename LoopPtr>
   StmtPtr RetypeLoop(const LoopPtr& op) {
-    const auto* context = PassContext::Current();
-    if ((context == nullptr || !context->GetEnableBufferIR()) && entries_.empty() && initializers_.empty()) {
-      // An isolation application normalizes every dependent loop binding,
-      // including nested loops without an entry copy of their own. Ordinary
-      // legacy retypes without isolation retain their old behavior.
-      // Pre-register the IterArg's TileType retype so body references to the
-      // IterArg are substituted via VisitExpr_(IterArgPtr). The init value
-      // recursion is handled inside VisitExpr_(IterArgPtr).
-      for (const auto& ia : op->iter_args_) {
-        auto var_key = std::static_pointer_cast<const Var>(ia);
-        auto rit = rewrites_.find(var_key);
-        if (rit != rewrites_.end()) {
-          auto new_iter_arg =
-              std::make_shared<IterArg>(ia->name_hint_, rit->second, ia->initValue_, ia->span_);
-          var_substitution_[var_key] = new_iter_arg;
-        }
-      }
-      for (const auto& rv : op->return_vars_) {
-        auto rit = rewrites_.find(rv);
-        if (rit != rewrites_.end()) {
-          var_substitution_[rv] = std::make_shared<Var>(rv->name_hint_, rit->second, rv->span_);
-        }
-      }
-      return IRMutator::VisitStmt_(op);
-    }
     std::vector<StmtPtr> prefix;
     if (auto entry = entries_.find(op.get()); entry != entries_.end()) {
       for (const auto& transfer : entry->second) prefix.push_back(VisitStmt(transfer));
@@ -2638,13 +3842,6 @@ class RetypeApplier : public IRMutator {
 // Retyping also propagates a retargeted input through its aliasing views.
 StmtPtr RefreshStorageTypes(const StmtPtr& body) { return RetypeApplier({}).VisitStmt(body); }
 
-StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body) {
-  TopDownRetargeter coalescer;
-  auto rewrites = coalescer.CoalesceAccumulatorIfPhis(body);
-  if (rewrites.empty()) return body;
-  return RetypeApplier(std::move(rewrites)).VisitStmt(body);
-}
-
 // Semantic must-alias materialization — the "Step 0" formerly at the head of
 // MemoryReuse. Propagates each ForStmt iter_arg/initValue's canonical MemRef
 // down the yield/producer chain so accumulator producers (and other loop-carry
@@ -2664,104 +3861,76 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // Graph body is orchestration too, so it is skipped for the same reason.
   if (IsOrchestrationLike(func->func_type_)) return func;
 
-  StmtPtr new_body = func->body_;
+  // Resolve required aliases before classifying independent incoming storage.
+  // InitMemRef may leave a rename/view with a provisional allocation request;
+  // that request must not turn a readonly same-window carry into a selector.
+  StmtPtr new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(func->body_);
+  new_body = RetypeApplier({}).VisitStmt(new_body);
+  new_body = NormalizeStorageReferences(new_body, func->params_);
+  ValidateStorageReferenceWrites(new_body, func->params_, func->param_directions_);
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
-    SnapshotAssembleSources snapshots(func);
+    auto current_function = MutableCopy(func);
+    current_function->body_ = new_body;
+    SnapshotAssembleSources snapshots(current_function);
     new_body = snapshots.VisitStmt(new_body);
     new_body = InsertAllocsIntoBody(new_body, snapshots.allocations);
-    // Resolve identity/view lineage before indexing old-value observations.
-    // Branch storage is still provisional here: every dependent alias must
-    // remain unsettled until CanonicalizeBranchStorage/YieldFixup selects it.
-    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
-    new_body = RetypeApplier({}).VisitStmt(new_body);
   }
-  {
-    const bool buffer_ir = ctx != nullptr && ctx->GetEnableBufferIR();
-    LoopInputIsolation isolation;
-    isolation.Plan(new_body, func->params_, /*recurrence_only=*/!buffer_ir);
-    if (!isolation.initializers.empty()) {
-      RetypeApplier applier(std::move(isolation.rewrites), std::move(isolation.initializers),
-                            std::move(isolation.entries));
-      new_body = applier.VisitStmt(new_body);
-      new_body = InsertAllocsIntoBody(new_body, isolation.allocations);
-      new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
-    }
-    if (buffer_ir) new_body = RetypeApplier({}).VisitStmt(new_body);
-  }
-  TopDownRetargeter retargeter;
-  auto rewrites = retargeter.Compute(new_body);
-  if (!rewrites.empty()) {
-    RetypeApplier applier(std::move(rewrites));
-    new_body = applier.VisitStmt(new_body);
-  }
-
-  // Peeled accumulator phis are semantic must-alias boundaries. Coalesce them
-  // before lifetime analysis so nested K-loop branches enter every memory
-  // planner as one allocation family. The legacy planner repeats this repair
-  // after packing because packing may introduce new carry mismatches.
-  new_body = CoalesceAccumulatorIfPhis(new_body);
-  // Accumulator-phi retargeting can expose bare SSA aliases or in-place outputs
-  // whose types still name the pre-retarget allocation. Those are semantic
-  // aliases too, so normalize them before any planner observes lifetimes or
-  // emits handles. Planner-specific repetitions remain below because later
-  // YieldFixup/reuse steps can create fresh mismatches.
-  //
-  // This is the earliest normalization on every path, so no IfStmt YieldFixup has
-  // run yet under any planner: use the pre-fixup form, or an in-place producer
-  // re-anchored onto a phi's not-yet-chosen buffer here survives into the planner
-  // (the guarded runs below only decline to *add* such an anchor, they do not undo
-  // one) and is read as the canonical branch target when the fixup finally runs.
+  // Required aliases and entry isolation precede the immutable planning
+  // snapshot on every path. A loop may update a private carry while its old
+  // initializer remains independently observable after the loop.
   new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
-
-  // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
-  // DsaRP must therefore run the remaining correctness normalizations from
-  // MemoryReuse Steps 4 through 4.5 in the same order. They are not optimizations: when a
-  // peeled accumulator if-phi or
-  // loop yields a value living in a different buffer than its iter_arg/return_var,
-  // it inserts the `tile.move` that writes the result back into the carry. Without
-  // it the carry is never updated and the loop silently becomes a no-op — the
-  // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
-  // because its branch producer runs on a `[1, N]` view in its own buffer.
-  //
-  // Run it here so both alternative planners reconcile carries. Under the
-  // legacy PyPTO planner it stays where it is: Step 4 must run *after* reuse
-  // decisions, which can themselves create fresh mismatches.
-  //
-  // PTOAS reconciles ForStmt carries and preserves existing same-window Mat
-  // if aliases. Addr-less codegen still handles distinct branch buffers by
-  // re-pointing a branch-local producer at the if-phi handle. DSA-RP instead
-  // materializes both IfStmt and ForStmt fixups and repairs bare-Var identity
-  // copies before lifetime analysis and placement.
-  if (ctx != nullptr && ctx->GetEnableBufferIR()) {
-    // The Buffer path cannot rely on codegen to repair branch producers or
-    // invent copies. Establish independent phi destinations while storage can
-    // still be allocated, before any of the three planners sees the program.
-    std::vector<StmtPtr> allocations;
-    TopDownRetargeter branch_storage;
-    auto branch_rewrites = branch_storage.CanonicalizeBranchStorage(new_body, &allocations);
-    if (!branch_rewrites.empty()) {
-      RetypeApplier applier(std::move(branch_rewrites));
-      new_body = applier.VisitStmt(new_body);
-    }
-    new_body = InsertAllocsIntoBody(new_body, allocations);
-    new_body = RetypeApplier({}).VisitStmt(new_body);
-    new_body =
-        FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true, /*canonical_branch_storage=*/true);
-    new_body = NormalizeIdentityCopyBuffers(new_body);
-    // Retargeted producers no longer use their original allocations. Removing
-    // those now is also necessary for PTOAS, which skips MemoryReuse entirely.
-    new_body = RemoveUnusedAllocStatements(new_body, memref_collectors::CollectUsedBasePtrs(new_body));
-  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
-    // Identity-copy normalization brackets YieldFixup on both sides; see the
-    // matching step in TransformMemoryReuse for why each side is needed.
-    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
-
-    new_body = FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true);
-    new_body = NormalizeIdentityCopyBuffers(new_body);
-  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
-    new_body = FixupYields(new_body, func->params_, /*fixup_if_stmts=*/false);
+  new_body = RetypeApplier({}).VisitStmt(new_body);
+  LoopInputIsolation isolation;
+  isolation.Plan(new_body, func->params_, func->param_directions_);
+  std::set<const Var*> reference_carries;
+  if (!isolation.initializers.empty()) {
+    // Consume entries while loop statement identities still match the frozen
+    // isolation plan. A selected carry in the same loop must not rebuild that
+    // loop before its independent copyable carries receive their entry copies.
+    RetypeApplier applier(std::move(isolation.rewrites), std::move(isolation.initializers),
+                          std::move(isolation.entries));
+    new_body = applier.VisitStmt(new_body);
+    reference_carries = applier.RemapReferenceCarries(isolation.reference_carries);
+    new_body = InsertAllocsIntoBody(new_body, isolation.allocations);
+  } else {
+    for (const auto& carry : isolation.reference_carries) reference_carries.insert(carry.get());
   }
+  if (!reference_carries.empty()) {
+    // Keep concrete bindings until the shared graph has recognized every
+    // inherited alias. Clearing a carry first would make its native writeback's
+    // inherited window look like an explicit result destination.
+    new_body = NormalizeStorageReferences(new_body, func->params_, reference_carries);
+    ValidateStorageReferenceWrites(new_body, func->params_, func->param_directions_);
+  }
+  new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
+  new_body = RetypeApplier({}).VisitStmt(new_body);
+  // Logical result identities and both incoming edges are planned together.
+  // Required loop/Acc targets and optional reuse share one SSA snapshot and
+  // one rewrite transaction; planner selection happens only after this contract.
+  std::vector<StmtPtr> allocations;
+  TopDownRetargeter storage;
+  auto rewrites = storage.PlanStorage(func, new_body, &allocations);
+  if (!rewrites.empty()) new_body = RetypeApplier(std::move(rewrites)).VisitStmt(new_body);
+  new_body = InsertAllocsIntoBody(new_body, allocations);
+  new_body = RetypeApplier({}).VisitStmt(new_body);
+  // Native Acc updates still have value-version obligations when their joins
+  // remain concrete. Check them after destination planning, before an illegal
+  // Acc-to-Acc edge repair can obscure the independently observed old value.
+  ValidateStorageReferenceWrites(new_body, func->params_, func->param_directions_,
+                                 /*include_concrete_acc_regions=*/true);
+
+  // Tile PYPTO still reconciles loop writebacks after packing. If edges must
+  // already be complete so every planner sees their actual reads and writes.
+  const bool all_boundaries =
+      ctx != nullptr && (ctx->GetEnableBufferIR() || ctx->GetMemoryPlanner() != MemoryPlanner::PyPTO);
+  new_body = FixupYields(new_body, func->params_, /*canonical_loop_copies=*/true,
+                         /*if_results_only=*/!all_boundaries);
+  new_body = NormalizeIdentityCopyBuffers(new_body);
+  // Fixed destinations can introduce transfers during boundary repair. Check
+  // their writes too; the pre-planning proof alone cannot cover new effects.
+  ValidateStorageReferenceWrites(new_body, func->params_, func->param_directions_);
+  new_body = RemoveUnusedAllocStatements(new_body, memref_collectors::CollectUsedBasePtrs(new_body));
 
   if (new_body == func->body_) return func;
 

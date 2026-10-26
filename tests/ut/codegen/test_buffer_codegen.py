@@ -291,7 +291,9 @@ def test_gm_tensor_carries_cannot_enter_legacy_control_flow_emission():
     loop = ir.ForStmt(
         _scalar("i"), _int(0), _int(2), _int(1), [carry], ir.YieldStmt([carry], SPAN), [result], SPAN
     )
-    with pytest.raises(ValueError, match="only scalar region results and carries"):
+    # Buffer-reference carries are now supported; GM tensor carries still need
+    # normalization to their parameter alias before direct Buffer emission.
+    with pytest.raises(ValueError, match="scalar or buffer-reference region results and carries"):
         _emit(_program([allocation, loop], [tensor]))
 
 

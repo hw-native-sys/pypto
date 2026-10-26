@@ -16,13 +16,13 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -38,12 +38,15 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/storage_reference_analysis.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/memory_reuse/storage.h"
 
 namespace pypto {
 namespace ir {
 namespace {
+
+using memory_reuse::ReverseBranchOrderVisitor;
 
 /**
  * @brief Collect all Var nodes referenced in an expression.
@@ -52,10 +55,8 @@ class VarUseCollector : public IRVisitor {
  public:
   std::set<VarPtr> used_vars;
 
-  void VisitVarLike_(const VarPtr& var) override {
-    used_vars.insert(var);
-    IRVisitor::VisitVarLike_(var);
-  }
+  void VisitVarLike_(const VarPtr& var) override { used_vars.insert(var); }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
 };
 
 /**
@@ -73,325 +74,196 @@ class VarUseCollector : public IRVisitor {
 class LifetimeAnalyzer : public IRVisitor {
  public:
   struct Result {
-    std::vector<VarPtr> ordered_defs;        // TileType vars in definition order
-    std::map<VarPtr, int> var_def_order;     // var -> def order
-    std::map<VarPtr, int> var_last_use;      // var -> effective last use (with loop extension)
-    std::map<VarPtr, StmtPtr> var_def_stmt;  // var -> defining AssignStmt (for op name extraction)
-    // Phi families, keyed per (scf.if, return-slot): each family id groups one
-    // phi return_var with its branch-local yield-sources (the same logical value
-    // across mutually-exclusive paths), so they may always share a buffer.  A
-    // var may belong to several families (e.g. a source yielded at >1 slot)
-    // without those families merging, so we store a *set* of ids per var.
-    std::map<const Var*, std::set<int>> phi_family_ids;
+    std::vector<VarPtr> ordered_defs;
+    std::map<VarPtr, int> var_def_order;
+    std::map<VarPtr, int> var_last_use;
+    std::map<VarPtr, StmtPtr> var_def_stmt;
+    std::map<VarPtr, std::pair<int, int>> var_reverse_liveness;
+    int function_end;
+    int reverse_function_end;
   };
 
   Result Analyze(const StmtPtr& func_body, const std::vector<VarPtr>& entry_vars = {}) {
-    // Function parameters have no defining AssignStmt. Seed Tile parameters at
-    // the entry point so function-wide allocation planning includes their
-    // MemRefs and body uses extend their lifetimes normally.
-    for (const VarPtr& var : entry_vars) {
-      const auto tile_type = As<TileType>(var->GetType());
-      if (!tile_type || !tile_type->memref_.has_value()) continue;
-      ordered_defs_.push_back(var);
-      var_def_order_[var] = current_order_;
+    ReverseBranchOrderVisitor reverse;
+    reverse.Run(func_body);
+    reverse_order_ = std::move(reverse.stmt_order);
+    reverse_end_order_ = std::move(reverse.stmt_end_order);
+    for (const auto& var : entry_vars) {
+      if (GetTileTypeWithMemRef(var->GetType())) RecordDefinition(var, nullptr, 0, 0);
     }
-
-    // Phase 1: Walk IR tree
-    if (func_body) {
-      VisitStmt(func_body);
-    }
-
-    // Phase 2: Apply loop-aware lifetime extension
-    auto effective_last_use = ComputeEffectiveLastUse();
-
-    return {std::move(ordered_defs_), std::move(var_def_order_), std::move(effective_last_use),
-            std::move(var_def_stmt_), std::move(var_family_ids_)};
+    if (func_body) VisitStmt(func_body);
+    auto last_use = ComputeEffectiveLastUse();
+    const int reverse_end = func_body ? static_cast<int>(reverse_end_order_.at(func_body.get()) + 1) : 0;
+    return {std::move(ordered_defs_),
+            std::move(var_def_order_),
+            std::move(last_use),
+            std::move(var_def_stmt_),
+            std::move(var_reverse_liveness_),
+            current_order_,
+            reverse_end};
   }
 
  protected:
-  // Container statements: recurse into children
-  void VisitStmt_(const SeqStmtsPtr& op) override {
-    for (const auto& stmt : op->stmts_) {
-      VisitStmt(stmt);
-    }
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!stmt) return;
+    const auto saved = current_reverse_;
+    current_reverse_ = reverse_order_.at(stmt.get()) + 1;
+    IRVisitor::VisitStmt(stmt);
+    current_reverse_ = saved;
   }
 
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    for (const auto& stmt : op->stmts_) VisitStmt(stmt);
+  }
   void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const ClusterScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { VisitStmt(op->body_); }
 
-  // Leaf statements: assign order + collect defs/uses
   void VisitStmt_(const AssignStmtPtr& op) override {
-    int order = current_order_++;
-
-    // Record TileType variable definitions
-    auto tile_type = As<TileType>(op->var_->GetType());
-    if (tile_type) {
-      ordered_defs_.push_back(op->var_);
-      var_def_order_[op->var_] = order;
-      var_def_stmt_[op->var_] = op;
+    const int order = current_order_++;
+    if (As<TileType>(op->var_->GetType())) {
+      RecordDefinition(op->var_, op, order, current_reverse_);
     }
-
-    // Collect variable uses from value expression (for ALL AssignStmt)
     CollectUsesFromExpr(op->value_, order);
   }
-
-  void VisitStmt_(const EvalStmtPtr& op) override {
-    int order = current_order_++;
-    CollectUsesFromExpr(op->expr_, order);
-  }
-
+  void VisitStmt_(const EvalStmtPtr& op) override { CollectUsesFromExpr(op->expr_, current_order_++); }
   void VisitStmt_(const YieldStmtPtr& op) override { CollectUsesFromValues(op->value_); }
-
   void VisitStmt_(const ReturnStmtPtr& op) override { CollectUsesFromValues(op->value_); }
 
-  // Control flow: recurse into bodies with scope tracking
   void VisitStmt_(const IfStmtPtr& op) override {
-    // Visit condition uses at the current order point (before branches)
     CollectUsesFromExpr(op->condition_, current_order_);
-
-    // Visit then body first, else body second (sequential ordering), recording
-    // each branch's order range so we can tell branch-local yield-sources apart.
-    int then_start = current_order_;
     VisitStmt(op->then_body_);
-    int then_end = current_order_ - 1;
-    int else_start = -1;
-    int else_end = -1;
-    if (op->else_body_.has_value()) {
-      else_start = current_order_;
-      VisitStmt(*op->else_body_);
-      else_end = current_order_ - 1;
-    }
-
-    // An scf.if return_var (phi) is NOT itself a tracked def -- it is materialized
-    // by YieldFixup into a branch yield-source's buffer downstream, and tracking
-    // it here would perturb that lowering.  But reads of the phi *after* the if
-    // keep that buffer live; if we drop them (RecordRawUse early-returns on
-    // untracked vars), the buffer's live range collapses at the yield and a later
-    // temporary is packed onto the still-live phi value (merge_norm mi/li/oi,
-    // #1821).  So we redirect the phi's reads onto its *branch-local* yield-
-    // sources (the tiles actually holding the value), recorded in
-    // `phi_local_sources_`.  A source defined OUTSIDE the branch (loaded before
-    // the if and live elsewhere) is left alone -- it genuinely conflicts and
-    // YieldFixup moves it into the phi buffer.
-    //
-    // Extending both branch sources to the phi's last read makes the two
-    // mutually-exclusive sources overlap, so we also tag them with a fresh
-    // per-slot family id; the reuse packer exempts intra-family pairs from the
-    // interference check.  Ids are *per return slot* (not a transitive union): a
-    // source shared across slots joins several families without merging them, so
-    // two distinct phi results are never exempted.
-    auto then_yield = transform_utils::GetLastYieldStmt(op->then_body_);
-    auto else_yield =
-        op->else_body_.has_value() ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
-    auto branch_local = [this](const VarPtr& v, int start, int end) {
-      if (start < 0) return false;
-      auto it = var_def_order_.find(v);
-      return it != var_def_order_.end() && it->second >= start && it->second <= end;
-    };
+    if (op->else_body_) VisitStmt(*op->else_body_);
+    const int merge = std::max(0, current_order_ - 1);
+    const size_t reverse_merge = reverse_end_order_.at(op.get()) + 1;
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      const auto& rv = op->return_vars_[i];
-      auto tile_type = As<TileType>(rv->GetType());
-      if (!tile_type || !tile_type->memref_.has_value()) continue;
-      int family_id = next_family_id_++;
-      std::vector<VarPtr> local_sources;
-      std::set<const Var*> seen_phi;
-      // Flatten a nested-if phi source down to its terminal tracked tiles, and
-      // tag THOSE with this (outer) slot's family id -- otherwise the terminals
-      // only carry the inner slot's id and `overlap_blocks_sharing` (which sees
-      // terminal vars, not the untracked phi wrapper) would reject safe nested
-      // mutually-exclusive sharing.
-      std::function<void(const VarPtr&, int, int)> add_source_var = [&](const VarPtr& src, int start,
-                                                                        int end) {
-        auto pit = phi_local_sources_.find(src.get());
-        if (pit != phi_local_sources_.end()) {
-          if (!seen_phi.insert(src.get()).second) return;
-          for (const auto& nested : pit->second) add_source_var(nested, start, end);
-          return;
-        }
-        if (!branch_local(src, start, end)) return;
-        local_sources.push_back(src);
-        var_family_ids_[src.get()].insert(family_id);
-      };
-      auto add_source = [&](const ExprPtr& val, int start, int end) {
-        if (auto src = AsVarLike(val)) add_source_var(src, start, end);
-      };
-      if (then_yield && i < then_yield->value_.size()) {
-        add_source(then_yield->value_[i], then_start, then_end);
-      }
-      if (else_yield && i < else_yield->value_.size()) {
-        add_source(else_yield->value_[i], else_start, else_end);
-      }
-      if (!local_sources.empty()) {
-        var_family_ids_[rv.get()].insert(family_id);
-        phi_local_sources_[rv.get()] = std::move(local_sources);
-      }
+      const auto& result = op->return_vars_[i];
+      if (!GetTileTypeWithMemRef(result->GetType())) continue;
+      RecordDefinition(result, op, merge, reverse_merge);
     }
   }
 
-  void VisitStmt_(const ForStmtPtr& op) override {
-    ProcessLoopBody(op->iter_args_, op->body_);
-    RegisterReturnVars(op->iter_args_, op->return_vars_);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    ProcessLoopBody(op->iter_args_, op->body_);
-    RegisterReturnVars(op->iter_args_, op->return_vars_);
-  }
+  void VisitStmt_(const ForStmtPtr& op) override { ProcessLoop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { ProcessLoop(op); }
 
  private:
-  int current_order_ = 0;
-
-  // Loop boundaries recorded during Phase 1
   struct LoopBoundary {
-    int start_order;
-    int end_order;
+    int start;
+    int end;
+    size_t reverse_end;
   };
-  std::vector<LoopBoundary> loop_scopes_;
-
-  // Variable tracking (Phase 1)
+  int current_order_ = 0;
+  size_t current_reverse_ = 0;
+  std::map<const Stmt*, size_t> reverse_order_;
+  std::map<const Stmt*, size_t> reverse_end_order_;
+  std::vector<LoopBoundary> loops_;
+  std::vector<size_t> active_loops_;
+  std::map<VarPtr, std::set<size_t>> recurring_uses_;
   std::vector<VarPtr> ordered_defs_;
   std::map<VarPtr, int> var_def_order_;
-  std::map<VarPtr, int> var_raw_last_use_;  // Raw last use (without loop extension)
+  std::map<VarPtr, int> var_raw_last_use_;
   std::map<VarPtr, StmtPtr> var_def_stmt_;
-
-  // Maps ForStmt/WhileStmt return_vars to their corresponding initValue vars.
-  // YieldFixup will place return_vars into initValue's MemRef buffer,
-  // so any post-loop use of a return_var must extend the initValue's lifetime.
   std::map<VarPtr, VarPtr> return_var_to_init_var_;
+  std::map<VarPtr, VarPtr> carrier_cache_;
+  std::map<VarPtr, std::pair<int, int>> var_reverse_liveness_;
 
-  // Per-slot phi families: var -> set of family ids (see VisitStmt_(IfStmtPtr)).
-  std::map<const Var*, std::set<int>> var_family_ids_;
-  int next_family_id_ = 0;
+  void RecordDefinition(const VarPtr& var, const StmtPtr& stmt, int order, size_t reverse_order) {
+    ordered_defs_.push_back(var);
+    var_def_order_[var] = order;
+    if (stmt) var_def_stmt_[var] = stmt;
+    const int reverse = static_cast<int>(reverse_order);
+    var_reverse_liveness_[var] = {reverse, reverse};
+  }
 
-  // scf.if phi return_var -> its branch-local yield-sources, so RecordRawUse can
-  // redirect phi reads onto the tiles that actually hold the value.
-  std::map<const Var*, std::vector<VarPtr>> phi_local_sources_;
+  [[nodiscard]] VarPtr ResolveCarryInitCarrier(const ExprPtr& value) {
+    auto var = AsVarLike(value);
+    std::vector<VarPtr> path;
+    std::set<const Var*> seen;
+    VarPtr carrier;
+    while (var) {
+      if (auto cached = carrier_cache_.find(var); cached != carrier_cache_.end()) {
+        carrier = cached->second;
+        break;
+      }
+      if (!seen.insert(var.get()).second) break;
+      path.push_back(var);
+      if (auto iter_arg = As<IterArg>(var)) {
+        var = AsVarLike(iter_arg->initValue_);
+      } else if (auto found = return_var_to_init_var_.find(var); found != return_var_to_init_var_.end()) {
+        var = found->second;
+      } else {
+        carrier = var;
+        break;
+      }
+    }
+    for (const auto& member : path) carrier_cache_[member] = carrier;
+    return carrier;
+  }
 
-  void CollectUsesFromExpr(const ExprPtr& expr, int use_order) {
+  template <typename LoopPtr>
+  void ProcessLoop(const LoopPtr& op) {
+    for (const auto& argument : op->iter_args_) {
+      CollectUsesFromExpr(argument->initValue_, current_order_);
+    }
+    const size_t index = loops_.size();
+    loops_.push_back({current_order_, current_order_, reverse_end_order_.at(op.get()) + 1});
+    active_loops_.push_back(index);
+    if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) {
+      CollectUsesFromExpr(op->condition_, current_order_);
+    }
+    VisitStmt(op->body_);
+    active_loops_.pop_back();
+    loops_[index].end = std::max(loops_[index].start, current_order_ - 1);
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      auto carrier = ResolveCarryInitCarrier(op->iter_args_[i]->initValue_);
+      if (!carrier || !var_def_order_.count(carrier)) continue;
+      // The carry's physical slot is required on every iteration, including a
+      // zero-trip exit. A fresh body result is not its initializer.
+      recurring_uses_[carrier].insert(index);
+      if (i < op->return_vars_.size()) return_var_to_init_var_[op->return_vars_[i]] = carrier;
+    }
+  }
+
+  void CollectUsesFromExpr(const ExprPtr& expr, int order) {
     if (!expr) return;
     VarUseCollector collector;
     collector.VisitExpr(expr);
-    for (const auto& var : collector.used_vars) {
-      RecordRawUse(var, use_order);
-    }
+    for (const auto& var : collector.used_vars) RecordRawUse(var, order);
   }
-
   void CollectUsesFromValues(const std::vector<ExprPtr>& values) {
-    int order = current_order_++;
-    for (const auto& val : values) {
-      CollectUsesFromExpr(val, order);
-    }
+    const int order = current_order_++;
+    for (const auto& value : values) CollectUsesFromExpr(value, order);
+  }
+  void RecordRawUse(const VarPtr& var, int order) {
+    const auto target = ResolveCarryInitCarrier(var);
+    if (!target || !var_def_order_.count(target)) return;
+    var_raw_last_use_[target] = std::max(var_raw_last_use_[target], order);
+    auto& reverse = var_reverse_liveness_.at(target);
+    reverse.second = std::max(reverse.second, static_cast<int>(current_reverse_));
+    const int definition = var_def_order_.at(target);
+    const auto loop = std::upper_bound(active_loops_.begin(), active_loops_.end(), definition,
+                                       [&](int point, size_t index) { return point < loops_[index].start; });
+    if (loop != active_loops_.end()) recurring_uses_[target].insert(*loop);
   }
 
-  void ProcessLoopBody(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
-    for (const auto& iter_arg : iter_args) {
-      if (iter_arg->initValue_) {
-        CollectUsesFromExpr(iter_arg->initValue_, current_order_);
-      }
-    }
-    int loop_start = current_order_;
-    VisitStmt(body);
-    int loop_end = current_order_ - 1;
-    loop_scopes_.push_back({loop_start, loop_end});
-  }
-
-  /// Resolve a loop carry's init to the variable that actually owns the buffer.
-  ///
-  /// A nested loop seeds its carry from the *enclosing* loop's IterArg, and an
-  /// IterArg is an alias of its own init rather than a definition in its own
-  /// right -- like return_vars, iter-args are deliberately absent from
-  /// `ordered_defs_` / `var_def_order_`, so they carry no lifetime of their own.
-  /// Walking the carry chain to the first non-IterArg therefore lands on the
-  /// AssignStmt-defined tile whose buffer the whole loop nest shares, which is
-  /// the variable a use of any return_var in that nest has to keep alive.
-  ///
-  /// Returns nullptr when the chain does not end at a tracked carrier; the
-  /// caller then records no mapping, exactly as before.
-  [[nodiscard]] VarPtr ResolveCarryInitCarrier(const ExprPtr& init_value) const {
-    auto var = AsVarLike(init_value);
-    // An init is always defined before its own loop, so the chain is acyclic in
-    // well-formed IR; the visited set bounds it anyway rather than hanging.
-    std::set<const Var*> seen;
-    while (var) {
-      auto iter_arg = As<IterArg>(var);
-      if (!iter_arg) return var;
-      if (!seen.insert(var.get()).second) return nullptr;
-      var = AsVarLike(iter_arg->initValue_);
-    }
-    return nullptr;
-  }
-
-  void RegisterReturnVars(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
-    size_t count = std::min(return_vars.size(), iter_args.size());
-    for (size_t i = 0; i < count; ++i) {
-      const auto& rv = return_vars[i];
-      if (!As<TileType>(rv->GetType())) continue;
-
-      // Map return_var -> the init's buffer carrier so that post-loop uses of the
-      // return_var extend that carrier's lifetime (not the return_var's).
-      // We do NOT register return_vars in ordered_defs_ -- they must not
-      // participate in sharing group computation, which would inflate
-      // group lifetimes and block unrelated reuse opportunities.
-      auto init_var = ResolveCarryInitCarrier(iter_args[i]->initValue_);
-      if (init_var && var_def_order_.count(init_var)) {
-        return_var_to_init_var_[rv] = init_var;
-      }
-    }
-  }
-
-  void RecordRawUse(const VarPtr& var, int use_order) {
-    // If var is an scf.if phi return_var, redirect the use to its branch-local
-    // yield-sources (the tiles holding the value), keeping their buffers live to
-    // the phi's last read.  Sources may themselves be phis (chained scf.if), so
-    // recurse.
-    auto pit = phi_local_sources_.find(var.get());
-    if (pit != phi_local_sources_.end()) {
-      for (const auto& src : pit->second) RecordRawUse(src, use_order);
-      return;
-    }
-
-    // If var is a loop return_var, redirect the use to its initValue var.
-    // YieldFixup will alias the return_var to the initValue's MemRef,
-    // so keeping the initValue live prevents premature buffer reuse.
-    auto it = return_var_to_init_var_.find(var);
-    const VarPtr& target = (it != return_var_to_init_var_.end()) ? it->second : var;
-
-    if (!var_def_order_.count(target)) {
-      return;
-    }
-    // operator[] default-inserts 0 for missing keys; use_order is always >= 0.
-    var_raw_last_use_[target] = std::max(var_raw_last_use_[target], use_order);
-  }
-
-  /**
-   * @brief Phase 2: Compute effective last use with loop-aware extension.
-   *
-   * For each variable, if it's used inside a loop body and defined before
-   * that loop, extend its lifetime to the end of the loop. This handles
-   * the case where the loop re-executes and the variable is needed again.
-   */
-  [[nodiscard]] std::map<VarPtr, int> ComputeEffectiveLastUse() const {
+  std::map<VarPtr, int> ComputeEffectiveLastUse() {
     std::map<VarPtr, int> effective;
-
     for (const auto& var : ordered_defs_) {
-      int def_order = var_def_order_.at(var);
-      int raw_last = var_raw_last_use_.count(var) ? var_raw_last_use_.at(var) : def_order;
-      int extended = raw_last;
-
-      // Check all loop scopes: if var is defined before the loop and
-      // has any use inside the loop [start, end], extend to loop end.
-      for (const auto& loop : loop_scopes_) {
-        if (def_order < loop.start_order && raw_last >= loop.start_order) {
-          // Variable is defined before loop and used inside it
-          extended = std::max(extended, loop.end_order);
+      int last = var_def_order_.at(var);
+      if (auto use = var_raw_last_use_.find(var); use != var_raw_last_use_.end()) {
+        last = use->second;
+      }
+      if (auto recurring = recurring_uses_.find(var); recurring != recurring_uses_.end()) {
+        for (const size_t index : recurring->second) {
+          const auto& loop = loops_[index];
+          last = std::max(last, loop.end);
+          auto& reverse = var_reverse_liveness_.at(var);
+          reverse.second = std::max(reverse.second, static_cast<int>(loop.reverse_end));
         }
       }
-
-      effective[var] = extended;
+      effective[var] = last;
     }
-
     return effective;
   }
 };
@@ -409,6 +281,7 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
   // Step 1: Walk full IR tree to collect variable defs, uses, and ordering
   LifetimeAnalyzer analyzer;
   auto result = analyzer.Analyze(func_body, entry_vars);
+  const auto references = AnalyzeStorageReferences(func_body, entry_vars);
 
   if (result.ordered_defs.empty()) {
     return {lifetimes, {}};
@@ -464,6 +337,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
     // Compute MERGED lifetime for all variables in the sharing group
     int min_def_point = INT_MAX;
     int max_last_use = INT_MIN;
+    int min_reverse_def = INT_MAX;
+    int max_reverse_last_use = INT_MIN;
 
     for (const auto& group_var : sharing_group) {
       int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
@@ -473,12 +348,17 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
+      const auto& reverse = result.var_reverse_liveness.at(group_var);
+      min_reverse_def = std::min(min_reverse_def, reverse.first);
+      max_reverse_last_use = std::max(max_reverse_last_use, reverse.second);
     }
 
     LifetimeInterval interval;
     interval.variable = sharing_group[0];
     interval.def_point = min_def_point;
     interval.last_use_point = max_last_use;
+    interval.reverse_def_point = min_reverse_def;
+    interval.reverse_last_use_point = max_reverse_last_use;
     auto representative_tile_type = As<TileType>(sharing_group[0]->GetType());
     INTERNAL_CHECK_SPAN(representative_tile_type != nullptr, sharing_group[0]->span_)
         << "Expected TileType for reuse interval";
@@ -487,6 +367,19 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
     interval.size = GetDefinedMemRef(representative_tile_type)->size_;
+    // A selector owns no allocation. Every concrete origin reachable through
+    // its reference graph remains exclusive for the complete function in both
+    // branch orders. This first implementation intentionally spends memory
+    // instead of expanding an origin set at each selector. Extend allocation
+    // occupancy only: per-value liveness below still describes the original
+    // SSA versions, so sequential author bindings and old-value observations
+    // do not acquire artificial conflicts merely by supplying a reference.
+    if (references.source_bases.count(GetDefinedMemRef(representative_tile_type)->base_.get())) {
+      interval.def_point = 0;
+      interval.last_use_point = result.function_end;
+      interval.reverse_def_point = 0;
+      interval.reverse_last_use_point = result.reverse_function_end;
+    }
 
     // A direct dynamic tile.slice is lowered through pto.subview, which rebuilds
     // its runtime address from the source tile and slice operands. Every other
@@ -544,8 +437,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
               << " space=" << static_cast<int>(interval.memory_space) << " size=" << interval.size;
   }
 
-  // Per-var individual liveness (def + effective last use, including phi/loop
-  // extension) for the packer's precise pairwise interference check.
+  // Primary intervals remain available to allocation constraints. The packer
+  // also uses the precomputed reverse interval of each allocation group.
   std::map<const Var*, std::pair<int, int>> var_liveness;
   for (const auto& [var, def_point] : result.var_def_order) {
     int last_use = result.var_last_use.count(var) ? result.var_last_use.at(var) : def_point;
@@ -554,7 +447,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
   return {lifetimes,
           var_sharing_groups,
-          std::move(result.phi_family_ids),
           std::move(var_liveness),
           std::move(pipeline_membership),
           std::move(pipeline_load_tiles),

@@ -53,11 +53,32 @@ program_with_memrefs = init_pass(program)
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
-   - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
+   - **ForStmt/WhileStmt return_vars**: share the corresponding entry carry's MemRef, including on zero-trip loops
+   - **IfStmt return_vars**: receive independent provisional requests from their own layout; common result planning later chooses a concrete destination or a reference selecting existing storage
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
 8. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+
+### Provisional result requests and storage references
+
+An unbound if result's request is not a requirement to copy both incoming
+values into another buffer. `MaterializeSemanticAliases` first tries a common
+window or safe producer destination. If that cannot implement a value selection,
+it may retain the result as a typed storage reference without a MemRef. Its
+aliases, views and reference loop carries follow the SSA definition graph.
+Automatic reference normalization targets spaces without a supported same-space
+copy, such as Mat and Acc. Vec keeps its existing concrete-copy and coalescing
+path, avoiding an unnecessary loss of lifetime reuse.
+Only actual storage owners keep allocations; the provisional result request is
+removed before placement and contributes no capacity. Explicit result bindings
+remain constraints and cannot be replaced with an arbitrary selected address.
+
+For example, selecting two independently live Mat loads does not require a
+third Mat allocation or an unsupported Mat-to-Mat transfer. The result selects
+one existing handle, while each load retains its own owner. The subsequent
+storage verifier distinguishes these graph-proven references from an unplanned
+producer that merely lacks storage.
 
 ### Constant inputs before address construction
 
@@ -275,23 +296,28 @@ gaps, listed here so the table above is not mistaken for a claim of correctness:
   structure as the accumulator. Their slice offsets carry the same latent mismatch and are
   deliberately left unchanged here; modelling them is separate work.
 
-## ForStmt Loop-Carry Variables
+## ForStmt/WhileStmt Loop-Carry Variables
 
-ForStmt has four loop-carry related variables with specific MemRef sharing rules:
+ForStmt and WhileStmt have four loop-carry roles with specific MemRef sharing rules:
 
 | Role | Description | MemRef Source |
 | ---- | ----------- | ------------- |
 | initValue | Initial value before first iteration | From producing operation |
 | iter_arg | Loop body variable | Inherited from initValue |
 | yield value | Produced at end of each iteration | From producing operation (independent) |
-| return_var | Captures final yield value after loop | Inherited from yield value |
+| return_var | Names the carry storage after the loop | Inherited from iter_arg, including zero-trip exit |
 
 **Sharing groups**:
 
-- Group A: initValue + iter_arg (same MemRef)
-- Group B: yield value + return_var (same MemRef)
+- Entry storage: initValue + iter_arg + return_var share one MemRef.
+- The yielded producer may still occupy independent storage.
 
-Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by MemoryReuse (which inserts `tile.move` if needed).
+Subsequent semantic planning retargets the producer or inserts a legal transfer
+into the carry. If results follow a separate contract: their unplaced requests do
+not inherit then/else addresses. Inferred result types omit source MemRefs;
+explicit result bindings remain authoritative. The common plan in
+[MaterializeSemanticAliases](36-materialize_semantic_aliases.md) resolves these
+requests before capacity planning, so a request does not itself add a physical buffer.
 
 ## Implementation
 
@@ -307,7 +333,7 @@ Pass InitMemRef();
 - `NormalizeStmtStructure` is called internally before MemRef initialization
 - `MaterializePtoLevel3ScratchMutator` inserts only missing compiler-owned optional scratch (`tile.ci`, narrowing `tile.cast`, required `tile.sort32`) after all tile shape/cast rewrites and before MemRef collection; explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
-  - Handles MemRef sharing for view ops, reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`), tile aliases (`a = b`), and ForStmt/IfStmt yield values
+  - Handles view/writeback aliases, bare tile aliases, For/While entry storage, and independent If result requests
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs
 - `CreateAllocStatement` / `InsertAllocsIntoBody` create and insert alloc ops
 
@@ -327,4 +353,4 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - Tests planner/target-gated `tile.ci`, narrowing `tile.cast`, and `tile.sort32` scratch materialization
 - Tests tile.store result shares MemRef with output param
 - Tests accumulate op (matmul_acc) MemRef sharing with accumulator input
-- Tests ForStmt loop-carry MemRef relationships (initValue/iter_arg sharing, yield/return_var sharing)
+- Tests For/While entry/carry/result storage and independent If result requests

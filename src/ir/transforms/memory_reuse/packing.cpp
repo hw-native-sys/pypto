@@ -144,9 +144,8 @@ struct PackedBuffer {
  */
 ReuseMap IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
-    const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
+    const ForbidAliasMap& forbid_alias, const ForbidAliasMap& copy_separation,
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
-    const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
@@ -185,62 +184,6 @@ ReuseMap IdentifyReuseOpportunities(
     auto it = sharing_groups.find(rep);
     return it != sharing_groups.end() ? &it->second : nullptr;
   };
-  auto ids_intersect = [](const std::set<int>& x, const std::set<int>& y) {
-    auto ix = x.begin();
-    auto iy = y.begin();
-    while (ix != x.end() && iy != y.end()) {
-      if (*ix < *iy) {
-        ++ix;
-      } else if (*iy < *ix) {
-        ++iy;
-      } else {
-        return true;
-      }
-    }
-    return false;
-  };
-  // Two vars are in the same phi family (the same logical value across
-  // mutually-exclusive scf.if paths for one return slot) -> they never conflict.
-  auto same_phi_family_var = [&](const Var* x, const Var* y) {
-    auto ix = phi_family_ids.find(x);
-    auto iy = phi_family_ids.find(y);
-    return ix != phi_family_ids.end() && iy != phi_family_ids.end() && ids_intersect(ix->second, iy->second);
-  };
-  // Precise per-var overlap (touching allowed: last_use == def is fine).
-  auto var_overlap = [&](const Var* x, const Var* y) {
-    auto ix = var_liveness.find(x);
-    auto iy = var_liveness.find(y);
-    if (ix == var_liveness.end() || iy == var_liveness.end()) return true;  // unknown -> conservative
-    return !(ix->second.second <= iy->second.first || iy->second.second <= ix->second.first);
-  };
-  // Decide whether a group-interval overlap between two intervals actually
-  // blocks sharing.  This is invoked ONLY when their merged intervals overlap.
-  //
-  // To keep behaviour identical to the prior coarse gate for everything that is
-  // not phi-related, we block unless a phi family makes the overlap spurious:
-  // some cross-group var pair must be phi-family-related (the same value across
-  // mutually-exclusive scf.if paths), AND no *non*-family cross-group pair may
-  // truly overlap.  The latter still catches a real conflict hidden behind a
-  // branch-local alias of an outside-live buffer (e.g. `result = seed` aliasing
-  // a `seed` that overlaps the sibling branch).
-  auto overlap_blocks_sharing = [&](const LifetimeInterval& a, const LifetimeInterval& b) {
-    const auto* ga = group_members(a.variable);
-    const auto* gb = group_members(b.variable);
-    const std::vector<VarPtr> sa = ga ? std::vector<VarPtr>{} : std::vector<VarPtr>{a.variable};
-    const std::vector<VarPtr> sb = gb ? std::vector<VarPtr>{} : std::vector<VarPtr>{b.variable};
-    bool family_pair = false;
-    for (const auto& x : (ga ? *ga : sa)) {
-      for (const auto& y : (gb ? *gb : sb)) {
-        if (same_phi_family_var(x.get(), y.get())) {
-          family_pair = true;
-        } else if (var_overlap(x.get(), y.get())) {
-          return true;  // genuine non-family conflict
-        }
-      }
-    }
-    return !family_pair;  // no phi relation -> block exactly as the coarse gate did
-  };
-
   // Maps a tile's *original* MemRef base to the base its buffer is coalesced
   // onto by a committed reuse decision.  A reuse retargets the reused var (and
   // every VIEW that inherited its base) from its own base onto the
@@ -316,9 +259,10 @@ ReuseMap IdentifyReuseOpportunities(
   // taking the MemRef base — catching both an operand reassigned by an earlier
   // reuse decision AND one occupying the buffer via VIEW inheritance (a reshape
   // / slice / extract shares its source's base with no reuse-map entry).
-  auto forbid_blocks = [&](const LifetimeInterval& writer, const LifetimeInterval& occupant) {
-    auto fa_it = forbid_alias.find(writer.variable.get());
-    if (fa_it == forbid_alias.end()) return false;
+  auto forbid_blocks = [&](const LifetimeInterval& writer, const LifetimeInterval& occupant,
+                           const ForbidAliasMap& constraints) {
+    auto fa_it = constraints.find(writer.variable.get());
+    if (fa_it == constraints.end()) return false;
     const Var* occ_base = physical_base(occupant.variable);
     if (occ_base == nullptr) return false;
     for (const VarPtr& operand : fa_it->second) {
@@ -464,15 +408,24 @@ ReuseMap IdentifyReuseOpportunities(
   // PTO binds a per-var alloc_tile so differing shapes/dtypes legally alias one
   // base, and largest-first ordering guarantees the buffer is sized to its
   // representative (no member is ever larger than the buffer it joins).
+  bool placing_subranges = false;
   auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
-    // Group-interval overlap is a fast reject; when it fires, fall back to the
-    // precise per-var check so mutually-exclusive / same-value phi-family tiles
-    // may still share while a genuine conflict (incl. one hidden behind a
-    // branch-local alias of an outside-live buffer) is still caught.
-    if (LifetimesOverlap(cand, member) && overlap_blocks_sharing(cand, member)) return false;
+    // Disjointness in either legal sibling order proves that the groups cannot
+    // be co-live. Overlap in both orders is conservative for nested branches.
+    // Both hulls already include every mandatory alias, so the existing
+    // quadratic root-pair search needs only constant-time bounds checks.
+    const bool reverse_overlap = !(cand.reverse_last_use_point <= member.reverse_def_point ||
+                                   member.reverse_last_use_point <= cand.reverse_def_point);
+    if (LifetimesOverlap(cand, member) && reverse_overlap) return false;
     if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
     if (workspace_blocks(cand, member) || workspace_blocks(member, cand)) return false;
-    if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
+    if (forbid_blocks(cand, member, forbid_alias) || forbid_blocks(member, cand, forbid_alias)) return false;
+    // A remaining copy permits identical or disjoint windows, never a partial
+    // overlap. Only whole-root placement proves identity for these transfers.
+    if (placing_subranges &&
+        (forbid_blocks(cand, member, copy_separation) || forbid_blocks(member, cand, copy_separation))) {
+      return false;
+    }
     if (pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
     return true;
   };
@@ -554,8 +507,9 @@ ReuseMap IdentifyReuseOpportunities(
     // legacy whole-buffer FFD exactly. Subrange mode instead treats members that
     // cannot share bytes with the candidate as address blockers and picks the
     // lowest aligned gap. Members stay sorted by offset, so one candidate scans
-    // each arena once and the pack remains O(M^2).
+    // each arena once, preserving the existing quadratic root-pair search.
     auto pack = [&](bool allow_subranges) {
+      placing_subranges = allow_subranges;
       std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
         if (is_pinned[idx]) {
@@ -659,8 +613,8 @@ ReuseMap IdentifyReuseOpportunities(
       // (.claude/rules/pass-complexity.md). A legitimate shed converges in Σ_g(F_g−1) steps over the few
       // co-live groups, but the pipeline-group count can grow with generated IR, so cap the full re-packs
       // at a constant. The cap only trips in a pathological many-group overflow, where the legacy fallback
-      // is the correct safe outcome anyway — keeping the shed at O(kMaxShedRepacks · M²), the same O(M²)
-      // class as the base FFD packer, instead of O(groups · M²).
+      // is the correct safe outcome anyway. A fixed retry budget preserves the complexity
+      // of one FFD pack up to a constant factor.
       constexpr int kMaxShedRepacks = 256;
       int shed_repacks = 0;
       while (cap != 0 && footprint(buffers) > cap) {
@@ -818,11 +772,33 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
         : reuse_map_(reuse_map), sharing_groups_(sharing_groups) {}
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      auto variable = RewriteDefinition(op->var_);
+      auto value = VisitExpr(op->value_);
+      if (variable == op->var_ && value == op->value_) return op;
+      return std::make_shared<AssignStmt>(variable, value, op->span_);
+    }
+
+    StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+      auto result = As<IfStmt>(IRMutator::VisitStmt_(op));
+      auto returns = result->return_vars_;
+      bool changed = false;
+      for (size_t i = 0; i < returns.size(); ++i) {
+        auto replacement = RewriteDefinition(op->return_vars_[i]);
+        changed |= replacement != returns[i];
+        returns[i] = std::move(replacement);
+      }
+      if (!changed) return result;
+      auto updated = MutableCopy(result);
+      updated->return_vars_ = std::move(returns);
+      return updated;
+    }
+
+    VarPtr RewriteDefinition(const VarPtr& var) {
       // Check if this variable should reuse another's MemRef
-      if (reuse_map_.count(op->var_)) {
-        const ReusePlacement& placement = reuse_map_.at(op->var_);
+      if (reuse_map_.count(var)) {
+        const ReusePlacement& placement = reuse_map_.at(var);
         INTERNAL_CHECK_SPAN(
-            placement.byte_offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()), op->span_)
+            placement.byte_offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()), var->span_)
             << "Internal error: reuse placement offset does not fit an INDEX ConstInt";
         VarPtr source_var = placement.representative;
 
@@ -831,17 +807,17 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
 
         if (!source_tile_type || !source_tile_type->memref_.has_value()) {
           LOG_ERROR << "Source variable " << source_var->name_hint_ << " does not have MemRef";
-          return IRMutator::VisitStmt_(op);
+          return var;
         }
 
         std::optional<MemRefPtr> source_memref = source_tile_type->memref_;
 
         // Get current variable's TileType
-        auto curr_tile_type = As<TileType>(op->var_->GetType());
+        auto curr_tile_type = As<TileType>(var->GetType());
 
         if (!curr_tile_type) {
-          LOG_ERROR << "Current variable " << op->var_->name_hint_ << " is not TileType";
-          return IRMutator::VisitStmt_(op);
+          LOG_ERROR << "Current variable " << var->name_hint_ << " is not TileType";
+          return var;
         }
 
         // Rebase a sharing-group member onto the reuse target, keeping its
@@ -904,18 +880,18 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
                                              [this](const ExprPtr& expr) { return VisitExpr(expr); }));
 
         // Create new Var
-        auto new_var = std::make_shared<const Var>(op->var_->name_hint_, new_tile_type, op->var_->span_);
+        auto new_var = std::make_shared<const Var>(var->name_hint_, new_tile_type, var->span_);
 
         // Record the variable substitution mapping (old -> new)
         // This ensures that all subsequent references to the old variable will be replaced with the new one
-        var_substitution_map_[op->var_] = new_var;
+        var_substitution_map_[var] = new_var;
 
         // CRITICAL: If this variable shares MemRef with others (view operations),
         // we need to update ALL of them to use the new MemRef
-        if (sharing_groups_.count(op->var_)) {
-          const auto& sharing_group = sharing_groups_.at(op->var_);
+        if (sharing_groups_.count(var)) {
+          const auto& sharing_group = sharing_groups_.at(var);
           for (const auto& shared_var : sharing_group) {
-            if (shared_var != op->var_) {
+            if (shared_var != var) {
               // Create new Var for shared variable with same reused MemRef
               auto shared_tile_type = As<TileType>(shared_var->GetType());
               if (shared_tile_type) {
@@ -933,13 +909,10 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
           }
         }
 
-        // Visit value expression (this will recursively apply substitutions)
-        ExprPtr new_value = VisitExpr(op->value_);
-
-        return std::make_shared<const AssignStmt>(new_var, new_value, op->span_);
+        return new_var;
       }
-
-      return IRMutator::VisitStmt_(op);
+      const auto found = var_substitution_map_.find(var);
+      return found == var_substitution_map_.end() ? var : found->second;
     }
 
     // Override VisitExpr_ to replace variable references with their new versions

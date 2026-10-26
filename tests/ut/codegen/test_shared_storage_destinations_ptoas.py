@@ -305,10 +305,26 @@ def test_addressed_packed_fp4_destination_keeps_its_own_allocation(root_dtype, r
 
 
 @pytest.mark.parametrize("operation", ["add", "exp"])
-def test_shared_destination_rejects_unsupported_dynamic_valid_shape(operation):
+def test_shared_destination_initializes_dynamic_valid_shape(operation):
     program = _elementwise_program(operation, (1, 32), (32, 1), dynamic_valid=True)
-    with pytest.raises(ValueError, match=rf"tile\.{operation}.*static valid_shape"):
-        _generate(program)
+    mlir = _generate(program)
+    producer = _line(mlir, f"pto.t{operation} ins(")
+    definitions = _definitions(mlir)
+    _assert_operand_declarations(producer, definitions)
+    destinations, annotations = _operands(producer, "outs")
+    destination = destinations[0]
+    view = _line(mlir, f"{destination} = pto.treshape %root ")
+    assert view.endswith(f"-> {annotations[0]}"), mlir
+    assert "rows=32, cols=1, v_row=?, v_col=?" in annotations[0], mlir
+    initialized = _line(mlir, f"pto.set_validshape {destination},")
+    source = _line(mlir, "%source = pto.alloc_tile")
+    valid_rows = re.search(r"valid_row = (%[A-Za-z0-9_]+)", source)
+    assert valid_rows is not None, source
+    assert f"{valid_rows[1]}, %c1_index : {annotations[0]}" in initialized, mlir
+    assert mlir.index(view) < mlir.index(initialized) < mlir.index(producer), mlir
+    assert _operands(_line(mlir, "pto.tstore"), "ins") == (destinations, annotations), mlir
+    assert "pto.set_validshape %root," not in mlir, mlir
+    assert mlir.count("= pto.alloc_tile") == 2, mlir
 
 
 @pytest.mark.ptoas_compile
@@ -420,13 +436,18 @@ def test_each_tuple_output_uses_its_own_shared_storage_view():
     assert mlir.count("= pto.alloc_tile") == 4, mlir
 
 
-@pytest.mark.parametrize("dynamic_valid", [False, True], ids=["static-valid", "dynamic-valid"])
-def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid):
+@pytest.mark.parametrize(
+    "dynamic_valid,body_local",
+    [(False, False), (True, False), (True, True)],
+    ids=["static-valid", "dynamic-valid", "dynamic-body-local"],
+)
+def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid, body_local):
     """A scalar update returns its input phi, even when its MemRef names an old root."""
     span = ir.Span.unknown()
     zero = ir.ConstInt(0, pl.INDEX, span)
     storage = ir.MemRef(ir.Var("root_base", ir.PtrType(), span), zero, 128, span)
     valid_rows = ir.Var("valid_rows", ir.ScalarType(pl.INDEX), span)
+    valid_input = ir.Var("valid_input", ir.ScalarType(pl.INDEX), span)
     root_type = ir.TileType((1, 32), pl.FP32, storage, None, ir.MemorySpace.Vec)
     column_type = ir.TileType(
         (32, 1),
@@ -442,6 +463,15 @@ def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid):
     output = ir.Var("output", ir.TensorType((32, 1), pl.FP32), span)
     stored = ir.Var("stored", output.type, span)
     offsets = ir.MakeTuple([zero, zero], span)
+    valid_statements = (
+        [
+            ir.AssignStmt(
+                valid_rows, ir.Min(valid_input, ir.ConstInt(32, pl.INDEX, span), pl.INDEX, span), span
+            )
+        ]
+        if body_local
+        else []
+    )
 
     def branch(name: str) -> ir.SeqStmts:
         tile = ir.Var(name, column_type, span)
@@ -456,6 +486,7 @@ def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid):
     body = ir.SeqStmts(
         [
             ir.AssignStmt(root, ir.Call(ir.Op("tile.create"), [], root_type, span), span),
+            *valid_statements,
             ir.IfStmt(flag, branch("left"), branch("right"), [merged], span),
             ir.AssignStmt(
                 updated,
@@ -476,7 +507,7 @@ def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid):
     )
     params = [(flag, ir.ParamDirection.In), (output, ir.ParamDirection.Out)]
     if dynamic_valid:
-        params.append((valid_rows, ir.ParamDirection.In))
+        params.append((valid_input if body_local else valid_rows, ir.ParamDirection.In))
     function = ir.Function("kernel", params, [output.type], body, span, ir.FunctionType.InCore)
     mlir = _generate(ir.Program([function], "SharedStorageTileWrite", span))
     write = _line(mlir, "pto.tsetval ins(")
@@ -484,14 +515,31 @@ def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid):
     destination, annotations = _operands(write, "outs")
     assert _operands(store, "ins") == (destination, annotations), mlir
     assert destination != ["%root"], mlir
-    assert f"{destination[0]} = pto.alloc_tile" in mlir, mlir
+    view = _line(mlir, f"{destination[0]} = pto.treshape %root ")
+    assert view.endswith(f"-> {annotations[0]}"), mlir
+    assert _definitions(mlir)[destination[0]] == annotations[0], mlir
     assert "rows=32, cols=1," in annotations[0], write
-    assert "pto.treshape %root " not in mlir, mlir
-    assert mlir.count("= pto.alloc_tile") == 2, mlir
+    assert mlir.index(view) < mlir.index("scf.if") < mlir.index(write), mlir
+    if dynamic_valid:
+        initialized = _line(mlir, f"pto.set_validshape {destination[0]},")
+        if body_local:
+            definition = _line(mlir, "arith.minsi")
+            valid_ssa = re.search(r"(%[A-Za-z0-9_]+) = arith.minsi", definition)
+            assert mlir.index(definition) < mlir.index(view), mlir
+        else:
+            valid_ssa = re.search(r"(%[A-Za-z0-9_]+): index", _line(mlir, "func.func @kernel"))
+        assert valid_ssa is not None, mlir
+        assert f"{valid_ssa[1]}, %c1_index : {annotations[0]}" in initialized, mlir
+        assert mlir.index(view) < mlir.index(initialized) < mlir.index("scf.if"), mlir
+    else:
+        assert "v_row=32, v_col=1," in annotations[0], mlir
+    assert "pto.set_validshape %root," not in mlir, mlir
+    assert "pto.tmov" not in mlir, mlir
+    assert mlir.count("= pto.alloc_tile") == 1, mlir
 
 
-def test_branch_move_copies_to_the_actual_phi_even_when_ir_storage_matches():
-    """An independent phi invalidates the source/result IR alias as copy proof."""
+def test_branch_move_copies_to_its_independent_typed_phi():
+    """An independent result keeps the real moves and their own operand types."""
     span = ir.Span.unknown()
     zero = ir.ConstInt(0, pl.INDEX, span)
     storage = ir.MemRef(ir.Var("root_base", ir.PtrType(), span), zero, 128, span)
@@ -499,20 +547,27 @@ def test_branch_move_copies_to_the_actual_phi_even_when_ir_storage_matches():
     column_type = ir.TileType(
         (32, 1), pl.FP32, storage, ir.TileView(blayout=ir.TileLayout.col_major), ir.MemorySpace.Vec
     )
+    destination_type = ir.TileType(
+        (32, 1),
+        pl.FP32,
+        ir.MemRef(ir.Var("destination_base", ir.PtrType(), span), zero, 128, span),
+        ir.TileView(blayout=ir.TileLayout.col_major),
+        ir.MemorySpace.Vec,
+    )
     root = ir.Var("root", root_type, span)
     source = ir.Var("source", column_type, span)
-    merged = ir.Var("merged", column_type, span)
+    merged = ir.Var("merged", destination_type, span)
     flag = ir.Var("flag", ir.ScalarType(pl.BOOL), span)
     output = ir.Var("output", ir.TensorType((32, 1), pl.FP32), span)
     stored = ir.Var("stored", output.type, span)
 
     def branch(name: str, line: int) -> ir.SeqStmts:
         move_span = ir.Span("shared_storage_branch.py", line, 1, line, 20)
-        moved = ir.Var(name, column_type, move_span)
+        moved = ir.Var(name, destination_type, move_span)
         return ir.SeqStmts(
             [
                 ir.AssignStmt(
-                    moved, ir.Call(ir.Op("tile.move"), [source], column_type, move_span), move_span
+                    moved, ir.Call(ir.Op("tile.move"), [source], destination_type, move_span), move_span
                 ),
                 ir.YieldStmt([moved], span),
             ],

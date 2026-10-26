@@ -790,6 +790,12 @@ class InlineCallsMutator : public IRMutator {
     bool changed = false;
     for (size_t i = 0; i < vars.size() && i < yield->value_.size(); ++i) {
       auto type = WithCarriedMemRef(yield->value_[i]->GetType(), vars[i]->GetType());
+      if (As<TileType>(type)) {
+        // Specialization updates the joined descriptor, while storage remains
+        // the result's own contract. WithCarriedMemRef alone would retain a
+        // pinned incoming allocation even when the original join was unbound.
+        type = CloneTypeWithMemRef(type, GetTypeMemRef(vars[i]->GetType()));
+      }
       auto var = Retype(op->return_vars_[i], vars[i], type);
       changed |= var.get() != vars[i].get();
       vars[i] = std::move(var);

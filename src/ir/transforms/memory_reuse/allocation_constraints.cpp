@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -268,14 +269,17 @@ class ForbidAliasCollector : public IRVisitor {
   // *values* need no such mapping: enforcement compares physical MemRef bases,
   // which every group member already shares.
   ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
-                       const BufferViewAnalysis* views)
-      : views_(views) {
+                       const BufferViewAnalysis* views, const std::set<const Var*>& coalescible_transfers)
+      : views_(views), coalescible_transfers_(coalescible_transfers) {
     for (const auto& [var, group] : sharing_groups) {
       if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
     }
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
+    // An exact copy can be eliminated by copy coalescing.
+    // Every remaining transfer still has to satisfy tile.move's disjointness.
+    if (coalescible_transfers_.count(op->var_.get()) != 0) return;
     // Multi-result calls are assigned to a tuple temporary and unpacked by
     // subsequent TupleGetItem assignments. Carry the call's semantic
     // no-alias inputs onto every physical tile result; the tuple temporary
@@ -351,6 +355,7 @@ class ForbidAliasCollector : public IRVisitor {
 
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
+  const std::set<const Var*>& coalescible_transfers_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
@@ -604,9 +609,54 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
 
 }  // namespace
 
+namespace memory_reuse {
+
+BranchStorageProtection CollectBranchStorageProtection(const FunctionPtr& function, const StmtPtr& body) {
+  BranchStorageProtection protection;
+  auto& hazard_bases = protection.no_mutable_alias_bases;
+  if (NeedsLoadTpopHazardGuard(function)) {
+    HazardInputCollector collector;
+    collector.Run(body);
+    const auto hazard = collector.Take();
+    for (const auto* value : hazard.load_derived) {
+      if (auto tile = GetTileTypeWithMemRef(value->GetType())) {
+        hazard_bases.insert(GetDefinedMemRef(tile)->base_.get());
+      }
+    }
+  }
+
+  WrittenWorkspaceCollector workspaces;
+  workspaces.VisitStmt(body);
+  const auto workspace_bases = workspaces.TakeBases();
+  hazard_bases.insert(workspace_bases.begin(), workspace_bases.end());
+  protection.immovable_bases = hazard_bases;
+
+  class PipelineAllocationCollector : public IRVisitor {
+   public:
+    explicit PipelineAllocationCollector(std::set<const Var*>& bases) : bases_(bases) {}
+
+    void VisitExpr(const ExprPtr&) override {}
+
+    void VisitStmt_(const AssignStmtPtr& assign) override {
+      const auto call = As<Call>(assign->value_);
+      if (call && !call->GetAttr<std::string>(kPipelineMembershipAttr, std::string()).empty()) {
+        if (const auto* base = TileMemRefBase(assign->var_)) bases_.insert(base);
+      }
+    }
+
+   private:
+    std::set<const Var*>& bases_;
+  } pipelines(protection.immovable_bases);
+  pipelines.VisitStmt(body);
+  return protection;
+}
+
+}  // namespace memory_reuse
+
 AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
                                                           const LifetimeAnalysisResult& lifetimes,
-                                                          const char* consumer) {
+                                                          const char* consumer,
+                                                          const std::set<const Var*>& coalescible_transfers) {
   AllocationConstraintAnalysis result;
   result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
   for (const auto& [base, size] : result.declared_allocation_sizes) {
@@ -632,7 +682,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
-  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr);
+  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr,
+                                        coalescible_transfers);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
   return result;

@@ -2350,3 +2350,67 @@ class Example:
 """
     with pytest.raises(ParserSyntaxError, match="types must match the number of results"):
         pl.parse_program(source)
+
+
+@pytest.mark.parametrize("kind", ["for", "while"])
+# BufferType constructor parsing is outside the existing Python text dialect.
+@pytest.mark.parametrize("descriptor", ["reference", "static_valid", "dynamic_valid", "unchanged"])
+def test_loop_carry_descriptor_roundtrips_independently_of_initializer(kind, descriptor):
+    """A reference binding keeps its exact type while retaining its concrete entry value."""
+    span = ir.Span.unknown()
+    count = ir.Var("count", ir.ScalarType(DataType.INDEX), span)
+    flag = ir.Var("flag", ir.ScalarType(DataType.BOOL), span)
+    required_rows = ir.Var("required_rows", ir.ScalarType(DataType.INDEX), span)
+    base = ir.Var("seed_storage", ir.PtrType(), span)
+    initial_type = ir.TileType(
+        [16, 16], DataType.FP16, ir.MemRef(base, 0, 512, span), memory_space=MemorySpace.Mat
+    )
+    valid_rows = required_rows if descriptor == "dynamic_valid" else 8
+    carry_type = (
+        initial_type
+        if descriptor == "unchanged"
+        else ir.TileType(
+            [16, 16],
+            DataType.FP16,
+            tile_view=ir.TileView(valid_shape=[valid_rows, 16])
+            if descriptor in ("static_valid", "dynamic_valid")
+            else None,
+            memory_space=MemorySpace.Mat,
+        )
+    )
+    seed = ir.Var("seed", initial_type, span)
+    current = ir.IterArg("current", carry_type, seed, span)
+    result = ir.Var("result", carry_type, span)
+    body = ir.YieldStmt([current], span)
+    if kind == "for":
+        loop = ir.ForStmt(
+            ir.Var("index", count.type, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            count,
+            ir.ConstInt(1, DataType.INDEX, span),
+            [current],
+            body,
+            [result],
+            span,
+        )
+    else:
+        loop = ir.WhileStmt(flag, [current], body, [result], span)
+    function = ir.Function(
+        "main",
+        [count, flag, required_rows, seed],
+        [carry_type],
+        ir.SeqStmts([loop, ir.ReturnStmt([result], span)], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    original = ir.Program([function], "ExplicitCarryDescriptor", span)
+    printed = ir.python_print(original)
+    assert ("pl._dump.loop_init(" in printed) == (descriptor != "unchanged")
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(original, reparsed, enable_auto_mapping=True)
+    assert ir.structural_hash(original) == ir.structural_hash(reparsed)
+    restored = next(iter(reparsed.functions.values()))
+    assert isinstance(restored.body, ir.SeqStmts)
+    restored_loop = restored.body.stmts[0]
+    assert isinstance(restored_loop, (ir.ForStmt, ir.WhileStmt))
+    assert restored_loop.iter_args[0].initValue.same_as(restored.params[3])

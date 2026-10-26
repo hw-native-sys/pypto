@@ -306,15 +306,17 @@ class BufferEmissionPreflight : public ir::IRVisitor {
                  assign->span_)
           << "Direct Buffer IR codegen supports only scalar or buffer assignments";
     }
-    if (auto branch = As<ir::IfStmt>(stmt)) CheckScalarRegionValues(branch->return_vars_, stmt->span_);
+    if (auto branch = As<ir::IfStmt>(stmt)) CheckRegionValues(branch->return_vars_, stmt->span_);
     if (auto loop = As<ir::WhileStmt>(stmt)) {
-      CheckScalarRegionValues(loop->iter_args_, stmt->span_);
-      CheckScalarRegionValues(loop->return_vars_, stmt->span_);
+      CheckRegionValues(loop->iter_args_, stmt->span_);
+      CheckRegionValues(loop->return_vars_, stmt->span_);
+      for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
     }
-    if (auto yield = As<ir::YieldStmt>(stmt)) CheckScalarRegionValues(yield->value_, stmt->span_);
+    if (auto yield = As<ir::YieldStmt>(stmt)) CheckRegionValues(yield->value_, stmt->span_);
     if (auto loop = As<ir::ForStmt>(stmt)) {
-      CheckScalarRegionValues(loop->iter_args_, stmt->span_);
-      CheckScalarRegionValues(loop->return_vars_, stmt->span_);
+      CheckRegionValues(loop->iter_args_, stmt->span_);
+      CheckRegionValues(loop->return_vars_, stmt->span_);
+      for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
       CHECK_SPAN(ir::GetScalarDtype(loop->loop_var_) == DataType::INDEX, loop->span_)
           << "Direct Buffer IR codegen requires an INDEX for-loop induction variable";
       for (const auto& bound : {loop->start_, loop->stop_, loop->step_}) {
@@ -333,6 +335,10 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   }
 
  protected:
+  // A carry's initializer is checked once at its loop binding. Following it
+  // again from every use would repeatedly expand nested handle-carry chains.
+  void VisitExpr_(const ir::IterArgPtr& argument) override { VisitVarLike_(argument); }
+
   void VisitBinaryExpr_(const ir::BinaryExprPtr& expr) override {
     CheckSignedArithmetic(expr);
     CheckSignedArithmetic(expr->left_);
@@ -397,10 +403,10 @@ class BufferEmissionPreflight : public ir::IRVisitor {
 
  private:
   template <typename T>
-  static void CheckScalarRegionValues(const std::vector<T>& values, const ir::Span& span) {
+  static void CheckRegionValues(const std::vector<T>& values, const ir::Span& span) {
     for (const auto& value : values) {
-      CHECK_SPAN(As<ir::ScalarType>(value->GetType()), span)
-          << "Direct Buffer IR codegen currently supports only scalar region results and carries";
+      CHECK_SPAN(As<ir::ScalarType>(value->GetType()) || As<ir::BufferType>(value->GetType()), span)
+          << "Direct Buffer IR codegen requires scalar or buffer-reference region results and carries";
     }
   }
 
@@ -418,6 +424,10 @@ class BufferEmissionPreflight : public ir::IRVisitor {
 };
 
 }  // namespace
+
+std::string PTOCodegen::GetBufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span) {
+  return BufferTypeString(type, span);
+}
 
 bool PTOCodegen::UsesBufferIR(const ir::FunctionPtr& func) {
   if (func->ir_stage_ == ir::FunctionIRStage::Buffer) return true;

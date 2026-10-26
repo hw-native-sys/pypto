@@ -9,13 +9,11 @@
 
 """Regression: if/else-yield tile phi under memory_planner=PTOAS (issue #1956).
 
-Under PTOAS the opportunistic MemoryReuse pass (whose YieldFixupMutator aliases a
-branch's tile yields onto the phi return_var's canonical handle) is skipped. PTO
-codegen must therefore itself point each branch's tile producer at the single
-head-declared phi handle; otherwise each branch writes its own handle and the
-post-if read of the phi handle reads a buffer no branch ever wrote — a silent
-miscompile. This test asserts both branch producers write the one phi handle and
-that handle is declared exactly once.
+MaterializeSemanticAliases settles each result's storage before PTOAS skips
+opportunistic MemoryReuse. Codegen must preserve that storage through differently
+typed views and control-flow scopes: branch writes and post-if reads must reach
+the same physical allocation, and each SSA handle must retain its own type and
+dominate every use.
 """
 
 # pyright: reportUndefinedVariable=false
@@ -53,22 +51,23 @@ class IfPhiProgram:
 @pl.program
 class IfPhiPassThroughProgram:
     """One branch yields a fresh producer; the other yields the outer tile `a`
-    unchanged (a pass-through). The pass-through branch has no producer writing
-    the phi buffer, so codegen must copy `a` into the phi handle (tmov)."""
+    unchanged (a pass-through). A post-if observation preserves the old value of
+    `a`, so the phi needs independent storage and the pass-through needs a copy."""
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
         self,
         x: pl.Tensor[[64, 64], pl.FP32],
         flag: pl.Scalar[pl.INT32],
-        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+    ) -> pl.Tensor[[128, 64], pl.FP32]:
         a: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
         if flag == 0:
             r: pl.Tile[[64, 64], pl.FP32] = pl.add(a, 1.0)
         else:
             r: pl.Tile[[64, 64], pl.FP32] = a
-        return pl.store(r, [0, 0], out)
+        saved = pl.store(r, [0, 0], out)
+        return pl.store(a, [64, 0], saved)
 
 
 @pl.program
@@ -165,9 +164,14 @@ def test_if_phi_branches_write_one_head_declared_handle():
 
 
 def test_if_phi_pass_through_branch_copies_into_phi_handle():
+    """An independently observed old input forces a real pass-through fallback copy."""
     mlir = _ptoas_pto(IfPhiPassThroughProgram)
-    store = next(ln for ln in mlir.splitlines() if "pto.tstore" in ln)
-    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
+    stores = [ln for ln in mlir.splitlines() if "pto.tstore" in ln]
+    assert len(stores) == 2, mlir
+    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", stores[0])
+    old = _first_group(r"outs\((%[A-Za-z0-9_]+)", _sole_line(mlir, "pto.tload"))
+    assert _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", stores[1]) == old, mlir
+    assert old != phi, f"the branch producer must not overwrite the independently observed input:\n{mlir}"
 
     # The producing branch writes the phi handle directly.
     prod = next(ln for ln in mlir.splitlines() if "pto.tadds" in ln)
@@ -177,6 +181,34 @@ def test_if_phi_pass_through_branch_copies_into_phi_handle():
     # phi handle via tmov, so the post-if store never reads an uninitialised buffer.
     movs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and f"outs({phi}" in ln]
     assert len(movs) == 1, f"pass-through branch must tmov into the phi handle {phi}:\n{mlir}"
+    assert _first_group(r"pto\.tmov ins\((%[A-Za-z0-9_]+)", movs[0]) == old, mlir
+
+
+def test_if_phi_pass_through_reuses_an_unobserved_incoming_handle():
+    """The same branch pattern needs no fallback copy when its old input is dead after the merge."""
+
+    @pl.program
+    class SafePassThrough:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a = pl.load(x, [0, 0], [64, 64])
+            if flag == 0:
+                r = pl.add(a, 1.0)
+            else:
+                r = a
+            return pl.store(r, [0, 0], out)
+
+    mlir = _ptoas_pto(SafePassThrough)
+    incoming = _first_group(r"outs\((%[A-Za-z0-9_]+)", _sole_line(mlir, "pto.tload"))
+    stored = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", _sole_line(mlir, "pto.tstore"))
+    updated = _first_group(r"outs\((%[A-Za-z0-9_]+)", _sole_line(mlir, "pto.tadds"))
+    assert incoming == stored == updated, mlir
+    assert "pto.tmov" not in mlir, mlir
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
@@ -329,50 +361,106 @@ def _ins_of(line: str) -> str:
     return _first_group(r"ins\((%[A-Za-z0-9_]+)", line)
 
 
-def test_colvec_carry_branch_views_are_copied_into_the_phi_handle():
-    """A branch that yields a zero-copy view must be copied, not re-pointed.
+def _tile_handle_definitions(mlir):
+    """Record exact SSA types and the allocation shared by each reshape view."""
+    definitions = {}
+    for index, line in enumerate(mlir.splitlines()):
+        match = re.match(r"\s*(%[A-Za-z0-9_]+) = pto\.(alloc_tile|treshape)\b", line)
+        if match is None:
+            continue
+        name, kind = match.groups()
+        assert name not in definitions, f"duplicate tile handle definition: {line}"
+        types = _tile_buf_types(line)
+        root = name
+        if kind == "treshape":
+            source = _first_group(r"pto\.treshape (%[A-Za-z0-9_]+)", line)
+            assert source in definitions, f"view source must dominate its definition: {line}"
+            assert types[0] == definitions[source][1], line
+            root = definitions[source][2]
+        definitions[name] = (index, types[-1], root)
+    return definitions
 
-    `tile.reshape` is a Call, so the branch-local-producer test used to accept it
-    and re-point it at the phi handle — but a view's codegen emits nothing when the
-    target already carries the result type, so the phi buffer stayed unwritten and
-    the loop became a silent no-op. Views must fall through to the tmov fallback.
-    """
+
+def _if_arm_lines(mlir):
+    lines = mlir.splitlines()
+    start = lines.index(_sole_line(mlir, "scf.if "))
+    arms = [[], []]
+    depth, arm = 1, 0
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped == "} else {" and depth == 1:
+            arm = 1
+            continue
+        if stripped == "}":
+            depth -= 1
+            if depth == 0:
+                return start, index, arms
+        elif stripped.endswith("{"):
+            depth += 1
+        arms[arm].append((index, line))
+    raise AssertionError(f"unterminated if region:\n{mlir}")
+
+
+def _assert_branch_tile_values(mlir, destination, initial, expected):
+    """Follow arithmetic and copies through views, requiring arm-local dominance."""
+    definitions = _tile_handle_definitions(mlir)
+    start, _, arms = _if_arm_lines(mlir)
+    target = definitions[destination][2]
+    assert definitions[target][0] < start, "the destination allocation must dominate both arms"
+    initial_roots = {definitions[handle][2]: value for handle, value in initial.items()}
+    for arm, expected_value in zip(arms, expected, strict=True):
+        indices = {index for index, _ in arm}
+        state = dict(initial_roots)
+        for index, line in arm:
+            operation = re.search(r"\bpto\.(tmov|tadd|tmul|tadds)\b", line)
+            if operation is None:
+                continue
+            operands = line.split("ins(", 1)[1].split(" :", 1)[0]
+            inputs = [handle for handle in re.findall(r"%[A-Za-z0-9_]+", operands) if handle in definitions]
+            output = _outs_of(line)
+            for handle in [*inputs, output]:
+                definition = definitions[handle][0]
+                assert definition < index and (definition < start or definition in indices), line
+            values = tuple(state[definitions[handle][2]] for handle in inputs)
+            state[definitions[output][2]] = values[0] if operation[1] == "tmov" else (operation[1], values)
+        assert state[target] == expected_value, f"branch did not write its selected value:\n{mlir}"
+
+
+def test_colvec_carry_branch_views_are_copied_into_the_phi_handle():
+    """Each arm's view must reach the shared carry, directly or through an edge copy."""
     mlir = _incore_ptoas_pto(ColVectorCarryProgram)
 
     store = _sole_line(mlir, "pto.tstore")
     carry = _ins_of(store)
 
-    # The final tmov of the iteration writes the carry from the phi handle.
-    into_carry = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == carry]
-    assert len(into_carry) == 1, f"the loop carry must be written back exactly once:\n{mlir}"
-    phi = _ins_of(into_carry[0])
-    assert phi != carry, f"the write-back must copy the phi handle into the carry:\n{into_carry[0]}"
-
-    # Both branches copy their (view) result into that phi handle.
-    into_phi = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == phi]
-    assert len(into_phi) == 2, f"each branch must tmov its view yield into {phi}:\n{mlir}"
-    for ln in into_phi:
-        src = _ins_of(ln)
-        assert f"{src} = pto.treshape" in mlir, f"a branch yield should be a reshape view:\n{ln}"
+    loads = [line for line in mlir.splitlines() if "pto.tload" in line]
+    assert len(loads) == 2, mlir
+    assert _outs_of(loads[0]) == carry, mlir
+    other = _outs_of(loads[1])
+    product = ("tmul", ("carry", "other"))
+    _assert_branch_tile_values(
+        mlir, carry, {carry: "carry", other: "other"}, (product, ("tadd", (product, "other")))
+    )
+    _assert_tmov_operand_types(mlir)
 
 
 def test_colvec_carry_tmov_annotates_each_operand_with_its_own_type():
     """A `pto.treshape` view carries static valid dims; an `alloc_tile` handle does
     not. Annotating both tmov operands with one type makes the def/use types
     disagree and ptoas rejects the module."""
-    mlir = _incore_ptoas_pto(ColVectorCarryProgram)
-
-    store = _sole_line(mlir, "pto.tstore")
-    carry = _ins_of(store)
-    into_carry = next(ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == carry)
-    phi = _ins_of(into_carry)
-
-    into_phi = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == phi]
-    assert into_phi, f"no tmov into the phi handle {phi}:\n{mlir}"
-    for ln in into_phi:
-        src, dst = ln.split("ins(", 1)[1].split(") outs(", 1)
-        assert "v_row=?" not in src, f"the view operand must keep its static valid dims:\n{ln}"
-        assert "v_row=?" in dst, f"the alloc_tile handle stays dynamic-valid:\n{ln}"
+    # Independent physical roots guarantee a real transfer even when branch
+    # planning can otherwise eliminate an intermediate phi copy.
+    program = _move_to_shared_storage_program((32, 1), (32, 1), source_shape=(1, 32))
+    mlir = _shared_storage_move_pto(program)
+    _assert_tmov_operand_types(mlir)
+    move = _sole_line(mlir, "pto.tmov")
+    definitions = _tile_handle_definitions(mlir)
+    source, target = _ins_of(move), _outs_of(move)
+    assert definitions[source][2] != definitions[target][2], mlir
+    source_type, target_type = _tile_buf_types(move)
+    assert "v_row=32, v_col=1" in source_type and "v_row=?, v_col=?" in target_type, move
+    assert _ins_of(_sole_line(mlir, "pto.tstore")) == target, mlir
 
 
 def test_colvec_carry_is_written_back_under_pypto_planner():
@@ -453,13 +541,16 @@ def test_post_if_view_reads_merged_phi_handle(program):
     assert "= pto.treshape " in view, mlir
     phi = _first_group(r"= pto\.treshape (%[A-Za-z0-9_]+)", view)
 
-    # Both branch yields must reach this phi, not an obsolete shared MemRef handle.
-    into_phi = [ln for ln in lines if "pto.tmov" in ln and _outs_of(ln) == phi]
-    assert len(into_phi) == 2, mlir
-    phi_decl = _sole_line(mlir, f"{phi} = pto.alloc_tile")
-    if_line = _sole_line(mlir, "scf.if ")
-    assert lines.index(phi_decl) < lines.index(if_line), mlir
-    assert lines.index(view) > max(lines.index(ln) for ln in into_phi), mlir
+    # The dead incoming value can own the destination. Its pass-through arm
+    # retains the load; the other arm must update those same physical bytes.
+    definitions = _tile_handle_definitions(mlir)
+    root = definitions[phi][2]
+    incoming = _outs_of(_sole_line(mlir, "pto.tload"))
+    assert root == definitions[incoming][2], mlir
+    _, end, _ = _if_arm_lines(mlir)
+    assert definitions[phi][0] < lines.index(_sole_line(mlir, "scf.if ")), mlir
+    assert lines.index(view) > end, "the post-if view must be rebuilt in the continuation"
+    _assert_branch_tile_values(mlir, phi, {incoming: "incoming"}, (("tadds", ("incoming",)), "incoming"))
 
 
 @pl.program
@@ -516,23 +607,30 @@ def test_row_initialized_column_carry_writes_a_view_of_its_original_storage():
     root = _outs_of(_sole_line(mlir, "pto.texpands"))
     root_alloc = _sole_line(mlir, f"{root} = pto.alloc_tile")
     assert "rows=1, cols=32" in root_alloc and "v_row=?, v_col=?" in root_alloc, root_alloc
-    # Initializer, merged if result, and updated row are the only allocations.
-    assert mlir.count("= pto.alloc_tile") == 3, mlir
+    # A column descriptor is a view of row storage, never another physical
+    # allocation that could strand the loop's original carry.
+    allocations = [line for line in mlir.splitlines() if "= pto.alloc_tile" in line]
+    assert allocations and all("rows=1, cols=32" in line for line in allocations), mlir
 
     # Both the post-loop store and the loop write-back address the original bytes.
     store_handle = _ins_of(_sole_line(mlir, "pto.tstore"))
     assert f"{store_handle} = pto.treshape {root} " in mlir, mlir
-    writes_to_root = []
-    for move in (line for line in mlir.splitlines() if "pto.tmov" in line):
+    definitions = _tile_handle_definitions(mlir)
+    assert definitions[store_handle][2] == root, mlir
+    _assert_branch_tile_values(mlir, store_handle, {root: "carry"}, (("tadds", ("carry",)), "carry"))
+    _, _, arms = _if_arm_lines(mlir)
+    into_root = [
+        (index, line)
+        for arm in arms
+        for index, line in arm
+        if "pto.tmov" in line and definitions[_outs_of(line)][2] == root
+    ]
+    assert into_root, "the typed branch view must address the original carry storage"
+    for index, move in into_root:
         destination = _outs_of(move)
-        views = [line for line in mlir.splitlines() if f"{destination} = pto.treshape {root} " in line]
-        if views:
-            assert len(views) == 1, mlir
-            view = views[0]
-            assert _tile_buf_types(view)[0] == _tile_buf_types(root_alloc)[0], view
-            assert "rows=32, cols=1, v_row=32, v_col=1" in _tile_buf_types(view)[-1], view
-            writes_to_root.append(move)
-    assert len(writes_to_root) == 1, mlir
+        view_index, view_type, view_root = definitions[destination]
+        assert view_root == root and view_index < index, move
+        assert "rows=32, cols=1" in view_type and "blayout=col_major" in view_type, move
 
 
 def test_row_initialized_column_carry_keeps_baked_address_codegen():
@@ -559,6 +657,7 @@ def _move_to_shared_storage_program(
     logical_shape: tuple[int, int],
     *,
     valid_shape: str = "full",
+    source_shape: tuple[int, int] | None = None,
 ) -> _ir.Program:
     """Build the lowered shared-MemRef state without high-level layout repair."""
     span = _ir.Span.unknown()
@@ -578,10 +677,23 @@ def _move_to_shared_storage_program(
     output = _ir.Var("output", _ir.TensorType(logical_shape, pl.FP32), span)
     stored = _ir.Var("stored", output.type, span)
     offsets = _ir.MakeTuple([zero, zero], span)
+    source_statements = [_ir.AssignStmt(source, _ir.Call(_ir.Op("tile.create"), [], source_type, span), span)]
+    if source_shape is not None:
+        source_storage_type = _ir.TileType(source_shape, pl.FP32, source_memref, None, _ir.MemorySpace.Vec)
+        source_storage = _ir.Var("source_storage", source_storage_type, span)
+        shape = _ir.MakeTuple([_ir.ConstInt(size, pl.INDEX, span) for size in logical_shape], span)
+        source_statements = [
+            _ir.AssignStmt(
+                source_storage, _ir.Call(_ir.Op("tile.create"), [], source_storage_type, span), span
+            ),
+            _ir.AssignStmt(
+                source, _ir.Call(_ir.Op("tile.reshape"), [source_storage, shape], source_type, span), span
+            ),
+        ]
     body = _ir.SeqStmts(
         [
             _ir.AssignStmt(root, _ir.Call(_ir.Op("tile.create"), [], root_type, span), span),
-            _ir.AssignStmt(source, _ir.Call(_ir.Op("tile.create"), [], source_type, span), span),
+            *source_statements,
             _ir.AssignStmt(
                 destination,
                 _ir.Call(_ir.Op("tile.move"), [source], destination_type, span),
@@ -629,10 +741,25 @@ def test_shared_storage_move_uses_the_logical_destination_type(root_shape, logic
         assert f"rows={rows}, cols={cols}, v_row={rows}, v_col={cols}" in view, view
 
 
-def test_shared_storage_move_rejects_a_dynamic_valid_destination_view():
+def test_shared_storage_move_initializes_a_dynamic_valid_destination_view():
     program = _move_to_shared_storage_program((1, 32), (32, 1), valid_shape="dynamic")
-    with pytest.raises(ValueError, match=r"tile\.move.*static valid_shape"):
-        _shared_storage_move_pto(program)
+    mlir = _shared_storage_move_pto(program)
+    _assert_tmov_operand_types(mlir)
+    definitions = _tile_handle_definitions(mlir)
+    move = _sole_line(mlir, "pto.tmov")
+    source, destination = _ins_of(move), _outs_of(move)
+    assert definitions[source][2] != definitions[destination][2], mlir
+    assert definitions[destination][2] == "%root", mlir
+    assert "rows=32, cols=1, v_row=?, v_col=?" in definitions[destination][1], mlir
+    initialized = _sole_line(mlir, f"pto.set_validshape {destination},")
+    valid_rows = re.search(r"(%[A-Za-z0-9_]+): index", _sole_line(mlir, "func.func @kernel"))
+    assert valid_rows is not None, mlir
+    assert f"{valid_rows[1]}, %c1_index : {definitions[destination][1]}" in initialized, mlir
+    assert definitions[destination][0] < mlir.splitlines().index(initialized), mlir
+    assert mlir.index(initialized) < mlir.index(move), mlir
+    assert _ins_of(_sole_line(mlir, "pto.tstore")) == destination, mlir
+    assert "pto.set_validshape %root," not in mlir, mlir
+    assert mlir.count("= pto.alloc_tile") == 2, mlir
 
 
 def test_shared_storage_move_keeps_the_zero_valid_sentinel_dynamic():
@@ -644,6 +771,132 @@ def test_shared_storage_move_keeps_the_zero_valid_sentinel_dynamic():
     assert "rows=32, cols=1, v_row=?, v_col=?" in _tile_buf_types(view)[-1], view
     assert "v_row=0" not in view and "v_col=0" not in view, view
     assert f"{_outs_of(_sole_line(mlir, 'pto.tmov'))} = pto.treshape %root " in view, mlir
+
+
+def _if_shared_metadata_program(*, dynamic_result: bool = False) -> _ir.Program:
+    """Keep one lowered allocation while its if result owns different live metadata."""
+    span = _ir.Span.unknown()
+    zero = _ir.ConstInt(0, pl.INDEX, span)
+    rows = _ir.Var("root_rows", _ir.ScalarType(pl.INDEX), span)
+    selected_rows = _ir.Var("selected_rows", _ir.ScalarType(pl.INDEX), span)
+    condition = _ir.Var("condition", _ir.ScalarType(pl.BOOL), span)
+    memref = _ir.MemRef(_ir.Var("root_base", _ir.PtrType(), span), zero, 512, span)
+    root_view = _ir.TileView(
+        valid_shape=[rows, 32], pad=_ir.PadValue.zero if dynamic_result else _ir.PadValue.max
+    )
+    result_view = _ir.TileView(
+        valid_shape=[selected_rows, 32] if dynamic_result else [4, 32],
+        pad=_ir.PadValue.zero,
+    )
+    root_type = _ir.TileType([4, 32], pl.FP32, memref, root_view, _ir.MemorySpace.Vec)
+    result_type = _ir.TileType([4, 32], pl.FP32, memref, result_view, _ir.MemorySpace.Vec)
+    root = _ir.Var("root", root_type, span)
+    selected = _ir.Var("selected", result_type, span)
+    incoming_selected = _ir.Var("incoming_selected", result_type, span) if dynamic_result else selected
+    output = _ir.Var("output", _ir.TensorType([4, 32], pl.FP32), span)
+    stored = _ir.Var("stored", output.type, span)
+    observed = _ir.Var("observed", output.type, span)
+    offsets = _ir.MakeTuple([zero, zero], span)
+
+    def branch(name: str) -> _ir.SeqStmts:
+        value = _ir.Var(name, result_type, span)
+        # create accepts the already-lowered dynamic descriptor; fillpad makes
+        # the static full-valid result while retaining root's partial metadata.
+        call = (
+            _ir.Call(_ir.Op("tile.create"), [], result_type, span)
+            if dynamic_result
+            else _ir.Call(
+                _ir.Op("tile.fillpad_inplace"),
+                [root],
+                {"pad_value": _ir.PadValue.zero},
+                result_type,
+                span,
+            )
+        )
+        return _ir.SeqStmts([_ir.AssignStmt(value, call, span), _ir.YieldStmt([value], span)], span)
+
+    branches = [_ir.IfStmt(condition, branch("left"), branch("right"), [incoming_selected], span)]
+    if dynamic_result:
+        # The source already has its own live dynamic metadata before this if.
+        # Another result view must share its bytes without emitting a self-copy.
+        branches.append(
+            _ir.IfStmt(
+                condition,
+                _ir.YieldStmt([incoming_selected], span),
+                _ir.YieldStmt([incoming_selected], span),
+                [selected],
+                span,
+            )
+        )
+    body = _ir.SeqStmts(
+        [
+            _ir.AssignStmt(root, _ir.Call(_ir.Op("tile.create"), [], root_type, span), span),
+            *branches,
+            _ir.AssignStmt(
+                stored, _ir.Call(_ir.Op("tile.store"), [selected, offsets, output], output.type, span), span
+            ),
+            _ir.AssignStmt(
+                observed, _ir.Call(_ir.Op("tile.store"), [root, offsets, stored], output.type, span), span
+            ),
+            _ir.ReturnStmt([observed], span),
+        ],
+        span,
+    )
+    params = [
+        (output, _ir.ParamDirection.Out),
+        (rows, _ir.ParamDirection.In),
+        (condition, _ir.ParamDirection.In),
+    ]
+    if dynamic_result:
+        params.append((selected_rows, _ir.ParamDirection.In))
+    function = _ir.Function("kernel", params, [output.type], body, span, _ir.FunctionType.InCore)
+    return _ir.Program([function], "IfMetadataViews", span)
+
+
+@pytest.mark.parametrize(
+    "dynamic_result", [False, True], ids=["fillpad-full-valid", "distinct-dynamic-valid"]
+)
+def test_if_canonical_storage_retains_independent_result_metadata(dynamic_result):
+    mlir = _shared_storage_move_pto(_if_shared_metadata_program(dynamic_result=dynamic_result))
+    lines = mlir.splitlines()
+    signature = _sole_line(mlir, "func.func @kernel(")
+    index_parameters = re.findall(r"(%[A-Za-z0-9_]+): index", signature)
+    assert len(index_parameters) == (2 if dynamic_result else 1), signature
+    root_rows = index_parameters[0]
+    definitions = _tile_handle_definitions(mlir)
+    allocation = _first_group(r"(%[A-Za-z0-9_]+) = pto\.alloc_tile", _sole_line(mlir, "= pto.alloc_tile"))
+    stores = [line for line in lines if "pto.tstore" in line]
+    assert len(stores) == 2, mlir
+    result, old_alias = _ins_of(stores[0]), _ins_of(stores[1])
+    assert old_alias == allocation and result != allocation, mlir
+    assert definitions[result][2] == allocation, mlir
+    root_pad = 1 if dynamic_result else 2
+    assert f"pad={root_pad}>" in definitions[allocation][1], mlir
+    assert "pad=1>" in definitions[result][1], mlir
+    assert _tile_buf_types(stores[0]) == [definitions[result][1]], mlir
+    assert _tile_buf_types(stores[1]) == [definitions[allocation][1]], mlir
+    if_index = max(i for i, line in enumerate(lines) if "scf.if" in line)
+    initialized = [
+        (i, line) for i, line in enumerate(lines) if line.strip().startswith(f"pto.set_validshape {result},")
+    ]
+    assert len(initialized) == 1, mlir
+    assert definitions[result][0] < initialized[0][0] < if_index, mlir
+    expected_rows = index_parameters[1] if dynamic_result else "%c4_index"
+    assert f"pto.set_validshape {result}, {expected_rows}, %c32_index" in initialized[0][1], mlir
+    # Restoring r must never update the canonical allocation or an older alias.
+    assert not any(line.strip().startswith(f"pto.set_validshape {allocation},") for line in lines), mlir
+    assert "pto.tmov" not in mlir, "metadata-only aliases must not cause an overlapping self-copy"
+    if dynamic_result:
+        assert definitions[result][1] == definitions[allocation][1], mlir
+    alloc_line = _sole_line(mlir, "= pto.alloc_tile")
+    assert f"valid_row = {root_rows}" in alloc_line, mlir
+    if not dynamic_result:
+        fillpads = [line for line in lines if "pto.tfillpad" in line]
+        assert len(fillpads) == 2, mlir
+        for fillpad in fillpads:
+            assert _ins_of(fillpad) == allocation, mlir
+            assert definitions[_outs_of(fillpad)][2] == allocation, mlir
+            assert "pad=1>" in _tile_buf_types(fillpad)[1], mlir
 
 
 if __name__ == "__main__":

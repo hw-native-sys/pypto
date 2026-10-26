@@ -1097,8 +1097,8 @@ class TestYieldMemRef:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    def test_if_yield_return_var_shares_memref(self):
-        """IfStmt: return_var shares MemRef with the then-branch yield value."""
+    def test_if_result_request_is_independent_until_materialized(self):
+        """InitMemRef records a separate result request; materialization closes both incoming edges."""
 
         @pl.program
         class Before:
@@ -1122,10 +1122,8 @@ class TestYieldMemRef:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
                 return result
 
-        # then-yield (tile_a) uses mem_vec_2; return_var (if_result) also uses
-        # mem_vec_2 — shared per InitMemRef's phi-resolution rule. The else-
-        # branch yield (tile_b) uses a separate mem_vec_3 — it's a distinct
-        # temporary that MemoryReuse will later merge.
+        # The incoming values and result have three independent requests.
+        # Choosing one destination for the incoming edges belongs to materialization.
         @pl.program
         class Expected:
             @pl.function
@@ -1137,6 +1135,7 @@ class TestYieldMemRef:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 if cond < 2:
                     tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.load(
@@ -1147,7 +1146,7 @@ class TestYieldMemRef:
                             target_memory=pl.Mem.Vec,
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(tile_a)
                     )
                 else:
@@ -1160,7 +1159,7 @@ class TestYieldMemRef:
                             target_memory=pl.Mem.Vec,
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(tile_b)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
@@ -1170,6 +1169,30 @@ class TestYieldMemRef:
 
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP, enable_buffer_ir=False):
+            materialized = passes.materialize_semantic_aliases()(After)
+        function = next(iter(materialized.functions.values()))
+        assert isinstance(function.body, ir.SeqStmts)
+        branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+        result_type = branch.return_vars[0].type
+        assert isinstance(result_type, ir.TileType) and result_type.memref is not None
+        for body in (branch.then_body, branch.else_body):
+            assert body is not None
+            yielded = ir.get_last_yield_stmt(body)
+            assert yielded is not None
+            incoming_type = yielded.value[0].type
+            assert isinstance(incoming_type, ir.TileType) and incoming_type.memref is not None
+            assert ir.MemRef.same_allocation(incoming_type.memref, result_type.memref)
+            assert ir.structural_equal(incoming_type.memref.byte_offset_, result_type.memref.byte_offset_)
+            assert incoming_type.memref.size_ == result_type.memref.size_
+            for tile_type in (incoming_type, result_type):
+                assert tile_type.shape == [64, 64] and tile_type.dtype == ir.DataType.FP32
+                assert tile_type.memory_space == MemorySpace.Vec
+                view = tile_type.tile_view
+                valid = view.valid_shape if view is not None and view.valid_shape else tile_type.shape
+                assert len(valid) == 2
+                assert [dim.value for dim in valid if isinstance(dim, ir.ConstInt)] == [64, 64]
 
     def test_tile_alias_shares_source_memref(self):
         """Tile alias (``a = b``) shares MemRef with source tile, not a fresh one."""
@@ -1195,9 +1218,8 @@ class TestYieldMemRef:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
                 return result
 
-        # tile_a → alias_a → then-yield all share mem_vec_2 (alias chain).
-        # The else-branch computation (tile_b) uses a fresh mem_vec_3.
-        # The phi return_var (if_result) picks up the then-branch's mem_vec_2.
+        # tile_a → alias_a → then-yield share mem_vec_2. The producer and
+        # result requests remain independent on mem_vec_3 and mem_vec_4.
         @pl.program
         class Expected:
             @pl.function
@@ -1209,19 +1231,20 @@ class TestYieldMemRef:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
                 )
                 if cond < 2:
                     alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = tile_a
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(alias_a)
                     )
                 else:
                     tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(tile_a, tile_a)
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(tile_b)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
@@ -1231,6 +1254,63 @@ class TestYieldMemRef:
 
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
+
+    @pytest.mark.parametrize("annotation_arm", ["then", "else"])
+    def test_inferred_if_result_does_not_inherit_a_source_declaration(self, annotation_arm):
+        """A source binding stays pinned without becoming an inferred result's binding."""
+        annotation = ': pl.Tile[[16, 32], pl.FP32, pl.MemRef("result"), pl.Mem.Vec]'
+        then_annotation = annotation if annotation_arm == "then" else ""
+        else_annotation = annotation if annotation_arm == "else" else ""
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[16, 32], pl.FP32], flag: pl.Scalar[pl.BOOL],
+               out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]) -> pl.Tensor[[32, 32], pl.FP32]:
+        source: pl.Tile[[16, 32], pl.FP32, pl.MemRef("incoming"), pl.Mem.Vec] = pl.tile.load(
+            x, [0, 0], [16, 32], target_memory=pl.Mem.Vec)
+        if flag:
+            inferred = pl.yield_(source)
+        else:
+            inferred = pl.yield_(source)
+        if flag:
+            bound{then_annotation} = pl.yield_(source)
+        else:
+            bound{else_annotation} = pl.yield_(source)
+        saved = pl.tile.store(inferred, [0, 0], out)
+        return pl.tile.store(bound, [16, 0], saved)
+""")
+
+        after = passes.init_mem_ref()(passes.convert_to_ssa()(Before))
+        function = next(iter(after.functions.values()))
+        assert isinstance(function.body, ir.SeqStmts)
+        branches = [stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt)]
+        assert len(branches) == 2
+        first_yield = ir.get_last_yield_stmt(branches[0].then_body)
+        assert first_yield is not None
+        source_type = first_yield.value[0].type
+        inferred_type = branches[0].return_vars[0].type
+        bound_type = branches[1].return_vars[0].type
+        assert isinstance(source_type, ir.TileType) and source_type.memref is not None
+        assert isinstance(inferred_type, ir.TileType) and inferred_type.memref is not None
+        assert isinstance(bound_type, ir.TileType) and bound_type.memref is not None
+        assert not ir.MemRef.may_alias(inferred_type.memref, source_type.memref)
+        assert not ir.MemRef.may_alias(inferred_type.memref, bound_type.memref)
+        assert source_type.memref.base_.name_hint == "incoming"
+        assert bound_type.memref.base_.name_hint == "result"
+        pinned_bases = {
+            stmt.var.name_hint
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.alloc").name
+            and dict(stmt.value.kwargs).get("pinned", False)
+        }
+        assert pinned_bases == {"incoming", "result"}
+        assert inferred_type.memref.base_.name_hint not in pinned_bases
+        for tile_type in (source_type, inferred_type, bound_type):
+            assert tile_type.shape == [16, 32] and tile_type.dtype == ir.DataType.FP32
+            assert tile_type.memory_space == MemorySpace.Vec
 
 
 class TestDynamicValidShape:
@@ -1345,9 +1425,9 @@ class TestDynamicValidShape:
     def test_if_phi_preserves_dynamic_valid_shape_vars(self):
         """IfStmt phi return vars must not clone Vars in TileView.valid_shape (issue #870).
 
-        When PatchReturnVarsFromYield updates the return var's MemRef, it must not
-        re-remap expressions that were already remapped by the base IRMutator visit.
-        Double-remapping creates a fresh, undefined Var clone that fails UseAfterDef.
+        Allocating an independent result request must preserve metadata expressions
+        already remapped by the base IRMutator visit. Double-remapping creates a
+        fresh, undefined Var clone that fails UseAfterDef.
 
         Kept as raw-IR construction because ``TileView`` with dynamic ``valid_shape``
         Vars has no DSL syntax — cannot be expressed in the Before/Expected pattern.

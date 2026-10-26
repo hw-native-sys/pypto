@@ -34,8 +34,10 @@ def _memref(value):
     return tile.memref
 
 
-def _program(body, params=(), func_type=ir.FunctionType.InCore):
-    return ir.Program([ir.Function("kernel", list(params), [], body, SPAN, type=func_type)], "Storage", SPAN)
+def _program(body, params=(), func_type=ir.FunctionType.InCore, attrs=None):
+    return ir.Program(
+        [ir.Function("kernel", list(params), [], body, SPAN, type=func_type, attrs=attrs)], "Storage", SPAN
+    )
 
 
 def _verify(program, physical=False):
@@ -190,6 +192,29 @@ def test_scalar_and_gm_control_flow_does_not_require_tile_storage():
 def test_orchestration_is_outside_storage_property_scope():
     tile = ir.Var("tile", ir.TileType([4, 8], DataType.FP32), SPAN)
     assert _verify(_program(ir.ReturnStmt(SPAN), [tile], ir.FunctionType.Orchestration)) == []
+
+
+@pytest.mark.parametrize("physical", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_bufferless_cross_core_slots_require_legacy_function_selection(physical, selected):
+    """Legal pipe slots do not satisfy the separately selected Buffer storage contract."""
+    tile_type = ir.TileType([4, 8], DataType.FP32, None, None, ir.MemorySpace.Vec)
+    popped = ir.Var("popped", tile_type, SPAN)
+    alias = ir.Var("alias", tile_type, SPAN)
+    pop = ir.Call(ir.get_op("tile.tpop_from_aic"), [], {}, tile_type, SPAN)
+    body = ir.SeqStmts(
+        [ir.AssignStmt(popped, pop, SPAN), ir.AssignStmt(alias, popped, SPAN), ir.ReturnStmt(SPAN)], SPAN
+    )
+    program = _program(body, func_type=ir.FunctionType.AIV, attrs={"buffer_ir_selected": selected})
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.HasMemRefs)
+    assert passes.PropertyVerifierRegistry.verify(properties, program) == []
+    if selected:
+        # Missing storage remains an error when a caller explicitly promises
+        # the Buffer contract; there is no blanket opaque-Tile exemption.
+        _assert_error(program, "must have a MemRef", physical)
+    else:
+        assert _verify(program, physical) == []
 
 
 def test_named_pass_validates_even_when_automatic_verification_is_disabled():

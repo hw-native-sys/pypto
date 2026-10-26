@@ -51,6 +51,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/acc_init_builder.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -462,8 +463,8 @@ class CarryRewriter : public IRMutator {
     auto if_stmt = As<IfStmt>(rebuilt);
     if (!if_stmt || if_stmt->return_vars_.empty()) return rebuilt;
 
-    // A phi is typed from the then branch (ConvertTensorToTileOps and the DSL parser
-    // agree on that), so follow it there rather than inventing a merge.
+    // Refresh the joined descriptor after carry narrowing. A branch value
+    // supplies its shape/view, while the result keeps its own storage binding.
     const auto then_yield = TrailingYieldValues(if_stmt->then_body_);
     if (then_yield.size() != if_stmt->return_vars_.size()) return rebuilt;
 
@@ -472,7 +473,10 @@ class CarryRewriter : public IRMutator {
     bool changed = false;
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
       const auto& rv = if_stmt->return_vars_[i];
-      const auto& yield_type = then_yield[i]->GetType();
+      auto yield_type = then_yield[i]->GetType();
+      if (As<TileType>(yield_type)) {
+        yield_type = CloneTypeWithMemRef(yield_type, GetTypeMemRef(rv->GetType()));
+      }
       if (!yield_type || (rv->GetType() && structural_equal(rv->GetType(), yield_type))) {
         new_return_vars.push_back(rv);
         continue;

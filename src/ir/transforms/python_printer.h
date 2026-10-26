@@ -357,6 +357,7 @@ class IRPythonPrinter : public IRVisitor {
   void PrintSplitAivScope(const SplitAivScopeStmtPtr& op, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
   void PrintYieldWithResults(const YieldStmtPtr& yield, const std::vector<VarPtr>& return_vars);
+  void PrintLoopInitializer(const IterArgPtr& argument);
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);

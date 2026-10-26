@@ -126,6 +126,33 @@ def test_reshape_rejects_unaligned_rows_even_when_total_byte_size_matches():
         _view("buffer.reshape", [source], _descriptor((16, 4), DataType.FP32))
 
 
+def test_reshape_can_bind_static_validity_without_changing_a_runtime_sources_physical_descriptor():
+    source_type = _descriptor((16, 32), DataType.FP32, valid_shape=[-1, 32])
+    destination = _descriptor((16, 32), DataType.FP32, valid_shape=[8, 32])
+    source = _var(source_type)
+    call = _view("buffer.reshape", [source], destination)
+    ir.assert_structural_equal(call.type, destination)
+    ir.assert_structural_equal(source.type, source_type)
+    assert isinstance(source.type, ir.BufferType)
+    assert list(source.type.valid_shape) == [-1, 32]
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        _descriptor((8, 64), DataType.FP32),
+        _descriptor((16, 32), DataType.INT32),
+        _descriptor((16, 32), DataType.FP32, valid_shape=[-1, 32]),
+        _descriptor((16, 32), DataType.FP32, blayout=ir.TileLayout.col_major),
+        _descriptor((16, 32), DataType.FP32, pad=ir.PadValue.zero),
+    ],
+)
+def test_runtime_source_reshape_rejects_physical_changes_and_dynamic_result_validity(destination):
+    source = _var(_descriptor((16, 32), DataType.FP32, valid_shape=[-1, 32]))
+    with pytest.raises(ValueError, match="same physical descriptor|static valid extents|dense rank-2"):
+        _view("buffer.reshape", [source], destination)
+
+
 @pytest.mark.parametrize("name", ["buffer.subview", "buffer.reshape"])
 def test_view_arity_and_kwargs_are_not_dropped(name):
     args: list[ir.Expr] = [_var()]

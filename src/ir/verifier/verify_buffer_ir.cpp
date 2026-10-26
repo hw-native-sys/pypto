@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +36,9 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -96,6 +99,16 @@ class BufferIRVisitor : public IRVisitor {
   // CheckType visits all expression-valued metadata once per shared type,
   // including distributed tensor views. Avoid repeating the base shape walk.
   void VisitVarLike_(const VarPtr&) override {}
+
+  // Loop initializers are boundary operands, visited once below rather than
+  // recursively through every occurrence of the current reference handle.
+  void VisitExpr_(const IterArgPtr& argument) override {
+    VisitVarLike_(argument);
+    // A Ptr/scalar IterArg can also occur inside GM or WindowBuffer metadata,
+    // outside an actual loop binding. Its initializer is then a real child
+    // expression and must not hide a Buffer handle behind the Ptr exemption.
+    if (checked_iter_arg_initializers_.insert(argument.get()).second) VisitExpr(argument->initValue_);
+  }
 
   void VisitExpr_(const WindowBufferPtr& op) override { CheckWindowBuffer(op); }
 
@@ -230,31 +243,59 @@ class BufferIRVisitor : public IRVisitor {
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    CheckNoBufferValues(op->return_vars_, "If return_vars");
+    CheckRegionResults(op->return_vars_, "If return_vars");
     CheckNoBufferValue(op->condition_, "If condition");
-    IRVisitor::VisitStmt_(op);
+    VisitExpr(op->condition_);
+    auto previous = std::exchange(region_results_, &op->return_vars_);
+    CheckRegionBody(op->then_body_, op->return_vars_, op->span_);
+    VisitStmt(op->then_body_);
+    if (op->else_body_) {
+      CheckRegionBody(*op->else_body_, op->return_vars_, op->span_);
+      VisitStmt(*op->else_body_);
+    }
+    if (!op->else_body_ && HasBufferResult(op->return_vars_)) {
+      Error("Buffer reference If results require both branch arms", op->span_);
+    }
+    region_results_ = previous;
+    for (const auto& result : op->return_vars_) {
+      VisitExpr(result);
+      if (As<BufferType>(result->GetType())) RegisterRegionWindow(result);
+    }
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    CheckNoBufferValues(op->iter_args_, "For iter_args");
-    CheckNoBufferValues(op->return_vars_, "For return_vars");
     CheckNoBufferValue(op->loop_var_, "For loop variable");
     CheckNoBufferValue(op->start_, "For start");
     CheckNoBufferValue(op->stop_, "For stop");
     CheckNoBufferValue(op->step_, "For step");
     CheckAttrs(op->attrs_, "For attribute");
-    IRVisitor::VisitStmt_(op);
+    VisitExpr(op->loop_var_);
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    VisitReferenceLoop(op->iter_args_, op->return_vars_, op->body_, op->span_);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    CheckNoBufferValues(op->iter_args_, "While iter_args");
-    CheckNoBufferValues(op->return_vars_, "While return_vars");
     CheckNoBufferValue(op->condition_, "While condition");
-    IRVisitor::VisitStmt_(op);
+    VisitReferenceLoop(op->iter_args_, op->return_vars_, op->body_, op->span_, op->condition_);
   }
 
   void VisitStmt_(const YieldStmtPtr& op) override {
-    CheckNoBufferValues(op->value_, "Yield values");
+    if (!region_results_) {
+      CheckNoBufferValues(op->value_, "Yield values");
+    } else {
+      const bool handles = HasBufferResult(*region_results_) ||
+                           std::any_of(op->value_.begin(), op->value_.end(), [this](const ExprPtr& value) {
+                             return value && ContainsBuffer(value->GetType());
+                           });
+      if (handles && op->value_.size() != region_results_->size()) {
+        Error("Yield values must provide every declared buffer reference region result", op->span_);
+      }
+      for (size_t i = 0; i < std::min(op->value_.size(), region_results_->size()); ++i) {
+        CheckRegionEndpoint((*region_results_)[i], op->value_[i], "Region yield", op->span_);
+      }
+    }
     IRVisitor::VisitStmt_(op);
   }
 
@@ -264,6 +305,70 @@ class BufferIRVisitor : public IRVisitor {
   }
 
  private:
+  bool HasBufferResult(const std::vector<VarPtr>& results) {
+    return std::any_of(results.begin(), results.end(),
+                       [this](const VarPtr& value) { return value && ContainsBuffer(value->GetType()); });
+  }
+
+  void CheckRegionResults(const std::vector<VarPtr>& results, const std::string& context) {
+    for (const auto& result : results) {
+      if (result && ContainsBuffer(result->GetType()) && !As<BufferType>(result->GetType())) {
+        Error(context + " may carry only flattened BufferType handles", result->span_);
+      }
+      if (result && buffer_parameters_.count(result.get())) {
+        Error("Incoming buffer parameter '" + result->name_hint_ + "' cannot be redefined", result->span_);
+      }
+    }
+  }
+
+  void CheckRegionEndpoint(const VarPtr& target, const ExprPtr& source, const std::string& context,
+                           const Span& span) {
+    if (!target) return;
+    if (!As<BufferType>(target->GetType())) {
+      CheckNoBufferValue(source, context);
+      return;
+    }
+    if (!source || !AsVarLike(source) || !As<BufferType>(source->GetType()) ||
+        !structural_equal(target->GetType(), source->GetType())) {
+      Error(context + " must provide a BufferType handle with the declared descriptor", span);
+    }
+  }
+
+  void CheckRegionBody(const StmtPtr& body, const std::vector<VarPtr>& targets, const Span& span) {
+    if (HasBufferResult(targets) && !transform_utils::GetLastYieldStmt(body)) {
+      Error("Buffer reference region requires a final yield", span);
+    }
+  }
+
+  void VisitReferenceLoop(const std::vector<IterArgPtr>& arguments, const std::vector<VarPtr>& results,
+                          const StmtPtr& body, const Span& span, const ExprPtr& condition = nullptr) {
+    const std::vector<VarPtr> targets(arguments.begin(), arguments.end());
+    CheckRegionResults(targets, "Loop iter_args");
+    CheckRegionResults(results, "Loop return_vars");
+    const bool handles = HasBufferResult(targets) || HasBufferResult(results);
+    if (handles && arguments.size() != results.size()) {
+      Error("Buffer reference loop must return every carried handle", span);
+    }
+    for (size_t i = 0; i < arguments.size(); ++i) {
+      const auto& argument = arguments[i];
+      CheckRegionEndpoint(argument, argument->initValue_, "Loop initializer", span);
+      checked_iter_arg_initializers_.insert(argument.get());
+      VisitExpr(argument->initValue_);
+      VisitExpr(argument);
+      if (As<BufferType>(argument->GetType())) RegisterRegionWindow(argument);
+      if (i < results.size()) CheckRegionEndpoint(argument, results[i], "Loop result", span);
+    }
+    auto previous = std::exchange(region_results_, &targets);
+    if (condition) VisitExpr(condition);
+    CheckRegionBody(body, targets, span);
+    if (body) VisitStmt(body);
+    region_results_ = previous;
+    for (const auto& result : results) {
+      VisitExpr(result);
+      if (As<BufferType>(result->GetType())) RegisterRegionWindow(result);
+    }
+  }
+
   struct Allocation {
     bool symbolic;
     ConstIntPtr address;  // Null with !symbolic means placement is unproven.
@@ -309,6 +414,20 @@ class BufferIRVisitor : public IRVisitor {
     uint64_t row_pitch;
     bool known_offset;
   };
+
+  void RegisterRegionWindow(const VarPtr& variable) {
+    const auto type = As<BufferType>(variable->GetType());
+    if (const auto bytes = PhysicalBytes(type)) {
+      const auto pitch = type->shape_.size() == 2
+                             ? static_cast<uint64_t>(type->shape_[1]) * (type->dtype_.GetBit() / 8)
+                             : *bytes;
+      // A region selects an existing handle. It never defines a new allocation
+      // identity, and a loop may select a different origin on every backedge.
+      // Null root explicitly retains this uncertainty through subsequent views.
+      windows_[variable.get()] = Window{nullptr, 0, *bytes, pitch, false};
+      view_handles_.insert(variable.get());
+    }
+  }
 
   std::optional<uint64_t> PhysicalBytes(const BufferTypePtr& type) {
     const auto [entry, inserted] = byte_sizes_.try_emplace(type.get(), std::nullopt);
@@ -374,6 +493,15 @@ class BufferIRVisitor : public IRVisitor {
     const std::string name = call->op_->name_;
     if (src == windows_.end() || dst == windows_.end()) {
       Error(name + " requires proven allocation provenance for distinct operands", call->span_);
+      return;
+    }
+    // The first reference implementation preserves source allocations for the
+    // entire function, but this verifier has no graph disjointness certificate.
+    // Same-handle in-place access and different-space pairs were proven above;
+    // distinct handles in one space remain unproven, even when their selected
+    // descriptors happen to be equal. Do not manufacture a singleton owner.
+    if (!src->second.root || !dst->second.root) {
+      Error(name + " requires a disjointness proof for runtime-selected storage handles", call->span_);
       return;
     }
     __int128 source_start = src->second.offset;
@@ -549,6 +677,7 @@ class BufferIRVisitor : public IRVisitor {
   std::unordered_set<const MemRef*> checked_gm_memrefs_;
   std::unordered_set<const WindowBuffer*> checked_window_buffers_;
   std::unordered_set<const Var*> buffer_parameters_;
+  std::unordered_set<const IterArg*> checked_iter_arg_initializers_;
   std::unordered_map<const Var*, Allocation> allocations_;
   std::unordered_map<const Var*, Window> windows_;
   std::unordered_set<const Var*> view_handles_;
@@ -558,6 +687,7 @@ class BufferIRVisitor : public IRVisitor {
   const Call* statement_call_ = nullptr;
   bool statement_assigns_result_ = false;
   std::string attribute_context_;
+  const std::vector<VarPtr>* region_results_ = nullptr;
   bool malformed_structure_ = false;
 };
 

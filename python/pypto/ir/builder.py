@@ -1121,6 +1121,11 @@ class ForLoopBuilder(_ReturnVarsAccessor):
         self._iter_args.append(iter_arg)  # Track for return_var type inference
         return iter_arg
 
+    def _dump_iter_arg(self, argument: ir.IterArg) -> None:
+        """Restore a recorded carry type while retaining its actual initializer."""
+        self._builder._builder.add_iter_arg(argument)
+        self._iter_args.append(argument)
+
     def return_var(self, name: str, type: ir.Type | None = None, span: ir.Span | None = None) -> ir.Var:
         """Add return variable to capture final iteration value.
 
@@ -1253,6 +1258,11 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
         self._builder._builder.add_while_iter_arg(iter_arg)
         self._iter_args.append(iter_arg)  # Track for return_var type inference
         return iter_arg
+
+    def _dump_iter_arg(self, argument: ir.IterArg) -> None:
+        """Restore a recorded carry type while retaining its actual initializer."""
+        self._builder._builder.add_while_iter_arg(argument)
+        self._iter_args.append(argument)
 
     def set_condition(self, condition: int | ir.Expr) -> None:
         """Set the condition for the while loop.

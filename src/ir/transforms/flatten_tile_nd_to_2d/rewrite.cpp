@@ -643,8 +643,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       new_return_vars.reserve(if_stmt->return_vars_.size());
       for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
         const auto& rv = if_stmt->return_vars_[i];
-        if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
-          auto new_rv = std::make_shared<Var>(rv->name_hint_, yield_types[i], rv->span_);
+        auto result_type = i < yield_types.size() ? yield_types[i] : rv->GetType();
+        if (As<TileType>(result_type)) {
+          // Flattening can change the physical descriptor, but a join still
+          // owns its binding. An incoming pinned allocation must not become
+          // the result's destination merely because its arm is visited first.
+          result_type = CloneTypeWithMemRef(result_type, GetTypeMemRef(rv->GetType()));
+        }
+        if (result_type != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_hint_, result_type, rv->span_);
           new_return_vars.push_back(new_rv);
           ctx.Insert(rv, new_rv);
         } else {

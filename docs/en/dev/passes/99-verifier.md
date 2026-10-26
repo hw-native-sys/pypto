@@ -70,10 +70,10 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **NoRedundantBlocks** | NoRedundantBlocks | No single-child or nested `SeqStmts` |
 | **SplitIncoreOrch** | SplitIncoreOrch | No `InCoreScopeStmt` nodes remain in Opaque functions |
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
-| **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
+| **HasMemRefs** | HasMemRefs | Tile allocation owners have initialized MemRefs; proven SSA storage references need no owned allocation |
 | **BufferIR** | BufferIR | Explicit device buffer representation, registered calls, and elementwise recipe window constraints; composes SSA, dominance, and assignment symmetry |
-| **TileStorageLegalized** | TileStorageLegalized | Device region boundaries share canonical symbolic storage, with independent simultaneous carry windows |
-| **TileStorageAllocated** | TileStorageAllocated | Canonical region storage plus effective-address nonoverlap for simultaneous destinations and explicit moves |
+| **TileStorageLegalized** | TileStorageLegalized | Concrete region boundaries use canonical storage; reference boundaries have proven compatible origins |
+| **TileStorageAllocated** | TileStorageAllocated | Legal region storage plus effective-address nonoverlap for concrete simultaneous destinations and explicit moves |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut params not reassigned with tensor-creating ops |
 | **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
@@ -254,9 +254,12 @@ redefined by assignments. Writes through those handles remain valid.
 Buffer calls with results must be direct assignment values; zero-result buffer
 calls must be direct `EvalStmt` expressions. Nested buffer calls and discarded
 allocations are rejected.
-Buffers cannot escape through function returns or flow through `return_vars`,
-loop `iter_args`, or yields. Scalar control-flow results remain valid, and
-operations inside the region can write outer buffer operands directly.
+Buffers cannot escape through function returns. Direct Buffer references can
+flow through If/For/While results, iter_args, and yields with matching physical
+descriptors and complete region signatures. Tuple-wrapped handles still require
+flattening. Dynamic references retain unknown window provenance; they do not
+invent an allocation owner or prove disjointness for alias-sensitive operations.
+Operations inside a region can also write outer buffer operands directly.
 
 Every buffer call is validated against its registered stage, original operands,
 kwargs, and stored result type. Validation does not recreate a call with a
@@ -309,11 +312,15 @@ of asynchronous effects. A valid allocation alone does not imply initialized dat
 ### Tile storage properties
 
 `TileStorageLegalized` checks `InCore`, `AIC`, and `AIV` functions after shared
-storage reconciliation. Every tile variable needs a defined MemRef and memory
-space. Each tile branch yield names its declared result window. Each `ForStmt`
-and `WhileStmt` initializer, iter_arg, yield, and result names one canonical
-window; simultaneous carry windows must be disjoint. Scalar and GM values are
-unchanged. Nested tile tuples must first be flattened.
+storage reconciliation. Allocation owners and static views need a defined
+MemRef and memory space. A reference result, carry, or required alias can omit
+its MemRef only when the shared SSA reference analysis proves its origins.
+Reference edges must preserve compatible physical descriptors, and every region
+must supply its complete result list. They select existing handles instead of
+claiming one common allocation. Other branch yields name their declared result
+windows; static loop initializers, iter_args, yields, and results name one
+canonical window, and simultaneous static carry destinations must be disjoint.
+Scalar and GM values are unchanged. Nested tile tuples must first be flattened.
 
 `pass::VerifyTileStorage()` / `passes.verify_tile_storage()` explicitly verifies
 and produces this property even with automatic verification disabled. The staged

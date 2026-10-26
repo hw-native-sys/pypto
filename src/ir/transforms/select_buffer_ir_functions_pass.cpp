@@ -125,9 +125,6 @@ class BufferKernelSupport : public IRVisitor {
           if (space != MemorySpace::Vec) supported &= valid && valid->value_ > 0;
         }
       }
-      if (const auto memory = tile->memref_.value_or(nullptr)) {
-        supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_;
-      }
     } else if (auto tensor = As<TensorType>(type)) {
       supported &= StaticShape(tensor->shape_) &&
                    (backend::IsDenseBufferTransferDtype(tensor->dtype_) || tensor->dtype_ == DataType::INT8);
@@ -154,6 +151,7 @@ class BufferKernelSupport : public IRVisitor {
     CheckType(expr->GetType());
     if (const auto var = AsVarLike(expr)) {
       if (const auto tile = As<TileType>(var->GetType())) {
+        CheckStorageType(tile);
         if (const auto memory = tile->memref_.value_or(nullptr)) {
           const auto offset = As<ConstInt>(memory->byte_offset_);
           const auto view = views_.Get(var);
@@ -205,16 +203,6 @@ class BufferKernelSupport : public IRVisitor {
     if (!supported) return;
     if (As<ScalarType>(assign->var_->GetType())) {
       scalar_multiples_.emplace(assign->var_.get(), KnownAlignmentMultiple(assign->value_));
-    }
-    if (IsMatrixType(assign->var_->GetType())) {
-      ExprPtr source = assign->value_;
-      if (auto call = As<Call>(source);
-          call && (IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.transpose_view"))) {
-        source = call->args_[0];
-      }
-      const auto alias = StableAlias(source);
-      matrix_aliases_.emplace(assign->var_.get(), alias ? alias : assign->var_);
-      return;
     }
     if (!As<TensorType>(assign->var_->GetType())) return;
     ExprPtr source = assign->value_;
@@ -271,7 +259,7 @@ class BufferKernelSupport : public IRVisitor {
           supported = false;
           return;
         }
-        AliasMap(result->GetType()).emplace(result.get(), alias);
+        tensor_aliases_.emplace(result.get(), alias);
       }
     }
   }
@@ -342,10 +330,19 @@ class BufferKernelSupport : public IRVisitor {
       const auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
       const auto destination = As<TileType>(call->GetType());
       const auto source_bytes = TileBytes(source);
-      supported &= source && destination && source->GetMemorySpace() == MemorySpace::Vec &&
-                   destination->GetMemorySpace() == MemorySpace::Vec && source_bytes &&
-                   source_bytes == TileBytes(destination) && views_.HasDenseRowPitch(call->args_[0]) &&
-                   (!views_.IsWindow(call->args_[0]) || views_.Get(call->args_[0]).offsets.has_value());
+      const bool matrix_reshape =
+          IsOp(call, "tile.reshape") && source && destination && source->GetMemorySpace() &&
+          backend::IsMatrixBufferSpace(*source->GetMemorySpace()) &&
+          source->GetMemorySpace() == destination->GetMemorySpace() && source->dtype_ == destination->dtype_;
+      const bool dense_vec_view =
+          source && destination && source->GetMemorySpace() == MemorySpace::Vec &&
+          destination->GetMemorySpace() == MemorySpace::Vec && views_.HasDenseRowPitch(call->args_[0]) &&
+          (!views_.IsWindow(call->args_[0]) || views_.Get(call->args_[0]).offsets.has_value());
+      // Matrix reshape relabels a complete fractal box, as the existing
+      // buffer.reshape recipe does. Dense Vec views additionally need pitch
+      // and window-coordinate proofs; a matrix reinterpret cannot change dtype.
+      supported &= source && destination && source_bytes && source_bytes == TileBytes(destination) &&
+                   (matrix_reshape || dense_vec_view);
       if (IsOp(call, "tile.reshape")) {
         supported &= call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
                      source->dtype_ == destination->dtype_;
@@ -557,6 +554,17 @@ class BufferKernelSupport : public IRVisitor {
   void CheckRegionType(const TypePtr& type) {
     supported &= As<TileType>(type) || As<TensorType>(type) || As<ScalarType>(type);
     CheckType(type);
+    if (const auto tile = As<TileType>(type)) CheckStorageType(tile);
+  }
+
+  void CheckStorageType(const TileTypePtr& tile) {
+    // Allocation metadata belongs to SSA storage variables. A producer Call
+    // can retain its original logical declaration after InitMemRef has already
+    // resolved the assigned Var to the planned window; that declaration must
+    // not make a supported single-slot variable fail whole-kernel selection.
+    if (const auto memory = tile->memref_.value_or(nullptr)) {
+      supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_;
+    }
   }
 
   struct Region {
@@ -566,22 +574,15 @@ class BufferKernelSupport : public IRVisitor {
     bool yielded = false;
   };
 
-  static bool IsMatrixType(const TypePtr& type) {
-    const auto tile = As<TileType>(type);
-    return tile && tile->GetMemorySpace() && backend::IsMatrixBufferSpace(*tile->GetMemorySpace());
-  }
-
-  static bool NeedsStableAlias(const TypePtr& type) { return As<TensorType>(type) || IsMatrixType(type); }
-
-  std::unordered_map<const Var*, VarPtr>& AliasMap(const TypePtr& type) {
-    return IsMatrixType(type) ? matrix_aliases_ : tensor_aliases_;
-  }
+  // GM region values retain the parameter ABI alias. On-chip values instead
+  // select typed buffer references, so different matrix allocations need not
+  // be forced into one storage identity merely to cross a region boundary.
+  static bool NeedsStableAlias(const TypePtr& type) { return As<TensorType>(type) != nullptr; }
 
   VarPtr StableAlias(const ExprPtr& value) {
     const auto var = AsVarLike(value);
-    auto& aliases = AliasMap(value->GetType());
-    const auto alias = aliases.find(var.get());
-    return alias == aliases.end() ? nullptr : alias->second;
+    const auto alias = tensor_aliases_.find(var.get());
+    return alias == tensor_aliases_.end() ? nullptr : alias->second;
   }
 
   void CheckRegion(const StmtPtr& body, Region& region) {
@@ -612,7 +613,7 @@ class BufferKernelSupport : public IRVisitor {
           supported = false;
           return;
         }
-        AliasMap(argument->GetType()).emplace(argument.get(), alias);
+        tensor_aliases_.emplace(argument.get(), alias);
       }
     }
     if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) VisitExpr(loop->condition_);
@@ -626,7 +627,7 @@ class BufferKernelSupport : public IRVisitor {
           supported = false;
           return;
         }
-        AliasMap(argument->GetType()).emplace(loop->return_vars_[i].get(), initial);
+        tensor_aliases_.emplace(loop->return_vars_[i].get(), initial);
       }
     }
   }
@@ -654,7 +655,6 @@ class BufferKernelSupport : public IRVisitor {
   std::unordered_map<const Var*, TileTypePtr> window_parents_;
   std::unordered_map<const Var*, ParamDirection> directions_;
   std::unordered_map<const Var*, VarPtr> tensor_aliases_;
-  std::unordered_map<const Var*, VarPtr> matrix_aliases_;
   std::unordered_set<const Type*> checked_types_;
 };
 

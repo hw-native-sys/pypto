@@ -206,6 +206,34 @@ def types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     return lhs == rhs
 
 
+def type_bindings_match(lhs: ir.Type, rhs: ir.Type) -> bool:
+    """Compare explicit storage annotations separately from value compatibility."""
+    # Shared tuple DAGs are checked once per pair. Retain their wrappers so
+    # Python cannot reuse an id while this comparison is still in progress.
+    cache: dict[tuple[int, int], tuple[ir.Type, ir.Type, bool]] = {}
+
+    def compare(left: ir.Type, right: ir.Type) -> bool:
+        if left is right:
+            return True
+        key = (id(left), id(right))
+        if key in cache:
+            return cache[key][2]
+        result = True
+        if isinstance(left, ir.TupleType) and isinstance(right, ir.TupleType):
+            result = len(left.types) == len(right.types) and all(
+                compare(a, b) for a, b in zip(left.types, right.types)
+            )
+        elif isinstance(left, ir.ShapedType) and isinstance(right, ir.ShapedType):
+            if left.memref is None or right.memref is None:
+                result = left.memref is None and right.memref is None
+            else:
+                result = ir.structural_equal(left.memref, right.memref)
+        cache[key] = (left, right, result)
+        return result
+
+    return compare(lhs, rhs)
+
+
 def tile_types_differ_only_by_unset_memory_space(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     """Return whether two TileTypes are equal once an unset space is a wildcard.
 

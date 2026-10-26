@@ -544,11 +544,11 @@ class TestSlots:
             def main(
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
-                # `main` is not an InCore function, so InferTileMemorySpace never places
-                # this parameter; spell the DDR carry buffer the test is about.
-                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.DDR],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
+                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
                 for i, (acc_i,) in pl.range(4, init_values=(seed,)):
                     t: pl.Tile[[64, 64], pl.FP32, l0c[i % 2], pl.Mem.Vec] = pl.load(
                         a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
@@ -1676,21 +1676,38 @@ class TestLoopCarryRoundtrip:
     def test_fixed_output_op_is_not_retargeted_across_memory_spaces(self, ascend_backend):
         """A Vec-only producer must keep its Vec buffer even under a DDR carry.
 
-        The carry's init is a Tile parameter, so it lives in DDR, and the carry
-        alias would drag the ``tile.add`` that feeds it onto that DDR buffer.
-        But ``tile.add`` is registered ``set_output_memory(Vec)`` — it cannot
-        write there. Retargeting it anyway would mint IR claiming a Vec-only op
-        produces DDR, and would leave the bound Call's type disagreeing with its
-        Var, a pair the DSL cannot spell (the printer emits only the Var's
-        annotation, so reparsing retypes the Call and the roundtrip compares
-        unequal). Declining leaves the carry yielding a different buffer than
-        its init, which ``YieldFixupMutator`` reconciles with a real move.
+        An InOut parameter explicitly permits updating the DDR carry. This
+        phase-focused fixture stops before loop transfer legalization: it checks
+        that the registered Vec output contract prevents retargeting the add
+        into DDR, and that the Call and its bound Var retain matching types.
         """
-        after = passes.materialize_semantic_aliases()(_run_full_pipeline(self._carry_program(), "InitMemRef"))
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                seed: pl.InOut[pl.Tile[[64, 64], pl.FP32, pl.Mem.DDR]],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc_i,) in pl.range(4, init_values=(seed,)):
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.Mem.Vec
+                    )
+                    acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+                    r = pl.yield_(acc_next)
+                return pl.store(r, [0, 0], output)
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False):
+            after = passes.materialize_semantic_aliases()(_run_full_pipeline(Before, "InitMemRef"))
         main = after.get_function("main")
         assert main is not None
         assert isinstance(main.body, ir.SeqStmts)
         loop = next(s for s in main.body.stmts if isinstance(s, ir.ForStmt))
+        assert main.param_directions[1] == ir.ParamDirection.InOut
+        assert isinstance(loop.iter_args[0].type, ir.TileType)
+        assert loop.iter_args[0].type.memory_space == ir.MemorySpace.DDR
         assert isinstance(loop.body, ir.SeqStmts)
         add_stmt = next(
             s

@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -39,15 +40,16 @@ struct LifetimeInterval {
   int last_use_point;
   MemorySpace memory_space;
   uint64_t size;
+  // A second conservative interval in else-first order. Defaults preserve
+  // conservative interference for callers that supply only the primary order.
+  int reverse_def_point = 0;
+  int reverse_last_use_point = std::numeric_limits<int>::max();
 };
 
-/**
- * @brief Shared result of allocation-lifetime analysis.
- */
+/** @brief Shared result of allocation-lifetime analysis. */
 struct LifetimeAnalysisResult {
   std::vector<LifetimeInterval> lifetimes;
   std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
-  std::map<const Var*, std::set<int>> phi_family_ids;
   std::map<const Var*, std::pair<int, int>> var_liveness;
   std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
   std::set<const Var*> pipeline_load_tiles;

@@ -39,10 +39,27 @@ bool LoopMayExecute(const StmtPtr& statement, bool after_first);
 // Each call owns its analysis/mutator state; no state survives a function pass.
 FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func);
 StmtPtr RefreshStorageTypes(const StmtPtr& body);
-StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body);
 
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
+
+// Pipeline membership prevents relocation; hardware hazards also forbid a new
+// mutable alias. Reuse the constraint collectors on the same frozen snapshot.
+struct BranchStorageProtection {
+  std::set<const Var*> immovable_bases;
+  std::set<const Var*> no_mutable_alias_bases;
+};
+BranchStorageProtection CollectBranchStorageProtection(const FunctionPtr& function, const StmtPtr& body);
+
+// Packing may eliminate exact whole-root transfers. Subviews retain separate
+// byte windows, and caller-owned storage never joins this optional coalescing.
+struct TransferCoalescing {
+  std::set<const Var*> definitions;
+  ForbidAliasMap subrange_separation;
+};
+TransferCoalescing CollectCoalescibleTransfers(const StmtPtr& body, const LifetimeAnalysisResult& analysis,
+                                               const std::vector<VarPtr>& parameters);
+StmtPtr RemoveIdentityStorageTransfers(const StmtPtr& body, const std::set<const Var*>& fixed_bases);
 
 // Offsets are bytes relative to the representative's existing MemRef window.
 // The representative owns the physical allocation; members retain their views.
@@ -54,9 +71,8 @@ using ReuseMap = std::map<VarPtr, ReusePlacement>;
 
 ReuseMap IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
-    const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
+    const ForbidAliasMap& forbid_alias, const ForbidAliasMap& copy_separation,
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
-    const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
@@ -67,12 +83,13 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
 
 // Align carries after packing, then normalize aliases both before and after
 // yield repair. Keeping these separate preserves the planner-specific ordering.
-StmtPtr AlignLoopCarriesToInit(const StmtPtr& body);
 StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body);
 StmtPtr NormalizeIdentityCopyBuffers(const StmtPtr& body);
 // Includes any scratch allocations required to reconcile cyclic carry copies.
-StmtPtr FixupYields(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool fixup_if_stmts,
-                    bool canonical_branch_storage = false);
+// All destinations are settled before packing. An if-only run leaves legacy
+// PyPTO loop writeback scheduling to the post-placement call.
+StmtPtr FixupYields(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool canonical_loop_copies,
+                    bool if_results_only = false);
 StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Var*>& used_bases);
 StmtPtr StripPipelineMembership(const StmtPtr& body);
 

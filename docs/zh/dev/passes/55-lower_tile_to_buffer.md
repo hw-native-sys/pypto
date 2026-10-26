@@ -34,7 +34,8 @@ GM 返回别名必须解析到参数，其类型（包括 TensorView 元数据�
 分支两臂的 GM 结果必须解析到同一参数；循环回边必须保持初始 GM 别名。
 For 要求 INDEX 归纳变量和可证明为正的常量步长。动态/负步长、变化的 GM 别名、
 区域内提前 return、无符号标量算术和 device helper 仍不在默认范围内。
-Tile carry 的复制在 lowering 前规划；标量 yield 同时赋值，Torch 调试也保留交换语义。
+有具体存储的 Tile carry 在 lowering 前规划复制。运行时选择的 Tile 引用保留为
+Buffer 区域结果和 carry，其 yield 选择句柄而不复制数据。标量 yield 同时赋值，Torch 调试也保留交换语义。
 block/subblock 查询使用已有 Buffer 配方。
 
 具有静态或运行时偏移的 Vec slice（包括嵌套 slice）保持父视图的行距。reshape 和 reinterpret 保持物理字节数不变，
@@ -56,8 +57,8 @@ assemble 目标的对齐，包括带显式 valid shape 的 slice。无法证明�
 普通 cube 路径为 GM -> Mat -> Left/Right -> Acc -> GM，支持 `move`、`extract`、
 `transpose_view`、`matmul` 和 `matmul_acc`。FP16/BF16/FP32 输入以 FP32 累加，
 INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或累加写入。
-较宽的 Acc valid 区域通过同一存储上的乘积视图写入。矩阵区域 carry 必须保持
-同一存储别名；任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和 workspace
+较宽的 Acc valid 区域通过同一存储上的乘积视图写入。矩阵区域值可从不同分配中
+选择兼容的带类型句柄；循环入口和回边保留该选择，包括零次循环。任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和 workspace
 操作仍不在默认范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
 转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
@@ -93,7 +94,7 @@ PYPTO 仅允许动态 allocation 与兼容的、覆盖完整容量的 typed root
 有效长度允许零：allocation metadata 仍更新，但 load/store/算术仅在两轴 valid
 均为正时执行。动态 valid 的 subview 在受 guard 保护的消费点物化，因此空路径
 不会构造空 native subview。常量空操作在创建 Buffer 调用前消除。view 不逃逸出
-分支，也不产生 Buffer-valued phi。扩大 valid 不初始化数据；非零动态长度仍须
+分支，也不产生 Buffer-valued phi；已支持的静态引用区域仍显式保留。扩大 valid 不初始化数据；非零动态长度仍须
 满足物理窗口边界，读取区域须已初始化。
 
 `tests/st/runtime/ops/test_buffer_views.py::test_default_dynamic_buffer_windows`
@@ -153,7 +154,8 @@ PTOAS 省略 `buffer.alloc` 的第二个操作数。地址规划器只传入一�
 
 ## 转换契约
 
-索引遍历从 Tile 变量收集已规划的 MemRef。生产者调用仍保留逻辑推导类型，
+索引遍历从具有实际分配的 Tile 变量收集已规划的 MemRef。规范化后不带 MemRef
+的 Tile 引用不拥有存储，不进入分配索引。生产者调用仍保留逻辑推导类型，
 不会建立额外的分配身份。第二次遍历将 Tile 使用替换为 Buffer 句柄，并改写支持的调用。
 映射仅存在于 pass 内部，输出 IR 不携带转换旁表。
 
@@ -168,6 +170,48 @@ PTOAS 省略 `buffer.alloc` 的第二个操作数。地址规划器只传入一�
 pass 验证输出并保持幂等；转换失败不会修改输入程序。此边界之后不应运行功能式 Tile pass。
 
 合成分配的原始位置未知时，继承已索引 Tile 句柄的源码位置，使原生分配诊断能够定位用户源码。
+
+### 引用区域结果
+
+存储合法化无法安全地将输入值放到同一窗口时，if 结果选择已有句柄。转换将该结果
+保留为 `BufferType` SSA 变量，每个分支 yield 自己的带类型句柄。结果不创建分配、
+没有独立地址，也不需要 `buffer.copy`。
+
+```text
+# Both inputs are already live in Mat memory.
+selected: Buffer[[32,64], FP16, Mat] = if flag:
+    yield first_buffer
+else:
+    yield second_buffer
+buffer.copy(selected, left_buffer)  # Legal Mat -> Left transfer.
+```
+
+静态描述符别名在所选句柄支配的位置定义，保留 shape、valid 范围、layout 和 padding，
+不重新绑定任何输入分配。相同描述符不代表相同引用；转换按逻辑 SSA 变量独立映射。
+
+引用进入 For/While 时保留为 Buffer 类型的 `IterArg`、结果和回边 yield。
+初始值提供零次循环的结果；各次迭代可以选择其他兼容句柄。具体同窗口 carry
+保持原有消除路径。注册的原位结果仅在存储合法化已保护独立观察的旧值后，才保留
+其所选引用。显式规范化的 Vec 引用结果可以通过逐轴描述符和显式 subview 操作数
+保留运行时 valid 范围；这不扩大带动态 valid 状态的用户控制流的默认选择范围。
+运行时 valid 的引用 relabel 和元数据 setter 仍需单独的转换配方。
+
+声明的结果描述符拥有自身 valid 范围。结果范围与所选源不同时，每条输入边建立独立
+元数据视图，即使两者运行时类型都打印为相同的 `?` 维度。视图使用结果的范围表达式，
+保持原始完整源句柄不变，以供后继读取。Legacy 引用发射准备原生 `scf.yield` 时遵循
+同一契约。
+
+PTOAS v0.67 可以在具体局部 owner 上建立运行时 valid 元数据视图，也可以原样传递
+已有引用的运行时元数据。但它不能通过 SCF 结果/iter-argument 的新视图改变运行时
+valid 范围；转换与 legacy codegen 都在发射原生代码前明确报告该边界。
+应在选择前为具体输入值准备所需元数据视图。静态结果元数据通过完整窗口的 reshape
+表示，选择后仍支持，包括源元数据为动态的情况；原始源句柄保持不变。
+
+参与选择的具体源分配组在 PYPTO 和 DSA_RP 下保守地占用整个函数生命周期，且排除
+可选的 PYPTO 复用。这可能增加内存消耗；各逻辑值的存活分析仍独立保留。
+所选句柄不虚构 root 或字节范围。Buffer 验证器允许算子支持的同句柄原位使用及不同
+存储空间；缺少图上的不相交证明时，拒绝不同句柄的同空间别名敏感配对。
+因此引用选择不能绕过消费者的存储分离契约。
 
 ## 已规划的存储视图
 
@@ -279,8 +323,9 @@ buffer.store(acc, (0,0), (64,64), Out)
 `buffer.matmul_acc`。累加器的 valid 矩形比乘积更宽时，通过同一存储上与乘积同形的视图写入
 （带地址时是另一个 alloc，PTOAS 下是 `buffer.reshape`），因为 PTOAS 要求原生 matmul 目标与乘积一致。
 这与旧发射器的原生写入相同：乘积之外的完整分形块保持原数据，被部分覆盖的块其余部分不保留。
-`tile.transpose_view` 不需要调用：存储索引阶段已经声明了重新标注的
-窗口。Acc store 只使用 fix-pipe 不带 scale 的转换；`pre_quant`/`pre_relu`、原子与分阶段
+具有具体分配的 `tile.transpose_view` 不需要调用：存储索引阶段已经声明了重新标注的
+窗口。所选引用的转置视图则在使用处生成 `buffer.reshape` 别名。
+Acc store 只使用 fix-pipe 不带 scale 的转换；`pre_quant`/`pre_relu`、原子与分阶段
 store 以及 cache 策略 load 在对应传输配方完成前仍显式报错。
 
 流水线阶段归属属性只约束存储规划，而规划结果已经记录在 MemRef 中。本 pass 会丢弃该属性
@@ -288,9 +333,9 @@ store 以及 cache 策略 load 在对应传输配方完成前仍显式报错。
 
 ## 分支
 
-存储合法化已经为每个 Tile 分支结果选择规范目标窗口，并在各分支体内放置必要的传输。
-最终转换移除这些 Tile 结果和 yield 操作数，保留标量结果的相对顺序，
-因此原生 `scf.if` 只携带真实的标量 SSA 值。
+对于已选择一个目标窗口的 Tile 分支结果，存储合法化已在各分支体内放置必要传输，
+最终转换移除该结果及其 yield 操作数。运行时选择的引用则按前文保留为 Buffer 结果。
+Buffer 与标量结果按原有相对顺序进入原生 `scf.if`。
 
 ```text
 # Input: (chosen_tile, selected_offset) = if flag:
@@ -314,12 +359,12 @@ buffer.store(destination, (selected_offset, 0), (16, 32), Out)
 
 ## 循环
 
-For 和 While 转换在确认 Tile 初始值、iter_args、结果和回边 yield 引用同一个合法化存储后，
+For 和 While 转换在确认具有具体存储的 Tile 初始值、iter_args、结果和回边 yield 引用同一个合法化存储后，
 移除这些 Tile 循环状态。入口复制已经放在循环前，因此零次迭代仍保留初始值。
 交换与扇出所需的快照是循环体内普通的 Buffer 写入；最终转换不会新增临时存储或复制。
 
-原生控制流仅保留标量 iter_args，并保持它们原有的相对顺序。
-While 条件引用重写后的标量绑定。若 GM 初始值和回边都解析到同一个参数，GM 循环状态会被移除；
+原生控制流保留标量与引用 Buffer 的 iter_args，并保持它们原有的相对顺序。
+While 条件引用重写后的 carry 绑定。若 GM 初始值和回边都解析到同一个参数，GM 循环状态会被移除；
 变化的 GM 选择需要单独的转换支持，当前会显式报错。
 嵌套循环和分支分别使用独立的 yield 上下文；每个初始值仅在绑定处遍历一次，
 避免沿外层循环状态链重复遍历。

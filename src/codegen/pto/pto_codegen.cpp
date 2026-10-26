@@ -461,6 +461,11 @@ bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
   // offset and extent too. The offset is an expression (a slice of a loop-carried
   // tile carries a loop-dependent one), so compare it structurally.
   if (lhs_memref->size_ != rhs_memref->size_) return false;
+  if (lhs_memref->slot_count_ != rhs_memref->slot_count_) return false;
+  const bool lhs_slot = lhs_memref->slot_index_.has_value() && *lhs_memref->slot_index_;
+  const bool rhs_slot = rhs_memref->slot_index_.has_value() && *rhs_memref->slot_index_;
+  if (lhs_slot != rhs_slot) return false;
+  if (lhs_slot && !ir::structural_equal(*lhs_memref->slot_index_, *rhs_memref->slot_index_)) return false;
   const auto& lhs_offset = lhs_memref->byte_offset_;
   const auto& rhs_offset = rhs_memref->byte_offset_;
   if (!lhs_offset || !rhs_offset) return lhs_offset == rhs_offset;
@@ -497,13 +502,25 @@ bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
   if (!call || !call->op_) return false;
 
-  auto result_tile_type = ir::GetTileTypeWithMemRef(stmt->var_->GetType());
+  auto result_tile_type = As<TileType>(stmt->var_->GetType());
   if (!result_tile_type) return false;
 
   auto input_tile_type_at = [&](size_t index) -> std::shared_ptr<const TileType> {
     if (index >= call->args_.size()) return nullptr;
-    return ir::GetTileTypeWithMemRef(call->args_[index]->GetType());
+    return As<TileType>(call->args_[index]->GetType());
   };
+
+  if (!result_tile_type->memref_.has_value()) {
+    // Semantic legalization preserves a selected reference on registered
+    // writeback results. It has no single allocation identity to compare;
+    // following the explicit target operand keeps the runtime-selected handle.
+    const auto target = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+    const auto input = target ? input_tile_type_at(*target)
+                              : (IsInPlaceInput0DpsOp(call->op_) ? input_tile_type_at(0) : nullptr);
+    return input && !input->memref_.has_value() &&
+           ir::TileBufSignature::FromTileType(*result_tile_type) ==
+               ir::TileBufSignature::FromTileType(*input);
+  }
 
   // Legacy arm: shared base memref only, exactly as before.
   if (IsInPlaceInput0DpsOp(call->op_)) {
@@ -1647,7 +1664,9 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     }
   }
 
-  auto memref = ir::GetDefinedMemRef(tile_type);
+  // Region references need descriptor/valid operands without owning storage.
+  // Address computation applies only to allocation-backed Tile types.
+  auto memref = tile_type->memref_.value_or(nullptr);
   if (memref && emit_tile_addr_) {
     if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
       fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
@@ -2070,9 +2089,24 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
       if (!value) return "";
       auto value_tile = As<ir::TileType>(value->GetType());
       if (!value_tile || value_tile->GetMemorySpace() != memory_space || !value_tile->memref_.has_value() ||
-          MemRefIdentityKey(ir::GetDefinedMemRef(value_tile)) != ident) {
+          !ShareOneMemRefWindow(tile_type, value_tile)) {
         return "";
       }
+    }
+    // The IR already owns one physical window. A different descriptor must
+    // become a view of its dominating allocation, never a second allocation:
+    // loop carries may otherwise keep reading the original, unwritten buffer.
+    // PrepareTileDestination creates the typed view at this if's lexical site.
+    const auto canonical_scope = fs_.tile_alloc_scope.find(it->second);
+    const auto canonical_type = fs_.ssa_to_tile_type.find(it->second);
+    if (canonical_scope != fs_.tile_alloc_scope.end() &&
+        fs_.active_tile_alloc_scopes.count(canonical_scope->second) != 0 &&
+        canonical_type != fs_.ssa_to_tile_type.end() && canonical_type->second->memref_.has_value() &&
+        canonical_type->second->GetMemorySpace() == memory_space &&
+        ShareOneMemRefWindow(tile_type, canonical_type->second)) {
+      return it->second;
+    }
+    for (const auto& value : {then_value, else_value}) {
       auto source = fs_.var_to_mlir.find(GetVarKey(value));
       if (source == fs_.var_to_mlir.end()) return "";
       if (shared_handle.empty()) {
@@ -2090,6 +2124,10 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
       return "";
     }
     return shared_handle;
+  }
+  const auto scope = fs_.tile_alloc_scope.find(it->second);
+  if (scope != fs_.tile_alloc_scope.end() && fs_.active_tile_alloc_scopes.count(scope->second) == 0) {
+    return "";  // A completed sibling's declaration cannot dominate this merge.
   }
   return it->second;
 }
@@ -2138,10 +2176,11 @@ bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
-std::string PTOCodegen::EnsureTileView(
-    const std::string& source, const std::string& source_type,
-    const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,
-    std::optional<std::pair<std::string, std::string>> mutable_valid_shape) {
+std::string PTOCodegen::EnsureTileView(const std::string& source, const std::string& source_type,
+                                       const std::shared_ptr<const ir::TileType>& tile_type,
+                                       const std::string& name_hint,
+                                       std::optional<std::pair<std::string, std::string>> mutable_valid_shape,
+                                       bool defer_valid_shape) {
   const std::string view_type = mutable_valid_shape ? GetTileBufTypeStringFromTileType(tile_type)
                                                     : GetViewTileBufTypeStringFromTileType(tile_type);
   // Equal dynamic types can still have independent live validity. Never reuse
@@ -2156,14 +2195,17 @@ std::string PTOCodegen::EnsureTileView(
     // TRESHAPE copies the address only; initialize the fresh handle's dynamic
     // valid extents without mutating the source's metadata.
     RegisterMutableTileName(view);
-    Emit("pto.set_validshape " + view + ", " + mutable_valid_shape->first + ", " +
-         mutable_valid_shape->second + " : " + view_type);
+    if (!defer_valid_shape) {
+      Emit("pto.set_validshape " + view + ", " + mutable_valid_shape->first + ", " +
+           mutable_valid_shape->second + " : " + view_type);
+    }
   }
   return view;
 }
 
 PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var, const std::string& storage,
-                                                           const std::string& op_name) {
+                                                           const std::string& op_name,
+                                                           bool defer_valid_shape) {
   const auto tile_type = ir::As<ir::TileType>(var->GetType());
   INTERNAL_CHECK_SPAN(tile_type, var->span_) << "Internal error: tile destination requires a TileType";
   TupleOutput output{storage, GetSSATileBufType(storage), var, tile_type};
@@ -2199,17 +2241,34 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
       << op_name << " in PTOAS codegen cannot reinterpret shared destination storage from " << output.type_str
       << " to " << GetTileBufTypeStringFromTileType(tile_type);
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
-  CHECK_SPAN(!view.valid_shape.empty() &&
-                 std::all_of(view.valid_shape.begin(), view.valid_shape.end(),
-                             [](const ir::ExprPtr& dim) { return ir::As<ir::ConstInt>(dim) != nullptr; }),
-             var->span_)
-      << op_name
-      << " in PTOAS codegen requires compile-time static valid_shape on the destination "
-         "when reinterpreting a shared buffer";
   // Emit in the current region and bind only this result at its definition.
   // A global storage->view cache could leak a branch-local SSA into a sibling
   // branch or the continuation. The canonical storage binding stays unchanged.
-  output.name = EnsureTileView(storage, output.type_str, tile_type, "dst_view");
+  const bool static_valid =
+      !view.valid_shape.empty() &&
+      std::all_of(view.valid_shape.begin(), view.valid_shape.end(),
+                  [](const ir::ExprPtr& dim) { return ir::As<ir::ConstInt>(dim) != nullptr; });
+  if (static_valid) {
+    output.name = EnsureTileView(storage, output.type_str, tile_type, "dst_view");
+  } else {
+    // A dynamic treshape starts with no valid extent. Give this destination its
+    // own mutable metadata, initialized before its producer can write it. Only
+    // full-span views of locally mutable storage support that initialization;
+    // subviews keep a distinct origin and cannot manufacture a mutable root.
+    std::string mutable_source = storage;
+    if (const auto origin = fs_.tile_view_names.find(storage); origin != fs_.tile_view_names.end()) {
+      mutable_source = origin->second;
+    }
+    CHECK_SPAN(IsMutableTileName(mutable_source), var->span_)
+        << op_name << " in PTOAS codegen requires locally mutable storage for a dynamic valid_shape "
+        << "when reinterpreting a shared destination";
+    const auto fields = ComputeAllocTileFields(tile_type);
+    INTERNAL_CHECK_SPAN(!fields.valid_row_ssa.empty() && !fields.valid_col_ssa.empty(), var->span_)
+        << "Internal error: dynamic shared destination requires both valid_shape operands";
+    output.name =
+        EnsureTileView(mutable_source, GetSSATileBufType(mutable_source), tile_type, "dst_view",
+                       std::make_pair(fields.valid_row_ssa, fields.valid_col_ssa), defer_valid_shape);
+  }
   output.type_str = GetSSATileBufType(output.name);
   return output;
 }
@@ -2397,10 +2456,17 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         // there is no MemRef to read. Register it before the op codegen runs so
         // GetCurrentResultTileBufTypeString() can emit the `-> type` annotation.
         result_tile_type = tile_type;
-        result_buf = NewNamedTemp(op->var_->name_hint_);
+        if (alias_result_to_in_place_input) {
+          const auto target = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+          result_buf = GetExprAsCode(call->args_[target.value_or(0)]);
+        } else {
+          result_buf = NewNamedTemp(op->var_->name_hint_);
+        }
         BindVarToMlir(op->var_, result_buf);
         std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
-        if (!type_str.empty()) {
+        if (!type_str.empty() && !alias_result_to_in_place_input) {
+          // A selected writeback keeps the input SSA's exact descriptor. In
+          // particular, a static-valid view must not be retyped as dynamic.
           RegisterTileBufType(result_buf, type_str, tile_type);
         }
       } else if (alias_array_update_to_input) {
@@ -2492,9 +2558,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         RegisterCommCtxFor(op->var_, comm_ctx);
         return;
       }
-    } else if (!emit_tile_addr_ && As<TileType>(op->var_->GetType())) {
-      // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
-      // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
+    } else if (auto tile = As<TileType>(op->var_->GetType());
+               As<ir::BufferType>(op->var_->GetType()) ||
+               (tile && (!emit_tile_addr_ || !tile->memref_.has_value()))) {
+      // Bare tile aliases under PTOAS, and selected references under every
+      // planner, and explicit Buffer references resolve to the current SSA.
+      // `lhs` and `rhs`
+      // denote the identical tile value, so `lhs` must resolve to `rhs`'s
       // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /
       // tile.transpose_view) that re-pointed itself at a typed view SSA of a
       // shared buffer — e.g. the `[N, 1]` col-major reshape of a `[1, N]`
@@ -2505,8 +2575,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // ptoas rejects for shape mismatch. Following `rhs` binds `lhs` to the
       // `[N, 1]` view SSA so the write-back has matching src/dst shapes — the
       // same shape the `s = pl.mul(...)`-style yield (no bare alias) already
-      // gets. Under PyPTO (emit_tile_addr_) the baked address already aliases
-      // the two allocs, so this is a no-op there and is left untouched.
+      // gets. Concrete addressed Tile aliases keep their established path;
+      // selected references have no allocation or baked address to fall back to.
       const std::string rhs_ssa = LookupVarName(rhs_var);
       if (!rhs_ssa.empty()) {
         BindVarToMlir(op->var_, rhs_ssa);
@@ -2927,6 +2997,9 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
 }
 
 std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
+  if (auto buffer = As<ir::BufferType>(expr->GetType())) {
+    return GetBufferTypeString(buffer, expr->span_);
+  }
   if (auto var = As<ir::Var>(expr)) {
     auto key = GetVarKey(var);
     // Primary lookup: SSA name → tile_buf type (covers root allocs AND view results)
@@ -2941,9 +3014,7 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
     // TileType, which is correct for view op results (slice, reshape,
     // fillpad) whose type differs from the root alloc's type.
     if (auto tile_type = As<TileType>(var->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        return GetTileBufTypeStringFromTileType(tile_type);
-      }
+      return GetTileBufTypeStringFromTileType(tile_type);
     }
     // Fallback: var → memref → root alloc type
     auto memref_it = fs_.var_to_memref.find(key);
@@ -2963,7 +3034,7 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
         return ssa_it->second;
       }
     }
-    if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
+    if (auto tile_type = As<TileType>(iter_arg->GetType())) {
       return GetTileBufTypeStringFromTileType(tile_type);
     }
     auto memref_it = fs_.var_to_memref.find(key);
