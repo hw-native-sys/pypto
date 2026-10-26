@@ -258,6 +258,124 @@ def test_proves_floor_divided_loop_offset():
     assert _values(_elements(load.args[2])) == [1, 1, 4, 16, 2]
 
 
+def test_proves_persistent_work_offsets_from_block_index():
+    """Both scale carriers retain aligned offsets across expert/chunk/N work."""
+
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a_s: pl.Tensor[[1024, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            b_s: pl.Tensor[[64, 256], pl.FP8E8M0, pl.MX_B_NN],
+        ):
+            core = pl.tile.get_block_idx()
+            for work in pl.range(core, 64, 32):
+                expert = work // 8
+                chunk = (work // 4) % 2
+                row = (expert * 2 + chunk) * 64
+                n0 = (work % 4) * 64
+                _lhs_scale = pl.load(a_s, [row, 0], [64, 8], target_memory=pl.Mem.Mat)
+                _rhs_scale = pl.load(b_s, [expert * 8, n0], [8, 64], target_memory=pl.Mem.Mat)
+
+    loads = _mx_loads(_run(Input))
+    assert len(loads) == 2
+    assert all(_values(_elements(load.args[2])) == [1, 4, 4, 16, 2] for load in loads)
+
+
+@pytest.mark.parametrize("step", [32, -32])
+def test_rejects_persistent_loop_with_unknown_start(step):
+    """Alignment alone cannot justify a possibly negative expert offset."""
+
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a_s: pl.Tensor[[1024, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            start: pl.Scalar[pl.INDEX],
+        ):
+            for work in pl.range(start, 64, step):
+                _ = pl.load(a_s, [work * 16, 0], [16, 2], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _run(Input)
+
+
+def test_rejects_remainder_with_unproven_dividend():
+    """Do not infer a nonnegative remainder from a positive divisor alone."""
+
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a_s: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+            work: pl.Scalar[pl.INDEX],
+        ):
+            row = (work % 4) * 16
+            _ = pl.load(a_s, [row, 0], [16, 2], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _run(Input)
+
+
+@pytest.mark.parametrize("dtype", [pl.UINT8, pl.UINT16, pl.UINT32])
+def test_proves_unsigned_descriptor_widened_to_index(dtype):
+    """Compact expert descriptors can safely select aligned global MX scales."""
+
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            b_s: pl.Tensor[[1920, 256], pl.FP8E8M0, pl.MX_B_NN],
+            descriptors: pl.Tensor[[16, 1], dtype],
+        ):
+            expert_raw = pl.read(descriptors, [0, 0])
+            expert = pl.cast(expert_raw, pl.INDEX)
+            _ = pl.load(b_s, [expert * 160, 0], [8, 256], target_memory=pl.Mem.Mat)
+
+    (load,) = _mx_loads(_run(Input))
+    assert _values(_elements(load.args[2])) == [1, 16, 4, 16, 2]
+
+
+@pytest.mark.parametrize("source_dtype,target_dtype", [(pl.UINT64, pl.INDEX), (pl.UINT32, pl.INT32)])
+def test_rejects_unsigned_descriptor_cast_that_can_be_negative(source_dtype, target_dtype):
+    """A signed narrowing/wrapping cast must not inherit unsigned positivity."""
+
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            b_s: pl.Tensor[[1920, 256], pl.FP8E8M0, pl.MX_B_NN],
+            descriptors: pl.Tensor[[16, 1], source_dtype],
+        ):
+            expert_raw = pl.read(descriptors, [0, 0])
+            expert = pl.cast(expert_raw, target_dtype)
+            _ = pl.load(b_s, [expert * 160, 0], [8, 256], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _run(Input)
+
+
+def test_unsigned_descriptor_still_requires_mx_alignment():
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            b_s: pl.Tensor[[1920, 256], pl.FP8E8M0, pl.MX_B_NN],
+            expert: pl.Scalar[pl.UINT32],
+        ):
+            offset = pl.cast(expert, pl.INDEX)
+            _ = pl.load(b_s, [offset, 0], [8, 256], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match=r"cannot be proven|multiple of"):
+        _run(Input)
+
+
 def test_proves_offset_through_outlined_scalar_params():
     @pl.jit
     def outlined(a_s: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):

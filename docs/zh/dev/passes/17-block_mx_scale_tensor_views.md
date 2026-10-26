@@ -68,13 +68,22 @@ MX_B_NN [g0, n0] -> [0, n0/16, g0/2, 0, 0]
 - scalar SSA 定义；
 - 常量、乘法、加法，以及用于整除证明的减法；
 - 正的 2 的幂 floor division，包括 `k0 // 32`；
-- start 与 step 为常量的循环变量；
+- step 为常量、start 表达式可证明的循环变量；正 step 保持 start 已证明的
+  非负性，包括以 block index 为起点的情况；
+- 被除数可证明非负、除数为正常量的取模表达式；
 - `tile.get_block_idx` 和 `tile.get_block_num` 的非负结果；
+- 不超过 32 位的无符号标量（包括描述符读取）及其保值的 `INDEX` 转换；
+  `UINT64` 到 `INDEX` 以及收窄的有符号转换仍无法通过证明，且对齐要求独立检查；
 - 经每个 Call 与 Submit 调用点传播的 scalar 参数。
 
 callee 参数必须在每一个 caller 中都可证明。调用映射缺失或畸形、递归，以及超出
 256 步有界证明预算的表达式都会被保守拒绝。该上界使 pass 保持 O(N)，且证明失败
 绝不会退化成“假定已对齐”。
+
+这些事实支持 `work = block_idx, block_idx + 32, ...` 这样的常驻任务循环
+（persistent work loop）。使用正除数的向下整除和取模得到的 expert/chunk/N
+坐标仍可证明非负。取模本身不提供整除性；最终 scale offset 仍须独立通过对齐
+证明。未知或可能为负的 start 不会被假定为安全。
 
 商以 `FloorDiv(offset, divisor)` 发出，保证原定宽表达式先按原语义求值，再做除法。
 
