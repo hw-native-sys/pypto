@@ -20,6 +20,7 @@ This module tests the error classes exposed from C++ to Python, ensuring that:
 import re
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 import pypto
 import pytest
@@ -38,9 +39,28 @@ _MACOS = sys.platform == "darwin"
 # Matches the frame lines emitted by Backtrace::FormatStackTrace.
 _FRAME_RE = re.compile(r'^ File "([^"]+)", line (\d+)$', re.MULTILINE)
 
-# PyPTO's own C++ implementation — everything except the python/bindings/ entry points. CPython's
-# sources (Python/, Objects/, Modules/, Include/) do not match: its include dir is capitalised.
-_PYPTO_IMPL_RE = re.compile(r"(?:^|/)(?:src|include/pypto)/")
+# PyPTO's own C++ implementation, excluding python/bindings/ entry points.
+# DWARF may use source-relative paths or this checkout's absolute path. An
+# arbitrary /src/ component also occurs in Conda's CPython build paths and does
+# not identify a PyPTO frame.
+_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+_PYPTO_IMPL_RE = re.compile(rf"^(?:\./)?src/|^{re.escape(str(_SOURCE_ROOT))}/src/|(?:^|/)include/pypto/")
+
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("src/ir/type.cpp", True),
+        ("./src/core/error.cpp", True),
+        (str(_SOURCE_ROOT / "src/backend/common/backend.cpp"), True),
+        ("/usr/include/pypto/ir/type.h", True),
+        ("/usr/local/src/conda/python-3.10.22/Python/ceval.c", False),
+        ("/usr/local/src/conda/python-3.10.22/Objects/call.c", False),
+        ("python/bindings/modules/testing.cpp", False),
+    ],
+)
+def test_pypto_implementation_frame_paths(filename: str, expected: bool):
+    assert bool(_PYPTO_IMPL_RE.search(filename)) is expected
 
 
 def _assert_has_trace(message: str) -> list[str]:
