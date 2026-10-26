@@ -93,7 +93,7 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     add(DataType::FP8E4M3FN, {DataType::FP32});
     add(DataType::FP8E5M2, {DataType::FP32});
     add(DataType::HF8, {DataType::FP32});
-    add(DataType::FP4E2M1X2, {DataType::BF16});
+    add(DataType::FP4E2M1X2, {DataType::BF16, DataType::FP8E4M3FN});
     add(DataType::FP4E1M2X2, {DataType::BF16});
     return t;
   }();

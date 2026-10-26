@@ -22,7 +22,9 @@ namespace pypto {
 namespace ir {
 namespace op_predicates {
 
-/// Whether tile.cast must keep its result disjoint from its source. Widening
+/// Whether tile.cast or tile.cast_to_nz requires disjoint source storage.
+/// The fused NZ result is always fresh. FP4 widening compares logical scalar
+/// widths (4 bits even for the packed byte carrier), not carrier widths. Widening
 /// casts are unsafe in place on every target. A2/A3 narrowing casts process all
 /// row heads before the tails, so later output rows can overwrite unread input.
 /// Callers without a resolved target must conservatively pass is_a2a3=true.

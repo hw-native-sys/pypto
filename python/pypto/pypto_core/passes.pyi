@@ -299,6 +299,8 @@ class PassContext:
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir: bool = True,
+        enable_fp4_nz_row_plus_one: bool = False,
+        enable_mx_l0_ping_pong: bool = False,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -314,6 +316,11 @@ class PassContext:
 
         ``enable_buffer_ir`` defaults to true and selects supported whole kernels
         for Buffer IR. Unsupported kernels retain Tile; false selects Tile for all.
+
+        The independent A5 options enable_fp4_nz_row_plus_one and
+        enable_mx_l0_ping_pong default to false. Unsupported geometry
+        retains the existing lowering. The NZ option initially selects
+        only full 128x256 FP8 producers consumed by a sole V-to-C push.
         """
         ...
 
@@ -350,6 +357,14 @@ class PassContext:
 
     def get_enable_buffer_ir(self) -> bool:
         """Whether supported whole kernels use Buffer IR."""
+        ...
+
+    def get_enable_fp4_nz_row_plus_one(self) -> bool:
+        """Whether supported full-tile A5 FP4 casts use padded NZ transport."""
+        ...
+
+    def get_enable_mx_l0_ping_pong(self) -> bool:
+        """Whether supported A5 MX matmuls use K128 L0 ping/pong."""
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:

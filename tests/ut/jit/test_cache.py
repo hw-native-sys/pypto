@@ -29,6 +29,8 @@ from pypto.jit.cache import (
 )
 from pypto.jit.decorator import (
     _resolve_enable_buffer_ir,
+    _resolve_enable_fp4_nz_row_plus_one,
+    _resolve_enable_mx_l0_ping_pong,
     _resolve_enable_pypto_l0c_double_buffer,
     _resolve_memory_planner,
     _resolve_runtime,
@@ -126,6 +128,8 @@ class TestMakeCacheKey:
             ("dep_layouts", ()),
             ("runtime", "tensormap_and_ringbuffer"),
             ("enable_buffer_ir", False),
+            ("enable_fp4_nz_row_plus_one", False),
+            ("enable_mx_l0_ping_pong", False),
             ("buffer_ir_version", 0),
         )
 
@@ -1367,6 +1371,36 @@ class TestConstexprParameters:
 
         assert records, "the dep's own binding must still be recorded"
         assert all(len(record) == 5 for record in records)
+
+
+@pytest.mark.parametrize("planner", list(MemoryPlanner))
+def test_independent_a5_options_split_cache_keys(planner):
+    common = dict(
+        source_hash="a5",
+        param_names=[],
+        tensor_shapes={},
+        tensor_dtypes={},
+        dynamic_dims=set(),
+        memory_planner=planner,
+    )
+    keys = {
+        make_cache_key(**common, enable_fp4_nz_row_plus_one=nz, enable_mx_l0_ping_pong=l0)
+        for nz in (False, True)
+        for l0 in (False, True)
+    }
+    assert len(keys) == 4
+
+
+@pytest.mark.parametrize("nz,l0", [(False, False), (True, False), (False, True), (True, True)])
+def test_a5_option_cache_resolution_follows_scoped_context(nz, l0):
+    with passes.PassContext([], enable_fp4_nz_row_plus_one=nz, enable_mx_l0_ping_pong=l0):
+        assert _resolve_enable_fp4_nz_row_plus_one() is nz
+        assert _resolve_enable_mx_l0_ping_pong() is l0
+        with passes.PassContext([]):
+            assert _resolve_enable_fp4_nz_row_plus_one() is False
+            assert _resolve_enable_mx_l0_ping_pong() is False
+        assert _resolve_enable_fp4_nz_row_plus_one() is nz
+        assert _resolve_enable_mx_l0_ping_pong() is l0
 
 
 if __name__ == "__main__":

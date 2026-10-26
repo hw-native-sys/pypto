@@ -137,8 +137,8 @@ struct AccumulatorTileGeometry {
 ///   unreachable or identical, never a silent approximation.
 ///
 /// ``CompactMode`` is deliberately not a factor: PTO only widens the stride for
-/// its ``RowPlusOne`` mode, which PyPTO's ``CompactMode`` (``null`` / ``normal``)
-/// never spells, so ``normal`` addresses exactly like ``null``.
+/// its RowPlusOne mode, which is confined to Vec NZ transport. Accumulators
+/// never carry it; normal addresses exactly like null.
 inline std::optional<AccumulatorTileGeometry> GetAccumulatorTileGeometry(const TileView& view,
                                                                          const std::vector<ExprPtr>& shape,
                                                                          const DataType& dtype) {

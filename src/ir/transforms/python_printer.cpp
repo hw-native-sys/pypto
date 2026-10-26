@@ -3748,6 +3748,9 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
       case CompactMode::normal:
         oss << "normal";
         break;
+      case CompactMode::row_plus_one:
+        oss << "row_plus_one";
+        break;
     }
   }
 

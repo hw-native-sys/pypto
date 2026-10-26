@@ -17,6 +17,7 @@
  * slice, reshape and transpose operations.
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -374,7 +375,16 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
       source_view.fractal == tile_view_semantics::kMXScaleFractal && complete_mx_scale_layout &&
       ((tile_type->dtype_ == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
        (tile_type->dtype_ == DataType::FP8E8M0 && target_dtype == DataType::UINT8));
-  CHECK_SPAN(source_view.slayout == TileLayout::none_box || mx_scale_byte_alias, args[0]->span_)
+  // The INT8<->FP8E4M3FN pair aliases one raw byte per element with no
+  // reinterpretation of the payload, so it is layout-agnostic: fractal (Mat)
+  // tiles may carry the alias too. The FP4->FP8 [N,K] rhs path relies on this
+  // -- PTOAS's treshape rejects an FP8E4M3FN source, so the transpose_view
+  // runs on the INT8 alias and the result flips back to FP8E4M3FN in place.
+  const bool fp8_data_byte_alias =
+      (tile_type->dtype_ == DataType::INT8 && target_dtype == DataType::FP8E4M3FN) ||
+      (tile_type->dtype_ == DataType::FP8E4M3FN && target_dtype == DataType::INT8);
+  CHECK_SPAN(source_view.slayout == TileLayout::none_box || mx_scale_byte_alias || fp8_data_byte_alias,
+             args[0]->span_)
       << kOpName
       << " only supports flat tiles with slayout=none_box, except UINT8/FP8E8M0 MX-scale byte aliases";
   CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
@@ -1177,6 +1187,102 @@ REGISTER_OP("tile.set_validshape")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSetValidShapeType(args, kwargs);
     });
+
+// Internal conversion/layout composition. Reusing the registered cast and
+// move deducers keeps packed geometry, valid extents and padding consistent
+// with the unfused path. The move creates fresh blocked addressing: copying
+// the cast's explicit ND strides here would misdescribe the NZ allocation.
+TypePtr DeduceTileCastToNZType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tile.cast_to_nz requires exactly 1 argument, but got " << args.size();
+  // This internal op has no scratch/layout override surface. Validate mode
+  // here as the ordinary cast deducer only checks its presence.
+  for (const auto& [key, value] : kwargs) {
+    CHECK(key == "target_type" || key == "mode" || key == "saturation_mode" || key == "compact")
+        << "tile.cast_to_nz does not support kwarg '" << key << "'";
+    if (key == "mode") {
+      const int mode = AnyCast<int>(value, "tile.cast_to_nz mode");
+      CHECK(mode >= 0 && mode <= 6) << "tile.cast_to_nz mode must be in [0, 6]";
+    }
+  }
+  auto source = As<TileType>(args[0]->GetType());
+  CHECK(source) << "tile.cast_to_nz requires a TileType source";
+  CHECK(source->dtype_ == DataType::FP4E2M1X2) << "tile.cast_to_nz requires FP4E2M1X2 source";
+  CHECK(!source->memory_space_ || source->memory_space_ == MemorySpace::Vec)
+      << "tile.cast_to_nz requires Vec source memory";
+  const auto view = tile_view_semantics::GetEffectiveTileView(*source);
+  CHECK(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box &&
+        view.compact == CompactMode::null)
+      << "tile.cast_to_nz requires ND source layout with compact=Null";
+  CHECK(source->shape_.size() == 2) << "tile.cast_to_nz requires static 2D physical geometry";
+  auto rows = As<ConstInt>(source->shape_[0]);
+  auto cols = As<ConstInt>(source->shape_[1]);
+  CHECK(rows && cols) << "tile.cast_to_nz requires static physical dimensions";
+  constexpr int64_t kMaxOffset = 0x7fffffff;
+  constexpr int64_t factor = 2;  // E2M1 byte carriers expand to two FP8 values.
+  CHECK(rows->value_ > 0 && rows->value_ <= 0xffff && rows->value_ % 16 == 0)
+      << "tile.cast_to_nz NZ rows must be positive, divisible by 16 and fit a 16-bit block stride";
+  CHECK(cols->value_ > 0 && cols->value_ <= kMaxOffset / factor)
+      << "tile.cast_to_nz logical columns must fit signed 32 bits";
+  const int64_t logical_cols = cols->value_ * factor;
+  CHECK(logical_cols >= 64 && logical_cols % 64 == 0)
+      << "tile.cast_to_nz source logical columns must be at least 64 and divisible by 64";
+  CHECK(rows->value_ <= kMaxOffset / logical_cols && logical_cols / 512 <= 0xffff)
+      << "tile.cast_to_nz physical byte offsets and VF register counts exceed supported bounds";
+  const auto valid = GetValidShape(source);
+  CHECK(valid.size() == 2) << "tile.cast_to_nz requires 2D valid geometry";
+  auto valid_cols = As<ConstInt>(valid[1]);
+  CHECK(valid_cols && valid_cols->value_ > 0 && valid_cols->value_ <= cols->value_)
+      << "tile.cast_to_nz packed-axis valid columns must be static, positive, within physical bounds "
+         "and represent an even logical extent";
+  if (auto valid_rows = As<ConstInt>(valid[0])) {
+    CHECK(valid_rows->value_ >= 0 && valid_rows->value_ <= rows->value_)
+        << "tile.cast_to_nz valid rows exceed physical bounds";
+  }
+  const auto compact = static_cast<CompactMode>(GetKwargOr<int>(kwargs, "compact", 0));
+  CHECK(compact == CompactMode::null || compact == CompactMode::row_plus_one)
+      << "tile.cast_to_nz compact must be null or row_plus_one";
+  if (compact == CompactMode::row_plus_one) {
+    auto valid_rows = As<ConstInt>(valid[0]);
+    CHECK(rows->value_ == 128 && logical_cols == 256 && valid_rows && valid_rows->value_ == 128 &&
+          valid_cols->value_ == cols->value_)
+        << "tile.cast_to_nz row_plus_one currently requires full 128x256 output";
+  }
+  auto cast_kwargs = kwargs;
+  cast_kwargs.erase(std::remove_if(cast_kwargs.begin(), cast_kwargs.end(),
+                                   [](const auto& item) { return item.first == "compact"; }),
+                    cast_kwargs.end());
+  auto& registry = OpRegistry::GetInstance();
+  auto cast = registry.Create("tile.cast", args, cast_kwargs, args[0]->span_);
+  CHECK(As<TileType>(cast->GetType())->dtype_ == DataType::FP8E4M3FN)
+      << "tile.cast_to_nz requires exact FP8E4M3FN target_type";
+  auto result = As<TileType>(registry
+                                 .Create("tile.move", {cast},
+                                         {{"target_memory", MemorySpace::Vec},
+                                          {"blayout", TileLayout::col_major},
+                                          {"slayout", TileLayout::row_major}},
+                                         args[0]->span_)
+                                 ->GetType());
+  if (compact == CompactMode::null) return result;
+  auto result_view = tile_view_semantics::GetEffectiveTileView(*result);
+  result_view.compact = compact;
+  return std::make_shared<TileType>(result->shape_, result->dtype_, result->memref_, result_view,
+                                    result->memory_space_);
+}
+
+REGISTER_OP("tile.cast_to_nz")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description("Internal native FP4 E2M1 to FP8 E4M3FN conversion into fresh NZ storage")
+    .add_argument("tile", "ND FP4E2M1X2 byte-carrier source")
+    .set_attr<int>("compact")
+    .set_attr<DataType>("target_type")
+    .set_attr<int>("mode")
+    .set_attr<int>("saturation_mode")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type(DeduceTileCastToNZType);
 
 }  // namespace ir
 }  // namespace pypto

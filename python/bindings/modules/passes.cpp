@@ -353,13 +353,14 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, RuntimeKind, bool>(),
+                    MemoryPlanner, bool, RuntimeKind, bool, bool, bool>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
-           nb::arg("enable_buffer_ir") = true,
+           nb::arg("enable_buffer_ir") = true, nb::arg("enable_fp4_nz_row_plus_one") = false,
+           nb::arg("enable_mx_l0_ping_pong") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the stored legacy "
            "L0C double-buffer compatibility flag, the target Simpler runtime ABI, and default-on "
@@ -389,6 +390,10 @@ void BindPass(nb::module_& m) {
       .def("get_runtime", &PassContext::GetRuntime, "Get the target Simpler runtime ABI for this context")
       .def("get_enable_buffer_ir", &PassContext::GetEnableBufferIR,
            "Whether supported whole kernels use Buffer IR")
+      .def("get_enable_fp4_nz_row_plus_one", &PassContext::GetEnableFp4NZRowPlusOne,
+           "Whether supported full-tile A5 FP4 casts use padded NZ transport")
+      .def("get_enable_mx_l0_ping_pong", &PassContext::GetEnableMxL0PingPong,
+           "Whether supported A5 MX matmuls use K128 L0 ping/pong")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

@@ -82,6 +82,78 @@ def test_a5_int32_to_fp16_becomes_fp32_bridge():
     assert pairs == [("int32", "fp32"), ("fp32", "fp16")], pairs
 
 
+def test_a5_explicit_packed_fp4_to_fp8_preserves_partial_valid_region():
+    """Native direct conversion preserves the original geometry and SSA contract."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 32], valid_shape=[8, 24])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+    # E2M1 -> E4M3FN is one native conversion for packed E2M1 sources.
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+
+
+def test_a5_packed_fp4_only_e5m2_cast_warns(capfd):
+    """E4M3 stays native and silent; E5M2 retains its three-hop warning."""
+    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
+
+    @pl.program
+    class E4M3:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 32])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        after = _run(E4M3, BackendType.Ascend950)
+        err_e4m3 = capfd.readouterr().err
+    finally:
+        set_log_level(prev)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    assert "LegalizeTileCast" not in err_e4m3  # native route: silent
+
+    @pl.program
+    class E5M2:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E5M2]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E5M2]:
+            t = pl.load(x, [0, 0], [16, 32])
+            c = pl.cast(t, pl.FP8E5M2)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        _run(E5M2, BackendType.Ascend950)
+        err_e5m2 = capfd.readouterr().err
+    finally:
+        set_log_level(prev)
+    assert "LegalizeTileCast" in err_e5m2
+    assert "FP4→BF16→FP32→FP8" in err_e5m2
+    assert "fp8e5m2" in err_e5m2.lower()
+
+
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
 def test_a5_packed_fp4_to_bf16_cast_is_silent_and_expands_last_dim(capfd, dtype):
     """Packed FP4→BF16 is a native hop; last axis expands 2:1."""
@@ -202,8 +274,8 @@ def test_a5_packed_fp4_encoding_keeps_lossless_bf16_bridges(source, target):
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
-    """Packed FP4→FP8 is legalized with a warning about the three-hop bridge."""
+def test_a5_packed_fp4_to_fp8_cast_preserves_format_policy(capfd, dtype):
+    """E2M1 uses native E4M3 conversion; E1M2 retains the lossless BF16 bridge."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -225,15 +297,16 @@ def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
         after = _run(Before, BackendType.Ascend950)
     finally:
         set_log_level(prev)
-    assert _cast_pairs(after) == [
-        (str(dtype), "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
+    expected = (
+        [(str(dtype), "fp8e4m3fn")]
+        if dtype == pl.fp4e2m1x2
+        else [(str(dtype), "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+    )
+    assert _cast_pairs(after) == expected
     err = capfd.readouterr().err
-    assert "LegalizeTileCast" in err
-    assert "FP4→BF16→FP32→FP8" in err
-    assert "LUT" in err
+    assert ("LegalizeTileCast" in err) == (dtype == pl.fp4e1m2x2)
+    assert ("FP4→BF16→FP32→FP8" in err) == (dtype == pl.fp4e1m2x2)
+    assert ("LUT" in err) == (dtype == pl.fp4e1m2x2)
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
@@ -254,11 +327,12 @@ def test_a5_packed_fp4_cast_expands_last_dim_valid_shape(dtype):
 
     after = _run(Before, BackendType.Ascend950)
 
-    assert _cast_pairs(after) == [
-        (str(dtype), "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
+    expected = (
+        [(str(dtype), "fp8e4m3fn")]
+        if dtype == pl.fp4e2m1x2
+        else [(str(dtype), "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+    )
+    assert _cast_pairs(after) == expected
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -773,16 +847,32 @@ def test_packed_fp4_cast_dn_rejects_partial_or_padded_extent(dtype, valid, tile_
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype):
+@pytest.mark.parametrize("target", [pl.FP32, pl.FP8E4M3FN, pl.FP8E5M2])
+@pytest.mark.parametrize("tile_cast", [False, True], ids=["tensor", "tile"])
+def test_packed_fp4_cast_dn_rejects_strided_storage_and_wider_chains(dtype, target, tile_cast):
+    # The native E2M1-to-E4M3 ND edge must not enable wider DN casts. DN
+    # supports only packed/BF16 endpoints, independently of the cast graph.
     span = ir.Span.unknown()
-    strided = ir.TileView(stride=[1, 64], blayout=ir.TileLayout.col_major)
-    source = ir.Var("source", ir.TileType([32, 32], dtype, None, strided), span)
+    if tile_cast:
+        strided = ir.TileView(stride=[1, 64], blayout=ir.TileLayout.col_major)
+        source_type = ir.TileType([32, 32], dtype, None, strided)
+        cast = ir.op.tile.cast
+    else:
+        strided = ir.TensorView([1, 64], ir.TensorLayout.DN)
+        source_type = ir.TensorType([32, 32], dtype, None, strided)
+        cast = ir.op.tensor.cast
+    source = ir.Var("source", source_type, span)
     with pytest.raises(ValueError, match="requires canonical contiguous column-major strides"):
-        ir.op.tile.cast(source, pl.BF16)
-    dense = ir.TileView(blayout=ir.TileLayout.col_major)
-    source = ir.Var("source", ir.TileType([32, 32], dtype, None, dense), span)
+        cast(source, pl.BF16)
+    if tile_cast:
+        dense = ir.TileView(blayout=ir.TileLayout.col_major)
+        dense_type = ir.TileType([32, 32], dtype, None, dense)
+    else:
+        dense = ir.TensorView([1, 32], ir.TensorLayout.DN)
+        dense_type = ir.TensorType([32, 32], dtype, None, dense)
+    source = ir.Var("source", dense_type, span)
     with pytest.raises(ValueError, match="supports only BF16 and packed FP4 endpoints"):
-        ir.op.tile.cast(source, pl.FP32)
+        cast(source, target)
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])

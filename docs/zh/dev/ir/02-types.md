@@ -442,12 +442,19 @@ TileView：它由 tile shape 以及（如果存在）tile memory space 推导得
 像 `pl.TileView()` 这样的冗余显式默认写法，会与省略写法被视为语义等价，
 并且在 printer 输出时可能统一成规范形式。`TileView.compact` 记录部分有效的
 boxed tile 是采用 PTO 的有效区域紧凑表示（`CompactMode.normal`），还是普通的
-物理 box 表示（默认的 `CompactMode.null`）。它只在 fractal 空间——`Left` / `Right` /
+物理 box 表示（默认的 `CompactMode.null`）。normal 模式只在 fractal 空间——`Left` / `Right` /
 `Acc`——有意义，因为它本身描述的就是 N-fractal pitch；`AccCompactValid` 校验器会拒绝
 其它空间上的 compact。编译器会为进入 L0A/L0B 的部分 `tile.extract`、以及行窄化的
 matmul 累加器（其 L0C pitch 由 `mad` 按 L0A 操作数的有效行数推导）自动设置该字段，
 `AutoTileMatmulL0` 还会通过 `tile.create(..., compact=True)` 在它合成的累加器种子上
 声明该字段。普通用户代码无需手动选择。
+
+`CompactMode.row_plus_one` 独立描述 FP8E4M3FN 的带填充标准 Vec NZ 存储
+（`blayout=col_major`、`slayout=row_major`、`fractal=512`）。逻辑 shape 保持不变，
+每个 32 字节面板多预留一个物理行，容量为 `(ceil(rows/16)*16 + 1) * cols` 字节。
+显式描述符要求静态正数行且行数为 16 的倍数、列数为 32 的倍数、没有显式 stride
+或起始偏移，并且仅有一个分配槽。Buffer IR 拒绝此模式。该类型与存储约定本身不
+选择转换策略；独立的 FP4 选项只覆盖完整 `128x256` 输出且默认关闭。
 
 隐式 view 依赖 memory space，构造函数只会针对传入的 space 把 view 折叠成
 `nullopt`。凡能确定结果 space 的 `f_deduce_type`，**都必须把该 space 传进来**：

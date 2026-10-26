@@ -765,7 +765,9 @@ void BindIR(nb::module_& m) {
   // CompactMode enum - must be before TileView.
   nb::enum_<CompactMode>(ir, "CompactMode", "Partial-tile compact mode enumeration")
       .value("null", CompactMode::null, "Ordinary non-compact layout")
-      .value("normal", CompactMode::normal, "Compact valid-region layout");
+      .value("normal", CompactMode::normal, "Compact valid-region layout")
+      .value("row_plus_one", CompactMode::row_plus_one,
+             "Standard Vec NZ storage with one extra physical row per panel");
 
   // Final device buffer descriptors carry no MemRef or runtime expressions.
   auto buffer_type_class = nb::class_<BufferType, Type>(

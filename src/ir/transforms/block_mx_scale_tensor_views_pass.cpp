@@ -113,6 +113,17 @@ bool IsMxProvableNonNegative(const ExprPtr& expr, const MxOffsetFacts& facts, in
   if (!expr || --*budget < 0) return false;
 
   if (auto value = As<ConstInt>(expr)) return value->value_ >= 0;
+  // Compact expert descriptors carry unsigned IDs. Restrict this proof to
+  // <=32 bits, whose entire range fits the signed INDEX used by MX offsets.
+  auto is_small_unsigned = [](const ExprPtr& value) {
+    auto scalar = As<ScalarType>(value->GetType());
+    return scalar && scalar->dtype_.IsUnsignedInt() && scalar->dtype_.GetBit() <= 32;
+  };
+  if (is_small_unsigned(expr)) return true;
+  if (auto cast = As<Cast>(expr)) {
+    auto target = As<ScalarType>(cast->GetType());
+    if (target && target->dtype_ == DataType::INDEX && is_small_unsigned(cast->operand_)) return true;
+  }
   if (auto mul = As<Mul>(expr)) {
     return IsMxProvableNonNegative(mul->left_, facts, budget) &&
            IsMxProvableNonNegative(mul->right_, facts, budget);
@@ -125,6 +136,14 @@ bool IsMxProvableNonNegative(const ExprPtr& expr, const MxOffsetFacts& facts, in
     auto denominator = As<ConstInt>(floordiv->right_);
     if (!denominator || denominator->value_ <= 0) return false;
     return IsMxProvableNonNegative(floordiv->left_, facts, budget);
+  }
+  if (auto mod = As<FloorMod>(expr)) {
+    auto denominator = As<ConstInt>(mod->right_);
+    if (!denominator || denominator->value_ <= 0) return false;
+    // Persistent work indices use remainder to select their N tile/chunk.
+    // Require a nonnegative dividend too: the lowered integer remainder must
+    // satisfy this proof even on targets that truncate signed division.
+    return IsMxProvableNonNegative(mod->left_, facts, budget);
   }
   if (auto var = As<Var>(expr)) {
     if (facts.is_non_negative && facts.is_non_negative(var, budget)) return true;
@@ -271,7 +290,10 @@ class MxOffsetFactStore {
       auto loop = loop_bindings_.find(var);
       if (loop != loop_bindings_.end()) {
         const auto& [start, step] = loop->second;
-        if (start % divisor == 0 && step % divisor == 0) return true;
+        auto recursive_facts = Facts();
+        if (step % divisor == 0 && IsMxProvableMultipleOf(start, divisor, recursive_facts, budget)) {
+          return true;
+        }
       }
       auto sources = parameter_sources_.find(var);
       if (sources == parameter_sources_.end() || sources->second.empty()) return false;
@@ -286,7 +308,8 @@ class MxOffsetFactStore {
       auto loop = loop_bindings_.find(var);
       if (loop != loop_bindings_.end()) {
         const auto& [start, step] = loop->second;
-        if (start >= 0 && step >= 0) return true;
+        auto recursive_facts = Facts();
+        if (step > 0 && IsMxProvableNonNegative(start, recursive_facts, budget)) return true;
       }
       auto sources = parameter_sources_.find(var);
       if (sources == parameter_sources_.end() || sources->second.empty()) return false;
@@ -361,10 +384,12 @@ class MxOffsetFactStore {
     }
 
     void VisitStmt_(const ForStmtPtr& op) override {
-      auto start = As<ConstInt>(op->start_);
       auto step = As<ConstInt>(op->step_);
-      if (op->loop_var_ && start && step) {
-        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(start->value_, step->value_));
+      if (op->loop_var_ && step) {
+        // A block-index start is not constant, but its existing sign fact is
+        // enough for a positive-step persistent loop. Keep the expression and
+        // prove it lazily with the same bounded recursion as scalar aliases.
+        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(op->start_, step->value_));
       }
       IRVisitor::VisitStmt_(op);
     }
@@ -385,7 +410,7 @@ class MxOffsetFactStore {
 
   ProgramPtr program_;
   std::unordered_map<VarPtr, ExprPtr> definitions_;
-  std::unordered_map<VarPtr, std::pair<int64_t, int64_t>> loop_bindings_;
+  std::unordered_map<VarPtr, std::pair<ExprPtr, int64_t>> loop_bindings_;
   std::unordered_set<VarPtr> non_negative_vars_;
   std::unordered_map<VarPtr, std::vector<ExprPtr>> parameter_sources_;
 };

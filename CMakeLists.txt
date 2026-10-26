@@ -269,6 +269,8 @@ set(PYPTO_SOURCES
     src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp
+    src/ir/transforms/fp4_cast_fusion.cpp
+    src/ir/transforms/utils/syntactic_use_analysis.cpp
     src/ir/transforms/legalize_tile_cast_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp

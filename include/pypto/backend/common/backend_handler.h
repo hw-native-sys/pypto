@@ -286,6 +286,14 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool RequiresRuntimeSubblockBridge() const = 0;
 
+  /// Whether the exact native FP4 E2M1 -> FP8 E4M3FN conversion can write
+  /// standard NZ directly on Vec. Fusion uses this capability independently
+  /// of memory-planner selection; other backends retain ordinary cast/move.
+  [[nodiscard]] virtual bool SupportsFp4CastToNZ() const { return false; }
+
+  /** Whether a V2C FIFO pop can directly declare a transposed Mat view. */
+  [[nodiscard]] virtual bool SupportsTransposeBoundaryPop(DataType /*dtype*/) const { return false; }
+
   /**
    * @brief Whether mixed kernels with no split mode (or `SplitMode::None`)
    *        must still be dispatched on both AIV lanes for cross-core sync.

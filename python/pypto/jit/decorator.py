@@ -225,6 +225,18 @@ def _resolve_enable_buffer_ir() -> bool:
     return ctx.get_enable_buffer_ir() if ctx is not None else True
 
 
+def _resolve_enable_fp4_nz_row_plus_one() -> bool:
+    """Match the padded NZ setting inherited by ir.compile()."""
+    ctx = _passes.PassContext.current()
+    return ctx.get_enable_fp4_nz_row_plus_one() if ctx is not None else False
+
+
+def _resolve_enable_mx_l0_ping_pong() -> bool:
+    """Keep independent MX L0 ablations in distinct JIT cache entries."""
+    ctx = _passes.PassContext.current()
+    return ctx.get_enable_mx_l0_ping_pong() if ctx is not None else False
+
+
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     """Resolve the stored legacy dbC flag for the compatibility cache key.
 
@@ -1123,6 +1135,8 @@ class JITFunction:
             memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             enable_buffer_ir=_resolve_enable_buffer_ir(),
+            enable_fp4_nz_row_plus_one=_resolve_enable_fp4_nz_row_plus_one(),
+            enable_mx_l0_ping_pong=_resolve_enable_mx_l0_ping_pong(),
             runtime=_resolve_runtime(),
         )
 

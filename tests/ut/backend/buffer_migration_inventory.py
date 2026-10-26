@@ -220,6 +220,7 @@ MIGRATION_FAMILIES = (
         (
             "tile.move",
             "tile.cast",
+            "tile.cast_to_nz",
             "tile.transpose",
             "tile.concat",
             "tile.extract",
