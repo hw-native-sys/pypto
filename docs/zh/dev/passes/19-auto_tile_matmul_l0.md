@@ -108,6 +108,49 @@ Acc tile，每块都必须放入后端 L0C 容量，列数不超过 4095。N 和
 不属于受支持改写的生产者/使用模式仍受分配检查和最终 NZ store 检查约束。
 用户也可显式按列分块；NZ 写回仍不能沿 M 拆分。
 
+## 公共视图语义与 Call 重建
+
+以下已有工具描述窗口的不同部分，应保持各自职责：
+
+| 工具 | 契约 |
+| ---- | ---- |
+| `tile_view_semantics::GetEffectiveTileView` | 解析片上 tile 的隐式布局，将空的有效区域展开为物理 shape |
+| `tile_view_semantics::GetAccumulatorTileGeometry` | 从源的**物理** shape 读取受支持的 Acc 几何；收窄 `valid_shape` 不改变源存储的 pitch |
+| `InferWindowReadValidShape` | 根据源、偏移、窗口和显式请求推导读取有效区域；不决定存储或复制时机 |
+| `GetValidShape` / `InferWriteValidShapeUnion` | 读取实际有效区域，推导目标有效区域的并集，不改变物理 shape 或 stride |
+| `tensor_view_semantics::BlockNzShape` / `BlockNzOffsets` | 将 GM `TensorLayout::NZ` 坐标映射成 rank-5 描述符；它与 Acc `TileView` 是不同层次 |
+
+GM 布局读取 `TensorType::tensor_view_`（省略时为 ND），片上配置读取有效 `TileView`。
+物理 shape、有效区域、offset/stride 和可选的目标 partition 应分别处理：有效窗口变小，
+不会改变父分配的物理 pitch。
+
+参数角色应由算子契约确定。`tile.store(tile, offsets, tensor, partition)` 的第四项
+描述目标分区；`tile.slice(tile, shape, offsets, valid_shape)` 的第四项描述有效区域。
+不能仅凭参数数量判定布局或 pitch。
+
+`pypto/ir/transforms/utils/registered_call_utils.h` 中的
+`transform_utils::RebuildRegisteredCall(original, new_args, remap_expr)` 共享
+registry 类型推导和 Expr 元数据保留逻辑。调用方提供 SSA 替换回调，并决定哪些
+替换值是终点，避免沿新循环携带值的 initializer 回溯到自身。工具不根据参数位置
+猜测替换关系，不选择别名、不继承 MemRef，也不插入或移动复制。direct GM 放置和
+规范 split-K 重分块仍在原有位置决定这些行为。
+
+[PR #3155](https://github.com/hw-native-sys/pypto/pull/3155) 后续可在
+`CanonicalizeTileSlice` 的 `TryRewriteMatmul`、`TryRewriteColExpand` 和
+`TryMaterializeUnalignedVecCall` 中复用该工具，先决定需要物化的操作数，再重建调用。
+例如：
+
+```cpp
+// The caller owns this explicit map, including terminal {new_var, new_var} entries.
+auto rebuilt = transform_utils::RebuildRegisteredCall(
+    call, new_args, [&](const ExprPtr& expr) {
+      return transform_utils::Substitute(expr, terminal_replacements);
+    });
+```
+
+这种复用将切片识别、有效区域细化、MemRef/别名传播，以及在定义处还是消费处复制的
+时机继续留在该 pass 中。
+
 ## Cost model & design space (`ChooseL0Tile`)
 
 `ChooseL0Tile` 通过**穷举式 roofline 搜索**挑选 L0 GEMM tile，而非闭式公式。对每个合法且对齐的 `(m, n, k)`（每维都是 `GetL0FractalAlignment()` 的倍数，L0C 预算按 `AlignUp(m, l0c_align_m) × n` 计算），它以核心 cycle 估算 wall-clock 并返回最小者：

@@ -17,13 +17,16 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/registered_call_utils.h"
 
 namespace pypto::ir::transform_utils {
 
@@ -113,6 +116,28 @@ ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, Exp
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map) {
   SubstituteMutator<ExprPtr> mutator(var_map);
   return mutator.VisitStmt(body);
+}
+
+CallPtr RebuildRegisteredCall(const CallPtr& original, const std::vector<ExprPtr>& rewritten_args,
+                              const std::function<ExprPtr(const ExprPtr&)>& remap_expr) {
+  INTERNAL_CHECK(original) << "Internal error: rebuilding an operator requires an original Call";
+  auto& registry = OpRegistry::GetInstance();
+  INTERNAL_CHECK_SPAN(original->op_ && !As<GlobalVar>(original->op_) &&
+                          registry.IsRegistered(original->op_->name_) &&
+                          !registry.GetEntry(original->op_->name_).RequiresExplicitType() && remap_expr,
+                      original->span_)
+      << "Internal error: registered-call rebuilding requires a type-deducible operator and remapper";
+  auto remap_fields = [&](const auto& fields) {
+    auto updated = fields;
+    for (auto& [key, value] : updated) {
+      if (auto mapped = MapAttrExprs(value, remap_expr)) value = std::move(*mapped);
+    }
+    return updated;
+  };
+  auto kwargs = remap_fields(original->kwargs_);
+  auto attrs = remap_fields(original->attrs_);
+  auto deduced = registry.Create(original->op_->name_, rewritten_args, kwargs, original->span_);
+  return PreserveCallAttrs(attrs, deduced);
 }
 
 // ---------------------------------------------------------------------------

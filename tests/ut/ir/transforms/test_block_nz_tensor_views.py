@@ -30,6 +30,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import codegen, passes
@@ -1584,7 +1585,15 @@ def test_auto_tiled_direct_store_preserves_expression_attrs(representation):
                 op.op,
                 op.args,
                 {**op.kwargs, "st_phase": int(pl.STPhase.Unspecified)},
-                {**op.attrs, "source_ref": op.args[0], "out_ref": op.args[2], "scalar_tag": 3036},
+                {
+                    **op.attrs,
+                    "source_ref": op.args[0],
+                    "out_ref": op.args[2],
+                    "dump_vars": [op.args[0], op.args[2]],
+                    "scalar_tag": 3036,
+                    "bool_tag": True,
+                    "string_tag": "store-metadata",
+                },
                 op.type,
                 op.span,
             )
@@ -1609,7 +1618,17 @@ def test_auto_tiled_direct_store_preserves_expression_attrs(representation):
             assert dict(call.kwargs) == dict(original.kwargs)
             assert call.attrs["source_ref"].same_as(call.args[0])
             assert call.attrs["out_ref"].same_as(call.args[2])
+            # dump_vars is stored as vector<VarPtr>, whereas the ordinary
+            # source/out fields are ExprPtr. Both must retain their payload
+            # kinds and follow the same terminal SSA replacements.
+            refs = call.attrs["dump_vars"]
+            assert len(refs) == 2
+            assert all(isinstance(ref, ir.Var) for ref in refs)
+            assert refs[0].same_as(call.args[0])
+            assert refs[1].same_as(call.args[2])
             assert call.attrs["scalar_tag"] == 3036
+            assert call.attrs["bool_tag"] is True
+            assert call.attrs["string_tag"] == "store-metadata"
             assert not call.args[0].same_as(original.args[0])
             ir.assert_structural_equal(call.type, call.args[2].type)
             if representation == "logical-nz-4":
@@ -1623,6 +1642,118 @@ def test_auto_tiled_direct_store_preserves_expression_attrs(representation):
             properties.insert(passes.IRProperty.SSAForm)
             properties.insert(passes.IRProperty.UseAfterDef)
             passes.verify_properties(properties, tiled, "ND direct-store metadata remapping")
+
+
+@pytest.mark.parametrize("layout", [ir.TensorLayout.ND, ir.TensorLayout.NZ])
+@pytest.mark.parametrize("partition", [False, True])
+@pytest.mark.parametrize("explicit_layout", [False, True])
+@pytest.mark.usefixtures("ascend_backend")
+def test_store_layout_is_independent_of_arity_and_tile_configuration(layout, partition, explicit_layout):
+    """GM layout comes from the tensor; the source remains an NZ-boxed Acc.
+
+    A fourth store argument is a destination partition in either layout. It
+    never changes the source's physical shape or its implicit/explicit config.
+    """
+    span = ir.Span.unknown()
+    config = (
+        ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major, fractal=1024)
+        if explicit_layout
+        else None
+    )
+    source = ir.Var(
+        "acc", ir.TileType([64, 16], DataType.FP32, tile_view=config, memory_space=ir.MemorySpace.Acc), span
+    )
+    output_type = ir.TensorType([64, 64], DataType.FP32, tensor_view=ir.TensorView(layout=layout))
+    output = ir.Var("out", output_type, span)
+    # Exercise the registry's actual 3/4-argument type deduction in both layouts.
+    store = tile.store(source, [0, 16], output, [64, 16] if partition else None, span=span)
+    result = ir.Var("stored", store.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(result, store, span), ir.ReturnStmt([result], span)], span)
+    function = ir.Function("main", [source, output], [store.type], body, span, ir.FunctionType.InCore)
+    before = ir.Program([function], "StoreLayouts", span)
+    after = passes.block_nz_tensor_views()(before)
+    call = _store_call(after)
+    target = call.args[2].type
+    source = call.args[0].type
+    assert isinstance(target, ir.TensorType)
+    assert isinstance(source, ir.TileType)
+    assert (target.tensor_view.layout if target.tensor_view else ir.TensorLayout.ND) == layout
+    assert len(call.args) == (4 if layout == ir.TensorLayout.NZ or partition else 3)
+    assert _shape_values(call.args[0]) == [64, 16]
+    view = source.get_effective_tile_view()
+    assert (view.blayout, view.slayout, view.fractal) == (
+        ir.TileLayout.col_major,
+        ir.TileLayout.row_major,
+        1024,
+    )
+    assert _values(view.valid_shape) == [64, 16]
+    assert _shape_values(call.args[2]) == ([1, 8, 4, 16, 8] if layout == ir.TensorLayout.NZ else [64, 64])
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_registered_rebuild_remaps_canonical_kwargs_attrs_and_span():
+    """Rebuilt MAD metadata must follow clone and narrowing in the same SSA.
+
+    Matmul has an open metadata schema, unlike store's closed kwargs. PTOAS's
+    canonical compatibility path retains the rebuilt MAD calls, letting this
+    check observe their Expr-valued kwargs without expanding the K emitter's
+    separate metadata policy.
+    """
+    before = _run(_wide_acc_nz_program(column_offset=8, split_k=True))
+    seed = next(
+        stmt.var
+        for function in before.functions.values()
+        for stmt in _walk(function.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.create").name
+    )
+    source_span = ir.Span("registered_call_rebuild.py", 17, 4)
+
+    class AttachMadMetadata(ir.IRMutator):
+        def visit_call(self, op):
+            if op.op.name != ir.get_op("tile.matmul_acc").name:
+                return super().visit_call(op)
+            return ir.Call(
+                op.op,
+                op.args,
+                {
+                    **op.kwargs,
+                    "lhs_ref": op.args[1],
+                    "rhs_ref": op.args[2],
+                    "carry_ref": op.args[0],
+                    "seed_ref": seed,
+                },
+                {**op.attrs, "lhs_ref": op.args[1], "rhs_ref": op.args[2]},
+                op.type,
+                source_span,
+            )
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        tiled = passes.auto_tile_matmul_l0()(AttachMadMetadata().visit_program(before))
+    calls = [
+        stmt.value
+        for function in tiled.functions.values()
+        for stmt in _walk(function.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.matmul_acc").name
+    ]
+    assert calls
+    for call in calls:
+        for key, position in (("carry_ref", 0), ("lhs_ref", 1), ("rhs_ref", 2)):
+            assert call.kwargs[key].same_as(call.args[position])
+        assert call.attrs["lhs_ref"].same_as(call.args[1])
+        assert call.attrs["rhs_ref"].same_as(call.args[2])
+        carry = call.args[0]
+        assert isinstance(carry, ir.IterArg)
+        assert call.kwargs["seed_ref"].same_as(carry.initValue)
+        assert not call.kwargs["seed_ref"].same_as(seed)
+        assert _shape_values(call) == [64, _shape_values(call.args[2])[1]]
+        assert _shape_values(call)[1] < 2048
+        assert call.span.filename == source_span.filename
+        assert call.span.begin_line == source_span.begin_line
+    _assert_nz_column_grid(tiled, 64, 2048, column_offset=8)
 
 
 @pytest.mark.usefixtures("ascend_backend")
@@ -1796,6 +1927,7 @@ def test_acc_nz_store_accepts_provably_aligned_loop_columns():
         {"source_dtype": DataType.INT32},
         {"output_dtype": DataType.FP16},
         {"valid_shape": (48, 16)},
+        {"tile_shape": (64, 32), "valid_shape": (64, 16)},
         {"tile_shape": (64, 8)},  # C0=8 alone does not satisfy the ISA's N%16 contract.
         {"tile_shape": (32, 16)},  # A row window has a FIXPIPE destination stride the ISA cannot express.
         {"output_shape": (128, 64), "offsets": (64, 16)},
@@ -1811,6 +1943,7 @@ def test_acc_nz_store_accepts_provably_aligned_loop_columns():
         "int32-source",
         "dtype-conversion",
         "partial-valid",
+        "partial-valid-columns",
         "eight-cols",
         "partial-parent-rows",
         "nonzero-row-offset",

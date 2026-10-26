@@ -198,6 +198,7 @@
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/nz_store_utils.h"
+#include "pypto/ir/transforms/utils/registered_call_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -1564,7 +1565,6 @@ class DirectGmPlacer : public SubtilePlacer {
 
   [[nodiscard]] VarPtr PlaceAt(std::vector<StmtPtr>& stmts, const VarPtr& sub, const ExprPtr& row_off,
                                const ExprPtr& col_off, const VarPtr& chain_in, int step) override {
-    auto& reg = OpRegistry::GetInstance();
     auto base_offsets = As<MakeTuple>(store_.call->args_[1]);
     INTERNAL_CHECK_SPAN(base_offsets, sp_) << "Internal error: direct-store offsets must remain a tuple";
     std::vector<ExprPtr> offsets = base_offsets->elements_;
@@ -1618,13 +1618,12 @@ class DirectGmPlacer : public SubtilePlacer {
                                                                  {out_in_.get(), chain_in},
                                                                  {sub.get(), sub},
                                                                  {chain_in.get(), chain_in}};
-    auto remapped = As<Call>(transform_utils::Substitute(store_.call, replacements));
-    INTERNAL_CHECK_SPAN(remapped, sp_) << "Internal error: direct-store substitution must preserve Call";
     // Both layouts share metadata remapping and the store's type rules. An
     // explicit partition preserves the destination type without turning the
     // 2-D Acc into a rank-5 tile; ordinary ND stores retain valid-region union.
-    auto deduced = reg.Create("tile.store", args, remapped->kwargs_, sp_);
-    auto scall = PreserveCallAttrs(remapped, deduced);
+    auto scall = transform_utils::RebuildRegisteredCall(store_.call, args, [&](const ExprPtr& expr) {
+      return transform_utils::Substitute(expr, replacements);
+    });
     auto sv = std::make_shared<Var>(out_base_ + "_t" + std::to_string(step), scall->GetType(), sp_);
     stmts.push_back(std::make_shared<AssignStmt>(sv, scall, sp_));
     return sv;
@@ -2073,6 +2072,11 @@ class CanonicalSplitKRetiler : public IRMutator {
                          int64_t mi, int64_t ni, CanonicalOutputWindow window,
                          std::optional<int64_t> selected_k, std::string suffix)
       : mi_(mi), ni_(ni), window_(window), k_(match.K), selected_k_(selected_k), suffix_(std::move(suffix)) {
+    // Expr-valued kwargs can still reference the original reduction's Vars.
+    // Keep original-to-clone links as well as the clone-to-narrowed mappings
+    // below, including the externally seeded initializer omitted by clone_map.
+    for (const auto& [original, clone] : clone_map) var_remap_[original] = clone;
+    var_remap_[match.init->var_.get()] = init;
     auto cloned = [&](const VarPtr& original) -> VarPtr {
       auto it = clone_map.find(original.get());
       INTERNAL_CHECK_SPAN(it != clone_map.end(), original->span_)
@@ -2129,8 +2133,8 @@ class CanonicalSplitKRetiler : public IRMutator {
       std::vector<ExprPtr> args;
       args.reserve(call->args_.size());
       for (const auto& arg : call->args_) args.push_back(VisitExpr(arg));
-      auto deduced = OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_);
-      rebuilt = PreserveCallAttrs(call, deduced);
+      rebuilt = transform_utils::RebuildRegisteredCall(
+          call, args, [this](const ExprPtr& expr) { return VisitExpr(expr); });
     }
     auto var = std::make_shared<Var>(op->var_->name_hint_ + suffix_, rebuilt->GetType(), op->var_->span_);
     if (selected_k_ && (key == matmul_ || key == matmul_acc_)) {
@@ -2180,8 +2184,8 @@ class CanonicalSplitKRetiler : public IRMutator {
       args[3] = MakeIndexTuple({k_, window_.valid_n}, call->span_);
     }
     args[1] = std::make_shared<MakeTuple>(std::move(new_offsets), call->span_);
-    auto deduced = OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_);
-    return PreserveCallAttrs(call, deduced);
+    return transform_utils::RebuildRegisteredCall(call, args,
+                                                  [this](const ExprPtr& expr) { return VisitExpr(expr); });
   }
 
   const Var* lhs_load_ = nullptr;

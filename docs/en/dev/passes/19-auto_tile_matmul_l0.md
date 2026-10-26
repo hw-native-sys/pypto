@@ -116,6 +116,54 @@ Producer/use patterns outside the supported rewrite remain subject to
 allocation checks and the final NZ-store guard. Explicit column tiling is
 also supported; M splitting remains unavailable for NZ writes.
 
+## Shared view semantics and Call rebuilding
+
+These existing helpers describe different parts of a window; keep their
+responsibilities separate:
+
+| Helper | Contract |
+| ------ | -------- |
+| `tile_view_semantics::GetEffectiveTileView` | Resolves an on-chip tile's implicit layout and expands empty validity to its physical shape |
+| `tile_view_semantics::GetAccumulatorTileGeometry` | Reads supported Acc geometry from the **physical** source shape; narrowing `valid_shape` does not change that source's pitch |
+| `InferWindowReadValidShape` | Derives a read window's validity from the source, offsets, window, and explicit request; does not choose storage or copy timing |
+| `GetValidShape` / `InferWriteValidShapeUnion` | Reads effective validity and derives the destination's valid-region union without changing its physical shape or strides |
+| `tensor_view_semantics::BlockNzShape` / `BlockNzOffsets` | Maps GM `TensorLayout::NZ` coordinates into the rank-5 descriptor; this is distinct from an Acc `TileView` |
+
+Read GM layout from `TensorType::tensor_view_` (absent means ND), and on-chip
+configuration from the effective `TileView`. Keep physical shape, validity,
+offsets/strides, and optional destination partition separate: a smaller valid
+window never changes the parent allocation's physical pitch.
+
+Identify operand roles by the operator contract. The fourth argument of
+`tile.store(tile, offsets, tensor, partition)` describes the destination
+partition; the fourth argument of `tile.slice(tile, shape, offsets, valid_shape)`
+describes validity. Argument count alone identifies neither layout nor pitch.
+
+`transform_utils::RebuildRegisteredCall(original, new_args, remap_expr)`
+in `pypto/ir/transforms/utils/registered_call_utils.h` shares registry type
+deduction and Expr-metadata preservation. The caller
+supplies its SSA substitution callback and decides which replacements are
+terminal, so a generated loop carry is not traversed back through its own
+initializer. The helper does not infer replacements from argument positions,
+select aliases, carry MemRefs, or insert or move copies. Direct GM placement
+and canonical split-K retiling retain those decisions at their existing sites.
+
+For a later adoption in [PR #3155](https://github.com/hw-native-sys/pypto/pull/3155),
+`CanonicalizeTileSlice` can use the same helper in `TryRewriteMatmul`,
+`TryRewriteColExpand`, and `TryMaterializeUnalignedVecCall`, after deciding
+which operands to materialize. For example:
+
+```cpp
+// The caller owns this explicit map, including terminal {new_var, new_var} entries.
+auto rebuilt = transform_utils::RebuildRegisteredCall(
+    call, new_args, [&](const ExprPtr& expr) {
+      return transform_utils::Substitute(expr, terminal_replacements);
+    });
+```
+
+This reuse leaves slice recognition, validity refinement, MemRef/alias
+propagation, and definition-site versus consumer-site copy timing in that pass.
+
 ## Cost model & design space (`ChooseL0Tile`)
 
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:
