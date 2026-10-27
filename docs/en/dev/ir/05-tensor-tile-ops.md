@@ -13,6 +13,51 @@ Part of the [Operator System](05-operators.md) reference.
 
 `tensor.view` is a metadata-only zero-copy shape/layout reinterpret. It is registered as a `TensorOp` passthrough in `ConvertTensorToTileOps`; PTO in-core codegen lowers it to `pto.make_tensor_view` over the original base pointer. Targets require rank at least 1 (DN requires rank at least 2). Orchestration shape reinterpret is normally ND-only and cannot also change layout. FP8E8M0 dynamic scale storage additionally permits an equal-element-count shaped alias between packed ND and `MX_A_ZZ` or `MX_B_NN`; orchestration preserves the same runtime tensor without calling `reshape`. Shape reinterpretation of a partially valid source is limited to either a packed ND leading-dimension collapse to 2D or a contiguous-prefix linear collapse to `[1, product(shape)]`; both require an explicit target `valid_shape`. These forms preserve the source tensor kind and backing metadata.
 
+An explicit `strides=` selects a separate InCore-only view contract. The source
+must be a local, fully valid, packed ND tensor; the result is a fully valid ND
+alias of the same dtype and MemRef, including its byte offset. Strides are in
+elements, must be positive, and must satisfy the existing non-overlapping ND
+family (innermost stride 1). FP4/sub-byte storage, distributed tensors, partial
+validity, and layout changes are unsupported in this form. No copy or implicit
+tile load is introduced. The ordinary view's element-count equality rule does
+not apply to this explicit form; instead, its last accessible element must lie
+inside the source's packed region:
+
+```text
+1 + sum((shape[i] - 1) * strides[i]) <= product(source.shape)
+```
+
+Static violations and int64 overflow are rejected. Dynamic dimensions and
+strides carry caller preconditions: positivity, non-overlap, representable
+address arithmetic, and the same span bound must hold at runtime. No automatic
+runtime bounds guard is generated. The capacity is relative to the source view,
+not any larger allocation it happens to share.
+Nonpacked ND aliases must use DMA `pl.load`/`pl.store` access; scalar
+`tensor.read`/`tensor.write` are rejected because their current addressing path
+assumes a packed tensor.
+
+For a contiguous INT8 native cache `[pages, page_bytes]`, the following fragment
+inside an InCore body skips each page's scale/padding tail without changing the
+root-input contract:
+
+```python
+pages = pl.tensor.dim(native_cache, 0)
+pitch = pl.tensor.dim(native_cache, 1)
+keys = pl.tensor.view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
+pair = pl.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.MemorySpace.Mat)
+```
+
+The bounded rank-3 multi-ND Mat-load path is currently enabled on A2/A3. Its
+physical window must be static and fully valid, without clamping; the source
+dimensions, offsets, and pitch may be dynamic under the caller's bounds
+contract. It preserves the three-dimensional GM window and forms a `[64,128]`
+Mat tile in this example. The backend also checks instruction ranges; A2/A3's
+multi-page pitch is at most 65535 **elements**, while a single-page window does
+not consume that stride. The caller must establish valid, forward-adjacent
+physical pages and keep its per-page path for other page-table cases. This
+feature does not infer adjacency or promise a performance improvement. A5
+multi-ND support is not yet enabled by PyPTO.
+
 Flat gather reuses `pl.gather(src, index=idx)` (equivalently `pl.gather(src, idx)`):
 `out = src.reshape(-1)[idx]`. The index is a 2D INT32 tensor or tile and can be
 computed inside the kernel. The output is a Tensor with the index's shape and

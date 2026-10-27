@@ -13,6 +13,40 @@
 
 `tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）。编排层通常仅支持 ND shape 重新解释，且不能同时改变 layout；FP8E8M0 dynamic scale storage 还允许在 packed ND 与 `MX_A_ZZ` 或 `MX_B_NN` 之间建立元素数相同的 shaped alias，编排层保留同一个 runtime tensor，不调用 `reshape`。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 
+显式指定 `strides=` 时，采用独立的 InCore 视图合同。源必须是本地、完全有效、
+紧密排列的 ND 张量；结果是同 dtype、同 MemRef（包括字节偏移）的完全有效 ND
+别名。stride 单位为元素，必须为正，且满足现有的非重叠 ND 规范（最内层 stride
+为 1）。该形式暂不支持 FP4/亚字节存储、分布式张量、部分有效区域或布局变换。
+它不会复制数据或隐式加载 Tile。普通 view 的元素数相等规则不用于显式 stride
+形式，而是要求最后一个可访问元素位于源的紧密区域内：
+
+```text
+1 + sum((shape[i] - 1) * strides[i]) <= product(source.shape)
+```
+
+静态非法值和 int64 溢出会被拒绝。动态尺寸和 stride 由调用方保证运行时前置
+条件：正值、非重叠、地址运算可表示，以及相同的跨度约束。编译器不自动生成
+运行时边界检查。容量相对于当前源视图计算，不能借用其共享的更大分配越界访问。
+非紧密 ND 别名须通过 DMA `pl.load`/`pl.store` 访问；标量
+`tensor.read`/`tensor.write` 的现有寻址路径假定张量紧密排列，因此明确拒绝该别名。
+
+对于连续的 INT8 Native cache `[pages, page_bytes]`，下面的 InCore 函数体片段
+在保留根输入合同的同时，跳过每页尾部的 scale/padding：
+
+```python
+pages = pl.tensor.dim(native_cache, 0)
+pitch = pl.tensor.dim(native_cache, 1)
+keys = pl.tensor.view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
+pair = pl.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.MemorySpace.Mat)
+```
+
+受限的三维 multi-ND Mat 加载路径目前仅在 A2/A3 启用。加载的物理窗口必须静态、
+完全有效且不启用 clamp；源尺寸、偏移和页距可以动态，但调用方必须满足边界合同。
+该例保留三维 GM 窗口，并将 Mat Tile 展平为 `[64,128]`。后端还会检查指令范围：
+A2/A3 多页窗口的页距上限为 65535 个**元素**；单页窗口不使用该步长。调用方
+仍须检查物理页有效且正序相邻，其他页表情况保留逐页读取。该能力不会推断页
+相邻性，也不保证性能收益。PyPTO 暂未启用 A5 multi-ND 路径。
+
 扁平 gather 复用 `pl.gather(src, index=idx)`（等价于 `pl.gather(src, idx)`），
 语义为 `out = src.reshape(-1)[idx]`。索引是二维 INT32 tensor 或 tile，可在内核中
 动态计算。结果为 Tensor，shape 和 valid shape 跟随索引，dtype 跟随源

@@ -6389,5 +6389,76 @@ class TestRowWindowAccumulatorPacking:
         assert "batch_matmul_acc" not in str(exc.value)
 
 
+@pytest.mark.parametrize("page_pitch,row_pitch,first_page", [(4160, 128, 0), (4224, 128, 1), (8192, 160, 7)])
+def test_strided_rank3_mat_load_preserves_source_window(page_pitch, row_pitch, first_page):
+    """Page and row padding stay in GM while only the destination is flattened."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, source: pl.Tensor[[9, page_pitch], pl.INT8]) -> pl.Tensor[[9, page_pitch], pl.INT8]:
+            keys = pl.tensor.view(source, [9, 32, 128], strides=[page_pitch, row_pitch, 1])
+            loaded = pl.tile.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
+            return source
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, source: pl.Tensor[[9, page_pitch], pl.INT8]) -> pl.Tensor[[9, page_pitch], pl.INT8]:
+            keys = pl.tensor.view(source, [9, 32, 128], strides=[page_pitch, row_pitch, 1])
+            loaded: pl.Tile[[64, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat
+            )
+            return source
+
+    After = passes.flatten_tile_nd_to_2d()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_strided_rank4_mat_load_rejected_before_packed_collapse():
+    """A higher-rank padded source must not silently acquire packed strides."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, source: pl.Tensor[[4, 4160], pl.INT8]) -> pl.Tensor[[4, 4160], pl.INT8]:
+            keys = pl.tensor.view(source, [2, 2, 32, 128], strides=[8320, 4160, 128, 1])
+            loaded = pl.tile.load(keys, [0, 0, 0, 0], [2, 2, 32, 128], target_memory=pl.Mem.Mat)
+            return source
+
+    with pytest.raises(ValueError, match="rank-3 ND source"):
+        passes.flatten_tile_nd_to_2d()(Before)
+
+
+def test_rank3_mat_load_with_implicit_stride_keeps_packed_collapse():
+    """A view carrying only validity metadata still has implicit packed strides."""
+    span = ir.Span.unknown()
+    source_type = ir.TensorType(
+        [2, 32, 128],
+        DataType.INT8,
+        None,
+        ir.TensorView(
+            layout=ir.TensorLayout.ND,
+            valid_shape=[ir.ConstInt(value, DataType.INDEX, span) for value in [2, 32, 128]],
+        ),
+    )
+    ib = IRBuilder()
+    with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+        source = function.param("source", source_type)
+        ib.let("loaded", tile_ops.load(source, [0, 0, 0], [2, 32, 128], target_memory=ir.MemorySpace.Mat))
+        function.return_type(source_type)
+        ib.return_stmt(source)
+    After = passes.flatten_tile_nd_to_2d()(ir.Program([function.get_result()], "implicit_stride", span))
+    kernel = After.get_function("kernel")
+    assert kernel is not None
+    calls = [
+        statement.value
+        for statement in cast(ir.SeqStmts, kernel.body).stmts
+        if isinstance(statement, ir.AssignStmt) and isinstance(statement.value, ir.Call)
+    ]
+    load = next(call for call in calls if call.op.name == _OP_TILE_LOAD)
+    assert cast(ir.MakeTuple, load.args[2]).elements == [64, 128]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

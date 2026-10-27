@@ -4696,5 +4696,153 @@ def test_tile_adapter_existing_static_qualifier_is_preserved_once():
     assert 'extern "C" __aicore__ void run_vf(' in result
 
 
+def _strided_mat_load_program(
+    window=(2, 32, 128),
+    strides=(4160, 128, 1),
+    dtype=DataType.INT8,
+    valid_shape=None,
+    clamp=False,
+    fractal=512,
+    source_valid_shape=None,
+):
+    """Build post-flatten IR to test final-emitter checks independently of passes."""
+    span = ir.Span.unknown()
+    shape = [max(9, window[0]), window[1], window[2]]
+    source_view = ir.TensorView(
+        stride=[ir.ConstInt(value, DataType.INDEX, span) for value in strides],
+        layout=ir.TensorLayout.ND,
+        valid_shape=source_valid_shape,
+    )
+    source_type = ir.TensorType(shape, dtype, None, source_view)
+    source = ir.Var("source", source_type, span)
+    call = tile.load(
+        source, [0, 0, 0], list(window), valid_shape, target_memory=ir.MemorySpace.Mat, clamp=clamp
+    )
+    flat_shape = [window[0] * window[1], window[2]]
+    # Model the 2D destination that FlattenTileNdTo2D creates, including a
+    # partial valid region when exercising its explicit unsupported contract.
+    valid = window if valid_shape is None else valid_shape
+    flat_valid = [valid[0] * valid[1], valid[2]]
+    view = ir.TileView(
+        valid_shape=[ir.ConstInt(value, DataType.INDEX, span) for value in flat_valid],
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+        fractal=fractal,
+    )
+    flat_type = ir.TileType(flat_shape, dtype, None, view, ir.MemorySpace.Mat)
+    flat_call = ir.Call(call.op, call.args, call.kwargs, flat_type, span)
+    loaded = ir.Var("loaded", flat_type, span)
+    body = ir.SeqStmts([ir.AssignStmt(loaded, flat_call, span), ir.ReturnStmt([], span)], span)
+    function = ir.Function("kernel", [source], [], body, span, ir.FunctionType.InCore)
+    return ir.Program([function], "strided_mat_load", span)
+
+
+@pytest.mark.parametrize("page_pitch", [4160, 4224, 8192, 65535])
+def test_strided_multi_nd_mat_load_emits_one_rank3_tload(page_pitch):
+    """Scale/padding bytes stay outside the one rank-3 Key DMA window."""
+    mlir = _generate_mlir(_strided_mat_load_program(strides=(page_pitch, 128, 1)))
+    assert mlir.count("pto.tload ins(") == 1
+    assert "!pto.partition_tensor_view<2x32x128xi8>" in mlir
+    assert f"strides = [%c{page_pitch}_index, %c128_index, %c1_index]" in mlir
+    load = _single_line(_get_mlir_lines(mlir), "pto.tload ins(")
+    assert "rows=64, cols=128" in load
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT8, DataType.FP16, DataType.FP32])
+def test_strided_multi_nd_mat_load_accepts_row_padding_and_element_strides(dtype):
+    """srcDValue encodes a padded row pitch; strides are always element counts."""
+    mlir = _generate_mlir(_strided_mat_load_program(strides=(8192, 160, 1), dtype=dtype))
+    assert "strides = [%c8192_index, %c160_index, %c1_index]" in mlir
+    assert mlir.count("pto.tload ins(") == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"strides": (65536, 128, 1)}, "page stride"),
+        ({"window": (1, 1, 128), "strides": (70000, 65536, 1)}, "row stride"),
+        ({"window": (2, 2048, 1), "strides": (4096, 1, 1)}, "destination matrix stride"),
+        ({"window": (2, 8193, 1), "strides": (16386, 1, 1)}, "B\\*M <= 16384"),
+        ({"valid_shape": [1, 32, 128]}, "fully valid"),
+        ({"source_valid_shape": [8, 32, 128]}, "fully valid source"),
+        ({"clamp": True}, "clamp=False"),
+        ({"fractal": 1024}, "512-byte NZ fractal"),
+        ({"dtype": DataType.INT64}, "8/16/32-bit"),
+    ],
+)
+def test_strided_multi_nd_mat_load_rejects_unsupported_window(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        _generate_mlir(_strided_mat_load_program(**kwargs))
+
+
+def test_strided_single_matrix_load_does_not_limit_unused_page_stride():
+    """ndNum=1 does not consume the 16-bit matrix-stride field."""
+    mlir = _generate_mlir(_strided_mat_load_program(window=(1, 32, 128), strides=(65536, 128, 1)))
+    assert "!pto.partition_tensor_view<1x32x128xi8>" in mlir
+
+
+def test_rank3_mat_load_with_implicit_stride_is_not_treated_as_strided():
+    """Empty source strides keep the old implicit-packed emitter behavior."""
+    mlir = _generate_mlir(_strided_mat_load_program(strides=()))
+    assert mlir.count("pto.tload ins(") == 1
+
+
+def test_strided_multi_nd_mat_load_backend_requires_compiler_enablement():
+    """A5 ISA support does not imply that PyPTO enables this compiler subset."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    with pytest.raises(ValueError, match="not enabled by PyPTO on this backend"):
+        _generate_mlir(_strided_mat_load_program())
+
+
+def test_strided_tensor_view_and_flatten_emit_original_page_stride():
+    """Exercise the public four-operand view through flattening and PTO emission."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, source: pl.Tensor[[9, 4160], pl.INT8]) -> pl.Tensor[[9, 4160], pl.INT8]:
+            keys = pl.tensor.view(source, [9, 32, 128], strides=[4160, 128, 1])
+            _loaded = pl.tile.load(keys, [1, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
+            return source
+
+    mlir = _generate_mlir(passes.flatten_tile_nd_to_2d()(Before))
+    assert mlir.count("pto.tload ins(") == 1
+    assert "!pto.partition_tensor_view<2x32x128xi8>" in mlir
+    alias = _single_line(_get_mlir_lines(mlir), "strides = [%c4160_index, %c128_index, %c1_index]")
+    assert "pto.make_tensor_view %arg0" in alias
+    assert "shape = [%c9_index, %c32_index, %c128_index]" in alias
+
+
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("strided", [False, True])
+def test_scalar_gm_access_rejects_nonpacked_nd_views(operation, strided):
+    """The old shape-only flat offset must never read/write a page's metadata."""
+    span = ir.Span.unknown()
+    pitch = 4160 if strided else 4096
+    source_type = ir.TensorType(
+        [9, 32, 128],
+        DataType.INT8,
+        None,
+        ir.TensorView(stride=[pitch, 128, 1], layout=ir.TensorLayout.ND),
+    )
+    source = ir.Var("source", source_type, span)
+    call = (
+        tensor_ops.read(source, [1, 0, 0])
+        if operation == "read"
+        else tensor_ops.write(source, [1, 0, 0], ir.ConstInt(7, DataType.INT8, span))
+    )
+    result = ir.Var("result", call.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([], span)], span)
+    function = ir.Function("kernel", [source], [], body, span, ir.FunctionType.InCore)
+    program = ir.Program([function], "scalar_view_access", span)
+    if strided:
+        with pytest.raises(ValueError, match="nonpacked ND tensor views; use pl.load/pl.store"):
+            _generate_mlir(program)
+    else:
+        mlir = _generate_mlir(program)
+        assert ("pto.load" if operation == "read" else "pto.store") in mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

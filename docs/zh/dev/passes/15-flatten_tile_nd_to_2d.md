@@ -49,7 +49,7 @@ program_2d = flatten_pass(program)
 
 | Tile 操作 | 变换方式 |
 | --------- | -------- |
-| `tile.load`（>2D） | 将结果 tile 重建为 2D。对于 natural NZ Mat load，还会在源张量上插入 shape-only 的 2D `tensor.view`，把 leading offsets/shapes/valid_shape 折叠到 2D 源窗口，并要求该窗口按 row-major 连续可折叠。Vec load 和 transposed Mat load 保留原始 rank>2 源窗口，只展平结果 tile |
+| `tile.load`（>2D） | 将结果 tile 重建为 2D。对于来自 packed ND 源的 natural NZ Mat load，插入 shape-only 的 2D `tensor.view`，把按 row-major 连续可折叠的 leading offsets/shapes/valid_shape 合并为 2D。非紧密 rank-3 ND 源保留原始窗口和 stride，交由受限 multi-ND 路径处理；不支持的带间隙 rank 会被拒绝。Vec load、transposed Mat load 和 blocked NZ 源保留原始 tensor-rank 窗口 |
 | `tile.store`（rank>2 张量） | 在转换后 IR 中注入张量 rank 对应的分区 `shapes` 作为额外的第 4 个操作数，供后端 codegen 重建 `partition_view`；DSL 源码不变。该窗口是**目标张量所包含的 box**，以 store 自身的 offsets 为原点 —— 见 [store 的分区窗口](#store-的分区窗口)。若 tile 操作数本身仍是 rank>2，pass 会先插入一个 `tile.reshape` 把 tile 操作数压回 2D —— 这是给手工构造 IR 的兜底，因为 `tile.load` 与 `tile.reshape` 分支现在已经展平了 DSL 能写出的每一种生产者 —— codegen 要求 tile 必须是 2D,而 tile shape 仍由 `shapes` 分区操作数携带 |
 | `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
@@ -60,6 +60,13 @@ program_2d = flatten_pass(program)
 | `tile.reshape` / `tile.reinterpret_view`（>2D 结果） | 将字面量目标 shape 操作数改写为合并后的 2D `[product(leading), last]` 并重新推导类型。这两个是仅有的结果 rank 来自 shape 操作数而非某个操作数类型的 tile 算子，因此下面的通用路径无法下降它们——通用路径会用**同一个** ND 元组重建调用，rank>2 的结果就此存活到 PTO codegen，被 `ExtractTileTypeInfo` 按前两维定型。此处的折叠严格保持语义：tile 是一段连续的行主序数据，`[2, 8, 128]` 与 `[16, 128]` 指向同一批元素、同一顺序。由此得到的 2D reshape 往往是恒等变换，随后由 `FoldNoOpReshape`（pass 38）消除。喂给 `tile.batch_matmul` 的安全 batch-only reshape 由该 lowering 剥离（见上），不会走到这个分支 |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
 | 1D/2D Tile 操作 | 不变 |
+
+非紧密 rank-3 情况的地址映射独立于后端能力保留：真实页间隙不能通过 packed
+折叠抹掉。最终加载 emitter 检查后端能力和指令范围。目前该路径仅在 A2/A3
+启用，要求静态、完全有效且不启用 clamp 的窗口，只把目标 Tile 从 `[B,M,N]`
+展平为 `[B*M,N]`。动态源尺寸、偏移和 stride 仍由调用方保证运行时前置条件；
+编译器不生成边界 guard 或自动逐页回退。详见
+[显式 stride 视图合同](../ir/05-tensor-tile-ops.md)。
 
 通用 Call 会统一替换参数、缓存的结果类型和包含表达式的属性。任意一处变化时，
 都会同步重建 Call 及其定义 Var，并记录该 Var 供下游引用。即使只有元数据变化，

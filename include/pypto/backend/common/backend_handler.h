@@ -264,6 +264,12 @@ class BackendHandler {
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.
   [[nodiscard]] virtual bool SupportsLocalPipeDepth() const { return false; }
 
+  /// Whether PyPTO enables its bounded rank-3 ND -> NZ Mat load contract.
+  /// The emitter separately checks static, fully valid windows and the current
+  /// conservative instruction limits. This is compiler enablement, not the
+  /// complete hardware capability: A5 multi-ND support is not enabled here yet.
+  [[nodiscard]] virtual bool SupportsMultiNdMatLoad() const { return false; }
+
   /**
    * @brief Whether this backend needs the MemoryReuse load + tpop_from_aic
    *        in-place hazard guard for split-AIV functions.

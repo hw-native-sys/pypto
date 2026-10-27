@@ -50,7 +50,7 @@ Per-statement handling:
 
 | Tile op | Transformation |
 | ------- | -------------- |
-| `tile.load` (>2D) | Rebuild the result tile as 2D. For a natural NZ Mat load, also insert a shape-only 2D `tensor.view` on the source tensor, collapse leading offsets/shapes/valid_shape to the 2D source window, and require that window to be row-major contiguous. Vec loads and transposed Mat loads keep the original rank>2 source window and only flatten the result tile |
+| `tile.load` (>2D) | Rebuild the result tile as 2D. A natural NZ Mat load from a packed ND source also gets a shape-only 2D `tensor.view`, with row-major-contiguous leading offsets/shapes/valid_shape collapsed to 2D. A nonpacked rank-3 ND source retains its original window and strides for the bounded multi-ND path; unsupported strided ranks are rejected. Vec loads, transposed Mat loads, and blocked NZ sources keep their tensor-rank source window |
 | `tile.store` (rank>2 tensor) | Inject the tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged. The window is a **box the destination contains**, anchored at the store's offsets — see [The store partition window](#the-store-partition-window). If the tile operand itself is still rank>2, insert a `tile.reshape` to flatten the tile operand to 2D first — a safety net for hand-built IR, since the `tile.load` and `tile.reshape` branches now flatten every producer the DSL can write — the codegen requires a 2D tile while the tile shape still flows through as the `shapes` partition operand |
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
@@ -61,6 +61,15 @@ Per-statement handling:
 | `tile.reshape` / `tile.reinterpret_view` (>2D result) | Rewrite the literal target-shape operand to the merged 2D `[product(leading), last]` and re-deduce. These are the only tile ops whose result rank comes from a shape operand rather than from an operand's type, so the generic path below cannot lower them — it rebuilds the call with the *same* ND tuple and the rank>2 result survives the pass, to be typed from its first two dimensions by `ExtractTileTypeInfo` in PTO codegen. The collapse is exactly semantics-preserving here: a tile is one contiguous row-major run, so `[2, 8, 128]` and `[16, 128]` name the same elements in the same order. The 2D reshape that results is often the identity, which `FoldNoOpReshape` (pass 38) then removes. A safe batch-only reshape feeding `tile.batch_matmul` is peeled by the lowering instead (see above) and never reaches this branch |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
+
+The nonpacked rank-3 exception preserves the address mapping independently of
+backend availability: a real page gap cannot be erased by a packed collapse.
+The final load emitter checks the backend capability and instruction limits.
+Currently enabled on A2/A3, this path requires a static, fully valid window with
+no clamping, and folds only its destination Tile `[B,M,N]` to `[B*M,N]`.
+Dynamic source dimensions, offsets, and strides remain caller preconditions;
+no runtime bounds guards or automatic per-page fallback are generated. See the
+[explicit-stride view contract](../ir/05-tensor-tile-ops.md).
 
 Generic Calls substitute their arguments, cached result types, and expression-valued
 attributes together. A change in any of these rebuilds both the Call and its defining

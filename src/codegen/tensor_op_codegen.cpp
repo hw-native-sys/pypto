@@ -446,8 +446,14 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   // constructor, so shape-changing orchestration views lower to reshape only
   // for ND layouts. Layout-only keeps the legacy ND/DN alias/transpose
   // behavior.
-  INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
-      << "tensor.view requires 1 to 3 args (input[, shape[, valid_shape]])";
+  INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 4, op->span_)
+      << "tensor.view requires 1 to 4 args (input[, shape[, valid_shape[, strides]]])";
+  // Runtime Tensor::reshape cannot retain explicit strides. Reject this new
+  // form rather than silently turning a padded alias into a packed descriptor.
+  const bool has_explicit_strides = op->args_.size() == 4;
+  CHECK_SPAN(!has_explicit_strides, op->span_)
+      << "tensor.view with explicit strides is supported only inside InCore functions; "
+         "pass the packed source tensor and create the view inside the InCore function";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   INTERNAL_CHECK_SPAN(!input_name.empty(), op->span_) << "tensor.view input must be a variable";

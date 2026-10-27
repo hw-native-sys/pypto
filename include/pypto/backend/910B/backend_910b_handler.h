@@ -45,6 +45,7 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool SupportsRuntimeBoundLocalSoftwarePipeline() const override { return true; }
   [[nodiscard]] bool SupportsLocalPipeDepth() const override { return true; }
+  [[nodiscard]] bool SupportsMultiNdMatLoad() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
 
   // A2/A3 has no int32 ordering compare; pto-isa substitutes an equality

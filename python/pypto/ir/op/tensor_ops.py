@@ -1957,6 +1957,7 @@ def view(
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     *,
     layout: TensorLayout | None = None,
+    strides: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Reinterpret ``tensor`` over the same physical memory.
@@ -1969,13 +1970,20 @@ def view(
 
     1. The target shape must have rank at least 1. A DN target must have rank
        at least 2 (RFC #1300 section 4.2 trailing-pair layout).
-    2. When ``shape`` is provided, the total element count must be
+    2. When ``shape`` is provided without ``strides``, the total element count must be
        product-preserving (new product == old product), except for symbolic
        dimensions where equality is unprovable and accepted optimistically.
        Static target dimensions must be positive. A source with a partial
        ``valid_shape`` can only use a packed ND leading-dimension collapse to
        2D or a contiguous-prefix linear collapse to ``[1, product(shape)]``;
        both require an explicit target ``valid_shape``.
+    Explicit ``strides`` instead describe a fully valid, non-overlapping ND view
+    within a fully valid packed local ND source. Strides use dtype elements;
+    the last addressed element must remain within the source region. Static
+    violations and int64 overflow are rejected. Symbolic positivity, stride
+    relationships, storage bounds, and address-arithmetic bounds are caller
+    preconditions; no runtime guards or copies are generated. This form is
+    supported only inside InCore functions and excludes FP4/sub-byte dtypes.
     Combining ``shape`` with a layout change is valid for type deduction and
     PTO in-core lowering. Only orchestration lowering is restricted: it supports
     ND shape reinterprets and shaped ND/MX_A_ZZ/MX_B_NN backing/consumer views
@@ -1985,7 +1993,7 @@ def view(
 
     Args:
         tensor: Input tensor expression.
-        shape: New shape for the view. Must be product-preserving unless
+        shape: New shape for the view. Without ``strides``, must be product-preserving unless
             symbolic dimensions are present. May introduce or remove unit
             dimensions (RFC #1300 P4). Must be a sequence of ints or
             Expr values, or a ``MakeTuple``. In an InCore function, the source
@@ -1999,6 +2007,8 @@ def view(
             Orchestration also permits shaped ND/MX_A_ZZ/MX_B_NN backing and
             consumer views for FP8E8M0 MX scales; other layout-changing shape
             views remain limited to in-core lowering.
+        strides: Explicit ND strides in dtype elements. Requires ``shape``;
+            ``valid_shape`` must be omitted, empty, or equal to ``shape``.
         span: Optional source span for debugging (auto-captured if not
             provided).
 
@@ -2009,6 +2019,8 @@ def view(
         ValueError: If the requested shape/layout is missing, unsupported, or
             inconsistent with the source tensor metadata.
     """
+    if strides is not None and shape is None:
+        raise ValueError("tensor.view strides requires shape")
     if shape is None and layout is None:
         raise ValueError("tensor.view requires at least one of shape or layout")
     if valid_shape is not None and shape is None:
@@ -2019,6 +2031,12 @@ def view(
         args.append(_to_make_tuple(shape, actual_span))
     if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
+    elif strides is not None:
+        # Keep the legacy three-operand valid_shape form unambiguous. Strides
+        # are an Expr operand so substitution and serialization visit them.
+        args.append(_to_make_tuple([], actual_span))
+    if strides is not None:
+        args.append(_to_make_tuple(strides, actual_span))
     kwargs: dict[str, Any] = {}
     if layout is not None:
         kwargs["layout"] = layout

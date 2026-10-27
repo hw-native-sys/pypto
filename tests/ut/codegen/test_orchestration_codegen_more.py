@@ -786,6 +786,20 @@ int main() {{
         reshape_line = next(line for line in code.splitlines() if f"Tensor {viewed_name} =" in line)
         assert f".reshape({viewed_name}_shapes, 2);" in reshape_line
 
+    def test_tensor_view_explicit_strides_rejected(self):
+        """A runtime reshape cannot implement the InCore-only padded alias."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        ib = IRBuilder()
+        with ib.function("orch_strided_view", type=ir.FunctionType.Orchestration) as function:
+            source = function.param("source", ir.TensorType([9, 4160], DataType.INT8))
+            viewed = ib.let("viewed", tensor_ops.view(source, [9, 32, 128], strides=[4160, 128, 1]))
+            function.return_type(viewed.type)
+            ib.return_stmt(viewed)
+        program = ir.Program([function.get_result()], "strided_view", ir.Span.unknown())
+        with pytest.raises(ValueError, match="explicit strides.*only inside InCore"):
+            _generate_orch_code(program)
+
     def test_tensor_view_shape_layout_combination_rejected(self):
         """Combining shape reinterpret with a layout change is rejected at
         orchestration codegen time -- the runtime ``Tensor::reshape`` does not

@@ -119,6 +119,95 @@ static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCo
   INTERNAL_UNREACHABLE_SPAN(op->span_) << "Internal error: invalid cache policy";
 }
 
+// Validate the bounded compiler contract for the rank-3 source windows that
+// FlattenTileNdTo2D retains instead of discarding their physical gaps. Static
+// violations are rejected here even for hand-built IR; symbolic source strides
+// and offsets remain caller preconditions, with no implicit runtime guard.
+static void ValidateStridedMultiNdMatLoad(const CallPtr& op, const ir::TensorTypePtr& source,
+                                          const ir::MakeTuplePtr& shapes, const ir::MakeTuplePtr& valid_shape,
+                                          codegen::PTOCodegen& codegen) {
+  auto tile = As<ir::TileType>(op->GetType());
+  const auto& maybe_source_view = source->tensor_view_;
+  if (!tile || tile->memory_space_ != ir::MemorySpace::Mat || source->shape_.size() <= 2 ||
+      !maybe_source_view) {
+    return;
+  }
+  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
+  const auto& source_view = *maybe_source_view;
+  // An absent stride is the implicit packed representation, including views
+  // that carry only valid_shape/padding metadata before stride materialization.
+  if (source_view.stride.empty()) return;
+  if (source_view.layout != ir::TensorLayout::ND || tile_view.blayout != ir::TileLayout::col_major ||
+      tile_view.slayout != ir::TileLayout::row_major) {
+    return;
+  }
+  const auto packed =
+      ir::tensor_view_semantics::BuildLogicalStridesFromLayout(source->shape_, source_view.layout);
+  if (ir::tile_view_semantics::ShapeExprListsEquivalent(source_view.stride, packed)) return;
+
+  const auto* handler = codegen.GetBackendHandler();
+  CHECK_SPAN(handler && handler->SupportsMultiNdMatLoad(), op->span_)
+      << "Strided multi-ND Mat loads are not enabled by PyPTO on this backend. "
+         "Load each matrix separately.";
+  CHECK_SPAN(source->shape_.size() == 3 && !As<ir::DistributedTensorType>(source), op->span_)
+      << "Strided multi-ND Mat loads currently require a local rank-3 ND source.";
+  const auto canonical =
+      ir::tensor_view_semantics::CheckCanonicalView(source->shape_, source_view.stride, source_view.layout);
+  CHECK_SPAN(canonical.ok, op->span_)
+      << "Strided multi-ND Mat load requires a canonical ND view: " << canonical.reason;
+  CHECK_SPAN(source_view.valid_shape.empty() ||
+                 ir::tile_view_semantics::ShapeExprListsEquivalent(source_view.valid_shape, source->shape_),
+             op->span_)
+      << "Strided multi-ND Mat loads currently require a fully valid source view.";
+  const auto dtype = source->dtype_;
+  CHECK_SPAN(
+      (dtype.GetBit() == 8 || dtype.GetBit() == 16 || dtype.GetBit() == 32) &&
+          (dtype.IsInt() || dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32),
+      op->span_)
+      << "Strided multi-ND Mat loads support only 8/16/32-bit integers, FP16, BF16 and FP32.";
+  CHECK_SPAN(tile_view.fractal == 512 && !op->GetKwarg<bool>("clamp", false), op->span_)
+      << "Strided multi-ND Mat loads require a 512-byte NZ fractal and clamp=False.";
+  CHECK_SPAN(
+      shapes->elements_.size() == 3 &&
+          ir::tile_view_semantics::ShapeExprListsEquivalent(shapes->elements_, valid_shape->elements_) &&
+          ir::tile_view_semantics::ShapeExprListsEquivalent(tile_view.valid_shape, tile->shape_),
+      op->span_)
+      << "Strided multi-ND Mat loads currently require a static, fully valid [B, M, N] window; "
+         "partial valid_shape is not supported.";
+
+  auto batch = As<ir::ConstInt>(shapes->elements_[0]);
+  auto rows = As<ir::ConstInt>(shapes->elements_[1]);
+  auto cols = As<ir::ConstInt>(shapes->elements_[2]);
+  CHECK_SPAN(batch && rows && cols && batch->value_ > 0 && batch->value_ <= 65535 && rows->value_ > 0 &&
+                 rows->value_ <= 16384 && cols->value_ > 0 && cols->value_ <= 65535,
+             op->span_)
+      << "Strided multi-ND Mat loads require static B in [1, 65535], M in [1, 16384], N in [1, 65535].";
+  const int64_t merged_rows = batch->value_ * rows->value_;
+  auto tile_rows = tile->shape_.size() == 2 ? As<ir::ConstInt>(tile->shape_[0]) : nullptr;
+  auto tile_cols = tile->shape_.size() == 2 ? As<ir::ConstInt>(tile->shape_[1]) : nullptr;
+  CHECK_SPAN(tile_rows && tile_cols && tile_rows->value_ == merged_rows &&
+                 tile_cols->value_ == cols->value_ && merged_rows <= 16384,
+             op->span_)
+      << "Strided multi-ND Mat load destination must be [B*M, N] with B*M <= 16384.";
+
+  // A2/A3 srcDValue and srcNdMatrixStride are 16-bit ELEMENT strides. Row
+  // padding is supported directly; neither stride has to equal a packed size.
+  // A single matrix does not use srcNdMatrixStride, so its page pitch may exceed
+  // the multi-matrix range. The compiler currently exposes this conservative
+  // subset even though other ISAs can encode larger source strides.
+  auto row_stride = As<ir::ConstInt>(source_view.stride[1]);
+  CHECK_SPAN(!row_stride || (row_stride->value_ > 0 && row_stride->value_ <= 65535), op->span_)
+      << "Strided multi-ND Mat load row stride must be in [1, 65535] elements.";
+  if (batch->value_ > 1) {
+    auto page_stride = As<ir::ConstInt>(source_view.stride[0]);
+    CHECK_SPAN(!page_stride || (page_stride->value_ > 0 && page_stride->value_ <= 65535), op->span_)
+        << "Strided multi-ND Mat load page stride must be in [1, 65535] elements when B > 1.";
+    CHECK_SPAN(rows->value_ * (32 / dtype.GetByte()) <= 65535, op->span_)
+        << "Strided multi-ND Mat load requires M * (32 / dtype_bytes) <= 65535 "
+           "for its destination matrix stride.";
+  }
+}
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -150,6 +239,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
+  ValidateStridedMultiNdMatLoad(op, tensor_type, shapes_tuple, valid_shape_tuple, codegen);
 
   // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.64 carries a
   // streaming read as a `cache_policy` attribute on `pto.tload` plus an optional
@@ -848,6 +938,23 @@ static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+// Scalar GM access currently linearizes indices from shape alone. Reject a
+// gapped ND alias rather than addressing its padding as data; DMA load/store
+// uses the TensorView descriptor and preserves these explicit strides.
+static void CheckPackedNdScalarAccess(const CallPtr& op, const ir::TensorTypePtr& tensor) {
+  if (!tensor->tensor_view_ || tensor->tensor_view_->layout != ir::TensorLayout::ND ||
+      tensor->tensor_view_->stride.empty()) {
+    return;
+  }
+  CHECK_SPAN(ir::tile_view_semantics::ShapeExprListsEquivalent(
+                 tensor->tensor_view_->stride, ir::tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                   tensor->shape_, ir::TensorLayout::ND)),
+             op->span_)
+      << op->op_->name_
+      << " does not support nonpacked ND tensor views; use pl.load/pl.store "
+         "so the TensorView strides are preserved.";
+}
+
 static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
@@ -855,6 +962,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
 
   auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.read first argument must be TensorType";
+  CheckPackedNdScalarAccess(op, tensor_type_ptr);
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.read second argument must be MakeTuple (indices)";
@@ -892,6 +1000,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
 
   auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.write first argument must be TensorType";
+  CheckPackedNdScalarAccess(op, tensor_type_ptr);
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.write second argument must be MakeTuple (indices)";
@@ -1106,8 +1215,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   // original storage.
   reg("tensor.view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
-        << "tensor.view requires 1 to 3 args (input[, shape[, valid_shape]])";
+    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 4, op->span_)
+        << "tensor.view requires 1 to 4 args (input[, shape[, valid_shape[, strides]]])";
     auto input_var = AsVarLike(op->args_[0]);
     INTERNAL_CHECK_SPAN(input_var, op->span_) << "tensor.view input must be a Var/IterArg";
 
