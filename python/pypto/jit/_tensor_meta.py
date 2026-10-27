@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from pypto.arith import Analyzer
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
@@ -407,6 +408,87 @@ def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
     return None
 
 
+def _constant_slice_extent(
+    lower: ast.expr | None,
+    upper: ast.expr,
+    resolve_int: Callable[[ast.expr], int | None],
+) -> int | None:
+    """Prove a slice width without assigning sample values to runtime bounds.
+
+    Static bounds keep their existing integer resolution. Otherwise translate
+    pure affine integer syntax into INDEX expressions and use the same arithmetic
+    analyzer as the parser. Symbols belong to this pair of bounds only: repeated
+    names refer to the same current binding, never an earlier assignment's value.
+    Unresolved calls/reads and nonlinear arithmetic are deliberately not atoms:
+    treating two identical calls as one symbol could cancel different results.
+    """
+    start = 0 if lower is None else resolve_int(lower)
+    stop = resolve_int(upper)
+    if isinstance(start, int) and isinstance(stop, int):
+        return stop - start
+
+    span = _ir.Span.unknown()
+    symbols: dict[str, _ir.Var] = {}
+    operations: dict[type[ast.operator], Callable[[_ir.Expr, _ir.Expr], _ir.Expr]] = {
+        ast.Add: _ir.add,
+        ast.Sub: _ir.sub,
+        ast.Mult: _ir.mul,
+    }
+
+    def as_index(value: int | _ir.Expr) -> _ir.Expr | None:
+        if isinstance(value, _ir.Expr):
+            return value
+        # Python constant folding uses unbounded integers; the analyzer's INDEX
+        # constants have an int64 payload. Decline rather than truncate a bound.
+        if not -(1 << 63) <= value < (1 << 63):
+            return None
+        return _ir.ConstInt(value, DataType.INDEX, span)
+
+    def convert(node: ast.expr | None) -> int | _ir.Expr | None:
+        if node is None:
+            return 0
+        if isinstance(node, ast.BinOp):
+            lhs, rhs = convert(node.left), convert(node.right)
+            if lhs is None or rhs is None:
+                return None
+            if isinstance(lhs, int) and isinstance(rhs, int):
+                return _fold_int_arith(node.op, lhs, rhs)
+            if isinstance(node.op, ast.Mult) and not (isinstance(lhs, int) or isinstance(rhs, int)):
+                return None
+            operation = operations.get(type(node.op))
+            left, right = as_index(lhs), as_index(rhs)
+            if operation is None or left is None or right is None:
+                return None
+            return operation(left, right)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = convert(node.operand)
+            if operand is None or isinstance(node.op, ast.UAdd):
+                return operand
+            if isinstance(operand, int):
+                return -operand
+            return _ir.sub(_ir.ConstInt(0, DataType.INDEX, span), operand)
+
+        # Resolve only leaves here, not each recursively visited arithmetic
+        # subtree, so long expressions do not repeatedly scan the same nodes.
+        value = resolve_int(node)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(node, ast.Name):
+            if node.id not in symbols:
+                symbols[node.id] = _ir.Var(node.id, _ir.ScalarType(DataType.INDEX), span)
+            return symbols[node.id]
+        return None
+
+    lhs, rhs = convert(upper), convert(lower)
+    if lhs is None or rhs is None:
+        return None
+    upper_expr, lower_expr = as_index(lhs), as_index(rhs)
+    if upper_expr is None or lower_expr is None:
+        return None
+    extent = Analyzer().simplify(_ir.sub(upper_expr, lower_expr))
+    return extent.value if isinstance(extent, _ir.ConstInt) else None
+
+
 def _subscript_slice_meta(
     sub: ast.Subscript,
     local: Mapping[str, TensorMeta],
@@ -418,10 +500,12 @@ def _subscript_slice_meta(
     form 2): dtype is inherited from ``src``; each slice dim resolves to
     ``stop - start`` (``start`` defaults to 0), and an open upper bound ``a:``
     resolves to ``parent_dim - start`` — mirroring the parser's
-    ``_build_subscript_slice_args``. A dim falls back to the parent extent when
-    its bounds aren't static — a ``DynDim`` parent flows through transparently
-    that way; a scalar index drops its dim (numpy-style rank reduction); dims
-    past the supplied indices are implicit ``:`` and keep the parent extent.
+    ``_build_subscript_slice_args``. Constant differences of runtime bounds
+    (``base:base + width``) retain their static width. A dim falls back to the
+    parent extent when the width cannot be proved — a ``DynDim`` parent flows
+    through transparently that way; a scalar index drops its dim (numpy-style
+    rank reduction); dims past the supplied indices are implicit ``:`` and keep
+    the parent extent.
     Returns ``None`` (skipped, leaving the clear ``_build_params`` error) when
     ``src`` is unknown, a step slice is used, or the index count exceeds
     ``src``'s rank.
@@ -440,16 +524,15 @@ def _subscript_slice_meta(
             continue  # scalar index → rank-reducing, dim dropped
         if idx.step is not None:
             return None
-        start = 0 if idx.lower is None else resolve_int(idx.lower)
         parent = src_meta.shape[dim_idx]
         if idx.upper is None:
             # Open upper bound ``a:`` — the parser bounds it at ``parent - start``
             # (see ``_build_subscript_slice_args``), so mirror that here instead
             # of falling back to the full parent extent for a nonzero ``start``.
+            start = 0 if idx.lower is None else resolve_int(idx.lower)
             extent = parent - start if isinstance(parent, int) and isinstance(start, int) else None
         else:
-            stop = resolve_int(idx.upper)
-            extent = stop - start if isinstance(start, int) and isinstance(stop, int) else None
+            extent = _constant_slice_extent(idx.lower, idx.upper, resolve_int)
         dims.append(extent if extent is not None else parent)
     dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
     return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype, layout=src_meta.layout)
