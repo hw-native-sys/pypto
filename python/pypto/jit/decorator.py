@@ -66,14 +66,14 @@ import re
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto._artifact_contract import ArtifactExecutionMode
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._environment import explicit_env_request
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
-from pypto._target import _platform_string
+from pypto._target import _parse_platform, _platform_string
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
@@ -100,6 +100,9 @@ from .specializer import (
     func_name_lookup,
     tile_annotation_fingerprints,
 )
+
+if TYPE_CHECKING:
+    from pypto.runtime.kernel.session import KernelConfig
 
 # ---------------------------------------------------------------------------
 # Error message rewriting for JIT compilation
@@ -271,6 +274,29 @@ def _resolve_runtime() -> _passes.RuntimeKind:
     """
     ctx = _passes.PassContext.current()
     return ctx.get_runtime() if ctx is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+
+
+def _eager_platform(requested: str, bound: str) -> str:
+    """Compile for the bound platform; only a non-default different target conflicts."""
+    from pypto.runtime import CompileOptions  # noqa: PLC0415
+
+    if requested not in (CompileOptions().platform, bound):
+        raise ValueError(
+            f"CompileOptions platform {requested!r} conflicts with platform {bound!r} "
+            "bound by pypto.torch.init"
+        )
+    return bound
+
+
+def _eager_runtime(ambient: _passes.RuntimeKind, bound_name: str) -> _passes.RuntimeKind:
+    """Use the bound runtime unless an active PassContext conflicts with it."""
+    bound = _passes.runtime_kind_from_name(bound_name)
+    if _passes.PassContext.current() is not None and ambient != bound:
+        raise ValueError(
+            f"Active PassContext runtime {runtime_kind_to_name(ambient)!r} conflicts with runtime "
+            f"{bound_name!r} bound by pypto.torch.init"
+        )
+    return bound
 
 
 def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
@@ -1124,6 +1150,7 @@ class JITFunction:
         _contract: ArtifactExecutionMode | None = None,
         _preflight: Callable[[_ir.Program, list[Any]], None] | None = None,
         _lookup_only: bool = False,
+        _kernel_config: "KernelConfig | None" = None,
     ) -> tuple[Any, list[Any], Any | None]:
         """Look up or build a specialized CompiledProgram.
 
@@ -1145,6 +1172,16 @@ class JITFunction:
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
         target_platform = _platform_string(compile_kwargs["backend_type"], compile_kwargs["execution_mode"])
+        runtime = _resolve_runtime()
+        if _kernel_config is not None:
+            target_platform = _eager_platform(target_platform, _kernel_config.platform)
+            compile_kwargs["backend_type"], compile_kwargs["execution_mode"] = _parse_platform(
+                target_platform
+            )
+            runtime = _eager_runtime(runtime, _kernel_config.runtime)
+            if _passes.PassContext.current() is None:
+                # Let ir.compile create its context so explicit pass options remain valid.
+                compile_kwargs["runtime"] = runtime
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
         if not cache_config.enabled:
@@ -1210,7 +1247,7 @@ class JITFunction:
             enable_software_pipeline=_resolve_enable_software_pipeline(
                 compile_kwargs.get("enable_software_pipeline")
             ),
-            runtime=_resolve_runtime(),
+            runtime=runtime,
         )
 
         if _contract is not None:
@@ -1233,7 +1270,7 @@ class JITFunction:
                     build,
                     self._persistent_source_digest,
                     platform=target_platform,
-                    runtime_name=runtime_kind_to_name(_resolve_runtime()),
+                    runtime_name=runtime_kind_to_name(runtime),
                     distributed=self._func_type == "host",
                     **consumer_options,
                 )

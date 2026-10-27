@@ -149,10 +149,11 @@ pypto.torch.init()
 result = op(x, out, config=CompileOptions(execution_mode=ExecutionMode.ONBOARD))
 ```
 
-初始化必须先于参数绑定和编译成功完成。省略 `config` 时按初始化目标选择 onboard 编译。
-直接调用拒绝 `RunConfig`、不同目标及分布式配置；执行配置属于初始化。
-使用 HBG 时，当前 `PassContext` 必须选择 `RuntimeKind.HOST_BUILD_GRAPH`，
-与 `init(runtime="host_build_graph")` 一致。`op.compile(..., config=run_config)`
+初始化必须先于参数绑定和编译成功完成。省略 `config` 或使用 `CompileOptions` 的默认
+平台时，按初始化绑定的目标编译。直接调用拒绝非默认且不匹配的平台、`RunConfig`
+及分布式配置。没有活跃 `PassContext` 时，编译使用 `init` 绑定的 runtime，包括 HBG；
+存在活跃 context 时，其 runtime 必须与初始化配置一致。解析后的平台和 runtime
+也用于标识缓存产物。`op.compile(..., config=run_config)`
 和 `op.warmup(...)` 保留 program 语义，不要求 kernel 初始化；同一进程内 program
 与 kernel 执行仍互斥。
 

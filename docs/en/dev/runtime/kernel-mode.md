@@ -194,10 +194,11 @@ result = op(x, out, config=CompileOptions(execution_mode=ExecutionMode.ONBOARD))
 ```
 
 Initialization must succeed before argument binding or compilation. Omitting
-`config` selects onboard compilation for the initialized target. Direct calls
-reject `RunConfig`, a different target and distributed configurations; runtime
-settings belong to initialization. For HBG, the active `PassContext` must select
-`RuntimeKind.HOST_BUILD_GRAPH`, matching `init(runtime="host_build_graph")`.
+`config` or using the default platform in `CompileOptions` selects the initialized
+target. A non-default different platform is rejected, as are `RunConfig` and
+distributed configurations. Without an active `PassContext`, compilation uses
+the runtime bound by `init`, including HBG. An active context must select the
+same runtime. The resolved platform and runtime also identify cached artifacts.
 `op.compile(..., config=run_config)` and `op.warmup(...)` keep program semantics
 and require no kernel initialization. Program and kernel execution remain
 mutually exclusive within one process.
