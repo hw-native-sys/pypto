@@ -22,6 +22,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.pypto_core import DataType
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
@@ -712,9 +713,44 @@ class TestAccumulatorMembership:
         )
 
 
-def _seed_predicates_after_simplify(start: int, stop: int, step: int) -> list[str]:
+_MATMUL_ACC_OPS = frozenset({ir.get_op("tensor.matmul_acc").name, ir.get_op("tile.matmul_acc").name})
+
+
+class _CollectMatmulAccPredicates(ir.IRVisitor):
+    """Collect every `matmul_acc` `init_cond` in traversal order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.predicates: list[ir.Expr] = []
+
+    def visit_call(self, op: ir.Call) -> None:
+        if op.op.name in _MATMUL_ACC_OPS:
+            self.predicates.append(op.args[3])
+        super().visit_call(op)
+
+
+class _ReplaceMatmulAccPredicates(ir.IRMutator):
+    """Replace every `matmul_acc` `init_cond` with the next entry of `predicates`."""
+
+    def __init__(self, predicates: list[ir.Expr]) -> None:
+        super().__init__()
+        self._predicates = predicates
+        self.index = 0
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        new = super().visit_call(op)
+        assert isinstance(new, ir.Call)
+        if new.op.name in _MATMUL_ACC_OPS:
+            args = list(new.args)
+            args[3] = self._predicates[self.index]
+            self.index += 1
+            return ir.Call(new.op, args, new.kwargs, new.type, new.span)
+        return new
+
+
+def _seed_predicates_after_simplify(start: int, stop: int, step: int):
     """Lower a stage=2 `pl.pipeline` whose body seeds an accumulator with `init_cond=(i == 0)`,
-    run `Simplify`, and return the printed `init_cond=` spelling of each replicated seed site.
+    then run `Simplify`; return `(lowered, after)`.
 
     The accumulator is carried through `init_values=` / `pl.yield_` because the input must
     already be SSA, and the operands are sliced outside the loop so the loop variable
@@ -739,8 +775,21 @@ def _seed_predicates_after_simplify(start: int, stop: int, step: int) -> list[st
             return pl.tensor.assemble(out, r, [0, 0, 0])
 
     lowered = passes.lower_pipeline_loops()(Before)
-    lines = ir.python_print(passes.simplify()(lowered)).splitlines()
-    return [ln.strip() for ln in lines if "init_cond=" in ln]
+    return lowered, passes.simplify()(lowered)
+
+
+def _assert_replica_one_predicate(lowered, after, expected_replica_one: ir.Expr) -> None:
+    """Assert the complete IR: Simplify may change replica 1's predicate and nothing else."""
+    collector = _CollectMatmulAccPredicates()
+    collector.visit_program(lowered)
+    assert len(collector.predicates) == 2, (
+        f"stage=2 must replicate the seed site twice, got {len(collector.predicates)}"
+    )
+
+    mutator = _ReplaceMatmulAccPredicates([collector.predicates[0], expected_replica_one])
+    expected = mutator.visit_program(lowered)
+    assert mutator.index == 2, f"expected 2 matmul_acc calls, replaced {mutator.index}"
+    ir.assert_structural_equal(after, expected)
 
 
 class TestReplicaSeedPredicateFoldsInSimplify:
@@ -751,18 +800,27 @@ class TestReplicaSeedPredicateFoldsInSimplify:
 
     def test_unreachable_zero_folds_the_replica_predicate(self):
         # start=0, step=2: replica 1 indexes {2, 6, 10}, never zero.
-        predicates = _seed_predicates_after_simplify(0, 12, 2)
-        assert len(predicates) == 2, f"stage=2 must replicate the seed site twice: {predicates}"
-        assert re.search(r"init_cond=i == 0\b", predicates[0]), predicates[0]
-        assert re.search(r"init_cond=False\b", predicates[1]), predicates[1]
+        lowered, after = _seed_predicates_after_simplify(0, 12, 2)
+        _assert_replica_one_predicate(lowered, after, ir.ConstBool(False, ir.Span.unknown()))
 
     def test_reachable_zero_keeps_the_replica_predicate(self):
         # start=-2, step=2: replica 1 indexes {0, 4}. Folding would make the first K
         # block accumulate onto an uninitialised accumulator instead of overwriting it.
-        predicates = _seed_predicates_after_simplify(-2, 6, 2)
-        assert len(predicates) == 2, f"stage=2 must replicate the seed site twice: {predicates}"
-        assert re.search(r"init_cond=i == 0\b", predicates[0]), predicates[0]
-        assert re.search(r"init_cond=i == -2\b", predicates[1]), predicates[1]
+        lowered, after = _seed_predicates_after_simplify(-2, 6, 2)
+
+        collector = _CollectMatmulAccPredicates()
+        collector.visit_program(lowered)
+        rewritten = collector.predicates[1]
+        assert isinstance(rewritten, ir.Eq), rewritten
+        shifted = rewritten.left
+        assert isinstance(shifted, ir.Add), shifted
+        expected = ir.Eq(
+            shifted.left,
+            ir.ConstInt(-2, DataType.INDEX, rewritten.span),
+            DataType.BOOL,
+            rewritten.span,
+        )
+        _assert_replica_one_predicate(lowered, after, expected)
 
 
 if __name__ == "__main__":
