@@ -230,8 +230,11 @@ int64_t MadCycles(int m, int n, int k, const L0TileConfig& cfg) {
   const int64_t k_tail = cfg.K - num_full * k;               // peel tail width (0 if k | K)
   const int64_t k_blocks = num_full + (k_tail > 0 ? 1 : 0);  // == CeilDiv(K, k)
   const int64_t k_fractals = num_full * CeilDiv(k, kt) + (k_tail > 0 ? CeilDiv(k_tail, kt) : 0);
+  // All supported cube targets issue 16x16 M/N fractals. Search spacing may
+  // be stricter (for example a boxed Mat bias), but does not reduce MAD work.
+  constexpr int64_t kMadMnFractal = 16;
   const int64_t per_mn =
-      k_blocks * cfg.mad_head + cpr * CeilDiv(m, cfg.align_m) * k_fractals * CeilDiv(n, cfg.align_n);
+      k_blocks * cfg.mad_head + cpr * CeilDiv(m, kMadMnFractal) * k_fractals * CeilDiv(n, kMadMnFractal);
   return RepeatedReductionWork(CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn, cfg);
 }
 
@@ -474,13 +477,17 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 // the IR.
 std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& regime, int64_t A0, int64_t B0,
                                        int64_t C0, bool require_inner_pair, bool require_full_k) {
-  const int64_t m_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.M), cfg.align_m) : cfg.M;
-  int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
+  const int64_t m_min = AlignUp(static_cast<int64_t>(cfg.min_m), cfg.align_m);
+  const int64_t n_min = AlignUp(static_cast<int64_t>(cfg.min_n), cfg.align_n);
+  const int64_t m_hi =
+      cfg.allow_padding ? AlignUp(static_cast<int64_t>(std::max(cfg.M, cfg.min_m)), cfg.align_m) : cfg.M;
+  int64_t n_hi =
+      cfg.allow_padding ? AlignUp(static_cast<int64_t>(std::max(cfg.N, cfg.min_n)), cfg.align_n) : cfg.N;
   if (cfg.max_n > 0) n_hi = std::min<int64_t>(n_hi, cfg.max_n);
   std::optional<Candidate> best;
-  for (int64_t m = cfg.min_m; m <= m_hi; m += cfg.align_m) {
+  for (int64_t m = m_min; m <= m_hi; m += cfg.align_m) {
     const auto boxed_m = BoxedExtent(m, cfg.box_align_m);
-    const auto boxed_min_n = BoxedExtent(cfg.min_n, cfg.box_align_n);
+    const auto boxed_min_n = BoxedExtent(n_min, cfg.box_align_n);
     if (!boxed_m || !boxed_min_n || *boxed_m > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
         *boxed_min_n > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       break;
@@ -495,7 +502,7 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
     // no larger m can either.
     if (physical_m > C0 / static_cast<int64_t>(*boxed_min_n)) break;
     const int64_t n_max = std::min<int64_t>(n_hi, C0 / physical_m);
-    for (int64_t n = cfg.min_n; n <= n_max; n += cfg.align_n) {
+    for (int64_t n = n_min; n <= n_max; n += cfg.align_n) {
       if (require_inner_pair &&
           PipelinedInnerFullTiles(static_cast<int>(m), static_cast<int>(n), cfg, regime.stat) < 2) {
         continue;
@@ -616,23 +623,25 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
                              ? L0bBudget(cfg, DeriveOperandDB(Stationarity::kBStationary))
                              : B0;
 
-  const auto min_boxed_m = BoxedExtent(cfg.min_m, cfg.box_align_m);
-  const auto min_boxed_n = BoxedExtent(cfg.min_n, cfg.box_align_n);
+  const auto min_m = AlignUp(static_cast<int64_t>(cfg.min_m), cfg.align_m);
+  const auto min_n = AlignUp(static_cast<int64_t>(cfg.min_n), cfg.align_n);
+  const auto min_boxed_m = BoxedExtent(min_m, cfg.box_align_m);
+  const auto min_boxed_n = BoxedExtent(min_n, cfg.box_align_n);
   CHECK(min_boxed_m && *min_boxed_m <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
         static_cast<int64_t>(*min_boxed_m) <= max_a0 / cfg.min_k)
       << "ChooseL0Tile: L0a capacity " << max_a0 << " elements is too small to fit the minimum tile ("
-      << cfg.min_m << " x " << cfg.min_k << ")";
+      << min_m << " x " << cfg.min_k << ")";
   CHECK(min_boxed_n && *min_boxed_n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
         static_cast<int64_t>(*min_boxed_n) <= max_b0 / cfg.min_k)
       << "ChooseL0Tile: L0b capacity " << max_b0 << " elements is too small to fit the minimum tile ("
-      << cfg.min_k << " x " << cfg.min_n << ")";
-  const auto min_c_elements = CandidateL0cPhysicalElements(cfg.min_m, cfg.min_n, cfg);
+      << cfg.min_k << " x " << min_n << ")";
+  const auto min_c_elements = CandidateL0cPhysicalElements(min_m, min_n, cfg);
   CHECK(min_c_elements && *min_c_elements <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
         C0_base >= static_cast<int64_t>(*min_c_elements))
       << "ChooseL0Tile: L0c capacity " << C0_base
       << " elements is too small to fit the minimum physical tile footprint ("
       << (min_c_elements ? std::to_string(*min_c_elements) : std::string("unrepresentable"))
-      << " elements for logical " << cfg.min_m << " x " << cfg.min_n << ")";
+      << " elements for logical " << min_m << " x " << min_n << ")";
 
   // 3. Score the design space. The baseline (output-stationary, dbC=1) is today's
   //    realizable algorithm and is always scored. Within a regime the wall
