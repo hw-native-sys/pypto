@@ -44,11 +44,14 @@ import pytest
 from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen
 
 
 def _default_allocation_snapshot(program: ir.Program) -> ir.Program:
     """Inspect planner-owned Tile allocations while still running the full pipeline."""
-    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     snapshot = None
     for transform in PassManager(OptimizationStrategy.Default).passes:
@@ -1321,7 +1324,6 @@ class TestAutoTileMatmulL0PredicatedAcc:
         means no second Acc tile to reconcile, and L0C has no Acc→Acc copy that
         could reconcile one.
         """
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         @pl.program
         class Before:
@@ -1642,7 +1644,6 @@ class TestAutoTileMatmulL0MNTiling:
         # Exercise the production lowering as well as the AutoTile-local IR:
         # the boundary's physical boxes and narrowed valid shapes must survive
         # memory inference and PTO codegen.
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
         from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
         from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
 
@@ -2376,7 +2377,6 @@ class TestAutoTileMatmulL0MNTiling:
         what makes the tile legal. 544 = 4*128 + 32, so the inner pipeline runs the 4
         full 128-wide blocks and a straight-line 32-wide N-peel follows. The full
         Default pipeline must allocate cleanly. (Numerics: st suite.)"""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
@@ -2475,7 +2475,6 @@ class TestAutoTileMatmulL0MNTiling:
         overflow), A = [64, 64] streamed across the 3 clean m-blocks. (256×272 no
         longer selects B-stationary under the drain-count model — B-stat splits the
         output over M, so on that small shape output-stationary has fewer drains.)"""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
@@ -2560,7 +2559,6 @@ class TestAutoTileMatmulL0MNTiling:
         """
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend950)
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         @pl.program
         class Before:
@@ -2870,8 +2868,6 @@ class TestAutoTileMatmulL0MNTiling:
         schedule; here it must allocate cleanly, and the moving-operand extract
         stays double-buffered (hoisted Load tier)."""
 
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
-
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
 
@@ -2937,7 +2933,6 @@ class TestAutoTileMatmulL0MNTiling:
         succeeds) — for both a clean divisible grid and a shape whose partial
         boundary is peeled into a straight-line tail (the tail reuses the same
         extract/matmul/store primitives, so it must also codegen)."""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
         from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
         from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
 
@@ -3441,7 +3436,6 @@ class TestAutoTileMatmulL0MatScratch:
         # both matmuls output-stationary, so their L0 operand buffers are the same 32 KB
         # shape and pack in MemoryReuse; a pass-level structural check alone would not
         # catch an overflow.
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
 
@@ -3489,7 +3483,6 @@ class TestAutoTileMatmulL0MatScratch:
         The consumer [128, 64] fits L0c (K-only tiling), so any Sequential
         ``pl.range`` in the emitted kernel is the producer's A/B-stationary
         held-operand loop."""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
@@ -3996,7 +3989,6 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
         ``pto.tinsert`` (FIXPIPE downcast) and zero ``pto.tcvt`` (Vector cast), with no
         ``_aiv`` Vector function. Without the fold this overflows the Vec buffer at
         ``[128, 128]``; with it the intermediate never leaves the cube."""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
         from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
         from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
 
@@ -4441,12 +4433,44 @@ def _verify_cast_fold_source(program):
     passes.verify_properties(props, program, "review input before AutoTile")
 
 
+def _assert_finalized_cast_scratch(program, *, narrowed):
+    """Prove that the consumer reads the folded Mat value, not the original cast."""
+    assignments = _cast_fold_assignments(program)
+    assert not any(stmt.var.name_hint.startswith("cb__") for stmt in assignments)
+    consumer = next(stmt for stmt in assignments if stmt.var.name_hint.startswith("result__"))
+    assert isinstance(consumer.value, ir.Call)
+    assert consumer.value.op.name == ir.get_op("tile.matmul").name
+    lhs = consumer.value.args[0]
+    assert isinstance(lhs.type, ir.TileType)
+    assert lhs.type.memory_space == ir.MemorySpace.Mat
+    definition = next(stmt for stmt in assignments if stmt.var.same_as(lhs))
+    assert isinstance(definition.value, ir.Call)
+    if narrowed:
+        assert definition.value.op.name == ir.get_op("tile.set_validshape").name
+        scratch = definition.value.args[0]
+        definition = next(stmt for stmt in assignments if stmt.var.same_as(scratch))
+        assert isinstance(definition.value, ir.Call)
+    else:
+        # Full validity needs neither a consumer view nor a dead finalization view.
+        assert not any(
+            isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.set_validshape").name
+            and stmt.value.args[0].same_as(lhs)
+            for stmt in assignments
+        )
+    assert definition.value.op.name == ir.get_op("tile.assemble").name
+    assert isinstance(definition.var.type, ir.TileType)
+    shape = definition.var.type.shape
+    assert len(shape) == 2
+    assert all(
+        isinstance(dim, ir.ConstInt) and dim.value == extent
+        for dim, extent in zip(shape, (16, 32), strict=True)
+    )
+    return lhs.type
+
+
 def _native_cast_fold(program, planner, backend_type, tmp_path):
     """Run the complete pipeline and pinned native assembler, without a device."""
-    from pypto.backend._ptoas_locate import find_ptoas_binary  # noqa: PLC0415
-    from pypto.backend.pto_backend import _run_ptoas  # noqa: PLC0415
-    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
-    from pypto.pypto_core import codegen  # noqa: PLC0415
 
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
@@ -4506,14 +4530,13 @@ def test_fits_cast_preserves_partial_valid_shape(planner, backend_type, valid_m,
     _verify_cast_fold_source(before)
     with passes.PassContext([], memory_planner=planner):
         after = passes.auto_tile_matmul_l0()(before)
-    lhs = next(
-        stmt.value.args[0]
-        for stmt in _cast_fold_assignments(after)
-        if stmt.var.name_hint.startswith("result__")
-    )
-    tile = lhs.type
+    tile = _assert_finalized_cast_scratch(after, narrowed=(valid_m, valid_n) != (16, 32))
     shape = tile.tile_view.valid_shape if tile.tile_view and tile.tile_view.valid_shape else tile.shape
-    assert tuple(dim.value for dim in shape) == (valid_m, valid_n)
+    assert len(shape) == 2
+    assert all(
+        isinstance(dim, ir.ConstInt) and dim.value == extent
+        for dim, extent in zip(shape, (valid_m, valid_n), strict=True)
+    )
     _native_cast_fold(Before, planner, backend_type, tmp_path)
 
 
@@ -4549,13 +4572,10 @@ def test_fits_cast_preserves_symbolic_rows(planner, backend_type, tmp_path):
     _verify_cast_fold_source(before)
     with passes.PassContext([], memory_planner=planner):
         after = passes.auto_tile_matmul_l0()(before)
-    lhs = next(
-        stmt.value.args[0]
-        for stmt in _cast_fold_assignments(after)
-        if stmt.var.name_hint.startswith("result__")
-    )
+    tile = _assert_finalized_cast_scratch(after, narrowed=True)
     func = next(iter(after.functions.values()))
-    assert lhs.type.tile_view.valid_shape[0].same_as(func.params[-1])
+    assert tile.tile_view is not None and tile.tile_view.valid_shape
+    assert tile.tile_view.valid_shape[0].same_as(func.params[-1])
     _native_cast_fold(Before, planner, backend_type, tmp_path)
 
 
