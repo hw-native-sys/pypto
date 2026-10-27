@@ -4420,5 +4420,94 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
     ir.assert_structural_equal(After, Expected)
 
 
+@pytest.mark.parametrize("capture_is_operand", [False, True])
+def test_function_use_index_counts_nested_captures(capture_is_operand):
+    """A cast may fold only when every capture uses it as a matrix operand."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    then_body = (
+        "            product = pl.tile.matmul(cb, bt)\n            updated = pl.store(product, [0, 0], out)\n"
+        if capture_is_operand
+        else "            updated = pl.store(cb, [0, 0], out)\n"
+    )
+    columns = 16 if capture_is_operand else 32
+    source = f"""@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.BF16],
+               b: pl.Tensor[[32, 32], pl.BF16],
+               other: pl.Tensor[[32, 16], pl.BF16],
+               flag: pl.Scalar[pl.INT32],
+               out: pl.Out[pl.Tensor[[16, {columns}], pl.BF16]]) -> pl.Tensor[[16, {columns}], pl.BF16]:
+        at = pl.load(a, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        bt0 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        bt = pl.load(other, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul(at, bt0)
+        cb = pl.cast(c, pl.BF16, mode="rint")
+        if flag > 0:
+{then_body}            result = pl.yield_(updated)
+        else:
+            result = pl.yield_(out)
+        return result
+"""
+    before = passes.convert_to_ssa()(pl.parse_program(source))
+    after = passes.auto_tile_matmul_l0()(before)
+    _assert_ssa_valid(after, "nested_capture_use_index")
+
+    class Calls(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.names = []
+
+        def visit_call(self, op):
+            self.names.append(op.op.name)
+            super().visit_call(op)
+
+    calls = Calls()
+    calls.visit_program(after)
+    assert (ir.get_op("tile.cast").name not in calls.names) == capture_is_operand
+    assert (ir.get_op("tile.assemble").name in calls.names) == capture_is_operand
+
+
+def _nested_scalar_carry_program(depth):
+    """Build linear-size IR whose IterArgs refer to the enclosing carry."""
+    span = ir.Span.unknown()
+    scalar = ir.ScalarType(pl.INDEX)
+    seed = ir.Var("seed", scalar, span)
+    carries = []
+    results = []
+    for i in range(depth):
+        carries.append(ir.IterArg(f"carry_{i}", scalar, seed if i == 0 else carries[-1], span))
+        results.append(ir.Var(f"result_{i}", scalar, span))
+    body: ir.Stmt = ir.YieldStmt([carries[-1]], span)
+    for i in reversed(range(depth)):
+        loop = ir.ForStmt(
+            ir.Var(f"i_{i}", scalar, span),
+            ir.ConstInt(0, pl.INDEX, span),
+            ir.ConstInt(4, pl.INDEX, span),
+            ir.ConstInt(1, pl.INDEX, span),
+            [carries[i]],
+            body,
+            [results[i]],
+            span,
+        )
+        tail = ir.YieldStmt([results[i]], span) if i else ir.ReturnStmt([], span)
+        body = ir.SeqStmts([loop, tail], span)
+    function = ir.Function("kernel", [seed], [], body, span, type=ir.FunctionType.InCore)
+    return ir.Program([function], "NestedCarry", span)
+
+
+@pytest.mark.parametrize("depth", [1, 2, 4])
+def test_function_use_index_does_not_rewrite_scalar_carry_chains(depth):
+    before = _nested_scalar_carry_program(depth)
+    _assert_ssa_valid(before, "nested_carry_before")
+    after = passes.auto_tile_matmul_l0()(before)
+    after_fn = after.get_function("kernel")
+    before_fn = before.get_function("kernel")
+    assert after_fn is not None and before_fn is not None
+    assert after_fn.same_as(before_fn)
+    _assert_ssa_valid(after, "nested_carry_after")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -103,10 +103,11 @@ struct MatmulTiling {
 };
 
 /// Counts reads (uses) of every Var/IterArg across a statement list, excluding
-/// AssignStmt LHS defs.  Built once per SeqStmts (see ``BuildSiblingIndex``) so
+/// AssignStmt LHS defs. Built once per function for ordinary M/N rewriting so
 /// the M/N foldability check — "is the matmul result used exactly once?" — is
 /// an O(1) lookup, keeping the pass O(N) overall rather than rescanning the
 /// siblings for every oversized matmul (.claude/rules/pass-complexity.md).
+/// Pipeline planning also uses it for flat candidate bodies without child regions.
 /// ``VisitVarLike_`` covers both Var and IterArg (.claude/rules/ir-kind-traits.md).
 class SiblingUseCounter : public IRVisitor {
  public:
@@ -116,8 +117,13 @@ class SiblingUseCounter : public IRVisitor {
 
  protected:
   void VisitVarLike_(const VarPtr& op) override;
+  // Count direct SSA edges, not an IterArg's initializer on every body read.
+  void VisitExpr_(const IterArgPtr& op) override;
   // Skip the LHS (a def); count only reads in the RHS value.
   void VisitStmt_(const AssignStmtPtr& op) override;
+  void VisitStmt_(const IfStmtPtr& op) override;
+  void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const WhileStmtPtr& op) override;
   // A *direct* Var at a matrix-operand position (``tile.matmul`` /
   // ``tile.matmul_bias`` args {0,1}; ``tile.matmul_acc`` args {1,2} — arg 0 is
   // the Acc accumulator, NOT a matrix operand) is a Mat-safe consumer use: the
