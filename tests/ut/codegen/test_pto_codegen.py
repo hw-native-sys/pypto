@@ -4844,5 +4844,37 @@ def test_scalar_gm_access_rejects_nonpacked_nd_views(operation, strided):
         assert ("pto.load" if operation == "read" else "pto.store") in mlir
 
 
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+@pytest.mark.parametrize("target_memory", [pl.Mem.Mat, pl.Mem.Vec])
+@pytest.mark.parametrize("pitch", [65535, 65536, 70000])
+def test_strided_rank2_load_checks_backend_row_pitch(backend_type, target_memory, pitch):
+    """A2/A3 ND2NZ narrows row pitch to uint16 even without a batch axis.
+
+    The public view is a legal storage alias. Only the selected instruction
+    limits its row pitch: A5's wider encoding and Vec DMA remain valid. A
+    16-row physical tile with two valid rows also preserves the existing 2D
+    partial-window contract independently of the stricter multi-ND contract.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+    program = pl.parse_program(f"""
+@pl.program
+class Rank2Stride:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, source: pl.Tensor[[2, {pitch}], pl.INT8]):
+        view = pl.tensor.view(source, [2, 128], strides=[{pitch}, 1])
+        _loaded = pl.load(
+            view, [0, 0], [16, 128], valid_shape=[2, 128], target_memory=pl.Mem.{target_memory.name}
+        )
+""")
+    if backend_type == BackendType.Ascend910 and target_memory == pl.Mem.Mat and pitch > 65535:
+        with pytest.raises(ValueError, match="row stride must be in \\[1, 65535\\] elements"):
+            _generate_default_mlir(program)
+    else:
+        mlir = _generate_default_mlir(program)
+        assert f"strides = [%c{pitch}_index, %c1_index]" in mlir
+        assert mlir.count("pto.tload ins(") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

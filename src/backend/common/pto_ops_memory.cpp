@@ -119,16 +119,16 @@ static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCo
   INTERNAL_UNREACHABLE_SPAN(op->span_) << "Internal error: invalid cache policy";
 }
 
-// Validate the bounded compiler contract for the rank-3 source windows that
+// Validate strided ND -> NZ Mat loads, including the rank-3 source windows that
 // FlattenTileNdTo2D retains instead of discarding their physical gaps. Static
 // violations are rejected here even for hand-built IR; symbolic source strides
 // and offsets remain caller preconditions, with no implicit runtime guard.
-static void ValidateStridedMultiNdMatLoad(const CallPtr& op, const ir::TensorTypePtr& source,
-                                          const ir::MakeTuplePtr& shapes, const ir::MakeTuplePtr& valid_shape,
-                                          codegen::PTOCodegen& codegen) {
+static void ValidateStridedNdMatLoad(const CallPtr& op, const ir::TensorTypePtr& source,
+                                     const ir::MakeTuplePtr& shapes, const ir::MakeTuplePtr& valid_shape,
+                                     codegen::PTOCodegen& codegen) {
   auto tile = As<ir::TileType>(op->GetType());
   const auto& maybe_source_view = source->tensor_view_;
-  if (!tile || tile->memory_space_ != ir::MemorySpace::Mat || source->shape_.size() <= 2 ||
+  if (!tile || tile->memory_space_ != ir::MemorySpace::Mat || source->shape_.size() < 2 ||
       !maybe_source_view) {
     return;
   }
@@ -146,7 +146,19 @@ static void ValidateStridedMultiNdMatLoad(const CallPtr& op, const ir::TensorTyp
   if (ir::tile_view_semantics::ShapeExprListsEquivalent(source_view.stride, packed)) return;
 
   const auto* handler = codegen.GetBackendHandler();
-  CHECK_SPAN(handler && handler->SupportsMultiNdMatLoad(), op->span_)
+  INTERNAL_CHECK_SPAN(handler, op->span_) << "Strided ND Mat load requires a backend handler";
+  if (auto limit = handler->GetNd2NzMatLoadMaxRowStrideElements()) {
+    INTERNAL_CHECK_SPAN(source_view.stride.size() == source->shape_.size(), op->span_)
+        << "Strided ND Mat load source stride rank must match its shape rank";
+    auto row_stride = As<ir::ConstInt>(source_view.stride[source->shape_.size() - 2]);
+    CHECK_SPAN(!row_stride || (row_stride->value_ > 0 && row_stride->value_ <= *limit), op->span_)
+        << "Strided ND2NZ Mat load row stride must be in [1, " << *limit << "] elements.";
+  }
+  // The row-pitch field is also used by ordinary 2D ND2NZ. Its existing
+  // partial-valid windows need no multi-ND capability or full-window contract.
+  if (source->shape_.size() == 2) return;
+
+  CHECK_SPAN(handler->SupportsMultiNdMatLoad(), op->span_)
       << "Strided multi-ND Mat loads are not enabled by PyPTO on this backend. "
          "Load each matrix separately.";
   CHECK_SPAN(source->shape_.size() == 3 && !As<ir::DistributedTensorType>(source), op->span_)
@@ -190,14 +202,11 @@ static void ValidateStridedMultiNdMatLoad(const CallPtr& op, const ir::TensorTyp
              op->span_)
       << "Strided multi-ND Mat load destination must be [B*M, N] with B*M <= 16384.";
 
-  // A2/A3 srcDValue and srcNdMatrixStride are 16-bit ELEMENT strides. Row
-  // padding is supported directly; neither stride has to equal a packed size.
+  // A2/A3 srcNdMatrixStride is a 16-bit ELEMENT stride. Row padding is
+  // supported directly through the separately checked source row pitch above.
   // A single matrix does not use srcNdMatrixStride, so its page pitch may exceed
   // the multi-matrix range. The compiler currently exposes this conservative
   // subset even though other ISAs can encode larger source strides.
-  auto row_stride = As<ir::ConstInt>(source_view.stride[1]);
-  CHECK_SPAN(!row_stride || (row_stride->value_ > 0 && row_stride->value_ <= 65535), op->span_)
-      << "Strided multi-ND Mat load row stride must be in [1, 65535] elements.";
   if (batch->value_ > 1) {
     auto page_stride = As<ir::ConstInt>(source_view.stride[0]);
     CHECK_SPAN(!page_stride || (page_stride->value_ > 0 && page_stride->value_ <= 65535), op->span_)
@@ -239,7 +248,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
-  ValidateStridedMultiNdMatLoad(op, tensor_type, shapes_tuple, valid_shape_tuple, codegen);
+  ValidateStridedNdMatLoad(op, tensor_type, shapes_tuple, valid_shape_tuple, codegen);
 
   // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.64 carries a
   // streaming read as a `cache_policy` attribute on `pto.tload` plus an optional

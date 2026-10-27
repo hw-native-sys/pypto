@@ -53,7 +53,9 @@ dimensions, offsets, and pitch may be dynamic under the caller's bounds
 contract. It preserves the three-dimensional GM window and forms a `[64,128]`
 Mat tile in this example. The backend also checks instruction ranges; A2/A3's
 multi-page pitch is at most 65535 **elements**, while a single-page window does
-not consume that stride. The caller must establish valid, forward-adjacent
+not consume that stride. Nonpacked rank-2 ND Mat loads also check A2/A3's
+65535-element row-stride limit; A5 keeps its wider row-stride encoding.
+The caller must establish valid, forward-adjacent
 physical pages and keep its per-page path for other page-table cases. This
 feature does not infer adjacency or promise a performance improvement. A5
 multi-ND support is not yet enabled by PyPTO.

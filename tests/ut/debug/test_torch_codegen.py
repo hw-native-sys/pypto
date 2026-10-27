@@ -170,6 +170,81 @@ def test_tensor_view_explicit_valid_shape_codegen_and_execution():
     assert actual._pypto_full_shape == (32, 128)
 
 
+@pytest.mark.parametrize("page_pitch", [4160, 4224, 8192])
+@pytest.mark.parametrize("with_offset", [False, True])
+@pytest.mark.parametrize("valid_shape", [None, [9, 32, 128]])
+def test_tensor_view_explicit_strides_skip_padding_and_preserve_alias(page_pitch, with_offset, valid_shape):
+    """The reference must skip page tails and retain a subregion's origin."""
+    source = _tensor_var("source", [9, page_pitch], DataType.INT8)
+    page = _scalar("page")
+    view_call = ir.op.tensor.view(source, [9, 32, 128], valid_shape, strides=[page_pitch, 128, 1])
+    keys = ir.Var("keys", view_call.type, _span())
+    pair_call = ir.op.tile.load(keys, [page, 0, 0], [2, 32, 128], target_memory=ir.MemorySpace.Mat)
+    pair = ir.Var("pair", pair_call.type, _span())
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(keys, view_call, _span()),
+            ir.AssignStmt(pair, pair_call, _span()),
+            ir.ReturnStmt([keys, pair], _span()),
+        ],
+        _span(),
+    )
+    function = _simple_function("strided_keys", [source, page], body, [keys.type, pair.type])
+    code = torch_codegen(function, check_shapes=True)
+    assert f"strides=({page_pitch}, 128, 1)" in code
+    namespace: dict[str, Any] = {}
+    exec(code, namespace)
+
+    owner = torch.full((10, page_pitch), -101, dtype=torch.int8)
+    start = 1 if with_offset else 0
+    value = owner[start : start + 9]
+    expected_keys = (torch.arange(9 * 4096, dtype=torch.int32) % 31 - 15).to(torch.int8).reshape(9, 32, 128)
+    value[:, :4096] = expected_keys.reshape(9, 4096)
+    original = owner.clone()
+
+    for first_page in (0, 1, 7):
+        actual_keys, actual_pair = namespace["strided_keys"](value, first_page)
+        assert torch.equal(actual_keys, expected_keys)
+        assert torch.equal(actual_pair, expected_keys[first_page : first_page + 2])
+        assert actual_keys.stride() == (page_pitch, 128, 1)
+        assert actual_keys.data_ptr() == value.data_ptr()
+        assert actual_keys.storage_offset() == value.storage_offset()
+        assert getattr(actual_keys, "_pypto_valid_shape", tuple(actual_keys.shape)) == (9, 32, 128)
+        assert getattr(actual_keys, "_pypto_full_shape", tuple(actual_keys.shape)) == (9, 32, 128)
+
+    # Check both alias directions and the entire allocation, including page
+    # tails and the extra guard page outside the source subregion.
+    actual_keys[2, 7, 11] = 71
+    original[start + 2, 7 * 128 + 11] = 71
+    assert torch.equal(owner, original)
+    value[3, 5 * 128 + 9] = -73
+    assert actual_keys[3, 5, 9].item() == -73
+
+
+def test_tensor_view_dynamic_explicit_strides_codegen_and_execution():
+    """Forward runtime shape and pitch operands instead of freezing a sample."""
+    pages = _scalar("pages", DataType.INDEX)
+    pitch = _scalar("pitch", DataType.INDEX)
+    source = ir.Var("source", ir.TensorType([pages, pitch], DataType.INT8), _span())
+    view_call = ir.op.tensor.view(source, [pages, 32, 128], strides=[pitch, 128, 1])
+    keys = ir.Var("keys", view_call.type, _span())
+    body = ir.SeqStmts([ir.AssignStmt(keys, view_call, _span()), ir.ReturnStmt([keys], _span())], _span())
+    function = _simple_function("dynamic_keys", [source, pages, pitch], body, [keys.type])
+    code = torch_codegen(function, check_shapes=True)
+    assert "strides=(pitch, 128, 1)" in code
+    namespace: dict[str, Any] = {}
+    exec(code, namespace)
+
+    for page_count, page_pitch in ((3, 4160), (9, 8192)):
+        source_value = torch.full((page_count, page_pitch), -101, dtype=torch.int8)
+        expected = (torch.arange(page_count * 4096) % 31 - 15).to(torch.int8).reshape(page_count, 32, 128)
+        source_value[:, :4096] = expected.reshape(page_count, 4096)
+        actual = namespace["dynamic_keys"](source_value, page_count, page_pitch)
+        assert torch.equal(actual, expected)
+        assert actual.stride() == (page_pitch, 128, 1)
+        assert actual.data_ptr() == source_value.data_ptr()
+
+
 def test_tensor_view_same_layout_is_identity():
     """A layout-only view targeting the current layout should be an identity."""
     src = _tensor_var("src", [2, 4])

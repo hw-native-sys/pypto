@@ -685,20 +685,27 @@ def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
         sliced._pypto_full_shape = shapes_t
     return sliced
 
-def _tensor_view(tensor, shape, is_dn, valid_shape=None):
+def _tensor_view(tensor, shape, is_dn, valid_shape=None, strides=None):
     shape = _coerce_shape(shape)
-    strides = [1] * len(shape)
-    if is_dn:
-        strides[-2] = 1
-        strides[-1] = shape[-2]
-        running = shape[-2] * shape[-1]
-        for i in range(len(shape) - 3, -1, -1):
-            strides[i] = running
-            running *= shape[i]
+    if strides is not None:
+        # The explicit IR operand defines the physical address map, including
+        # page gaps. Reconstructing packed strides would read metadata as data.
+        strides = _coerce_shape(strides)
     else:
-        for i in range(len(shape) - 2, -1, -1):
-            strides[i] = strides[i + 1] * shape[i + 1]
-    result = torch.as_strided(tensor, shape, strides)
+        strides = [1] * len(shape)
+        if is_dn:
+            strides[-2] = 1
+            strides[-1] = shape[-2]
+            running = shape[-2] * shape[-1]
+            for i in range(len(shape) - 3, -1, -1):
+                strides[i] = running
+                running *= shape[i]
+        else:
+            for i in range(len(shape) - 2, -1, -1):
+                strides[i] = strides[i + 1] * shape[i + 1]
+    # A sliced source already has an offset into its storage. Retain that
+    # origin and the allocation itself so mutations remain zero-copy aliases.
+    result = torch.as_strided(tensor, shape, strides, storage_offset=tensor.storage_offset())
     if valid_shape:
         result._pypto_valid_shape = _coerce_shape(valid_shape)
         result._pypto_full_shape = shape
@@ -1781,8 +1788,11 @@ class TorchCodegen(_ir.IRVisitor):
             if len(arg_strs) >= 2:
                 result_view = getattr(op.type, "tensor_view", None)
                 is_dn = result_view is not None and result_view.layout == _ir.TensorLayout.DN
-                valid_shape = f", {arg_strs[2]}" if len(arg_strs) == 3 else ""
-                self._expr_result = f"_tensor_view({arg_strs[0]}, {arg_strs[1]}, {is_dn}{valid_shape})"
+                valid_shape = f", {arg_strs[2]}" if len(arg_strs) >= 3 else ""
+                strides = f", strides={arg_strs[3]}" if len(arg_strs) == 4 else ""
+                self._expr_result = (
+                    f"_tensor_view({arg_strs[0]}, {arg_strs[1]}, {is_dn}{valid_shape}{strides})"
+                )
             else:
                 src_view = getattr(op.args[0].type, "tensor_view", None)
                 result_view = getattr(op.type, "tensor_view", None)
