@@ -111,9 +111,14 @@ provably constant difference. For example, `src[base:base + 128, :]` carries
 `[128, src.shape[1]]` metadata, allowing a join with a same-typed `[128, N]`
 allocation when the second dimensions agree. The JIT translates integer
 addition/subtraction and constant multiplication into temporary expressions
-and reuses the parser's arithmetic analyzer to prove the width. Constants use
-the current binding and constexpr rules; runtime dimensions never use sample
-bounds as proof. Symbols are shared only within one pair of slice bounds, so
+and reuses the parser's arithmetic analyzer to prove the width. Each binary
+operation must have a constant operand to promote its arithmetic to INDEX. Since
+scalar dtypes are unavailable in this inference, operations on two runtime
+operands and runtime negation are conservatively rejected. For example,
+`base + other:base + (other + 128)` cannot establish width 128: the lower sum
+may overflow in INT32 before the upper expression promotes to INDEX.
+Resolved constants use the current binding and constexpr rules; runtime
+dimensions never use sample bounds as proof. Symbols are shared only within one pair of slice bounds, so
 rebinding and aliases from other statements do not establish new equalities.
 Unresolved calls, reads, dynamic division, and nonlinear products are not
 cancelled as symbols. Unproved widths keep the existing parent-extent fallback,
