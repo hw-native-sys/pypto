@@ -391,23 +391,107 @@ def _with_init_cond(call_stmt, cond):
     return ir.AssignStmt(call_stmt.var, new_call, call_stmt.span)
 
 
-# How a folded predicate prints: the fold emits ConstBool, as the DSL does for a literal.
-_LITERAL = {True: "True", False: "False"}
+_MATMUL_ACC_OPS = frozenset({ir.get_op("tensor.matmul_acc").name, ir.get_op("tile.matmul_acc").name})
 
 
-def _printed_init_cond(program, ssa: bool = True, roundtrip: bool = True) -> str:
-    """Run Simplify (after ConvertToSSA unless `ssa=False`) and return the single printed
-    `init_cond=` operand. `roundtrip=False` runs without the shared verification
-    instruments, for IR that the printer cannot reproduce independently of Simplify."""
+class _ReplaceInitCond(ir.IRMutator):
+    """Replace the `init_cond` operand of the single `matmul_acc` call."""
+
+    def __init__(self, new_cond: ir.Expr) -> None:
+        super().__init__()
+        self._new_cond = new_cond
+        self.replaced = 0
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        new = super().visit_call(op)
+        assert isinstance(new, ir.Call)
+        if new.op.name in _MATMUL_ACC_OPS:
+            args = list(new.args)
+            args[3] = self._new_cond
+            self.replaced += 1
+            return ir.Call(new.op, args, new.kwargs, new.type, new.span)
+        return new
+
+
+def _simplify(program, ssa: bool = True, roundtrip: bool = True):
+    """Run ConvertToSSA (unless `ssa=False`) then Simplify; return the transformed program."""
     if ssa:
         program = passes.convert_to_ssa()(program)
     if roundtrip:
-        simplified = passes.simplify()(program)
+        return passes.simplify()(program)
+    with passes.PassContext([]):
+        return passes.simplify()(program)
+
+
+def _with_expected_init_cond(program, expected: ir.Expr):
+    """`program` with its single `matmul_acc` predicate replaced by `expected`."""
+    mutator = _ReplaceInitCond(expected)
+    replaced = mutator.visit_program(program)
+    assert mutator.replaced == 1, f"expected one matmul_acc call, replaced {mutator.replaced}"
+    return replaced
+
+
+def _init_cond_of(program) -> ir.Expr:
+    """The single `matmul_acc` predicate, read structurally (not from printed text)."""
+    conds: list[ir.Expr] = []
+
+    class Collect(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name in _MATMUL_ACC_OPS:
+                conds.append(op.args[3])
+            super().visit_call(op)
+
+    Collect().visit_program(program)
+    assert len(conds) == 1, f"expected one matmul_acc call, found {len(conds)}"
+    return conds[0]
+
+
+def _prepare(program, ssa: bool = True):
+    """The input Simplify actually receives (ConvertToSSA unless `ssa=False`)."""
+    return passes.convert_to_ssa()(program) if ssa else program
+
+
+def _assert_simplified(
+    program,
+    expected: ir.Expr | None = None,
+    *,
+    expected_program=None,
+    ssa: bool = True,
+    roundtrip: bool = True,
+):
+    """Assert Simplify's **complete** output, not only the rendered predicate.
+
+    With `expected_program`, the transformed program must be structurally equal to it.
+    Otherwise two structural checks cover every node:
+    * everything except the `matmul_acc` predicate must be unchanged (both sides get the same
+      sentinel predicate, so a dropped statement, a retyped result, or a rewritten sibling
+      operand fails here);
+    * the predicate itself must equal `expected` (a `ConstBool` literal) when the fold applies,
+      or must not be a literal when `expected=None`.
+
+    The predicate's symbolic form is deliberately not compared when the fold does not apply:
+    the ordinary rewrite rules may canonicalize a comparison (`i < c` -> `c > i`), which is
+    out of scope for this test class and covered by the rewriting tests.
+    """
+    prepared = _prepare(program, ssa)
+    after = _simplify(prepared, ssa=False, roundtrip=roundtrip)
+
+    if expected_program is not None:
+        ir.assert_structural_equal(after, expected_program)
+        return after
+
+    sentinel = ir.ConstBool(True, ir.Span.unknown())
+    ir.assert_structural_equal(
+        _with_expected_init_cond(after, sentinel),
+        _with_expected_init_cond(prepared, sentinel),
+    )
+
+    actual = _init_cond_of(after)
+    if expected is None:
+        assert not isinstance(actual, ir.ConstBool), f"predicate was unexpectedly folded: {actual}"
     else:
-        with passes.PassContext([]):
-            simplified = passes.simplify()(program)
-    (line,) = [ln for ln in ir.python_print(simplified).splitlines() if "init_cond=" in ln]
-    return line.split("init_cond=")[1].split(", a_trans")[0]
+        ir.assert_structural_equal(actual, expected)
+    return after
 
 
 class TestProvableComparisonFold:
@@ -432,7 +516,7 @@ class TestProvableComparisonFold:
                 r = pl.matmul_acc(acc, a, b, init_cond=(x == -9223372036854775808))
                 return r
 
-        assert _printed_init_cond(Before) not in _LITERAL.values()
+        _assert_simplified(Before)
 
     def test_overflowing_product_comparison_is_kept(self):
         # i * (2**62 - 1) wraps negative at i == 3, so 0 < product is not always true.
@@ -450,7 +534,7 @@ class TestProvableComparisonFold:
                     acc = pl.matmul_acc(acc, a, b, init_cond=(0 < i * 4611686018427387903))
                 return acc
 
-        assert _printed_init_cond(Before) not in _LITERAL.values()
+        _assert_simplified(Before)
 
     def test_narrow_loop_var_is_kept(self):
         # IR built through the bindings: an INT32 loop variable over INDEX bounds outside
@@ -464,10 +548,7 @@ class TestProvableComparisonFold:
             i32, ir.ConstInt(2147483648, DataType.INDEX, sp), ir.ConstInt(2147483650, DataType.INDEX, sp),
             loop.step, [], _with_init_cond(call_stmt, cond), [], sp, loop.kind,
         )  # fmt: skip
-        assert (
-            _printed_init_cond(_with_body(program, rebuilt), ssa=False, roundtrip=False)
-            not in _LITERAL.values()
-        )
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
 
     def test_loop_var_reassigned_after_a_nested_use_is_kept(self):
         # Pre-SSA: the second inner iteration reads i == 100, although the use precedes
@@ -488,7 +569,7 @@ class TestProvableComparisonFold:
                         i = 100
                 return acc
 
-        assert _printed_init_cond(Before, ssa=False) not in _LITERAL.values()
+        _assert_simplified(Before, ssa=False)
 
     def test_reassigned_loop_var_inside_a_single_trip_clone_is_kept(self):
         # Fold B clones the single-trip `k` body with fresh Vars; the clone's `i` must
@@ -510,7 +591,15 @@ class TestProvableComparisonFold:
                             i = 100
                 return acc
 
-        assert _printed_init_cond(Before, ssa=False) not in _LITERAL.values()
+        # Fold B inlines the single-trip `k` loop, so the expected program is the input
+        # with that loop replaced by its (cloned) body; the predicate must survive.
+        prepared = _prepare(Before, ssa=False)
+        func_body = next(iter(prepared.functions.values())).body
+        assert isinstance(func_body, ir.SeqStmts)
+        single_trip = func_body.stmts[0]
+        assert isinstance(single_trip, ir.ForStmt)
+        expected = _with_body(prepared, ir.SeqStmts([single_trip.body, *func_body.stmts[1:]], func_body.span))
+        _assert_simplified(Before, expected_program=expected, ssa=False)
 
     def test_if_constraint_from_a_wrapping_operand_does_not_decide(self):
         # `c + 1` wraps to -128 at run time, so the `if` always holds and j == 125 is
@@ -534,7 +623,16 @@ class TestProvableComparisonFold:
                                 acc = pl.matmul_acc(acc, a, b, init_cond=(j == 125))
                 return acc
 
-        assert _printed_init_cond(Before) not in _LITERAL.values()
+        # The ordinary rewrite rules canonicalize the wrapping `j >= cast(...)` guard to
+        # `cast(...) <= j`; encode that rewrite so the full program can be compared.
+        prepared = _prepare(Before)
+
+        class CanonicalizeGe(ir.IRMutator):
+            def visit_ge(self, op: ir.Ge) -> ir.Expr:
+                return ir.Le(op.right, op.left, DataType.BOOL, op.span)
+
+        expected = CanonicalizeGe().visit_program(prepared)
+        _assert_simplified(Before, expected_program=expected)
 
     def test_out_of_range_narrow_loop_bound_is_kept(self):
         # The INT32 bounds fold to 2147483648 and 2147483650, outside INT32; codegen
@@ -558,7 +656,30 @@ class TestProvableComparisonFold:
                     acc = pl.matmul_acc(acc, a, b, init_cond=(i == -2147483647))
                 return acc
 
-        assert _printed_init_cond(Before, roundtrip=False) not in _LITERAL.values()
+        # Simplify folds the INT32 bound arithmetic; encode that so the whole program
+        # (including the untouched predicate) can be compared structurally.
+        prepared = _prepare(Before)
+
+        class FoldInt32Bounds(ir.IRMutator):
+            def visit_for_stmt(self, op: ir.ForStmt) -> ir.Stmt:
+                new = super().visit_for_stmt(op)
+                assert isinstance(new, ir.ForStmt)
+                if isinstance(new.start, ir.ConstInt):
+                    return new
+                return ir.ForStmt(
+                    new.loop_var,
+                    ir.ConstInt(2147483648, DataType.INT32, new.start.span),
+                    ir.ConstInt(2147483650, DataType.INT32, new.stop.span),
+                    new.step,
+                    list(new.iter_args),
+                    new.body,
+                    list(new.return_vars),
+                    new.span,
+                    new.kind,
+                )
+
+        expected = FoldInt32Bounds().visit_program(prepared)
+        _assert_simplified(Before, expected_program=expected, roundtrip=False)
 
     def test_loop_var_redefined_by_a_nested_loop_is_kept(self):
         # IR built directly through the bindings (the parser renames shadowed loop
@@ -591,7 +712,7 @@ class TestProvableComparisonFold:
         inner_body = ir.substitute_stmt(inner.body, [(inner.loop_var, shared)])
         new_outer = _remake_for(outer, body=_remake_for(inner, loop_var=shared, body=inner_body))
         program = _with_body(Before, ir.SeqStmts([new_outer, *func_body.stmts[1:]], func_body.span))
-        assert _printed_init_cond(program, ssa=False, roundtrip=False) not in _LITERAL.values()
+        _assert_simplified(program, ssa=False, roundtrip=False)
 
     def test_parameter_reused_as_loop_var_is_kept(self):
         # IR built through the bindings: the parameter `n` is also the loop variable, and
@@ -626,7 +747,28 @@ class TestProvableComparisonFold:
         assert isinstance(loop, ir.ForStmt)
         stmts[idx] = _remake_for(loop, loop_var=func.params[3])
         program = _with_body(Before, ir.SeqStmts(stmts, func_body.span))
-        assert _printed_init_cond(program, ssa=False, roundtrip=False) not in _LITERAL.values()
+
+        # Fold A collapses the constant `if k > 0` branch and remaps r -> n, so the
+        # expected program drops the pre-loop statements and folds `r == 7` to `n == 7`.
+        param_loop = stmts[idx]
+        assert isinstance(param_loop, ir.ForStmt)
+        loop_body = param_loop.body
+        if isinstance(loop_body, ir.SeqStmts):
+            loop_body = loop_body.stmts[0]
+        assert isinstance(loop_body, ir.AssignStmt)
+        assert isinstance(loop_body.value, ir.Call)
+        old_cond = loop_body.value.args[3]
+        assert isinstance(old_cond, ir.Eq)
+        param_n = func.params[3]
+        new_cond = ir.Eq(param_n, old_cond.right, DataType.BOOL, old_cond.span)
+        expected = _with_body(
+            program,
+            ir.SeqStmts(
+                [_remake_for(param_loop, body=_with_init_cond(loop_body, new_cond)), *stmts[idx + 1 :]],
+                func_body.span,
+            ),
+        )
+        _assert_simplified(program, expected_program=expected, ssa=False, roundtrip=False)
 
     def test_non_bool_comparison_is_kept(self):
         # IR built through the bindings: `Eq(i, 100)` typed INT32 feeds an addition.
@@ -638,10 +780,7 @@ class TestProvableComparisonFold:
         shifted = ir.Add(int_cmp, ir.ConstInt(1, DataType.INT32, sp), DataType.INT32, sp)
         cond = ir.Eq(shifted, ir.ConstInt(2, DataType.INT32, sp), DataType.BOOL, sp)
         rebuilt = _remake_for(loop, body=_with_init_cond(call_stmt, cond))
-        assert (
-            _printed_init_cond(_with_body(program, rebuilt), ssa=False, roundtrip=False)
-            not in _LITERAL.values()
-        )
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
 
     def test_narrow_constant_against_an_index_loop_var_is_kept(self):
         # IR built through the bindings: an INT32 literal 4294967303 wraps to 7 at run
@@ -651,10 +790,7 @@ class TestProvableComparisonFold:
         sp = loop.span
         cond = ir.Eq(loop.loop_var, ir.ConstInt(4294967303, DataType.INT32, sp), DataType.BOOL, sp)
         rebuilt = _remake_for(loop, body=_with_init_cond(call_stmt, cond))
-        assert (
-            _printed_init_cond(_with_body(program, rebuilt), ssa=False, roundtrip=False)
-            not in _LITERAL.values()
-        )
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
 
     @pytest.mark.parametrize("binder", ["if", "for", "while"])
     def test_loop_var_rebound_by_a_control_flow_result_is_kept(self, binder):
@@ -675,10 +811,7 @@ class TestProvableComparisonFold:
             rebind = ir.WhileStmt(ir.Lt(x, hundred, DataType.BOOL, sp), [x], ir.YieldStmt([x], sp), [i], sp)
         cond = ir.Eq(i, hundred, DataType.BOOL, sp)
         rebuilt = _remake_for(loop, body=ir.SeqStmts([rebind, _with_init_cond(call_stmt, cond)], sp))
-        assert (
-            _printed_init_cond(_with_body(program, rebuilt), ssa=False, roundtrip=False)
-            not in _LITERAL.values()
-        )
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
 
     @pytest.mark.parametrize("op", list(_PY_OPS))
     @pytest.mark.parametrize("start, stop", [(0, 8), (-2, 6), (3, 5)])
@@ -704,11 +837,10 @@ class P:
                     _PY_OPS[op](i, constant) if var_first else _PY_OPS[op](constant, i)
                     for i in range(start, stop)
                 }
-                printed = _printed_init_cond(program)
-                if len(outcomes) == 1:
-                    assert printed == _LITERAL[outcomes.pop()], (cond, printed)
-                else:
-                    assert printed not in _LITERAL.values(), (cond, printed)
+                expected = (
+                    ir.ConstBool(next(iter(outcomes)), ir.Span.unknown()) if len(outcomes) == 1 else None
+                )
+                _assert_simplified(program, expected)
 
 
 # ============================================================================
