@@ -2775,8 +2775,8 @@ def subview(
     Raises:
         ValueError: Invalid geometry. Compilation also rejects containment or
             strict reduction that cannot be proven from dominating facts.
-            The first executable profile is rank-2 ND BF16 with unit inner
-            step and a caller-owned GM root, consumed by Vec loads.
+            Native consumers retain their existing dtype, layout and target
+            restrictions; subview adds no device-specific load limits.
     """
     if type(source) is not Tensor:
         raise ValueError("tensor.subview requires an ordinary Tensor source")

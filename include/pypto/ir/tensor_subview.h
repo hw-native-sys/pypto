@@ -14,10 +14,6 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/type.h"
-namespace pypto::backend {
-class BackendHandler;
-}
-
 namespace pypto::ir {
 // This tag is an addressing contract, never proof of provenance or safety.
 inline bool IsAffineSubviewType(const TypePtr& type) {
@@ -27,8 +23,7 @@ inline bool IsAffineSubviewType(const TypePtr& type) {
          tensor->tensor_view_->addressing_kind == TensorAddressingKind::AffineSubview;
 }
 // Recompute safety at conversion and emission entry; no cached proof survives
-// transformations. The backend profile is checked separately from containment.
-void VerifyTensorSubviews(const FunctionPtr& function,
-                          const backend::BackendHandler* backend_handler = nullptr);
+// transformations. Consumer hardware limits belong to their existing lowering.
+void VerifyTensorSubviews(const FunctionPtr& function);
 }  // namespace pypto::ir
 #endif  // PYPTO_IR_TENSOR_SUBVIEW_H_

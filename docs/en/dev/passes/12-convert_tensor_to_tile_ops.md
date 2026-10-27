@@ -1,12 +1,5 @@
 # ConvertTensorToTileOps Pass
 
-`tensor.subview` remains an ordinary GM Tensor descriptor. Before conversion, a
-shared contextual verifier proves strict containment, overflow-free geometry and
-read-only caller-owned provenance; false and unknown facts reject. An affine
-`tensor.set_validshape` alias also remains Tensor and may only narrow validity.
-Consumer `tensor.slice`/compute conversions load from that descriptor using its
-actual pitch. Existing materializing slice semantics are unchanged.
-
 Converts tensor operations to tile operations in InCore, AIC, and AIV functions and updates orchestration call sites.
 
 ## Overview
@@ -96,6 +89,15 @@ For each `FunctionType::InCore` function:
 5. **Upgrade written param directions**: An alias-origin analysis (`AnalyzeCallAccess`) attributes every read/write back to the parameter it originates from, then upgrades each `In` param that is written to `Out` (write-only) or `InOut` (read and written). Which argument an operator writes is **not** decided here — it is read from that operator's registry declaration (`set_arg_effect`, see [Operators](../ir/05-operators.md#argument-effects)), so `tile.store`, `tile.mscatter`, `tensor.write`, `tensor.assemble`, `tensor.expand_clone`, the `pld.tile.*` / `pld.tensor.*` push and pull family, `pld.system.notify`, `system.syncall` and the composite collectives all reach the same analysis through one table. An argument declared `Write` is not counted as a read: a store landing on a sub-region never reads the untouched remainder. Kwarg-dependent effects resolve per call, so an atomic store or an `AtomicAdd` notify marks its destination read+write while the plain forms do not. Params the user already declared `Out` / `InOut` are left as-is.
 
    An operator that never declared its effects still counts as reading every argument. That default is now confined to operators the registry has nothing to say about — most of them functional — rather than being the fallback for a hand-maintained list that a new write operator silently escaped.
+
+### Borrowed GM descriptors
+
+`tensor.subview` remains an ordinary GM Tensor descriptor. Before conversion, a
+shared contextual verifier proves strict containment, overflow-free geometry and
+read-only caller-owned provenance; false and unknown facts reject. An affine
+`tensor.set_validshape` alias also remains Tensor and may only narrow validity.
+Consumer `tensor.slice`/compute conversions load from that descriptor using its
+actual pitch.
 
 ### GM Identity and Read/Write Ordering
 

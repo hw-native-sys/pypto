@@ -529,8 +529,7 @@ ParamOrigins GetAliasOrigins(const ExprPtr& expr, const AliasOriginMap& origin_m
   if (auto write_target = ResultAliasedDestination(call)) {
     return GetAliasOrigins(write_target, origin_map);
   }
-  if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.view") || IsOp(call, "tensor.subview") ||
-       IsOp(call, "tensor.set_validshape")) &&
+  if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.view") || IsOp(call, "tensor.subview")) &&
       !call->args_.empty()) {
     return GetAliasOrigins(call->args_[0], origin_map);
   }
