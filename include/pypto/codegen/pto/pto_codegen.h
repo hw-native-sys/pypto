@@ -794,11 +794,19 @@ class PTOCodegen : public CodegenBase {
 
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
+  void VisitStmt_(const ir::RegScopeStmtPtr& op) override;
   void VisitStmt_(const ir::ForStmtPtr& op) override;
   void VisitStmt_(const ir::IfStmtPtr& op) override;
   void VisitStmt_(const ir::WhileStmtPtr& op) override;
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
+
+  /// Reg operations are schema-validated and emitted as typed VMI SSA, not
+  /// Tile callbacks. Addresses are prepared outside their owning vecscope.
+  bool TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& result);
+  std::string GetRegTypeString(const ir::RegTypePtr& type) const;
+  std::map<const ir::Var*, std::string> reg_addresses_;
+  bool inside_reg_scope_ = false;
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;

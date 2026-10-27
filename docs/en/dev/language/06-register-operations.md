@@ -83,7 +83,7 @@ uninitialized load. One-dimensional Tiles are directly supported. Multidimension
 Tiles require an explicit contiguous row-major View; padded, boxed or compact
 layouts are rejected. Static View offsets contribute to absolute effect ranges.
 
-`ir.get_reg_op_spec(name)` reports the scope requirement and future VMI emitter.
+`ir.get_reg_op_spec(name)` reports the scope requirement and VMI emitter.
 `ir.get_reg_memory_effect(call)` reports the target, root allocation when known,
 Read/Write access, absolute element interval and optional mask. Dynamic offsets
 produce unknown endpoints, never an empty effect. They do not prove bounds and
@@ -91,10 +91,10 @@ require later analysis before emission. A dynamic offset load requires complete
 valid-shape coverage. A mask is preserved without claiming whole-buffer
 initialization or disjointness.
 
-PR2 supplies schema effects and frontend validation only. SSA propagation,
-initialization tracking across statements, alias-aware scheduling and VMI
-emission belong to PR3. PTO codegen currently rejects RegScope with a stable
-unsupported-backend diagnostic, regardless of whether PTOAS is installed.
+PR3 lowers RegScope to typed `pto.vecscope` VMI operations. A store emits a no-result
+`pto.vmi.vstore`; its Tile result remains an alias of the external destination. The target capability query rejects
+unsupported register types before emission. SSA propagation, initialization tracking across statements, and
+alias-aware scheduling are also part of PR3.
 
 ## Builder
 

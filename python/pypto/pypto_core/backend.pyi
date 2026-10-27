@@ -108,6 +108,9 @@ class BackendHandler:
     """
 
     def get_pto_target_arch(self) -> str: ...
+    def supports_reg_type(self, type: ir.RegType) -> bool:
+        """Whether the target supports this logical VMI register type."""
+        ...
     def get_launch_spec_core_count_method(self) -> str:
         """Return ``set_block_num`` for both supported backends and runtimes."""
 

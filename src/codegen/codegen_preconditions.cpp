@@ -25,8 +25,10 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/spmd_launch_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/reg_scope.h"
 
 namespace pypto {
 namespace codegen {
@@ -97,9 +99,8 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
 
 void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
-  // PR1 persists these semantics but does not lower them. Check the whole tree
-  // before emitting anything: the base scope visitor would otherwise erase the
-  // register boundary and ordinary scf.for emission would ignore Require.
+  // Check lexical register ownership before emission. Hardware-loop Require
+  // remains unsupported until its separate lowering and evidence contract.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
     void VisitFunction(const ir::FunctionPtr& func) override {
@@ -112,12 +113,14 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
               << ir::FunctionTypeToString(func->func_type_) << " function '" << func->name_ << "'";
         }
       }
+      std::vector<Diagnostic> diagnostics;
+      VerifyRegScopes(func, diagnostics, true);
+      if (!diagnostics.empty()) CHECK_SPAN(false, diagnostics.front().span) << diagnostics.front().message;
+      VerifyRegMemoryInitialization(func);
       ir::IRVisitor::VisitFunction(func);
     }
 
-    void VisitStmt_(const ir::RegScopeStmtPtr& op) override {
-      CHECK_SPAN(false, op->span_) << "RegScopeStmt code generation is not supported yet";
-    }
+    void VisitStmt_(const ir::RegScopeStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
     void VisitStmt_(const ir::ForStmtPtr& op) override {
       CHECK_SPAN(op->hardware_loop_policy_ == ir::HardwareLoopPolicy::Auto, op->span_)
           << "HardwareLoopPolicy.Require code generation is not supported yet";

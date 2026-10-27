@@ -27,6 +27,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -390,6 +391,11 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   // from args, so the args walk alone won't propagate substitutions into a
   // returned TileType/TensorType's shape/view fields.
   auto new_type = RemapTypeViaVisitor(op->GetType());
+  if (args_changed && IsOp(op, "reg.store")) {
+    // reg.store's result is exactly its destination type, including storage
+    // metadata rewritten by InitMemRef, MemoryReuse or AllocateMemoryAddr.
+    new_type = new_args[0]->GetType();
+  }
   bool type_changed = (new_type.get() != op->GetType().get());
 
   // Var-typed dependency attrs reference Vars defined elsewhere

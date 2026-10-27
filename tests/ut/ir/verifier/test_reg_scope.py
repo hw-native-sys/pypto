@@ -297,12 +297,13 @@ def test_expand_mixed_kernel_places_register_region_on_aiv():
     assert passes.PropertyVerifierRegistry.verify(properties, expanded) == []
 
 
-def test_backend_rejection_is_stable_without_emitter():
+def test_register_only_scope_emits_without_tile_capture():
     backend.set_backend_type(backend.BackendType.Ascend950)
     function = ir.Function("kernel", [], [], region(definition(register())), SPAN, type=ir.FunctionType.AIV)
     program = ir.Program([function], "RegTest", SPAN)
-    with pytest.raises(ValueError, match="RegScopeStmt code generation is not supported"):
-        codegen.PTOCodegen().generate(program)
+    mlir = codegen.PTOCodegen().generate(program)
+    assert "pto.vecscope" in mlir
+    assert 'pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<64xpred>' in mlir
 
 
 def test_local_scalar_if_results_stay_inside_region():

@@ -96,7 +96,13 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) value = assign->value_;
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) value = eval->expr_;
   if (value && As<Submit>(value)) return true;
-  return side_effect_ops.count(GetStmtOpName(stmt)) > 0;
+  const auto name = GetStmtOpName(stmt);
+  const auto& registry = OpRegistry::GetInstance();
+  if (registry.IsRegistered(name)) {
+    const auto& entry = registry.GetEntry(name);
+    if (entry.GetRegSpec() && entry.WritesAnyArg()) return true;
+  }
+  return side_effect_ops.count(name) > 0;
 }
 
 void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,

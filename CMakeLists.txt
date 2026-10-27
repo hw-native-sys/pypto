@@ -232,6 +232,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp
+    src/ir/transforms/utils/reg_memory_analysis.cpp
     src/ir/transforms/lower_composite/lower_composite_all_to_all.cpp
     src/ir/transforms/lower_composite/lower_composite_all_to_all_v.cpp
     src/ir/transforms/lower_composite/lower_composite_allgather.cpp
@@ -388,6 +389,7 @@ set(PYPTO_SOURCES
     src/codegen/orchestration/orchestration_tensor_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
+    src/codegen/pto/reg_codegen.cpp
     src/codegen/pto/pto_buffer_codegen.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp

@@ -1026,7 +1026,8 @@ class SSAConverter {
     // stays fully transparent. ``SplitAivScopeStmt`` is likewise transparent:
     // it is never outlined and is lowered in place by LowerAutoVectorSplit
     // (pass 23), so its body shares SSA state with the enclosing function.
-    const bool is_outline_boundary = !As<RuntimeScopeStmt>(op) && !As<SplitAivScopeStmt>(op);
+    const bool is_outline_boundary =
+        !As<RuntimeScopeStmt>(op) && !As<SplitAivScopeStmt>(op) && !As<RegScopeStmt>(op);
     std::unordered_set<const Var*> saved_future_needs;
     if (is_outline_boundary) {
       saved_future_needs = future_needs_;

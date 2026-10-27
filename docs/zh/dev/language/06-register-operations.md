@@ -71,15 +71,15 @@ load 还要求整个区间位于已初始化的 `valid_shape` 内；后续操作
 未初始化读取。一维 Tile 可直接使用；多维 Tile 必须具有显式连续行优先 View，
 拒绝带行 padding、boxed 或 compact 布局。静态 View offset 计入绝对效应区间。
 
-`ir.get_reg_op_spec(name)` 返回 scope 要求及未来 VMI emitter 名称。
+`ir.get_reg_op_spec(name)` 返回 scope 要求及 VMI emitter 名称。
 `ir.get_reg_memory_effect(call)` 返回目标、已知时的根分配、Read/Write、绝对元素区间
 以及可选 mask。动态 offset 产生未知端点，不会被当作空效应；它不能证明边界，
 发射前需要后续分析。动态 offset load 要求完整 valid-shape 覆盖。
 保留 mask 不代表整个缓冲区被初始化，也不证明区间互不重叠。
 
-PR2 仅提供 schema 效应与前端验证。SSA 传播、跨语句初始化跟踪、别名调度与 VMI
-发射属于 PR3。无论是否安装 PTOAS，当前 PTO codegen 都会对 RegScope 报告稳定的
-后端不支持错误。
+PR3 PTO codegen 将 RegScope 降低为带类型的 `pto.vecscope` VMI 操作。store 发射无结果的
+`pto.vmi.vstore`，其 Tile 结果仍是外部目标的别名；目标 capability 查询会在发射前拒绝不支持的
+寄存器类型。SSA 传播、跨语句初始化跟踪和别名调度也属于 PR3。
 
 ## Builder
 

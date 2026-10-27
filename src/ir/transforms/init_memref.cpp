@@ -57,6 +57,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -1055,6 +1056,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto result_func = MutableCopy(normalized_func);
   result_func->params_ = new_params;
   result_func->body_ = new_body;
+  VerifyRegMemoryInitialization(result_func);
 
   // Step 4: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
   memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);

@@ -89,7 +89,7 @@ bool IsBufferAliasingViewOp(const std::string& op_name);
 bool OutputInheritsSourceBuffer(const std::string& op_name);
 
 /// True for builtin ops whose name is namespaced `tile.` / `tensor.` /
-/// `system.` / `array.`, or for the distributed context query
+/// `system.` / `array.` / `reg.`, or for the distributed context query
 /// `pld.system.get_comm_ctx`. Builtin ops are never user Functions, so they
 /// carry no callee body and no Out/InOut params to trace.
 ///

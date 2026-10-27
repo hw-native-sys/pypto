@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""PR1 descriptors must not silently acquire unsupported lowering semantics."""
+"""VF descriptors must respect final placement and unsupported ABI boundaries."""
 
 import pytest
 from pypto import DataType, ir, passes
@@ -39,10 +39,11 @@ def _program(body):
     return ir.Program([function], "VFBoundary", span)
 
 
-def test_pto_codegen_rejects_register_scope_until_lowering_exists():
+def test_pto_codegen_rejects_register_scope_before_aiv_placement():
     span = ir.Span.unknown()
     scope = ir.RegScopeStmt("vf", ir.SeqStmts([], span), span)
-    with pytest.raises(ValueError, match="RegScopeStmt.*not supported"):
+    # PR3 lowers register scopes only after ExpandMixedKernel places them in AIV.
+    with pytest.raises(ValueError, match="RegScope.*requires AIV"):
         codegen.PTOCodegen().generate(_program(scope))
 
 
@@ -89,7 +90,7 @@ def test_host_codegen_rejects_vf_infrastructure(entrypoint, register_scope):
     span = ir.Span.unknown()
     body = ir.RegScopeStmt("vf", ir.SeqStmts([], span), span) if register_scope else _loop()
     program = _program(body)
-    with pytest.raises(ValueError, match="RegScopeStmt|Require"):
+    with pytest.raises(ValueError, match="RegScope.*requires AIV|Require"):
         if entrypoint == "distributed":
             codegen.DistributedCodegen().generate(program)
         else:

@@ -149,6 +149,10 @@ class BackendHandler {
    */
   [[nodiscard]] virtual std::string GetPtoTargetArch() const = 0;
 
+  /// Logical VMI register capability. This is an IR/emitter capability, not
+  /// evidence that a particular installed assembler supports its lowering.
+  [[nodiscard]] virtual bool SupportsRegType(const ir::RegType& /*type*/) const { return false; }
+
   /**
    * @brief Borrow this backend's immutable synchronization resource catalog.
    *

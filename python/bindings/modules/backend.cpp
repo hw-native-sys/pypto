@@ -146,6 +146,8 @@ void BindBackend(nb::module_& m) {
   nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
+      .def("supports_reg_type", &BackendHandler::SupportsRegType, nb::arg("type"),
+           "Whether this target supports the logical VMI register type")
       .def("get_launch_spec_core_count_method", &BackendHandler::GetLaunchSpecCoreCountMethod,
            "Method name on launch_spec for setting the logical block count "
            "('set_block_num' on both backends and runtimes)")

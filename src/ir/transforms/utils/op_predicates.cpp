@@ -93,7 +93,7 @@ std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count
 bool IsBuiltinOp(const std::string& op_name) {
   return op_name.rfind("tile.", 0) == 0 || op_name.rfind("tensor.", 0) == 0 ||
          op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0 ||
-         op_name == "pld.system.get_comm_ctx";
+         op_name.rfind("reg.", 0) == 0 || op_name == "pld.system.get_comm_ctx";
 }
 
 bool IsManagedTensorCollective(const OpPtr& op) {
