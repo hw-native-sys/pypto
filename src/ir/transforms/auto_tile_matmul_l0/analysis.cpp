@@ -500,6 +500,21 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   }
 
   if (full_output_reason) {
+    // The chooser enumerates an aligned tiling grid, not every native whole
+    // matmul shape (notably M=1). Keep an already capacity-fitting operation
+    // intact rather than turning its storage contract into a tiling mandate.
+    const auto fits = [&](int64_t rows, int64_t cols, int64_t row_align, int64_t col_align, uint32_t bytes,
+                          uint64_t capacity) {
+      const auto boxed_rows = static_cast<uint64_t>(AlignStaticExtent(rows, row_align, assign->span_));
+      const auto boxed_cols = static_cast<uint64_t>(AlignStaticExtent(cols, col_align, assign->span_));
+      return boxed_rows <= capacity / bytes / boxed_cols;
+    };
+    if ((M < cfg.min_m || N < cfg.min_n || M % cfg.align_m != 0 || N % cfg.align_n != 0) &&
+        fits(M, K, left_alignment->rows, left_alignment->cols, bytes_a, l0a_bytes) &&
+        fits(K, N, right_alignment->rows, right_alignment->cols, bytes_b, l0b_bytes) &&
+        fits(M, N, cfg.l0c_align_m, cfg.align_n, bytes_c, l0c_bytes)) {
+      return std::nullopt;
+    }
     // Selection must preserve one full accumulator when M/N subdivision
     // would lose an output binding or postpone reads beyond an input write.
     cfg.M = static_cast<int>(M);

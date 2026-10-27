@@ -125,6 +125,8 @@ Producer/use patterns outside the supported rewrite remain subject to
 allocation checks and the final NZ-store guard. Explicit column tiling is
 also supported; M splitting remains unavailable for NZ writes.
 
+Snapshot checks apply only to supported Mat-backed direct-store folds. Unknown storage provenance retains its known memory space: an Acc write cannot overwrite a Mat input, while opaque effects remain conservative. Already fitting off-grid whole matmuls keep their declared result storage without being forced onto the tiling grid. Functions already lowered to Buffer IR are left untouched.
+
 ## Shared view semantics and Call rebuilding
 
 These existing helpers describe different parts of a window; keep their

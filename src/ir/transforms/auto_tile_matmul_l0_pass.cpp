@@ -2469,9 +2469,13 @@ class AutoTileMutator : public IRMutator {
         std::string full_output_reason;
         if (GetTypeMemRef(assign->var_->GetType())) {
           full_output_reason = "declared accumulator storage";
-        } else if (consumer && consumer->store_stmt && consumer->result_uses == 1) {
+        } else if (consumer && consumer->store_stmt && consumer->result_uses == 1 &&
+                   consumer->supports_output_grid) {
+          const auto call = As<Call>(assign->value_);
+          const auto lhs_type = As<TileType>(call->args_[0]->GetType());
           const auto hazard = delayed_input_hazards_.find(assign->var_.get());
-          if (hazard != delayed_input_hazards_.end()) {
+          if (lhs_type && lhs_type->GetMemorySpace() == MemorySpace::Mat &&
+              hazard != delayed_input_hazards_.end()) {
             full_output_reason =
                 "the input snapshot of '" + hazard->second + "' across a possible later write";
           }
@@ -2627,7 +2631,7 @@ class AutoTileMutator : public IRMutator {
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
   if (!func || !func->body_) return func;
-  if (!IsInCoreType(func->func_type_)) return func;
+  if (!IsInCoreType(func->func_type_) || func->ir_stage_ == FunctionIRStage::Buffer) return func;
   // Canonical loop-carried split-K output tiling changes both the Acc inventory
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.

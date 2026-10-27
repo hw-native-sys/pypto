@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -38,7 +40,13 @@ namespace {
 struct Storage {
   const Var* base;
   std::optional<int64_t> slot;
+  std::optional<MemorySpace> space;
 };
+
+Storage UnknownStorage(const VarPtr& var) {
+  const auto tile = As<TileType>(var->GetType());
+  return Storage{nullptr, std::nullopt, tile ? tile->GetMemorySpace() : std::nullopt};
+}
 
 struct Writes {
   std::vector<size_t> all;
@@ -60,7 +68,7 @@ class SnapshotIndex : public IRVisitor {
     for (const auto& param : func->params_) {
       // Tile parameters have no fresh-allocation/noalias proof at this
       // boundary; ordinary tensor parameters do not occupy on-chip storage.
-      if (As<TileType>(param->GetType())) storage_[param.get()] = Storage{nullptr, std::nullopt};
+      if (As<TileType>(param->GetType())) storage_[param.get()] = UnknownStorage(param);
     }
     VisitStmt(func->body_);
     std::unordered_map<const Var*, std::string> hazards;
@@ -92,9 +100,9 @@ class SnapshotIndex : public IRVisitor {
     // Follow the same alias edges as InitMemRef. A declared result binding
     // takes precedence; an ordinary fresh result owns its own SSA storage.
     if (auto alias = AsVarLike(op->value_)) {
-      storage_[op->var_.get()] = Resolve(alias).value_or(Storage{nullptr, std::nullopt});
+      storage_[op->var_.get()] = Resolve(alias).value_or(UnknownStorage(op->var_));
     } else if (!entry) {
-      storage_[op->var_.get()] = Storage{nullptr, std::nullopt};
+      storage_[op->var_.get()] = UnknownStorage(op->var_);
     } else {
       auto reuse = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
       if (!reuse && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
@@ -106,8 +114,7 @@ class SnapshotIndex : public IRVisitor {
         }
       }
       if (reuse) {
-        storage_[op->var_.get()] =
-            Resolve(AsVarLike(call->args_[*reuse])).value_or(Storage{nullptr, std::nullopt});
+        storage_[op->var_.get()] = Resolve(AsVarLike(call->args_[*reuse])).value_or(UnknownStorage(op->var_));
       }
     }
     if (!call) return;
@@ -148,27 +155,27 @@ class SnapshotIndex : public IRVisitor {
       VisitExpr(arg->initValue_);
       // A yielded allocation may differ from the first initializer in later
       // iterations. Do not assume initializer lineage for all body reads.
-      storage_[arg.get()] = Storage{nullptr, std::nullopt};
+      storage_[arg.get()] = UnknownStorage(arg);
     }
     VisitStmt(op->body_);
-    for (const auto& result : op->return_vars_) storage_[result.get()] = Storage{nullptr, std::nullopt};
+    for (const auto& result : op->return_vars_) storage_[result.get()] = UnknownStorage(result);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& arg : op->iter_args_) {
       VisitExpr(arg->initValue_);
-      storage_[arg.get()] = Storage{nullptr, std::nullopt};
+      storage_[arg.get()] = UnknownStorage(arg);
     }
     VisitExpr(op->condition_);
     VisitStmt(op->body_);
-    for (const auto& result : op->return_vars_) storage_[result.get()] = Storage{nullptr, std::nullopt};
+    for (const auto& result : op->return_vars_) storage_[result.get()] = UnknownStorage(result);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     VisitExpr(op->condition_);
     VisitStmt(op->then_body_);
     if (op->else_body_) VisitStmt(*op->else_body_);
-    for (const auto& result : op->return_vars_) storage_[result.get()] = Storage{nullptr, std::nullopt};
+    for (const auto& result : op->return_vars_) storage_[result.get()] = UnknownStorage(result);
   }
 
  private:
@@ -186,15 +193,18 @@ class SnapshotIndex : public IRVisitor {
     if (tile->memref_) {
       const auto& memref = *tile->memref_;
       const auto slot = memref->slot_index_ ? As<ConstInt>(*memref->slot_index_) : nullptr;
-      return Storage{memref->base_.get(), slot ? std::optional<int64_t>(slot->value_) : std::nullopt};
+      return Storage{memref->base_.get(), slot ? std::optional<int64_t>(slot->value_) : std::nullopt,
+                     tile->GetMemorySpace()};
     }
-    return Storage{var.get(), std::nullopt};
+    return Storage{var.get(), std::nullopt, tile->GetMemorySpace()};
   }
 
   void RecordWrite(const Storage& storage, size_t point) {
     all_writes_.push_back(point);
+    space_writes_[storage.space].push_back(point);
     if (!storage.base) {
-      opaque_.push_back(point);
+      ambiguous_writes_.push_back(point);
+      ambiguous_space_writes_[storage.space].push_back(point);
       return;
     }
     auto& writes = writes_[storage.base];
@@ -230,7 +240,21 @@ class SnapshotIndex : public IRVisitor {
 
   bool MayWrite(const Storage& input, size_t start, size_t end) const {
     if (InInterval(opaque_, start, end)) return true;
-    if (!input.base) return InInterval(all_writes_, start, end);
+    // Unknown provenance does not erase a known address space. Acc/Vec
+    // writes cannot overwrite a Mat input. Truly opaque effects still fence
+    // every space; unknown-base writes fence their own space and unknown space.
+    const auto in_space = [&](const auto& index) {
+      const auto unknown = index.find(std::nullopt);
+      if (unknown != index.end() && InInterval(unknown->second, start, end)) return true;
+      const auto found = index.find(input.space);
+      return found != index.end() && InInterval(found->second, start, end);
+    };
+    if (!input.base) {
+      return input.space ? in_space(space_writes_) : InInterval(all_writes_, start, end);
+    }
+    if (input.space ? in_space(ambiguous_space_writes_) : InInterval(ambiguous_writes_, start, end)) {
+      return true;
+    }
     const auto found = writes_.find(input.base);
     if (found == writes_.end()) return false;
     const auto& writes = found->second;
@@ -244,6 +268,9 @@ class SnapshotIndex : public IRVisitor {
   std::unordered_map<const Var*, Storage> storage_;
   std::unordered_map<const Var*, Writes> writes_;
   std::vector<size_t> all_writes_;
+  std::map<std::optional<MemorySpace>, std::vector<size_t>> space_writes_;
+  std::vector<size_t> ambiguous_writes_;
+  std::map<std::optional<MemorySpace>, std::vector<size_t>> ambiguous_space_writes_;
   std::vector<size_t> opaque_;
   std::unordered_map<const Var*, size_t> stores_;
   std::vector<Query> queries_;
