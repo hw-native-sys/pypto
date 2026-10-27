@@ -30,7 +30,8 @@
 ```python
 from pypto.runtime import RunConfig
 
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
+compiled = kernel.compile(a, b, out, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
+compiled(a, b, out, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
 ```
 
 然后渲染它：
@@ -51,7 +52,8 @@ viewer 默认输出文本，要图视图得传 `--format html`。
 一张并行的图并不保证并行的执行。swimlane 给出逐任务时序：
 
 ```python
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
+compiled = kernel.compile(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
+compiled(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
 ```
 
 > **模拟器注意事项：** 在 `*sim` 平台上这是单趟的，只产出 `chip_swimlane_records.json`。合并后的 `merged_swimlane_*.json` 视图会被**有意跳过**，因为模拟器尚未提供转换器所需的任务元数据。在真机平台上同一个开关会把负载**跑两遍** —— 先一趟 dep_gen 采集图，再一趟干净的计时 —— 因为采集会扰动时序。
@@ -63,7 +65,8 @@ kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True
 运行时用环来存放在飞的任务。如果某个环饱和了，往图里加并行度不会有任何收益：
 
 ```python
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_scope_stats=True))
+compiled = kernel.compile(a, b, out, config=RunConfig(platform="a2a3sim", enable_scope_stats=True))
+compiled(a, b, out, config=RunConfig(platform="a2a3sim", enable_scope_stats=True))
 ```
 
 ```bash

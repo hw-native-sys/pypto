@@ -105,7 +105,7 @@ def require_runtime() -> Any:
     interface = importlib.import_module("simpler.task_interface")
     workers = importlib.import_module("simpler.worker")
     worker = getattr(simpler, "Worker", None)
-    for name in ("init", "register", "unregister", "submit", "close", "flush_diagnostics"):
+    for name in ("init", "register", "unregister", "submit", "release_buffer", "close", "flush_diagnostics"):
         _require_method(worker, name, "Worker")
     for method, keyword in (("init", "borrowed_context_generation"), ("submit", "caller_stream")):
         if keyword not in inspect.signature(getattr(worker, method)).parameters:
@@ -151,7 +151,7 @@ class _BorrowedWorkerSession:
     def __init__(self, config: KernelConfig, state: Any) -> None:
         from pypto.torch.shutdown import install_shutdown  # noqa: PLC0415
 
-        self.sources = SourcePool()
+        self.sources = SourcePool(lambda buffer: self.worker.release_buffer(buffer))
         self._api = require_runtime()
         self._native = install_shutdown(state)
         self._context = self._native.borrow_context(config.device_id)

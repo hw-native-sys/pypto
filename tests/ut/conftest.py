@@ -474,6 +474,7 @@ def eager_env(monkeypatch):
 
         def __init__(self, **options):
             self.location = object()
+            self.imports = {}
             self.options = options
             env.workers.append(self)
 
@@ -493,12 +494,18 @@ def eager_env(monkeypatch):
             env.events.append(("submit", target, args, config, caller_stream, threading.get_ident()))
             if env.submit_error:
                 raise env.submit_error
+            assert args is not None
+            self.imports.update((id(view.buffer), view.buffer) for view, _ in args.tensors)
             run = RunHandle()
             env.runs.append(run)
             return run
 
         def flush_diagnostics(self):
             pytest.fail("no implicit DFX flush")
+
+        def release_buffer(self, buffer):
+            buffer.close()
+            self.imports.pop(id(buffer), None)
 
         def close(self):
             env.events.append("close")
@@ -577,6 +584,7 @@ def eager_env(monkeypatch):
         monkeypatch.setitem(sys.modules, module, api)
     monkeypatch.setattr(session, "check_runtime_pin", lambda: None)
     monkeypatch.setattr(arguments, "check_runtime_pin", lambda: None)
+    env.tensor_dtype = arguments._tensor_dtype
     monkeypatch.setattr(arguments, "_tensor_dtype", str)
     for module in (interop, shutdown):
         monkeypatch.setattr(module, "_load_torch_npu", lambda: framework)

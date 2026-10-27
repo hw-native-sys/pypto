@@ -80,6 +80,11 @@ void Enqueue(nb::list objects, int64_t stream_id, int32_t device_id, uintptr_t c
       c10_npu::NPUCachingAllocator::recordStream(storage.data_ptr(), stream);
     }
   }
+  // torch_npu 2.6/2.10 queue drains release the caller GIL only after this
+  // process-wide flag is set. Our Python callback has the same requirement as
+  // ACL-op compilation, including later stream.query() and empty_cache() calls.
+  // Set it before admission and never reset it while queued work may exist.
+  g_used_aclop = true;
   PyObject* borrowed_callback = callback.ptr();
   // Queue admission may block. Release the caller GIL so the queue can enter
   // Python, both when callbacks execute inline and when taskQueue is enabled.

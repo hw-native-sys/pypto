@@ -59,6 +59,9 @@ def public_runtime(monkeypatch):
         def flush_diagnostics(self):
             raise AssertionError("DFX windows are a later step")
 
+        def release_buffer(self, buffer):
+            buffer.close()
+
         def close(self):
             events.append(("close", threading.get_ident()))
 
@@ -171,7 +174,7 @@ def test_context_mismatch_and_register_error_keep_original_semantics(public_runt
 
 
 @pytest.mark.parametrize(
-    "missing", ["init_keyword", "submit_keyword", "register", "done", "buffer", "scalar", "dfx"]
+    "missing", ["init_keyword", "submit_keyword", "register", "done", "buffer", "scalar", "release", "dfx"]
 )
 def test_capability_guard_rejects_missing_public_contract(public_runtime, monkeypatch, missing):
     api, _ = public_runtime
@@ -187,6 +190,8 @@ def test_capability_guard_rejects_missing_public_contract(public_runtime, monkey
         monkeypatch.delattr(api.Buffer, "wrap")
     elif missing == "scalar":
         monkeypatch.delattr(api.TaskArgs, "add_scalar")
+    elif missing == "release":
+        monkeypatch.delattr(api.Worker, "release_buffer")
     else:
         monkeypatch.delattr(api.Worker, "flush_diagnostics")
     with pytest.raises(NotImplementedError):

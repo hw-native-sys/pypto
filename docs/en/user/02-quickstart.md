@@ -67,7 +67,8 @@ compiled = add.compile()
 print(f"Generated code in: {compiled.output_dir}")
 
 out = torch.zeros(128, 128, dtype=torch.float32)
-add(A, B, out, config=CFG)
+compiled = add.compile(A, B, out, config=CFG)
+compiled(A, B, out, config=CFG)
 torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 ```
 
@@ -117,7 +118,8 @@ def add_then_square(
 
 
 out = torch.zeros(128, 128, dtype=torch.float32)
-add_then_square(A, B, out, config=CFG)
+compiled = add_then_square.compile(A, B, out, config=CFG)
+compiled(A, B, out, config=CFG)
 torch.testing.assert_close(out, (A + B) * (A + B), rtol=1e-4, atol=1e-4)
 ```
 
@@ -282,13 +284,16 @@ a = torch.full((128, 128), 2.0, dtype=torch.float32)
 b = torch.full((128, 128), 3.0, dtype=torch.float32)
 out = torch.zeros((128, 128), dtype=torch.float32)
 
-add(a, b, out, config=RunConfig())          # compiles, caches, dispatches
+compiled = add.compile(a, b, out, config=RunConfig())
+compiled(a, b, out, config=RunConfig())          # compiles, caches, dispatches
 assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 ```
 
-Calling a `@pl.jit` function directly does the whole thing: specialize on the argument
-shapes and dtypes, compile, cache, dispatch. Later calls with the same shapes reuse the
-cached compilation. `examples/beginner/01_hello_world.py` is this pattern, at tile level.
+Explicit `compile()` specializes and caches a program; calling the returned
+program dispatches it with `RunConfig`. This supports host tensors on device or
+simulator platforms, as in `examples/beginner/01_hello_world.py`. Direct
+`@pl.jit` calls instead require `pypto.torch.init()` and NPU tensors; see
+[Torch eager kernels](../dev/runtime/kernel-mode.md).
 
 ## Edge Cases
 

@@ -104,6 +104,23 @@ def test_storage_offset_and_aliases_share_one_source(eager_env, prepared):
     env.state.close()
 
 
+def test_repeated_retirement_releases_worker_imports(eager_env, prepared):
+    env = eager_env
+    worker = env.workers[0]
+    x, out = env.tensor(), env.tensor()
+    for _ in range(3):
+        _invoke(env, prepared, x=x, out=out)
+        _invoke(env, prepared, x=x, out=out)
+        env.run_queue()
+        assert len(worker.imports) == 2
+        first, second = env.state._submissions[-2:]
+        env.runs[-2].complete = True
+        assert first.done() and len(worker.imports) == 2
+        env.runs[-1].complete = True
+        assert second.done() and not worker.imports
+    env.state.close()
+
+
 def test_owners_live_until_retirement_and_closures_are_released(eager_env, prepared):
     env = eager_env
     frame = _invoke(env, prepared)
@@ -186,10 +203,12 @@ def test_retirement_failure_preserves_resources_for_retry(eager_env, prepared, f
         ticket.done()
     assert ticket._owners
     assert not env.buffers[0].closed
+    assert env.workers[0].imports
     run.wait_error = env.buffers[0].close_error = None
     assert ticket.done()
     env.state.close()
     assert all(b.closed for b in env.buffers)
+    assert not env.workers[0].imports
 
 
 def test_close_can_finish_queued_callback_without_admission_lock_deadlock(eager_env, prepared):

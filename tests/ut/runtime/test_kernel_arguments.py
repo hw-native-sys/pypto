@@ -56,7 +56,8 @@ def test_kernel_packer_never_enters_program_helpers(eager_env, monkeypatch):
 def test_external_storage_leases_span_multiple_calls(eager_env):
     env = eager_env
     env.init()
-    pool, location = SourcePool(), env.workers[0].device_location
+    worker = env.workers[0]
+    pool, location = SourcePool(worker.release_buffer), worker.device_location
     base = env.tensor((32, 16))
     view = base[16:]
     first = BorrowedArguments(_frame([base, view]), pool, location)
@@ -76,7 +77,7 @@ def test_external_storage_leases_span_multiple_calls(eager_env):
 def test_partial_argument_construction_rolls_back_or_retains_storage(eager_env, monkeypatch, close_fails):
     env = eager_env
     env.init()
-    pool = SourcePool()
+    pool = SourcePool(env.workers[0].release_buffer)
     tensor = env.tensor()
 
     def fail_scalar(self, value):

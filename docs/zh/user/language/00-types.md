@@ -76,7 +76,8 @@ acc = torch.randn(64, 128, dtype=torch.float32)
 out = torch.zeros(64, 128, dtype=torch.float32)
 acc_before = acc.clone()
 
-apply_scale(x, acc, out, config=CFG)
+compiled = apply_scale.compile(x, acc, out, config=CFG)
+compiled(x, acc, out, config=CFG)
 
 scaled = x.float() * 2.0
 torch.testing.assert_close(out, scaled, rtol=1e-2, atol=1e-2)               # Out was written
@@ -270,7 +271,8 @@ def drive(x: pl.Tensor[[N, 64], pl.FP32], out: pl.Out[pl.Tensor[[N, 64], pl.FP32
 for extent in (TILE, 3 * TILE):
     x = torch.randn(extent, 64, dtype=torch.float32)
     out = torch.zeros(extent, 64, dtype=torch.float32)
-    drive(x, out, config=CFG)
+    compiled = drive.compile(x, out, config=CFG)
+    compiled(x, out, config=CFG)
     torch.testing.assert_close(out[:TILE], x[:TILE] * 2.0, rtol=1e-4, atol=1e-4)
 ```
 

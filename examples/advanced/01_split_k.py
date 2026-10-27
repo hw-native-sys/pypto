@@ -71,7 +71,8 @@ if __name__ == "__main__":
     b = torch.randn(K, N, dtype=torch.float32)
 
     c = torch.zeros((M, N), dtype=torch.float32)
-    matmul_split_k(a, b, c, config=cfg)
+    compiled = matmul_split_k.compile(a, b, c, config=cfg)
+    compiled(a, b, c, config=cfg)
     assert torch.allclose(c, torch.matmul(a, b), rtol=1e-3, atol=1e-3)
 
     print("OK")
