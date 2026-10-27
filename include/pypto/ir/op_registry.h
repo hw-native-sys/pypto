@@ -92,14 +92,14 @@ struct OpMemorySpaceSpec {
       std::function<std::optional<MemorySpace>(const std::vector<std::pair<std::string, std::any>>& kwargs)>;
   OutputResolver deduce_output_memory;
 
-  /// When set, the output reuses the MemRef of the input argument at this index.
-  /// Used by accumulate ops (matmul_acc, gemv_acc) where the output IS the input buffer.
+  /// Semantic storage alias: the result shares this argument's underlying storage.
+  /// It may carry a different MemRef window or descriptor and need not write data.
   std::optional<size_t> output_reuses_input_arg;
 
   /// True when the output memory space is defined to equal the first tile-typed
   /// input's memory space (set via `set_output_memory_inherit_input`).
   /// InferTileMemorySpace uses this for forward inheritance and backward-demand
-  /// propagation through view-like ops; memory reuse uses it to skip retargeting.
+  /// propagation. This does not imply storage aliasing or permit physical reuse.
   bool output_inherits_input = false;
 };
 
@@ -688,7 +688,7 @@ class OpRegistryEntry {
     return *this;
   }
 
-  /// Set output memory inherited from first tile-typed input (view ops).
+  /// Set output memory space to the first Tile/Tensor input's space; no storage alias.
   /// The resolver returns nullopt; InferTileMemorySpace resolves by copying the input's
   /// (already-resolved) memory space onto the output.
   inline OpRegistryEntry& set_output_memory_inherit_input() {
@@ -728,13 +728,10 @@ class OpRegistryEntry {
   /// Get memory spec (nullopt if not annotated)
   [[nodiscard]] const std::optional<OpMemorySpaceSpec>& GetMemorySpec() const { return memory_spec_; }
 
-  /// True when this op's output memory space equals its first tile-typed input's
-  /// (registered via `set_output_memory_inherit_input`). The single source of truth
-  /// for passes that need to propagate memory-space information through view-like ops
-  /// (InferTileMemorySpace, memory reuse).
-  /// An op may combine this with `set_output_reuses_input(idx)` (e.g. in-place
-  /// variants like tile.fillpad_inplace that reuse the input's MemRef in place);
-  /// the memory-space-inheritance relation still holds.
+  /// Output memory space equals the first Tile/Tensor input's space.
+  /// This does not imply a storage alias: tile.transpose inherits space while
+  /// producing independent storage. Alias declarations and in-place constraints
+  /// are separate contracts, even when an operator declares all three.
   [[nodiscard]] bool OutputMemoryInheritsInput() const {
     return memory_spec_.has_value() && memory_spec_->output_inherits_input;
   }
@@ -753,8 +750,10 @@ class OpRegistryEntry {
     return !memory_spec_->deduce_output_memory({}).has_value();
   }
 
-  /// Declare that this op's output reuses the MemRef of the input at arg_index.
-  /// Used for accumulate ops where the output writes into the input buffer.
+  /// Declare that the single result semantically shares arg_index's storage.
+  /// This does not imply writes, identical MemRef windows/descriptors, or SSA
+  /// substitutability. Declare argument effects separately, including read-only
+  /// views. Lifetime-based physical reuse does not create this relationship.
   inline OpRegistryEntry& set_output_reuses_input(size_t arg_index) {
     EnsureMemorySpec();
     auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
@@ -762,11 +761,14 @@ class OpRegistryEntry {
     return *this;
   }
 
-  /// Returns the input arg index whose MemRef the output should reuse, or nullopt.
+  /// Returns the explicit storage-alias input index, or nullopt.
   [[nodiscard]] std::optional<size_t> GetOutputReusesInputArg() const {
     if (!memory_spec_.has_value()) return std::nullopt;
     return memory_spec_->output_reuses_input_arg;
   }
+
+  /// Validate the single-result storage alias and its explicit effect verdict.
+  void ValidateOutputStorageAlias() const;
 
   /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
   /// The shared allocation-constraint analysis prevents producer-consumer reuse
@@ -1354,23 +1356,12 @@ class OpRegistry {
   void ValidateTileOps() const;
 
   /**
-   * @brief Validate that every operator which updates an argument in place has
-   *        declared its per-argument effects.
+   * @brief Validate Functional storage aliases and argument-effect declarations.
    *
-   * An operator declaring `set_output_reuses_input(N)` writes through argument
-   * N — that is what reusing the buffer means. Direction inference, dependency
-   * analysis and the parameter-direction verifier all read those effects, and
-   * an undeclared operator reads as a pure consumer: the write vanishes, no
-   * dependency edge is emitted, and the failure surfaces on device as a race
-   * or a deadlock rather than at compile time.
-   *
-   * Classification, not a particular answer, is what is required: an operator
-   * whose in-place slot is metadata rather than data may declare it `Read` (via
-   * `no_arg_writes()`), which records that a human decided.
-   *
-   * Call at module init to catch an unclassified operator at import time.
-   *
-   * @throws ValueError listing every in-place operator with undeclared effects
+   * An alias index must name a declared argument with an explicit effect verdict.
+   * Read and no_arg_writes() are valid: sharing storage does not imply writing.
+   * Write channels additionally require at least one possible argument write.
+   * Call at module init to catch invalid or unclassified registrations.
    */
   void ValidateArgEffects() const;
 

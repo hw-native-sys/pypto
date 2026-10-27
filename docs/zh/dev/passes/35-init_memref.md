@@ -51,7 +51,7 @@ program_with_memrefs = init_pass(program)
 4. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
 5. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
-   - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
+   - **View 操作**（如 `tile.reshape`、`tile.slice`）：显式 `output_reuses_input_arg` 选择共享存储，视图映射保留偏移和范围
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配

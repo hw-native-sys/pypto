@@ -268,7 +268,7 @@ slices:
 | ---- | ------------- |
 | `v = tile.slice(src, shape, offset)` | The window itself (seed); chained slices are peeled, offsets accumulated |
 | `v = w` (plain SSA alias) | `w`'s window |
-| `v = <op>(src, ...)` where the op's output lands in a source operand's storage | The source operand's window. The relation is a registry read (`OutputMemoryInheritsInput() && IsInplaceSafe()`, or `set_output_reuses_input`), never an op list — so `tile.reshape` / `tile.set_validshape` and a chained `tile.matmul_acc` are covered, while `tile.transpose` and `tile.extract` (fresh buffers) are excluded |
+| `v = <op>(src, ...)` where the op's output lands in a source operand's storage | The source operand's window. The relation is a registry read (`set_output_reuses_input`), never an op list — so `tile.reshape` / `tile.set_validshape` and a chained `tile.matmul_acc` are covered, while `tile.transpose` and `tile.extract` (fresh buffers) are excluded |
 | Loop `IterArg` | Its **initializer's** window (`ForStmt` / `WhileStmt`) |
 | `ForStmt` / `WhileStmt` `return_vars_[i]` | The window the trailing `pl.yield_` names for `iter_args_[i]` — **only when that is the same window the initializer names**, which is the canonical carry. A zero-trip loop returns the initializer instead, so binding a different window would claim one that a path does not name |
 | `IfStmt::return_vars_[i]` | The window both arms yield, when they provably yield the *same* one (same parent Var, equal offsets) |

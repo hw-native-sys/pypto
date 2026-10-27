@@ -4,6 +4,11 @@ Forces buffers that the program *semantics require* to be the same allocation to
 share one MemRef, by propagating each loop-carried `iter_arg`/`initValue` MemRef
 down the yield/producer chain.
 
+Operator storage sources come from explicit `set_output_reuses_input` declarations;
+plain SSA aliases and control-flow relations remain separate sources. Argument
+effects determine writes. View windows and descriptors are preserved when their
+source moves; sharing storage does not mean copying the entire source MemRef.
+
 ## Overview
 
 Memory planning distinguishes two kinds of buffer sharing:
@@ -124,9 +129,9 @@ its own fresh MemRef. This pass closes that gap:
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
    after retargeting, rather than repairing one producer in isolation. Bare SSA
-   aliases follow their source, registered `output_reuses_input` results follow
-   the specified writeback input, and registered first-input buffer-aliasing
-   operations follow their current first input. A single forward walk substitutes
+   aliases follow their source. Whole-window writebacks and view aliases both
+   select their source through the explicit `output_reuses_input` index, while
+   retaining their distinct window rules below. A single forward walk substitutes
    each repaired result into downstream uses, so a writeback result followed by
    `transpose_view`, `reshape`, or `slice` stays on the correct storage throughout
    the chain; no fixed-point iteration is needed. This closes lowering-created
@@ -136,20 +141,20 @@ its own fresh MemRef. This pass closes that gap:
 These rules cover shaped results with MemRefs, including tile and tensor
 writebacks. Bare SSA renames follow the complete source type without copying
 data; call-result retyping preserves result shape, dtype, view/distribution
-metadata. An explicit `output_reuses_input` contract takes precedence over
-first-input inheritance. The first-input buffer-alias predicate requires both
-`OutputMemoryInheritsInput()` and `IsInplaceSafe()`; inheriting the memory space
-alone does not establish a buffer alias.
-Writeback results inherit the current writeback input's exact MemRef window.
-First-input aliases retain their result extent and derive their window from the
-current input allocation and byte offset plus the operation's relative view
-offset, applied once; they also inherit the input's pipeline slot identity and,
-for tile results, memory space. Recomputing the relative offset from the
-operation, rather than adding it to a stale absolute offset, makes normalization
-idempotent and handles changes within the same allocation as well as changes of
-allocation. Buffer aliasing is a storage contract: `tile.assemble` also follows
-its first input even though it writes data. Real non-in-place `tile.transpose` and independent
-`tile.extract` results keep their own storage.
+metadata. Every call-result storage alias comes from the explicit
+`output_reuses_input` index; `OutputMemoryInheritsInput()` and `IsInplaceSafe()`
+do not establish aliases. Argument effects identify writes independently.
+Whole-window writeback results inherit the declared input's exact MemRef window.
+Read-only views such as `tile.slice` and `tile.reshape` retain their own extent
+and derive their window from the declared input's current allocation and byte
+offset plus the operation-relative view offset, applied once. They also follow
+its pipeline slot identity and, for tile results, memory space. Recomputing the
+relative offset rather than adding it to a stale absolute offset makes
+normalization idempotent within and across allocations. `tile.assemble` writes
+its target but keeps its existing partial-update window mapping; a write effect
+alone does not make it a whole-window writeback. Allocating `tile.transpose`
+and independent `tile.extract` results have no storage alias and keep their
+own storage.
 
 In both legacy Tile and Buffer IR modes, `TensorType`/`DistributedTensorType`
 For/While arguments and returns are mutable views of the current initializer.
@@ -160,7 +165,7 @@ carries retain their separate canonical-buffer and yield-fixup rules, including
 explicit transfers when a yielded tile needs to reach the carry buffer.
 
 The pre-yield-fixup form of normalization seeds unresolved `IfStmt` results and
-propagates that status through bare aliases, writeback results, and first-input
+propagates that status through bare aliases, writeback results, and view
 aliases, including through tensor loop arguments and returns. None of the
 dependent calls is anchored to that provisional window.
 Once the control-flow boundary is resolved, the following normalization walk

@@ -27,6 +27,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -165,17 +166,18 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
     if (assign->var_.get() != var) return false;
     auto call = As<ir::Call>(assign->value_);
     if (!call || !call->op_) return false;
-    // A zero-copy view (inherit-input: tile.reshape, tile.slice, ...) IS the
-    // "view" the comment above excludes. Its codegen emits nothing when the target
-    // handle already carries the result type, so re-pointing it at the phi handle
-    // leaves the phi buffer unwritten. `[N, 1]` col-vector carries always hit this:
-    // their elementwise ops run on a `[1, N]` row-major view and the branch yields
-    // the reshape back, not the op result.
-    auto& registry = ir::OpRegistry::GetInstance();
-    if (registry.IsRegistered(call->op_->name_) &&
-        registry.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) {
+    // A read-only storage alias cannot populate a retargeted phi buffer. Its
+    // emitter only builds a descriptor, even if that descriptor has the same
+    // type as the phi handle. Keep this separate from space restrictions.
+    if (auto index = ir::op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+        index && !ir::op_predicates::CallWritesArg(call, *index)) {
       return false;
     }
+    // Preserve the existing restriction on retargeting space-inheriting ops,
+    // including transpose. This is a descriptor/space constraint, not an alias
+    // claim; relaxing it would change the branch-copy policy.
+    const auto* entry = ir::LookupOpEntry(call->op_);
+    if (entry && entry->OutputMemoryInheritsInput()) return false;
     return true;
   }
   if (auto seq = As<ir::SeqStmts>(body)) {

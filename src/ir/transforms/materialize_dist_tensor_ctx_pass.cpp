@@ -173,13 +173,7 @@ class LocalNameCollector : public IRVisitor {
 /// a `GlobalVar`, so without this the context would look unresolvable.
 [[nodiscard]] std::optional<size_t> CtxInheritingArgIndex(const CallPtr& call) {
   if (!call || !call->op_) return std::nullopt;
-  if (auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-    return writeback;
-  }
-  if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-    return 0;
-  }
-  return std::nullopt;
+  return op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
 }
 
 /// Describe a DistributedTensor value for a user-facing diagnostic.

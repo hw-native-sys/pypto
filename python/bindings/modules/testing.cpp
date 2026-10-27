@@ -19,6 +19,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
 #include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
 #include <nanobind/stl/tuple.h>
@@ -46,6 +47,7 @@
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 
 namespace nb = nanobind;
@@ -104,6 +106,18 @@ void ValidateOpTypeRegistrationForTesting(ir::OpIRStage stage, bool internal_onl
     }
   }
   entry.ValidateIRStage();
+}
+
+/// Exercise the production alias validator on a local entry, never the singleton.
+void ValidateStorageAliasForTesting(size_t argument_count, size_t alias_index, size_t output_arity,
+                                    const std::vector<std::pair<size_t, ir::ArgEffect>>& effects,
+                                    bool no_arg_writes) {
+  ir::OpRegistryEntry entry;
+  entry.no_argument().set_output_arity(output_arity).set_output_reuses_input(alias_index);
+  for (size_t i = 0; i < argument_count; ++i) entry.add_argument(std::to_string(i), "Test argument");
+  if (no_arg_writes) entry.no_arg_writes();
+  for (const auto& [index, effect] : effects) entry.set_arg_effect(index, effect);
+  entry.ValidateOutputStorageAlias();
 }
 
 // ============================================================================
@@ -334,6 +348,15 @@ void BindTesting(nb::module_& m) {
               nb::arg("arity").none(), nb::arg("args"), nb::arg("result_type"), nb::arg("effects"),
               nb::arg("results"), nb::arg("internal_only") = true,
               "Validate a local operator contract without changing the global registry");
+  testing.def("validate_storage_alias", &ValidateStorageAliasForTesting, nb::arg("argument_count"),
+              nb::arg("alias_index"), nb::arg("output_arity"), nb::arg("effects"),
+              nb::arg("no_arg_writes") = false, "Validate a local Functional storage-alias registration");
+  testing.def(
+      "storage_alias_arg_index",
+      [](const std::string& name, size_t arg_count) {
+        return ir::op_predicates::StorageAliasArgIndex(ir::OpRegistry::GetInstance().GetOp(name), arg_count);
+      },
+      nb::arg("name"), nb::arg("arg_count"), "Inspect the internal storage-source query");
   testing.def("validate_op_type_registration", &ValidateOpTypeRegistrationForTesting, nb::arg("stage"),
               nb::arg("internal_only"), nb::arg("typing_modes"),
               "Validate local operator typing modes without changing the global registry");

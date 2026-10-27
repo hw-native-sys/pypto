@@ -33,6 +33,40 @@ def _run_normalize_direct(program):
     return passes.normalize_return_order()(program)
 
 
+@pytest.mark.parametrize("view_kind", ["slice", "reshape", "view"])
+def test_returned_view_keeps_its_descriptor(view_kind):
+    """A storage alias is not permission to return the unsliced parameter."""
+    if view_kind == "slice":
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def kernel(self, p: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[8, 16], pl.FP32]:
+                v = pl.tensor.slice(p, [8, 16], [4, 0])
+                return v
+
+    elif view_kind == "reshape":
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def kernel(self, p: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[8, 32], pl.FP32]:
+                v = pl.tensor.reshape(p, [8, 32])
+                return v
+
+    else:
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def kernel(self, p: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[8, 32], pl.FP32]:
+                v = pl.tensor.view(p, [8, 32])
+                return v
+
+    After = _run_normalize_direct(Before)
+    ir.assert_structural_equal(After, Before)
+
+
 class TestNormalizeReturnOrder:
     """Tests for the NormalizeReturnOrder pass."""
 

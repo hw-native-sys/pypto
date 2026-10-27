@@ -8,6 +8,11 @@ This pass analyzes variable lifetimes and dependencies to enable memory sharing.
 
 After applying MemRef sharing, the pass also **removes redundant `tile.alloc` statements** for MemRefs that are no longer referenced by any TileType variable.
 
+This lifetime-based physical reuse creates no semantic alias edge. Explicit
+operator aliases use `set_output_reuses_input`, independently of memory-space
+inheritance and in-place execution constraints. Views retain their own windows
+and descriptors even when their underlying storage is shared.
+
 **Key insights**:
 
 - Variables that don't overlap in lifetime can reuse memory
@@ -76,22 +81,23 @@ program_optimized = reuse_pass(program)
    | Alias category | Required result storage |
    | -------------- | ----------------------- |
    | Bare SSA alias `x = y` | Current source's exact MemRef window |
-   | Registered `output_reuses_input` result | Exact window of the registered writeback input |
-   | Registered first-input buffer-aliasing operation | Current first input's allocation, offset, and slot identity, plus the operation-relative offset; retain the result extent |
+   | Whole-window writeback result (`output_reuses_input`) | Exact window of the declared writeback input |
+   | Read-only view alias (`output_reuses_input`), such as `tile.slice` or `tile.reshape` | Current declared input's allocation, offset, and slot identity, plus the view-relative offset; retain the result extent |
+   | Partial-update alias, such as `tile.assemble` | Follow the declared input with the operation's existing window mapping and result extent |
    | Tensor/DistributedTensor For/While arguments and returns | Current initializer's exact window, including on zero-trip loops |
 
    These rules apply to shaped results with MemRefs, including tile and tensor
    writebacks. Bare SSA renames follow the complete source type without copying
    data. Call-result retyping preserves the result's shape, dtype,
    view/distribution metadata, and follows the current input's memory space for
-   tile results. An explicit writeback contract takes precedence over first-input
-   inheritance. The first-input buffer-alias predicate requires both
-   `OutputMemoryInheritsInput()` and `IsInplaceSafe()`; memory-space inheritance
-   alone does not establish a buffer alias.
-   `ReanchorAliasingOutput` handles the call categories through their registered
-   contracts, including writing operations such as `assemble`; it does not
-   classify all buffer aliases as metadata-only views. Real non-in-place
-   `tile.transpose` and independent `tile.extract` results are excluded.
+   tile results. All call categories select their storage source through the
+   explicit `output_reuses_input` index. Argument effects distinguish reads from
+   writes; the operation's view mapping distinguishes a whole-window writeback
+   from a view or partial update. A storage alias alone does not imply identical
+   windows. Neither `OutputMemoryInheritsInput()` nor `IsInplaceSafe()` creates
+   an alias. `ReanchorAliasingOutput` preserves these distinctions, including
+   `tile.assemble`'s partial-update mapping. Allocating `tile.transpose` and
+   `tile.extract` results have no storage alias and are excluded.
 
    Tensor loop-boundary repair runs in both legacy Tile and Buffer IR modes,
    preserving boundary shape, view metadata, and distributed-window identity.

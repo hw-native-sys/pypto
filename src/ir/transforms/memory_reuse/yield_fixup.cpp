@@ -209,11 +209,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     VarPtr input = AsVarLike(op->value_);
     bool is_aliasing_view = false;
     if (auto call = As<Call>(op->value_); call && call->op_) {
-      is_aliasing_view = op_predicates::IsBufferAliasingViewOp(call->op_->name_);
-      auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-      if (!index && !call->args_.empty() && is_aliasing_view) {
-        index = 0;
-      }
+      auto index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+      is_aliasing_view = index && !WholeWindowWritebackArg(call);
       if (index) input = AsVarLike(call->args_[*index]);
     }
     if (!input) return result;
@@ -1303,11 +1300,10 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   StmtPtr ReanchorAliasingOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
     if (!call || !call->op_) return nullptr;
-    auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-    const bool is_view = op_predicates::IsBufferAliasingViewOp(call->op_->name_);
-    if (!reuse_idx && (!is_view || call->args_.empty())) return nullptr;
-    // An explicit writeback contract wins over memory-space inheritance.
-    auto in_var = AsVarLike(call->args_[reuse_idx ? *reuse_idx : 0]);
+    auto source_index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+    if (!source_index) return nullptr;
+    const bool is_view = !WholeWindowWritebackArg(call);
+    auto in_var = AsVarLike(call->args_[*source_index]);
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
     if (!new_in) return nullptr;
@@ -1321,7 +1317,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     auto input = std::dynamic_pointer_cast<const ShapedType>(new_in->GetType());
     if (!lhs || !input || !lhs->memref_ || !input->memref_) return nullptr;
     auto target = *input->memref_;
-    if (!reuse_idx) {
+    if (is_view) {
       // Derive only the view-relative offset. A writeback's transfer offset
       // selects what it writes; its result still denotes the whole destination.
       auto relative = ComputeViewByteOffset(call, new_in->GetType());

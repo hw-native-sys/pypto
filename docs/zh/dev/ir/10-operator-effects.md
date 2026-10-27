@@ -6,6 +6,41 @@
 > 消费这些声明的整条链见
 > [参数方向推导](08-param-directions.md)。
 
+## 存储别名、物理复用与视图
+
+以下契约分别回答不同问题：
+
+| 查询 | 唯一职责 |
+| ---- | -------- |
+| `OutputMemoryInheritsInput()` | 输出继承第一个 Tile/Tensor 输入的 memory space |
+| `IsInplaceSafe()` 与禁止别名约束 | 判断物理复用是否满足执行限制 |
+| `GetOutputReusesInputArg()` | 显式声明结果共享哪个输入的底层存储 |
+| `GetArgEffect(i, call->kwargs_)` | 参数 `i` 的数据读写效果 |
+| execution-memory-access 信息 | 执行是否实际访问数据 |
+| 结果类型与视图映射 | offset、shape、stride、layout 和 valid extent |
+
+`set_output_reuses_input(i)` 仅适用于单结果；索引必须在声明的参数范围内，且该参数必须
+有明确的效果声明，允许 `Read` 或 `no_arg_writes()`。共享存储不隐含数据写入、完整
+MemRef 或 descriptor 相同，也不允许直接替换 SSA 值。多输出算子不能使用此单结果
+别名声明。Buffer IR 保持独立的结果及效果契约。
+
+例如，`tile.add(a, x)` 产生独立逻辑值，即使活性允许规划器复用 `a` 的物理地址。
+`tile.slice(a, ...)` 必须共享 `a` 的存储，但保留自己的窗口；`tile.reshape(a, ...)`
+可能需要不同的后端 descriptor。`tile.assemble(target, source, offsets)` 共享
+`target` 并对其声明 `ReadWrite`。`tile.transpose(a, ...)` 继承内存空间且禁止原地
+执行，但输出存储独立。
+
+存储消费者使用 `op_predicates::StorageAliasArgIndex`，或布尔封装
+`OutputInheritsSourceBuffer`；写入消费者查询参数效果。内存空间继承与原地安全属性均
+不建立别名边。源存储移动后必须重新应用原视图映射，不能用整个输入 MemRef 替换子视图。
+后端 SSA 合并仍需检查窗口和 descriptor。返回值归一化使用独立的值替换规则：共享存储
+不允许将 `return slice(p)` 替换成 `return p`。
+
+物理复用仍由规划器结合活性、空间、容量、布局和执行限制决定，不产生语义别名边。本契约
+不新增 DCE 或复用优化。Python memory-spec 查询仍以原格式报告空间继承。
+
+## 参数效果
+
 原地更新某个参数的算子必须显式声明。方向推导（direction inference）、依赖分析
 （dependency analysis）和参数方向验证器都向注册表询问同一个问题——*这次调用是否
 写入该参数所指的缓冲区？*——而从未回答过的算子会被读成纯消费者：
@@ -23,6 +58,11 @@ tile.mscatter 写 output_tensor，却从未声明
 | `ArgEffect::Read` | 只读，从不写入。未声明参数的默认值 | `tile.store` 的源 tile |
 | `ArgEffect::Write` | 覆盖写，写前不读 | `tile.store` 的 `output_tensor`、`pld.tile.get` 的 `dst` |
 | `ArgEffect::ReadWrite` | 既读*又*写 | `tile.matmul_acc` 的累加器、原子 store 的目的操作数 |
+
+硬件临时工作缓冲（scratch）在不读取调用前内容时，也必须声明 `ArgEffect::Write`。
+例如，`tile.row_sum` 会把第二个参数作为工作区写入。`set_lane_invariant_arg()`
+描述分 lane 规则，不是参数效果，不能代替写入声明。后续消费者读取同一存储时，
+slice 提取必须保持在 scratch 写入之后。
 
 **部分覆盖仍然是 `Write`。** 只写入子区域的 store 不会读取未触及的其余部分——没有
 任何数据流*进*内核——所以其目的操作数是纯写。把它声明成 `ReadWrite` 并非无害的保守
@@ -59,12 +99,11 @@ REGISTER_OP("tile.store")
 写入任何参数"（`no_arg_writes()`，例如 `pld.system.wait`）与"还没有人看过这个算子"。
 需要答案的分析因而可以拒绝猜测，而不是把未分类的写者默认成只读。
 
-**强制约束。** `OpRegistry::ValidateArgEffects()` 在 import 时运行，拒绝两种形态，
+**强制约束。** `OpRegistry::ValidateArgEffects()` 在 import 时运行，拒绝非法声明，
 一次性列出所有违规算子和修复方式，而不是等到首次使用才失败：
 
-- 声明了 `set_output_reuses_input(N)`（其 SSA 结果*就是*第 N 个参数的缓冲区，因此会
-  通过它写入），却没有专门对第 N 个参数作出裁决。要求的是"做出分类"而非某个特定答案：
-  原地槽位是元数据的算子可以声明为只读。
+- 声明了 `set_output_reuses_input(N)`，但索引越界、结果不止一个，或未明确声明参数 N
+  的效果。只读存储别名合法；共享存储不隐含数据写入。
 - 声明了写通路却不通过任何参数写入。通路描述的是"怎么写"，因此没有写的通路要么是多余
   声明，要么是漏了声明。
 

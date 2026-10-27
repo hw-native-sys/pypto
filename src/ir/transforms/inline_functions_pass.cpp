@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -858,9 +859,17 @@ class InlineCallsMutator : public IRMutator {
       const auto& entry = registry.GetEntry(call->op_->name_);
       if (entry.RequiresExplicitType()) return call;
       // Static operations untouched by substitution retain their descriptors.
-      // Writebacks and dynamic results need operand-specific specialization.
-      if (call == op && !entry.GetOutputReusesInputArg() &&
-          var_collectors::CollectTypeVars(call->GetType()).empty()) {
+      // Destination updates and valid-extent updates need operand-specific
+      // specialization. A storage alias alone does not make a static view a
+      // writeback: preserve its existing descriptor when no operand changed.
+      // Assemble merges target/source extents rather than inheriting a whole
+      // destination descriptor; its unchanged static result stays as annotated.
+      auto source = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+      const bool follows_destination =
+          source && !IsOp(call, "tile.assemble") && op_predicates::CallWritesArg(call, *source);
+      const bool updates_descriptor =
+          follows_destination || IsOp(call, "tensor.set_validshape") || IsOp(call, "tile.set_validshape");
+      if (call == op && !updates_descriptor && var_collectors::CollectTypeVars(call->GetType()).empty()) {
         return call;
       }
       type = registry.Create(call->op_->name_, call->args_, call->kwargs_, call->span_)->GetType();

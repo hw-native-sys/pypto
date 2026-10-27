@@ -57,6 +57,23 @@ CallLikeView AsCallLike(const ExprPtr& expr) {
   return {};
 }
 
+// Return normalization is a value-replacement policy, not storage lineage.
+// Preserve its established destination-returning builtins explicitly: adding a
+// storage alias (especially a slice or reshape) must not authorize `return p`.
+std::optional<size_t> ReturnedBuiltinArgIndex(const OpPtr& op, size_t arg_count) {
+  auto index = op_predicates::StorageAliasArgIndex(op, arg_count);
+  if (!index) return std::nullopt;
+  if (IsOp(op, "tile.store") || IsOp(op, "tile.mscatter")) return 2;
+  if (IsOp(op, "tile.set_validshape") || IsOp(op, "tensor.assemble") || IsOp(op, "tensor.set_validshape") ||
+      IsOp(op, "tile.batch_matmul_acc") || IsOp(op, "tile.fillpad_inplace") || IsOp(op, "tile.gather_row") ||
+      IsOp(op, "tile.gemv_acc") || IsOp(op, "tile.matmul_acc") || IsOp(op, "tile.matmul_mx_acc") ||
+      IsOp(op, "tile.scatter") || IsOp(op, "tile.scatter_mask") || IsOp(op, "tile.scatter_update") ||
+      IsOp(op, "tile.tget_scale_addr")) {
+    return 0;
+  }
+  return std::nullopt;
+}
+
 using ParamIndexMap = std::unordered_map<const Var*, size_t>;
 
 ParamIndexMap IndexParams(const std::vector<VarPtr>& params) {
@@ -348,7 +365,7 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       const std::string& op_name = call.op->name_;
       // Builtin output-side ops bind a fresh SSA var to an existing buffer, so
       // the result inherits that argument's param lineage.
-      if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call.op, args.size())) {
+      if (auto aliased = ReturnedBuiltinArgIndex(call.op, args.size())) {
         auto arg_var = AsVarLike(args[*aliased]);
         if (!arg_var) {
           auto lineage = TraceExpr(args[*aliased], index, param_indices, program, memo);

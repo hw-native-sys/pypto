@@ -163,11 +163,11 @@ from drifting apart:
 | ------ | ------- |
 | `BufferRootCollector` | which buffer does this variable own? |
 | `ResultAliasedArgIndex` | which argument's buffer does this call's result name? |
-| `op_predicates::IsBufferAliasingViewOp` | is this a zero-copy view of its input? (`OutputMemoryInheritsInput() && IsInplaceSafe()`) |
+| `op_predicates::StorageAliasArgIndex` | which input explicitly shares storage with this result? |
 
-The third excludes `tile.transpose`: it inherits the memory *space* but permutes
-into a fresh buffer (`pto.ttrans` is registered `not_inplace_safe()`), so its
-output does not alias its input.
+The third excludes `tile.transpose`: it declares space inheritance but no storage
+alias. Views declare storage aliases without data writes; return-value replacement
+and backend descriptor compatibility require separate checks.
 
 ## Known limits
 

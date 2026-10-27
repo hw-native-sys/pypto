@@ -144,10 +144,10 @@ for _ in pl.range(4):
 | ------ | ---- |
 | `BufferRootCollector` | 这个变量属于哪块 buffer？ |
 | `ResultAliasedArgIndex` | 这次调用的结果指向哪个实参的 buffer？ |
-| `op_predicates::IsBufferAliasingViewOp` | 这是否是对输入的零拷贝 view？（`OutputMemoryInheritsInput() && IsInplaceSafe()`） |
+| `op_predicates::StorageAliasArgIndex` | 哪个输入被显式声明为结果的共享存储来源？ |
 
-第三个排除了 `tile.transpose`：它继承内存**空间**，但会把数据置换进一块全新
-buffer（`pto.ttrans` 注册为 `not_inplace_safe()`），因此其输出并不别名输入。
+第三个排除了 `tile.transpose`：它声明空间继承，但没有存储别名。视图声明存储别名而不
+写入数据；返回值替换与后端 descriptor 兼容性需要独立检查。
 
 ## 已知限制
 

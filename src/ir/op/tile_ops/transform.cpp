@@ -502,7 +502,7 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
   // dual (NZ<->ZN, NN<->ZZ, ND<->DN). A tile and its dual over the same bytes are
   // mutual transposes, so the result aliases the source buffer byte-for-byte —
   // no data movement is emitted in codegen, and
-  // InitMemRef shares the source MemRef via set_output_memory_inherit_input.
+  // InitMemRef shares the source storage via set_output_reuses_input.
   CHECK(args.size() == 1) << "tile.transpose_view requires exactly 1 argument (input), but got "
                           << args.size();
 
@@ -565,6 +565,8 @@ REGISTER_OP("tile.slice")
                   "Optional axes (MakeTuple of ConstInt) erased from the result type; the result is "
                   "clamped to 2D if reduction would take it below 2D")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .no_execution_memory_access()
     .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -578,6 +580,8 @@ REGISTER_OP("tile.reshape")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -591,6 +595,8 @@ REGISTER_OP("tile.reinterpret_view")
     .add_argument("shape", "Optional target shape; omitted to scale the physically contiguous dimension")
     .set_attr<DataType>("dtype")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -635,6 +641,8 @@ REGISTER_OP("tile.transpose_view")
     // layout, so it inherits the input's memory space and InitMemRef shares the
     // input MemRef (same base_ -> same address). Codegen emits no data movement.
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -768,6 +776,7 @@ REGISTER_OP("tile.assemble")
     // the result, so the prior content is read. Tile-local, hence no channel.
     .set_arg_effect(0, ArgEffect::ReadWrite)
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileAssembleType(args, kwargs);

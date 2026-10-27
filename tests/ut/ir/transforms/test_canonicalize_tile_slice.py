@@ -1572,6 +1572,41 @@ class TestVecExtractPlacement:
 
         ir.assert_structural_equal(_run_pass(Before), Expected)
 
+    def test_scratch_write_keeps_consumer_site_extract(self):
+        """A scratch clobber must prevent copying a view before the reduction."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
+                tmp: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
+            ) -> pl.Tile[[16, 8], pl.FP32]:
+                # Column 1 is unaligned. The view must read tmp at its consumer,
+                # after row_sum has used that same storage as hardware scratch.
+                view: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.slice(tmp, [16, 8], [0, 1])
+                reduced: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.row_sum(x, tmp)
+                out: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.exp(view)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
+                tmp: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
+            ) -> pl.Tile[[16, 8], pl.FP32]:
+                reduced: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.row_sum(x, tmp)
+                extracted: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    tmp, 0, 1, shape=[16, 8], target_memory=pl.Mem.Vec
+                )
+                out: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.exp(extracted)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
     def test_chained_slice_rebased_onto_definition_site_extract(self):
         """A slice of a materialized slice is rebased onto the extract. Relative
         to the original source, column 1 + 7 = 8 is 32-byte aligned; relative to

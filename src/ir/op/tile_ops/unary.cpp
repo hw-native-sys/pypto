@@ -361,6 +361,7 @@ REGISTER_OP("tile.cast")
     .set_output_memory(MemorySpace::Vec)
     .forbid_output_alias(1)
     .set_lane_invariant_arg(1)
+    .set_arg_effect(1, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCastType(args, kwargs, "tile.cast");

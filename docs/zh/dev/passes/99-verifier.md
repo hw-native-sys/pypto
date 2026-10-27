@@ -177,13 +177,9 @@ view = pl.tile.slice(acc, [8, 128], [0, 0])   # acc 声明为 In
 view = pl.tile.assemble(view, src, [0, 0])    # 写的是 acc 的 buffer
 ```
 
-判定一个值指向哪块 buffer 的是两份共享声明，都不是本地维护的清单：`ResultAliasedArgIndex`
-（算子返回它更新过的那个实参——`tensor.assemble`、`tensor.write`、各集合通信），以及
-`op_predicates::IsBufferAliasingViewOp`，后者读取 `OutputMemoryInheritsInput() &&
-IsInplaceSafe()`——即零拷贝 view，它们不更新任何东西，因此也不声明复用契约。
-`tile.transpose` 凭自身的 `not_inplace_safe()` 注册被第二个判据排除：它把数据置换进一块
-全新 buffer，输出并不别名输入；日后任何以同样方式注册的 inherit-input 算子也会被自动
-排除，无需改动此处。
+`ResultAliasedArgIndex` 解析显式存储别名（包括只读视图），并保留既有的
+host/distributed 返回值来源规则。数据写入独立查询参数效果。`tile.transpose` 没有
+存储别名声明，因此空间继承不会将其变成输入的视图。
 
 `tensor.slice` 正属于这类 view，因此写入参数的某个 slice **会**被报告——尽管
 `BufferRootCollector` 有意把它映射为全新 root。该链在校验器内部解析而非改动那份共享分析，

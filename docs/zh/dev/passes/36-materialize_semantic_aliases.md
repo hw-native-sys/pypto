@@ -3,6 +3,10 @@
 将**语义要求**必须是同一块分配的 buffer 归一到同一个 MemRef —— 通过把每个循环
 carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来实现。
 
+算子存储来源由显式 `set_output_reuses_input` 声明提供；普通 SSA 别名和控制流关系
+仍是独立来源。参数效果决定写入。源存储移动时保留视图窗口和 descriptor；共享存储
+不表示复制整个源 MemRef。
+
 ## 概述
 
 内存规划区分两种 buffer 共享：
@@ -93,8 +97,8 @@ program = passes.materialize_semantic_aliases()(program)
    才进入的循环，因此每轮在循环体内重新生成的累加器仍可安全合并。别名和循环区间
    索引均预先建立，分析复杂度保持 O(N log N)。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
-   alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
-   让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护
+   alias 跟随 source。完整窗口写回与视图别名都通过显式 `output_reuses_input`
+   索引选择来源，同时保留下文所述的不同窗口规则。目标是在重定向后统一维护
    所有必需的别名关系，而不是孤立修正某个 producer。单次前向遍历会把每个修正后的
    结果替换到下游使用中，因此写回结果后接 `transpose_view`、`reshape` 或 `slice`
    时，整条链始终使用正确的存储，无需不动点迭代。这样可在任何 memory planner
@@ -102,17 +106,16 @@ program = passes.materialize_semantic_aliases()(program)
 
 这些规则覆盖带 MemRef 的 shaped result，包括 tile 和 tensor 写回。裸 SSA 重命名
 直接跟随 source 的完整类型，不复制数据；调用结果重定型保留结果的 shape、dtype、
-view/distribution 元数据。显式 `output_reuses_input` 契约优先于首输入继承。
-首输入 buffer 别名判定要求同时满足 `OutputMemoryInheritsInput()` 和
-`IsInplaceSafe()`；只继承 memory space 并不意味着共享 buffer。
-写回结果继承当前写回输入的完整 MemRef
-窗口。首输入别名保留结果的窗口大小，使用当前输入的 allocation、字节偏移，加上
-由操作计算的 view 相对偏移构造窗口；相对偏移只应用一次，同时继承输入的流水线
-slot 身份；tile 结果还会跟随输入的 memory space。从操作重新计算相对偏移，
-而不是在陈旧的绝对偏移上累加，使归一化保持幂等，并能处理同一 allocation 内部
-的窗口变化与跨 allocation 变化。Buffer 别名是一种存储契约：`tile.assemble`
-虽然会写数据，结果也必须跟随第一个输入。真正搬运数据、不能原地执行的
-`tile.transpose` 和独立的 `tile.extract` 结果保持自己的存储。
+view/distribution 元数据。调用结果的存储别名均来自显式 `output_reuses_input`
+索引，`OutputMemoryInheritsInput()` 和 `IsInplaceSafe()` 不建立别名。参数效果
+独立描述写入。完整窗口写回结果继承声明输入的完整 MemRef 窗口。`tile.slice`、
+`tile.reshape` 等只读视图保留自己的窗口大小，使用声明输入当前的 allocation 和
+字节偏移，加上操作的视图相对偏移构造窗口；相对偏移只应用一次。同时继承输入的
+流水线 slot 身份；tile 结果还会跟随输入的 memory space。从操作重新计算相对
+偏移，而不是在陈旧的绝对偏移上累加，使归一化保持幂等，并能处理同一 allocation
+内部和跨 allocation 的变化。`tile.assemble` 会写入 target，但仍保留已有的部分
+更新窗口映射；仅有写效果不能使它成为完整窗口写回。独立分配的 `tile.transpose`
+和 `tile.extract` 结果没有存储别名，保持自己的存储。
 
 在 legacy Tile 和 Buffer IR 两种模式下，`TensorType`/`DistributedTensorType`
 的 For/While 参数和返回值都是当前 initializer 的可变 view。归一化会对齐它们的
@@ -121,7 +124,7 @@ slot 身份；tile 结果还会跟随输入的 memory space。从操作重新计
 规范缓冲区及 yield 修复规则；yield tile 需要写入 carry 缓冲区时会插入显式传输。
 
 yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始集合，并沿裸别名、
-写回结果和首输入别名传播未决状态，也会经过 tensor 循环参数和返回值继续传播。
+写回结果和视图别名传播未决状态，也会经过 tensor 循环参数和返回值继续传播。
 所有依赖它的调用都不会被锚定到临时窗口。
 控制流边界确定后，后续归一化遍历再修复整条链。Buffer IR 在索引旧值观测之前，
 以及隔离循环入口之后，也使用这一延迟形式，因为分支存储尚未确定；边界确定后的

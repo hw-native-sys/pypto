@@ -28,25 +28,14 @@ namespace op_predicates {
 /// Callers without a resolved target must conservatively pass is_a2a3=true.
 bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3);
 
-/// Index of the argument a builtin *output-side* op binds its result to.
-///
-/// These ops do not allocate: they bind a fresh SSA var to a buffer an existing
-/// value already names, so the result inherits that argument's identity — and
-/// with it anything derived from identity, such as which function parameter a
-/// value traces back to or which communication context a DistributedTensor
-/// belongs to (`tile.store(value, indices, target)` -> `args[2]`,
-/// `tensor.assemble(target, source, offset)` -> `args[0]`).
-///
-/// The op declares this itself via `set_output_reuses_input(idx)`; this is a
-/// registry read, not an op list, so a newly added in-place op is picked up
-/// without touching every lineage analysis. Note the sibling declaration
-/// `set_output_memory_inherit_input()` is a *different* statement — it fixes the
-/// output's memory SPACE, not its buffer, and carries no argument index (see
-/// `IsBufferAliasingViewOp`).
-///
-/// @return the aliased argument index, or nullopt when @p op declares no reuse
-///         or @p arg_count is too small for the declared index
-[[nodiscard]] std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count);
+/// Explicit semantic storage source of a single-result Functional operator.
+/// This says nothing about writes, descriptor equality, or SSA substitutability.
+/// Returns nullopt for an undeclared alias or an index absent from this call.
+[[nodiscard]] std::optional<size_t> StorageAliasArgIndex(const OpPtr& op, size_t arg_count);
+
+/// Whether this Functional call writes data through argument index, including
+/// kwarg-dependent effects. Storage alias declarations do not imply a write.
+[[nodiscard]] bool CallWritesArg(const CallPtr& call, size_t index);
 
 /// True if the Call targets a tpop op (tile.tpop_from_aic / tile.tpop_from_aiv).
 /// Decided by the registry's CrossCoreRole, not by op-name string matching.
@@ -62,30 +51,9 @@ bool IsTFree(const CallPtr& call);
 /// (system.aic_initialize_pipe / system.aiv_initialize_pipe).
 bool IsInitializePipe(const CallPtr& call);
 
-/// True if `op_name` is an inherit-input view op whose output ALIASES its input's
-/// buffer in place — a zero-copy reinterpretation (slice / reshape / extract /
-/// transpose_view / ...). Decided by the registry:
-/// `OutputMemoryInheritsInput() && IsInplaceSafe()`.
-/// Excludes `tile.transpose`: it permutes data into a FRESH buffer (pto.ttrans is
-/// registered not_inplace_safe()), so its output does NOT alias the input.
-///
-/// Used wherever a view over a buffer-less tile (e.g. a cross-core tpop result)
-/// must be treated as the SAME underlying buffer: InitMemRef's buffer-less
-/// propagation and the tpop lifetime / tfree finalizer.
-bool IsBufferAliasingViewOp(const std::string& op_name);
-
-/// True when the op's output lands in a source operand's storage rather than a
-/// buffer of its own — either a buffer-aliasing view (`IsBufferAliasingViewOp`)
-/// or an in-place / accumulate op (`GetOutputReusesInputArg`).
-///
-/// Broader than `IsBufferAliasingViewOp` by the in-place / accumulate case only.
-/// Both exclude `tile.transpose`: it inherits the input's memory *space* but
-/// permutes into a fresh buffer, so it does own its storage.
-///
-/// Use this to answer "does this output get to choose its own buffer" —
-/// InitMemRef rejects a declared allocation on such an output, and MemoryReuse
-/// excludes those tiles from the co-live check because they occupy storage the
-/// source already accounts for.
+/// True when the operator explicitly declares that its result shares an input's
+/// underlying storage. Physical reuse chosen from liveness does not count.
+/// Memory-space inheritance and in-place safety are independent contracts.
 bool OutputInheritsSourceBuffer(const std::string& op_name);
 
 /// True for builtin ops whose name is namespaced `tile.` / `tensor.` /

@@ -668,6 +668,7 @@ REGISTER_OP("tile.rem")
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .set_lane_invariant_arg(2)
+    .set_arg_effect(2, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRemainderType(args, kwargs, "tile.rem", true);
@@ -811,6 +812,7 @@ REGISTER_OP("tile.rems")
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .set_lane_invariant_arg(2)
+    .set_arg_effect(2, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScalarRemainderType(args, kwargs, "tile.rems", true);
@@ -1233,6 +1235,7 @@ REGISTER_OP("tile.prelu")
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .set_lane_invariant_arg(2)
+    .set_arg_effect(2, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTilePreluType(args, kwargs, "tile.prelu");
@@ -1382,6 +1385,7 @@ REGISTER_OP("tile.sel")
     .forbid_output_alias(0)
     .forbid_output_alias(3)
     .set_lane_invariant_arg(3)
+    .set_arg_effect(3, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelType(args, kwargs, "tile.sel");

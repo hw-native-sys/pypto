@@ -235,6 +235,7 @@ REGISTER_OP("tile.row_sum")
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
     .set_lane_invariant_arg(1)
+    .set_arg_effect(1, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_sum");
@@ -252,6 +253,7 @@ REGISTER_OP("tile.row_max")
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
     .set_lane_invariant_arg(1)
+    .set_arg_effect(1, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_max");
@@ -269,6 +271,7 @@ REGISTER_OP("tile.row_min")
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
     .set_lane_invariant_arg(1)
+    .set_arg_effect(1, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       auto result_type = DeduceTileRowReductionType(args, kwargs, "tile.row_min");
@@ -297,6 +300,7 @@ REGISTER_OP("tile.row_prod")
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()
     .set_lane_invariant_arg(1)
+    .set_arg_effect(1, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_prod");
@@ -317,6 +321,7 @@ REGISTER_OP("tile.col_sum")
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_lane_invariant_arg(1)
+    .set_arg_effect(1, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1 || args.size() == 2)

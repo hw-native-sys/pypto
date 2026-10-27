@@ -603,6 +603,19 @@ void OpRegistry::ValidateTileOps() const {
   }
 }
 
+void OpRegistryEntry::ValidateOutputStorageAlias() const {
+  auto index = GetOutputReusesInputArg();
+  if (!index) return;
+  CHECK(*index < GetArgumentCount()) << "Operator '" << name_ << "' storage alias index " << *index
+                                     << " is out of range for " << GetArgumentCount()
+                                     << " declared arguments";
+  CHECK(GetOutputArity() == 1) << "Operator '" << name_
+                               << "' set_output_reuses_input requires a single result";
+  CHECK(HasDeclaredArgEffect(*index))
+      << "Operator '" << name_ << "' aliases argument " << *index
+      << " without a declared effect; add .set_arg_effect(<index>, ...) or .no_arg_writes()";
+}
+
 void OpRegistry::ValidateArgEffects() const {
   std::vector<std::string> unclassified;
   std::vector<std::string> channel_without_write;
@@ -616,14 +629,11 @@ void OpRegistry::ValidateArgEffects() const {
     if (entry.GetWriteChannel().has_value() && !entry.WritesAnyArg()) {
       channel_without_write.push_back(name);
     }
-    const auto& spec = entry.GetMemorySpec();
-    if (!spec.has_value() || !spec->output_reuses_input_arg.has_value()) continue;
-    const size_t reused = *spec->output_reuses_input_arg;
-    // Ask about the reused argument specifically. A registration that named a
-    // different argument still leaves this one defaulting to `Read`, and the
-    // whole point of the gate is that such a default is a decision nobody made.
-    if (entry.HasDeclaredArgEffect(reused)) continue;
-    unclassified.push_back(name + " (in-place on argument " + std::to_string(reused) + ")");
+    try {
+      entry.ValidateOutputStorageAlias();
+    } catch (const ValueError& error) {
+      unclassified.emplace_back(error.what());
+    }
   }
   if (!channel_without_write.empty()) {
     std::sort(channel_without_write.begin(), channel_without_write.end());
@@ -639,12 +649,7 @@ void OpRegistry::ValidateArgEffects() const {
   }
   if (!unclassified.empty()) {
     std::sort(unclassified.begin(), unclassified.end());
-    std::string msg =
-        "The following ops update an argument in place but never declared what they do to it. "
-        "Direction inference reads an undeclared operator as a pure consumer, so the write is "
-        "silently dropped. Add .set_arg_effect(<index>, ArgEffect::Write) — ArgEffect::ReadWrite "
-        "when the op accumulates into the slot — or .no_arg_writes() when the slot is metadata "
-        "rather than data:";
+    std::string msg = "Invalid Functional output storage alias declarations:";
     for (const auto& name : unclassified) {
       msg += "\n  - " + name;
     }

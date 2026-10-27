@@ -242,13 +242,11 @@ class ParamReadCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    // ``var_`` is the binding, not a use — but when the value writes a tracked
-    // destination in place, that binding is another name for the destination,
-    // so register it before descending. Registering first is safe: the value's
-    // own destination slot is skipped below, so the statement cannot read
-    // itself into ``InOut``.
+    // ``var_`` is a binding, not a use. Register explicit storage lineage for
+    // views and destination updates before descending. Argument effects below
+    // independently decide which operands count as reads.
     if (op->var_) {
-      if (auto dst = WrittenDestination(op->value_)) {
+      if (auto dst = ResultStorageSource(op->value_)) {
         auto it = aliases_.find(dst.get());
         if (it != aliases_.end()) aliases_.emplace(op->var_.get(), it->second);
       }
@@ -356,7 +354,7 @@ class ParamReadCollector : public IRVisitor {
   /// that turns disjoint per-rank slices into a cross-rank dependency
   /// (issue #2415). An operator whose result really does name a destination
   /// says so in the contract.
-  [[nodiscard]] static VarPtr WrittenDestination(const ExprPtr& value) {
+  [[nodiscard]] static VarPtr ResultStorageSource(const ExprPtr& value) {
     auto call = As<Call>(value);
     if (!call) return nullptr;
     auto index = ResultAliasedArgIndex(call);

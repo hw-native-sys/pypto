@@ -369,13 +369,17 @@ bool NamesSameWindowExtent(const TileTypePtr& lhs, const TileTypePtr& rhs) {
 /// The accumulator operand of `call` — the argument whose buffer the result
 /// names.  Null when the call is not an accumulator op (or carries no Var there).
 ///
-/// Asking `BuiltinWritebackArgIndex` — rather than naming `tile.matmul_acc` /
+/// Asking `StorageAliasArgIndex` — rather than naming `tile.matmul_acc` /
 /// `tile.gemv_acc` / `tile.matmul_mx_acc` — is what lets the guard below cover
-/// any future accumulator op for free.
+/// any future accumulator op. The argument effect must independently report
+/// a write: a read-only view is not an accumulator.
 VarPtr AccumulatorOperand(const CallPtr& call) {
   if (!call || !call->op_) return nullptr;
-  auto declared = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-  if (!declared.has_value()) return nullptr;
+  // Assemble inserts a region with its own mapping; it is not a compact
+  // whole-destination accumulator write and keeps its existing legality path.
+  if (IsOp(call, "tile.assemble")) return nullptr;
+  auto declared = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+  if (!declared || !op_predicates::CallWritesArg(call, *declared)) return nullptr;
   return AsVarLike(call->args_[*declared]);
 }
 
@@ -740,12 +744,11 @@ class SliceCollector : public IRVisitor {
   ///     (`tile.matmul_acc`, so a chained accumulation stays checked).
   ///
   /// The relation is read from the op registry via
-  /// `op_predicates::OutputInheritsSourceBuffer`, so a newly added in-place or
-  /// view op is covered without editing this pass — and `tile.transpose` /
-  /// `tile.extract`, which permute or copy into a *fresh* buffer, are excluded
-  /// for the right reason rather than by name.  An in-place op names its source
-  /// through the registry's declared index; a view op declares no index, and
-  /// every inherit-input view in the registry takes its source as argument 0.
+  /// `op_predicates::StorageAliasArgIndex`: both views and destination updates
+  /// name their source explicitly. A new alias is covered without editing this
+  /// pass, while `tile.transpose` / `tile.extract` have no storage alias and are
+  /// excluded. The declaration identifies storage only; the slice-specific
+  /// window mapping above must still account for its offset and extent.
   void RecordAliasedWindow(const AssignStmtPtr& op) {
     if (!op || !op->var_) return;
     if (AsVarLike(op->value_)) {
@@ -759,10 +762,9 @@ class SliceCollector : public IRVisitor {
     // It is an inherit-input view op, so it would otherwise fall through below
     // and inherit its *source's* window — silently dropping that offset.
     if (IsOp(call, "tile.slice")) return;
-    if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) return;
-    size_t source_index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()).value_or(0);
-    if (source_index >= call->args_.size()) return;
-    BindWindowAlias(op->var_, call->args_[source_index]);
+    auto source_index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+    if (!source_index) return;
+    BindWindowAlias(op->var_, call->args_[*source_index]);
   }
 
   // Convert direct ConstInt SSA definitions (and their plain aliases) back to
@@ -799,10 +801,10 @@ bool IsColExpandMaterializingOp(const OpPtr& op) {
 /// any Var sharing its storage.  Storage sharing is an equivalence relation
 /// built with union-find over the edges that bind a Var to existing storage —
 /// a plain alias, an output that inherits its source buffer (views, in-place
-/// ops), and loop / if merges.  A write is a declared writeback operand, a
-/// declared hardware scratch or absolute-indexed destination, or any tile
-/// operand of a call the registry cannot describe.  Whole-function rather than
-/// between-site analysis keeps the sweep O(N α(N)); it can only decline a
+/// ops), and loop / if merges. Writes come from argument effects, including
+/// hardware scratch and absolute-indexed destinations, or conservatively from
+/// every tile operand of a call the registry cannot describe. Whole-function
+/// rather than between-site analysis keeps the sweep O(N α(N)); it can only decline a
 /// placement, never admit a wrong one.
 class SliceStorageAnalysis : public IRVisitor {
  public:
@@ -898,16 +900,13 @@ class SliceStorageAnalysis : public IRVisitor {
       for (const auto& arg : call->args_) MarkWritten(arg);
       return;
     }
-    const auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-    if (writeback.has_value()) MarkWritten(call->args_[*writeback]);
-    const auto& entry = registry.GetEntry(call->op_->name_);
     for (size_t i = 0; i < call->args_.size(); ++i) {
-      auto kind = entry.GetLaneInvariantArgKind(i);
-      if (kind.has_value() && *kind != LaneInvariantArg::IndexAddressedSource) MarkWritten(call->args_[i]);
+      if (op_predicates::CallWritesArg(call, i)) MarkWritten(call->args_[i]);
     }
-    if (result && !call->args_.empty() && op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
-      const size_t source_index = writeback.value_or(0);
-      if (source_index < call->args_.size()) Union(result, call->args_[source_index]);
+    if (result) {
+      if (auto source = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size())) {
+        Union(result, call->args_[*source]);
+      }
     }
   }
 

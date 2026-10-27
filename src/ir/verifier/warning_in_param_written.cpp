@@ -48,7 +48,7 @@
  *
  * A write reaching its parameter through a zero-copy view — `tile.slice`,
  * `tensor.slice`, ... — is resolved here, from the `ResultAliasedArgIndex`
- * contract and `op_predicates::IsBufferAliasingViewOp`. `BufferRootCollector`
+ * contract. `BufferRootCollector`
  * maps a slice to a fresh root and three other passes share it, so this resolves
  * the chain rather than widening that analysis. Lineage is not carried across a
  * phi (`return_vars_` / `iter_args_`).
@@ -72,7 +72,6 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/type.h"
@@ -160,23 +159,14 @@ class InParamWriteFinder : public IRVisitor {
   /// The buffer @p value names on the way out, already resolved, or null when it
   /// names a buffer of its own.
   ///
-  /// Two declarations answer, and they are the same two the rest of the tree
-  /// reads. `ResultAliasedArgIndex` is the result-alias contract — the operator
-  /// returns the argument it updated (`tensor.assemble`, `tensor.write`, the
-  /// collectives). `IsBufferAliasingViewOp` covers the zero-copy views, which
-  /// declare no reuse contract because they update nothing: they reinterpret
-  /// argument 0 and hand it back.
+  /// ResultAliasedArgIndex follows explicit storage aliases and the existing
+  /// host/distributed result contract. Neither implies an argument write.
   [[nodiscard]] const Var* SourceBufferOf(const ExprPtr& value) const {
     auto call = As<Call>(value);
     if (!call || !call->op_ || call->args_.empty()) return nullptr;
-    size_t index = 0;
-    if (auto aliased = ResultAliasedArgIndex(call)) {
-      index = *aliased;
-    } else if (!op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-      return nullptr;
-    }
-    if (index >= call->args_.size()) return nullptr;
-    auto source = AsVarLike(call->args_[index]);
+    auto index = ResultAliasedArgIndex(call);
+    if (!index) return nullptr;
+    auto source = AsVarLike(call->args_[*index]);
     if (!source) return nullptr;
     auto it = view_sources_.find(source.get());
     return it == view_sources_.end() ? source.get() : it->second;
@@ -248,12 +238,8 @@ class InParamWriteFinder : public IRVisitor {
   /// passes share that analysis, and widening what counts as an alias for all of
   /// them is a separate change with its own blast radius.
   ///
-  /// The view set is decided by ``op_predicates::IsBufferAliasingViewOp`` —
-  /// ``OutputMemoryInheritsInput() && IsInplaceSafe()``, the shared registry
-  /// read that ``InitMemRef`` and the tpop lifetime analysis already use. It
-  /// excludes ``tile.transpose``, which inherits the memory *space* but permutes
-  /// into a fresh buffer, and it will exclude any future inherit-input op
-  /// registered ``not_inplace_safe()`` without an edit here.
+  /// Storage sources come from explicit alias declarations, independently of
+  /// memory-space inheritance or physical in-place safety.
   /// One map read: entries are recorded already resolved (see `VisitStmt_`).
   [[nodiscard]] const Var* ResolveThroughViews(const Var* var) const {
     auto it = view_sources_.find(var);

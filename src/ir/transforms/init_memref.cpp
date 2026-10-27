@@ -80,8 +80,8 @@ bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source
     if (IsOp(call, "tile.tpop_from_aic") || IsOp(call, "tile.tpop_from_aiv")) {
       return true;
     }
-    if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-      auto in = AsVarLike(call->args_[0]);
+    if (auto index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size())) {
+      auto in = AsVarLike(call->args_[*index]);
       return in && source_buffer_less(in.get());
     }
     return false;
@@ -765,34 +765,11 @@ class InitMemRefMutator : public IRMutator {
           << "', which lands in its source tile's allocation, so it cannot be given one of its own. "
              "Bind the source tile instead.";
 
-      // Handle view operations: output should share MemRef with input tile.
-      // A pure metadata view (slice/reshape/...) inherits its input's buffer.  A
-      // permuting inherit-input op — tile.transpose — must NOT: pto.ttrans is
-      // not in-place safe (the unaligned scalar path writes dst directly from
-      // src), so the transpose output always gets a fresh buffer.  Both halves
-      // of that statement are `IsBufferAliasingViewOp`, which is
-      // `OutputMemoryInheritsInput() && IsInplaceSafe()` — it excludes transpose
-      // without naming it, and will exclude any future inherit-input op
-      // registered `not_inplace_safe()`.
-      if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-        LOG_DEBUG << "Detected view operation: " << call->op_->name_;
-        // Get the input tile (first argument) after mutation
-        auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
-        if (new_call && !new_call->args_.empty()) {
-          auto result = ShareMemRefFrom(new_call->args_[0], op, new_value);
-          if (result) {
-            LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
-            return result;
-          }
-          LOG_DEBUG << "Input tile has no MemRef yet";
-        }
-      }
-
       // Handle ops whose output lands in a specific input arg's MemRef.
       //
       // The registry's `set_output_reuses_input` slot, NOT the broader
       // `ResultAliasedArgIndex`. The two answer different questions.  This pass
-      // asks a *physical* one — which argument's buffer does this result
+      // asks a storage-source one — which argument's buffer does this result
       // occupy, so the LHS can be bound to it — and only the registry
       // declaration states that.  `ResultAliasedArgIndex` additionally covers
       // host-level ops whose result names an argument for *lineage* purposes
@@ -801,7 +778,7 @@ class InitMemRefMutator : public IRMutator {
       // to the distributed runtime and is materialized later by
       // LowerHostTensorCollectives, so binding the SSA result to it here
       // rewrites a buffer this pass does not own.
-      auto reuse_arg_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      auto reuse_arg_idx = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
       if (reuse_arg_idx.has_value()) {
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && *reuse_arg_idx < new_call->args_.size()) {

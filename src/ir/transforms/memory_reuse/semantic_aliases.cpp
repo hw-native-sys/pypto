@@ -345,17 +345,20 @@ class DefMapVisitor : public IRVisitor {
         reading_initializer_ = false;
         return;
       }
-      if (auto call = As<Call>(op->value_);
-          call && call->op_ && op_predicates::IsBufferAliasingViewOp(call->op_->name_) &&
+      auto call = As<Call>(op->value_);
+      const auto source_index =
+          call ? op_predicates::StorageAliasArgIndex(call->op_, call->args_.size()) : std::nullopt;
+      if (call && call->op_ && source_index &&
           OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
-              ExecutionMemoryAccessEvidence::NoAccess &&
-          !call->args_.empty()) {
-        if (auto source = AsVarLike(call->args_[0])) {
+              ExecutionMemoryAccessEvidence::NoAccess) {
+        if (auto source = AsVarLike(call->args_[*source_index])) {
           if (payload_reachable_) binding_reads[op->var_].emplace_back(op.get(), source);
           reading_initializer_ = true;
-          VisitExpr(call->args_[0]);
+          VisitExpr(call->args_[*source_index]);
           reading_initializer_ = false;
-          for (size_t i = 1; i < call->args_.size(); ++i) VisitExpr(call->args_[i]);
+          for (size_t i = 0; i < call->args_.size(); ++i) {
+            if (i != *source_index) VisitExpr(call->args_[i]);
+          }
           // Debug/dependency attributes can independently consume payloads.
           for (const auto& [key, value] : call->attrs_) {
             (void)key;
@@ -888,9 +891,13 @@ class LoopInputIsolation : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& statement) override {
     auto source = AsVarLike(statement->value_);
     bool identity = source != nullptr;
-    if (auto call = As<Call>(statement->value_); call && call->op_ && !call->args_.empty() &&
-                                                 op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-      source = AsVarLike(call->args_[0]);
+    auto call = As<Call>(statement->value_);
+    const auto source_index =
+        call ? op_predicates::StorageAliasArgIndex(call->op_, call->args_.size()) : std::nullopt;
+    if (call && call->op_ && source_index &&
+        OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
+            ExecutionMemoryAccessEvidence::NoAccess) {
+      source = AsVarLike(call->args_[*source_index]);
       const auto input = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
       const auto output = GetTileTypeWithMemRef(statement->var_->GetType());
       identity = input && output && SameKnownTileMemorySpace(input, output) &&
@@ -1298,10 +1305,11 @@ class TopDownRetargeter {
     const auto& registry = OpRegistry::GetInstance();
     if (!call || !call->op_ || !registry.IsRegistered(call->op_->name_)) return;
     const auto& entry = registry.GetEntry(call->op_->name_);
-    // Reusing an input, including a metadata view, is an existing storage
-    // contract. Do not walk that producer chain onto a fresh phi allocation.
+    // Keep the existing space-retarget restriction, independently of storage
+    // aliasing. Neither a space-constrained producer nor a storage alias may
+    // be walked onto this fresh phi allocation by the current planner.
     if (entry.OutputMemoryInheritsInput() ||
-        op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()).has_value()) {
+        op_predicates::StorageAliasArgIndex(call->op_, call->args_.size()).has_value()) {
       return;
     }
     // The target is freshly allocated and the producer is branch-local, so it
@@ -1316,7 +1324,7 @@ class TopDownRetargeter {
     auto input = source ? CurrentTileType(source) : nullptr;
     if (!output || !input) return;
     auto target = GetDefinedMemRef(input);
-    if (call && !op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+    if (call && !WholeWindowWritebackArg(call)) {
       target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), GetDefinedMemRef(output)->size_,
                                   result->span_);
     }
@@ -1673,16 +1681,11 @@ class TopDownRetargeter {
 
       auto call = As<Call>(assign->value_);
       if (!call || !call->op_ || !registry.IsRegistered(call->op_->name_)) continue;
-      if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) continue;
-      if (auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-        if (auto source = AsVarLike(call->args_[*reuse_idx])) {
+      if (auto index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size())) {
+        if (auto source = AsVarLike(call->args_[*index])) {
           alias_source_[var] = source;
-          inplace_source_[var] = source;
+          if (WholeWindowWritebackArg(call)) inplace_source_[var] = source;
         }
-        continue;
-      }
-      if (!call->args_.empty()) {
-        if (auto source = AsVarLike(call->args_[0])) alias_source_[var] = source;
       }
     }
   }
@@ -1849,7 +1852,7 @@ class TopDownRetargeter {
       }
       auto call = As<Call>(assign->value_);
       if (!call || !call->op_) break;
-      auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      auto reuse_idx = WholeWindowWritebackArg(call);
       if (!reuse_idx.has_value()) break;
       result = AsVarLike(call->args_[*reuse_idx]);
       break;
@@ -2092,7 +2095,7 @@ class TopDownRetargeter {
     if (!reg.IsRegistered(call->op_->name_)) return false;
     const auto& entry = reg.GetEntry(call->op_->name_);
 
-    auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+    auto reuse_idx = WholeWindowWritebackArg(call);
     if (reuse_idx.has_value()) {
       // Pinned output: can't change this stmt's LHS MemRef; recurse onto pinned input.
       auto input_var = AsVarLike(call->args_[*reuse_idx]);
@@ -2480,7 +2483,7 @@ class RetypeApplier : public IRMutator {
     return IRMutator::VisitStmt_(op);
   }
 
-  /// Re-anchor an inherit-input view (tile.transpose_view / reshape / slice /
+  /// Re-anchor an explicit storage alias (tile.transpose_view / reshape / slice /
   /// set_validshape / tensor.view, ...) onto its input's reused buffer when
   /// the input was retargeted.  The planner never retargets a view's output
   /// directly (RetargetAssign declines OutputMemoryInheritsInput ops), so when its
@@ -2492,13 +2495,14 @@ class RetypeApplier : public IRMutator {
   /// Re-derive the view's MemRef from its (retargeted) input, mirroring InitMemRef's
   /// ShareMemRefFrom.
   ///
-  /// Returns the rewritten AssignStmt, or nullptr when `op` is not an inherit-input
-  /// view whose input was retargeted (caller then falls back to the default visit).
+  /// Returns the rewritten AssignStmt, or nullptr when `op` is not a storage
+  /// alias whose input was retargeted (caller falls back to the default visit).
   StmtPtr FollowRetargetedViewInput(const AssignStmtPtr& op) {
     auto orig_call = As<Call>(op->value_);
     if (!orig_call || !orig_call->op_ || orig_call->args_.empty()) return nullptr;
-    if (!op_predicates::IsBufferAliasingViewOp(orig_call->op_->name_)) return nullptr;
-    auto in_var = AsVarLike(orig_call->args_[0]);
+    auto source_index = op_predicates::StorageAliasArgIndex(orig_call->op_, orig_call->args_.size());
+    if (!source_index) return nullptr;
+    auto in_var = AsVarLike(orig_call->args_[*source_index]);
     if (!in_var) return nullptr;
     auto sub = var_substitution_.find(in_var);
     if (sub == var_substitution_.end()) return nullptr;  // input not retargeted
@@ -2514,8 +2518,10 @@ class RetypeApplier : public IRMutator {
     // OutputMemoryInheritsInput also requires the view's memory space to follow its
     // input: if the retarget moved across memory spaces, carry the new space too.
     std::optional<MemorySpace> new_memory;
-    if (auto in_new_tile = GetTileTypeWithMemRef(sub->second->GetType())) {
-      new_memory = in_new_tile->GetMemorySpace();
+    if (OpRegistry::GetInstance().GetEntry(orig_call->op_->name_).OutputMemoryInheritsInput()) {
+      if (auto in_new_tile = GetTileTypeWithMemRef(sub->second->GetType())) {
+        new_memory = in_new_tile->GetMemorySpace();
+      }
     }
     auto output_tile = As<TileType>(op->var_->GetType());
     if (SamePhysicalWindow(out_mr, new_mr) && (!output_tile || output_tile->GetMemorySpace() == new_memory)) {

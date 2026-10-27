@@ -482,19 +482,11 @@ ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap&
 /// The argument whose buffer this call's SSA result names, or null when the
 /// result is a fresh value.
 ///
-/// This is the destination-rebind idiom — `c2 = tile.store(t, off, c)`, where
-/// reading `c2` reads `c` — and it is a *narrower* question than "which argument
-/// does this operator write", which the registry now answers (`set_arg_effect`).
-/// The two differ: `tile.mgather` clobbers a GM scratch operand yet returns a
-/// fresh tile, so it writes an argument it does not alias.
-///
-/// An operator declaring `set_output_reuses_input(N)` states exactly this
-/// relation, so that declaration is consulted first. The remaining entries are
-/// the tensor-level and cross-rank operators whose result rebinds a destination
-/// without reusing an on-chip MemRef; unifying them onto one declaration is
-/// follow-up work, and the two sources are kept consistent by the write-effect
-/// check below.
-ExprPtr ResultAliasedDestination(const CallPtr& call) {
+/// Views and destination updates both share storage with an input. This query
+/// carries parameter origins, not a write verdict or permission to replace the
+/// SSA value. ResultAliasedArgIndex also retains the existing host/distributed
+/// lineage cases that have no on-chip storage declaration.
+ExprPtr ResultStorageSource(const CallPtr& call) {
   if (auto index = ResultAliasedArgIndex(call)) return call->args_[*index];
   return nullptr;
 }
@@ -526,7 +518,7 @@ ParamOrigins GetAliasOrigins(const ExprPtr& expr, const AliasOriginMap& origin_m
   auto call = As<Call>(expr);
   if (!call) return {};
 
-  if (auto write_target = ResultAliasedDestination(call)) {
+  if (auto write_target = ResultStorageSource(call)) {
     return GetAliasOrigins(write_target, origin_map);
   }
   if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.view")) && !call->args_.empty()) {

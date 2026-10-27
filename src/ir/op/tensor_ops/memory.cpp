@@ -582,6 +582,8 @@ REGISTER_OP("tensor.slice")
     .add_argument("valid_shape", "Optional logical valid shape; an empty tuple means none")
     .add_argument("drop_dims", "Optional axes (MakeTuple of ConstInt) erased from the result type")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .set_attr<PadValue>("pad_value")
     .set_attr<bool>("clamp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

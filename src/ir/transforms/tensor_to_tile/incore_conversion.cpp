@@ -618,9 +618,9 @@ class ConsumerSpaceCollector : public IRVisitor {
       } else if (auto call = As<Call>(op->value_);
                  call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
         // Deliberately the raw `OutputMemoryInheritsInput()` flag, NOT
-        // `op_predicates::IsBufferAliasingViewOp`: the edge recorded here carries
+        // `op_predicates::OutputInheritsSourceBuffer`: the edge recorded here carries
         // the memory *space* relation, which is what the flag declares. Buffer
-        // identity is the stricter `inherit && IsInplaceSafe()` and is answered
+        // identity requires an explicit storage alias and is answered
         // by `ResultAliasedArgIndex` elsewhere in this pass.
         auto& op_reg = OpRegistry::GetInstance();
         if (op_reg.IsRegistered(call->op_->name_) &&

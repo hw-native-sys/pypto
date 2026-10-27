@@ -164,8 +164,9 @@ class DisqualifyingUseCollector : public IRVisitor {
     }
     auto call = As<Call>(op->value_);
     if (!call || !call->op_ || call->args_.empty()) return;
-    if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) return;
-    if (auto src = AsVarLike(call->args_[0])) alias_root_[op->var_.get()] = Root(src.get());
+    auto index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+    if (!index) return;
+    if (auto src = AsVarLike(call->args_[*index])) alias_root_[op->var_.get()] = Root(src.get());
   }
 
   /// The tile that owns the buffer `var` resolves to. SSA rules out a cycle; the

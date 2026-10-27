@@ -1524,7 +1524,7 @@ _CHANNEL_OPS = {
 }
 
 #: Operators declaring ``set_output_reuses_input``: their SSA result IS an
-#: argument's buffer, so they write through it and must classify that argument.
+#: argument's storage, so they must classify it even when no data is written.
 #: Routed through ``get_op`` so a renamed operator fails at import rather than
 #: silently dropping out of the coverage this list asserts.
 _IN_PLACE_OPS = [
@@ -1550,6 +1550,90 @@ _IN_PLACE_OPS = [
         "tile.tget_scale_addr",
     )
 ]
+
+
+class TestStorageAliasContract:
+    """Space inheritance, storage aliases and data writes are separate contracts."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "tile.slice",
+            "tile.reshape",
+            "tile.reinterpret_view",
+            "tile.transpose_view",
+            "tile.set_validshape",
+            "tensor.slice",
+            "tensor.reshape",
+            "tensor.reinterpret_view",
+            "tensor.view",
+            "tensor.set_validshape",
+        ],
+    )
+    def test_read_only_views_share_storage(self, name):
+        assert testing.storage_alias_arg_index(name, 5) == 0
+        assert ir.op_has_declared_arg_effects(name)
+        assert ir.get_op_arg_effect(name, 0) == ir.ArgEffect.Read
+
+    @pytest.mark.parametrize(
+        ("name", "index", "effect"),
+        [
+            ("tile.assemble", 0, ir.ArgEffect.ReadWrite),
+            ("tile.matmul_acc", 0, ir.ArgEffect.ReadWrite),
+            ("tile.store", 2, ir.ArgEffect.Write),
+        ],
+    )
+    def test_destination_alias_keeps_its_effect(self, name, index, effect):
+        assert testing.storage_alias_arg_index(name, 3) == index
+        assert ir.get_op_arg_effect(name, index) == effect
+
+    @pytest.mark.parametrize("name", ["tile.transpose", "tile.add"])
+    def test_independent_result_has_no_alias(self, name):
+        assert testing.storage_alias_arg_index(name, 4) is None
+
+    @pytest.mark.parametrize(
+        ("name", "index"),
+        [
+            ("tile.row_sum", 1),
+            ("tile.row_max", 1),
+            ("tile.row_min", 1),
+            ("tile.row_prod", 1),
+            ("tile.col_sum", 1),
+            ("tile.rem", 2),
+            ("tile.rems", 2),
+            ("tile.prelu", 2),
+            ("tile.sel", 3),
+            ("tile.sort32", 2),
+            ("tile.row_expand_add", 2),
+            ("tile.cast", 1),
+        ],
+    )
+    def test_hardware_scratch_declares_write_without_result_alias(self, name, index):
+        # Slice placement must observe scratch clobbers through ArgEffect,
+        # independently of lane-splitting metadata or result storage aliases.
+        assert ir.get_op_arg_effect(name, index) == ir.ArgEffect.Write
+        assert testing.storage_alias_arg_index(name, index + 1) is None
+
+    def test_missing_call_argument_does_not_resolve_alias(self):
+        assert testing.storage_alias_arg_index("tile.store", 2) is None
+
+    @pytest.mark.parametrize("index", [1, 5])
+    def test_out_of_range_registration_is_rejected(self, index):
+        with pytest.raises(ValueError, match="storage alias index .* out of range"):
+            testing.validate_storage_alias(1, index, 1, [], no_arg_writes=True)
+
+    @pytest.mark.parametrize("effects", [[], [(1, ir.ArgEffect.ReadWrite)]])
+    def test_alias_requires_effect_on_aliased_argument(self, effects):
+        with pytest.raises(ValueError, match="without a declared effect"):
+            testing.validate_storage_alias(2, 0, 1, effects)
+
+    def test_multi_output_alias_is_rejected(self):
+        with pytest.raises(ValueError, match="requires a single result"):
+            testing.validate_storage_alias(1, 0, 2, [], no_arg_writes=True)
+
+    def test_explicit_read_effect_and_no_writes_are_valid(self):
+        testing.validate_storage_alias(1, 0, 1, [(0, ir.ArgEffect.Read)])
+        testing.validate_storage_alias(1, 0, 1, [], no_arg_writes=True)
 
 
 class TestResultAliasContract:

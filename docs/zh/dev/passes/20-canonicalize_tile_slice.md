@@ -262,7 +262,7 @@ slice 结果是不同的 Var；保持形状的 `tile.reshape` 则是同一段字
 | -- | -------- |
 | `v = tile.slice(src, shape, offset)` | 窗口本身（种子）；链式 slice 会被剥离并累加偏移 |
 | `v = w`（普通 SSA 别名） | `w` 的窗口 |
-| `v = <op>(src, ...)`，且该 op 的输出落在某个源操作数的存储上 | 该源操作数的窗口。这一关系来自注册表（`OutputMemoryInheritsInput() && IsInplaceSafe()`，或 `set_output_reuses_input`），而非硬编码的 op 列表——因此 `tile.reshape` / `tile.set_validshape` 以及链式 `tile.matmul_acc` 都被覆盖，而写入**新缓冲区**的 `tile.transpose` 和 `tile.extract` 被排除在外 |
+| `v = <op>(src, ...)`，且该 op 的输出落在某个源操作数的存储上 | 该源操作数的窗口。这一关系来自注册表（`set_output_reuses_input`），而非硬编码的 op 列表——因此 `tile.reshape` / `tile.set_validshape` 以及链式 `tile.matmul_acc` 都被覆盖，而写入**新缓冲区**的 `tile.transpose` 和 `tile.extract` 被排除在外 |
 | 循环 `IterArg` | 其**初值**的窗口（`ForStmt` / `WhileStmt`） |
 | `ForStmt` / `WhileStmt` 的 `return_vars_[i]` | 循环体末尾 `pl.yield_` 为 `iter_args_[i]` 给出的窗口——**仅当它与初值指向同一窗口时**，即典型的循环携带。零次迭代的循环返回的是初值，因此绑定其他窗口就等于宣称一个某条路径并不指向的窗口 |
 | `IfStmt::return_vars_[i]` | 两个分支 yield 的窗口，且可证明两者**相同**（同一父 Var、偏移相等） |

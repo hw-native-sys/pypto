@@ -14,6 +14,7 @@
 #include <any>
 #include <cctype>
 #include <climits>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -35,11 +36,19 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace memory_reuse {
+
+std::optional<size_t> WholeWindowWritebackArg(const CallPtr& call) {
+  if (!call || IsOp(call, "tile.assemble")) return std::nullopt;
+  auto index = op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+  if (!index || !op_predicates::CallWritesArg(call, *index)) return std::nullopt;
+  return index;
+}
 
 /// True when two MemRefs denote the same codegen-visible byte window.
 /// Allocation identity alone is insufficient: one allocation can contain

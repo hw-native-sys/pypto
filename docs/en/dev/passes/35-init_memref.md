@@ -51,7 +51,7 @@ program_with_memrefs = init_pass(program)
 4. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
 5. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
-   - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
+   - **View ops** (e.g. `tile.reshape`, `tile.slice`): the explicit `output_reuses_input_arg` selects shared storage; the view mapping preserves its offset and extent
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one

@@ -40,12 +40,8 @@ strict ``xfail`` rather than asserting it away.
 
 **Views are followed.** ``BufferRootCollector`` maps ``tensor.slice`` to a fresh
 root and skips the tile views entirely, so the verifier resolves the chain itself
-from two shared declarations: ``ResultAliasedArgIndex`` (the operator returns the
-argument it updated) and ``op_predicates::IsBufferAliasingViewOp``
-(``OutputMemoryInheritsInput() && IsInplaceSafe()`` — the zero-copy views, which
-update nothing and so declare no reuse contract). ``tile.transpose`` is excluded
-by that predicate: it permutes into a fresh buffer, so its output is not an alias
-of its input.
+using ``ResultAliasedArgIndex``: explicit storage aliases cover views without
+claiming a data write. ``tile.transpose`` has no storage alias declaration.
 """
 
 import pypto.language as pl
@@ -312,7 +308,7 @@ def test_write_through_a_zero_copy_view_is_reported():
     ``tensor.slice`` to a *fresh* root and skips the tile views entirely — so a
     store through one used to reach no parameter at all. The verifier now
     follows the chain itself, using the registry's own
-    ``OutputMemoryInheritsInput()`` view set.
+    explicit storage-alias declarations.
     """
 
     @pl.program

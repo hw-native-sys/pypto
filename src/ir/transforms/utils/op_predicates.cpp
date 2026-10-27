@@ -57,37 +57,24 @@ bool IsTPush(const CallPtr& call) { return HasRole(call, CrossCoreRole::TPush); 
 bool IsTFree(const CallPtr& call) { return HasRole(call, CrossCoreRole::TFree); }
 bool IsInitializePipe(const CallPtr& call) { return HasRole(call, CrossCoreRole::InitializePipe); }
 
-bool IsBufferAliasingViewOp(const std::string& op_name) {
-  auto& registry = OpRegistry::GetInstance();
-  if (!registry.IsRegistered(op_name)) return false;
-  const auto& entry = registry.GetEntry(op_name);
-  // An inherit-input op aliases its input buffer only if it is also in-place
-  // safe. tile.transpose inherits input memory but PERMUTES data into a fresh
-  // buffer (pto.ttrans, registered not_inplace_safe()), so its output does NOT
-  // alias the input — IsInplaceSafe() excludes it without hardcoding op names.
-  return entry.OutputMemoryInheritsInput() && entry.IsInplaceSafe();
-}
-
 bool OutputInheritsSourceBuffer(const std::string& op_name) {
   auto& registry = OpRegistry::GetInstance();
-  if (!registry.IsRegistered(op_name)) return false;
-  const auto& entry = registry.GetEntry(op_name);
-  // Inheriting the input's memory *space* is not the same as landing in its
-  // buffer: tile.transpose inherits the space but permutes into a fresh one
-  // (pto.ttrans, registered not_inplace_safe()). IsBufferAliasingViewOp already
-  // draws that line, so reuse it rather than testing OutputMemoryInheritsInput()
-  // directly — otherwise a transpose output, which does own its buffer, could
-  // not be bound to a declared allocation.
-  return IsBufferAliasingViewOp(op_name) || entry.GetOutputReusesInputArg().has_value();
+  return registry.IsRegistered(op_name) && registry.GetEntry(op_name).GetOutputReusesInputArg().has_value();
 }
 
-std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count) {
-  if (!op) return std::nullopt;
-  auto& registry = OpRegistry::GetInstance();
-  if (!registry.IsRegistered(op->name_)) return std::nullopt;
-  auto aliased_idx = registry.GetEntry(op->name_).GetOutputReusesInputArg();
-  if (!aliased_idx || *aliased_idx >= arg_count) return std::nullopt;
-  return aliased_idx;
+std::optional<size_t> StorageAliasArgIndex(const OpPtr& op, size_t arg_count) {
+  const auto* entry = LookupOpEntry(op);
+  if (!entry) return std::nullopt;
+  auto index = entry->GetOutputReusesInputArg();
+  if (!index || *index >= arg_count) return std::nullopt;
+  return index;
+}
+
+bool CallWritesArg(const CallPtr& call, size_t index) {
+  if (!call || index >= call->args_.size()) return false;
+  const auto* entry = LookupOpEntry(call->op_);
+  return entry && entry->GetIRStage() == OpIRStage::Functional &&
+         ArgEffectWrites(entry->GetArgEffect(index, call->kwargs_));
 }
 
 bool IsBuiltinOp(const std::string& op_name) {

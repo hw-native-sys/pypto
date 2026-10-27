@@ -15,7 +15,7 @@ Internal testing utilities (do not use in production)
 
 from typing import Literal, NoReturn, TypedDict
 
-from .ir import BufferAccess, BufferResultBehavior, Call, Expr, Function, OpIRStage, Type
+from .ir import ArgEffect, BufferAccess, BufferResultBehavior, Call, Expr, Function, OpIRStage, Type
 
 def validate_buffer_op_contract(
     stage: OpIRStage,
@@ -32,6 +32,18 @@ def validate_buffer_op_contract(
     and metadata access. Result entries give result index, ownership behavior,
     and optional alias source argument. ``arity=None`` omits the declaration.
     """
+
+def validate_storage_alias(
+    argument_count: int,
+    alias_index: int,
+    output_arity: int,
+    effects: list[tuple[int, ArgEffect]],
+    no_arg_writes: bool = False,
+) -> None:
+    """Validate a local Functional storage alias without changing the registry."""
+
+def storage_alias_arg_index(name: str, arg_count: int) -> int | None:
+    """Inspect the internal storage-source query for contract tests."""
 
 def validate_op_type_registration(
     stage: OpIRStage, internal_only: bool, typing_modes: list[Literal["deduced", "explicit"]]

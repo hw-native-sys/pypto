@@ -34,6 +34,10 @@ namespace pypto {
 namespace ir {
 namespace memory_reuse {
 
+// Whole-window destination updates supported by carry repair. Partial assemble
+// updates and read-only views retain their own window mapping.
+std::optional<size_t> WholeWindowWritebackArg(const CallPtr& call);
+
 /// True when two MemRefs denote the same codegen-visible byte window.
 /// Allocation identity alone is insufficient: one allocation can contain
 /// multiple disjoint tile windows and pipeline slots.

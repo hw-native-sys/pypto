@@ -176,9 +176,9 @@ class HazardInputCollector : public IRVisitor {
         }
         if (IsOp(call, "tile.tpop_from_aic")) {
           MarkTpop(op->var_);
-        } else if (call->op_ && op_predicates::IsBufferAliasingViewOp(call->op_->name_) &&
-                   !call->args_.empty()) {
-          if (const auto source = AsVarLike(call->args_[0]); source && IsTpop(source)) {
+        } else if (const auto source_index =
+                       op_predicates::StorageAliasArgIndex(call->op_, call->args_.size())) {
+          if (const auto source = AsVarLike(call->args_[*source_index]); source && IsTpop(source)) {
             MarkTpop(op->var_);
           }
         }

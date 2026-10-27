@@ -686,6 +686,8 @@ REGISTER_OP("tensor.reshape")
                   "Optional logical valid shape (MakeTuple, same rank as `shape`) carried onto the "
                   "result TensorView; present only in the 3-arg form")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReshapeType(args, kwargs);
@@ -699,6 +701,8 @@ REGISTER_OP("tensor.reinterpret_view")
     .add_argument("shape", "Optional target shape; omitted to scale the physically contiguous dimension")
     .set_attr<DataType>("dtype")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReinterpretViewType(args, kwargs);
@@ -729,6 +733,8 @@ REGISTER_OP("tensor.view")
     .add_argument("valid_shape", "Optional explicit target valid shape for shape reinterpretation")
     .set_attr<TensorLayout>("layout")
     .set_output_memory_inherit_input()
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorViewType(args, kwargs);
@@ -835,20 +841,9 @@ REGISTER_OP("tensor.set_validshape")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
     .set_output_memory_inherit_input()
-    // Metadata-only: no data moves, so the result names the same buffer as the
-    // input. Orthogonal to the space-inheritance above (see
-    // OpRegistryEntry::OutputMemoryInheritsInput).
-    //
-    // ConvertTensorToTileOps rewrites this op to `tile.set_validshape` before
-    // any param-lineage consumer runs, so nothing reads this today. Declared
-    // anyway because it is true, and because the alternative failure is silent:
-    // a lineage walk that cannot see the aliasing reports the result as a fresh
-    // kernel allocation.
+    // Share underlying storage while changing the result's valid extent.
+    // Storage lineage and memory-space inheritance are independent of writes.
     .set_output_reuses_input(0)
-    // The in-place slot is metadata, not data: this op rebinds the valid extent
-    // and moves nothing, so no dependency edge should order against it. A
-    // verdict on record — the gate requires one, and "writes nothing" is the
-    // honest answer rather than an omission.
     .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

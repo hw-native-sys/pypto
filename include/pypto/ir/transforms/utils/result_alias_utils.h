@@ -21,17 +21,13 @@ namespace ir {
 
 /**
  * @brief The argument index whose buffer @p call 's result names, or nullopt
- *        when the result is a fresh value.
+ *        when the result has independent storage.
  *
- * An SSA-pure writer returns a new Var for a buffer it updated in place, so the
- * result and that argument are two names for one tensor. Every analysis that
- * follows a value back to the parameter it came from needs the same answer
- * here: ``ConvertTensorToTileOps`` uses it to carry parameter origins across the
- * call, and ``ScopeOutliner`` uses it to decide whether reading the result
- * counts as reading the argument. Answering the question in two places let them
- * disagree — a collective with several write slots looked un-aliased to one and
- * aliased to the other, so the same program could come out ``Out`` from one
- * pass and ``InOut`` from the other.
+ * Views and destination updates may return distinct SSA values sharing an
+ * input's storage. This query carries parameter origins and read attribution
+ * through both, without implying writes, identical windows/descriptors, or
+ * interchangeable values. ConvertTensorToTileOps and ScopeOutliner use the same
+ * answer so their direction inference stays consistent.
  *
  * Two sources feed the answer, in order:
  *   1. the operator's own ``set_output_reuses_input`` declaration, and

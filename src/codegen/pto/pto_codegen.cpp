@@ -435,7 +435,7 @@ std::vector<VarPtr> CollectTensorShapeDynVarsImpl(const FunctionPtr& func) {
 // result tile:
 //   * scatter family (`set_output_reuses_input(0)`): a tscatter into a fresh
 //     uninitialized tile would lose the rows it does not write;
-//   * `tile.assemble` (`set_output_memory_inherit_input()`): the result is the
+//   * `tile.assemble` (`set_output_reuses_input(0)`): the result is the
 //     target with one window overwritten — written in place so the out-of-window
 //     data is preserved (and the Acc->Mat pto.tmov stays a clean converting move,
 //     not an unsupported Mat->Mat preservation copy);
@@ -475,7 +475,7 @@ bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
 //   * `IsInPlaceInput0DpsOp` — ops whose in-place-ness is a codegen-lowering fact.
 //     Gated on a shared base memref only, which is the long-standing behaviour.
 //
-//   * `BuiltinWritebackArgIndex` — the declared, op-level truth: the registry's
+//   * `StorageAliasArgIndex` — the declared, op-level truth: the registry's
 //     `set_output_reuses_input` slot. Deliberately not `ResultAliasedArgIndex`,
 //     which answers the *lineage* question (which argument does the result
 //     name) and additionally covers host-level ops whose result is a window,
@@ -514,8 +514,8 @@ bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
     return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
   }
 
-  auto declared = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-  if (!declared.has_value()) return false;
+  auto declared = ir::op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+  if (!declared || !ir::op_predicates::CallWritesArg(call, *declared)) return false;
   auto input_tile_type = input_tile_type_at(*declared);
   if (!input_tile_type) return false;
   return ShareOneMemRefWindow(result_tile_type, input_tile_type) &&
@@ -2422,9 +2422,11 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       fs_.current_result_buf = result_buf;
       fs_.current_result_tile_type = result_tile_type;
       bool elide_move = false;
+      const auto source_index = ir::op_predicates::StorageAliasArgIndex(call->op_, call->args_.size());
+      const bool defines_view = source_index && (!ir::op_predicates::CallWritesArg(call, *source_index) ||
+                                                 ir::IsOp(call, "tile.assemble"));
       if (!emit_tile_addr_ && result_tile_type && result_tile_type->memref_.has_value() &&
-          !is_set_validshape && !ir::IsOp(call, "tile.extract") &&
-          !ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+          !is_set_validshape && !ir::IsOp(call, "tile.extract") && !defines_view) {
         // Views define their result from the input; extract already prepares
         // an independent destination in its emitter. TPOP has no general-pool
         // MemRef, and set_validshape must retain its mutable input handle.

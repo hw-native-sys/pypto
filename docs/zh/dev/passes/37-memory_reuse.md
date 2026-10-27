@@ -8,6 +8,10 @@
 
 应用 MemRef 共享后，该 Pass 还会**移除冗余的 `tile.alloc` 语句 (Statement)**——即那些不再被任何 TileType 变量引用的 MemRef 对应的 alloc 语句。
 
+基于生命周期的物理复用不产生语义别名边。算子的显式别名使用
+`set_output_reuses_input`，与内存空间继承和原地执行限制分开。即使共享底层存储，
+视图仍保留自身的窗口和 descriptor。
+
 **核心要点**：
 
 - 生命周期不重叠的变量可以复用内存
@@ -71,19 +75,20 @@ program_optimized = reuse_pass(program)
    | 别名类别 | 结果必须使用的存储 |
    | -------- | ------------------ |
    | 裸 SSA 别名 `x = y` | 当前 source 的完整 MemRef 窗口 |
-   | 注册了 `output_reuses_input` 的结果 | 注册的写回输入的完整窗口 |
-   | 注册的首输入 buffer 别名操作 | 当前第一个输入的 allocation、偏移、slot 身份，加上操作的相对偏移；保留结果窗口大小 |
+   | 完整窗口写回结果（`output_reuses_input`） | 声明的写回输入的完整窗口 |
+   | 只读视图别名（`output_reuses_input`），如 `tile.slice` 或 `tile.reshape` | 当前声明输入的 allocation、偏移、slot 身份，加上视图相对偏移；保留结果窗口大小 |
+   | 部分更新别名，如 `tile.assemble` | 按操作已有的窗口映射和结果窗口大小跟随声明的输入 |
    | Tensor/DistributedTensor 的 For/While 参数和返回值 | 当前 initializer 的完整窗口，也涵盖零次迭代路径 |
 
    这些规则适用于带 MemRef 的 shaped result，包括 tile 和 tensor 写回。裸 SSA
    重命名直接跟随 source 的完整类型，不复制数据。调用结果重定型保留结果的
    shape、dtype、view/distribution 元数据；tile 结果的 memory space 跟随当前
-   输入。显式写回契约优先于首输入继承。首输入 buffer 别名判定要求同时满足
-   `OutputMemoryInheritsInput()` 和 `IsInplaceSafe()`；只继承 memory space
-   并不意味着共享 buffer。`ReanchorAliasingOutput` 根据注册契约处理两类调用，
-   也包括 `assemble` 这类写数据的操作，不会把所有 buffer 别名都当作纯元数据 view。
-   真正搬运数据、不能原地执行的 `tile.transpose` 和独立的 `tile.extract` 结果
-   不属于修复对象。
+   输入。所有调用类别都通过显式 `output_reuses_input` 索引选择存储来源。参数效果
+   区分读写，操作的视图映射区分完整窗口写回与视图或部分更新。仅有存储别名声明
+   不代表窗口相同。`OutputMemoryInheritsInput()` 和 `IsInplaceSafe()` 均不建立
+   别名。`ReanchorAliasingOutput` 保留这些区别，包括 `tile.assemble` 的部分更新
+   映射。独立分配的 `tile.transpose` 和 `tile.extract` 结果没有存储别名，不属于
+   修复对象。
 
    Tensor 循环边界修复在 legacy Tile 和 Buffer IR 两种模式下都运行，保留边界的
    shape、view 元数据和分布式窗口身份，不重定向独立产生的 yield tensor。

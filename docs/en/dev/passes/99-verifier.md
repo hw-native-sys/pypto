@@ -199,15 +199,10 @@ view = pl.tile.slice(acc, [8, 128], [0, 0])   # acc declared In
 view = pl.tile.assemble(view, src, [0, 0])    # writes acc's buffer
 ```
 
-Two shared declarations decide what a value names, and neither is a list kept
-here: `ResultAliasedArgIndex` (the operator returns the argument it updated —
-`tensor.assemble`, `tensor.write`, the collectives) and
-`op_predicates::IsBufferAliasingViewOp`, which reads
-`OutputMemoryInheritsInput() && IsInplaceSafe()` — the zero-copy views, which
-update nothing and so declare no reuse contract. `tile.transpose` falls out of
-the second by its own `not_inplace_safe()` registration: it permutes into a fresh
-buffer, so its output is not an alias of its input, and any future inherit-input
-op registered the same way is excluded without an edit here.
+`ResultAliasedArgIndex` resolves explicit storage aliases, including read-only
+views, and retains the existing host/distributed result-lineage cases. Data writes
+are queried independently from argument effects. `tile.transpose` declares no
+storage alias, so space inheritance never makes it a view of its input.
 
 `tensor.slice` is one of those views, so a store into a slice of a parameter *is*
 reported — even though `BufferRootCollector` deliberately maps it to a fresh

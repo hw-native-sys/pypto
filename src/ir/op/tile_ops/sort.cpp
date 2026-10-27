@@ -136,6 +136,7 @@ REGISTER_OP("tile.sort32")
     // enforces where the target is known. Rejecting here would break the form
     // A5 accepts to duplicate a check this pass cannot make accurately.
     .set_lane_invariant_arg(2)
+    .set_arg_effect(2, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSort32Type(args, kwargs, "tile.sort32");
