@@ -4513,7 +4513,8 @@ def test_function_use_index_does_not_rewrite_scalar_carry_chains(depth):
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
 @pytest.mark.parametrize("capture_kind", ["var", "tuple"])
-def test_function_use_index_counts_keyword_value_edges(planner, capture_kind):
+@pytest.mark.parametrize("capture_surface", ["kwargs", "attrs"])
+def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, capture_surface):
     """A retained keyword edge forbids deleting a matmul's whole result."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
@@ -4551,14 +4552,11 @@ def test_function_use_index_counts_keyword_value_edges(planner, capture_kind):
                 # and an Expr tree containing it are real def-use edges, even
                 # though this compile-only test does not lower this metadata.
                 value = self.producer if capture_kind == "var" else ir.MakeTuple([self.producer], op.span)
-                call = ir.Call(
-                    op.value.op,
-                    op.value.args,
-                    {"retained_value": value},
-                    op.value.attrs,
-                    op.value.type,
-                    op.value.span,
-                )
+                kwargs = dict(op.value.kwargs)
+                attrs = dict(op.value.attrs)
+                metadata = kwargs if capture_surface == "kwargs" else attrs
+                metadata["retained_value"] = value
+                call = ir.Call(op.value.op, op.value.args, kwargs, attrs, op.value.type, op.value.span)
                 return ir.AssignStmt(op.var, call, op.span)
             return op
 

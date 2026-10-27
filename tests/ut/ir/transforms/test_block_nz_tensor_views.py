@@ -1751,6 +1751,40 @@ def test_registered_rebuild_remaps_operand_attrs_and_span():
 
 
 @pytest.mark.usefixtures("ascend_backend")
+def test_canonical_seed_captured_by_store_metadata_is_not_eliminated():
+    """Only the cloned loop owns remappable seed metadata, not its later store."""
+    before = _run(_wide_acc_nz_program(column_offset=8, split_k=True))
+    seed = next(
+        stmt.var
+        for function in before.functions.values()
+        for stmt in _walk(function.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.create").name
+    )
+
+    class AttachSeedReference(ir.IRMutator):
+        def visit_call(self, op):
+            if op.op.name != ir.get_op("tile.store").name:
+                return super().visit_call(op)
+            return ir.Call(op.op, op.args, op.kwargs, {**op.attrs, "seed_ref": seed}, op.type, op.span)
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        annotated = AttachSeedReference().visit_program(before)
+        tiled = passes.auto_tile_matmul_l0()(annotated)
+    assert any(
+        isinstance(stmt, ir.AssignStmt) and stmt.var.same_as(seed)
+        for function in tiled.functions.values()
+        for stmt in _walk(function.body)
+    )
+    assert _store_call(tiled).attrs["seed_ref"].same_as(seed)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    passes.verify_properties(properties, tiled, "retained canonical seed metadata")
+
+
+@pytest.mark.usefixtures("ascend_backend")
 def test_acc_nz_store_rejects_when_no_full_row_column_tile_fits():
     """Even the minimum 16-column Acc exceeds L0C at 2064 complete rows."""
     before = _wide_acc_nz_program(rows=2064, cols=16)
@@ -1984,8 +2018,11 @@ def test_rejects_acc_nz_store_with_unknown_column_offset():
 @pytest.mark.usefixtures("ascend_backend")
 def test_rejects_acc_nz_store_with_dynamic_source_shape():
     rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    # Keep both dimensions Expr-valued so native construction reaches the NZ
+    # verifier instead of relying on mixed int/Expr convenience conversion.
+    columns = ir.ConstInt(16, DataType.INDEX, ir.Span.unknown())
     with pytest.raises(ValueError, match="NZ"):
-        passes.block_nz_tensor_views()(_nz_store_program(tile_shape=(rows, 16)))
+        passes.block_nz_tensor_views()(_nz_store_program(tile_shape=(rows, columns)))
 
 
 @pytest.mark.parametrize("negative", [False, True], ids=["unknown", "negative"])

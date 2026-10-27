@@ -814,12 +814,13 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
 struct SiblingIndex {
   const std::unordered_map<const Var*, int>& use_counts;
   const std::unordered_map<const Var*, int>& matmul_operand_uses;  ///< reads at a matmul-operand position
+  const SiblingUseCounter& census;
   std::unordered_map<const Var*, const AssignStmt*> store_of;
   std::unordered_map<const Var*, const AssignStmt*> cast_of;  ///< ``cb = tile.cast(v, dtype)`` by source
 };
 
 SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts, const SiblingUseCounter& uses) {
-  SiblingIndex idx{uses.counts, uses.matmul_operand_uses, {}, {}};
+  SiblingIndex idx{uses.counts, uses.matmul_operand_uses, uses, {}, {}};
   for (const auto& s : stmts) {
     auto as = std::dynamic_pointer_cast<const AssignStmt>(s);
     if (!as) continue;
@@ -1151,9 +1152,11 @@ std::optional<std::pair<AssignStmtPtr, YieldStmtPtr>> MatchSingleAssignYield(con
 /// ``hints`` is optional: when supplied, an otherwise-canonical *predicated*
 /// triplet whose ``init_cond`` is not a split-K seed test reports a PerfHint
 /// instead of silently losing loop-level M/N tiling.
-std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
-    const AssignStmtPtr& init, const ForStmtPtr& loop, const AssignStmtPtr& store,
-    const std::unordered_map<const Var*, int>& use_counts, std::vector<Diagnostic>* hints = nullptr) {
+std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(const AssignStmtPtr& init,
+                                                               const ForStmtPtr& loop,
+                                                               const AssignStmtPtr& store,
+                                                               const SiblingUseCounter& census,
+                                                               std::vector<Diagnostic>* hints = nullptr) {
   if (!init || !loop || !store || loop->kind_ != ForKind::Pipeline || loop->iter_args_.size() != 1 ||
       loop->return_vars_.size() != 1) {
     return std::nullopt;
@@ -1166,13 +1169,16 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
       store_call->args_[0].get() != loop->return_vars_[0].get()) {
     return std::nullopt;
   }
+  const auto& use_counts = census.counts;
   auto init_use = use_counts.find(init->var_.get());
   auto result_use = use_counts.find(loop->return_vars_[0].get());
   // True read counts exclude definitions: the create feeds exactly one IterArg
-  // initializer and the loop result feeds exactly one store. Any other read
-  // would be invalidated when the triplet is replaced.
-  if (init_use == use_counts.end() || init_use->second != 1 || result_use == use_counts.end() ||
-      result_use->second != 1) {
+  // initializer and the loop result feeds exactly one store. The retiled
+  // clone remaps seed metadata inside the loop body, and DirectGmPlacer
+  // remaps result metadata on its store. Other references remain consumers.
+  if (init_use == use_counts.end() || result_use == use_counts.end() ||
+      init_use->second - census.MetadataReadsOwnedBy(init->var_.get(), loop->return_vars_[0].get()) != 1 ||
+      result_use->second - census.MetadataReadsOwnedBy(loop->return_vars_[0].get(), store->var_.get()) != 1) {
     return std::nullopt;
   }
 
@@ -1579,12 +1585,11 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
 }
 
 /// Rewrite every canonical create/loop/store triplet in one SeqStmts scan.
-/// ``use_counts`` is built once over the original function, so matching all
-/// nested sequences remains O(N) rather than recursively rescanning each
+/// The census is built once over the original function, so matching all
+/// nested sequences uses indexed lookups rather than recursively rescanning each
 /// subtree. A running remap preserves an earlier store's output chain in later
 /// siblings.
-StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
-                                  const std::unordered_map<const Var*, int>& use_counts,
+StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq, const SiblingUseCounter& census,
                                   std::vector<Diagnostic>& hints) {
   if (!seq || seq->stmts_.size() < 3) return seq;
   std::vector<StmtPtr> out;
@@ -1599,7 +1604,7 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
       auto third =
           remap.empty() ? seq->stmts_[i + 2] : transform_utils::Substitute(seq->stmts_[i + 2], remap);
       auto match = MatchCanonicalSplitKAcc(As<AssignStmt>(current), As<ForStmt>(next), As<AssignStmt>(third),
-                                           use_counts, &hints);
+                                           census, &hints);
       if (match) {
         if (auto fold = TryFoldCanonicalSplitKAcc(*match, hints)) {
           for (auto& stmt : fold->stmts) out.push_back(std::move(stmt));
@@ -1622,9 +1627,8 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
 /// their M/N output grid before dbC planning or ordinary call-level tiling.
 class CanonicalSplitKPreMutator : public IRMutator {
  public:
-  CanonicalSplitKPreMutator(const std::unordered_map<const Var*, int>& use_counts,
-                            std::vector<Diagnostic>& hints)
-      : use_counts_(use_counts), hints_(hints) {}
+  CanonicalSplitKPreMutator(const SiblingUseCounter& census, std::vector<Diagnostic>& hints)
+      : census_(census), hints_(hints) {}
 
  protected:
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -1635,21 +1639,21 @@ class CanonicalSplitKPreMutator : public IRMutator {
     // Under PyPTO-owned placement their K schedule is already emitted;
     // ordinary AutoTile sees Left/Right operands and cannot choose again.
     // The PTOAS compatibility route still leaves K to ordinary AutoTile.
-    auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, use_counts_, hints_));
+    auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, census_, hints_));
     INTERNAL_CHECK_SPAN(rewritten, op->span_)
         << "Internal error: canonical split-K pre-phase did not preserve SeqStmts";
     return IRMutator::VisitStmt_(rewritten);
   }
 
  private:
-  const std::unordered_map<const Var*, int>& use_counts_;
+  const SiblingUseCounter& census_;
   std::vector<Diagnostic>& hints_;
 };
 
 FunctionPtr RewriteCanonicalSplitKAcc(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
   SiblingUseCounter counter;
   counter.VisitStmt(func->body_);
-  CanonicalSplitKPreMutator mutator(counter.counts, hints);
+  CanonicalSplitKPreMutator mutator(counter, hints);
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body == func->body_) return func;
   auto rewritten = MutableCopy(func);
@@ -2017,6 +2021,10 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
                             type->dtype_, result};
   if (auto store = index.store_of.find(result); store != index.store_of.end()) {
     plan.store_stmt = store->second;
+    // The sole direct store is replaced as a unit. Its metadata follows
+    // source -> sub-tile through DirectGmPlacer, so these references do not
+    // require the old full accumulator to survive. Retained calls still do.
+    plan.result_uses -= index.census.MetadataReadsOwnedBy(result, store->second->var_.get());
   }
   // Preserve the existing FIXPIPE cast-fold contract while making its consumer
   // information available before selection. This does not admit new consumers
