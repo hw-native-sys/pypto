@@ -1,10 +1,5 @@
 # ConvertTensorToTileOps Pass
 
-`tensor.subview` 保留为普通 GM Tensor 描述符。转换前由共享上下文 verifier 证明
-严格包含、几何运算不溢出及只读调用者 GM 根；false/unknown 均拒绝。Affine
-`tensor.set_validshape` 别名也保留为 Tensor，只能缩小有效区。消费者
-`tensor.slice`/计算操作转换时，按描述符真实 pitch 加载；已有 slice 的物化语义不变。
-
 将 InCore、AIC 和 AIV 函数中的 tensor 操作（张量操作）转换为 tile 操作（块操作），并更新编排函数的调用点。
 
 ## 概述
@@ -87,6 +82,13 @@ program_tiled = convert_pass(program)
 5. **升级被写入参数的方向（direction）**：通过别名溯源分析（`AnalyzeCallAccess`）把每次读/写归属到其来源参数，再把被写入的 `In` 参数升级为 `Out`（只写）或 `InOut`（既读又写）。**某个算子写哪个实参不再由本 pass 判定**，而是读取该算子在注册表上的声明（`set_arg_effect`，参见 [算子](../ir/05-operators.md#参数效应argument-effects)）；因此 `tile.store`、`tile.mscatter`、`tensor.write`、`tensor.assemble`、`tensor.expand_clone`、`pld.tile.*` / `pld.tensor.*` 推送与拉取家族、`pld.system.notify`、`system.syncall` 以及复合集合通信都经由同一张表进入本分析。被声明为 `Write` 的实参不计为读：只写入子区域的 store 从不读取未触及的部分。由 kwarg 决定的效应按调用逐个解析，因此原子 store 或 `AtomicAdd` 形式的 notify 会把目的操作数标记为读+写，而普通形式不会。用户已显式声明为 `Out` / `InOut` 的参数保持不变。
 
    从未声明效应的算子仍然按"读取全部实参"处理。该默认值如今只覆盖注册表无话可说的算子（其中绝大多数是纯函数式的），而不再是一张手工维护清单的兜底——新增的写类算子曾经可以悄无声息地从这张清单里漏掉。
+
+### 借用的 GM 描述符
+
+`tensor.subview` 保留为普通 GM Tensor 描述符。转换前由共享上下文 verifier 证明
+严格包含、几何运算不溢出及只读调用者 GM 根；false/unknown 均拒绝。Affine
+`tensor.set_validshape` 别名也保留为 Tensor，只能缩小有效区。消费者
+`tensor.slice`/计算操作转换时，按描述符真实 pitch 加载。
 
 ### GM 身份与读写顺序
 

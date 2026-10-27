@@ -38,10 +38,11 @@ def make_program(
     extra_params=(),
     valid_rows=1,
     subview_rows: int | ir.Expr = 2,
+    dtype: DataType = DataType.BF16,
 ):
     span = ir.Span.unknown()
-    cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
-    output = ir.Var("output", ir.TensorType([2, 512], DataType.BF16), span)
+    cache = ir.Var("cache", ir.TensorType([8, 512], dtype), span)
+    output = ir.Var("output", ir.TensorType([2, 512], dtype), span)
     call = ir.op.tensor.subview(cache, [subview_rows, 512], [offset, 0], steps=[step, 1])
     selected = ir.Var("selected", call.type, span)
     statements: list[ir.Stmt] = [ir.AssignStmt(selected, call, span)]
@@ -76,9 +77,9 @@ def statements(func: ir.Function) -> list[ir.Stmt]:
     return list(func.body.stmts)
 
 
-def lower(program):
+def lower(program, backend_type=BackendType.Ascend910):
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(backend_type)
     return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 
@@ -449,31 +450,220 @@ def test_subview_nested_origins_and_view_alias_preserve_current_pointer():
     assert mlir.count("pto.tload") == 1
 
 
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize(
-    "dtype,parent_shape,shape,steps,reason",
+    "dtype,parent_shape,shape,steps",
     [
-        (DataType.FP32, [8, 512], [2, 512], [3, 1], "rank-2 ND BF16"),
-        (DataType.BF16, [8, 512], [2, 256], [3, 2], "unit inner stride"),
-        (DataType.BF16, [8, 512], [2, 511], [3, 1], "row-byte alignment"),
-        (DataType.BF16, [10000, 16], [5000, 16], [1, 1], "row-count limit"),
+        (DataType.FP32, [8, 512], [2, 512], [3, 1]),
+        (DataType.BF16, [8, 512], [2, 256], [3, 2]),
+        (DataType.BF16, [8, 512], [2, 511], [3, 1]),
+        (DataType.BF16, [10000, 16], [5000, 16], [1, 1]),
+        (DataType.BF16, [8, (1 << 32) + 16], [2, 16], [1, 1]),
+        (DataType.FP32, [4, 8, 16], [2, 4, 16], [1, 1, 1]),
     ],
 )
-def test_subview_backend_rejects_unsupported_native_loads(dtype, parent_shape, shape, steps, reason):
+def test_subview_descriptor_has_no_native_load_profile(backend_type, dtype, parent_shape, shape, steps):
+    """Descriptor validity does not depend on a future consumer's DMA encoding."""
     span = ir.Span.unknown()
     source = ir.Var("cache", ir.TensorType(parent_shape, dtype), span)
-    subview = ir.op.tensor.subview(source, shape, [0, 0], steps=steps)
+    subview = ir.op.tensor.subview(source, shape, [0] * len(shape), steps=steps)
     selected = ir.Var("selected", subview.type, span)
-    load = ir.op.tile.load(selected, [0, 0], shape, target_memory=ir.MemorySpace.Vec)
-    tile = ir.Var("tile", load.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(selected, subview, span), ir.ReturnStmt([], span)], span)
+    func = ir.Function("describe", [source], [], body, span, type=ir.FunctionType.InCore)
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], "descriptor", span))
+    assert "pto.make_tensor_view" in mlir
+    assert "pto.tload" not in mlir
+    assert "pto.alloc_tile" not in mlir
+
+
+def test_subview_strided_columns_require_a_consumer_that_preserves_the_address_map():
+    span = ir.Span.unknown()
+    source = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
+    subview = ir.op.tensor.subview(source, [2, 256], [0, 0], steps=[3, 2])
+    selected = ir.Var("selected", subview.type, span)
+    load = ir.op.tile.load(selected, [0, 0], [2, 256], target_memory=ir.MemorySpace.Vec)
     body = ir.SeqStmts(
-        [ir.AssignStmt(selected, subview, span), ir.AssignStmt(tile, load, span), ir.ReturnStmt([], span)],
+        [
+            ir.AssignStmt(selected, subview, span),
+            ir.AssignStmt(ir.Var("tile", load.type, span), load, span),
+            ir.ReturnStmt([], span),
+        ],
         span,
     )
-    func = ir.Function("unsupported", [source], [], body, span, type=ir.FunctionType.InCore)
+    function = ir.Function("noncontiguous_load", [source], [], body, span, type=ir.FunctionType.InCore)
+    with pytest.raises(ValueError, match="subview.*load.*contiguous"):
+        passes.convert_tensor_to_tile_ops()(ir.Program([function], "noncontiguous_load", span))
+
+
+@pytest.mark.parametrize("backend_type,arch", [(BackendType.Ascend910, "a3"), (BackendType.Ascend950, "a5")])
+def test_subview_fp32_load_uses_existing_backend_path(tmp_path, backend_type, arch):
+    optimized = lower(make_program(dtype=DataType.FP32), backend_type)
+    mlir = codegen.PTOCodegen().generate(optimized)
+    assert mlir.count("pto.tload") == 1
+    assert mlir.count("pto.tstore") == 1
+    ptoas = find_ptoas_binary()
+    if ptoas is not None:
+        source = tmp_path / "fp32-subview.pto"
+        source.write_text(mlir)
+        result = subprocess.run(
+            [
+                ptoas,
+                str(source),
+                f"--pto-arch={arch}",
+                "--pto-level=level3",
+                "-o",
+                str(tmp_path / "fp32-subview.cpp"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("direct_codegen", [False, True])
+def test_subview_scalar_read_requires_explicit_load(direct_codegen):
+    span = ir.Span.unknown()
+    func = next(iter(make_program().functions.values()))
+    definition = statements(func)[0]
+    assert isinstance(definition, ir.AssignStmt)
+    read = ir.op.tensor.read(definition.var, [1, 0])
+    body = ir.SeqStmts(
+        [definition, ir.AssignStmt(ir.Var("scalar", read.type, span), read, span), ir.ReturnStmt([], span)],
+        span,
+    )
+    function = ir.Function("scalar_read", func.params, [], body, span, type=ir.FunctionType.InCore)
+    program = ir.Program([function], "scalar_read", span)
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
-    with pytest.raises(ValueError, match=f"subview.*{reason}"):
-        codegen.PTOCodegen().generate(ir.Program([func], "unsupported", span))
+    backend.set_backend_type(BackendType.Ascend910)
+    with pytest.raises(ValueError, match="subview.*explicit load.*tensor.read"):
+        if direct_codegen:
+            codegen.PTOCodegen().generate(program)
+        else:
+            passes.convert_tensor_to_tile_ops()(program)
+
+
+@pytest.mark.parametrize("backend_type,arch", [(BackendType.Ascend910, "a3"), (BackendType.Ascend950, "a5")])
+@pytest.mark.parametrize("valid", [None, [1, 8, 16]])
+def test_subview_nd_load_survives_tile_flattening(tmp_path, backend_type, arch, valid):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([4, 8, 16], DataType.FP32), span)
+    subview = ir.op.tensor.subview(source, [2, 8, 16], [0, 0, 0], steps=[2, 1, 1])
+    selected = ir.Var("selected", subview.type, span)
+    load = ir.op.tile.load(
+        selected, [0, 0, 0], [2, 8, 16], valid_shape=valid, target_memory=ir.MemorySpace.Vec
+    )
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(selected, subview, span),
+            ir.AssignStmt(ir.Var("tile", load.type, span), load, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    function = ir.Function("nd_load", [source], [], body, span, type=ir.FunctionType.InCore)
+    optimized = lower(ir.Program([function], "nd_load", span), backend_type)
+    loads: list[ir.Call] = []
+
+    class FindLoad(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == ir.get_op("tile.load").name:
+                loads.append(op)
+            super().visit_call(op)
+
+    FindLoad().visit_program(optimized)
+    assert len(loads) == 1
+    tile_type = loads[0].type
+    assert isinstance(tile_type, ir.TileType)
+    for dim, expected in zip(tile_type.shape, [16, 16], strict=True):
+        assert isinstance(dim, ir.ConstInt) and dim.value == expected
+    expected_valid = [16 if valid is None else 8, 16]
+    for dim, expected in zip(tile_type.get_effective_tile_view().valid_shape, expected_valid, strict=True):
+        assert isinstance(dim, ir.ConstInt) and dim.value == expected
+    mlir = codegen.PTOCodegen().generate(optimized)
+    assert mlir.count("pto.tload") == 1
+    ptoas = find_ptoas_binary()
+    if ptoas is not None:
+        path = tmp_path / "nd-subview.pto"
+        path.write_text(mlir)
+        result = subprocess.run(
+            [ptoas, str(path), f"--pto-arch={arch}", "--pto-level=level3", "-o", str(tmp_path / "nd.cpp")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr + mlir
+
+
+@pytest.mark.parametrize("bad_shape,bad_valid", [([17, 16], [8, 16]), ([16, 16], [7, 16])])
+def test_subview_flattened_load_must_preserve_window(bad_shape, bad_valid):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([4, 8, 16], DataType.FP32), span)
+    subview = ir.op.tensor.subview(source, [2, 8, 16], [0, 0, 0])
+    selected = ir.Var("selected", subview.type, span)
+    load = ir.op.tile.load(
+        selected, [0, 0, 0], [2, 8, 16], valid_shape=[1, 8, 16], target_memory=ir.MemorySpace.Vec
+    )
+    result_type = ir.TileType(
+        bad_shape,
+        DataType.FP32,
+        tile_view=ir.TileView(valid_shape=bad_valid),
+        memory_space=ir.MemorySpace.Vec,
+    )
+    forged = ir.Call(load.op, load.args, result_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(selected, subview, span),
+            ir.AssignStmt(ir.Var("tile", result_type, span), forged, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    function = ir.Function("bad_flatten", [source], [], body, span, type=ir.FunctionType.InCore)
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    with pytest.raises(ValueError, match="subview.*load result matches"):
+        codegen.PTOCodegen().generate(ir.Program([function], "bad_flatten", span))
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize("valid", [None, [16, 64]])
+def test_subview_fp4_load_checks_source_window_before_packing(tmp_path, dtype, valid):
+    """ND carrier rows/columns differ from the Mat destination packing axes."""
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([64, 64], dtype), span)
+    subview = ir.op.tensor.subview(source, [32, 64], [0, 0])
+    selected = ir.Var("selected", subview.type, span)
+    load = ir.op.tile.load(selected, [0, 0], [32, 64], valid_shape=valid, target_memory=ir.MemorySpace.Mat)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(selected, subview, span),
+            ir.AssignStmt(ir.Var("tile", load.type, span), load, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    function = ir.Function("fp4_load", [source], [], body, span, type=ir.FunctionType.InCore)
+    optimized = lower(ir.Program([function], "fp4_load", span), BackendType.Ascend950)
+    mlir = codegen.PTOCodegen().generate(optimized)
+    assert mlir.count("pto.tload") == 1
+    assert "rows=16, cols=128" in mlir
+    ptoas = find_ptoas_binary()
+    if ptoas is not None:
+        path = tmp_path / "fp4-subview.pto"
+        path.write_text(mlir)
+        result = subprocess.run(
+            [ptoas, str(path), "--pto-arch=a5", "--pto-level=level3", "-o", str(tmp_path / "fp4.cpp")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr + mlir
 
 
 def test_subview_return_is_rejected():

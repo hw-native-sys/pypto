@@ -11,19 +11,6 @@
 
 **操作：** `tensor.add/sub/mul/div`（逐元素，支持完整 N 维广播），`tensor.maximum/minimum`（逐元素 max/min；rhs 可为 tensor 或 scalar — `ConvertTensorToTileOps` 根据 rhs 类型分发到 `tile.maximum/minimum` 或 `tile.maximums/minimums`），`tensor.set_validshape`（更新 valid_shape 元数据，不搬移数据；也可通过 `pl.set_validshape` 使用），`tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2`（排序；分别对应 `tile.sort32` / `tile.mrgsort` 的 tensor 层接口，由 `ConvertTensorToTileOps` 转换为 tile 操作），`tensor.gather`（指定 `dim` 时按维索引，省略时按扁平元素索引；见下文），`tensor.gather_mask`（掩码模式选择；对应 `tile.gather_mask`，支持可选同位宽 `output_dtype`；见[掩码模式](#掩码模式)），`tensor.scatter`（按列散布；`tensor.gather` 的按列逆操作，MVP 仅支持 2D 输入 + `dim=-1` —— `out[b, index[b, k]] = src[b, k]`，`index` 与 `src` 同形状 —— 由 `ConvertTensorToTileOps` 下降到 `tile.scatter`），`tensor.scatter_mask`（按掩码模式散布；对应 `tile.scatter_mask`，将紧凑 `input` 按掩码扩展到 `dst` 的对应列 —— 见[掩码模式](#掩码模式)），`tensor.ci` / `tensor.arange`（生成连续整数序列，下层降到 `tile.ci`；同时通过 `pl.arange` 暴露在顶层 namespace），`tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs`（仅整数的位运算与移位。此处列出的是注册的 *IR* 名称；其中名字本身是 Python 关键字的三个，其 Python 拼写带尾部下划线 —— `tensor.and_`、`tensor.or_`、`tensor.not_` —— printer 也按该形式输出，以保证 IR 能往返为合法 Python；对应同名 `tile.*` 操作。张量-张量形式的两个操作数形状必须相同 —— 硬件没有 `tile.row_expand_and`，因此广播在类型推导阶段即被拒绝，而不是延迟到 pass 中失败。`tensor.not` 仅支持 int16/uint16，与 `tile.not`/TNOT 一致。移位保持 lhs 的元素类型；`and`/`or`/`xor` 要求操作数使用相同的 8/16/32 位 dtype，scalar 形式使用 tile 下沉要求的同位宽 signless `iN` 编码。`ConvertTensorToTileOps` 将其中九个 1:1 下降，并为 `tensor.xor`/`tensor.xors` 合成 `pto.txor` 所需的临时操作数，使 tensor 层调用者无需提供 `tmp`）
 
-`pl.tensor.subview(source, shape, offsets, *, steps=None)` 在 InCore 函数中
-借用普通 GM Tensor 的仿射窗口。它保留父视图的物理 pitch，本身不 load、
-不分配；`slice` 仍在 TensorToTile 时物化选定窗口。必须证明每个采样坐标
-都位于直接父视图的有效窗口内，且至少一维逻辑长度严格缩小。作为来源链的
-canonical `view` 也必须证明与父视图元素数相同，才能提供借用 GM 窗口；无关的
-普通 view 保持原有契约。证明为假或未知均拒绝。父视图的有效长度也必须证明
-不超过其物理 shape。首个可执行范围为二维 ND BF16、内层 stride 为 1、调用方拥有
-GM 根存储，并由 Ascend910（A2/A3）的 Vec load 消费。原生加载要求行数不超过
-4095、索引在有符号 32 位范围内、有效行和物理行均按 32 字节对齐，且源行间隔
-字节数在无符号 32 位范围内。`GetSubviewLoadLimits` 提供这些目标约束；其他
-后端在原生加载范围完成验证前拒绝 subview。Tile/DistributedTensor 输入、描述符逃逸、
-编译器分配的根存储及通过描述符写入均拒绝。
-
 `tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）。编排层通常仅支持 ND shape 重新解释，且不能同时改变 layout；FP8E8M0 dynamic scale storage 还允许在 packed ND 与 `MX_A_ZZ` 或 `MX_B_NN` 之间建立元素数相同的 shaped alias，编排层保留同一个 runtime tensor，不调用 `reshape`。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 
 扁平 gather 复用 `pl.gather(src, index=idx)`（等价于 `pl.gather(src, idx)`），
@@ -93,6 +80,34 @@ with ib.function("tensor_example") as f:
     result = ib.let("result", tensor.add(input_a, input_b))
     ib.return_stmt(result)
 ```
+
+### 借用的 GM 子视图
+
+`pl.tensor.subview(source, shape, offsets, *, steps=None)` 在 InCore 函数中
+描述普通 GM Tensor 的只读窗口。它不 load、不分配，并保留父视图的物理 pitch。
+与 `view` 相比，它选择严格更小的窗口；与 `slice` 相比，它在 TensorToTile
+转换时仍保留为 GM 描述符。
+
+| 参数 | 含义及约束 |
+| ---- | ---------- |
+| `source` | 调用者提供的普通 GM Tensor，或已证明的 metadata/subview 别名；不支持 Tile、DistributedTensor |
+| `shape` | 正的逻辑长度，rank 与父视图一致 |
+| `offsets` | 在直接父视图坐标系中的非负起点 |
+| `steps` | 正的采样步长，省略时每一维均为 1 |
+
+每一维的 `offset + (shape - 1) * step` 都必须位于父视图有效长度内，且至少
+一维逻辑长度严格缩小。父视图有效长度不得超过物理 shape。作为来源链的
+canonical `view` 必须保持元素数。所有几何和地址运算必须证明不溢出。
+动态参数仅在周围控制流能够证明这些条件时支持；证明为假或未知均拒绝。
+
+结果保留来源 dtype/layout，将父 stride 乘以 `steps`，整个逻辑 shape 均有效。
+支持嵌套 subview。Metadata 别名必须保持地址映射，`set_validshape` 只能缩小
+有效区。描述符逃逸、编译器分配的根存储及通过借用描述符写入均拒绝。
+
+消费者沿用已有 lowering 和设备约束。现有 ND/DN load 要求最内层存储轴连续；
+该轴上的非单位步长需要支持它的消费者。标量 `tensor.read` 须先将窗口 load 到
+Tile。N-D load 保留来源坐标，由流水线展平结果 Tile。Subview 本身不增加
+后端专属的 dtype、rank、DMA 行数、行间隔位宽或对齐限制。
 
 ## TileOp：硬件优化 Tile 操作
 

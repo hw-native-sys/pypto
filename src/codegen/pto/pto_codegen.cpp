@@ -750,7 +750,7 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   VerifyVFInfrastructureCodegenPreconditions(program);
   for (const auto& [gvar, function] : program->functions_) {
-    ir::VerifyTensorSubviews(function, GetBackendHandler());
+    ir::VerifyTensorSubviews(function);
   }
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
