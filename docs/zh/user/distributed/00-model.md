@@ -108,7 +108,8 @@ cfg = RunConfig(platform="a2a3", distributed_config=dc)
 
 inputs = torch.randn(2, 1, SIZE)
 outputs = torch.zeros_like(inputs)
-orchestrator(inputs, outputs, config=cfg)   # 阻塞直到两个 rank 都完成
+compiled = orchestrator.compile(inputs, outputs, config=cfg)
+compiled(inputs, outputs, config=cfg)   # 阻塞直到两个 rank 都完成
 ```
 
 这是"one-shot"派发模式。`DistributedWorker`、持久 worker 和多程序派发见

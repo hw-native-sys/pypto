@@ -12,6 +12,7 @@
 import importlib
 import math
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,7 +26,16 @@ def _load_api() -> Any:
     return importlib.import_module("simpler.task_interface")
 
 
+def check_tensor_dtype(dtype: Any) -> None:
+    """Reject unsupported borrowed tensor types before registration or enqueue."""
+    import torch  # noqa: PLC0415
+
+    if dtype == torch.bool:
+        raise ValueError("Torch eager kernels do not support torch.bool tensors in the pinned runtime")
+
+
 def _tensor_dtype(dtype: Any) -> Any:
+    check_tensor_dtype(dtype)
     from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
 
     return torch_dtype_to_datatype(dtype)
@@ -46,7 +56,8 @@ class SourcePool:
     A failed close keeps both the registration and allocation owner for retry.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, release_buffer: Callable[[Any], None]) -> None:
+        self._release_buffer = release_buffer
         self._location: Any = None
         self._sources: dict[tuple[int, int], _Source] = {}
         self._lock = threading.Lock()
@@ -71,7 +82,7 @@ class SourcePool:
         with self._lock:
             source = self._sources[key]
             if source.uses == 1:
-                source.buffer.close()
+                self._release_buffer(source.buffer)
                 del self._sources[key]
             else:
                 source.uses -= 1
@@ -80,7 +91,7 @@ class SourcePool:
         """Revoke remaining preparation-only sources after pending runs retire."""
         with self._lock:
             for key in list(self._sources):
-                self._sources[key].buffer.close()
+                self._release_buffer(self._sources[key].buffer)
                 del self._sources[key]
 
 

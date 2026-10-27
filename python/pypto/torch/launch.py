@@ -55,9 +55,12 @@ def check_eager_call(config: Any) -> bool:
 
 
 def check_frame(frame: Any, config: Any) -> bool:
+    from pypto.runtime.kernel.arguments import check_tensor_dtype  # noqa: PLC0415
+
     if frame.device_index != config.device_id:
         raise ValueError("Kernel call device differs from its initialized Worker device")
     for argument in frame.tensors:
+        check_tensor_dtype(argument.tensor.dtype)
         meta = argument.metadata
         if not 1 <= len(meta.shape) <= 5 or any(
             extent <= 0 or extent > 0xFFFFFFFF for extent in (*meta.shape, *meta.strides)

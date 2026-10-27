@@ -169,14 +169,17 @@ CallFrame 构造 TaskArgs，并管理本次调用的 storage 租用，不进入 
 storage 按基址和完整容量通过 `Buffer.wrap(..., location=worker.device_location)`
 注册。Tensor view 保留字节 offset 和 stride；原生 NZ 使用经过校验的物理 blocked
 维度。同一 storage 的 view 和重叠 pending 调用共享会话 source，每次调用持有租用
-直到 run 退休；最后一个租用释放时才关闭 source。Tensor 使用 INPUT/OUTPUT_EXISTING/
+直到 run 退休；最后一个租用通过 `Worker.release_buffer()` 关闭 source 并清除缓存导入。
+释放失败时保留租用供后续重试。Tensor 使用 INPUT/OUTPUT_EXISTING/
 INOUT 和显式 NONE transfer，Scalar 通过带类型的 ctypes 值传给公开
 `TaskArgs.add_scalar`，不隐式执行 H2D。
 
 `RunOpApiV2` 入队前，Python pending ticket 已持有 BorrowedArguments、Torch stream、
 callback、配置、Worker 和 callable。native `enqueue` 函数校验 context、记录 allocator
 stream 并捕获 native stream，不再创建 native ticket 或持有 Tensor 引用。
-入队期间释放调用线程的 GIL；callback 获取
+入队前设置 torch_npu 的进程级 `g_used_aclop` 标志，让支持的 2.6/2.10
+版本在后续队列排空时释放 GIL；该标志保持到进程结束。
+入队期间也释放调用线程的 GIL；callback 获取
 GIL 后调用公开 Python `Worker.submit(..., caller_stream=...)`，再发布 RunHandle。
 不使用同步 `Worker.run`、私有 native submit 或 slot API。native 队列状态不拥有
 Python 引用；pending owners 和 callback closure 仅在退休成功后、持有 GIL 时释放。
@@ -221,6 +224,8 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
 
 - 接受同一设备上的真实 NPU torch Tensor。拒绝 CPU、Meta/Fake Tensor 和 Worker
   自有对象，不自动选择 program mode。
+- BOOL Tensor 在编译或源注册前被拒绝：固定版本运行时缺少借用 BOOL Tensor 的类型映射。
+  BOOL Scalar 仍受支持。
 - 对照 `ParamInfo` 校验 dtype 和 rank。静态 carrier 维度必须匹配；`-1` 维度使用
   本次大小。打包 FP4 直接使用 `ParamInfo` 已提供的 carrier shape，不再次展开。
 - 要求 base NCHW (0) 或 ND (2) 格式的连续 strided view，保留非零 storage offset
@@ -232,8 +237,11 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
   物理描述符查询按需加载可选 native adapter；UT 仅替换该查询边界。
   签名校验直接比较逻辑 Torch shape 与逻辑 `ParamInfo`；物理查询独立校验
   blocked 维度和字节容量。
-- 空 view 不访问任何元素，因此非负 storage offset 可以超过 storage 容量；
-  仅对非空 view 校验访问范围上界。
+- `CallSignature` 接受空 view：它们不访问任何元素，因此非负 storage offset 可以
+  超过 storage 容量；仅对非空 view 校验访问范围上界。eager launch 的运行时描述符
+  契约更严格，要求 rank 为 1..5，extent/stride 为正 u32 值。
+  即使 frame 校验成功，零尺寸 Tensor 仍会在编译或注册前被拒绝；空 view 的互操作
+  测试仅覆盖 frame 校验。
 - 允许字节区间完全一致的别名（可具有不同 dtype/shape）、同一 storage 上互不相交的 view，以及重叠的
   只读 view。涉及 Out/InOut 的部分重叠需要更丰富的别名契约，当前明确拒绝。
 - 使用 program Scalar 类型映射复制 Python 或类型匹配的 ctypes Scalar。
@@ -291,14 +299,14 @@ API 选择测试在 PyTorch 2.6 上模拟旧注册入口，验证 Fake/Meta disp
 
 ## 可选依赖与范围
 
-`import pypto.torch` 导出 `init`，尚不提供 kernel 提交入口。导入该包、`interop` 或 `registration` 模块不请求 torch_npu、
+`import pypto.torch` 导出 `init`，初始化后的直接 JIT 调用通过 eager 路径提交 kernel。导入该包、`interop` 或 `registration` 模块不请求 torch_npu、
 Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正描述 NPU 调用时
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 
-本基础能力覆盖公共编译、metadata 与缓存加载、Python 调用 frame 所有权及内部 schema/Fake 辅助，
-不表示 kernel launch、
-taskQueue 顺序、allocator 安全、eager 数值执行或 ACLGraph 已可用。公开入口切换
-必须等待 native adapter 和 runtime 集成完成。
+公共编译、metadata/缓存加载、调用 frame 所有权、进程初始化和 eager 提交均已实现。
+直接 JIT 调用使用 Torch 队列桥接，显式 `compile()` 保留 program 执行语义。
+单元测试通过模拟执行边界验证队列顺序和资源生命周期。native adapter 构建、真实设备
+数值正确性及 allocator 安全仍需设备验证；ACLGraph capture/replay 仍不支持。
 
 ## 验证
 
@@ -321,7 +329,9 @@ PyPTO 自身行为与已安装的框架插件。查找器的负向测试确保 C
 
 `tests/st/runtime/kernel/test_torch_interop.py` 核对真实 NPU Tensor、非默认 stream、
 offset view 和非连续输入拒绝行为。没有真实 NPU 或所选平台为模拟器时跳过。
-这些是 metadata 测试，不是 PyPTO kernel 执行测试。
+这些测试包含 metadata 验证，以及使用 native adapter 的子进程队列回归测试：
+验证持有 GIL 的 `stream.query()` 和 `empty_cache()` 能完成队列排空。
+队列回归只执行 Python callback，不启动 PyPTO 设备 kernel。
 
 `tests/ut/torch/test_registration.py` 覆盖 schema mutation/alias 契约、Fake/Meta
 与符号输入、隔离导入、重复定义，以及不依赖真实 kernel executor 的测试内

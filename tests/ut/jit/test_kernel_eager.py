@@ -60,6 +60,23 @@ def test_uninitialized_fails_before_binding_or_compilation(eager_env, copy_kerne
     assert not eager_env.workers
 
 
+def test_bool_tensors_fail_before_compilation_and_packing(eager_env, copy_kernel, monkeypatch):
+    from pypto.runtime.kernel import arguments  # noqa: PLC0415
+
+    env = eager_env
+    env.init()
+    # Exercise the production converter too: the shared fixture normally stubs
+    # runtime dtype conversion, which previously hid the missing BOOL mapping.
+    monkeypatch.setattr(arguments, "_tensor_dtype", env.tensor_dtype)
+    with pytest.raises(ValueError, match=r"do not support torch.bool tensors"):
+        arguments._tensor_dtype(torch.bool)
+    with pytest.raises(ValueError, match=r"do not support torch.bool tensors"):
+        copy_kernel(env.tensor(dtype=torch.bool), 1, env.tensor(dtype=torch.bool))
+    assert not copy_kernel._cache and not env.buffers and not env.queue
+    assert "register" not in env.events
+    env.state.close()
+
+
 def test_real_compiler_cache_callback_and_retirement(eager_env, copy_kernel, stub_device_runner):
     env = eager_env
     env.init()
