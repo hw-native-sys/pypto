@@ -4953,31 +4953,58 @@ def test_storage_unknown_mat_carry_does_not_alias_fresh_acc_results(planner, tmp
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
-@pytest.mark.parametrize("variant", ["vec-left", "bias-snapshot", "partitioned-store"])
-def test_storage_unsupported_placement_keeps_existing_diagnostic(planner, variant, capfd):
-    """Snapshot protection must not convert an unsupported fold into a new error."""
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "vec-left",
+        "bias-snapshot",
+        "partitioned-store",
+        "reshaped-store",
+        "bias-m-only",
+        "bias-n-window-write",
+    ],
+)
+def test_storage_snapshot_constraint_matches_emitted_placement(planner, variant, capfd):
+    """Guard supported store folds while retaining unsupported-placement controls."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
     space = "Vec" if variant == "vec-left" else "Mat"
-    K, N = (1024, 512) if variant == "bias-snapshot" else (64, 256)
-    dtype = "INT8" if variant == "bias-snapshot" else "BF16"
-    bias_dtype = "INT32" if variant == "bias-snapshot" else "FP32"
+    needs_bias_windows = variant in ("bias-snapshot", "bias-n-window-write")
+    K, N = (1024, 512) if needs_bias_windows else (64, 256)
+    dtype = "INT8" if needs_bias_windows else "BF16"
+    bias_dtype = "INT32" if needs_bias_windows else "FP32"
     bias_load = f"        bias_mat = pl.load(bias, [0, 0], [1, {N}], target_memory=pl.Mem.Mat)\n"
     product = (
-        "pl.tile.matmul_bias(at, bt, bias_mat)" if variant == "bias-snapshot" else "pl.tile.matmul(at, bt)"
+        "pl.tile.matmul_bias(at, bt, bias_mat)" if variant.startswith("bias-") else "pl.tile.matmul(at, bt)"
     )
-    partition = ", [256, 256]" if variant == "partitioned-store" else ""
+    partition = ""
+    output_shape = f"256, {N}"
+    store_offsets = "0, 0"
+    if variant == "partitioned-store":
+        partition = f", [256, {N}]"
+    elif variant == "reshaped-store":
+        # A non-singleton batch prefix reshapes the output instead of storing
+        # one matrix page. It remains outside the direct M/N-fold contract.
+        partition = f", [2, 128, {N}]"
+        output_shape = f"2, 128, {N}"
+        store_offsets = "0, 0, 0"
     barrier = (
         "        side = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)\n"
-        if variant == "bias-snapshot"
+        if variant.startswith("bias-")
         else ""
+    )
+    writer = (
+        f"pl.tile.create([256, {K}], dtype=pl.{dtype}, target_memory=pl.Mem.{space})"
+        if variant == "bias-snapshot"
+        else f"pl.load(a_next, [0, 0], [256, {K}], target_memory=pl.Mem.{space})"
     )
     before = pl.parse_program(f"""@pl.program
 class Before:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(self, a: pl.Tensor[[256, {K}], pl.{dtype}], b: pl.Tensor[[{K}, {N}], pl.{dtype}],
-               bias: pl.Tensor[[1, {N}], pl.{bias_dtype}],
-               out: pl.Out[pl.Tensor[[256, {N}], pl.{bias_dtype}]]) -> pl.Tensor[[256, {N}], pl.{bias_dtype}]:
+               a_next: pl.Tensor[[256, {K}], pl.{dtype}], bias: pl.Tensor[[1, {N}], pl.{bias_dtype}],
+               out: pl.Out[pl.Tensor[[{output_shape}], pl.{bias_dtype}]],
+    ) -> pl.Tensor[[{output_shape}], pl.{bias_dtype}]:
         at: pl.Tile[
             [256, {K}], pl.{dtype}, pl.MemRef("inputs", slots=2)[0], pl.Mem.{space}
         ] = pl.load(a, [0, 0], [256, {K}], target_memory=pl.Mem.{space})
@@ -4985,10 +5012,27 @@ class Before:
 {bias_load}        c = {product}
         changed: pl.Tile[
             [256, {K}], pl.{dtype}, pl.MemRef("inputs", slots=2)[0], pl.Mem.{space}
-        ] = pl.load(a, [0, 0], [256, {K}], target_memory=pl.Mem.{space})
-{barrier}        result = pl.tile.store(c, [0, 0], out{partition})
+        ] = {writer}
+{barrier}        result = pl.tile.store(c, [{store_offsets}], out{partition})
         return result
 """)
+    _storage_verify_source(before)
+    if variant == "partitioned-store":
+        # #3091 admits a full physical output window. Deferring that grid would
+        # now cross the input overwrite, and the full Acc cannot fit in L0C.
+        with (
+            passes.PassContext([], memory_planner=planner),
+            pytest.raises(ValueError, match="input snapshot.*no full-output K-only plan fits"),
+        ):
+            passes.auto_tile_matmul_l0()(before)
+        return
+    if variant == "bias-m-only":
+        with (
+            passes.PassContext([], memory_planner=planner),
+            pytest.raises(ValueError, match="input snapshot.*delayed M/N store fold"),
+        ):
+            passes.auto_tile_matmul_l0()(before)
+        return
     with passes.PassContext([], memory_planner=planner):
         passes.auto_tile_matmul_l0()(before)
     diagnostics = capfd.readouterr().err

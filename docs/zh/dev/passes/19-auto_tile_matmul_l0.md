@@ -117,7 +117,7 @@ Acc tile，每块都必须放入后端 L0C 容量，列数不超过 4095。N 和
 不属于受支持改写的生产者/使用模式仍受分配检查和最终 NZ store 检查约束。
 用户也可显式按列分块；NZ 写回仍不能沿 M 拆分。
 
-快照检查仅用于支持的 Mat 操作数 direct-store 切分。未知存储来源仍保留已知 memory space：Acc 写入不能覆盖 Mat 输入，而未知物理 effect 仍保守处理。已能容纳但不在切分网格上的完整 matmul 保留其声明结果存储，不强制切分。已经降低到 Buffer IR 的函数保持不变。
+快照检查仅用于支持的 Mat 操作数 direct-store 切分。未知存储来源仍保留已知 memory space：Acc 写入不能覆盖 Mat 输入，而未知物理 effect 仍保守处理。已能容纳但不在切分网格上的完整 matmul 保留其声明结果存储，不强制切分。已经降低到 Buffer IR 的函数保持不变。 发射端也检查实际 direct-store 路由：bias barrier 可能禁止 N 子窗口重建，但仍允许完整 N 的 M-only 切分；后者也必须保留输入快照。
 
 ## 公共视图语义与 Call 重建
 

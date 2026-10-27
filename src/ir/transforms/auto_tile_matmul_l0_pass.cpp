@@ -2480,11 +2480,12 @@ class AutoTileMutator : public IRMutator {
                 "the input snapshot of '" + hazard->second + "' across a possible later write";
           }
         }
-        if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
-                                        consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
-                                        /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0,
-                                        full_output_reason.empty() ? nullptr : full_output_reason.c_str())) {
+        if (auto tiling =
+                AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
+                              /*output_box_alignment=*/std::nullopt, &direct_defs,
+                              consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
+                              /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0,
+                              full_output_reason.empty() ? nullptr : full_output_reason.c_str())) {
           auto emit_k_only = [&](const MatmulTiling& plan) {
             // AnalyzeMatmul skips a full M/N/K fit, so a shape-preserving plan
             // reaching this emitter must split K. Preserve the original result
@@ -2569,6 +2570,19 @@ class AutoTileMutator : public IRMutator {
                 tiling->assign->span_);
           }
           if (bias_snapshot_reaches_store) {
+            // A bias barrier rejects N-window reconstruction, not a full-N
+            // M-only fold. That candidate can reach this emitter even when
+            // supports_output_grid was false during early classification.
+            // Check the realized route as well: never defer its Mat reads
+            // past an overwrite, and never turn an unsupported route's
+            // placement hint into a snapshot error.
+            if (result_uses == 1 && store_stmt && !tiling->stage_lhs_to_mat &&
+                AnalyzeDirectGmStore(As<Call>(store_stmt->value_))) {
+              CHECK_SPAN(delayed_input_hazards_.count(assign->var_.get()) == 0, assign->span_)
+                  << "AutoTile cannot preserve the input snapshot of '" << assign->var_->name_hint_
+                  << "' in a delayed M/N store fold. Store the result before reusing its input storage, "
+                     "or use separate input slots.";
+            }
             if (auto fold = TryFoldMNTiling(*tiling, result_uses, store_stmt, hints)) {
               if (tiling->bias_load_def && tiling->n != tiling->N) {
                 retroactively_dropped.insert(tiling->bias_load_def->var_.get());
