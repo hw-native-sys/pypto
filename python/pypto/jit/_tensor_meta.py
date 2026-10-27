@@ -416,9 +416,10 @@ def _constant_slice_extent(
     """Prove a slice width without assigning sample values to runtime bounds.
 
     Static bounds keep their existing integer resolution. Otherwise translate
-    pure affine integer syntax into INDEX expressions and use the same arithmetic
-    analyzer as the parser. Symbols belong to this pair of bounds only: repeated
-    names refer to the same current binding, never an earlier assignment's value.
+    integer arithmetic promoted by constants into INDEX expressions and use the
+    same arithmetic analyzer as the parser. Symbols belong to this pair of bounds
+    only: repeated names refer to the same current binding, never an earlier
+    assignment's value.
     Unresolved calls/reads and nonlinear arithmetic are deliberately not atoms:
     treating two identical calls as one symbol could cancel different results.
     """
@@ -453,7 +454,11 @@ def _constant_slice_extent(
                 return None
             if isinstance(lhs, int) and isinstance(rhs, int):
                 return _fold_int_arith(node.op, lhs, rhs)
-            if isinstance(node.op, ast.Mult) and not (isinstance(lhs, int) or isinstance(rhs, int)):
+            # Scalar dtypes are unavailable here. A constant operand promotes
+            # the parser's arithmetic to INDEX; two runtime operands may instead
+            # overflow in a narrower dtype before a later INDEX promotion.
+            # Do not reassociate across that unknown promotion boundary.
+            if not (isinstance(lhs, int) or isinstance(rhs, int)):
                 return None
             operation = operations.get(type(node.op))
             left, right = as_index(lhs), as_index(rhs)
@@ -462,11 +467,11 @@ def _constant_slice_extent(
             return operation(left, right)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             operand = convert(node.operand)
-            if operand is None or isinstance(node.op, ast.UAdd):
-                return operand
             if isinstance(operand, int):
-                return -operand
-            return _ir.sub(_ir.ConstInt(0, DataType.INDEX, span), operand)
+                return -operand if isinstance(node.op, ast.USub) else operand
+            # Runtime negation retains the operand dtype in the parser; it is
+            # not equivalent to INDEX subtraction for a narrow signed minimum.
+            return None
 
         # Resolve only leaves here, not each recursively visited arithmetic
         # subtree, so long expressions do not repeatedly scan the same nodes.

@@ -2368,8 +2368,12 @@ class TestConstantWidthSliceMetadata:
             ("base:128 + base", 128),
             ("base - 16:base + 112", 128),
             ("base * 128:(base + 1) * 128", 128),
-            ("base + other:base + other + 128", 128),
-            ("-base:128 - base", 128),
+            ("0 - base:128 - base", 128),
+            ("base + other:base + other + 128", None),
+            ("base + other:base + (other + 128)", None),
+            ("base - other:base + (128 - other)", None),
+            ("base + base:2 * base + 128", None),
+            ("-base:128 - base", None),
             ("base:base + WIDTH", 128),
             ("base:other + 128", None),
             ("base:base + width", None),
@@ -2404,6 +2408,30 @@ class TestConstantWidthSliceMetadata:
         assert metas["view"] == TensorMeta(
             shape=(expected, 32), dtype=DataType.BF16, layout=ir.TensorLayout.ND
         )
+
+    def test_narrow_scalar_slice_branch_does_not_infer_fixed_width(self):
+        @jit.inline
+        def consumer(view: pl.Tensor):
+            return view
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_SLICE_ROWS_3145, 32], pl.BF16],
+            base: pl.Scalar[pl.INT32],
+            other: pl.Scalar[pl.INT32],
+            flag: pl.Scalar[pl.BOOL],
+        ):
+            if flag:
+                view = src[base + other : base + (other + 128), :]
+            else:
+                view = pl.create_tensor([128, 32], dtype=pl.BF16)
+            return consumer(view)
+
+        # The lower sum is INT32, while the literal promotes the upper to
+        # INDEX. Do not manufacture a [128, 32] helper parameter across this
+        # overflow boundary and leave the parser to discover a shape mismatch.
+        with pytest.raises(ValueError, match="missing inferred tensor metadata for parameter 'view'"):
+            entry.specialize()
 
     def test_fixed_width_slice_does_not_reuse_rebound_alias(self):
         def body(src, base, other):
