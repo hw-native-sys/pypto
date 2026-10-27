@@ -19,9 +19,10 @@ import functools
 import math
 import types
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from pypto.arith import Analyzer
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
@@ -320,7 +321,7 @@ def _dep_return_metas(
                     instance_dims[key] = synthesized_dyn_dim(deps.owner, result, axis)
                 dim = instance_dims[key]
             shape.append(dim)
-        return TensorMeta(shape=tuple(shape), dtype=meta.dtype, layout=meta.layout)
+        return replace(meta, shape=tuple(shape))
 
     resolved = {
         v: instantiate(callee_metas[r], index)
@@ -407,6 +408,92 @@ def _fold_int_arith(op: ast.operator, lhs: int, rhs: int) -> int | None:
     return None
 
 
+def _constant_slice_extent(
+    lower: ast.expr | None,
+    upper: ast.expr,
+    resolve_int: Callable[[ast.expr], int | None],
+) -> int | None:
+    """Prove a slice width without assigning sample values to runtime bounds.
+
+    Static bounds keep their existing integer resolution. Otherwise translate
+    integer arithmetic promoted by constants into INDEX expressions and use the
+    same arithmetic analyzer as the parser. Symbols belong to this pair of bounds
+    only: repeated names refer to the same current binding, never an earlier
+    assignment's value.
+    Unresolved calls/reads and nonlinear arithmetic are deliberately not atoms:
+    treating two identical calls as one symbol could cancel different results.
+    """
+    start = 0 if lower is None else resolve_int(lower)
+    stop = resolve_int(upper)
+    if isinstance(start, int) and isinstance(stop, int):
+        return stop - start
+
+    span = _ir.Span.unknown()
+    symbols: dict[str, _ir.Var] = {}
+    operations: dict[type[ast.operator], Callable[[_ir.Expr, _ir.Expr], _ir.Expr]] = {
+        ast.Add: _ir.add,
+        ast.Sub: _ir.sub,
+        ast.Mult: _ir.mul,
+    }
+
+    def as_index(value: int | _ir.Expr) -> _ir.Expr | None:
+        if isinstance(value, _ir.Expr):
+            return value
+        # Python constant folding uses unbounded integers; the analyzer's INDEX
+        # constants have an int64 payload. Decline rather than truncate a bound.
+        if not -(1 << 63) <= value < (1 << 63):
+            return None
+        return _ir.ConstInt(value, DataType.INDEX, span)
+
+    def convert(node: ast.expr | None) -> int | _ir.Expr | None:
+        if node is None:
+            return 0
+        if isinstance(node, ast.BinOp):
+            lhs, rhs = convert(node.left), convert(node.right)
+            if lhs is None or rhs is None:
+                return None
+            if isinstance(lhs, int) and isinstance(rhs, int):
+                return _fold_int_arith(node.op, lhs, rhs)
+            # Scalar dtypes are unavailable here. A constant operand promotes
+            # the parser's arithmetic to INDEX; two runtime operands may instead
+            # overflow in a narrower dtype before a later INDEX promotion.
+            # Do not reassociate across that unknown promotion boundary.
+            if not (isinstance(lhs, int) or isinstance(rhs, int)):
+                return None
+            operation = operations.get(type(node.op))
+            left, right = as_index(lhs), as_index(rhs)
+            if operation is None or left is None or right is None:
+                return None
+            return operation(left, right)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = convert(node.operand)
+            if isinstance(operand, int):
+                return -operand if isinstance(node.op, ast.USub) else operand
+            # Runtime negation retains the operand dtype in the parser; it is
+            # not equivalent to INDEX subtraction for a narrow signed minimum.
+            return None
+
+        # Resolve only leaves here, not each recursively visited arithmetic
+        # subtree, so long expressions do not repeatedly scan the same nodes.
+        value = resolve_int(node)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(node, ast.Name):
+            if node.id not in symbols:
+                symbols[node.id] = _ir.Var(node.id, _ir.ScalarType(DataType.INDEX), span)
+            return symbols[node.id]
+        return None
+
+    lhs, rhs = convert(upper), convert(lower)
+    if lhs is None or rhs is None:
+        return None
+    upper_expr, lower_expr = as_index(lhs), as_index(rhs)
+    if upper_expr is None or lower_expr is None:
+        return None
+    extent = Analyzer().simplify(_ir.sub(upper_expr, lower_expr))
+    return extent.value if isinstance(extent, _ir.ConstInt) else None
+
+
 def _subscript_slice_meta(
     sub: ast.Subscript,
     local: Mapping[str, TensorMeta],
@@ -418,10 +505,12 @@ def _subscript_slice_meta(
     form 2): dtype is inherited from ``src``; each slice dim resolves to
     ``stop - start`` (``start`` defaults to 0), and an open upper bound ``a:``
     resolves to ``parent_dim - start`` — mirroring the parser's
-    ``_build_subscript_slice_args``. A dim falls back to the parent extent when
-    its bounds aren't static — a ``DynDim`` parent flows through transparently
-    that way; a scalar index drops its dim (numpy-style rank reduction); dims
-    past the supplied indices are implicit ``:`` and keep the parent extent.
+    ``_build_subscript_slice_args``. Constant differences of runtime bounds
+    (``base:base + width``) retain their static width. A dim falls back to the
+    parent extent when the width cannot be proved — a ``DynDim`` parent flows
+    through transparently that way; a scalar index drops its dim (numpy-style
+    rank reduction); dims past the supplied indices are implicit ``:`` and keep
+    the parent extent.
     Returns ``None`` (skipped, leaving the clear ``_build_params`` error) when
     ``src`` is unknown, a step slice is used, or the index count exceeds
     ``src``'s rank.
@@ -435,24 +524,31 @@ def _subscript_slice_meta(
     if len(indices) > len(src_meta.shape):
         return None
     dims: list[ShapeDim] = []
+    inexact_axes: set[int] = set()
     for dim_idx, idx in enumerate(indices):
         if not isinstance(idx, ast.Slice):
             continue  # scalar index → rank-reducing, dim dropped
         if idx.step is not None:
             return None
-        start = 0 if idx.lower is None else resolve_int(idx.lower)
         parent = src_meta.shape[dim_idx]
         if idx.upper is None:
             # Open upper bound ``a:`` — the parser bounds it at ``parent - start``
             # (see ``_build_subscript_slice_args``), so mirror that here instead
             # of falling back to the full parent extent for a nonzero ``start``.
+            start = 0 if idx.lower is None else resolve_int(idx.lower)
             extent = parent - start if isinstance(parent, int) and isinstance(start, int) else None
         else:
-            stop = resolve_int(idx.upper)
-            extent = stop - start if isinstance(start, int) and isinstance(stop, int) else None
+            extent = _constant_slice_extent(idx.lower, idx.upper, resolve_int)
+        if (
+            extent is None and isinstance(parent, int) and (idx.lower is not None or idx.upper is not None)
+        ) or (idx.upper is None and dim_idx in src_meta.inexact_axes):
+            inexact_axes.add(len(dims))
         dims.append(extent if extent is not None else parent)
+    inexact_axes.update(
+        len(dims) + axis - len(indices) for axis in src_meta.inexact_axes if axis >= len(indices)
+    )
     dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
-    return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype, layout=src_meta.layout)
+    return replace(src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes))
 
 
 def _call_operand(call: ast.Call, index: int | None, name: str) -> ast.expr | None:
@@ -615,7 +711,7 @@ def _alias_dim(alias: tuple[str, int] | None, local: Mapping[str, TensorMeta]) -
     rank = len(src_meta.shape)
     if axis < 0:
         axis += rank
-    return src_meta.shape[axis] if 0 <= axis < rank else None
+    return src_meta.shape[axis] if 0 <= axis < rank and axis not in src_meta.inexact_axes else None
 
 
 def _assignment_parts(stmt: ast.stmt) -> tuple[list[ast.expr], ast.expr | None] | None:
@@ -676,7 +772,8 @@ def _merge_tensor_metas(lhs: TensorMeta | None, rhs: TensorMeta | None) -> Tenso
     ):
         return None
     # Keep explicit ND so a later helper annotation cannot overwrite it as unspecified.
-    return rhs if lhs.layout is None and rhs.layout is not None else lhs
+    result = rhs if lhs.layout is None and rhs.layout is not None else lhs
+    return replace(result, inexact_axes=lhs.inexact_axes | rhs.inexact_axes)
 
 
 def _resolve_dim_binop(elt: ast.BinOp, resolve: Callable[[ast.expr], _DimValue]) -> _DimValue:
@@ -855,7 +952,7 @@ def _update_dim_values(
                 and isinstance(elt, ast.Name)
                 and axis < len(unpack_meta.shape)
             ):
-                dim_values[elt.id] = unpack_meta.shape[axis]
+                dim_values[elt.id] = None if axis in unpack_meta.inexact_axes else unpack_meta.shape[axis]
                 continue
             _forget_names(elt, dim_values)
 
@@ -1107,20 +1204,31 @@ def _resolve_dim_axis(node: ast.expr, scope: _StaticScope) -> int | None:
     return None
 
 
-def _preview_static_unary_plus(
+class _StaticPreview(NamedTuple):
+    """Folded scalar source locations from one body rewrite."""
+
+    unary_plus: dict[tuple[int, int], int]
+    constants: dict[tuple[int, int], int]
+
+
+def _preview_static_expressions(
     func_def: ast.FunctionDef,
     seed_meta: Mapping[str, TensorMeta],
     scope: _StaticScope,
     constexpr_values: Mapping[str, str] | None,
-) -> dict[tuple[int, int], int]:
-    """Preview the real body rewrite once, recording static unary-plus source points.
+) -> _StaticPreview:
+    """Preview the real body rewrite once, recording expressions emitted as constants.
 
     Runtime names left by alpha-renaming must never resolve through globals.
+    Shape aliases are constants only where the real transformer inlines them;
+    ordinary and annotated scalar assignments remain variables even if their
+    initializer is known. Source positions associate the copy with the input AST.
     Memoizing the pure constant fold keeps nested unary expressions linear.
     """
-    if not any(isinstance(node, ast.UAdd) for node in ast.walk(func_def)):
-        return {}
+    if not any(isinstance(node, (ast.UAdd, ast.Subscript)) for node in ast.walk(func_def)):
+        return _StaticPreview({}, {})
     values: dict[tuple[int, int], int] = {}
+    constants: dict[tuple[int, int], int] = {}
 
     @functools.cache
     def static_int(node: ast.expr) -> int | None:
@@ -1140,6 +1248,21 @@ def _preview_static_unary_plus(
         return None
 
     class Preview(_BodyTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.expr:
+            transformed = super().visit_Name(node)
+            value = static_int(transformed)
+            if value is not None and hasattr(node, "lineno") and hasattr(node, "col_offset"):
+                constants[node.lineno, node.col_offset] = value
+            return transformed
+
+        def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
+            position = (getattr(node, "lineno", -1), getattr(node, "col_offset", -1))
+            transformed = super().visit_Subscript(node)
+            value = static_int(transformed)
+            if value is not None:
+                constants[position] = value
+            return transformed
+
         def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.UnaryOp:
             position = (node.lineno, node.col_offset)
             transformed = cast("ast.UnaryOp", self.generic_visit(node))
@@ -1150,7 +1273,16 @@ def _preview_static_unary_plus(
             return transformed
 
     transformer = Preview(
-        tensor_meta=dict(seed_meta),
+        tensor_meta={
+            name: replace(
+                meta,
+                shape=tuple(
+                    synthesized_dyn_dim(func_def.name, name, axis) if axis in meta.inexact_axes else dim
+                    for axis, dim in enumerate(meta.shape)
+                ),
+            )
+            for name, meta in seed_meta.items()
+        },
         dep_names=set(),
         param_names=[
             arg.arg
@@ -1170,13 +1302,54 @@ def _preview_static_unary_plus(
             transformer.visit(stmt)
     except (IndexError, KeyError, TypeError, ValueError):
         # Invalid source still belongs to the normal specializer/parser path.
-        return {}
-    return values
+        return _StaticPreview({}, {})
+    return _StaticPreview(values, constants)
 
 
 def _matching_static_unary_plus(value: int | None, operand: _DimValue) -> int | None:
     """Accept the preview only when the current binding independently agrees."""
     return value if value is not None and isinstance(operand, int) and operand == value else None
+
+
+def _resolve_slice_int(
+    elt: ast.expr,
+    scope: _StaticScope,
+    constants: Mapping[tuple[int, int], int],
+    local: Mapping[str, TensorMeta],
+) -> int | None:
+    """Resolve literal-foldable constants, never known-valued runtime locals.
+
+    The dimension table also records ``width = 128`` and annotated scalar
+    assignments. Those names survive specialization as Vars, preserving
+    their declared dtypes; replacing them with INDEX literals would prove
+    extents the parser cannot prove. Shape aliases require literal emission
+    by the body transformer. Direct shape reads can also fold in the parser
+    from the current tensor type, including tensors allocated in this body.
+    Other constants use the static scope's constexpr and shadowing rules.
+    """
+    if isinstance(elt, ast.Subscript):
+        alias = _constant_shape_alias(elt)
+        if alias is not None and alias[0] in local:
+            # The preview can retain one arm's alias at a runtime join. Live
+            # metadata carries the union of both arms' fallback dimensions.
+            dim = _alias_dim(alias, local)
+            return dim if isinstance(dim, int) else None
+    if isinstance(elt, (ast.Name, ast.Subscript)):
+        value = constants.get((elt.lineno, elt.col_offset))
+        if value is not None:
+            return value
+    if isinstance(elt, ast.BinOp):
+        lhs = _resolve_slice_int(elt.left, scope, constants, local)
+        rhs = _resolve_slice_int(elt.right, scope, constants, local)
+        return _fold_int_arith(elt.op, lhs, rhs) if lhs is not None and rhs is not None else None
+    if isinstance(elt, ast.UnaryOp):
+        value = _resolve_slice_int(elt.operand, scope, constants, local)
+        if value is not None:
+            if isinstance(elt.op, ast.USub):
+                return -value
+            if isinstance(elt.op, ast.UAdd):
+                return value
+    return _resolve_dim_axis(elt, scope)
 
 
 def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> bool:
@@ -1203,6 +1376,35 @@ def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> 
         node is None
         or (isinstance(node, ast.Constant) and node.value is None)
         or (isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) == 0)
+    )
+
+
+def _resolve_whole_shape(
+    node: ast.expr | None, local: Mapping[str, TensorMeta], scope: _StaticScope
+) -> tuple[ShapeDim, ...] | None:
+    """Resolve a whole tensor shape or a global/closure shape constant.
+
+    Fallback bounds do not establish the actual shape of a derived tensor.
+    """
+    if node is None:
+        return None
+    src = _shape_attr_source(node)
+    if src is not None:
+        meta = local.get(src)
+        return meta.shape if meta is not None and not meta.inexact_axes else None
+    return scope.int_shape(node)
+
+
+def _shape_inexact_axes(
+    node: ast.expr | None, shape: tuple[ShapeDim, ...], resolve: Callable[[ast.expr], int | None]
+) -> frozenset[int]:
+    """Distinguish inferred scalar values from literal dimensions in a shape list."""
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return frozenset()
+    return frozenset(
+        axis
+        for axis, (elt, dim) in enumerate(zip(node.elts, shape, strict=True))
+        if isinstance(dim, int) and resolve(elt) is None
     )
 
 
@@ -1301,7 +1503,10 @@ def extract_local_tensor_metas(
     collected = dict(local)
     dynvar_anchors = _build_dynvar_anchor_index(seed_meta or {})
     declared_dims = _declared_dim_values(func_def, seed_meta or {})
-    static_unary_plus = _preview_static_unary_plus(func_def, seed_meta or {}, scope, constexpr_values)
+    static_preview = _preview_static_expressions(func_def, seed_meta or {}, scope, constexpr_values)
+    resolve_slice_int = functools.partial(
+        _resolve_slice_int, scope=scope, constants=static_preview.constants, local=local
+    )
 
     def _resolve_dim_value(elt: ast.expr) -> _DimValue:
         """Resolve a scalar to a snapshot of known dimension/integer arithmetic.
@@ -1349,7 +1554,8 @@ def extract_local_tensor_metas(
         if isinstance(elt, ast.UnaryOp):
             if isinstance(elt.op, ast.UAdd):
                 return _matching_static_unary_plus(
-                    static_unary_plus.get((elt.lineno, elt.col_offset)), _resolve_dim_value(elt.operand)
+                    static_preview.unary_plus.get((elt.lineno, elt.col_offset)),
+                    _resolve_dim_value(elt.operand),
                 )
             v = _resolve_dim_value(elt.operand)
             if isinstance(v, (DynDim, tuple)) and isinstance(elt.op, ast.USub):
@@ -1371,20 +1577,6 @@ def extract_local_tensor_metas(
         v = _resolve_shape_elt(elt)
         return v if isinstance(v, int) else None
 
-    def _resolve_whole_shape(node: ast.expr | None) -> tuple[ShapeDim, ...] | None:
-        """Resolve a shape operand that names a whole shape instead of listing it.
-
-        Covers ``src.shape`` of a tracked tensor and a module-level or closure
-        constant holding a list or tuple of ints — both of which the specializer
-        folds into a literal shape in the generated source.
-        """
-        if node is None:
-            return None
-        src = _shape_attr_source(node)
-        if src is not None:
-            return local[src].shape if src in local else None
-        return scope.int_shape(node)
-
     def _resolve_shape(
         node: ast.expr | None, dyn_base: str | None = None, *, dimension_arithmetic: bool = False
     ) -> tuple[ShapeDim, ...] | None:
@@ -1401,7 +1593,7 @@ def extract_local_tensor_metas(
         are known dimensions or integers; arbitrary runtime values are rejected.
         """
         node = scope.fold(node)
-        whole = _resolve_whole_shape(node)
+        whole = _resolve_whole_shape(node, local, scope)
         if whole is not None:
             return whole
         if not isinstance(node, (ast.List, ast.Tuple)):
@@ -1457,7 +1649,12 @@ def extract_local_tensor_metas(
             return None
         # ND is recorded as no layout — what an omitted annotation slot means.
         return TensorMeta(
-            shape=shape, dtype=dtype_val, layout=None if layout == _ir.TensorLayout.ND else layout
+            shape=shape,
+            dtype=dtype_val,
+            layout=None if layout == _ir.TensorLayout.ND else layout,
+            inexact_axes=_shape_inexact_axes(
+                scope.fold(_call_operand(call, 0, "shape")), shape, resolve_slice_int
+            ),
         )
 
     def _window_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
@@ -1471,7 +1668,13 @@ def extract_local_tensor_metas(
         dtype_val = _resolve_dtype(_call_operand(call, None, "dtype"))
         if shape is None or dtype_val is None:
             return None
-        return TensorMeta(shape=shape, dtype=dtype_val)
+        return TensorMeta(
+            shape=shape,
+            dtype=dtype_val,
+            inexact_axes=_shape_inexact_axes(
+                scope.fold(_call_operand(call, 1, "shape")), shape, resolve_slice_int
+            ),
+        )
 
     def _reshape_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pl.reshape(input, shape) / pl.tensor.reshape(tensor, shape) — dtype
@@ -1511,7 +1714,12 @@ def extract_local_tensor_metas(
                 return None
         # Unlike an omitted parameter layout, a reshape result is known ND.
         # Keep it explicit so a dependency's annotation cannot overwrite it.
-        return TensorMeta(shape=shape, dtype=src_meta.dtype, layout=_ir.TensorLayout.ND)
+        return TensorMeta(
+            shape=shape,
+            dtype=src_meta.dtype,
+            layout=_ir.TensorLayout.ND,
+            inexact_axes=_shape_inexact_axes(scope.fold(shape_node), shape, resolve_slice_int),
+        )
 
     def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pl.slice(input, shape, offset, ...) / pl.tensor.slice(tensor, shape,
@@ -1530,7 +1738,7 @@ def extract_local_tensor_metas(
             return None
         src_meta = local[src.id]
         shape_node = scope.fold(_call_operand(call, 1, "shape"))
-        whole = _resolve_whole_shape(shape_node)
+        whole = _resolve_whole_shape(shape_node, local, scope)
         if whole is not None:
             if len(whole) != len(src_meta.shape):
                 return None
@@ -1538,6 +1746,7 @@ def extract_local_tensor_metas(
         if not isinstance(shape_node, (ast.List, ast.Tuple)) or len(shape_node.elts) != len(src_meta.shape):
             return None
         dims: list[ShapeDim] = []
+        inexact_axes: set[int] = set()
         for elt, parent_dim in zip(shape_node.elts, src_meta.shape, strict=True):
             v = _resolve_int(elt)
             # A non-static slice dim (e.g. a runtime ``valid_len = pl.min(...)``)
@@ -1545,8 +1754,10 @@ def extract_local_tensor_metas(
             # the way hand-written @pl.program code annotates a kernel that
             # consumes a narrowed view (see examples/models/04_paged_attention.py).
             # If the parent dim is itself a DynDim, it propagates through.
+            if isinstance(v if v is not None else parent_dim, int) and resolve_slice_int(elt) is None:
+                inexact_axes.add(len(dims))
             dims.append(v if v is not None else parent_dim)
-        return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype, layout=src_meta.layout)
+        return replace(src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes))
 
     deps = _DepScan(
         io=scan_dep_io(func, caller_func_type, discover_deps=discover_deps),
@@ -1609,7 +1820,7 @@ def extract_local_tensor_metas(
             local=local,
             dim_values=dim_values,
             deps=deps,
-            resolve_int=_resolve_int,
+            resolve_int=resolve_slice_int,
             pl_attr_handlers=_pl_attr_handlers,
             qualified_call_handlers=_qualified_call_handlers,
             resolve_dim=_resolve_dim_value,
@@ -1705,6 +1916,11 @@ def resolve_dep_call_metadata(
                         # Layout describes the trailing dims, so dropping
                         # leading ones leaves it intact.
                         layout=base_meta.layout,
+                        inexact_axes=frozenset(
+                            axis - caller_arg.drop
+                            for axis in base_meta.inexact_axes
+                            if axis >= caller_arg.drop
+                        ),
                     )
                 continue
             if caller_arg in all_tensor_meta:
@@ -1776,8 +1992,10 @@ def _overlay_dep_declared_dyn_dims(
             new_shape[i] = DynDim(name=dyn.name, literal=dyn.literal, static_bound=static_bound)
             changed = True
         if changed:
-            dep_tensor_meta[dep_param] = TensorMeta(
-                shape=tuple(new_shape), dtype=meta.dtype, layout=meta.layout
+            # A declared dynamic axis reads the actual argument descriptor;
+            # its former integer fallback no longer limits shape inference.
+            dep_tensor_meta[dep_param] = replace(
+                meta, shape=tuple(new_shape), inexact_axes=meta.inexact_axes.difference(dim_to_dyn)
             )
 
 
@@ -1797,4 +2015,4 @@ def _overlay_dep_declared_layouts(dep: "JITFunction", dep_tensor_meta: dict[str,
         meta = dep_tensor_meta.get(dep_param)
         if meta is None or meta.layout is not None:
             continue
-        dep_tensor_meta[dep_param] = TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=dep_layout)
+        dep_tensor_meta[dep_param] = replace(meta, layout=dep_layout)

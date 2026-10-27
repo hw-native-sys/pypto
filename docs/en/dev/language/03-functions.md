@@ -106,6 +106,37 @@ remain in the program; placeholder bounds do not replace runtime extents.
 `synthesized` records an automatically generated placeholder symbol and retains
 its existing annotation-overlay and helper-return behavior.
 
+Subscript views also retain a static width when their runtime bounds have a
+provably constant difference. For example, `src[base:base + 128, :]` carries
+`[128, src.shape[1]]` metadata, allowing a join with a same-typed `[128, N]`
+allocation when the second dimensions agree. The JIT translates integer
+addition/subtraction and constant multiplication into temporary expressions
+and reuses the parser's arithmetic analyzer to prove the width. Each binary
+operation must have a constant operand to promote its arithmetic to INDEX. Since
+scalar dtypes are unavailable in this inference, operations on two runtime
+operands and runtime negation are conservatively rejected. For example,
+`base + other:base + (other + 128)` cannot establish width 128: the lower sum
+may overflow in INT32 before the upper expression promotes to INDEX.
+The proof resolves literals, unshadowed global/closure constants, constexpr
+parameters, direct static tensor-shape reads from the current tensor metadata,
+and shape aliases that the body transformer actually replaces with literals.
+Direct shape reads also work for locally allocated tensors whose dimensions
+are folded by the parser. Parent extents retained as fallbacks for unresolved
+slices are marked inexact and cannot prove widths through later shape reads,
+tensor aliases, branch joins, or helper returns. A helper's declared dynamic
+axis replaces that fallback with its actual descriptor-bound dimension.
+Local scalar assignments such as
+`width = 128` or `width: pl.Scalar[pl.INT32] = 128` remain symbolic even when their values are
+known to dimension inference: they survive specialization as variables, not
+INDEX literals. Runtime dimensions never use sample bounds as proof.
+Symbols are shared only within one pair of slice bounds, so
+rebinding and aliases from other statements do not establish new equalities.
+Unresolved calls, reads, dynamic division, and nonlinear products are not
+cancelled as symbols. Unproved widths keep the existing parent-extent fallback,
+and step slices remain unsupported by this metadata inference. Branch joins
+still require compatible shapes, dtypes, layouts, and dynamic-axis identities.
+This inference does not change the slice operation or its storage lifetime.
+
 ### Tile parameters in JIT inline helpers
 
 An inline helper can take an explicitly typed on-chip Tile:
