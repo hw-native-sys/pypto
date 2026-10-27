@@ -38,6 +38,13 @@ namespace codegen {
 
 using ir::As;
 
+const char* HighPrecisionModeToMLIR(const std::string& attr_kind) {
+  // PTOAS 0.70 renamed division algorithm 1 to diff_compensation. Other
+  // precision enums retain high_precision; both Tile and Buffer emission
+  // must use the same spelling without changing the public boolean API.
+  return attr_kind == "div_precision" ? "diff_compensation" : "high_precision";
+}
+
 std::string DataTypeToMLIR(DataType dtype) {
   if (dtype == DataType::FP32) {
     return "f32";

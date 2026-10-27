@@ -416,7 +416,9 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   if (high_precision) {
     code += " {precisionType = #pto<";
     code += attr_kind;
-    code += " high_precision>}";
+    code += " ";
+    code += codegen::HighPrecisionModeToMLIR(attr_kind);
+    code += ">}";
     codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
   }
   codegen.Emit(code);

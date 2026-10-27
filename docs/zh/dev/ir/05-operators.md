@@ -101,7 +101,9 @@ buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
 ```
 
 `div`、`log`、`recip` 保留可选布尔 kwarg `high_precision`。配方选择相应的原生
-精度属性，false 使用原生默认值，不隐式引入 workspace、复制或分配。`recip`
+精度属性，false 使用原生默认值。PTOAS 0.70+ 中，除法在 true 时生成
+`#pto<div_precision diff_compensation>`；log 和 recip 仍使用 `high_precision`。
+Tile 与 Buffer 发射共享此映射，不隐式引入 workspace、复制或分配。`recip`
 要求源与目标存储不重叠，构造时拒绝两个位置使用同一句柄。`BufferIR` 验证对
 表中每个配方检查不同句柄的已分配范围：拒绝部分重叠，仅支持精确原地执行的
 配方可接受完全相同的窗口。独立的无地址分配不重叠；未知存储来源或位置需要

@@ -150,8 +150,8 @@ def test_public_recipes_preserve_explicit_destinations_through_binary_artifacts(
         assert text.count(f"pto.{mnemonic} ins(") == 1
         assert not re.search(rf"= pto\.{mnemonic}\b", text)
     assert (" addr = " in text) == (planner != passes.MemoryPlanner.PTOAS)
-    for kind in ("div", "log", "recip"):
-        assert (f"#pto<{kind}_precision high_precision>" in text) == high_precision
+    for kind, mode in (("div", "diff_compensation"), ("log", "high_precision"), ("recip", "high_precision")):
+        assert (f"#pto<{kind}_precision {mode}>" in text) == high_precision
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
         ir.assert_structural_equal(
             passes.lower_tile_to_buffer()(restored), restored, enable_auto_mapping=True

@@ -10,7 +10,7 @@
 """``high_precision=True`` is reported when the target backend will drop it.
 
 The request survives every layer below the DSL: PyPTO writes ``precisionType``
-into the PTO IR and PTOAS keeps it as a ``HIGH_PRECISION`` template argument.
+into the PTO IR and PTOAS keeps it as an algorithm template argument.
 Only PTO-ISA decides whether to read it, and Ascend910's ``TDIV_IMPL`` /
 ``TLOG_IMPL`` / ``TREM_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
 without ever branching on it — the op computes the default result and nothing
@@ -38,6 +38,8 @@ import pypto.language as pl
 import pytest
 from pypto import LogLevel, backend, codegen, ir, passes, set_log_level
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir import OptimizationStrategy, PassManager
 
 WARNING_TAG = "[HighPrecisionIgnored]"
@@ -227,7 +229,9 @@ def _incore_mlir(
     incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
     assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
     single = ir.Program([incore[0]], incore[0].name, optimized.span)
-    result = codegen.PTOCodegen().generate(single, emit_tile_addr=not enable_buffer_ir)
+    # The default pipeline assigns addresses with the PyPTO planner in both
+    # modes. Buffer allocations carry them as operands, so emit level3 IR.
+    result = codegen.PTOCodegen().generate(single)
     return result if isinstance(result, str) else "".join(result.values())
 
 
@@ -351,7 +355,8 @@ def test_both_emitters_report_the_same_dropped_request(enable_buffer_ir, capfd):
     mlir = _incore_mlir(BufferIrPrecisionOps, BackendType.Ascend910, enable_buffer_ir=enable_buffer_ir)
     warnings = _warnings(capfd)
 
-    assert mlir.count("high_precision>") == 3, f"expected three attributes:\n{mlir}"
+    assert mlir.count("high_precision>") == 2, f"expected log/recip attributes:\n{mlir}"
+    assert mlir.count("div_precision diff_compensation>") == 1, mlir
     assert _warned_ops(warnings) == {"tile.div", "tile.log", "tile.recip"}, warnings
     assert len(warnings) == 3, f"expected one warning per op, got {warnings}"
 
@@ -380,7 +385,22 @@ def test_attribute_is_emitted_on_both_backends(backend_type, arch):
     mlir = _incore_mlir(HighPrecisionDiv, backend_type)
 
     assert f'pto.target_arch = "{arch}"' in mlir, mlir
-    assert "precisionType = #pto<div_precision high_precision>" in mlir, mlir
+    assert "precisionType = #pto<div_precision diff_compensation>" in mlir, mlir
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type,arch", [(BackendType.Ascend910, "a2"), (BackendType.Ascend950, "a5")])
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_high_precision_div_compiles_with_ptoas(tmp_path, backend_type, arch, enable_buffer_ir):
+    """Both emitters must use the renamed division enum accepted by PTOAS 0.70."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "high_precision_div.pto"
+    output = tmp_path / "high_precision_div.cpp"
+    source.write_text(_incore_mlir(HighPrecisionDiv, backend_type, enable_buffer_ir=enable_buffer_ir))
+    _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", "--pto-level=level3"])
+    # Check lowering as well as parsing: the compensated algorithm must reach TDIV.
+    assert "TDIV<pto::DivAlgorithm::HIGH_PRECISION>" in output.read_text()
 
 
 if __name__ == "__main__":
