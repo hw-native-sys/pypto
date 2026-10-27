@@ -693,8 +693,8 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
                 call->args_.back());
     if (recipe && recipe->precision != backend::BufferPrecisionKind::None &&
         call->GetKwarg<bool>("high_precision", false)) {
-      line << " {precisionType = #pto<" << backend::BufferPrecisionAttributeName(recipe->precision)
-           << " high_precision>}";
+      const auto* attr_kind = backend::BufferPrecisionAttributeName(recipe->precision);
+      line << " {precisionType = #pto<" << attr_kind << " " << HighPrecisionModeToMLIR(attr_kind) << ">}";
       // Report the logical op, not `recipe->buffer_op`: the user wrote
       // `tile.div`, and lowering it through Buffer IR must not change what the
       // diagnostic names.

@@ -38,6 +38,9 @@ std::string MemorySpaceToMLIR(ir::MemorySpace space);
 /// `ArrayType` v1 constraints enforced by its constructor.
 std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type);
 
+/// Map the public high_precision=True request to a PTOAS precision enum value.
+const char* HighPrecisionModeToMLIR(const std::string& attr_kind);
+
 /// Convert TileLayout to its string name (e.g., row_major -> "row_major")
 const char* TileLayoutToStr(ir::TileLayout layout);
 

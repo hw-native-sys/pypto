@@ -111,7 +111,10 @@ buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
 
 `div`, `log`, and `recip` preserve the optional boolean `high_precision` kwarg.
 The recipe selects the corresponding native precision attribute; false uses
-the native default. No implicit workspace, copy, or allocation is introduced.
+the native default. With PTOAS 0.70+, division emits
+`#pto<div_precision diff_compensation>` for true; log and reciprocal retain
+`high_precision`. Tile and Buffer emission share this mapping. No implicit
+workspace, copy, or allocation is introduced.
 `recip` requires source and destination storage to be disjoint. Construction
 rejects one handle used in both positions. `BufferIR` verification checks placed
 ranges across different handles for every table recipe: partial overlap is

@@ -853,7 +853,9 @@ class TestB01PrecisionAndRowExpandAddCodegen:
         default_line = self._op_line(self._generate_mlir(DefaultProg), "pto.tdiv")
         high_precision_line = self._op_line(self._generate_mlir(HighPrecisionProg), "pto.tdiv")
         assert "precisionType" not in default_line
-        assert strip_loc(high_precision_line).endswith("{precisionType = #pto<div_precision high_precision>}")
+        assert strip_loc(high_precision_line).endswith(
+            "{precisionType = #pto<div_precision diff_compensation>}"
+        )
         assert ") outs(" in high_precision_line
         assert high_precision_line.index("outs(") < high_precision_line.index("precisionType")
 
