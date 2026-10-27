@@ -381,6 +381,10 @@ out     = pl.tile.store(d, [0, 0], out)
 
 `tile.cast` 被删除。当 producer 需要 K-loop（`k < K`）时，照常发出 K-loop，其 Acc 结果喂给*同一个*单次 `tile.assemble` —— 折叠与 K 切分无关。
 
+整窗 cast-fold 和 M/N scratch 路径都会在组装后恢复 producer 的 `valid_shape`。
+分配保留完整物理形状，链式消费者只读取原来的有效行列范围，包括符号化的有效维度。
+完全有效的结果不需要额外视图。
+
 ## 分形边界：尾块为何不需要特判
 
 chooser 返回 16 对齐的 `(m, n, k)`，本 pass 剥离网格未覆盖的部分，因此边界 tile 的物理

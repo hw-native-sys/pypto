@@ -4420,5 +4420,144 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
     ir.assert_structural_equal(After, Expected)
 
 
+def _cast_fold_assignments(program):
+    """Collect execution-order assignment sites, including nested output grids."""
+    result = []
+
+    class Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            result.append(op)
+            super().visit_assign_stmt(op)
+
+    Collector().visit_program(program)
+    return result
+
+
+def _verify_cast_fold_source(program):
+    """Establish that the counterexample is valid before running AutoTile."""
+    props = passes.IRPropertySet()
+    for prop in (passes.IRProperty.SSAForm, passes.IRProperty.UseAfterDef, passes.IRProperty.TypeChecked):
+        props.insert(prop)
+    passes.verify_properties(props, program, "review input before AutoTile")
+
+
+def _native_cast_fold(program, planner, backend_type, tmp_path):
+    """Run the complete pipeline and pinned native assembler, without a device."""
+    from pypto.backend._ptoas_locate import find_ptoas_binary  # noqa: PLC0415
+    from pypto.backend.pto_backend import _run_ptoas  # noqa: PLC0415
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    with passes.PassContext([], memory_planner=planner):
+        after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    functions = [
+        func
+        for func in after.functions.values()
+        if func.func_type in (ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV)
+    ]
+    assert functions
+    fixed = planner != passes.MemoryPlanner.PTOAS
+    mlir = codegen.PTOCodegen().generate(ir.Program(functions, "review", after.span), emit_tile_addr=fixed)
+    source = tmp_path / "review.pto"
+    output = tmp_path / "review.cpp"
+    source.write_text(mlir)
+    arch = "a2" if backend_type == BackendType.Ascend910 else "a5"
+    level = "level3" if fixed else "level2"
+    _run_ptoas(
+        str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={level}", "--enable-insert-sync"]
+    )
+    assert output.is_file()
+    return mlir
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+@pytest.mark.parametrize(
+    "valid_m,valid_n", [(7, 32), (16, 17), (16, 32)], ids=["partial-M", "partial-N", "full-control"]
+)
+def test_fits_cast_preserves_partial_valid_shape(planner, backend_type, valid_m, valid_n, tmp_path):
+    """A fully allocated Mat scratch must retain the cast's logical rectangle."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[valid_m, 16], pl.BF16],
+            b: pl.Tensor[[16, valid_n], pl.BF16],
+            d: pl.Tensor[[valid_n, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[valid_m, 16], pl.FP32]],
+        ) -> pl.Tensor[[valid_m, 16], pl.FP32]:
+            at = pl.load(a, [0, 0], [16, 16], valid_shape=[valid_m, 16], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [16, 32], valid_shape=[16, valid_n], target_memory=pl.Mem.Mat)
+            dt = pl.load(d, [0, 0], [32, 16], valid_shape=[valid_n, 16], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(at, bt)
+            cb = pl.cast(c, pl.BF16, mode="rint")
+            result = pl.tile.matmul(cb, dt)
+            return pl.store(result, [0, 0], out)
+
+    before = passes.convert_to_ssa()(Before)
+    _verify_cast_fold_source(before)
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    lhs = next(
+        stmt.value.args[0]
+        for stmt in _cast_fold_assignments(after)
+        if stmt.var.name_hint.startswith("result__")
+    )
+    tile = lhs.type
+    shape = tile.tile_view.valid_shape if tile.tile_view and tile.tile_view.valid_shape else tile.shape
+    assert tuple(dim.value for dim in shape) == (valid_m, valid_n)
+    _native_cast_fold(Before, planner, backend_type, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_fits_cast_preserves_symbolic_rows(planner, backend_type, tmp_path):
+    """Narrowing a Mat scratch must preserve the original runtime row extent."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            b: pl.Tensor[[16, 32], pl.BF16],
+            d: pl.Tensor[[32, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            rows: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            at = pl.load(a, [0, 0], [16, 16], valid_shape=[rows, 16], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+            dt = pl.load(d, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(at, bt)
+            cb = pl.cast(c, pl.BF16, mode="rint")
+            result = pl.tile.matmul(cb, dt)
+            return pl.store(result, [0, 0], out)
+
+    before = passes.convert_to_ssa()(Before)
+    _verify_cast_fold_source(before)
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    lhs = next(
+        stmt.value.args[0]
+        for stmt in _cast_fold_assignments(after)
+        if stmt.var.name_hint.startswith("result__")
+    )
+    func = next(iter(after.functions.values()))
+    assert lhs.type.tile_view.valid_shape[0].same_as(func.params[-1])
+    _native_cast_fold(Before, planner, backend_type, tmp_path)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
