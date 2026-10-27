@@ -90,6 +90,10 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
 8. **Preserve existing L0 pipelines** — automatic accumulator-buffer recognition is disabled before analysis. An explicit `pipeline_double_buffer_c` attribute remains unchanged.
 
+Direct-store M/N grids execute at the consumer store, so their operand snapshots must survive until that point. Before selection, a function-wide index follows storage aliases and records writes by allocation and slot. Different constant slots are disjoint; unresolved aliases, changing carries, and unknown physical effects (including cross-core ring recycling) are conservative. Ordinary and atomic GM stores do not overwrite the input tiles' on-chip storage. If delaying a read would cross a possible overwrite, the chooser is restricted to a full-output K-only plan. If no such plan fits, compilation reports an actionable error: store the result before reusing its input storage, or use separate input slots. The pass does not move GM stores earlier, because distinct tensor parameters may alias.
+
+A matmul result with an explicit MemRef likewise requires a full-output plan. K tiling attaches that binding to the first allocation owner (the accumulator placeholder or fresh/head-peeled matmul), preserving generated layout and valid-shape metadata; accumulation and tail blocks inherit the same storage. M/N tiling must not silently replace the declared whole-result storage with unrelated sub-tiles. Existing PTOAS restrictions remain explicit errors, including single-slot declarations and multi-slot values carried through unsupported loop phis; use PYPTO or DSA_RP for those compositions.
+
 The pass is a `ProgramPass` and walks each function with an `IRMutator`; functions are returned unchanged when no rewrite fires (no `MutableCopy` cost for matmul-free programs).
 
 ## NZ GM destinations
@@ -463,6 +467,7 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 
 - `src/ir/transforms/auto_tile_matmul_l0_pass.cpp` — pass entry, canonical split-K rewrite, K-loop and M/N-grid emission.
 - `src/ir/transforms/auto_tile_matmul_l0/analysis.cpp` — matmul eligibility, explicit L0 capacity diagnostics, and L0 schedule selection.
+- `src/ir/transforms/auto_tile_matmul_l0/storage_contracts.cpp` — storage lineage and indexed writes for deferred-input snapshot checks.
 - `src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp` — existing-pipeline accumulator buffering analysis and capacity planning.
 - `src/ir/transforms/auto_tile_matmul_l0/common.cpp` — shared shape checks and sibling-use counting.
 - `src/ir/transforms/auto_tile_matmul_l0/internal.h` — private tiling plans and cross-module declarations.

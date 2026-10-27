@@ -192,6 +192,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -206,6 +207,7 @@ namespace {
 using transform_utils::PreserveCallAttrs;
 
 using auto_tile_matmul_l0::AlignStaticExtent;
+using auto_tile_matmul_l0::AnalyzeDelayedInputHazards;
 using auto_tile_matmul_l0::AnalyzeMatmul;
 using auto_tile_matmul_l0::BuildPipelineDbCPlan;
 using auto_tile_matmul_l0::DirectDefMap;
@@ -458,6 +460,12 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const bool is_acc = r.kind == MatmulKind::kAccumulate;
   const bool is_bias = r.kind == MatmulKind::kBias;
   auto& reg = OpRegistry::GetInstance();
+  const auto output_binding = GetTypeMemRef(r.original->var_->GetType());
+  INTERNAL_CHECK_SPAN(!output_binding || (r.m == r.M && r.n == r.N), sp)
+      << "Internal error: declared accumulator storage cannot be assigned to M/N sub-tiles";
+  CHECK_SPAN(!is_acc || !output_binding || !(*output_binding)->is_pinned_, sp)
+      << "A tile.matmul_acc result cannot declare independent accumulator storage; bind its input "
+         "accumulator instead, since accumulation writes that input in place.";
 
   INTERNAL_CHECK_SPAN(is_acc == (r.acc_init != nullptr), sp)
       << "Internal error: matmul kind and accumulator initializer disagree";
@@ -502,6 +510,29 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
       auto acc_dtype = As<TileType>(r.original->var_->GetType())->dtype_;
       auto c_init =
           BuildAccInitWithValidShape(r.m, r.n, r.valid_m, r.valid_n, acc_dtype, base + "_l0_init", sp);
+      if (output_binding) {
+        // Bind the allocation owner before its valid-shape alias. Carries and
+        // accumulating blocks then inherit this storage through the normal
+        // InitMemRef rules; copying the old whole type would lose compactness
+        // and layout refinements on the generated initializer.
+        std::unordered_map<const Var*, VarPtr> bound;
+        for (auto& stmt : c_init.stmts) {
+          const auto assign = As<AssignStmt>(stmt);
+          INTERNAL_CHECK_SPAN(assign, sp) << "Internal error: accumulator initializer is not an assignment";
+          const bool owns_storage = IsOp(As<Call>(assign->value_), "tile.create");
+          auto var = std::make_shared<Var>(
+              assign->var_->name_hint_,
+              CloneTypeWithMemRef(assign->var_->GetType(), owns_storage ? output_binding : std::nullopt),
+              assign->var_->span_);
+          auto value = transform_utils::Substitute(assign->value_, bound);
+          bound.emplace(assign->var_.get(), var);
+          stmt = std::make_shared<AssignStmt>(var, value, assign->span_);
+        }
+        const auto result = bound.find(c_init.value.get());
+        INTERNAL_CHECK_SPAN(result != bound.end(), sp)
+            << "Internal error: accumulator initializer result was not rebound";
+        c_init.value = result->second;
+      }
       for (auto& stmt : c_init.stmts) out.push_back(std::move(stmt));
       loop_init = c_init.value;
       loop_iter_type = c_init.value->GetType();
@@ -550,7 +581,9 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     } else {
       call = reg.Create("tile.matmul", {sa->var_, sb->var_}, kwargs, sp);
     }
-    auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
+    auto result_type =
+        !acc_in && output_binding ? CloneTypeWithMemRef(call->GetType(), output_binding) : call->GetType();
+    auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, result_type, sp);
     out.push_back(sa);
     out.push_back(sb);
     out.push_back(std::make_shared<AssignStmt>(cvar, call, sp));
@@ -2212,8 +2245,10 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
 
 class AutoTileMutator : public IRMutator {
  public:
-  explicit AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan)
-      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)) {}
+  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan,
+                  std::unordered_map<const Var*, std::string> delayed_input_hazards)
+      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)),
+        delayed_input_hazards_(std::move(delayed_input_hazards)) {}
 
   std::vector<Diagnostic> hints;
 
@@ -2431,11 +2466,21 @@ class AutoTileMutator : public IRMutator {
         const Stmt* next_effect =
             next_non_load[i] < op->stmts_.size() ? op->stmts_[next_non_load[i]].get() : nullptr;
         const auto consumer = AnalyzeMatmulOutputConsumer(assign, sibling_index, next_effect);
-        if (auto tiling =
-                AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
-                              /*output_box_alignment=*/std::nullopt, &direct_defs,
-                              consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
-                              /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0)) {
+        std::string full_output_reason;
+        if (GetTypeMemRef(assign->var_->GetType())) {
+          full_output_reason = "declared accumulator storage";
+        } else if (consumer && consumer->store_stmt && consumer->result_uses == 1) {
+          const auto hazard = delayed_input_hazards_.find(assign->var_.get());
+          if (hazard != delayed_input_hazards_.end()) {
+            full_output_reason =
+                "the input snapshot of '" + hazard->second + "' across a possible later write";
+          }
+        }
+        if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
+                                        /*output_box_alignment=*/std::nullopt, &direct_defs,
+                                        consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
+                                        /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0,
+                                        full_output_reason.empty() ? nullptr : full_output_reason.c_str())) {
           auto emit_k_only = [&](const MatmulTiling& plan) {
             // AnalyzeMatmul skips a full M/N/K fit, so a shape-preserving plan
             // reaching this emitter must split K. Preserve the original result
@@ -2577,6 +2622,7 @@ class AutoTileMutator : public IRMutator {
 
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
+  std::unordered_map<const Var*, std::string> delayed_input_hazards_;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
@@ -2586,7 +2632,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
   auto canonical = RewriteCanonicalSplitKAcc(func, hints);
-  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical));
+  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), AnalyzeDelayedInputHazards(canonical));
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;

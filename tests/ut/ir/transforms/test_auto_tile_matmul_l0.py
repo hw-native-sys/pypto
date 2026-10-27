@@ -4420,5 +4420,470 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
     ir.assert_structural_equal(After, Expected)
 
 
+def _storage_assignments(program):
+    """Collect execution-order assignment sites, including nested output grids."""
+    result = []
+
+    class Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            result.append(op)
+            super().visit_assign_stmt(op)
+
+    Collector().visit_program(program)
+    return result
+
+
+def _storage_verify_source(program):
+    """Establish that the counterexample is valid before running AutoTile."""
+    props = passes.IRPropertySet()
+    for prop in (passes.IRProperty.SSAForm, passes.IRProperty.UseAfterDef, passes.IRProperty.TypeChecked):
+        props.insert(prop)
+    passes.verify_properties(props, program, "storage input before AutoTile")
+
+
+def _storage_native(program, planner, backend_type, tmp_path):
+    """Run the complete pipeline and pinned native assembler, without a device."""
+    from pypto.backend._ptoas_locate import find_ptoas_binary  # noqa: PLC0415
+    from pypto.backend.pto_backend import _run_ptoas  # noqa: PLC0415
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    with passes.PassContext([], memory_planner=planner):
+        after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    functions = [
+        func
+        for func in after.functions.values()
+        if func.func_type in (ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV)
+    ]
+    assert functions
+    fixed = planner != passes.MemoryPlanner.PTOAS
+    mlir = codegen.PTOCodegen().generate(ir.Program(functions, "review", after.span), emit_tile_addr=fixed)
+    source = tmp_path / "review.pto"
+    output = tmp_path / "review.cpp"
+    source.write_text(mlir)
+    arch = "a2" if backend_type == BackendType.Ascend910 else "a5"
+    level = "level3" if fixed else "level2"
+    _run_ptoas(
+        str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={level}", "--enable-insert-sync"]
+    )
+    assert output.is_file()
+    return after
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize(
+    "M,N,K",
+    [(16, 128, 64), (16, 128, 512), (128, 128, 352)],
+    ids=["untiled-control", "K-loop", "INT8-head-and-tail"],
+)
+@pytest.mark.parametrize("valid_rows", [None, 7], ids=["full-valid", "partial-valid"])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_storage_k_tiling_preserves_declared_result_slots(
+    planner, M, N, K, valid_rows, backend_type, tmp_path
+):
+    """Rewriting a fresh matmul must preserve the author's output allocation."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(backend_type)
+    slots = pl.MemRef("result_acc_slots", slots=2)
+    rows = M if valid_rows is None else valid_rows
+    input_dtype = pl.INT8 if K == 352 else pl.BF16
+    acc_dtype = pl.INT32 if K == 352 else pl.FP32
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], input_dtype],
+            b0: pl.Tensor[[K, N], input_dtype],
+            b1: pl.Tensor[[K, N], input_dtype],
+            out0: pl.Out[pl.Tensor[[M, N], acc_dtype]],
+            out1: pl.Out[pl.Tensor[[M, N], acc_dtype]],
+        ) -> tuple[pl.Tensor[[M, N], acc_dtype], pl.Tensor[[M, N], acc_dtype]]:
+            at = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+            av = pl.tile.set_validshape(at, rows, K)
+            bt0 = pl.load(b0, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+            bt1 = pl.load(b1, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+            c0: pl.Tile[[M, N], acc_dtype, slots[0], pl.Mem.Acc] = pl.tile.matmul(av, bt0)
+            o0 = pl.store(c0, [0, 0], out0)
+            c1: pl.Tile[[M, N], acc_dtype, slots[1], pl.Mem.Acc] = pl.tile.matmul(av, bt1)
+            o1 = pl.store(c1, [0, 0], out1)
+            return o0, o1
+
+    before = passes.convert_to_ssa()(Before)
+    _storage_verify_source(before)
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    stores = [
+        stmt.value
+        for stmt in _storage_assignments(after)
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == ir.get_op("tile.store").name
+    ]
+    assert len(stores) == 2
+    owners = [
+        stmt.var
+        for stmt in _storage_assignments(after)
+        if isinstance(stmt.var.type, ir.TileType)
+        and stmt.var.type.memref is not None
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name in (ir.get_op("tile.create").name, ir.get_op("tile.matmul").name)
+    ]
+    bindings = [var.type.memref for var in owners]
+    assert len(bindings) == 2
+    assert [binding.slot_count_ for binding in bindings] == [2, 2]
+    assert [binding.slot_index_.value for binding in bindings] == [0, 1]
+    if K == 352:
+        tails = _matmul_acc_calls(after)
+        assert len(tails) == 2
+        assert all(call.args[1].type.shape[1].value == 160 for call in tails)
+    if planner == passes.MemoryPlanner.PTOAS and K == 512:
+        # Preserving the declaration exposes the existing unsupported slotted
+        # loop-phi composition instead of silently coalescing both slots.
+        with pytest.raises(ValueError, match="slots=2.*carried out of an if or a loop as a phi"):
+            _storage_native(Before, planner, backend_type, tmp_path)
+    else:
+        allocated = _storage_native(Before, planner, backend_type, tmp_path)
+        allocated_stores = [
+            stmt.value
+            for stmt in _storage_assignments(allocated)
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == ir.get_op("tile.store").name
+        ]
+        assert len(allocated_stores) == 2
+        indices = []
+        for store in allocated_stores:
+            tile = store.args[0].type
+            assert isinstance(tile, ir.TileType)
+            binding = tile.memref
+            assert binding is not None and isinstance(binding.slot_index_, ir.ConstInt)
+            indices.append(binding.slot_index_.value)
+        assert indices == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize(
+    "variant,M,K",
+    [
+        ("same-slot-delayed", 256, 64),
+        ("different-slot-control", 256, 64),
+        ("early-store-control", 256, 64),
+        ("same-slot-delayed", 32, 512),
+        ("alias-view-delayed", 256, 64),
+        ("nested-view-delayed", 256, 64),
+        ("plain-alias-delayed", 256, 64),
+        ("dynamic-slot-delayed", 256, 64),
+        ("nested-write-delayed", 256, 64),
+        ("argument-write-delayed", 256, 64),
+        ("no-access-control", 256, 64),
+        ("atomic-store-control", 256, 64),
+    ],
+)
+def test_storage_mn_fold_preserves_input_snapshot(planner, variant, M, K, tmp_path):
+    """Moving an output grid cannot extend an input read beyond its slot write."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    slot = (
+        "slot_index"
+        if variant == "dynamic-slot-delayed"
+        else ("1" if variant in ("different-slot-control", "atomic-store-control") else "0")
+    )
+    early = "        oc = pl.store(c, [0, 0], outc)\n" if variant == "early-store-control" else ""
+    late = "" if early else "        oc = pl.store(c, [0, 0], outc)\n"
+    input_view = f"        av = pl.tile.reshape(at0, [{M}, {K}])\n"
+    if variant == "nested-view-delayed":
+        input_view = f"        av = pl.tile.reshape(pl.tile.set_validshape(at0, {M}, {K}), [{M}, {K}])\n"
+    elif variant == "plain-alias-delayed":
+        input_view = "        av = at0\n"
+    lhs = "av" if variant in ("alias-view-delayed", "nested-view-delayed", "plain-alias-delayed") else "at0"
+    alias = input_view if lhs == "av" else ""
+    bound = f', pl.MemRef("input_mat_slots", slots=2)[{slot}]'
+    if variant == "argument-write-delayed":
+        bound = ""
+    load = (
+        f"pl.tile.create([{M}, {K}], dtype=pl.BF16, target_memory=pl.Mem.Mat)"
+        if variant == "no-access-control"
+        else f"pl.load(a1, [0, 0], [{M}, {K}], target_memory=pl.Mem.Mat)"
+    )
+    writer = f"        at1: pl.Tile[[{M}, {K}], pl.BF16{bound}, pl.Mem.Mat] = {load}\n"
+    d_lhs = "at1"
+    if variant == "argument-write-delayed":
+        writer += (
+            "        identity_mat = pl.load(identity, [0, 0], [64, 64], target_memory=pl.Mem.Mat)\n"
+            "        update = pl.tile.matmul(at1, identity_mat)\n"
+            "        refreshed = pl.tile.assemble(at0, update, [0, 0])\n"
+        )
+        d_lhs = "refreshed"
+    elif variant == "no-access-control":
+        d_lhs = "at0"
+    atomic = ", atomic=pl.AtomicType.Add" if variant == "atomic-store-control" else ""
+    outd_direction = "pl.InOut" if atomic else "pl.Out"
+    writer += f"        d = pl.tile.matmul({d_lhs}, bt)\n        od = pl.store(d, [0, 0], outd{atomic})\n"
+    if variant == "nested-write-delayed":
+        writer = (
+            "        if slot_index > 0:\n"
+            + "\n".join("    " + line for line in writer.rstrip().splitlines())
+            + "\n            merged = pl.yield_(od)\n"
+            + "        else:\n            merged = pl.yield_(outd)\n"
+            + "        od_final = merged\n"
+        )
+    else:
+        writer += "        od_final = od\n"
+    source = f"""@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a0: pl.Tensor[[{M}, {K}], pl.BF16],
+        a1: pl.Tensor[[{M}, {K}], pl.BF16],
+        b: pl.Tensor[[{K}, 256], pl.BF16],
+        identity: pl.Tensor[[64, 64], pl.BF16],
+        slot_index: pl.Scalar[pl.INDEX],
+        outc: pl.Out[pl.Tensor[[{M}, 256], pl.FP32]],
+        outd: {outd_direction}[pl.Tensor[[{M}, 256], pl.FP32]],
+    ) -> tuple[pl.Tensor[[{M}, 256], pl.FP32], pl.Tensor[[{M}, 256], pl.FP32]]:
+        at0: pl.Tile[
+            [{M}, {K}], pl.BF16, pl.MemRef("input_mat_slots", slots=2)[0], pl.Mem.Mat
+        ] = pl.load(a0, [0, 0], [{M}, {K}], target_memory=pl.Mem.Mat)
+        bt = pl.load(b, [0, 0], [{K}, 256], target_memory=pl.Mem.Mat)
+{alias}        c = pl.tile.matmul({lhs}, bt)
+{early}{writer}{late}        return oc, od_final
+"""
+    before = passes.convert_to_ssa()(pl.parse_program(source))
+    _storage_verify_source(before)
+    unsafe = M == 256 and variant not in (
+        "different-slot-control",
+        "early-store-control",
+        "no-access-control",
+        "atomic-store-control",
+    )
+    if unsafe:
+        with (
+            passes.PassContext([], memory_planner=planner),
+            pytest.raises(ValueError, match="input snapshot.*no full-output K-only plan fits"),
+        ):
+            passes.auto_tile_matmul_l0()(before)
+        return
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    assignments = _storage_assignments(after)
+    source_var = next(stmt.var for stmt in assignments if stmt.var.name_hint.startswith(f"{lhs}__"))
+    overwrite = next(i for i, stmt in enumerate(assignments) if stmt.var.name_hint.startswith("at1__"))
+    first_read = next(
+        i
+        for i, stmt in enumerate(assignments)
+        if isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name in (ir.get_op("tile.extract").name, ir.get_op("tile.matmul").name)
+        and any(arg.same_as(source_var) for arg in stmt.value.args)
+    )
+    if variant == "no-access-control":
+        # This is an AutoTile-only no-write control. Existing later declared-
+        # slot liveness validation conservatively rejects even this unused
+        # tile.create sharing the live slot; that contract is outside this fix.
+        return
+    _storage_native(before, planner, BackendType.Ascend910, tmp_path)
+    if variant in ("same-slot-delayed", "early-store-control"):
+        assert first_read < overwrite, "AutoTile reads the old slot only after it was overwritten"
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_storage_delayed_fold_does_not_cross_ring_release(planner):
+    """A registered opaque effect may recycle storage without a MemRef write."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            b: pl.Tensor[[64, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+        ) -> pl.Tensor[[256, 256], pl.FP32]:
+            popped: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.tpop_from_aiv(split=1)
+            bt = pl.load(b, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(popped, bt)
+            pl.system.tfree_to_aiv(popped, split=1)
+            result = pl.store(c, [0, 0], out)
+            return result
+
+    before = passes.convert_to_ssa()(Before)
+    _storage_verify_source(before)
+    with (
+        passes.PassContext([], memory_planner=planner),
+        pytest.raises(ValueError, match="input snapshot.*popped.*no full-output K-only plan fits"),
+    ):
+        passes.auto_tile_matmul_l0()(before)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_storage_bias_head_keeps_pinned_accumulator(planner, backend_type, tmp_path):
+    _backend.reset_for_testing()
+    _backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 512], pl.BF16],
+            b: pl.Tensor[[512, 128], pl.BF16],
+            bias: pl.Tensor[[1, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            at = pl.load(a, [0, 0], [16, 512], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [512, 128], target_memory=pl.Mem.Mat)
+            bias_mat = pl.load(bias, [0, 0], [1, 128], target_memory=pl.Mem.Mat)
+            c: pl.Tile[[16, 128], pl.FP32, pl.MemRef("bias_acc"), pl.Mem.Acc] = pl.tile.matmul_bias(
+                at, bt, bias_mat
+            )
+            result = pl.store(c, [0, 0], out)
+            return result
+
+    before = passes.convert_to_ssa()(Before)
+    _storage_verify_source(before)
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    owners = [
+        stmt.var
+        for stmt in _storage_assignments(after)
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == ir.get_op("tile.matmul_bias").name
+    ]
+    assert len(owners) == 1
+    assert owners[0].type.memref is not None
+    assert owners[0].type.memref.is_pinned_
+    if planner == passes.MemoryPlanner.PTOAS:
+        with pytest.raises(ValueError, match="single-slot declared allocation.*not supported"):
+            _storage_native(Before, planner, backend_type, tmp_path)
+        return
+    allocated = _storage_native(Before, planner, backend_type, tmp_path)
+    stores = [
+        stmt.value
+        for stmt in _storage_assignments(allocated)
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == ir.get_op("tile.store").name
+    ]
+    assert len(stores) == 1
+    tile = stores[0].args[0].type
+    assert isinstance(tile, ir.TileType) and tile.memref is not None
+    assert "bias_acc" in tile.memref.base_.name_hint
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_storage_changing_loop_carry_is_not_assumed_to_keep_initializer_slot(planner):
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[256, 64], pl.BF16],
+            b: pl.Tensor[[64, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+        ) -> pl.Tensor[[256, 256], pl.FP32]:
+            first: pl.Tile[[256, 64], pl.BF16, pl.MemRef("carry_slots", slots=2)[1], pl.Mem.Mat] = pl.load(
+                a, [0, 0], [256, 64], target_memory=pl.Mem.Mat
+            )
+            bt = pl.load(b, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+            for _, (carried, output) in pl.range(2, init_values=(first, out)):
+                c = pl.tile.matmul(carried, bt)
+                changed: pl.Tile[[256, 64], pl.BF16, pl.MemRef("carry_slots", slots=2)[0], pl.Mem.Mat] = (
+                    pl.load(a, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+                )
+                updated = pl.store(c, [0, 0], output)
+                final_carry, result = pl.yield_(changed, updated)
+            return result
+
+    before = passes.convert_to_ssa()(Before)
+    _storage_verify_source(before)
+    with (
+        passes.PassContext([], memory_planner=planner),
+        pytest.raises(ValueError, match="input snapshot.*carried.*no full-output K-only plan fits"),
+    ):
+        passes.auto_tile_matmul_l0()(before)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_storage_mn_grid_does_not_discard_explicit_result_binding(planner):
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[256, 64], pl.BF16],
+            b: pl.Tensor[[64, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+        ) -> pl.Tensor[[256, 256], pl.FP32]:
+            at = pl.load(a, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+            c: pl.Tile[[256, 256], pl.FP32, pl.MemRef("full_result", slots=2)[0], pl.Mem.Acc] = (
+                pl.tile.matmul(at, bt)
+            )
+            result = pl.store(c, [0, 0], out)
+            return result
+
+    before = passes.convert_to_ssa()(Before)
+    _storage_verify_source(before)
+    with (
+        passes.PassContext([], memory_planner=planner),
+        pytest.raises(ValueError, match="declared accumulator storage.*no full-output K-only plan fits"),
+    ):
+        passes.auto_tile_matmul_l0()(before)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("K", [64, 512])
+def test_storage_k_tiling_does_not_legalize_declared_inplace_result(planner, K):
+    """The existing InitMemRef policy rejects even matching output annotations."""
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    slots = pl.MemRef("acc_slots", slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, K], pl.BF16],
+            b: pl.Tensor[[K, 128], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            at = pl.load(a, [0, 0], [16, K], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [K, 128], target_memory=pl.Mem.Mat)
+            seed: pl.Tile[[16, 128], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [16, 128], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            c: pl.Tile[[16, 128], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul_acc(seed, at, bt, True)
+            result = pl.store(c, [0, 0], out)
+            return result
+
+    before = passes.convert_to_ssa()(Before)
+    _storage_verify_source(before)
+    with (
+        passes.PassContext([], memory_planner=planner),
+        pytest.raises(ValueError, match="(Bind the source tile instead|bind its input accumulator instead)"),
+    ):
+        PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
