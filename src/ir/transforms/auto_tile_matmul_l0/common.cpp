@@ -105,6 +105,31 @@ void SiblingUseCounter::VisitVarLike_(const VarPtr& op) {
 
 void SiblingUseCounter::VisitStmt_(const AssignStmtPtr& op) { VisitExpr(op->value_); }
 
+void SiblingUseCounter::VisitExpr_(const IterArgPtr& op) { VisitVarLike_(op); }
+
+void SiblingUseCounter::VisitStmt_(const IfStmtPtr& op) {
+  VisitExpr(op->condition_);
+  VisitStmt(op->then_body_);
+  if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+}
+
+void SiblingUseCounter::VisitStmt_(const ForStmtPtr& op) {
+  VisitExpr(op->start_);
+  VisitExpr(op->stop_);
+  VisitExpr(op->step_);
+  for (const auto& iter_arg : op->iter_args_) VisitExpr(iter_arg->initValue_);
+  for (const auto& [key, value] : op->attrs_) {
+    ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+  }
+  VisitStmt(op->body_);
+}
+
+void SiblingUseCounter::VisitStmt_(const WhileStmtPtr& op) {
+  for (const auto& iter_arg : op->iter_args_) VisitExpr(iter_arg->initValue_);
+  VisitExpr(op->condition_);
+  VisitStmt(op->body_);
+}
+
 void SiblingUseCounter::VisitExpr_(const CallPtr& op) {
   const bool is_mm = IsOp(op, "tile.matmul");
   const bool is_acc = IsOp(op, "tile.matmul_acc");
@@ -115,6 +140,9 @@ void SiblingUseCounter::VisitExpr_(const CallPtr& op) {
     in_matmul_operand_ = operand_pos && (AsVarLike(op->args_[i]) != nullptr);
     VisitExpr(op->args_[i]);
     in_matmul_operand_ = prev;
+  }
+  for (const auto& [key, value] : op->attrs_) {
+    ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
   }
 }
 

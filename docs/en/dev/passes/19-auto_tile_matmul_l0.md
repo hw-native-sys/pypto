@@ -195,6 +195,8 @@ propagation, and definition-site versus consumer-site copy timing in that pass.
 
 Search minima are lower bounds, rounded up to the corresponding alignment; they do not offset the tile grid. With padding enabled, the upper bound includes the first aligned tile meeting both the problem extent and the minimum. An auxiliary `max_n` still caps N. Search alignment and physical boxing do not change the cube's 16×16 M/N MAD fractals: increasing either search stride must not discount the compute work of an unchanged tile.
 
+Result-use classification counts all reads once per function after canonical split-K rewriting, including captures in nested regions. Each region then indexes only its direct stores and casts against that immutable census. This avoids rescanning every descendant at every enclosing `SeqStmts`; read indexing is linear in IR size, independent of nesting depth.
+
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:
 
 - `wall ≈ max(C_load, C_mad) + C_drain` when the FIXPIPE L0C→L1 drain is exposed (single L0C), or
