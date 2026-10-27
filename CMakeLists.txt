@@ -259,6 +259,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/lower_auto_vector_split_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp
+    src/ir/transforms/auto_tile_matmul_l0/analysis.cpp
+    src/ir/transforms/auto_tile_matmul_l0/common.cpp
+    src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp
     src/ir/transforms/auto_tile_matmul_l0_pass.cpp
     src/ir/transforms/window_externalization/analysis.cpp
     src/ir/transforms/window_externalization/callee_rewrite.cpp

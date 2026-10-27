@@ -450,7 +450,13 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 
 **Properties**: `include/pypto/ir/transforms/pass_properties.h` (`kAutoTileMatmulL0Properties`)
 
-**Implementation**: `src/ir/transforms/auto_tile_matmul_l0_pass.cpp`
+**Implementation**:
+
+- `src/ir/transforms/auto_tile_matmul_l0_pass.cpp` — pass entry, canonical split-K rewrite, K-loop and M/N-grid emission.
+- `src/ir/transforms/auto_tile_matmul_l0/analysis.cpp` — matmul eligibility, explicit L0 capacity diagnostics, and L0 schedule selection.
+- `src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp` — existing-pipeline accumulator buffering analysis and capacity planning.
+- `src/ir/transforms/auto_tile_matmul_l0/common.cpp` — shared shape checks and sibling-use counting.
+- `src/ir/transforms/auto_tile_matmul_l0/internal.h` — private tiling plans and cross-module declarations.
 
 **Chooser utility**: `src/ir/transforms/utils/l0_tile_chooser.cpp` — roofline cost-model L0 tile picker (exhaustive over the legal aligned grid; see [Cost model & design space](#cost-model--design-space-choosel0tile)), shared with future tilers.
 

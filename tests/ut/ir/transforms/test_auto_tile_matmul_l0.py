@@ -458,14 +458,14 @@ class TestAutoTileMatmulL0KOnly:
         """``tile.matmul_acc`` whose left (A) operand is Vec-resident
         (fused-attention PV / ``score·V`` with a running caller accumulator).
 
-        Per the pass (``auto_tile_matmul_l0_pass.cpp`` lines 540-541): the
+        ``AnalyzeMatmul`` in ``auto_tile_matmul_l0/analysis.cpp`` ensures the
         Vec left operand sets ``stage_lhs_to_mat=true`` so a single
         ``tile.move(lhs_vec, target=Mat)`` is emitted before the K-loop and the
         per-iter Left extract slices from the staged Mat tile; ``acc_init`` is
         the caller's accumulator threaded into the iter-arg directly.  Because
         ``is_acc`` is true the body is the *uniform* ``matmul_acc`` shape with
         **no** ``init_cond`` predicate and **no** ``tile.create`` placeholder (``BuildKLoopRewrite``
-        lines 325-327, ``BuildMatmulAccBody``).  16×64 @ 2048 BF16 with
+        in ``auto_tile_matmul_l0_pass.cpp``).  16×64 @ 2048 BF16 with
         ``c_read=true`` picks (m=16, n=64, k=256) — the same tile the Mat-lhs
         ``test_matmul_acc_pipelined`` case pins."""
 

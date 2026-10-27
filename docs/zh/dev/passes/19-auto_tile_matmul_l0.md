@@ -417,7 +417,13 @@ L0/Mat 容量与 fractal 对齐都来自当前 `BackendHandler`。Pass 优先从
 
 **Properties 声明**：`include/pypto/ir/transforms/pass_properties.h`（`kAutoTileMatmulL0Properties`）
 
-**实现**：`src/ir/transforms/auto_tile_matmul_l0_pass.cpp`
+**实现**：
+
+- `src/ir/transforms/auto_tile_matmul_l0_pass.cpp` — pass 入口、canonical split-K 重写、K-loop 与 M/N 网格生成.
+- `src/ir/transforms/auto_tile_matmul_l0/analysis.cpp` — matmul 适用性判断、显式 L0 容量诊断与 L0 调度选择.
+- `src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp` — 已有流水线的累加器缓冲分析与容量规划.
+- `src/ir/transforms/auto_tile_matmul_l0/common.cpp` — 共享形状检查与同级语句使用计数.
+- `src/ir/transforms/auto_tile_matmul_l0/internal.h` — 私有切分计划与跨模块声明.
 
 **Chooser 工具**：`src/ir/transforms/utils/l0_tile_chooser.cpp` —— 基于 roofline 代价模型的 L0 tile 选取（在合法对齐网格上穷举；见 [Cost model & design space](#cost-model--design-space-choosel0tile)），未来其它 tiler 也可复用。
 
