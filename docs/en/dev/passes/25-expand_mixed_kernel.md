@@ -638,11 +638,14 @@ result variables. Branch-local bindings never become visible to sibling branches
 
 **Header**: `include/pypto/ir/transforms/passes.h`
 
-**Implementation**: `src/ir/transforms/expand_mixed_kernel_pass.cpp`
+**Implementation**:
+
+- `src/ir/transforms/expand_mixed_kernel_pass.cpp`: mixed-kernel expansion, cross-core transport, and pass orchestration.
+- `src/ir/transforms/expand_mixed_kernel/group_abi.cpp`: hand-written Group ABI normalization, output binding analysis, and member adapter construction. The private `group_abi.h` declares its result and entry point.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_expand_mixed_kernel.py`
+**Tests**: `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`, `test_expand_mixed_kernel_a5.py`, `test_expand_mixed_kernel_split_aiv.py`, and `test_group_output_bindings.py`.
 
 ## Pass Properties
 

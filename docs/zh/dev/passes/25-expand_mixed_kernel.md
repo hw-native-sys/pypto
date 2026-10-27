@@ -557,11 +557,14 @@ class After:
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现文件**：`src/ir/transforms/expand_mixed_kernel_pass.cpp`
+**实现文件**：
+
+- `src/ir/transforms/expand_mixed_kernel_pass.cpp`：混合核展开、跨核传输与 pass 流程。
+- `src/ir/transforms/expand_mixed_kernel/group_abi.cpp`：手写 Group 的 ABI 规范化、输出绑定分析与成员适配器（adapter）构造；私有头文件 `group_abi.h` 声明结果类型与入口函数。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
-**测试**：`tests/ut/ir/transforms/test_expand_mixed_kernel.py`
+**测试**：`tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`、`test_expand_mixed_kernel_a5.py`、`test_expand_mixed_kernel_split_aiv.py` 与 `test_group_output_bindings.py`。
 
 ## Pass 属性
 
