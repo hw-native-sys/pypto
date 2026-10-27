@@ -140,6 +140,9 @@ class TensorMeta:
     shape: tuple[ShapeDim, ...]
     dtype: DataType
     layout: TensorLayout | None = None
+    # Bounds retained by local inference are useful for compatibility, but are
+    # not exact dimensions and must never establish a constant-width proof.
+    inexact_axes: frozenset[int] = field(default_factory=frozenset[int], compare=False, repr=False)
 
     def static_shape(self) -> tuple[int, ...]:
         """Concrete shape tuple — DynDim dims collapse to their static_bound."""

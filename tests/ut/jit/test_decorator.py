@@ -2433,6 +2433,296 @@ class TestConstantWidthSliceMetadata:
         with pytest.raises(ValueError, match="missing inferred tensor metadata for parameter 'view'"):
             entry.specialize()
 
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "width = 128",
+            "width: pl.Scalar[pl.INT32] = 128",
+            "width = WIDTH",
+            "alias = 128\nwidth = alias",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "bounds, extent",
+        [
+            ("base:base + width", 1024),
+            ("0:width", 1024),
+            ("width:256", 1024),
+            ("width:", 1024),
+            ("width:width + 128", 128),
+        ],
+    )
+    def test_local_scalar_values_are_not_slice_constants(self, binding, bounds, extent, monkeypatch):
+        WIDTH = 128
+
+        def body(src, base):
+            width = WIDTH
+            view = src[base : base + width, :]
+            return view
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source = textwrap.dedent("".join(lines)).replace("width = WIDTH", binding.replace("\n", "\n    "))
+        source = source.replace("base : base + width", bounds)
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        seed = {"src": TensorMeta(shape=(1024, 32), dtype=DataType.BF16)}
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        # Known local values remain runtime symbols. They can still cancel as
+        # offsets when a literal, rather than another local, supplies the width.
+        assert metas["view"].shape == (extent, 32)
+
+    @pytest.mark.parametrize("annotated", [False, True])
+    @pytest.mark.parametrize("reassociated", [False, True])
+    def test_local_scalar_slice_branch_does_not_infer_fixed_width(self, annotated, reassociated, monkeypatch):
+        @jit.inline
+        def consumer(view: pl.Tensor):
+            return view
+
+        def entry(
+            src: pl.Tensor[[_SLICE_ROWS_3145, 32], pl.BF16],
+            base: pl.Scalar[pl.INT32],
+            flag: pl.Scalar[pl.BOOL],
+        ):
+            width = 128
+            if flag:
+                view = src[base : base + width, :]
+            else:
+                view = pl.create_tensor([128, 32], dtype=pl.BF16)
+            return consumer(view)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(entry)
+        source = "".join(lines)
+        if annotated:
+            source = source.replace("width = 128", "width: pl.Scalar[pl.INT32] = 128")
+        if reassociated:
+            source = source.replace("base : base + width", "base + width : base + (width + 128)")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is entry else get_lines(func),
+        )
+        with pytest.raises(ValueError, match="missing inferred tensor metadata for parameter 'view'"):
+            jit(entry).specialize()
+
+    @pytest.mark.parametrize("source", ["direct", "arithmetic", "alias", "unpack"])
+    def test_static_shape_slice_branch_specializes(self, source, monkeypatch):
+        @jit.inline
+        def consumer(view: pl.Tensor):
+            return view
+
+        def entry(src: pl.Tensor[[1024, 32], pl.BF16], flag: pl.Scalar[pl.BOOL]):
+            rows = 1024
+            if flag:
+                view = src[16:rows, :]
+            else:
+                view = pl.create_tensor([1008, 32], dtype=pl.BF16)
+            return consumer(view)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(entry)
+        # Feed traced shape syntax to the frontend without requiring Python's
+        # optional Tensor.shape property to be statically non-None.
+        text = "".join(lines).replace("rows = 1024", "rows = src.shape[0]")
+        if source == "direct":
+            text = text.replace("16:rows", "16:src.shape[0]")
+        elif source == "arithmetic":
+            text = text.replace("16:rows", "16:src.shape[0] + 1 - 1")
+        elif source == "unpack":
+            text = text.replace("rows = src.shape[0]", "rows, cols = src.shape")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (text.splitlines(keepends=True), line) if func is entry else get_lines(func),
+        )
+        program = jit(entry).specialize()
+        helper = program.get_function("consumer")
+        assert helper is not None
+        tensor_type = helper.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        dim = tensor_type.shape[0]
+        assert isinstance(dim, ir.ConstInt) and dim.value == 1008
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "prefix = src[:n, :]",
+            "prefix = pl.slice(src, [n, 32], [0, 0])",
+            "tmp = src[:n, :]\nprefix = tmp",
+            "tmp = src[:n, :]\nprefix = tmp[:, :]",
+            "tmp = src[:n, :]\nprefix = tmp[16:, :]",
+            "prefix = src[0, :n]",
+            "if flag:\n    prefix = src[:n, :]\nelse:\n    prefix = src",
+            "tmp = src[:n, :]\nprefix = pl.create_tensor([tmp.shape[0], 32], dtype=pl.BF16)",
+            "tmp = src[:n, :]\nrows, cols = tmp.shape\n"
+            "prefix = pl.create_tensor([rows, cols], dtype=pl.BF16)",
+            "prefix = narrow(src, n)",
+        ],
+    )
+    def test_fallback_shape_cannot_prove_chained_slice_width(self, binding, monkeypatch):
+        @jit.inline
+        def narrow(src: pl.Tensor, n: pl.Scalar[pl.INDEX]):
+            result = src[:n, :]
+            return result
+
+        def body(src, dst, base, n, flag):
+            prefix = narrow(src, n)  # noqa: F841 — shape read inserted below
+            view = dst[base : base + 1024, :]
+            return view
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source = (
+            textwrap.dedent("".join(lines))
+            .replace("prefix = narrow(src, n)", binding.replace("\n", "\n    "))
+            .replace("base + 1024", "base + prefix.shape[0]")
+        )
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        rows = DynDim("ROWS", "ROWS", 4096)
+        seed = {
+            "src": TensorMeta(shape=(1024, 32), dtype=DataType.BF16),
+            "dst": TensorMeta(shape=(rows, 32), dtype=DataType.BF16),
+        }
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["view"].shape == (rows, 32)
+
+    def test_fallback_shape_slice_cannot_join_static_allocation(self, monkeypatch):
+        @jit.inline
+        def consumer(view: pl.Tensor):
+            return view
+
+        def entry(
+            src: pl.Tensor[[1024, 32], pl.BF16],
+            dst: pl.Tensor[[_SLICE_ROWS_3145, 32], pl.BF16],
+            base: pl.Scalar[pl.INDEX],
+            n: pl.Scalar[pl.INDEX],
+            flag: pl.Scalar[pl.BOOL],
+        ):
+            prefix = src[:n, :]  # noqa: F841 — shape read inserted below
+            if flag:
+                view = dst[base : base + 1024, :]
+            else:
+                view = pl.create_tensor([1024, 32], dtype=pl.BF16)
+            return consumer(view)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(entry)
+        source = textwrap.dedent("".join(lines)).replace("base + 1024", "base + prefix.shape[0]")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is entry else get_lines(func),
+        )
+        with pytest.raises(ValueError, match="missing inferred tensor metadata for parameter 'view'"):
+            jit(entry).specialize()
+
+    @pytest.mark.parametrize("shape_read", ["x.shape[0]", "pl.tensor.dim(x, 0)"])
+    def test_fallback_dimension_becomes_descriptor_bound_in_helper(self, shape_read, monkeypatch):
+        @jit.inline
+        def consumer(view: pl.Tensor):
+            return view
+
+        def reshape_helper(x: pl.Tensor[[_SLICE_ROWS_3145, 32], pl.BF16]):
+            rows = pl.tensor.dim(x, 0)
+            view = pl.reshape(x, [rows, 32])
+            return consumer(view)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(reshape_helper)
+        source = textwrap.dedent("".join(lines)).replace("pl.tensor.dim(x, 0)", shape_read)
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line)
+            if func is reshape_helper
+            else get_lines(func),
+        )
+        helper = jit.inline(reshape_helper)
+
+        @jit
+        def entry(src: pl.Tensor[[1024, 32], pl.BF16], n: pl.Scalar[pl.INDEX]):
+            prefix = src[:n, :]
+            return helper(prefix)
+
+        program = entry.specialize()
+        downstream = program.get_function("consumer")
+        assert downstream is not None
+        tensor_type = downstream.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        assert not isinstance(tensor_type.shape[0], ir.ConstInt)
+
+    @pytest.mark.parametrize("alias", [False, True])
+    def test_local_tensor_shape_slice_branch_specializes(self, alias, monkeypatch):
+        @jit.inline
+        def consumer(view: pl.Tensor):
+            return view
+
+        def entry(flag: pl.Scalar[pl.BOOL]):
+            buf = pl.create_tensor([1024, 32], dtype=pl.BF16)
+            if flag:
+                view = buf[16:1024, :]
+            else:
+                view = pl.create_tensor([1008, 32], dtype=pl.BF16)
+            return consumer(view)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(entry)
+        text = textwrap.dedent("".join(lines)).replace("16:1024", "16:buf.shape[0]")
+        if alias:
+            text = text.replace(
+                "buf = pl.create_tensor([1024, 32], dtype=pl.BF16)",
+                "source = pl.create_tensor([1024, 32], dtype=pl.BF16)\n    buf = source",
+            )
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (text.splitlines(keepends=True), line) if func is entry else get_lines(func),
+        )
+        # The body transformer does not track this allocation. The parser
+        # nevertheless folds the direct shape read from the local tensor type.
+        program = jit(entry).specialize()
+        helper = program.get_function("consumer")
+        assert helper is not None
+        tensor_type = helper.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        dim = tensor_type.shape[0]
+        assert isinstance(dim, ir.ConstInt) and dim.value == 1008
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "width: pl.Scalar[pl.INT32] = src.shape[1]",
+            "rows = src.shape[1]\nwidth = rows",
+            "width = src.shape[1]\nwidth = 128",
+        ],
+    )
+    def test_shape_values_left_as_variables_are_not_slice_constants(self, binding, monkeypatch):
+        def body(src, base):
+            width = src.shape[1]
+            view = src[base : base + width, :]
+            return view
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        text = textwrap.dedent("".join(lines))
+        text = text.replace("width = src.shape[1]", binding.replace("\n", "\n    "))
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (text.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        seed = {"src": TensorMeta(shape=(1024, 128), dtype=DataType.BF16)}
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["view"].shape == (1024, 128)
+
     def test_fixed_width_slice_does_not_reuse_rebound_alias(self):
         def body(src, base, other):
             end = base + 128
