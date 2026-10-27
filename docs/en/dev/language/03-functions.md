@@ -106,6 +106,21 @@ remain in the program; placeholder bounds do not replace runtime extents.
 `synthesized` records an automatically generated placeholder symbol and retains
 its existing annotation-overlay and helper-return behavior.
 
+Subscript views also retain a static width when their runtime bounds have a
+provably constant difference. For example, `src[base:base + 128, :]` carries
+`[128, src.shape[1]]` metadata, allowing a join with a same-typed `[128, N]`
+allocation when the second dimensions agree. The JIT translates integer
+addition/subtraction and constant multiplication into temporary expressions
+and reuses the parser's arithmetic analyzer to prove the width. Constants use
+the current binding and constexpr rules; runtime dimensions never use sample
+bounds as proof. Symbols are shared only within one pair of slice bounds, so
+rebinding and aliases from other statements do not establish new equalities.
+Unresolved calls, reads, dynamic division, and nonlinear products are not
+cancelled as symbols. Unproved widths keep the existing parent-extent fallback,
+and step slices remain unsupported by this metadata inference. Branch joins
+still require compatible shapes, dtypes, layouts, and dynamic-axis identities.
+This inference does not change the slice operation or its storage lifetime.
+
 ### Tile parameters in JIT inline helpers
 
 An inline helper can take an explicitly typed on-chip Tile:
