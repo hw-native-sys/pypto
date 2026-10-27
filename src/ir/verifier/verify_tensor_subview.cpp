@@ -19,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
@@ -32,6 +31,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto::ir {
 namespace {
@@ -57,10 +57,8 @@ class BorrowedTypeCache {
 // by merely acquiring an AffineSubview type (including through deserialization).
 class SubviewVerifier : public IRVisitor {
  public:
-  SubviewVerifier(const FunctionPtr& function, const backend::BackendHandler* handler,
-                  const std::unordered_set<const Expr*>& required_provenance)
+  SubviewVerifier(const FunctionPtr& function, const std::unordered_set<const Expr*>& required_provenance)
       : function_(function),
-        handler_(handler),
         analyzer_(std::make_shared<arith::Analyzer>()),
         required_provenance_(required_provenance) {
     for (const auto& param : function->params_) {
@@ -152,15 +150,11 @@ class SubviewVerifier : public IRVisitor {
         if (IsOp(op, "tensor.view")) CheckView(op);
       }
       CHECK_SPAN(entry.GetOpCategory() == "TensorOp" || IsOp(op, "tile.load"), op->span_)
-          << "tensor.subview supports tensor read consumers and explicit Vec loads only";
+          << "tensor.subview supports tensor read consumers and explicit loads only";
       CHECK_SPAN(!IsOp(op, "tensor.reshape") && !IsOp(op, "tensor.transpose") &&
-                     !IsOp(op, "tensor.reinterpret_view"),
+                     !IsOp(op, "tensor.reinterpret_view") && !IsOp(op, "tensor.read"),
                  op->span_)
           << "tensor.subview requires an explicit load before " << op->op_->name_;
-      CHECK_SPAN(!handler_ || IsOp(op, "tensor.subview") || IsOp(op, "tensor.view") ||
-                     IsOp(op, "tensor.set_validshape") || IsOp(op, "tensor.dim") || IsOp(op, "tile.load"),
-                 op->span_)
-          << "tensor.subview backend supports metadata and Vec-load consumers only";
       if (IsOp(op, "tile.load")) CheckLoad(op);
     }
     IRVisitor::VisitExpr_(op);
@@ -374,10 +368,6 @@ class SubviewVerifier : public IRVisitor {
     const auto bound = analyzer_->const_int_bound(value);
     CHECK_SPAN(bound.min_value >= 0 && bound.max_value < arith::ConstIntBound::kPosInf, span)
         << "tensor.subview cannot prove nonnegative overflow-free index arithmetic";
-    if (handler_) {
-      CHECK_SPAN(bound.max_value <= handler_->GetSubviewLoadLimits().max_index, span)
-          << "tensor.subview exceeds the supported device index/DMA range";
-    }
   }
   void CheckSubview(const CallPtr& op) {
     CHECK_SPAN(function_->ir_stage_ == FunctionIRStage::Functional, op->span_)
@@ -398,8 +388,6 @@ class SubviewVerifier : public IRVisitor {
                    offsets->elements_.size() == rank && steps->elements_.size() == rank && rank > 0,
                op->span_)
         << "tensor.subview geometry rank mismatch";
-    CHECK_SPAN(!handler_ || handler_->GetSubviewLoadLimits().max_rows > 0, op->span_)
-        << "tensor.subview native loads are unsupported on this backend";
     auto parent_view = parent->tensor_view_.value_or(TensorView{});
     CHECK_SPAN(parent_view.pad == PadValue::null &&
                    (parent_view.layout == TensorLayout::ND || parent_view.layout == TensorLayout::DN),
@@ -476,12 +464,6 @@ class SubviewVerifier : public IRVisitor {
         MakeMul(max_address, std::make_shared<ConstInt>(static_cast<int64_t>(parent->dtype_.GetByte()),
                                                         DataType::INDEX, op->span_)),
         op->span_);
-    if (handler_) {
-      CHECK_SPAN(rank == 2 && parent_view.layout == TensorLayout::ND && parent->dtype_ == DataType::BF16 &&
-                     analyzer_->CanProveEqual(result->tensor_view_->stride[1], one),
-                 op->span_)
-          << "tensor.subview backend profile requires rank-2 ND BF16 with unit inner stride";
-    }
   }
   void CheckView(const CallPtr& op) {
     auto parent = As<TensorType>(op->args_[0]->GetType());
@@ -535,61 +517,100 @@ class SubviewVerifier : public IRVisitor {
     }
   }
   void CheckLoad(const CallPtr& op) {
-    if (!handler_) return;
     auto source = As<TensorType>(op->args_[0]->GetType());
-    CHECK_SPAN(source, op->span_) << "tensor.subview native load requires an ordinary Tensor";
+    CHECK_SPAN(source, op->span_) << "tensor.subview load requires an ordinary Tensor";
     const auto& source_metadata = source->tensor_view_;
-    CHECK_SPAN(source_metadata.has_value(), op->span_)
-        << "tensor.subview native load requires affine addressing metadata";
+    CHECK_SPAN(source_metadata.has_value(), op->span_) << "tensor.subview load requires addressing metadata";
     const auto& source_view = source_metadata.value();
-    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, op->span_);
-    CHECK_SPAN(source && source->shape_.size() == 2 && source->dtype_ == DataType::BF16 &&
-                   source_view.layout == TensorLayout::ND && source_view.stride.size() == 2 &&
-                   analyzer_->CanProveEqual(source_view.stride[1], one),
-               op->span_)
-        << "tensor.subview backend load requires rank-2 ND BF16 with unit inner stride";
     auto tile = As<TileType>(op->GetType());
-    CHECK_SPAN(tile && tile->shape_.size() == 2 && tile->memory_space_ == MemorySpace::Vec, op->span_)
-        << "tensor.subview backend profile supports rank-2 Vec loads only";
-    const auto limits = handler_->GetSubviewLoadLimits();
+    const auto rank = source->shape_.size();
+    CHECK_SPAN(tile && (tile->shape_.size() == rank || (rank > 2 && tile->shape_.size() == 2)), op->span_)
+        << "tensor.subview load result must match the original or flattened window rank";
+    // Existing ND/DN loads copy contiguous elements along the innermost
+    // storage axis. A borrowed address map must be expressible by that
+    // consumer; descriptor geometry itself has no such restriction.
+    const size_t contiguous_axis = source_view.layout == TensorLayout::DN ? rank - 2 : rank - 1;
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, op->span_);
+    CHECK_SPAN(analyzer_->CanProveEqual(source_view.stride[contiguous_axis], one), op->span_)
+        << "tensor.subview load requires a contiguous inner storage axis";
     auto ci = [&](int64_t value) { return std::make_shared<ConstInt>(value, DataType::INDEX, op->span_); };
-    const auto& valid = tile->tile_view_ && !tile->tile_view_->valid_shape.empty()
-                            ? tile->tile_view_->valid_shape
-                            : tile->shape_;
-    Prove(MakeLe(tile->shape_[0], ci(limits.max_rows)), op->span_, "native row-count limit");
-    Prove(MakeGt(valid[0], ci(0)), op->span_, "native valid rows > 0");
-    Prove(MakeGt(valid[1], ci(0)), op->span_, "native valid columns > 0");
     auto offsets = As<MakeTuple>(op->args_[1]);
-    CHECK_SPAN(offsets && offsets->elements_.size() == 2, op->span_)
-        << "tensor.subview native load offsets must have rank 2";
+    auto shapes = As<MakeTuple>(op->args_[2]);
+    auto requested_valid = As<MakeTuple>(op->args_[3]);
+    CHECK_SPAN(offsets && shapes && requested_valid && offsets->elements_.size() == rank &&
+                   shapes->elements_.size() == rank && requested_valid->elements_.size() == rank,
+               op->span_)
+        << "tensor.subview load geometry rank mismatch";
+    // FlattenTileNdTo2D keeps the tensor-rank load operands and collapses
+    // only the result Tile. Prove bounds in the original coordinate system,
+    // then check that the result still describes that same allocation/window.
+    // Source bounds use carrier coordinates. Destination deduction may change
+    // the FP4 packing axis, so its shape/validity cannot bound source accesses.
+    // Reuse the ordinary load's window inference before that conversion.
+    const auto& physical = shapes->elements_;
+    auto valid = InferWindowReadValidShape({
+        /*source_physical=*/source->shape_,
+        /*source_valid=*/GetEffectiveTensorValidShape(*source),
+        /*offsets=*/offsets->elements_,
+        /*window=*/physical,
+        /*requested_valid=*/requested_valid->elements_,
+        /*kind=*/WindowReadKind::kClampedWindow,
+        /*clamp=*/GetKwargOr<bool>(op->kwargs_, "clamp", false),
+        /*op_name=*/op->op_->name_,
+        /*bounds_remedy=*/"Use an in-bounds subview load window or pass clamp=True",
+        /*span=*/op->span_,
+    });
+    // Compare the actual result against the destination geometry produced by
+    // the existing deducer (including FP4 repacking), then optionally flattened.
+    auto deduced = OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
+    auto original_tile = As<TileType>(deduced->GetType());
+    CHECK_SPAN(original_tile, op->span_) << "tensor.subview load requires a Tile result";
+    CHECK_SPAN(valid.size() == rank, op->span_) << "tensor.subview load validity rank mismatch";
     const auto& extent = source_view.valid_shape.empty() ? source->shape_ : source_view.valid_shape;
     ExprPtr last_address = ci(0);
-    for (size_t i = 0; i < 2; ++i) {
+    for (size_t i = 0; i < rank; ++i) {
       auto offset = offsets->elements_[i];
       CHECK_SPAN(ScalarArithmeticIsSafe(offset) && ScalarArithmeticIsSafe(valid[i]) &&
-                     ScalarArithmeticIsSafe(tile->shape_[i]),
+                     ScalarArithmeticIsSafe(physical[i]),
                  op->span_)
-          << "tensor.subview cannot prove overflow-free native load geometry";
-      Prove(MakeLe(valid[i], tile->shape_[i]), op->span_, "native validity inside the Tile allocation");
-      Prove(MakeGe(offset, ci(0)), op->span_, "native load offsets >= 0");
-      Prove(MakeLe(MakeAdd(offset, valid[i]), extent[i]), op->span_,
-            "native load inside the borrowed window");
+          << "tensor.subview cannot prove overflow-free load geometry";
+      Prove(MakeGt(valid[i], ci(0)), op->span_, "load valid extents > 0");
+      Prove(MakeLe(valid[i], physical[i]), op->span_, "load validity inside the Tile allocation");
+      Prove(MakeGe(offset, ci(0)), op->span_, "load offsets >= 0");
+      Prove(MakeLe(MakeAdd(offset, valid[i]), extent[i]), op->span_, "load inside the borrowed window");
       last_address =
           MakeAdd(last_address, MakeMul(MakeSub(MakeAdd(offset, valid[i]), ci(1)), source_view.stride[i]));
       CheckFinite(last_address, op->span_);
     }
-    auto byte_count = MakeMul(valid[1], ci(2));
-    auto physical_bytes = MakeMul(tile->shape_[1], ci(2));
-    Prove(MakeEq(MakeFloorMod(byte_count, ci(limits.row_alignment_bytes)), ci(0)), op->span_,
-          "native valid row-byte alignment");
-    Prove(MakeEq(MakeFloorMod(physical_bytes, ci(limits.row_alignment_bytes)), ci(0)), op->span_,
-          "native tile row-byte alignment");
-    auto gap = MakeMul(MakeSub(source_view.stride[0], valid[1]), ci(2));
-    Prove(MakeGe(gap, ci(0)), op->span_, "native nonnegative source gap");
-    Prove(MakeLe(gap, ci(limits.max_gap_bytes)), op->span_, "native source-gap width");
+    auto check_result = [&](const std::vector<ExprPtr>& original, const std::vector<ExprPtr>& result) {
+      auto expected = original;
+      if (tile->shape_.size() != rank) {
+        ExprPtr leading = ci(1);
+        for (size_t i = 0; i + 1 < rank; ++i) {
+          leading = MakeMul(leading, original[i]);
+          CheckFinite(leading, op->span_);
+        }
+        expected = {leading, original.back()};
+      }
+      CHECK_SPAN(result.size() == expected.size(), op->span_)
+          << "tensor.subview load result geometry rank mismatch";
+      for (size_t i = 0; i < expected.size(); ++i) {
+        CHECK_SPAN(ScalarArithmeticIsSafe(result[i]), op->span_)
+            << "tensor.subview cannot prove overflow-free result geometry";
+        Prove(MakeEq(expected[i], result[i]), op->span_, "load result matches the original window");
+      }
+    };
+    check_result(original_tile->shape_, tile->shape_);
+    const auto& tile_valid = tile->tile_view_ && !tile->tile_view_->valid_shape.empty()
+                                 ? tile->tile_view_->valid_shape
+                                 : tile->shape_;
+    const auto& destination_valid =
+        original_tile->tile_view_ && !original_tile->tile_view_->valid_shape.empty()
+            ? original_tile->tile_view_->valid_shape
+            : original_tile->shape_;
+    check_result(destination_valid, tile_valid);
   }
   FunctionPtr function_;
-  const backend::BackendHandler* handler_;
   std::shared_ptr<arith::Analyzer> analyzer_;
   std::unordered_set<const Expr*> roots_;
   std::vector<const Expr*> local_roots_;
@@ -600,7 +621,7 @@ class SubviewVerifier : public IRVisitor {
   const std::unordered_set<const Expr*>& required_provenance_;
 };
 }  // namespace
-void VerifyTensorSubviews(const FunctionPtr& function, const backend::BackendHandler* backend_handler) {
+void VerifyTensorSubviews(const FunctionPtr& function) {
   // Keep ordinary kernels off the arithmetic-analysis path. Detection is a
   // separate linear walk so false/unknown proofs are never silently skipped
   // just because the descriptor does not have a well-formed defining call.
@@ -645,7 +666,7 @@ void VerifyTensorSubviews(const FunctionPtr& function, const backend::BackendHan
     auto alias = presence.aliases.find(root);
     if (alias != presence.aliases.end()) presence.pending_roots.push_back(alias->second);
   }
-  SubviewVerifier verifier(function, backend_handler, required_provenance);
+  SubviewVerifier verifier(function, required_provenance);
   verifier.VisitStmt(function->body_);
 }
 }  // namespace pypto::ir

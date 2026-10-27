@@ -11,24 +11,6 @@ Part of the [Operator System](05-operators.md) reference.
 
 **Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting), `tensor.maximum/minimum` (element-wise max/min; rhs may be tensor or scalar — `ConvertTensorToTileOps` dispatches to `tile.maximum/minimum` or `tile.maximums/minimums` based on the rhs operand type), `tensor.set_validshape` (update valid-shape metadata without data movement; also reachable as `pl.set_validshape`), `tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2` (sorting; tensor-level counterparts of `tile.sort32` / `tile.mrgsort` — converted to tile ops by `ConvertTensorToTileOps`), `tensor.gather` (axis indexing with `dim`, or flat element indexing without `dim`; see below), `tensor.gather_mask` (mask-pattern gather; tensor-level counterpart of `tile.gather_mask`, with optional same-bit-width `output_dtype` — see [Mask patterns](#mask-patterns)), `tensor.scatter` (column scatter; the column-wise inverse of `tensor.gather`, MVP supports rank-2 inputs with `dim=-1` — `out[b, index[b, k]] = src[b, k]`, `index` same shape as `src` — and lowers to `tile.scatter` via `ConvertTensorToTileOps`), `tensor.scatter_mask` (mask-pattern row-scatter; tensor-level counterpart of `tile.scatter_mask`, expands a compact `input` tensor into the mask-marked columns of `dst` — see [Mask patterns](#mask-patterns)), `tensor.ci` / `tensor.arange` (contiguous integer sequence generation; lowers to `tile.ci`; also exposed at top level as `pl.arange`), `tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs` (integer-only bitwise and shift ops. These are the registered *IR* names; the Python spellings for the three whose leaf is a Python keyword carry a trailing underscore -- `tensor.and_`, `tensor.or_`, `tensor.not_` -- and the printer emits that form so IR round-trips as valid Python; tensor-level counterparts of the matching `tile.*` ops. Both operands of a tensor-tensor form must have the same shape — there is no `tile.row_expand_and`, so broadcasting is rejected at type deduction rather than failing later in the pass. `tensor.not` is int16/uint16 only, matching `tile.not`/TNOT. Shifts keep the lhs element type; `and`/`or`/`xor` require matching 8/16/32-bit operand dtypes, and scalar forms use the same-width signless `iN` encoding required by their tile lowering. `ConvertTensorToTileOps` lowers nine of them 1:1, and synthesizes the `pto.txor` scratch operand for `tensor.xor`/`tensor.xors` so tensor-level callers never supply a `tmp`)
 
-`pl.tensor.subview(source, shape, offsets, *, steps=None)` borrows an affine
-window from an ordinary GM Tensor inside an InCore function. It preserves
-parent pitches and performs no load or allocation; `slice` still materializes
-its selected window during TensorToTile conversion. Every sampled coordinate
-must be provably inside the immediate parent's valid window, and at least one
-logical extent must be strictly smaller. Canonical `view` ancestors must also
-provably preserve their parent element count before they can supply a borrowed
-GM window. Unrelated ordinary views keep their existing contract. False and
-unknown proofs are rejected. A parent valid extent must also be provably within
-its physical shape.
-The initial executable profile is rank-2 ND BF16, unit inner stride, caller-owned
-GM roots, and Vec loads on Ascend910 (A2/A3). Native loads require at most 4095
-rows, signed 32-bit indices, 32-byte valid and physical rows, and a source gap
-that fits in an unsigned 32-bit byte count. `GetSubviewLoadLimits` supplies
-these target constraints; other backends reject subviews until their native
-load profile is validated. Tile/DistributedTensor inputs, descriptor escape,
-compiler-owned roots, and writes through the descriptor are rejected.
-
 `tensor.view` is a metadata-only zero-copy shape/layout reinterpret. It is registered as a `TensorOp` passthrough in `ConvertTensorToTileOps`; PTO in-core codegen lowers it to `pto.make_tensor_view` over the original base pointer. Targets require rank at least 1 (DN requires rank at least 2). Orchestration shape reinterpret is normally ND-only and cannot also change layout. FP8E8M0 dynamic scale storage additionally permits an equal-element-count shaped alias between packed ND and `MX_A_ZZ` or `MX_B_NN`; orchestration preserves the same runtime tensor without calling `reshape`. Shape reinterpretation of a partially valid source is limited to either a packed ND leading-dimension collapse to 2D or a contiguous-prefix linear collapse to `[1, product(shape)]`; both require an explicit target `valid_shape`. These forms preserve the source tensor kind and backing metadata.
 
 Flat gather reuses `pl.gather(src, index=idx)` (equivalently `pl.gather(src, idx)`):
@@ -109,6 +91,41 @@ with ib.function("tensor_example") as f:
     result = ib.let("result", tensor.add(input_a, input_b))
     ib.return_stmt(result)
 ```
+
+### Borrowed GM subviews
+
+`pl.tensor.subview(source, shape, offsets, *, steps=None)` describes a read-only
+window of an ordinary GM Tensor inside an InCore function. It performs no load
+or allocation and retains parent storage pitches. Unlike `view`, it selects a
+strictly smaller window; unlike `slice`, it remains a GM descriptor during
+TensorToTile conversion.
+
+| Parameter | Meaning and constraint |
+| --------- | ---------------------- |
+| `source` | Caller-owned ordinary GM Tensor, or a proven metadata/subview alias; not Tile or DistributedTensor |
+| `shape` | Positive logical extents, with the same rank as the parent |
+| `offsets` | Nonnegative origin in the immediate parent's coordinates |
+| `steps` | Positive sampling steps, defaulting to one on every axis |
+
+For every axis, `offset + (shape - 1) * step` must be inside the parent's valid
+extent, and at least one logical extent must be strictly smaller. The parent's
+valid extents must fit its physical shape. Canonical `view` ancestors must
+preserve element count. All geometry and address arithmetic must be provably
+free of overflow. Dynamic parameters are supported only when the surrounding
+control flow proves these conditions; false and unknown proofs are rejected.
+
+The result keeps the source dtype/layout, multiplies parent strides by `steps`,
+and treats its whole logical shape as valid. Nested subviews are supported.
+Metadata aliases must preserve the address map; `set_validshape` may only narrow
+validity. Descriptor escape, compiler-owned roots, and writes through the
+borrowed descriptor are rejected.
+
+Consumers retain their existing lowering and device restrictions. Existing
+ND/DN loads require a contiguous inner storage axis; a non-unit step on that
+axis needs a consumer that supports it. Scalar `tensor.read` requires loading
+the window into a Tile first. N-D loads retain source coordinates while the
+pipeline flattens the result Tile. Subview itself adds no backend-specific
+dtype, rank, DMA row-count, gap-width, or alignment limits.
 
 ## TileOp: Hardware-Optimized Tile Operations
 

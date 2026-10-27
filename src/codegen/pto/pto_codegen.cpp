@@ -899,7 +899,7 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   single_vf_function_ = program->functions_.size() == 1;
   VerifyVFInfrastructureCodegenPreconditions(program);
   for (const auto& [gvar, function] : program->functions_) {
-    ir::VerifyTensorSubviews(function, GetBackendHandler());
+    ir::VerifyTensorSubviews(function);
   }
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;

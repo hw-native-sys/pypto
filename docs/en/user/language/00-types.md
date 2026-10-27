@@ -300,8 +300,8 @@ strides are [1536,1]; `pl.load` materializes only the requested consumer Tile.
 `pl.TensorAddressingKind` distinguishes `Canonical` from compiler-produced
 `AffineSubview` descriptors in IR dumps; do not put the latter on function
 parameters. Geometry must be provably strictly smaller and contained in the
-parent valid window; unknown bounds reject. The initial load profile is rank-2
-ND BF16 Vec with contiguous columns. `tensor.view` retains packed reshape rules,
+parent valid window; unknown bounds reject. Native consumers retain their
+existing device restrictions; subview adds no hardware load limits. `tensor.view` retains packed reshape rules,
 and `tensor.slice` keeps its materializing InCore behavior.
 
 `pl.MX_A_ZZ` and `pl.MX_B_NN` are the two remaining layout constants. They tag the **GM

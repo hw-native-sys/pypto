@@ -31,16 +31,6 @@ namespace backend {
 
 class Backend;
 
-// Validated native GM-subview load profile. Zero limits mean unsupported.
-// max_rows and max_index are element counts/indices; max_gap_bytes and
-// row_alignment_bytes are measured in bytes.
-struct SubviewLoadLimits {
-  int64_t max_rows = 0;
-  int64_t max_index = 0;
-  int64_t max_gap_bytes = 0;
-  int64_t row_alignment_bytes = 0;
-};
-
 /**
  * @brief The (src, dst) dtype pairs an architecture converts in one `pto.tcvt`.
  *

@@ -35,9 +35,6 @@ def subview_rows(
 _CACHE = (16 * torch.arange(8)[:, None] + torch.arange(512)[None, :] % 16).to(torch.bfloat16)
 
 
-@pytest.mark.platforms(
-    "a2a3", "a2a3sim", reason="Native GM subview loads currently have a validated A2/A3 profile only"
-)
 @st.cases(
     st.case(
         subview_rows,

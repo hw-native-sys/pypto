@@ -237,8 +237,8 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 Tensor 的第 1、4 行，不读取数据或分配 buffer。结果 stride 为 [1536,1]；`pl.load`
 只物化消费者请求的 Tile。`pl.TensorAddressingKind` 在 IR dump 中区分 `Canonical`
 与编译器生成的 `AffineSubview` 描述符，后者不能用于函数形参注解。几何必须能证明
-严格小于且包含于父有效窗口，unknown 边界拒绝。首个 load profile 为 rank-2 ND BF16
-Vec、列连续。`tensor.view` 保留 packed reshape 约束，`tensor.slice` 保持 InCore 物化语义。
+严格小于且包含于父有效窗口，unknown 边界拒绝。原生消费者沿用已有设备约束，
+subview 不新增硬件 load 范围限制。`tensor.view` 保留 packed reshape 约束，`tensor.slice` 保持 InCore 物化语义。
 
 剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS v0.60 负责物理打包）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。两种打包 FP4 格式均可在显式调用 `pl.cast(fp4_tile, pl.FP8E4M3FN)` 后作为左操作数；A5 在 `matmul_mx` 前经 BF16 和 FP32 对其合法化。 原生 FP4×FP4 与反向 FP8×FP4 均不支持。`pl.quant_mx` 支持 MXFP8 和原生 E2M1 MXFP4，`group_axis` 对齐 PTOAS `grpAxis`。FP8 结果可在同一个混合 InCore 任务中经 V2C 供 `matmul_mx` 使用，包括生成的 Vec→Mat→scale memory 路径。
 

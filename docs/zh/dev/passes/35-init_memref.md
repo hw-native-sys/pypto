@@ -1,9 +1,5 @@
 # InitMemRef Pass
 
-借用的 affine GM 描述符（`TensorAddressingKind.AffineSubview`）始终没有 MemRef，
-包括嵌套 subview 和 metadata 别名。它们不继承根分配包络，也不分配 GM/UB；只有
-物化的消费者 Tile 按普通规则获得存储。
-
 物化编译器负责的 PTO level3 scratch，为所有变量初始化内存引用 (MemRef)，并创建地址未分配的 alloc 操作。
 
 ## 概述
@@ -62,6 +58,12 @@ program_with_memrefs = init_pass(program)
 6. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 7. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
 8. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+
+### 借用的 GM 描述符
+
+借用的 affine GM 描述符（`TensorAddressingKind.AffineSubview`）始终没有 MemRef，
+包括嵌套 subview 和 metadata 别名。它们不继承根分配包络，也不分配 GM/UB；只有
+物化的消费者 Tile 按普通规则获得存储。
 
 ### 构建地址前化简常量输入
 

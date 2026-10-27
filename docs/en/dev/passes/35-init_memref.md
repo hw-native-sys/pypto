@@ -1,10 +1,5 @@
 # InitMemRef Pass
 
-Borrowed affine GM descriptors (`TensorAddressingKind.AffineSubview`) remain
-without a MemRef, including nested subviews and metadata aliases. They neither
-inherit the root allocation envelope nor allocate GM/UB storage. Only the
-materialized consumer Tile receives storage under the normal rules.
-
 Materializes compiler-owned PTO level3 scratch, initializes MemRef for all variables, and creates alloc operations with unallocated addresses.
 
 ## Overview
@@ -63,6 +58,13 @@ program_with_memrefs = init_pass(program)
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
 8. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+
+### Borrowed GM descriptors
+
+Borrowed affine GM descriptors (`TensorAddressingKind.AffineSubview`) remain
+without a MemRef, including nested subviews and metadata aliases. They neither
+inherit the root allocation envelope nor allocate GM/UB storage. Only the
+materialized consumer Tile receives storage under the normal rules.
 
 ### Constant inputs before address construction
 
