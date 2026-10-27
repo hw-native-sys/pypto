@@ -905,11 +905,11 @@ Pass LowerAutoVectorSplit();
 - `CheckNoCubeTileHalved` —— cube 操作数完整性兜底。
 - `WithSplitAivAttrs` —— 打 `split` + `split_aiv`。
 
-**共享机制**：`src/ir/transforms/utils/split_axis_utils.cpp`
-（`ProcessStmts`、`InjectSubblockIdx`、`SplitDimension`、`IsReduceOnSplitAxis`）
-—— 逐算子向量折半，与 `SplitVectorKernel` 的独立拆分分支
-（`ProcessStandaloneSplitFunction`）以及 `AivSplitValid` 校验器
-（`SplitDimension` / `IsReduceOnSplitAxis`）共享。
+**共享机制**（也供 `SplitVectorKernel` 与 `AivSplitValid` 校验器使用）：
+
+- `src/ir/transforms/utils/split_axis_utils.cpp`：形状折半、循环/分支状态修复、语句重写与 subblock index 注入。
+- `src/ir/transforms/utils/split_axis/boundary_valid.cpp`：显式边界的有效范围局部化（valid-extent localization）与 AUTO 运行时范围延后传播。
+- `src/ir/transforms/utils/split_axis/body_analysis.cpp`：lane 局部数据流分析与 transpose-split 风险检测；`split_axis/internal.h` 保存私有共享辅助函数声明。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 

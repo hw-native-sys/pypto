@@ -4300,7 +4300,7 @@ def test_mixed_explicit_implicit_region_in_while_splices_through():
 # (tile.full/create/ci/random) and address-carrying ops (tile.load/slice/extract)
 # whose args reference the region's lane index. The rationale for each, and for
 # why a generator is NOT added to half_tiles, lives at ScanSplitBody in
-# src/ir/transforms/utils/split_axis_utils.cpp — keep it in one place.
+# src/ir/transforms/utils/split_axis/body_analysis.cpp — keep it in one place.
 #
 # The explicit path splices the region body through UNCHANGED, so a positive
 # test's Expected is literally its Before minus the scope wrapper. That identity

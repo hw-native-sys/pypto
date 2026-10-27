@@ -1072,10 +1072,11 @@ Pass LowerAutoVectorSplit();
 - `CheckNoCubeTileHalved` — cube-operand integrity backstop.
 - `WithSplitAivAttrs` — stamps `split` + `split_aiv`.
 
-**Shared machinery**: `src/ir/transforms/utils/split_axis_utils.cpp`
-(`ProcessStmts`, `InjectSubblockIdx`, `SplitDimension`, `IsReduceOnSplitAxis`) —
-the per-op vector halving, shared with `SplitVectorKernel`'s
-`ProcessStandaloneSplitFunction` and the `AivSplitValid` verifier.
+**Shared machinery** (also used by `SplitVectorKernel` and the `AivSplitValid` verifier):
+
+- `src/ir/transforms/utils/split_axis_utils.cpp`: shape halving, loop/branch carry repair, statement rewriting, and subblock-index injection.
+- `src/ir/transforms/utils/split_axis/boundary_valid.cpp`: explicit-boundary valid-extent localization and AUTO runtime-extent deferral.
+- `src/ir/transforms/utils/split_axis/body_analysis.cpp`: lane-local dataflow analysis and transpose-split hazard detection; `split_axis/internal.h` holds private shared helper declarations.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
