@@ -144,6 +144,10 @@ void SiblingUseCounter::VisitExpr_(const CallPtr& op) {
   for (const auto& [key, value] : op->attrs_) {
     ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
   }
+  // Value-typed keyword metadata is a real read, not a matrix operand.
+  for (const auto& [key, value] : op->kwargs_) {
+    ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+  }
 }
 
 }  // namespace auto_tile_matmul_l0
