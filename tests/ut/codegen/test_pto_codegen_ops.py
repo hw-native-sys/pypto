@@ -1197,6 +1197,49 @@ class TestB02SelectionAndPreluCodegen:
         self._assert_named_ssas(ins[:3], ["mask", "src", "tmp"])
         self._assert_named_ssas(outs, ["result"])
 
+    @pytest.mark.ptoas_compile
+    def test_tsels_materializes_aligned_column_and_preserves_writable_tmp(self, tmp_path):
+        """Normalize a read-only source even when the same call writes scratch.
+
+        The aligned column is a legal borrowed view, but an arithmetic result
+        cannot inherit its four-byte row-major axis. Copy that source densely
+        while keeping the caller's separately allocated scratch destination.
+        """
+
+        @pl.program
+        class ColumnSelect:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                mask_in: pl.Tensor[[16, 32], pl.UINT8],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.load(src, [0, 0], [16, 8])
+                mask = pl.load(mask_in, [0, 0], [16, 32])
+                column = pl.tile.slice(local, [16, 1], [0, 0])
+                tmp = pl.tile.create([1, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                result = pl.tile.sels(mask, column, tmp, -1.0)
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(ColumnSelect, BackendType.Ascend910)
+        extracts = [line for line in mlir.splitlines() if "pto.textract " in line]
+        assert len(extracts) == 1, mlir
+        assert "rows=16, cols=8" in extracts[0].split("outs(", 1)[0], mlir
+        select = strip_loc(self._op_line(mlir, "pto.tsels"))
+        inputs, _outputs = self._ins_outs_ssas(select)
+        scratch = next(
+            line.strip().split(" = ", 1)[0]
+            for line in mlir.splitlines()
+            if "= pto.alloc_tile " in line and "%tmp__" in line.split("=", 1)[0]
+        )
+        assert inputs[2] == scratch, mlir
+        assert mlir.index("pto.textract ") < mlir.index("pto.tsels "), mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TEXTRACT(" in cpp and "TSELS(" in cpp, cpp
+
     def test_tprelu_emits_target_specific_exact_operands(self):
         @pl.program
         class Prog:
@@ -2332,13 +2375,22 @@ class TestTileSliceCodegen:
     fractal/pad) and only the shape/valid_shape change.
     """
 
-    def _generate_mlir(self, program_cls) -> str:
+    def _generate_mlir(self, program_cls, *, canonicalize_slices: bool = True) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(program_cls)
+        if canonicalize_slices:
+            optimized = pm.run_passes(program_cls)
+        else:
+            # Exercise codegen's last-resort guard on the same input as the
+            # successful pipeline, retaining every other normal lowering pass.
+            pipeline = passes.PassPipeline()
+            for pass_obj in pm.passes:
+                if pass_obj.get_name() != "CanonicalizeTileSlice":
+                    pipeline.add_pass(pass_obj)
+            optimized = pipeline.run(program_cls)
         codegen_instance = codegen.PTOCodegen()
         funcs = list(optimized.functions.values())
         assert funcs, "Program has no functions"
@@ -2370,6 +2422,137 @@ class TestTileSliceCodegen:
         line = subview_lines[0]
         assert "sizes [16, 16]" in line, f"sizes attribute must be [16, 16], got:\n{line}"
         assert "rows=16, cols=16" in line, f"result tile_buf must carry rows=16, cols=16, got:\n{line}"
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("dtype", [pl.FP32, pl.INT32])
+    @pytest.mark.parametrize("use_alias", [False, True], ids=["direct", "plain-alias"])
+    def test_aligned_vec_column_subview_compiles_without_private_allocation(self, tmp_path, dtype, use_alias):
+        """An aligned column is a view of its parent's physical row stride.
+
+        Its inherited row-major [16, 1] config is legal as a subview, but an
+        independent allocation of that shape has a four-byte contiguous axis
+        and violates the ISA's 32-byte allocation granularity.
+        """
+
+        @pl.program
+        class AlignedColumn:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], dtype],
+                dst: pl.Out[pl.Tensor[[16, 1], dtype]],
+            ) -> pl.Tensor[[16, 1], dtype]:
+                local = pl.load(src, [0, 0], [16, 8])
+                column = pl.tile.slice(local, [16, 1], [0, 0])
+                return pl.store(column, [0, 0], dst)
+
+        @pl.program
+        class AlignedColumnAlias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], dtype],
+                dst: pl.Out[pl.Tensor[[16, 1], dtype]],
+            ) -> pl.Tensor[[16, 1], dtype]:
+                local = pl.load(src, [0, 0], [16, 8])
+                column = pl.tile.slice(local, [16, 1], [0, 0])
+                alias = column
+                return pl.store(alias, [0, 0], dst)
+
+        mlir = self._generate_mlir(AlignedColumnAlias if use_alias else AlignedColumn)
+        assert "pto.subview " in mlir, mlir
+        assert "pto.textract " not in mlir and "pto.tmov " not in mlir, mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        # The source is the only allocation; the column only supplies a view.
+        assert mlir.count("pto.alloc_tile ") == 1, mlir
+        assert "TSTORE(" in cpp, cpp
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("use_alias", [False, True], ids=["direct", "plain-alias"])
+    def test_aligned_column_arithmetic_materializes_dense_operand(self, tmp_path, use_alias):
+        """An aligned borrowed column still needs a legal fresh arithmetic result.
+
+        The column's inherited row-major [16, 1] type is valid as a subview,
+        but propagating that type to muls would allocate four-byte rows. Copy
+        from the parent's actual pitch before producing the arithmetic result.
+        """
+
+        @pl.program
+        class ColumnArithmetic:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.load(src, [0, 0], [16, 8])
+                column = pl.tile.slice(local, [16, 1], [0, 0])
+                scaled = pl.tile.muls(column, 0.5)
+                return pl.store(scaled, [0, 0], dst)
+
+        @pl.program
+        class ColumnAliasArithmetic:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.load(src, [0, 0], [16, 8])
+                column = pl.tile.slice(local, [16, 1], [0, 0])
+                alias = column
+                scaled = pl.tile.muls(alias, 0.5)
+                return pl.store(scaled, [0, 0], dst)
+
+        mlir = self._generate_mlir(ColumnAliasArithmetic if use_alias else ColumnArithmetic)
+        extracts = [line for line in mlir.splitlines() if "pto.textract " in line]
+        assert len(extracts) == 1, mlir
+        assert "rows=16, cols=8" in extracts[0].split("outs(", 1)[0], mlir
+        assert mlir.count("pto.tmuls ") == 1, mlir
+        assert mlir.index("pto.textract ") < mlir.index("pto.tmuls "), mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TEXTRACT(" in cpp and "TMULS(" in cpp and "TSTORE(" in cpp, cpp
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("column_offset", [0, 1], ids=["aligned", "unaligned"])
+    @pytest.mark.parametrize("valid_rows", [16, 8], ids=["full-valid", "partial-valid"])
+    def test_explicit_valid_column_arithmetic_compiles_with_requested_extent(
+        self, tmp_path, valid_rows, column_offset
+    ):
+        """An explicit valid shape must not bypass dense arithmetic layout repair.
+
+        Both cases keep sixteen physical rows. The partial case must continue
+        to store only eight logical rows after the source is copied densely.
+        """
+
+        @pl.program
+        class ExplicitValidColumn:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.load(src, [0, 0], [16, 8])
+                column = pl.tile.slice(local, [16, 1], [0, column_offset], valid_shape=[valid_rows, 1])
+                scaled = pl.tile.muls(column, 0.5)
+                return pl.store(scaled, [0, 0], dst)
+
+        mlir = self._generate_mlir(ExplicitValidColumn)
+        extracts = [line for line in mlir.splitlines() if "pto.textract " in line]
+        assert len(extracts) == 1, mlir
+        assert "rows=16, cols=1" in extracts[0].split("outs(", 1)[1], mlir
+        store = next(line for line in mlir.splitlines() if "pto.tstore " in line)
+        assert f"!pto.partition_tensor_view<{valid_rows}x1xf32>" in store, mlir
+        assert mlir.count("pto.tmuls ") == 1, mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TEXTRACT(" in cpp and "TMULS(" in cpp and "TSTORE(" in cpp, cpp
 
     def test_unaligned_vec_column_slice_into_muls_uses_aligned_extract(self):
         """Regression for #1789: an FP32 column subview at offset 1 starts four
@@ -2421,6 +2604,53 @@ class TestTileSliceCodegen:
             assert int(constant.group(1)) % 32 == 0, (
                 f"Vec operand address must be 32-byte aligned: {alloc_line}"
             )
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("dtype,column_offset", [(pl.FP32, 1), (pl.FP32, 0), (pl.INT32, 0)])
+    def test_materialized_column_slice_alias_loop_codegen(self, tmp_path, dtype, column_offset):
+        """A dense extract's layout must propagate through aliases and carries.
+
+        The slice inherits its row-major parent's layout; materializing its
+        unaligned column creates a dense column-major tile instead. Keeping the
+        old view type on an alias, loop argument, or result breaks verification.
+        Aligned columns exercise boundary normalization too; INT32 retains
+        A2/A3's explicit rejection of an unsupported native extract dtype.
+        """
+
+        @pl.program
+        class ColumnCarry:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], dtype],
+                dst: pl.Out[pl.Tensor[[16, 1], dtype]],
+            ) -> pl.Tensor[[16, 1], dtype]:
+                local = pl.load(src, [0, 0], [16, 8])
+                head = pl.tile.slice(local, [16, 1], [0, column_offset])
+                first_alias = head
+                second_alias = first_alias
+                head_alias = second_alias
+                for _i, (carried,) in pl.range(2, init_values=(head_alias,)):
+                    updated = pl.tile.adds(carried, 1)
+                    result = pl.yield_(updated)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(ColumnCarry)
+        assert "pto.subview" not in mlir, mlir
+        assert mlir.count("pto.textract ") == 1, mlir
+        assert mlir.count("pto.tadds ") == 1, mlir
+        assert "scf.for " in mlir, mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        if dtype == pl.INT32:
+            # A2/A3's TEXTRACT has no i32 form. Keep the required stride-correct
+            # copy and its explicit ISA rejection instead of silently treating
+            # the parent's strided column as a dense integer tile.
+            with pytest.raises(RuntimeError, match="A2/A3 textract element type to be i8/f16/bf16/f32"):
+                pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            return
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TEXTRACT(" in cpp and "TADDS(" in cpp, cpp
 
     @pytest.mark.parametrize(
         "op_name, pto_op",
@@ -2616,17 +2846,21 @@ class TestTileSliceCodegen:
             f"{addrs[src]} — the repack would corrupt its own source (#2010)"
         )
 
-    def test_dynamic_offset_slice_escaping_the_pass_into_col_expand_is_rejected(self):
-        """A dynamic-offset slice that ``CanonicalizeTileSlice`` cannot rewrite must be
-        rejected by codegen, not silently materialized onto its own source.
+    @pytest.mark.parametrize(
+        "canonicalize_slices",
+        [
+            pytest.param(False, id="codegen-guard"),
+            pytest.param(True, id="canonicalized", marks=pytest.mark.ptoas_compile),
+        ],
+    )
+    def test_dynamic_row_slice_col_expand_canonicalization_and_codegen_guard(
+        self, tmp_path, canonicalize_slices
+    ):
+        """Canonicalize a geometry-preserving five-argument row slice safely.
 
-        The pass only canonicalizes plain 3-arg windows, so a rank-reducing ``t[row]``
-        (a 5-arg slice carrying drop_dims) escapes it. Its window is a single row —
-        contiguous — but the offset is dynamic, and a dynamic offset cannot be folded
-        into the source-inherited buffer's address: the destination falls back to the
-        source base, so the lazy ``pto.textract`` would extract row ``row`` on top of
-        the source's row 0 while the source is still live (#1640). The contiguity
-        guard alone lets this through, so the offset must be checked too.
+        With that pass deliberately omitted, the original dynamic-offset
+        codegen guard must still reject the slice: lazy materialization would
+        copy row ``row`` over the still-live source's row zero (#1640).
         """
 
         @pl.program
@@ -2641,8 +2875,8 @@ class TestTileSliceCodegen:
             ) -> pl.Tensor[[1, 32], pl.FP32]:
                 t: pl.Tile[[16, 32], pl.FP32] = pl.load(x, [0, 0], [16, 32])
                 gamma_t: pl.Tile[[1, 32], pl.FP32] = pl.load(gamma, [0, 0], [1, 32])
-                # Rank-reducing subscript -> tile.slice with drop_dims: not a plain
-                # 3-arg window, so CanonicalizeTileSlice leaves it alone.
+                # The five-argument subscript keeps its [1, 32] geometry after
+                # the minimum-rank clamp, so canonicalization is now eligible.
                 row_tile: pl.Tile[[1, 32], pl.FP32] = t[row]
                 scaled: pl.Tile[[1, 32], pl.FP32] = pl.tile.col_expand_mul(row_tile, gamma_t)
                 # Keep the source live past the materialization.
@@ -2651,8 +2885,34 @@ class TestTileSliceCodegen:
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with pytest.raises(RuntimeError, match="dynamic-offset tile.slice"):
-                self._generate_mlir(Prog)
+            if not canonicalize_slices:
+                with pytest.raises(RuntimeError, match="dynamic-offset tile.slice"):
+                    self._generate_mlir(Prog, canonicalize_slices=False)
+                return
+            mlir = self._generate_mlir(Prog)
+
+        extracts = [line for line in mlir.splitlines() if "pto.textract " in line]
+        assert len(extracts) == 1, mlir
+        source = re.search(r"ins\((%[\w.$]+)", extracts[0])
+        destination = re.search(r"outs\((%[\w.$]+)", extracts[0])
+        assert source is not None and destination is not None, extracts[0]
+        source_ssa, destination_ssa = source.group(1), destination.group(1)
+        allocations = {
+            line.strip().split(" = ", 1)[0]: line.split("addr = ", 1)[1].split()[0]
+            for line in mlir.splitlines()
+            if "= pto.alloc_tile " in line
+        }
+        assert allocations[source_ssa] != allocations[destination_ssa], mlir
+        col_expand = next(line for line in mlir.splitlines() if "pto.tcolexpandmul " in line)
+        assert col_expand.split("ins(", 1)[1].startswith(f"{destination_ssa},"), mlir
+        # The later t[0] read keeps the parent live across extraction, making a
+        # private address necessary rather than an incidental planner choice.
+        after_expand = mlir[mlir.index("pto.tcolexpandmul ") :]
+        assert f"pto.subview {source_ssa}[" in after_expand and "pto.tadd " in after_expand, mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TEXTRACT(" in cpp and "TCOLEXPANDMUL(" in cpp, cpp
 
     def test_tile_slice_codegen_rank_reducing(self):
         """A rank-reducing tile subscript `t[i]` (→ tile.slice with drop_dims) reaches
@@ -4408,7 +4668,7 @@ class TestTileExtractCodegen:
 
 
 class TestTileMoveAccAddressInvariant:
-    """Regressions for #1310/#1352: lowering must not leave Acc→Acc moves.
+    """Regressions for #1310/#1352/#3132: lowering must not leave Acc→Acc moves.
 
     When AutoTileMatmulL0 rewrites matmul_acc into an inner K-loop, the fresh
     IterArg Vars carry different MemRef bases than the outer loop's accumulator.
@@ -4455,6 +4715,76 @@ class TestTileMoveAccAddressInvariant:
             if "loc=acc" in ins_clause and "loc=acc" in outs_clause:
                 return True
         return False
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
+    @pytest.mark.parametrize("slots", [2, 6])
+    def test_gemv_acc_column_pool_writes_subviews_without_acc_copy(self, slots, buffer_ir, tmp_path):
+        """GEMV writes full-height Acc column windows before one FIX store (#3132).
+
+        The pool has an implicit Acc layout, whereas each slice has an explicit
+        valid shape. Both must describe the same NZ storage so the GEMV result
+        keeps the slice's SSA and assemble recognizes the write as in place.
+        """
+        pool_cols = slots * 64
+
+        @pl.program
+        class ColumnPool:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[1, 64], pl.FP16],
+                b: pl.Tensor[[64, 64], pl.FP16],
+                out: pl.Out[pl.Tensor[[1, pool_cols], pl.FP32]],
+            ) -> pl.Tensor[[1, pool_cols], pl.FP32]:
+                # Physical K256 supplies A2/A3's 512-byte single-row alignment.
+                lhs = pl.load(a, [0, 0], [1, 256], valid_shape=[1, 64], target_memory=pl.Mem.Mat)
+                rhs = pl.load(b, [0, 0], [256, 64], valid_shape=[64, 64], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                pool = pl.tile.create([16, pool_cols], pl.FP32, target_memory=pl.Mem.Acc)
+                for i in pl.unroll(slots):
+                    slot = pl.tile.slice(pool, [16, 64], [0, i * 64], valid_shape=[1, 64])
+                    result = pl.tile.gemv_acc(slot, left, right, init_cond=True)
+                    pool = pl.tile.assemble(pool, result, [0, i * 64])
+                return pl.store(pl.set_validshape(pool, 1, pool_cols), [0, 0], out)
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=buffer_ir):
+            mlir = self._generate_mlir(ColumnPool)
+
+        assert not self._has_acc_to_acc_tmov(mlir), mlir
+        gemvs = [line for line in mlir.splitlines() if "pto.tgemv ins(" in line]
+        assert len(gemvs) == slots, mlir
+        assert sum("pto.tstore " in line for line in mlir.splitlines()) == 1, mlir
+
+        # Shared MemRefs alone missed this bug: the actual GEMV destination must
+        # be each column's subview SSA, including the nonzero column offsets.
+        subviews = [line for line in mlir.splitlines() if "pto.subview" in line and "sizes [16, 64]" in line]
+        assert len(subviews) == slots, mlir
+        destinations = []
+        for gemv in gemvs:
+            match = re.search(r"outs\((%[\w.$]+) :", gemv)
+            assert match is not None, gemv
+            destinations.append(match.group(1))
+        assert set(destinations) == {line.strip().split(" = ", 1)[0] for line in subviews}, mlir
+        assert len(set(destinations)) == slots, mlir
+        constants = dict(re.findall(r"(%[\w.$]+) = arith.constant (\d+) : index", mlir))
+        column_offsets = []
+        for subview in subviews:
+            offsets = re.search(r"pto\.subview %[\w.$]+\[([^,]+), ([^\]]+)\]", subview)
+            assert offsets is not None, subview
+            assert int(constants.get(offsets.group(1), offsets.group(1))) == 0, subview
+            column_offsets.append(int(constants.get(offsets.group(2), offsets.group(2))))
+            result_type = subview.split(" -> ", 1)[1]
+            assert "loc=acc" in result_type and "rows=16, cols=64" in result_type, subview
+            assert "v_row=1, v_col=64" in result_type, subview
+        assert column_offsets == [i * 64 for i in range(slots)], mlir
+
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert cpp.count("TGEMV(") == slots, cpp
+        assert cpp.count("TSTORE(") == 1, cpp
 
     def test_matmul_acc_in_outer_loop_no_acc_to_acc_tmov(self):
         """matmul_acc inside an outer accumulation loop must not produce pto.tmov acc→acc.

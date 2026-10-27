@@ -450,6 +450,22 @@ bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
          ir::IsOp(op, "tile.tget_scale_addr") || ir::IsOp(op, "tile.write");
 }
 
+// A slice defines its result with pto.subview. Its private allocation is only
+// used by the legacy lazy-extract fallback, which rejects a noncontiguous
+// window before accessing that target. Omit that unused allocation: the view
+// may legally inherit a narrow parent stride that cannot be allocated alone
+// (e.g. a row-major [16, 1] column of a [16, 8] Vec tile).
+bool IsNonContiguousSlice(const ir::CallPtr& call) {
+  if (!ir::IsOp(call, "tile.slice") || call->args_.size() < 3) return false;
+  auto source = As<TileType>(call->args_[0]->GetType());
+  auto shape = As<ir::MakeTuple>(call->args_[1]);
+  if (!source || source->shape_.size() != 2 || !shape || shape->elements_.size() != 2) return false;
+  auto source_cols = As<ir::ConstInt>(source->shape_[1]);
+  auto rows = As<ir::ConstInt>(shape->elements_[0]);
+  auto cols = As<ir::ConstInt>(shape->elements_[1]);
+  return source_cols && rows && cols && rows->value_ > 1 && cols->value_ != source_cols->value_;
+}
+
 bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
                           const std::shared_ptr<const TileType>& rhs) {
   auto lhs_memref = ir::GetDefinedMemRef(lhs);
@@ -2354,6 +2370,23 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 
+  if (auto source = AsVarLike(op->value_)) {
+    auto result_tile = ir::GetTileTypeWithMemRef(op->var_->GetType());
+    auto source_tile = ir::GetTileTypeWithMemRef(source->GetType());
+    if (result_tile && source_tile && ShareOneMemRefWindow(result_tile, source_tile) &&
+        ir::TileBufSignature::FromTileType(*result_tile) ==
+            ir::TileBufSignature::FromTileType(*source_tile)) {
+      const auto source_ssa = LookupVarName(source);
+      if (!source_ssa.empty() && IsTileViewName(source_ssa)) {
+        // A plain alias of the exact same typed window keeps its view SSA and
+        // physical parent stride. Allocating a separate handle would lose that
+        // stride and can reject an otherwise legal narrow subview in PTOAS.
+        BindVarToMlir(op->var_, source_ssa);
+        return;
+      }
+    }
+  }
+
   if (ir::IsOp(call, "pld.tile.remote_load")) {
     auto result_tile_type = As<ir::TileType>(op->var_->GetType());
     INTERNAL_CHECK_SPAN(result_tile_type, call->span_)
@@ -2364,7 +2397,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (!is_set_validshape && !alias_result_to_in_place_input) {
+    if (!is_set_validshape && !alias_result_to_in_place_input && !IsNonContiguousSlice(call)) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }

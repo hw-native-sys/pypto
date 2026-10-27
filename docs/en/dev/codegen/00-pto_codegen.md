@@ -233,15 +233,25 @@ fallback `tile.assemble` path use `pto.subview`, a pure alias of the source tile
 data movement, no extra `pto.alloc_tile`).  `pto.subview` requires the
 result `tile_buf` to share `dtype`, `memory_space`, `blayout`, `slayout`,
 `fractal`, `pad`, and `compact` with the source — `DeduceTileSliceType` propagates
-those five `TileView` fields from the source so the produced `TileType`
-satisfies the constraints by construction.  Backend codegen also runs a
+those five fields from the source's effective `TileView`, including the
+memory-space defaults when no explicit view is stored. It does not re-infer
+layout from the slice shape: a column window of an implicit Acc tile keeps
+`col_major` / `row_major` / fractal 1024. The slice recomputes its own valid
+shape without copying the parent's stride or start offset. Backend codegen also runs a
 `CheckSubviewTileCompat` guard at lowering time:
 
-- Source and result must both carry an explicit `TileView`.
+- Omitted views are resolved to their effective memory-space layouts.
 - `dtype`, `blayout`, `slayout`, `fractal`, `pad`, and `compact` must match exactly.
 - `pad` must be `PadValue::null` — `pto.subview` is a view, not a fillpad,
   so use `tile.fillpad` on the slice result if zero/min/max padding is
   required.
+
+Non-contiguous slice windows have no usable lazy-extract destination, so codegen
+omits their unused private tile declaration and retains the subview SSA. This
+also permits narrow views whose own flat allocation would violate the 32-byte
+granularity. Plain aliases of the same typed MemRef window follow that view SSA
+to preserve its parent stride. Contiguous or unknown windows retain the existing
+allocation used by lazy materialization.
 
 For `tile.assemble`, the leading `pto.tmov target → dst` is only emitted
 when buffer reuse did not collapse `target` and the destination buffer; in

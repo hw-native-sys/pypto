@@ -232,22 +232,19 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   // Slice produces a window over the source tile.  PTO's pto.subview semantics
   // require the result tile_buf to share dtype, memory space, and the five
   // tile-config fields (blayout, slayout, fractal, pad, compact) with the source.
-  // Inherit only those fields from the source TileView; recompute the
+  // Inherit only those fields from the effective source TileView; recompute the
   // window-specific fields (valid_shape and physical stride/start_offset are
-  // inherent to the slice itself, not the parent buffer).  Tiles without an
-  // explicit TileView fall back to inferring layout from shape (covers
-  // intermediate IR built before backend-level allocation).
+  // inherent to the slice itself, not the parent buffer). An omitted TileView
+  // still carries the source memory space's implicit layout (e.g. Acc's NZ
+  // layout and 1024-byte fractal). Inferring from the slice shape would lose
+  // that layout and prevent in-place writers from aliasing the window's SSA.
+  const auto src_v = tile_view_semantics::GetEffectiveTileView(*tile_type);
   TileView tile_view;
-  if (tile_type->tile_view_.has_value()) {
-    const auto& src_v = *tile_type->tile_view_;
-    tile_view.blayout = src_v.blayout;
-    tile_view.slayout = src_v.slayout;
-    tile_view.fractal = src_v.fractal;
-    tile_view.pad = src_v.pad;
-    tile_view.compact = src_v.compact;
-  } else {
-    tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
-  }
+  tile_view.blayout = src_v.blayout;
+  tile_view.slayout = src_v.slayout;
+  tile_view.fractal = src_v.fractal;
+  tile_view.pad = src_v.pad;
+  tile_view.compact = src_v.compact;
   tile_view.valid_shape = valid_shape;
 
   // Optional pad_value kwarg overrides the inherited pad mode.  When the user

@@ -3245,6 +3245,107 @@ class TestTileSliceReshapeOps:
         assert result_type.dtype == DataType.FP16
         assert len(result_type.shape) == 2
 
+    @pytest.mark.parametrize("narrow_source", [False, True], ids=["implicit-view", "explicit-view"])
+    @pytest.mark.parametrize(
+        ("memory_space", "blayout", "slayout", "fractal"),
+        [
+            (None, ir.TileLayout.row_major, ir.TileLayout.none_box, 512),
+            (ir.MemorySpace.Vec, ir.TileLayout.row_major, ir.TileLayout.none_box, 512),
+            (ir.MemorySpace.Mat, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Left, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Right, ir.TileLayout.row_major, ir.TileLayout.col_major, 512),
+            (ir.MemorySpace.Acc, ir.TileLayout.col_major, ir.TileLayout.row_major, 1024),
+            (ir.MemorySpace.LeftScale, ir.TileLayout.row_major, ir.TileLayout.row_major, 32),
+            (ir.MemorySpace.RightScale, ir.TileLayout.col_major, ir.TileLayout.col_major, 32),
+        ],
+    )
+    def test_tile_slice_inherits_effective_memory_layout(
+        self, narrow_source, memory_space, blayout, slayout, fractal
+    ):
+        """Sparse and explicit parent views give the same column-window layout."""
+        span = ir.Span.unknown()
+        dtype = (
+            DataType.FP8E8M0
+            if memory_space in (ir.MemorySpace.LeftScale, ir.MemorySpace.RightScale)
+            else DataType.FP32
+        )
+        source_view = None
+        if narrow_source:
+            # A full implicit view canonicalizes away. Narrow its validity to
+            # retain an explicit view, as in the workaround for issue #3132.
+            source_view = ir.TileView(valid_shape=[1, 128], blayout=blayout, slayout=slayout, fractal=fractal)
+        source_type = ir.TileType([16, 128], dtype, tile_view=source_view, memory_space=memory_space)
+        assert (source_type.tile_view is not None) == narrow_source
+        source = ir.Var("pool", source_type, span)
+
+        result = tile.slice(source, [16, 64], [0, 64], valid_shape=[1, 64]).type
+
+        assert isinstance(result, ir.TileType)
+        assert result.memory_space == memory_space
+        assert _shape_ints(result.shape) == [16, 64]
+        view = result.get_effective_tile_view()
+        assert (view.blayout, view.slayout, view.fractal) == (blayout, slayout, fractal)
+        # Physical rows stay at 16 even though only the first row is live.
+        assert _shape_ints(view.valid_shape) == [1, 64]
+
+    @pytest.mark.parametrize("memory_space", [None, ir.MemorySpace.Vec])
+    @pytest.mark.parametrize(
+        ("source_shape", "slice_shape", "blayout"),
+        [
+            ([16, 128], [16, 1], ir.TileLayout.row_major),
+            ([16, 1], [1, 1], ir.TileLayout.col_major),
+        ],
+    )
+    def test_tile_slice_uses_parent_orientation(self, memory_space, source_shape, slice_shape, blayout):
+        """A pure window keeps the parent's orientation when its shape changes."""
+        source = ir.Var(
+            "source",
+            ir.TileType(source_shape, DataType.FP32, memory_space=memory_space),
+            ir.Span.unknown(),
+        )
+
+        result = tile.slice(source, slice_shape, [0, 0]).type
+
+        assert isinstance(result, ir.TileType)
+        assert _shape_ints(result.shape) == slice_shape
+        assert result.get_effective_tile_view().blayout == blayout
+
+    @pytest.mark.parametrize("compact", [ir.CompactMode.null, ir.CompactMode.normal])
+    def test_tile_slice_inherits_config_without_parent_window_metadata(self, compact):
+        """Keep the parent's buffer config but recompute the slice's own window."""
+        source_view = ir.TileView(
+            valid_shape=[1, 96],
+            stride=[256, 1],
+            start_offset=512,
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+            pad=ir.PadValue.zero,
+            compact=compact,
+        )
+        source = ir.Var(
+            "pool",
+            ir.TileType([16, 128], DataType.FP32, tile_view=source_view, memory_space=ir.MemorySpace.Acc),
+            ir.Span.unknown(),
+        )
+
+        result = tile.slice(source, [16, 64], [0, 64], valid_shape=[1, 64]).type
+
+        assert isinstance(result, ir.TileType)
+        view = result.get_effective_tile_view()
+        assert (view.blayout, view.slayout, view.fractal) == (
+            source_view.blayout,
+            source_view.slayout,
+            source_view.fractal,
+        )
+        assert view.pad == source_view.pad
+        assert view.compact == compact
+        # Only 32 live columns remain after the offset. Parent strides and
+        # origin describe its window, rather than this newly formed subview.
+        assert _shape_ints(view.valid_shape) == [1, 32]
+        assert not view.stride
+        assert view.start_offset is None
+
     def test_tile_slice_with_dynamic_valid_shape(self):
         """tile.slice keeps static allocation shape and stores dynamic valid_shape in TileView."""
         span = ir.Span.unknown()
