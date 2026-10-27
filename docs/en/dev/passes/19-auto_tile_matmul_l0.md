@@ -171,7 +171,7 @@ propagation, and definition-site versus consumer-site copy timing in that pass.
 
 ## Cost model & design space (`ChooseL0Tile`)
 
-Result-use classification counts all reads once per function after canonical split-K rewriting, including captures in nested regions. Each region then indexes only its direct stores and casts against that immutable census. This avoids rescanning every descendant at every enclosing `SeqStmts`; read indexing is linear in IR size, independent of nesting depth.
+Result-use classification counts all reads once per function after canonical split-K rewriting, including captures in nested regions and value references in call attributes and keyword arguments. Keyword references count as reads, never as positional matrix operands. Each region then indexes only its direct stores and casts against that immutable census. This avoids rescanning every descendant at every enclosing `SeqStmts`; read indexing is linear in IR size, independent of nesting depth.
 
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:
 
