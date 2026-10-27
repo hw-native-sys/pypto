@@ -17,7 +17,9 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto._artifact_contract import ArtifactExecutionMode
+from pypto.backend import BackendType
 from pypto.ir.compiled_artifact import CompiledArtifact
+from pypto.pypto_core import passes
 from pypto.runtime import CompileOptions, ExecutionMode, RunConfig
 from pypto.runtime.kernel.context import KernelState
 
@@ -159,12 +161,61 @@ def test_fake_capable_capture_only_uses_prepared_entries(
     env.state.close()
 
 
-@pytest.mark.parametrize("options", [RunConfig(), CompileOptions()])
-def test_call_config_cannot_change_execution_mode(eager_env, copy_kernel, options):
+@pytest.mark.parametrize("options", [RunConfig(), CompileOptions(backend_type=BackendType.Ascend950)])
+def test_call_config_cannot_change_execution_target(eager_env, copy_kernel, options):
     eager_env.init()
-    with pytest.raises((TypeError, ValueError), match="CompileOptions|initialized"):
-        copy_kernel(config=options)
+    with pytest.raises((TypeError, ValueError), match="CompileOptions.*conflicts|require CompileOptions"):
+        copy_kernel(eager_env.tensor(), 1, eager_env.tensor(), config=options)
     eager_env.state.close()
+
+
+@pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
+@pytest.mark.parametrize("default_options", [False, True])
+def test_default_compile_target_uses_initialized_config(
+    eager_env, copy_kernel, stub_device_runner, runtime, default_options
+):
+    env = eager_env
+    env.init(runtime=runtime)
+    callable_, _, config = stub_device_runner._compile_and_assemble.return_value
+    stub_device_runner._compile_and_assemble.return_value = callable_, runtime, config
+    options = CompileOptions(memory_planner=passes.MemoryPlanner.PYPTO)
+    kwargs = {"config": options} if default_options else {}
+    x, out = env.tensor(), env.tensor()
+    assert passes.PassContext.current() is None
+    assert copy_kernel(x, 1, out, **kwargs) == (out, out)
+    key, artifact = next(iter(copy_kernel._cache.items()))
+    assert key.platform == artifact.platform == "a2a3"
+    assert dict(key.compile_opts)["runtime"] == runtime
+    assert f'"{runtime}"' in (artifact.output_dir / "kernel_config.py").read_text()
+    assert options.execution_mode is ExecutionMode.SIM  # Do not mutate caller options.
+    assert passes.PassContext.current() is None
+    copy_kernel(x, 2, out, config=CompileOptions(execution_mode=ExecutionMode.ONBOARD))
+    assert len(copy_kernel._cache) == 1 and env.events.count("register") == 1
+    env.state.close()
+
+
+@pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
+@pytest.mark.parametrize("matching", [False, True])
+def test_active_context_runtime_must_match_initialized_config(
+    eager_env, copy_kernel, stub_device_runner, monkeypatch, runtime, matching
+):
+    env = eager_env
+    env.init(runtime=runtime)
+    callable_, _, config = stub_device_runner._compile_and_assemble.return_value
+    stub_device_runner._compile_and_assemble.return_value = callable_, runtime, config
+    other = "host_build_graph" if runtime == "tensormap_and_ringbuffer" else "tensormap_and_ringbuffer"
+    context = passes.PassContext([], runtime=passes.runtime_kind_from_name(runtime if matching else other))
+    with context:
+        if matching:
+            copy_kernel(env.tensor(), 1, env.tensor(), config=CompileOptions())
+            key = next(iter(copy_kernel._cache))
+            assert dict(key.compile_opts)["runtime"] == runtime
+        else:
+            monkeypatch.setattr(copy_kernel, "_compile", lambda *a, **kw: pytest.fail("compiled mismatch"))
+            with pytest.raises(ValueError, match="Active PassContext runtime.*conflicts"):
+                copy_kernel(env.tensor(), 1, env.tensor())
+            assert not copy_kernel._cache and "register" not in env.events
+    env.state.close()
 
 
 def test_invalid_arguments_fail_before_passes(eager_env, copy_kernel, monkeypatch):
@@ -203,8 +254,9 @@ def test_compile_options_change_rebuilds(eager_env, copy_kernel, stub_device_run
     env.state.close()
 
 
+@pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
 def test_persistent_kernel_build_restore_and_binary_validation(
-    eager_env, copy_kernel, device_runner, monkeypatch, tmp_path
+    eager_env, copy_kernel, device_runner, monkeypatch, tmp_path, runtime
 ):
     from enum import Enum  # noqa: PLC0415
     from types import SimpleNamespace  # noqa: PLC0415
@@ -245,7 +297,7 @@ def test_persistent_kernel_build_restore_and_binary_validation(
         "_current_binary_context",
         lambda *a, **kw: BinaryCacheContext(
             platform="a2a3",
-            runtime_name="tensormap_and_ringbuffer",
+            runtime_name=runtime,
             runtime_revision="a" * 40,
             pto_isa_revision="b" * 40,
         ),
@@ -270,12 +322,13 @@ def test_persistent_kernel_build_restore_and_binary_validation(
     monkeypatch.setattr(
         _cache_config, "_DEFAULT_CONFIG", _cache_config.CacheConfig(enabled=True, root=tmp_path / "cache")
     )
-    env.init()
+    env.init(runtime=runtime)
     x, out = env.tensor(), env.tensor()
     copy_kernel(x, 1, out)
     env.state.drain()
     artifact = next(iter(copy_kernel._artifact_objects.values()))
     handle = artifact._artifact_runtime.handle
+    assert artifact.runtime_name == runtime
     assert handle.key.contract is ArtifactExecutionMode.KERNEL
     assert handle.spec.execution_capabilities.modes == (ArtifactExecutionMode.KERNEL,)
     from pypto.jit._artifact_manifest import ArtifactState  # noqa: PLC0415

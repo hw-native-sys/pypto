@@ -21,21 +21,17 @@ def invoke_jit(jit: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     state = get_process_kernel_state()
     bound = state.require_config()
     from pypto.ir._compile_contract import analyze_contract  # noqa: PLC0415
-    from pypto.runtime import CompileOptions, ExecutionMode  # noqa: PLC0415
+    from pypto.runtime import CompileOptions  # noqa: PLC0415
     from pypto.torch import launch  # noqa: PLC0415
     from pypto.torch.interop import CallSignature  # noqa: PLC0415
 
-    from .decorator import _resolve_runtime, runtime_kind_to_name  # noqa: PLC0415
-
     options = kwargs.get("config")
     if options is None:
-        options = CompileOptions(execution_mode=ExecutionMode.ONBOARD)
+        options = CompileOptions()
     if not isinstance(options, CompileOptions):
         raise TypeError("Direct JIT kernel calls require CompileOptions; use op.compile() for RunConfig")
-    if options.platform != bound.platform or options.distributed_config is not None:
-        raise ValueError(f"Kernel compilation requires the initialized single-chip target {bound.platform}")
-    if runtime_kind_to_name(_resolve_runtime()) != bound.runtime:
-        raise ValueError("Kernel compilation PassContext runtime differs from pypto.torch.init runtime")
+    if options.distributed_config is not None:
+        raise ValueError("Direct JIT kernel calls do not support CompileOptions.distributed_config")
     capturing = launch.check_eager_call(bound)
 
     def preflight(program: Any, ordered: list[Any]) -> None:
@@ -52,6 +48,7 @@ def invoke_jit(jit: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         _contract=ArtifactExecutionMode.KERNEL,
         _preflight=preflight,
         _lookup_only=capturing,
+        _kernel_config=bound,
     )
     artifact.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
     metadata = artifact.metadata
