@@ -115,7 +115,9 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
       }
       std::vector<Diagnostic> diagnostics;
       VerifyRegScopes(func, diagnostics, true);
-      if (!diagnostics.empty()) CHECK_SPAN(false, diagnostics.front().span) << diagnostics.front().message;
+      if (!diagnostics.empty()) {
+        CHECK_SPAN(false, diagnostics.front().span) << diagnostics.front().message;
+      }
       VerifyRegMemoryInitialization(func);
       ir::IRVisitor::VisitFunction(func);
     }

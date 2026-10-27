@@ -610,6 +610,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         result.push_back(rewrite(split_aiv));
       } else if (auto runtime_scope = As<RuntimeScopeStmt>(stmt)) {
         result.push_back(rewrite(runtime_scope));
+      } else if (auto reg_scope = As<RegScopeStmt>(stmt)) {
+        result.push_back(rewrite(reg_scope));
       } else {
         INTERNAL_UNREACHABLE_SPAN(scope->span_) << "Unknown ScopeStmt subclass: " << scope->TypeName();
       }
@@ -964,6 +966,27 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
       // ≤2D tile.load: honor any pending var_map substitutions
       auto deduced_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
+      // Re-deduction does not know the author's explicit physical View. Its
+      // contiguous stride proof is needed by reg.load/store inside RegScope.
+      // TODO(reg-vmi-generalize): this preservation is currently safe only for
+      // the P0 contiguous Vec RegOp contract. If reg.load/store gain dynamic or
+      // strided access modes, retain and validate the complete access
+      // descriptor instead of treating TileView as a single contiguous view.
+      // Rank has not changed here, so retain that View and remap its expressions.
+      auto declared_tile = As<TileType>(assign->var_->GetType());
+      auto deduced_tile = As<TileType>(deduced_call->GetType());
+      // Mat/Acc layouts are derived by tile.load from the source tensor and
+      // target memory. Preserve the declaration only for the Vec contract that
+      // RegOp currently consumes.
+      if (declared_tile && declared_tile->tile_view_ && deduced_tile &&
+          declared_tile->GetMemorySpace() == MemorySpace::Vec &&
+          deduced_tile->GetMemorySpace() == MemorySpace::Vec) {
+        auto loaded_tile = MutableCopy(deduced_tile);
+        loaded_tile->tile_view_ = declared_tile->tile_view_;
+        auto loaded_type = RemapTypeReferences(loaded_tile, ctx);
+        deduced_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
+                                              loaded_type, deduced_call->span_);
+      }
       auto new_call =
           WithRemappedCallAttrs(call, WithRemappedResultAllocation(deduced_call, assign, ctx), ctx);
       auto new_var =

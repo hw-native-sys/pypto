@@ -9,8 +9,13 @@
 
 """Register lowering tests assert typed VMI, external storage and lexical scope."""
 
+import subprocess
+
+import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
+from pypto.backend import pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
 
@@ -85,6 +90,133 @@ def test_typed_load_store_and_external_tile_alias():
     assert "scf.yield" not in body
 
 
+def test_register_module_selects_vpto():
+    assert 'pto.backend = "vpto"' in generate(build_kernel())
+
+
+def test_ordinary_module_keeps_emitc_default():
+    @pl.function(type=pl.FunctionType.AIV)
+    def ordinary():
+        _tile = pl.tile.full([1, 128], pl.FP32, 0.0)
+
+    program = ir.Program([ordinary], "Ordinary", SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    assert "pto.backend" not in generate(program)
+
+
+def frontend_tile_kernel():
+    @pl.function(type=pl.FunctionType.AIV)
+    def register_kernel(
+        src: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec],
+        dst: pl.InOut[pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec]],
+    ):
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=64)
+            y = pl.reg.add(x, x)
+            out = pl.reg.store(dst, value=y)
+        _unused = pl.tile.add(out, out)
+
+    return ir.Program([register_kernel], "RegisterKernel", SPAN)
+
+
+def test_frontend_register_scope_survives_flattening():
+    with passes.PassContext([]):
+        lowered = passes.flatten_tile_nd_to_2d()(frontend_tile_kernel())
+        lowered = passes.init_mem_ref()(lowered)
+    mlir = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    assert "!pto.ptr<f32, ub>" in mlir.splitlines()[1]
+    assert "pto.castptr %arg0 : !pto.ptr<f32, ub> -> i64" in mlir
+
+
+@pytest.mark.ptoas_compile
+def test_frontend_register_kernel_compiles_with_vpto(tmp_path):
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    # Exercise the same Python example that previously produced a GM pointer
+    # consumed as a tile_buf. Level3 preserves caller-owned UB addresses.
+    with passes.PassContext([]):
+        lowered = passes.flatten_tile_nd_to_2d()(frontend_tile_kernel())
+        lowered = passes.init_mem_ref()(lowered)
+        lowered = passes.allocate_memory_addr()(lowered)
+    source = tmp_path / "register_kernel.pto"
+    source.write_text(codegen.PTOCodegen().generate(lowered, emit_source_loc=False))
+    output = tmp_path / "register_kernel.vpto"
+    result = subprocess.run(
+        [compiler, str(source), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pto.vecscope" in output.read_text()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_tensor_frontend_default_pipeline(tmp_path, planner):
+    # Tensor parameters are the public GM ABI; Tile parameters above exercise
+    # the lower-level caller-owned UB ABI. Both must reach valid codegen.
+    @pl.function(type=pl.FunctionType.AIV)
+    def register_tensor_kernel(
+        src: pl.Tensor[[1, 128], pl.FP32],
+        dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+    ):
+        tile_src: pl.Tile[
+            [1, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[1, 128], stride=[128, 1])
+        ] = pl.tile.load(src, [0, 0], [1, 128], [1, 128], target_memory=pl.MemorySpace.Vec)
+        tile_dst: pl.Tile[
+            [1, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[1, 128], stride=[128, 1])
+        ] = pl.tile.load(dst, [0, 0], [1, 128], [1, 128], target_memory=pl.MemorySpace.Vec)
+        with pl.reg_scope():
+            x = pl.reg.load(tile_src, lanes=64)
+            y = pl.reg.add(x, x)
+            out = pl.reg.store(tile_dst, value=y)
+        _stored = pl.tile.store(out, [0, 0], dst)
+
+    with passes.PassContext([], memory_planner=planner):
+        ir.compile(
+            ir.Program([register_tensor_kernel], "RegisterTensor", SPAN),
+            output_dir=str(tmp_path),
+            backend_type=backend.BackendType.Ascend950,
+            skip_ptoas=True,
+        )
+    source = tmp_path / "kernels/aiv/register_tensor_kernel.pto"
+    assert 'pto.backend = "vpto"' in source.read_text()
+    compiler = find_ptoas_binary()
+    if compiler is not None:
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        result = subprocess.run(
+            [compiler, str(source), "--pto-arch=a5", f"--pto-level={level}", "--emit-vpto"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+def test_vpto_object_artifact_is_not_wrapped_as_cpp(tmp_path, monkeypatch):
+    binary = b"\x7fELF\x00\xff"
+
+    def fake_ptoas(pto_path, output_path, ptoas_flags=None):
+        assert output_path.endswith(".o")
+        with open(output_path, "wb") as output:
+            output.write(binary)
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", fake_ptoas)
+    ir.compile(
+        frontend_tile_kernel(),
+        output_dir=str(tmp_path),
+        backend_type=backend.BackendType.Ascend950,
+    )
+    assert (tmp_path / "kernels/aiv/register_kernel.o").read_bytes() == binary
+    assert not (tmp_path / "kernels/aiv/register_kernel.cpp").exists()
+    assert '"artifact_kind": "fatobj"' in (tmp_path / "kernels/aiv/register_kernel.o.json").read_text()
+
+
 @pytest.mark.parametrize(
     "operation,opcode",
     [
@@ -126,6 +258,190 @@ def test_non_a5_codegen_rejects_registers():
     backend.set_backend_type(backend.BackendType.Ascend910)
     with pytest.raises(ValueError, match="A5|register|RegScope"):
         generate(program)
+
+
+def compile_review_pto(source, tmp_path, level="level2"):
+    """Verify generated VMI with the real assembler, not just string matching."""
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    path = tmp_path / "review.pto"
+    path.write_text(source)
+    result = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", f"--pto-level={level}", "--emit-vpto"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.ptoas_compile
+def test_review_masked_store_preserves_inactive_lanes(tmp_path):
+    source = generate(build_kernel(masked=True))
+    store = next(line for line in source.splitlines() if "pto.vmi.vstore" in line)
+    assert 'pmode = "merge"' in store
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype,attrs",
+    [
+        (DataType.FP16, DataType.FP32, {}),
+        (DataType.INT32, DataType.INT8, {"saturate": False}),
+        (DataType.FP32, DataType.INT32, {"saturate": False, "rounding": "Z"}),
+    ],
+)
+def test_review_conversion_attribute_presence(src_dtype, dst_dtype, attrs, tmp_path):
+    ib = IRBuilder()
+    with ib.function("convert", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.create([128], dtype=dst_dtype, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            scalar = (
+                ir.ConstFloat(1.0, src_dtype, SPAN)
+                if src_dtype in (DataType.FP16, DataType.FP32)
+                else ir.ConstInt(1, src_dtype, SPAN)
+            )
+            x = ib.emit_reg("x", "reg.broadcast", [scalar], {"lanes": 64, "dtype": src_dtype}, SPAN)
+            y = ib.emit_reg("y", "reg.convert", [x], {"dtype": dst_dtype, **attrs}, SPAN)
+            ib.emit_reg_store("out", dst, y, span=SPAN)
+    with passes.PassContext([]):
+        source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN)))
+    cvt = next(line for line in source.splitlines() if "pto.vmi.vcvt" in line)
+    assert ("rounding" in cvt) == ("rounding" in attrs)
+    assert ("saturate" in cvt) == ("saturate" in attrs)
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dtype", [DataType.INT8, DataType.INT16, DataType.INT32])
+def test_review_signed_broadcast(dtype, tmp_path):
+    ib = IRBuilder()
+    with ib.function("broadcast", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.create([128], dtype=dtype, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg(
+                "x", "reg.broadcast", [ir.ConstInt(-1, dtype, SPAN)], {"lanes": 64, "dtype": dtype}, SPAN
+            )
+            # Same-type conversion folds to a plain Reg alias assignment.
+            alias = ib.emit_reg("alias", "reg.convert", [x], {"dtype": dtype}, SPAN)
+            ib.emit_reg_store("out", dst, alias, span=SPAN)
+    with passes.PassContext([]):
+        source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN)))
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("kind", ["for", "while", "if"])
+@pytest.mark.parametrize("mask_carry", [False, True])
+def test_review_register_control_flow_ssa(kind, mask_carry, tmp_path):
+    ib = IRBuilder()
+    with ib.function("control", span=SPAN, type=ir.FunctionType.AIV) as f:
+        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
+        dst = ib.let("dst", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg(
+                "x",
+                "reg.broadcast",
+                [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                {"lanes": 64, "dtype": DataType.FP32},
+                SPAN,
+            )
+            initial = ib.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN) if mask_carry else x
+            op = "reg.mask_not" if mask_carry else "reg.add"
+            if kind == "if":
+                with ib.if_stmt(condition, SPAN) as branch:
+                    branch.return_var("result", initial.type, SPAN)
+                    value = ib.emit_reg(
+                        "next", op, [initial] if mask_carry else [initial, initial], span=SPAN
+                    )
+                    ib.emit(ir.YieldStmt([value], SPAN))
+                    branch.else_(SPAN)
+                    ib.emit(ir.YieldStmt([initial], SPAN))
+                result = branch.output(0)
+            else:
+                context = (
+                    ib.for_loop(ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN)
+                    if kind == "for"
+                    else ib.while_loop(condition, SPAN)
+                )
+                with context as loop:
+                    carry = loop.iter_arg("carry", initial, span=SPAN)
+                    result = loop.return_var("result", span=SPAN)
+                    value = ib.emit_reg("next", op, [carry] if mask_carry else [carry, carry], span=SPAN)
+                    ib.emit(ir.YieldStmt([value], SPAN))
+            # Consume the carried mask through select: arbitrary-mask stores
+            # additionally require PTOAS to prove the UB pointer's alignment.
+            if mask_carry:
+                result = ib.emit_reg("selected", "reg.select", [result, x, x], span=SPAN)
+            ib.emit_reg_store("out", dst, result, span=SPAN)
+    with passes.PassContext([]):
+        initialized = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+        allocated = passes.allocate_memory_addr()(initialized)
+        source = codegen.PTOCodegen().generate(allocated, emit_source_loc=False)
+    control = next(line for line in source.splitlines() if f"scf.{kind}" in line)
+    expected = "!pto.vmi.mask<64xpred>" if mask_carry else "!pto.vmi.vreg<64xf32>"
+    assert expected in control
+    assert "scf.yield" in source
+    # The consumer must use the control-flow result, not the initial value.
+    result_ssa = control.strip().split(" = scf.", 1)[0]
+    opcode = "pto.vmi.vsel" if mask_carry else "pto.vmi.vstore"
+    consumer = next(line for line in source.splitlines() if opcode in line)
+    assert f" {result_ssa}," in consumer
+    compile_review_pto(source, tmp_path, level="level3")
+
+
+@pytest.mark.ptoas_compile
+def test_review_partial_valid_tile_parameter(tmp_path):
+    ib = IRBuilder()
+    with ib.function("partial", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = f.param(
+            "src",
+            ir.TileType(
+                [1, 128],
+                DataType.FP32,
+                tile_view=ir.TileView([1, 64], [128, 1], integer(0)),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+            SPAN,
+        )
+        dst = ib.let("dst", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg("x", "reg.load", [src, integer(0)], {"lanes": 64}, SPAN)
+            ib.emit_reg_store("out", dst, x, span=SPAN)
+    with passes.PassContext([]):
+        initialized = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+        # Parameter handles require the level3 UB pointer ABI.
+        allocated = passes.allocate_memory_addr()(initialized)
+    source = codegen.PTOCodegen().generate(allocated, emit_source_loc=False)
+    assert "pto.vmi.vload" in source
+    compile_review_pto(source, tmp_path, level="level3")
+
+
+@pytest.mark.ptoas_compile
+def test_review_address_annotation_uses_actual_view_ssa_type(tmp_path):
+    ib = IRBuilder()
+    with ib.function("view_address", span=SPAN, type=ir.FunctionType.AIV) as f:
+        base = ib.let("base", tile.full([2, 128], dtype=DataType.FP32, value=1.0))
+        view = ib.let(
+            "view",
+            tile.slice(base, [1, 128], [0, 0]),
+            type=ir.TileType(
+                [1, 128],
+                DataType.FP32,
+                tile_view=ir.TileView([1, 128], [128, 1], integer(0)),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        dst = ib.let("dst", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg("x", "reg.load", [view, integer(0)], {"lanes": 64}, SPAN)
+            ib.emit_reg_store("out", dst, x, span=SPAN)
+    with passes.PassContext([]):
+        source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN)))
+    compile_review_pto(source, tmp_path)
 
 
 if __name__ == "__main__":

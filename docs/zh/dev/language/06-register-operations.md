@@ -77,10 +77,6 @@ load 还要求整个区间位于已初始化的 `valid_shape` 内；后续操作
 发射前需要后续分析。动态 offset load 要求完整 valid-shape 覆盖。
 保留 mask 不代表整个缓冲区被初始化，也不证明区间互不重叠。
 
-PR3 PTO codegen 将 RegScope 降低为带类型的 `pto.vecscope` VMI 操作。store 发射无结果的
-`pto.vmi.vstore`，其 Tile 结果仍是外部目标的别名；目标 capability 查询会在发射前拒绝不支持的
-寄存器类型。SSA 传播、跨语句初始化跟踪和别名调度也属于 PR3。
-
 ## Builder
 
 Python 提供 `with ib.reg_scope():`、`ib.emit_reg(name, op_name, args, kwargs)` 和

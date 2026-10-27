@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <map>
 #include <set>
 #include <string>
@@ -16,11 +17,14 @@
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_codegen.h"
-#include "pypto/core/error.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::codegen {
 namespace {
@@ -44,10 +48,12 @@ class ScopeOperands : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (As<RegType>(stmt->var_->GetType()) || As<ScalarType>(stmt->var_->GetType()))
+    if (As<RegType>(stmt->var_->GetType()) || As<ScalarType>(stmt->var_->GetType())) {
       locals.push_back(stmt->var_);
-    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store"))
+    }
+    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store")) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
+    }
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
@@ -94,7 +100,15 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
     if (inserted) {
       it->second = NewNamedTemp(external->name_hint_ + "_reg_ptr");
       Emit(it->second + " = pto.tile_buf_addr " + GetExprAsCode(external) + " : " +
-           GetTileBufTypeStringFromTileType(tile) + " -> !pto.ptr<" + GetTypeString(tile->dtype_) + ", ub>");
+           GetExprTypeAnnotation(external) + " -> !pto.ptr<" + GetTypeString(tile->dtype_) + ", ub>");
+    }
+    // Tile storage uses signless integers, while VMI requires pointer and
+    // register element types to agree, including explicit signedness.
+    if (inserted && tile->dtype_.IsSignedInt()) {
+      auto typed = NewNamedTemp(external->name_hint_ + "_signed_ptr");
+      Emit(typed + " = pto.castptr " + it->second + " : !pto.ptr<" + GetTypeString(tile->dtype_) +
+           ", ub> -> !pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>");
+      it->second = typed;
     }
     reg_addresses_[target.get()] = it->second;
   }
@@ -136,12 +150,15 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     auto addr = reg_addresses_.find(target.get());
     CHECK_SPAN(addr != reg_addresses_.end(), call->span_) << "Unprepared external register address";
     auto tile = ir::As<ir::TileType>(args[0]->GetType());
-    std::string ptr_type = "!pto.ptr<" + GetTypeString(tile->dtype_) + ", ub>";
+    std::string ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
     auto offset = GetExprAsCode(args[1]);
     if (store) {
       std::string line =
           spec->emitter + " " + GetExprAsCode(args[2]) + ", " + addr->second + "[" + offset + "]";
       if (args.size() == 4) line += ", " + GetExprAsCode(args[3]);
+      // A masked store changes only active lanes; preserve the destination
+      // in inactive lanes rather than accepting VMI's zero-mode default.
+      if (args.size() == 4) line += " {pmode = \"merge\"}";
       line += " : " + operand_type(args[2]) + ", " + ptr_type;
       if (args.size() == 4) line += ", " + operand_type(args[3]);
       Emit(line);
@@ -162,20 +179,50 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
       operands += ", ";
       types += ", ";
     }
-    operands += GetExprAsCode(arg);
-    types += operand_type(arg);
+    auto value = GetExprAsCode(arg);
+    auto type = operand_type(arg);
+    if (ir::IsOp(call, "reg.broadcast")) {
+      auto scalar = ir::As<ir::ScalarType>(arg->GetType());
+      if (scalar && scalar->dtype_.IsSignedInt()) {
+        const auto signed_type = RegisterElement(scalar->dtype_);
+        auto typed = NewNamedTemp("broadcast_scalar");
+        Emit(typed + " = builtin.unrealized_conversion_cast " + value + " : " + type + " to " + signed_type);
+        value = typed;
+        type = signed_type;
+      }
+    }
+    operands += value;
+    types += type;
   }
   if (ir::IsOp(call, "reg.full_mask")) operands = "\"PAT_ALL\"";
   if (ir::IsOp(call, "reg.index_gen")) attrs = " {order = \"ASC\"}";
-  if (ir::IsOp(call, "reg.compare"))
+  if (ir::IsOp(call, "reg.compare")) {
     attrs = " {cmp = \"" + ir::GetStringKwarg(call->kwargs_, "predicate", "") + "\"}";
-  if (ir::IsOp(call, "reg.convert")) {
-    attrs = " {rounding = \"" + ir::GetStringKwarg(call->kwargs_, "rounding", "R") + "\", saturate = \"" +
-            std::string(ir::GetKwargOr<bool>(call->kwargs_, "saturate", false) ? "SAT" : "NOSAT") + "\"}";
   }
+  if (ir::IsOp(call, "reg.convert")) {
+    // The schema validates pair-specific attributes. Absence matters: widening
+    // conversions prohibit rounding/saturate, and integer narrowing prohibits
+    // rounding. Do not invent floating conversion defaults here.
+    std::vector<std::string> attributes;
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key == "rounding") {
+        attributes.push_back("rounding = \"" + std::any_cast<std::string>(value) + "\"");
+      } else if (key == "saturate") {
+        attributes.push_back(std::string("saturate = \"") + (std::any_cast<bool>(value) ? "SAT" : "NOSAT") +
+                             "\"");
+      }
+    }
+    for (const auto& attr : attributes) {
+      attrs += attrs.empty() ? " {" : ", ";
+      attrs += attr;
+    }
+    if (!attrs.empty()) attrs += "}";
+  }
+
   if (args.size() == 3 && ir::As<ir::RegType>(args[0]->GetType()) && !ir::IsOp(call, "reg.compare") &&
-      !ir::IsOp(call, "reg.select"))
+      !ir::IsOp(call, "reg.select")) {
     attrs = " {pmode = \"zero\"}";
+  }
   auto name = NewNamedTemp(result->name_hint_);
   auto type = GetRegTypeString(ir::As<ir::RegType>(validated->GetType()));
   Emit(name + " = " + spec->emitter + " " + operands + attrs + " : " +

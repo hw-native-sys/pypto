@@ -214,6 +214,11 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
 }
 }  // namespace
 
+std::string PTOCodegen::GetValueCarryTypeString(const ir::TypePtr& type) const {
+  if (auto reg = As<ir::RegType>(type)) return GetRegTypeString(reg);
+  return GetScalarIterArgTypeString(As<ScalarType>(type));
+}
+
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK_SPAN(op->condition_ != nullptr, op->span_) << "Internal error: IfStmt has null condition";
@@ -254,11 +259,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
-      if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
+      if (As<ScalarType>(return_var->GetType()) || As<ir::RegType>(return_var->GetType())) {
         std::string ret_name = NewNamedTemp(return_var->name_hint_);
         BindVarToMlir(return_var, ret_name);
         scf_return_names.push_back(ret_name);
-        scf_return_types.push_back(GetScalarIterArgTypeString(scalar_type));
+        scf_return_types.push_back(GetValueCarryTypeString(return_var->GetType()));
         returns_via_scf[i] = true;
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
@@ -389,11 +394,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           << "IfStmt " << branch_name << "-branch yield count (" << branch_yields.size()
           << ") must match return_vars (" << op->return_vars_.size() << ")";
 
-      std::vector<std::string> scalar_yields;
-      scalar_yields.reserve(scf_return_types.size());
+      std::vector<std::string> ssa_yields;
+      ssa_yields.reserve(scf_return_types.size());
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         if (returns_via_scf[i]) {
-          scalar_yields.push_back(branch_yields[i]);
+          ssa_yields.push_back(branch_yields[i]);
         } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
                    ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
           if (As<ir::DistributedTensorType>(op->return_vars_[i]->GetType())) {
@@ -477,10 +482,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       }
 
       if (!scf_return_types.empty()) {
-        Emit("scf.yield " + JoinCommaSep(scalar_yields) + " : " + JoinCommaSep(scf_return_types));
+        Emit("scf.yield " + JoinCommaSep(ssa_yields) + " : " + JoinCommaSep(scf_return_types));
       }
-      CHECK(scalar_yields.size() == scf_return_types.size())
-          << "IfStmt " << branch_name << "-branch scalar yield count (" << scalar_yields.size()
+      CHECK(ssa_yields.size() == scf_return_types.size())
+          << "IfStmt " << branch_name << "-branch scalar yield count (" << ssa_yields.size()
           << ") must match scalar return_vars (" << scf_return_types.size() << ")";
       fs_.yield_buffer.clear();
     };
@@ -604,22 +609,22 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   std::string loop_var_name = NewNamedTemp(op->loop_var_->name_hint_);
   BindVarToMlir(op->loop_var_, loop_var_name);
 
-  // In PTO, only scalar types (index, f32, bool, etc.) need iter_args/yield
-  // for loop-carried value semantics. Non-scalar types (TileType, TensorType)
+  // Scalars and registers (including masks) are immutable SSA values and need
+  // iter_args/yield to carry each iteration's result. TileType and TensorType
   // are mutable references written in-place via outs(), so they are mapped
   // directly to their init values and excluded from iter_args/yield.
-  std::vector<bool> is_scalar(op->iter_args_.size(), false);
-  bool has_scalar_iter_args = false;
+  std::vector<bool> is_ssa(op->iter_args_.size(), false);
+  bool has_ssa_iter_args = false;
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType())) {
-      is_scalar[i] = true;
-      has_scalar_iter_args = true;
+    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType())) {
+      is_ssa[i] = true;
+      has_ssa_iter_args = true;
     }
   }
 
   // Map non-scalar iter_args/return_vars directly to their init values
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (is_scalar[i]) continue;
+    if (is_ssa[i]) continue;
 
     const auto& iter_arg = op->iter_args_[i];
     const auto& return_var = op->return_vars_[i];
@@ -698,7 +703,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     lower_bound_scope.key = loop_var_key;
   }
 
-  if (!has_scalar_iter_args) {
+  if (!has_ssa_iter_args) {
     // Simple scf.for (no iter_args, or all iter_args are non-scalar)
     EmitStructural("scf.for " + loop_var_name + " = " + start + " to " + stop + " step " + step + " {");
     IncreaseIndent();
@@ -710,13 +715,13 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     DecreaseIndent();
     EmitStructural("}");
   } else {
-    // scf.for with scalar iter_args only
+    // scf.for with SSA value iter_args only
     std::vector<std::string> init_values;
     std::vector<std::string> iter_arg_names;
     std::vector<std::string> iter_arg_types;
 
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (!is_scalar[i]) continue;
+      if (!is_ssa[i]) continue;
 
       const auto& iter_arg = op->iter_args_[i];
 
@@ -728,13 +733,13 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       BindVarToMlir(iter_arg, iter_name);
       iter_arg_names.push_back(iter_name);
 
-      iter_arg_types.push_back(GetScalarIterArgTypeString(As<ScalarType>(iter_arg->GetType())));
+      iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
     }
 
-    // Register return_vars SSA names (scalar only)
+    // Register return_vars SSA names (SSA values only)
     std::vector<std::string> return_var_names;
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      if (!is_scalar[i]) continue;
+      if (!is_ssa[i]) continue;
       std::string ret_name = NewNamedTemp(op->return_vars_[i]->name_hint_);
       BindVarToMlir(op->return_vars_[i], ret_name);
       return_var_names.push_back(ret_name);
@@ -750,21 +755,21 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     fs_.yield_buffer.clear();
     VisitStmt(op->body_);
 
-    // Filter yield_buffer to keep only scalar iter_arg entries
-    std::vector<std::string> scalar_yields;
+    // Filter yield_buffer to keep only SSA value iter_arg entries
+    std::vector<std::string> ssa_yields;
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (is_scalar[i] && i < fs_.yield_buffer.size()) {
-        scalar_yields.push_back(fs_.yield_buffer[i]);
+      if (is_ssa[i] && i < fs_.yield_buffer.size()) {
+        ssa_yields.push_back(fs_.yield_buffer[i]);
       }
     }
 
     // Emit scf.yield from filtered yield values
-    if (!scalar_yields.empty()) {
+    if (!ssa_yields.empty()) {
       std::ostringstream yield_oss;
       yield_oss << "scf.yield ";
-      for (size_t i = 0; i < scalar_yields.size(); ++i) {
+      for (size_t i = 0; i < ssa_yields.size(); ++i) {
         if (i > 0) yield_oss << ", ";
-        yield_oss << scalar_yields[i];
+        yield_oss << ssa_yields[i];
       }
       yield_oss << " : ";
       for (size_t i = 0; i < iter_arg_types.size(); ++i) {
@@ -773,8 +778,8 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       }
       Emit(yield_oss.str());
     }
-    CHECK(scalar_yields.size() == iter_arg_types.size())
-        << "ForStmt scalar yield count (" << scalar_yields.size() << ") must match scalar iter_args ("
+    CHECK(ssa_yields.size() == iter_arg_types.size())
+        << "ForStmt scalar yield count (" << ssa_yields.size() << ") must match scalar iter_args ("
         << iter_arg_types.size() << ")";
     fs_.yield_buffer.clear();
 
@@ -792,22 +797,22 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       << "WhileStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
       << op->return_vars_.size() << ")";
 
-  // In PTO, only scalar types (index, f32, bool, etc.) need iter_args/yield
-  // for loop-carried value semantics. Non-scalar types (TileType, TensorType)
+  // Scalars and registers (including masks) are immutable SSA values and need
+  // iter_args/yield to carry each iteration's result. TileType and TensorType
   // are mutable references written in-place via outs(), so they are mapped
   // directly to their init values and excluded from iter_args/yield.
-  std::vector<bool> is_scalar(op->iter_args_.size(), false);
-  bool has_scalar_iter_args = false;
+  std::vector<bool> is_ssa(op->iter_args_.size(), false);
+  bool has_ssa_iter_args = false;
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType())) {
-      is_scalar[i] = true;
-      has_scalar_iter_args = true;
+    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType())) {
+      is_ssa[i] = true;
+      has_ssa_iter_args = true;
     }
   }
 
   // Map non-scalar iter_args/return_vars directly to their init values
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (is_scalar[i]) continue;
+    if (is_ssa[i]) continue;
 
     const auto& iter_arg = op->iter_args_[i];
     const auto& return_var = op->return_vars_[i];
@@ -848,7 +853,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     }
   }
 
-  if (!has_scalar_iter_args) {
+  if (!has_ssa_iter_args) {
     // Simple scf.while (no iter_args, or all iter_args are non-scalar)
     EmitStructural("scf.while : () -> () {");
     IncreaseIndent();
@@ -871,14 +876,14 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     DecreaseIndent();
     EmitStructural("}");
   } else {
-    // scf.while with scalar iter_args only
+    // scf.while with SSA value iter_args only
     std::vector<std::string> init_values;
     std::vector<std::string> before_arg_names;
     std::vector<std::string> after_arg_names;
     std::vector<std::string> iter_arg_types;
 
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (!is_scalar[i]) continue;
+      if (!is_ssa[i]) continue;
 
       const auto& iter_arg = op->iter_args_[i];
 
@@ -889,26 +894,26 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       before_arg_names.push_back(NewTemp());
       after_arg_names.push_back(NewTemp());
 
-      iter_arg_types.push_back(GetScalarIterArgTypeString(As<ScalarType>(iter_arg->GetType())));
+      iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
     }
 
-    // Register return_vars SSA names (scalar only)
+    // Register return_vars SSA names (SSA values only)
     std::vector<std::string> return_var_names;
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      if (!is_scalar[i]) continue;
+      if (!is_ssa[i]) continue;
 
       std::string ret_name = NewTemp();
       BindVarToMlir(op->return_vars_[i], ret_name);
       return_var_names.push_back(ret_name);
     }
 
-    // Lambda to register scalar iter_args in fs_.var_to_mlir
-    auto register_scalar_iter_args = [&](const std::vector<std::string>& ssa_names) {
-      size_t scalar_idx = 0;
+    // Lambda to register SSA value iter_args in fs_.var_to_mlir
+    auto register_ssa_iter_args = [&](const std::vector<std::string>& ssa_names) {
+      size_t ssa_idx = 0;
       for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-        if (!is_scalar[i]) continue;
-        BindVarToMlir(op->iter_args_[i], ssa_names[scalar_idx]);
-        scalar_idx++;
+        if (!is_ssa[i]) continue;
+        BindVarToMlir(op->iter_args_[i], ssa_names[ssa_idx]);
+        ssa_idx++;
       }
     };
 
@@ -921,7 +926,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     IncreaseIndent();
 
     // Before region: register before-region args, evaluate condition
-    register_scalar_iter_args(before_arg_names);
+    register_ssa_iter_args(before_arg_names);
 
     VisitExpr(op->condition_);
     std::string cond = fs_.current_expr_value;
@@ -939,26 +944,26 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     IncreaseIndent();
 
     // Re-register iter_args with after-region SSA names
-    register_scalar_iter_args(after_arg_names);
+    register_ssa_iter_args(after_arg_names);
 
     // Visit body
     fs_.yield_buffer.clear();
     VisitStmt(op->body_);
 
-    // Filter yield_buffer to keep only scalar iter_arg entries
-    std::vector<std::string> scalar_yields;
+    // Filter yield_buffer to keep only SSA value iter_arg entries
+    std::vector<std::string> ssa_yields;
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (is_scalar[i] && i < fs_.yield_buffer.size()) {
-        scalar_yields.push_back(fs_.yield_buffer[i]);
+      if (is_ssa[i] && i < fs_.yield_buffer.size()) {
+        ssa_yields.push_back(fs_.yield_buffer[i]);
       }
     }
 
     // Emit scf.yield from filtered yield values
-    if (!scalar_yields.empty()) {
-      Emit("scf.yield " + JoinCommaSep(scalar_yields) + " : " + JoinCommaSep(iter_arg_types));
+    if (!ssa_yields.empty()) {
+      Emit("scf.yield " + JoinCommaSep(ssa_yields) + " : " + JoinCommaSep(iter_arg_types));
     }
-    CHECK(scalar_yields.size() == iter_arg_types.size())
-        << "WhileStmt scalar yield count (" << scalar_yields.size() << ") must match scalar iter_args ("
+    CHECK(ssa_yields.size() == iter_arg_types.size())
+        << "WhileStmt scalar yield count (" << ssa_yields.size() << ") must match scalar iter_args ("
         << iter_arg_types.size() << ")";
     fs_.yield_buffer.clear();
 

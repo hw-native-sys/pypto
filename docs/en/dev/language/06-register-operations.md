@@ -91,11 +91,6 @@ require later analysis before emission. A dynamic offset load requires complete
 valid-shape coverage. A mask is preserved without claiming whole-buffer
 initialization or disjointness.
 
-PR3 lowers RegScope to typed `pto.vecscope` VMI operations. A store emits a no-result
-`pto.vmi.vstore`; its Tile result remains an alias of the external destination. The target capability query rejects
-unsupported register types before emission. SSA propagation, initialization tracking across statements, and
-alias-aware scheduling are also part of PR3.
-
 ## Builder
 
 Python uses `with ib.reg_scope():`, `ib.emit_reg(name, op_name, args, kwargs)`

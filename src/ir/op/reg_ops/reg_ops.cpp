@@ -61,6 +61,10 @@ int Lanes(const Kwargs& kw) {
 }
 
 int64_t Constant(const ExprPtr& e, const char* label) {
+  // TODO(reg-vmi-generalize): P0 keeps tile geometry and view strides static so
+  // the current register memory effect can be represented by one interval.
+  // Once reg.load/store expose dynamic geometry, this must accept symbolic
+  // expressions and defer the proof to the range analysis.
   auto c = As<ConstInt>(e);
   CHECK_SPAN(c, e->span_) << label << " must be a static integer in P0";
   return c->value_;
@@ -92,6 +96,10 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
       << "Register access exceeds capacity bounds";
   if (t->tile_view_) {
     const auto& v = *t->tile_view_;
+    // TODO(reg-vmi-generalize): PTOAS VMI supports block/group/strided loads,
+    // but the P0 reg.load/store ABI emits only the contiguous vload/vstore
+    // form. Remove this restriction when those access modes are represented
+    // in the RegOp attributes and lowered by reg_codegen.cpp.
     CHECK(v.blayout == TileLayout::row_major && v.slayout == TileLayout::none_box &&
           v.compact == CompactMode::null)
         << "Register memory requires a contiguous row-major View";
@@ -107,6 +115,9 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
     }
     if (auto start = As<ConstInt>(v.start_offset)) CHECK(start->value_ >= 0) << "Negative View offset";
     if (read && !v.valid_shape.empty()) {
+      // TODO(reg-vmi-generalize): dynamic valid_shape and dynamic offsets are
+      // legal VMI operands, but P0's initialization proof currently needs
+      // static endpoints and a rectangular contiguous interval.
       CHECK(v.valid_shape.size() == t->shape_.size()) << "valid_shape rank mismatch";
       // A contiguous read can cross rows; both endpoints and every crossed
       // row must lie in the initialized rectangular valid_shape.
@@ -412,6 +423,9 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
       result.end = *result.begin + lanes;
     }
   }
+  // TODO(reg-vmi-generalize): a dynamic offset is valid for PTOAS vload, but
+  // this P0 memory effect has no symbolic interval. Extend it to carry a
+  // range/stride access description before relaxing the codegen precondition.
   return result;
 }
 }  // namespace pypto::ir

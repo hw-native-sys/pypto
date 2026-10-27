@@ -763,7 +763,19 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
-  stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
+  // Select the compiler from structured IR, before serializing it. EmitC cannot
+  // legalize vecscope; PTOAS honors this attribute without a global CLI override.
+  class RegScopeDetector : public ir::IRVisitor {
+   public:
+    bool found = false;
+
+   protected:
+    void VisitStmt_(const ir::RegScopeStmtPtr&) override { found = true; }
+  } detector;
+  detector.VisitProgram(program);
+  stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"";
+  if (detector.found) stream_ << ", pto.backend = \"vpto\"";
+  stream_ << "} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
@@ -1147,6 +1159,12 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       stream_ << GetTypeString(scalar_type->dtype_);
     } else if (ir::IsA<ir::CommCtxType>(param->GetType())) {
       stream_ << "!pto.ptr<i64>";
+    } else if (auto tile_type = As<ir::TileType>(param->GetType());
+               tile_type && tile_type->memory_space_ == ir::MemorySpace::Vec) {
+      CHECK_SPAN(emit_tile_addr_, param->span_)
+          << "Caller-owned Tile parameters require PyPTO memory planning (PTO level3); "
+             "use Tensor parameters with tile.load for PTOAS memory planning";
+      stream_ << "!pto.ptr<" << GetTypeString(tile_type->dtype_) << ", ub>";
     } else {
       stream_ << "!pto.ptr<f32>";
     }
@@ -1303,6 +1321,26 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   auto saved_stream = std::move(stream_);
   stream_ = std::move(fs_.body_section);
+
+  // Vec Tile arguments denote caller-owned UB storage. Build the materialized
+  // handle PTOAS needs for both tile ops and tile_buf_addr.
+  // These addresses must not enter the allocator's pool of owned allocations.
+  for (const auto& param : func->params_) {
+    if (auto tile_type = As<ir::TileType>(param->GetType());
+        tile_type && tile_type->memory_space_ == ir::MemorySpace::Vec) {
+      const auto ptr = GetVarName(param);
+      const auto addr = NewNamedTemp(param->name_hint_ + "_addr");
+      Emit(addr + " = pto.castptr " + ptr + " : !pto.ptr<" + GetTypeString(tile_type->dtype_) +
+           ", ub> -> i64");
+      const auto fields = ComputeAllocTileFields(tile_type);
+      const auto handle = NewNamedTemp(param->name_hint_ + "_tile");
+      Emit(handle + " = pto.alloc_tile addr = " + addr + " valid_row = " + fields.valid_row_ssa +
+           " valid_col = " + fields.valid_col_ssa + " : " + fields.type_str);
+      BindVarToMlir(param, handle);
+      RegisterTileBufType(handle, fields.type_str, tile_type);
+      RegisterMutableTileName(handle);
+    }
+  }
 
   if (func->body_) {
     VisitStmt(func->body_);
@@ -2518,7 +2556,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 
   fs_.current_expr_value = "";
   VisitExpr(op->value_);
-  // Register scalar/index/CommCtx result so subsequent expressions can look up
+  // Bind plain Reg aliases as well as scalar/index/CommCtx results. Same-type
+  // reg.convert is canonicalized to a Var and must retain its source SSA.
+  // Subsequent expressions can look up
   // this variable. N7: CommCtxType is a singleton marker; the bound SSA is the
   // matching explicit ``!pto.ptr<i64>`` ctx ptr from the func.func signature
   // (no MLIR is emitted for ``pld.system.get_comm_ctx`` — its lambda just sets
@@ -2526,7 +2566,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // downstream ``pld.system.rank(ctx)`` / ``pld.system.nranks(ctx)`` codegen
   // resolve ``ctx`` via the standard ``GetExprAsCode(call->args_[0])`` path.
   const auto& var_type = op->var_->GetType();
-  if ((As<ScalarType>(var_type) || As<CommCtxType>(var_type)) && !fs_.current_expr_value.empty()) {
+  if ((As<ScalarType>(var_type) || As<ir::RegType>(var_type) || As<CommCtxType>(var_type)) &&
+      !fs_.current_expr_value.empty()) {
     BindVarToMlir(op->var_, fs_.current_expr_value);
   }
 }

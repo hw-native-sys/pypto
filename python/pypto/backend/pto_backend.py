@@ -1530,7 +1530,7 @@ def _compile_pto_module(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
 ) -> str:
-    """Run ptoas for one MLIR module and return the generated C++."""
+    """Run PTOAS and return EmitC text; VPTO writes its object beside the PTO."""
     ptoas_dir = os.path.join(output_dir, "ptoas")
     os.makedirs(ptoas_dir, exist_ok=True)
 
@@ -1543,15 +1543,40 @@ def _compile_pto_module(
         passes_dump_dir = os.path.join(output_dir, "ptoas_passes", unit_name)
         os.makedirs(passes_dump_dir, exist_ok=True)
 
-    cpp_path = os.path.join(ptoas_dir, f"{unit_name}.cpp")
+    # PTOCodegen stamps the top-level module attribute from structured IR.
+    # Do not scan operation spellings: comments and source locations can contain
+    # vecscope too. VPTO emits a host-linkable fat object, never C++ source.
+    is_vpto = 'pto.backend = "vpto"' in pto_code.partition("\n")[0]
+    suffix = "o" if is_vpto else "cpp"
+    compiled_path = os.path.join(ptoas_dir, f"{unit_name}.{suffix}")
     _run_ptoas(
         pto_path,
-        cpp_path,
+        compiled_path,
         ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir),
     )
 
-    with open(cpp_path) as f:
+    if is_vpto:
+        # Binary output is persisted directly; the text-file API returns a marker.
+        return ""
+    with open(compiled_path) as f:
         return f.read()
+
+
+def _emit_vpto_object(result_files: dict[str, str], object_rel: str, content: bytes, output_dir: str) -> None:
+    """Persist binary objects separately from the existing text-file map.
+
+    The manifest records the artifact kind without changing every text consumer
+    to accept bytes. As with the PTOAS intermediates, object bytes are written
+    directly under output_dir and travel with the compiled artifact directory.
+    """
+    object_path = os.path.join(output_dir, object_rel)
+    os.makedirs(os.path.dirname(object_path), exist_ok=True)
+    with open(object_path, "wb") as output:
+        output.write(content)
+    result_files[object_rel + ".json"] = json.dumps(
+        {"backend": "vpto", "artifact_kind": "fatobj", "object": object_rel, "runtime_supported": False},
+        indent=2,
+    )
 
 
 def _emit_single_function_output(
@@ -1580,7 +1605,13 @@ def _emit_single_function_output(
         )
     else:
         ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner)
-    result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
+    if 'pto.backend = "vpto"' in pto_code.partition("\n")[0]:
+        object_path = os.path.join(output_dir, "ptoas", f"{func.name}.o")
+        with open(object_path, "rb") as object_file:
+            object_bytes = object_file.read()
+        _emit_vpto_object(result_files, _get_kernel_output_path(func, "o"), object_bytes, output_dir)
+    else:
+        result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
 def _emit_group_output(
@@ -1608,6 +1639,12 @@ def _emit_group_output(
         )
     else:
         ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner)
+    if 'pto.backend = "vpto"' in pto_code.partition("\n")[0]:
+        object_path = os.path.join(output_dir, "ptoas", f"{group_name}.o")
+        with open(object_path, "rb") as object_file:
+            object_bytes = object_file.read()
+        _emit_vpto_object(result_files, os.path.join("kernels", f"{group_name}.o"), object_bytes, output_dir)
+        return
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
@@ -2324,6 +2361,14 @@ def _generate_single_chip(
     # Orchestration + config
     if orch_func is not None:
         try:
+            if not skip_ptoas and any(
+                'pto.backend = "vpto"' in unit.pto_code.partition("\n")[0] for unit in units
+            ):
+                raise NotImplementedError(
+                    "VPTO object compilation succeeded, but PTOAS does not yet expose the "
+                    "device direct-call ABI required by PyPTO runtime wrappers. "
+                    "The compiled .o files are retained; runtime execution is unsupported."
+                )
             with _profiling_stage(prof, "orchestration_codegen"):
                 orch_result = _codegen_core.generate_orchestration(transformed_program, orch_func)
             result_files[f"orchestration/{orch_func.name}.cpp"] = (

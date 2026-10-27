@@ -141,5 +141,27 @@ def test_compile_pto_module_enables_per_unit_pass_dump(tmp_path, monkeypatch) ->
     ]
 
 
+def test_compile_vpto_module_preserves_binary_output(tmp_path, monkeypatch) -> None:
+    # A VPTO object can contain arbitrary non-UTF8 bytes. Reading it as C++
+    # (the historical unconditional path) must never happen.
+    binary = b"\x7fELF\x00\xff"
+
+    def fake_run_ptoas(pto_path, output_path, ptoas_flags=None):
+        assert Path(output_path).suffix == ".o"
+        assert "--pto-backend=emitc" not in (ptoas_flags or [])
+        Path(output_path).write_bytes(binary)
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", fake_run_ptoas)
+    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
+    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
+    result = pto_backend._compile_pto_module(
+        'module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {}',
+        "register_kernel",
+        str(tmp_path),
+    )
+    assert result == ""
+    assert (tmp_path / "ptoas/register_kernel.o").read_bytes() == binary
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
