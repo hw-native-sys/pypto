@@ -217,7 +217,15 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
         runtime_dir = Path(tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent))
         sys.argv = entry_args(entry_path, platform, runtime_dir)
     else:
-        sys.argv = [str(entry_path), *argv]
+        # Self-dispatched children inherit explicit CLI arguments. Replace the
+        # inherited manifest directory while preserving their case selection.
+        child_args = list(argv)
+        for index, arg in enumerate(child_args):
+            if arg == "--runtime-dir" and index + 1 < len(child_args):
+                child_args[index + 1] = tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent)
+            elif arg.startswith("--runtime-dir="):
+                child_args[index] = "--runtime-dir=" + tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent)
+        sys.argv = [str(entry_path), *child_args]
     try:
         runpy.run_path(str(entry_path), run_name="__main__")
     finally:
