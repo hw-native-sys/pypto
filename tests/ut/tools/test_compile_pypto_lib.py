@@ -11,16 +11,119 @@
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 _RUNNER = Path(__file__).resolve().parents[2] / "ci/compile_pypto_lib.py"
 _spec = importlib.util.spec_from_file_location("compile_pypto_lib", _RUNNER)
 assert _spec is not None and _spec.loader is not None
 audit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(audit)
+
+
+@pytest.mark.parametrize(
+    ("job_name", "step_name"),
+    [
+        ("pypto-lib-compile", "Clone current pypto-lib"),
+        ("pypto-lib-model", "Clone pypto-lib (Qwen3-14B + DeepSeek-V4-Flash models)"),
+    ],
+    ids=["compile", "model"],
+)
+@pytest.mark.parametrize(
+    ("failures", "status", "attempts", "delays"),
+    [(0, 0, 1, []), (2, 0, 3, ["5", "10"]), (3, 128, 3, ["5", "10"])],
+    ids=["first-attempt", "transient-tls", "permanent-failure"],
+)
+def test_workflow_retries_pypto_lib_clone(
+    tmp_path: Path,
+    job_name: str,
+    step_name: str,
+    failures: int,
+    status: int,
+    attempts: int,
+    delays: list[str],
+) -> None:
+    """Execute the actual CI shell with partial clones and no network or waits."""
+    workflow = yaml.safe_load((_RUNNER.parents[2] / ".github/workflows/ci.yml").read_text())
+    job = workflow["jobs"][job_name]
+    clone_step = next(step for step in job["steps"] if step["name"] == step_name)
+    workspace = tmp_path / "workspace with spaces"
+    checkout = workspace / job["defaults"]["run"]["working-directory"]
+    checkout.mkdir(parents=True)
+    clone = checkout / "build/pypto-lib" if job_name == "pypto-lib-compile" else workspace / "pypto-lib"
+    clone.mkdir(parents=True)
+    (clone / "stale").write_text("previous checkout")
+    unrelated = workspace / "keep"
+    unrelated.write_text("unrelated checkout")
+
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    git = commands / "git"
+    git.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "log = Path(os.environ['TEST_CLONE_CALLS'])\n"
+        "calls = log.read_text().splitlines() if log.exists() else []\n"
+        "target = Path(sys.argv[-1])\n"
+        "with log.open('a') as output:\n"
+        "    output.write(json.dumps({'args': sys.argv[1:], 'cwd': str(Path.cwd()),\n"
+        "                             'existed': target.exists()}) + '\\n')\n"
+        "if target.exists():\n"
+        "    raise SystemExit(90)\n"
+        "target.mkdir(parents=True)\n"
+        "(target / 'partial').write_text('incomplete clone')\n"
+        "if len(calls) < int(os.environ['TEST_CLONE_FAILURES']):\n"
+        "    print('fatal: gnutls_handshake() failed: TLS connection terminated', file=sys.stderr)\n"
+        "    raise SystemExit(128)\n"
+        "(target / 'partial').unlink()\n"
+        "(target / 'complete').write_text('cloned')\n"
+    )
+    git.chmod(0o755)
+    sleep = commands / "sleep"
+    sleep.write_text('#!/bin/sh\nprintf \'%s\\n\' "$1" >> "$TEST_CLONE_SLEEPS"\n')
+    sleep.chmod(0o755)
+    call_log = tmp_path / "calls.jsonl"
+    sleep_log = tmp_path / "sleeps"
+    env = os.environ | {
+        "PATH": f"{commands}{os.pathsep}{os.environ['PATH']}",
+        "GITHUB_WORKSPACE": str(workspace),
+        "TEST_CLONE_CALLS": str(call_log),
+        "TEST_CLONE_FAILURES": str(failures),
+        "TEST_CLONE_SLEEPS": str(sleep_log),
+    }
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", clone_step["run"]],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == status, result.stdout + result.stderr
+    calls = [json.loads(line) for line in call_log.read_text().splitlines()]
+    assert len(calls) == attempts
+    assert all(not call["existed"] for call in calls), "Stale/partial clones must be removed before retry"
+    for call in calls:
+        assert call["args"][:4] == [
+            "clone",
+            "--depth",
+            "1",
+            "https://github.com/hw-native-sys/pypto-lib.git",
+        ]
+        assert Path(call["cwd"], call["args"][-1]).resolve() == clone.resolve()
+    assert (sleep_log.read_text().splitlines() if sleep_log.exists() else []) == delays
+    assert unrelated.read_text() == "unrelated checkout"
+    if status == 0:
+        assert sorted(path.name for path in clone.iterdir()) == ["complete"]
+    else:
+        assert not clone.exists(), "The final failed clone must also be cleaned up"
 
 
 @pytest.fixture
