@@ -139,6 +139,35 @@ def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, pa
     assert len(result["compilations"]) == count
 
 
+@pytest.mark.parametrize("declares_runtime_dir", [False, True])
+def test_compile_only_launch_plan_directory(library, tmp_path, declares_runtime_dir):
+    # Exercise argument parsing and real receipt collection in the child interpreter.
+    body = (
+        "import argparse\n"
+        "from pathlib import Path\n"
+        "from pypto.ir import compile\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "parser.add_argument('--compile-only', action='store_true')\n"
+    )
+    if declares_runtime_dir:
+        body += "parser.add_argument('--runtime-dir', type=Path, required=True)\n"
+    body += "args = parser.parse_args()\nassert args.compile_only\n"
+    if declares_runtime_dir:
+        body += (
+            "assert args.runtime_dir.is_absolute()\n"
+            "args.runtime_dir.mkdir(parents=True, exist_ok=True)\n"
+            "(args.runtime_dir / 'manifest.json').write_text('{}')\n"
+        )
+    body += "compile('ok')\n"
+    (library / "models/case.py").write_text(body)
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+    artifact = tmp_path / "out/models/case/runtime_artifacts/manifest.json"
+    assert artifact.exists() is declares_runtime_dir
+
+
 def test_python_subprocess_preserves_other_commands(library, tmp_path):
     (library / "models/helper.py").write_text("raise SystemExit(0)\n")
     (library / "models/case.py").write_text(

@@ -63,7 +63,7 @@ def select_entries(lib: Path, platform: str) -> list[str]:
     return entries
 
 
-def entry_args(path: Path, platform: str) -> list[str]:
+def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> list[str]:
     """Supply platform and declared logical ranks without acquiring devices."""
     source = path.read_text()
     args = [str(path), "-p", platform]
@@ -94,6 +94,13 @@ def entry_args(path: Path, platform: str) -> list[str]:
         for node in options
     ):
         args += ["--compile-only"]
+        # Some production entries compile a launch plan into an explicit directory.
+        # Keep it under this case's output tree, separate from other entries.
+        if runtime_dir is not None and any(
+            any(isinstance(arg, ast.Constant) and arg.value == "--runtime-dir" for arg in node.args)
+            for node in options
+        ):
+            args += ["--runtime-dir", str(runtime_dir.resolve())]
     return args
 
 
@@ -205,7 +212,11 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
     runner._prepare_inputs = reject_execution
     compile_module.compile = ir_module.compile = full_compile
     subprocess.Popen = CompileOnlyPopen
-    sys.argv = [str(entry_path), *argv] if argv is not None else entry_args(entry_path, platform)
+    sys.argv = (
+        [str(entry_path), *argv]
+        if argv is not None
+        else entry_args(entry_path, platform, receipt.parent / "runtime_artifacts")
+    )
     try:
         runpy.run_path(str(entry_path), run_name="__main__")
     finally:
