@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -382,11 +383,29 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_reinterpret_view, ("tensor.reinterpret_view")) {
-  CHECK_SPAN(false, op->span_)
+  INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
+      << "Internal error: tensor.reinterpret_view requires an input and optional shape";
+  auto source = As<TensorType>(op->args_[0]->GetType());
+  auto result = As<TensorType>(op->GetType());
+  const bool byte_alias = source && result &&
+                          ((source->dtype_.IsPackedFp4() &&
+                            (result->dtype_ == DataType::UINT8 || result->dtype_ == DataType::INT8)) ||
+                           (result->dtype_.IsPackedFp4() &&
+                            (source->dtype_ == DataType::UINT8 || source->dtype_ == DataType::INT8)));
+  CHECK_SPAN(byte_alias, op->span_)
       << "tensor.reinterpret_view is not supported in Orchestration functions because the runtime "
-         "Tensor API cannot change the element dtype of a view; place reinterpret_view inside an "
-         "InCore function";
-  return {};
+         "Tensor API cannot change the element width of a view; only same-shape packed FP4 byte "
+         "aliases are supported here. Place other reinterpret_view operations inside an InCore function";
+  INTERNAL_CHECK_SPAN(tile_view_semantics::ShapeExprListsEquivalent(source->shape_, result->shape_),
+                      op->span_)
+      << "Internal error: packed FP4 byte alias changed carrier shape";
+  const auto input_name = codegen.TryGetVarName(op->args_[0]);
+  INTERNAL_CHECK_SPAN(!input_name.empty(), op->span_) << "tensor.reinterpret_view input must be a variable";
+  const auto result_var = codegen.GetCurrentResultTarget();
+  // All supported endpoints occupy one byte. Preserve the backing buffer,
+  // offsets, strides, ownership and dependency metadata; only the format changes.
+  return "Tensor " + result_var + " = " + codegen.GetExternalTensorName(input_name) + ";\n" + result_var +
+         ".dtype = " + codegen.GetRuntimeDataTypeString(result->dtype_) + ";";
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {

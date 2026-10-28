@@ -2380,5 +2380,18 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
   return result;
 }
 
+// Public shapes count byte carriers. MX arithmetic and scales count values;
+// expand the contiguous axis before inferring M/K/N, including before memory
+// inference has moved an ND/DN operand into its hardware Left/Right layout.
+std::vector<ExprPtr> GetMatmulLogicalShape(const TileTypePtr& tile, bool valid) {
+  auto dims = valid ? GetValidShape(tile) : tile->shape_;
+  if (!tile->dtype_.IsPackedFp4()) return dims;
+  INTERNAL_CHECK(dims.size() == 2) << "Internal error: matmul logical shape requires rank two";
+  const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+  const size_t axis = view.blayout == TileLayout::col_major ? 0 : 1;
+  dims[axis] = AdjustPackedFp4CastLastDim({dims[axis]}, tile->dtype_, DataType::FP32, Span::unknown())[0];
+  return dims;
+}
+
 }  // namespace ir
 }  // namespace pypto

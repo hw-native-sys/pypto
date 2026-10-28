@@ -756,15 +756,13 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
       << ": packed FP4 Vec-to-Mat moves require matching source and destination layouts; "
          "the native move copies storage without ND-to-NZ conversion. Load directly to Mat or "
          "convert the Vec layout before staging";
-  // PTOAS validates Mat-source moves against raw carrier dimensions. A
-  // packing-axis change would need different raw dimensions for the same
-  // logical tile, which that path cannot currently express safely.
+  // A Mat-to-L0 transfer changes the packing axis while preserving logical
+  // extents. Other Mat destinations retain the existing layout restriction.
   CHECK_SPAN(!out_dtype.IsPackedFp4() || tile_type->GetMemorySpace() != MemorySpace::Mat ||
-                 source_view.blayout == tile_view.blayout,
+                 source_view.blayout == tile_view.blayout || space == MemorySpace::Left ||
+                 space == MemorySpace::Right,
              args[0]->span_)
-      << op_name
-      << ": PTOAS v0.67 cannot change the packed FP4 axis of a Mat-source move; "
-         "load the Mat operand with the consumer's packing axis";
+      << op_name << ": packed FP4 Mat layout conversion requires a Left or Right destination";
   RetargetPackedFp4Geometry(out_dtype, source_view.blayout, tile_view.blayout, output_shape, tile_view,
                             args[0]->span_, op_name);
 

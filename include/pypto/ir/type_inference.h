@@ -837,6 +837,11 @@ inline void StampCompactForNarrowedAccRows(TileView& dst, const std::vector<Expr
   }
 }
 
+/// Matrix arithmetic uses logical value extents; packed FP4 tile types store
+/// byte-carrier extents along the contiguous layout axis. Requires rank two.
+[[nodiscard]] std::vector<ExprPtr> GetMatmulLogicalShape(const TileTypePtr& tile,
+                                                         bool use_valid_shape = false);
+
 namespace detail {
 
 /**

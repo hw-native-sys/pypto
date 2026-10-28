@@ -55,7 +55,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Operation | Support |
 | --------- | ------- |
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
-| Either packed format ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
+| Either packed format ↔ UINT8/INT8 alias | Same-shape orchestration GM aliases; dense addressed 2D row-major Vec aliases with PYPTO or DSA_RP planning |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
 | Either packed format → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
 | E2M1↔E1M2 conversion | Numerical cast through BF16; carrier shape is unchanged |
@@ -66,7 +66,7 @@ below. Native MXFP4 quantization supports E2M1 only.
 | `fillpad`, `fillpad_expand`, `fillpad_inplace` | Both formats, ND Vec; zero/min/max padding preserves the valid carrier rectangle |
 | DN numerical casts | Full static dense 2D BF16↔packed or packed↔packed; PYPTO/DSA_RP static addresses; partial, padded, and boxed cases are rejected |
 | Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
-| Native packed FP4 `matmul_mx` | Unsupported by the pinned PTOAS geometry contract; cast ND operands to FP8 first |
+| Native packed FP4 `matmul_mx` | Tile API: both formats and mixed E2M1/E1M2 pairs, FP32 accumulator; requires the PTOAS #1700 logical-shape fix |
 | MXFP4 `quant_mx` | E2M1 only, FP16/BF16 source, OCP or supported axis0 NV; PYPTO/DSA_RP static allocation |
 | `pl.tile.quant_mx_raw` | Native E2M1 payload (INT8 for MXFP8) and raw UINT8 exponents with explicit workspaces; static partial validity and axis0 interleaving |
 | Ascend910/A2A3 packed FP4 execution | Unsupported |
@@ -76,6 +76,17 @@ instruction's value geometry belongs to PTOAS; scaling the GM shape again in
 PyPTO would double its row pitch. Physical tiles still need ISA alignment,
 including a 32-byte ND Vec row pitch; use padded storage with `valid_shape`
 for a narrower carrier window.
+
+Native FP4 matrix operands keep carrier dimensions through GM and Mat.
+For logical `[M, K] @ [K, N]`, Left uses `[M/2, K]` carriers and Right uses
+`[K, N/2]`; scales remain `[M, K/32]` and `[K/32, N]`, and Acc is FP32
+`[M, N]`. Mat-to-Left/Right moves retarget the packed axis without a numeric
+cast. A direct GM-to-Mat load avoids the unsupported mixed-core Vec transfer.
+Orchestration FP4/byte aliases preserve buffer identity, offsets, strides,
+and dependencies. Other orchestration dtype reinterpretations remain rejected.
+
+This path requires [PTOAS #1700](https://github.com/hw-native-sys/PTOAS/issues/1700);
+PTOAS v0.70 does not contain that geometry fix.
 
 ## Numerical cast constraints
 
@@ -164,8 +175,9 @@ Static partial valid regions are supported; axis1 requires tight physical/valid
 columns and FP4 physical columns divisible by 64. Axis0 groups 32 valid rows;
 `interleave=True` requires FP16/BF16 physical and valid rows divisible by 64.
 See the [operator catalog](../user/ops/01-catalog.md) for the quantization entry
-points. Native packed FP4 `matmul_mx` remains unsupported; the quantization
-result does not establish a native matrix path.
+points. Native FP4 matrix multiplication is available through the tile API;
+`tensor.matmul_mx` remains FP8-only. The generic mixed-core FP4 Vec-to-Mat
+restriction still applies to quantization results.
 
 ## See also
 
