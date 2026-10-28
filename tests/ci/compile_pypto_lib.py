@@ -39,6 +39,12 @@ NON_KERNEL_ENTRIES = {
 }
 
 
+# These entry contracts use runtime-dir as a compile OUTPUT. Other library
+# CLIs use that spelling for replay inputs or only in checkpoint branches;
+# discovering an add_argument call is not sufficient to enable it (#3205).
+COMPILE_OUTPUT_ENTRIES = {"models/glm5_3_flash/prefill_fwd.py"}
+
+
 def select_entries(lib: Path, platform: str) -> list[str]:
     """Use the library's full formal-entry selector, including device-only cases."""
     selected = subprocess.run(
@@ -95,10 +101,7 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         for node in options
     ):
         args += ["--compile-only"]
-        if runtime_dir is not None and any(
-            any(isinstance(arg, ast.Constant) and arg.value == "--runtime-dir" for arg in node.args)
-            for node in options
-        ):
+        if runtime_dir is not None:
             args += ["--runtime-dir", str(runtime_dir)]
     return args
 
@@ -214,13 +217,19 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
     # A fresh per-invocation directory prevents a retained manifest from turning
     # this audit into a cache-load check. Keep artifacts beside the receipt.
     if argv is None:
-        runtime_dir = Path(tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent))
+        runtime_dir = (
+            Path(tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent))
+            if entry in COMPILE_OUTPUT_ENTRIES
+            else None
+        )
         sys.argv = entry_args(entry_path, platform, runtime_dir)
     else:
         # Self-dispatched children inherit explicit CLI arguments. Replace the
         # inherited manifest directory while preserving their case selection.
         child_args = list(argv)
         for index, arg in enumerate(child_args):
+            if entry not in COMPILE_OUTPUT_ENTRIES:
+                break
             if arg == "--runtime-dir" and index + 1 < len(child_args):
                 child_args[index + 1] = tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent)
             elif arg.startswith("--runtime-dir="):
