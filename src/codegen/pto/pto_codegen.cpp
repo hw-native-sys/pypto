@@ -937,6 +937,7 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
+  parameter_backed_tile_bases_.clear();
   if (UsesBufferIR(func)) {
     GenerateBufferFunction(func);
     return;
@@ -1339,6 +1340,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       BindVarToMlir(param, handle);
       RegisterTileBufType(handle, fields.type_str, tile_type);
       RegisterMutableTileName(handle);
+      auto memref = ir::GetDefinedMemRef(tile_type);
+      if (memref) parameter_backed_tile_bases_.insert(memref->base_.get());
     }
   }
 
@@ -1933,6 +1936,12 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   INTERNAL_CHECK_SPAN(mlir_it != fs_.var_to_mlir.end(), tile_var->span_)
       << "Tile var " << tile_var->name_hint_ << " not found in fs_.var_to_mlir";
   std::string tile_buf = mlir_it->second;
+
+  // Views derived from caller-owned Vec Tiles retain the parameter backing.
+  // Their view operation materializes a typed SSA view; allocating here would
+  // silently redirect a later reg.load/store to compiler-owned storage.
+  auto defined_memref = ir::GetDefinedMemRef(tile_type);
+  if (defined_memref && parameter_backed_tile_bases_.count(defined_memref->base_.get()) > 0) return;
 
   // In PTOAS mode several vars may share one handle (in-place aliasing); emit
   // the alloc_tile only once per handle so the shared buffer has a single def.

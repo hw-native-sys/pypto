@@ -1079,8 +1079,7 @@ static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& 
                                const std::string& target, const std::string& result_type,
                                bool result_has_memref) {
   const auto existing_type = codegen.GetSSATileBufType(target);
-  return result_has_memref && !existing_type.empty() && existing_type == result_type &&
-         (codegen.EmitTileAddr() || source == target);
+  return result_has_memref && !existing_type.empty() && existing_type == result_type && source == target;
 }
 
 // Same, resolving the source SSA and its type from the IR operand.

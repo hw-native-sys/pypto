@@ -1368,6 +1368,7 @@ class PTOCodegen : public CodegenBase {
   /// Get MLIR type string for a scalar iter_arg/return_var (e.g., "index", "i1", "f32")
   // Control-flow value carries include scalars and Reg/MaskReg SSA values.
   std::string GetValueCarryTypeString(const ir::TypePtr& type) const;
+  std::set<const ir::Var*> parameter_backed_tile_bases_;
   std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
 };
 

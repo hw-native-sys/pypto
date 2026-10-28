@@ -155,6 +155,60 @@ def test_frontend_register_kernel_compiles_with_vpto(tmp_path):
 
 
 @pytest.mark.ptoas_compile
+def test_review_reg_access_adds_tile_view_origin(tmp_path):
+    ib = IRBuilder()
+    with ib.function("view_origin", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = ib.let(
+            "src",
+            tile.full([128], dtype=DataType.FP32, value=1.0),
+            type=ir.TileType(
+                [128],
+                DataType.FP32,
+                tile_view=ir.TileView([128], [1], integer(32)),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        dst = ib.let("dst", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg("x", "reg.load", [src, integer(0)], {"lanes": 64}, SPAN)
+            ib.emit_reg_store("out", dst, x, span=SPAN)
+    with passes.PassContext([]):
+        source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN)))
+    assert "arith.addi" in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+def test_review_parameter_view_keeps_caller_backing(tmp_path):
+    ib = IRBuilder()
+    with ib.function("parameter_view", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = f.param(
+            "src",
+            ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec),
+            SPAN,
+        )
+        view = ib.let(
+            "view",
+            tile.reshape(src, [1, 128]),
+            type=ir.TileType(
+                [1, 128],
+                DataType.FP32,
+                tile_view=ir.TileView([1, 128], [128, 1], integer(0)),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        with ib.reg_scope(SPAN):
+            ib.emit_reg("x", "reg.load", [view, integer(0)], {"lanes": 64}, SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+        program = passes.allocate_memory_addr()(program)
+    source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    assert source.count("pto.alloc_tile") == 1
+    assert "pto.alloc_tile addr = %src_addr" in source
+    compile_review_pto(source, tmp_path, level="level3")
+
+
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_tensor_frontend_default_pipeline(tmp_path, planner):
     # Tensor parameters are the public GM ABI; Tile parameters above exercise

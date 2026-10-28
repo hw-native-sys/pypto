@@ -152,6 +152,15 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     auto tile = ir::As<ir::TileType>(args[0]->GetType());
     std::string ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
     auto offset = GetExprAsCode(args[1]);
+    // Reg memory analysis includes a TileView origin in the proven interval.
+    // Add that same element origin to the emitted VMI access; tile_buf_addr
+    // points at the MemRef base and does not encode TileView.start_offset.
+    if (tile->tile_view_ && tile->tile_view_->start_offset) {
+      auto origin = GetExprAsCode(tile->tile_view_->start_offset);
+      auto adjusted = NewNamedTemp("reg_view_offset");
+      Emit(adjusted + " = arith.addi " + offset + ", " + origin + " : index");
+      offset = adjusted;
+    }
     if (store) {
       std::string line =
           spec->emitter + " " + GetExprAsCode(args[2]) + ", " + addr->second + "[" + offset + "]";
