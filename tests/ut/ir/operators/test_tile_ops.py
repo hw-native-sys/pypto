@@ -366,6 +366,30 @@ class TestTileElementwiseOps:
         assert "tile.cmps" in ir_str
 
 
+@pytest.mark.parametrize("lhs_rows,rhs_rows", [(1, 8), (8, 1)])
+def test_cmp_rejects_implicit_row_broadcast(lhs_rows, rhs_rows):
+    lhs = ir.Var("lhs", ir.TileType([lhs_rows, 128], DataType.FP32), ir.Span.unknown())
+    rhs = ir.Var("rhs", ir.TileType([rhs_rows, 128], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="identical physical shapes"):
+        tile.cmp(lhs, rhs, cmp_type=0)
+
+
+@pytest.mark.parametrize("rhs_valid", [[2, 128], [4, 64]])
+def test_cmp_rejects_mismatched_valid_regions(rhs_valid):
+    lhs = ir.Var(
+        "lhs",
+        ir.TileType([8, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[4, 128])),
+        ir.Span.unknown(),
+    )
+    rhs = ir.Var(
+        "rhs",
+        ir.TileType([8, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=rhs_valid)),
+        ir.Span.unknown(),
+    )
+    with pytest.raises(ValueError, match="matching valid regions"):
+        tile.cmp(lhs, rhs, cmp_type=0)
+
+
 class TestTileSelect:
     """Type deduction for ``tile.select``, the scratch-free selection surface."""
 

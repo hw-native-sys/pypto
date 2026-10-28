@@ -8656,5 +8656,35 @@ class Before:
     ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
 
 
+@pytest.mark.parametrize("rows", ["4", "n"])
+def test_nd_compare_constants_keep_valid_region_after_flattening(rows):
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[1, 8, 128], pl.FP32], n: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[1, 8, 128], pl.BOOL]:
+        v = pl.slice(x, [1, 8, 128], [0, 0, 0], valid_shape=[1, {rows}, 128])
+        y = pl.cmp(v, 0.0, cmp_type=5)
+        return y
+""")
+    converted = passes.convert_tensor_to_tile_ops()(before)
+    flattened = passes.flatten_tile_nd_to_2d()(converted)
+    func = next(iter(flattened.functions.values()))
+    compare = _find_calls_to(func, "tile.cmps")[0]
+    source = compare.args[0].type
+    assert isinstance(source, ir.TileType)
+    expected = source.get_effective_tile_view().valid_shape
+    assert len(expected) == 2
+    select = _find_calls_to(func, "tile.sel")[0]
+    for value in (*select.args[1:3], select):
+        value_type = value.type
+        assert isinstance(value_type, ir.TileType)
+        for got, want in zip(value_type.get_effective_tile_view().valid_shape, expected):
+            ir.assert_structural_equal(got, want)
+    ir.assert_structural_equal(flattened, pl.parse_program(flattened.as_python()))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

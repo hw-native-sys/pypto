@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/internal.h"
 #include "src/ir/transforms/flatten_tile_nd_to_2d/rewrite_internal.h"
 
@@ -196,6 +197,22 @@ VarPtr EmitFlattenedTileAlloc(const CallPtr& call, const AssignStmtPtr& assign,
     create_kwargs.emplace_back("target_memory", MemorySpace::Acc);
   }
   auto deduced = op_registry.Create(op_name, new_args, create_kwargs, span);
+  if (!acc_plan && IsOp(call, "tile.full")) {
+    // Rebuilding through the registry restores full validity. Keep an explicit
+    // partial region (e.g. comparison constants) in its flattened coordinates.
+    const auto valid = GetValidShape(result_tile);
+    CHECK_SPAN(tile_conversion_utils::IsRowMajorCollapseContiguous(valid, result_tile->shape_), span)
+        << "FlattenTileNdTo2D: tile.full valid region cannot be represented by one 2D view";
+    TileView view;
+    view.valid_shape = ComputeMergedValidShape(valid, span);
+    InheritTileViewLayout(view, result_tile);
+    auto tile = As<TileType>(deduced->GetType());
+    INTERNAL_CHECK_SPAN(tile, span) << "tile.full must produce a TileType";
+    auto type =
+        std::make_shared<TileType>(tile->shape_, tile->dtype_, tile->memref_, view, tile->memory_space_);
+    deduced =
+        std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_, type, span);
+  }
   auto new_call = WithRemappedCallAttrs(call, WithRemappedResultAllocation(deduced, assign, ctx), ctx);
   auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
   result->push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
