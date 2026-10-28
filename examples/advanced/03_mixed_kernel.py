@@ -117,7 +117,8 @@ if __name__ == "__main__":
     bias = torch.randn(M, N, dtype=torch.float32)
     out = torch.zeros(M, N, dtype=torch.float32)
 
-    _MODES[args.mode](a, b, bias, out, config=RunConfig(platform=args.platform))
+    compiled = _MODES[args.mode].compile(a, b, bias, out, config=RunConfig(platform=args.platform))
+    compiled(a, b, bias, out, config=RunConfig(platform=args.platform))
 
     expected = a.float() @ b.float() + bias
     assert torch.allclose(out, expected, rtol=1e-2, atol=1e-2), (

@@ -37,7 +37,8 @@ cfg = RunConfig(
     enable_dep_gen=True,        # the task DAG the timing is joined against
     save_kernels=True,          # forced anyway; be explicit about wanting the directory
 )
-out = kernel(a, b, torch.zeros(...), config=cfg)
+compiled = kernel.compile(a, b, torch.zeros(...), config=cfg)
+out = compiled(a, b, torch.zeros(...), config=cfg)
 ```
 
 从 pytest 用同样两个：

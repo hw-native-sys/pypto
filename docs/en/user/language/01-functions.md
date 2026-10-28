@@ -369,18 +369,24 @@ warns.
 
 ### Splitting compile from dispatch
 
-`@pl.jit` kernels normally fuse specialize + compile + dispatch into one `kernel(*args)`
-call. `JITFunction.compile(*sample_args)` stops after compilation and hands back the
-`CompiledProgram` — for driving `ChipWorker` yourself, inspecting artifacts under
-`compiled.output_dir`, or validating codegen ahead of time.
+`JITFunction.compile(*sample_args)` specializes and compiles for the PROGRAM contract,
+then returns a `CompiledProgram` without dispatching. Use it for host-tensor or simulator
+execution, driving `ChipWorker` yourself, inspecting `compiled.output_dir`, or validating
+codegen ahead of time. Dispatch the returned object with `compiled(*args)`.
+
+Direct `kernel(*args)` calls require `pypto.torch.init()` and real NPU tensors. They
+specialize, compile and submit on the current Torch stream under the eager KERNEL
+contract. This path uses a separate cache entry and accepts `CompileOptions` rather than
+`RunConfig`. See [kernel mode](../../dev/runtime/kernel-mode.md) for its prerequisites.
 
 ```python
 compiled = my_kernel.compile(sample_x, sample_w, sample_out)
 print("artifacts in:", compiled.output_dir)
 ```
 
-The returned object is the same one the JIT cache holds, so a later call with the same
-specialization key returns the identical instance.
+The returned object is held in the PROGRAM cache, so repeating `.compile()` with the
+same specialization and compile configuration returns the identical instance. It does
+not warm the separate KERNEL cache used by direct eager calls.
 
 `lower(*sample_args)` stops one stage earlier: it runs the passes and returns the
 post-pass `ir.Program`, with no code generation, no `ptoas`, no artifacts, and no cache

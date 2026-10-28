@@ -112,7 +112,7 @@ def test_per_lane_gather_row_compiles_to_pto():
     # materializes first.
     compile_error: Exception | None = None
     try:
-        sparse_kv_qk(
+        sparse_kv_qk.compile(
             torch.randn(POOL_ROWS, HEAD_DIM, dtype=torch.bfloat16),
             ((torch.arange(ROWS, dtype=torch.int64) * 977) % (POOL_ROWS - ROWS)).to(torch.int32),
             torch.randn(Q_ROWS, HEAD_DIM, dtype=torch.bfloat16),

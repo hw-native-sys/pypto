@@ -196,6 +196,7 @@ def kernel(
         pl.store(pl.add(pl.load(x, [0, 0], [BLOCK, BLOCK]), scale), [0, 0], out)
     return out
 
+# Eager calls require pypto.torch.init() and NPU tensors x/out.
 kernel(x, out, scale=1.0, BLOCK=16)
 kernel(x, out, scale=2.0, BLOCK=16)   # same artifact — only the scalar changed
 kernel(x, out, scale=2.0, BLOCK=32)   # a second artifact
@@ -227,6 +228,7 @@ fixed configuration, and a closure factory still works for several. `constexpr`
 is for when the configuration belongs in the call:
 
 ```python
+# Eager calls require pypto.torch.init() and NPU tensors x/out.
 # Before: a factory per configuration, and callers juggle the kernel objects.
 def build(block: int):
     BLOCK = block

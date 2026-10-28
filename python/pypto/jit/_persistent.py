@@ -23,6 +23,7 @@ from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, cast
 
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._cache_config import CacheConfig, record_bypass, record_stats, time_stage
 from pypto._identity import digest_record, fingerprint_extra_sources
 from pypto.pypto_core import DataType
@@ -224,6 +225,8 @@ def resolve_persistent(
     platform: str,
     runtime_name: str,
     distributed: bool,
+    contract: ArtifactExecutionMode = ArtifactExecutionMode.PROGRAM,
+    lookup_only: bool = False,
 ) -> Any:
     """Capture identity before object lookup; keep policy out of content keys."""
     from pypto.runtime._artifact_runtime import bind_artifact, restore_artifact  # noqa: PLC0415
@@ -235,6 +238,8 @@ def resolve_persistent(
         identity = capture_toolchain(platform, runtime_name)
         extra = fingerprint_extra_sources(config.extra_source_paths, config.extra_fingerprint)
     if not identity.usable or extra.digest is None:
+        if lookup_only:
+            raise RuntimeError("Kernel capture requires a prepared specialization with usable cache identity")
         reason = extra.failure or "; ".join(f"{f.component}: {f.reason}" for f in identity.failures)
         _bypass(reason)
         return build()
@@ -248,6 +253,8 @@ def resolve_persistent(
         except Exception as exc:
             specialization_failure = f"Specialization identity unavailable: {exc}"
     if specialization_failure is not None:
+        if lookup_only:
+            raise RuntimeError("Kernel capture requires a prepared specialization with usable cache identity")
         # Same fallback as an unusable toolchain identity above: record the
         # bypass and fall back to a plain, uncached build. Outside the timing
         # block, so the uncached build is not charged to lookup_ns.
@@ -262,6 +269,7 @@ def resolve_persistent(
             extra.digest,
             specialization,
             kind,
+            contract,
             semantic,
             config.root,
             config.readonly,
@@ -270,10 +278,13 @@ def resolve_persistent(
         if cached is not None:
             record_stats(object_hits=1)
             return cached
+        if lookup_only:
+            raise RuntimeError("Kernel specialization is not prepared; call it outside capture first")
         key = ArtifactKey(
             identity,
             digest_record((source_before, extra.digest)),
             digest_record((specialization, kind.value, semantic)),
+            contract=contract,
         )
         assert config.root is not None
         # Avoid tempfile's write probes under a readonly TMPDIR. The usual
@@ -289,6 +300,7 @@ def resolve_persistent(
             ("distributed_meta.json", "orchestration/host_orch.py")
             if distributed
             else ("compiled_meta.json", "kernel_config.py"),
+            execution_capabilities=ExecutionCapabilities((contract,)),
         )
         ready = store.lookup_ready(key, spec)
         _event(ready.status)
@@ -299,6 +311,7 @@ def resolve_persistent(
                 ready.handle,
                 private_root / f"run-{uuid.uuid4().hex}",
                 _validated_manifest=ready.manifest,
+                consumer=contract,
             )
             owner._artifact_objects[compatible] = compiled
             return compiled
@@ -315,6 +328,7 @@ def resolve_persistent(
                 handle,
                 private_root / f"run-{uuid.uuid4().hex}",
                 _validated_manifest=ready.manifest if ready.handle is not None else initial.manifest,
+                consumer=contract,
             )
             owner._artifact_objects[compatible] = compiled
             return compiled
@@ -351,6 +365,8 @@ def resolve_persistent(
             compiled = result.value
             bind_artifact(compiled, store, result.handle, private_root / f"run-{uuid.uuid4().hex}")
         else:
-            compiled = restore_artifact(store, result.handle, private_root / f"run-{uuid.uuid4().hex}")
+            compiled = restore_artifact(
+                store, result.handle, private_root / f"run-{uuid.uuid4().hex}", consumer=contract
+            )
         owner._artifact_objects[compatible] = compiled
         return compiled

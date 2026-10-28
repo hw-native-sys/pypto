@@ -112,7 +112,8 @@ cfg = RunConfig(platform="a2a3", distributed_config=dc)
 
 inputs = torch.randn(2, 1, SIZE)
 outputs = torch.zeros_like(inputs)
-orchestrator(inputs, outputs, config=cfg)   # blocks until both ranks finish
+compiled = orchestrator.compile(inputs, outputs, config=cfg)
+compiled(inputs, outputs, config=cfg)   # blocks until both ranks finish
 ```
 
 This is the "one-shot" dispatch pattern. See [03-execution](03-execution.md)

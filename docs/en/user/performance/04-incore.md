@@ -28,7 +28,8 @@ A = (indices % 3 - 1).to(torch.float32).reshape(ROWS, TC)
 
 def check(kernel):
     out = torch.zeros(ROWS, TC, dtype=torch.float32)
-    kernel(A, out, config=CFG)
+    compiled = kernel.compile(A, out, config=CFG)
+    compiled(A, out, config=CFG)
     torch.testing.assert_close(out, torch.exp(A), rtol=1e-3, atol=1e-4)
 ```
 

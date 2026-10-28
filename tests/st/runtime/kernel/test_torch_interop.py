@@ -10,6 +10,10 @@
 """Validate call frames against actual torch_npu storage and stream contexts."""
 
 import ctypes
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -83,6 +87,63 @@ def test_real_npu_rejects_transposed_input(npu_context):
     signature = CallSignature([ParamInfo("x", ParamDirection.In, [2, 3], DataType.FP32)])
     with pytest.raises(ValueError, match="contiguous strided tensor"):
         signature.describe_call((value,))
+
+
+@pytest.mark.parametrize("drain", ["query", "empty_cache"])
+def test_python_queue_callback_survives_gil_held_drain(npu_context, test_config, drain):
+    """A fresh OpApi-only process must release the GIL while draining callbacks."""
+    pytest.importorskip("pypto._torch_npu")
+    script = textwrap.dedent("""
+        import sys
+        import threading
+        import torch
+        import torch_npu
+        from pypto import _torch_npu
+
+        device = int(sys.argv[1])
+        torch.npu.set_device(device)
+        stream = torch.npu.current_stream()
+        context = _torch_npu.borrow_context(device)
+        # The first enqueue drains the INIT queue synchronously. Complete a
+        # nonblocking OpApi callback before testing a later GIL-held drain.
+        warmed = threading.Event()
+
+        def warmup(caller_stream):
+            assert caller_stream > 0
+            warmed.set()
+
+        _torch_npu.enqueue([], stream.stream_id, device, context, warmup)
+        assert warmed.wait(10)
+        started, unblock, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def callback(caller_stream):
+            assert caller_stream > 0
+            started.set()
+            assert unblock.wait(10)
+            finished.set()
+
+        # No ACL-op runs first: only the adapter can enable GIL-safe queue drains.
+        _torch_npu.enqueue([], stream.stream_id, device, context, callback)
+        assert started.wait(10)
+        timer = threading.Timer(0.1, unblock.set)
+        timer.start()
+        if sys.argv[2] == "query":
+            stream.query()
+        else:
+            torch.npu.empty_cache()
+        timer.join()
+        assert finished.wait(10)
+        stream.synchronize()
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(test_config.device_id), drain],
+        env={**os.environ, "TASK_QUEUE_ENABLE": "1", "ASCEND_LAUNCH_BLOCKING": "0"},
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":

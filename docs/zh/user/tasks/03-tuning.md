@@ -49,7 +49,8 @@ A = torch.randn(ROWS, COLS, dtype=torch.float32)
 
 def check(kernel):
     out = torch.zeros(ROWS, COLS, dtype=torch.float32)
-    kernel(A, out, config=CFG)
+    compiled = kernel.compile(A, out, config=CFG)
+    compiled(A, out, config=CFG)
     torch.testing.assert_close(out, A * 2.0, rtol=1e-4, atol=1e-4)
 ```
 

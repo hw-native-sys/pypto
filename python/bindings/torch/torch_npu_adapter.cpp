@@ -9,17 +9,20 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// Optional lifecycle bridge. No Simpler SDK implementation or submission ABI is linked.
+// Optional Torch queue bridge. Simpler execution is reached only through Python Worker.submit.
 #include <acl/acl.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 #include <torch/csrc/autograd/python_variable.h>
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 
 #include "pypto/core/error.h"
 
@@ -59,9 +62,53 @@ c10_npu::NPUStream CallStream(int64_t stream_id, int32_t device_id) {
   return stream;
 }
 
+// PendingTicket owns callback and all Tensor/Storage references before this
+// function is called. The queue captures only the native stream and a borrowed
+// callback pointer; no Python reference is destroyed on an arbitrary queue thread.
+void Enqueue(nb::list objects, int64_t stream_id, int32_t device_id, uintptr_t context, nb::handle callback) {
+  auto stream = CallStream(stream_id, device_id);
+  Require(BorrowContext(device_id) == context, "Kernel borrowed context changed before enqueue");
+  std::unordered_set<const c10::StorageImpl*> recorded;
+  for (auto object : objects) {
+    Require(THPVariable_Check(object.ptr()), "Kernel arguments must be torch tensors");
+    const at::Tensor& tensor = THPVariable_Unpack(object.ptr());
+    Require(tensor.device().type() == c10::DeviceType::PrivateUse1 && tensor.device().index() == device_id &&
+                tensor.is_contiguous(),
+            "Kernel tensors must be contiguous on the current NPU device");
+    const auto& storage = tensor.storage();
+    if (recorded.insert(storage.unsafeGetStorageImpl()).second) {
+      c10_npu::NPUCachingAllocator::recordStream(storage.data_ptr(), stream);
+    }
+  }
+  // torch_npu 2.6/2.10 queue drains release the caller GIL only after this
+  // process-wide flag is set. Our Python callback has the same requirement as
+  // ACL-op compilation, including later stream.query() and empty_cache() calls.
+  // Set it before admission and never reset it while queued work may exist.
+  g_used_aclop = true;
+  PyObject* borrowed_callback = callback.ptr();
+  // Queue admission may block. Release the caller GIL so the queue can enter
+  // Python, both when callbacks execute inline and when taskQueue is enabled.
+  nb::gil_scoped_release release;
+  at_npu::native::OpCommand::RunOpApiV2("PyPTOKernel", [stream, borrowed_callback]() -> int {
+    std::string error;
+    {
+      nb::gil_scoped_acquire gil;
+      try {
+        nb::borrow<nb::object>(borrowed_callback)(reinterpret_cast<uintptr_t>(stream.stream(false)));
+      } catch (nb::python_error& exc) {
+        // The Python callback retains the original exception on PendingTicket.
+        // Destroy the Python-owning exception while the GIL is still held.
+        error = exc.what();
+      }
+    }
+    if (!error.empty()) throw pypto::RuntimeError(error);
+    return 0;
+  });
+}
 }  // namespace
 
 NB_MODULE(_torch_npu, m) {
+  m.def("enqueue", &Enqueue);
   m.def("framework_alive", &FrameworkAlive);
   m.def("borrow_context", &BorrowContext);
   m.def("bind_context", &BindContext);

@@ -81,7 +81,8 @@ def softmax(
 torch.manual_seed(0)
 a = torch.randn(64, 64)
 out = torch.zeros(64, 64)
-softmax(a, out, config=RunConfig(platform="a2a3sim"))
+compiled = softmax.compile(a, out, config=RunConfig(platform="a2a3sim"))
+compiled(a, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, torch.softmax(a, dim=1), rtol=1e-5, atol=1e-5)
 ```
 

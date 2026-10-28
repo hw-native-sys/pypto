@@ -90,7 +90,8 @@ def test_fp32_matmul_clears_inherited_hf32(test_config, monkeypatch, split_k):
     if test_config.codegen_only:
         fp32_matmul.compile(config=test_config)
     else:
-        fp32_matmul(a, b, out, config=test_config)
+        compiled = fp32_matmul.compile(a, b, out, config=test_config)
+        compiled(a, b, out, config=test_config)
         torch.testing.assert_close(out, a @ b, rtol=1e-3, atol=1e-3)
 
 
@@ -140,8 +141,9 @@ def test_hf32_rounding_and_fp32_restoration(test_config, mode, split_k):
     expected_fp = expected_hf + expected_fp
     hf = torch.empty(32, 32)
     fp = torch.empty(32, 32)
+    compiled = kernel.compile(a, b, hf, fp, config=test_config)
     for _ in range(2):
-        kernel(a, b, hf, fp, config=test_config)
+        compiled(a, b, hf, fp, config=test_config)
         torch.testing.assert_close(hf, expected_hf, rtol=0, atol=0)
         torch.testing.assert_close(fp, expected_fp, rtol=0, atol=0)
 
@@ -166,7 +168,8 @@ def test_explicit_valid_shape_matmul(test_config):
     a = (torch.arange(17 * 128).reshape(17, 128) % 5 - 2).to(torch.float16)
     b = (torch.arange(128 * 24).reshape(128, 24) % 7 - 3).to(torch.float16)
     out = torch.full((17, 24), float("nan"), dtype=torch.float32)
-    explicit_valid_shape_matmul(a, b, out, config=test_config)
+    compiled = explicit_valid_shape_matmul.compile(a, b, out, config=test_config)
+    compiled(a, b, out, config=test_config)
     if not test_config.codegen_only:
         torch.testing.assert_close(out, a.float() @ b.float(), rtol=0, atol=0)
 
@@ -197,7 +200,8 @@ def test_explicit_valid_shape_matmul_carry(test_config):
     out = torch.full((64, 32), -777.0, dtype=torch.float32)
     expected = out.clone()
     expected[:17, :24] = a.float() @ b.float()
-    split_k(a, b, out, config=test_config)
+    compiled = split_k.compile(a, b, out, config=test_config)
+    compiled(a, b, out, config=test_config)
     if not test_config.codegen_only:
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
@@ -1720,7 +1724,8 @@ class TestMatmulOperations:
         a = torch.randn(64, 64, dtype=torch.float32)
         b = torch.randn(64, 64, dtype=torch.float32)
         c = torch.zeros((64, 64), dtype=torch.float32)
-        matmul_acc_64(a, b, c, config=test_config)
+        compiled = matmul_acc_64.compile(a, b, c, config=test_config)
+        compiled(a, b, c, config=test_config)
         expected = torch.matmul(a, b)
         assert torch.allclose(c, expected, rtol=1e-3, atol=1e-3), (
             f"matmul_acc_64 failed: max diff = {(c - expected).abs().max().item()}"

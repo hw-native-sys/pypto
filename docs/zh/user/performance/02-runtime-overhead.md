@@ -90,7 +90,8 @@ def spmd_blocks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 for kernel in (per_block_tasks, spmd_blocks):
     c = fresh()
-    kernel(A, B, c, config=CFG)
+    compiled = kernel.compile(A, B, c, config=CFG)
+    compiled(A, B, c, config=CFG)
     torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
@@ -134,7 +135,8 @@ def gated(a: pl.Tensor, gate: pl.Tensor, out: pl.Out[pl.Tensor]):
 for gate_value, expected in ((0, A * 2.0), (1, A * 2.0 + 1.0)):
     gate = torch.full((1, 1), gate_value, dtype=torch.int32)
     out = fresh()
-    gated(A, gate, out, config=CFG)
+    compiled = gated.compile(A, gate, out, config=CFG)
+    compiled(A, gate, out, config=CFG)
     torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
 ```
 
@@ -171,7 +173,8 @@ def early_resolve(a: pl.Tensor, b: pl.Tensor, scratch: pl.Out[pl.Tensor], out: p
     return scratch, out
 
 scratch, out = fresh(TILE_ROWS), fresh(TILE_ROWS)
-early_resolve(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
+compiled = early_resolve.compile(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
+compiled(A[:TILE_ROWS], B[:TILE_ROWS], scratch, out, config=CFG)
 torch.testing.assert_close(out, torch.exp(A[:TILE_ROWS] + B[:TILE_ROWS]), rtol=1e-3, atol=1e-4)
 ```
 
