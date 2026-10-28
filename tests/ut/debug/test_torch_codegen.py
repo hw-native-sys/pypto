@@ -264,16 +264,13 @@ def test_tensor_view_dynamic_explicit_strides_codegen_and_execution():
 
 
 @pytest.mark.parametrize("page_pitch", [4160, 4224, 8192])
-@pytest.mark.parametrize("valid", [(2, 32, 128), (2, 16, 128), (2, 16, 100)])
-def test_retained_nd_load_replays_before_and_after_flatten(page_pitch, valid):
-    """GM windows stay ND, while the destination changes shape and coordinates."""
+@pytest.mark.parametrize("first_page", [0, 1, 7])
+def test_issue3038_mat_load_replays_before_and_after_flatten(page_pitch, first_page):
+    """Load two full Key pages while skipping each page's scale/padding tail."""
     source = _tensor_var("source", [9, page_pitch], DataType.INT8)
     view_call = ir.op.tensor.view(source, [9, 32, 128], strides=[page_pitch, 128, 1])
     keys = ir.Var("keys", view_call.type, _span())
-    # Mat exercises the new multi-ND path. Vec also supports partial middle
-    # axes/columns; its DMA packs each valid page block into the flat result.
-    memory = ir.MemorySpace.Mat if valid == (2, 32, 128) else ir.MemorySpace.Vec
-    load_call = ir.op.tile.load(keys, [1, 0, 0], [2, 32, 128], list(valid), target_memory=memory)
+    load_call = ir.op.tile.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=ir.MemorySpace.Mat)
     loaded = ir.Var("loaded", load_call.type, _span())
     body = ir.SeqStmts(
         [
@@ -292,92 +289,20 @@ def test_retained_nd_load_replays_before_and_after_flatten(page_pitch, valid):
     expected_keys = (torch.arange(9 * 4096) % 31 - 15).to(torch.int8).reshape(9, 32, 128)
     source_value[:, :4096] = expected_keys.reshape(9, 4096)
     original = owner.clone()
-    valid_data = expected_keys[1:3, : valid[1], : valid[2]]
+    valid_data = expected_keys[first_page : first_page + 2]
 
     for program, flattened in ((before, False), (after, True)):
         actual_keys, actual = _run_load_keys(program, source_value)
         shape = (64, 128) if flattened else (2, 32, 128)
-        valid_shape = (valid[0] * valid[1], valid[2]) if flattened else valid
-        expected = torch.zeros(shape, dtype=torch.int8)
-        expected[tuple(slice(0, extent) for extent in valid_shape)] = valid_data.reshape(valid_shape)
         assert actual.shape == shape
-        assert torch.equal(actual, expected)
-        assert getattr(actual, "_pypto_valid_shape") == valid_shape
+        assert torch.equal(actual, valid_data.reshape(shape))
+        assert getattr(actual, "_pypto_valid_shape") == shape
         assert getattr(actual, "_pypto_full_shape") == shape
         assert actual_keys.data_ptr() == source_value.data_ptr()
         assert actual_keys.storage_offset() == source_value.storage_offset()
         assert actual.untyped_storage().data_ptr() != owner.untyped_storage().data_ptr()
         actual.fill_(77)
         assert torch.equal(owner, original)
-
-
-@pytest.mark.parametrize("first_page", [0, 8])
-@pytest.mark.parametrize("first_col", [0, 80])
-def test_retained_nd_load_runtime_clamp_pads_declared_result(first_page, first_col):
-    """A dynamic boundary can expose less data than the declared valid box."""
-    source = _tensor_var("source", [9, 4160], DataType.INT8)
-    page = _scalar("page")
-    column = _scalar("column")
-    view_call = ir.op.tensor.view(source, [9, 32, 128], strides=[4160, 128, 1])
-    keys = ir.Var("keys", view_call.type, _span())
-    # The physical three-page request and explicit two-page valid box prevent
-    # static proof that runtime page 8 narrows valid B from two pages to one.
-    load_call = ir.op.tile.load(
-        keys, [page, 0, column], [3, 32, 128], [2, 16, 100], target_memory=ir.MemorySpace.Vec, clamp=True
-    )
-    loaded = ir.Var("loaded", load_call.type, _span())
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(keys, view_call, _span()),
-            ir.AssignStmt(loaded, load_call, _span()),
-            ir.ReturnStmt([keys], _span()),
-        ],
-        _span(),
-    )
-    before = _program(
-        [ir.Function("load_keys", [source, page, column], [keys.type], body, _span(), ir.FunctionType.InCore)]
-    )
-    after = passes.flatten_tile_nd_to_2d()(before)
-    value = torch.full((9, 4160), -101, dtype=torch.int8)
-    expected_keys = (torch.arange(9 * 4096) % 31 - 15).to(torch.int8).reshape(9, 32, 128)
-    value[:, :4096] = expected_keys.reshape(9, 4096)
-    pages = min(2, 9 - first_page)
-    cols = min(100, 128 - first_col)
-    data = expected_keys[first_page : first_page + pages, :16, first_col : first_col + cols]
-
-    for program, flattened in ((before, False), (after, True)):
-        _, actual = _run_load_keys(program, value, first_page, first_col)
-        shape = (96, 128) if flattened else (3, 32, 128)
-        expected = torch.zeros(shape, dtype=torch.int8)
-        if flattened:
-            expected[: pages * 16, :cols] = data.reshape(pages * 16, cols)
-            valid = (32, 100)
-        else:
-            expected[:pages, :16, :cols] = data
-            valid = (pages, 16, cols)
-        assert torch.equal(actual, expected)
-        assert getattr(actual, "_pypto_valid_shape") == valid
-        assert getattr(actual, "_pypto_full_shape") == shape
-
-
-def test_retained_nd_load_partial_source_uses_effective_window_validity():
-    """Crop each valid source page before packing; flat truncation is wrong."""
-    source_view = ir.TensorView([4096, 128, 1], ir.TensorLayout.ND, [9, 16, 128])
-    source = ir.Var("source", ir.TensorType([9, 32, 128], DataType.INT8, None, source_view), _span())
-    load_call = ir.op.tile.load(source, [1, 0, 0], [2, 32, 128], target_memory=ir.MemorySpace.Vec)
-    loaded = ir.Var("loaded", load_call.type, _span())
-    body = ir.SeqStmts([ir.AssignStmt(loaded, load_call, _span()), ir.ReturnStmt([source], _span())], _span())
-    before = _program(
-        [ir.Function("load_keys", [source], [source.type], body, _span(), ir.FunctionType.InCore)]
-    )
-    after = passes.flatten_tile_nd_to_2d()(before)
-    value = (torch.arange(9 * 4096) % 31 - 15).to(torch.int8).reshape(9, 32, 128)
-    _, actual = _run_load_keys(after, value)
-    expected = torch.zeros((64, 128), dtype=torch.int8)
-    expected[:32] = value[1:3, :16].reshape(32, 128)
-    assert torch.equal(actual, expected)
-    assert getattr(actual, "_pypto_valid_shape") == (32, 128)
-    assert getattr(actual, "_pypto_full_shape") == (64, 128)
 
 
 def test_tensor_view_same_layout_is_identity():

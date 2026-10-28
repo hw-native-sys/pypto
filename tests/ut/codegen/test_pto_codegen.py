@@ -4804,23 +4804,26 @@ def test_strided_multi_nd_mat_load_accepts_legacy_three_operands():
     assert mlir.count("pto.tload ins(") == 1
 
 
-def test_strided_tensor_view_and_flatten_emit_original_page_stride():
-    """Exercise the public four-operand view through flattening and PTO emission."""
+@pytest.mark.parametrize("page_pitch,first_page", [(4160, 0), (4224, 1), (8192, 7)])
+def test_strided_tensor_view_and_flatten_emit_original_page_stride(page_pitch, first_page):
+    """Issue #3038: the public view reaches one Key TLOAD with its page pitch."""
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
-        def kernel(self, source: pl.Tensor[[9, 4160], pl.INT8]) -> pl.Tensor[[9, 4160], pl.INT8]:
-            keys = pl.tensor.view(source, [9, 32, 128], strides=[4160, 128, 1])
-            _loaded = pl.tile.load(keys, [1, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
+        def kernel(self, source: pl.Tensor[[9, page_pitch], pl.INT8]) -> pl.Tensor[[9, page_pitch], pl.INT8]:
+            keys = pl.tensor.view(source, [9, 32, 128], strides=[page_pitch, 128, 1])
+            _loaded = pl.tile.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
             return source
 
     mlir = _generate_mlir(passes.flatten_tile_nd_to_2d()(Before))
     assert mlir.count("pto.tload ins(") == 1
     assert "!pto.partition_tensor_view<2x32x128xi8>" in mlir
-    alias = _single_line(_get_mlir_lines(mlir), "strides = [%c4160_index, %c128_index, %c1_index]")
+    alias = _single_line(_get_mlir_lines(mlir), f"strides = [%c{page_pitch}_index, %c128_index, %c1_index]")
     assert "pto.make_tensor_view %arg0" in alias
     assert "shape = [%c9_index, %c32_index, %c128_index]" in alias
+    load = _single_line(_get_mlir_lines(mlir), "pto.tload ins(")
+    assert "rows=64, cols=128" in load
 
 
 @pytest.mark.parametrize("operation", ["read", "write"])

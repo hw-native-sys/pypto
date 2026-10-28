@@ -525,43 +525,28 @@ def _mask_valid_region(tensor, shapes, valid_shape):
         tensor._pypto_full_shape = shapes_t
     return tensor
 
-def _tile_load(tensor, offsets, shapes, valid_shape=None, result_shape=None, result_valid_shape=None):
+def _tile_load(tensor, offsets, shapes, valid_shape=None, result_shape=None):
     offsets_t = _coerce_shape(offsets)
     shapes_t = _coerce_shape(shapes)
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, shapes_t))
     tile = tensor[slices].clone()
     actual_shape = tuple(tile.shape)
-    # Use provided valid_shape or fall back to the physical boundary; cap by actual data bounds.
-    v_shape = _coerce_shape(valid_shape) if valid_shape is not None else actual_shape
-    v_shape = tuple(min(v, a) for v, a in zip(v_shape, actual_shape))
-    if result_shape is not None:
-        result_shape = _coerce_shape(result_shape)
-        result_valid_shape = _coerce_shape(
-            result_valid_shape if result_valid_shape is not None else result_shape
-        )
-        # A lowered DMA can retain an ND GM window but produce a flat Tile.
-        # Pack the valid source box before changing coordinates: reshaping the
-        # padded physical box would leave holes between partial page blocks.
-        valid_slices = tuple(slice(0, extent) for extent in v_shape)
-        valid_rows = 1
-        for extent in v_shape[:-1]:
-            valid_rows *= extent
-        valid_data = tile[valid_slices].reshape(valid_rows, v_shape[-1])
-        # Runtime clamping can expose fewer rows/columns than the symbolic IR
-        # could prove. Preserve the declared destination valid box and pad its
-        # unavailable portion, matching the ordinary helper's boundary behavior.
-        padded_valid = tile.new_zeros(result_valid_shape)
-        copied = tuple(
-            slice(0, min(actual, declared)) for actual, declared in zip(valid_data.shape, result_valid_shape)
-        )
-        padded_valid[copied] = valid_data[copied]
-        return _mask_valid_region(padded_valid, result_shape, result_valid_shape)
     # Pad to requested shape if source is smaller (boundary case)
     if actual_shape != shapes_t:
         padded = tile.new_zeros(shapes_t)
         pad_slices = tuple(slice(0, s) for s in actual_shape)
         padded[pad_slices] = tile
         tile = padded
+    # Only the fully valid multi-ND Mat path supplies a flattened result shape.
+    # Its source window retains the page pitch, while the Tile stores packed rows.
+    if result_shape is not None:
+        if actual_shape != shapes_t or (valid_shape is not None and _coerce_shape(valid_shape) != shapes_t):
+            raise ValueError("torch_codegen requires a fully valid multi-ND Mat window")
+        result_shape = _coerce_shape(result_shape)
+        return _mask_valid_region(tile.reshape(result_shape), result_shape, result_shape)
+    # Use provided valid_shape or fall back to the physical boundary; cap by actual data bounds.
+    v_shape = _coerce_shape(valid_shape) if valid_shape is not None else actual_shape
+    v_shape = tuple(min(v, a) for v, a in zip(v_shape, actual_shape))
     return _mask_valid_region(tile, shapes_t, v_shape)
 
 def _tile_store(tile, offsets, output_tensor, atomic=0):
@@ -903,20 +888,9 @@ def _kw_dtype(kw: dict[str, Any]) -> str:
     return _torch_dtype(dt) if isinstance(dt, DataType) else "torch.float32"
 
 
-def _handle_tile_load(
-    a: list[str],
-    kw: dict[str, Any],
-    *,
-    result_shape: str | None = None,
-    result_valid_shape: str | None = None,
-) -> str:
+def _handle_tile_load(a: list[str], kw: dict[str, Any]) -> str:
     # args: [tensor, offsets_tuple, shapes_tuple, valid_shape_tuple]
-    result = (
-        f", result_shape={result_shape}, result_valid_shape={result_valid_shape}"
-        if result_shape is not None
-        else ""
-    )
-    return f"_tile_load({a[0]}, {a[1]}, {a[2]}, {a[3]}{result})"
+    return f"_tile_load({a[0]}, {a[1]}, {a[2]}, {a[3]})"
 
 
 def _handle_tile_store(a: list[str], kw: dict[str, Any]) -> str:
@@ -1837,28 +1811,19 @@ class TorchCodegen(_ir.IRVisitor):
         elif (
             op_name == _ir.get_op("tile.load").name
             and isinstance(op.type, _ir.TileType)
+            and op.type.memory_space == _ir.MemorySpace.Mat
             and isinstance(op.args[2], _ir.MakeTuple)
             and len(op.type.shape) == 2
-            and len(op.args[2].elements) != len(op.type.shape)
+            and len(op.args[2].elements) == 3
         ):
-            # FlattenTileNdTo2D changes the destination, while Mat/Vec loads
-            # can retain source-rank windows. Both coordinate systems are IR
-            # operands/type metadata; a source-window shape cannot stand in
-            # for the actual result or its valid region.
-            # Re-deduce the original window's validity using the existing op
-            # contract, including partial source views and offset clamping.
-            # The recorded result type has already moved to 2D coordinates.
-            window_type = cast(_ir.TileType, _ir.create_op_call(op_name, list(op.args), kw, op.span).type)
-            load_args = list(arg_strs)
-            window_valid = _ir.MakeTuple(list(window_type.get_effective_tile_view().valid_shape), op.span)
-            load_args[3] = self._visit_expr_str(window_valid)
+            # Multi-ND Mat loads retain their 3D GM window after flattening.
+            # The enabled path requires full validity, so the copied data can
+            # be reshaped directly to the declared 2D destination.
             result_shape = _ir.MakeTuple(list(op.type.shape), op.span)
-            valid_shape = _ir.MakeTuple(list(op.type.get_effective_tile_view().valid_shape), op.span)
-            self._expr_result = _handle_tile_load(
-                load_args,
-                kw,
-                result_shape=self._visit_expr_str(result_shape),
-                result_valid_shape=self._visit_expr_str(valid_shape),
+            valid = arg_strs[3] if len(arg_strs) >= 4 else arg_strs[2]
+            self._expr_result = (
+                f"_tile_load({arg_strs[0]}, {arg_strs[1]}, {arg_strs[2]}, {valid}, "
+                f"result_shape={self._visit_expr_str(result_shape)})"
             )
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)

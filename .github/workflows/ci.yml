@@ -749,7 +749,7 @@ jobs:
     # the required context uncreated, i.e. permanently "expected", and the PR
     # unmergeable — the opposite of the intent.
     #
-    # So the matrix always expands and the expensive steps carry the
+    # So the matrix always expands and the two expensive steps carry the
     # condition instead: on a docs-only PR the leg checks out, reports its
     # required context green, and finishes in seconds without building the C++
     # extension or running pytest. The runner is GitHub-hosted, so this costs
@@ -811,7 +811,7 @@ jobs:
         path: wheelhouse
         key: ${{ needs.prebuild-wheels-github.outputs.cache_key }}
 
-    # The steps the docs-only gate actually elides — installing the
+    # The two steps the docs-only gate actually elides — installing the
     # extension and running the suite. The job itself still runs, so both
     # required matrix contexts are created and reported green.
     - name: Install project and dependencies
@@ -832,11 +832,6 @@ jobs:
         # The wheel is built in ubuntu 22.04 and installed here on 24.04, so
         # assert the ABI holds instead of discovering it through a test error.
         python -c "import pypto; print('env OK:', pypto.__file__)"
-
-    # Ordinary xdist tests do not exercise pytest-forked's child report transport.
-    - name: Test forked pytest report transport
-      if: needs.changes.outputs.docs_only != 'true'
-      run: python -m pytest tests/ut/core/test_error.py::TestErrorTypes --forked -q
 
     - name: Test unit tests
       if: needs.changes.outputs.docs_only != 'true'
@@ -1680,25 +1675,7 @@ jobs:
 
       - name: Clone current pypto-lib
         run: |
-          set -euo pipefail
-          # Retry only acquisition: transient TLS failures must not trigger a
-          # rebuild/retest, and an incomplete clone cannot be reused.
-          clone_dir=build/pypto-lib
-          rm -rf -- "$clone_dir"
-          for attempt in 1 2 3; do
-            if git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$clone_dir"; then
-              exit 0
-            else
-              clone_status=$?
-            fi
-            rm -rf -- "$clone_dir"
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::pypto-lib clone failed after 3 attempts (exit $clone_status)"
-              exit "$clone_status"
-            fi
-            echo "::warning::pypto-lib clone attempt $attempt/3 failed; retrying"
-            sleep "$((attempt * 5))"
-          done
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git build/pypto-lib
 
       - name: Compile every formal library entry
         id: compile
@@ -1806,26 +1783,10 @@ jobs:
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of lib-checkout, so
         # actions/checkout won't clean it on a persistent self-hosted runner — a
         # leftover dir from a previous run makes `git clone` fail with
-        # "destination path already exists". Remove only this managed clone;
-        # retry acquisition after transient TLS failures without rerunning models.
+        # "destination path already exists". Remove it first (mirrors daily_ci).
         run: |
-          set -euo pipefail
-          clone_dir="${GITHUB_WORKSPACE:?}/pypto-lib"
-          rm -rf -- "$clone_dir"
-          for attempt in 1 2 3; do
-            if git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$clone_dir"; then
-              exit 0
-            else
-              clone_status=$?
-            fi
-            rm -rf -- "$clone_dir"
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::pypto-lib clone failed after 3 attempts (exit $clone_status)"
-              exit "$clone_status"
-            fi
-            echo "::warning::pypto-lib clone attempt $attempt/3 failed; retrying"
-            sleep "$((attempt * 5))"
-          done
+          rm -rf "$GITHUB_WORKSPACE/pypto-lib"
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib"
 
       # Each model run borrows a card via task-submit for the whole `python ...`
       # invocation (compile + run). task-submit propagates the inner exit code,

@@ -750,7 +750,11 @@ def _strided_key_view_entry(
 @pytest.mark.platforms("a2a3", "a2a3sim")
 @pytest.mark.parametrize("page_bytes", [4160, 4224, 8192])
 def test_strided_gm_view_multi_nd_mat_load_and_replay(test_config, page_bytes):
-    """Skip page tails while loading adjacent pairs, including odd/last pairs."""
+    """Issue #3038: load adjacent Key pages from a contiguous Native cache.
+
+    Each page starts with 4096 INT8 Key bytes; its scale/padding tail must be
+    skipped. Include odd starts, the last legal pair, and same-graph replay.
+    """
     native_cache = torch.full((9, page_bytes), -101, dtype=torch.int8)
     # Every page/row/column influences the exact dot product. Padding differs
     # from all keys, so treating the page pitch as packed corrupts the result.
