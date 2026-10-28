@@ -763,6 +763,7 @@ class PTOCodegen : public CodegenBase {
    * `pto.reserve_buffer` is emitted as `auto = true` with no `base`.
    */
   [[nodiscard]] bool EmitTileAddr() const { return emit_tile_addr_; }
+  [[nodiscard]] bool IsParameterBackedTile(const std::shared_ptr<const ir::TileType>& tile_type) const;
 
   /**
    * @brief Check if the current function is an AIC (Cube) function

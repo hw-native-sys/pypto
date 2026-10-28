@@ -156,7 +156,7 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     // Add that same element origin to the emitted VMI access; tile_buf_addr
     // points at the MemRef base and does not encode TileView.start_offset.
     if (tile->tile_view_ && tile->tile_view_->start_offset) {
-      auto origin = GetExprAsCode(tile->tile_view_->start_offset);
+      auto origin = EmitArithOperand(tile->tile_view_->start_offset, "index");
       auto adjusted = NewNamedTemp("reg_view_offset");
       Emit(adjusted + " = arith.addi " + offset + ", " + origin + " : index");
       offset = adjusted;

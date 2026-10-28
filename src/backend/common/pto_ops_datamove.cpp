@@ -1077,9 +1077,10 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
 // a same-typed MemRef representative may have become stale after an if-phi rebind.
 static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
                                const std::string& target, const std::string& result_type,
-                               bool result_has_memref) {
+                               bool result_has_memref, bool parameter_backed) {
   const auto existing_type = codegen.GetSSATileBufType(target);
-  return result_has_memref && !existing_type.empty() && existing_type == result_type && source == target;
+  return result_has_memref && !existing_type.empty() && existing_type == result_type &&
+         (!codegen.EmitTileAddr() || !parameter_backed || source == target);
 }
 
 // Same, resolving the source SSA and its type from the IR operand.
@@ -1545,17 +1546,20 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // result type alone and a `v_row=?` would leave its valid extent at zero.
     std::string view_type;
     bool result_has_memref = false;
+    bool parameter_backed = false;
     if (auto result_var = codegen.GetCurrentResultVar()) {
       if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
         result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
         view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
         result_has_memref = result_tile->memref_.has_value();
+        parameter_backed = codegen.IsParameterBackedTile(result_tile);
       }
     }
     // The no-op check compares against the pre-declared alloc_tile, whose type is
     // always the dynamic-valid form — so it must use `result_type`, not `view_type`.
     const std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
-    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref)) {
+    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref,
+                           parameter_backed)) {
       return std::string("");
     }
 
@@ -1656,11 +1660,13 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string result_type;
     std::string view_type;  // static valid dims — see tile.reshape above
     bool result_has_memref = false;
+    bool parameter_backed = false;
     if (auto result_var = codegen.GetCurrentResultVar()) {
       if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
         result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
         view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
         result_has_memref = result_tile->memref_.has_value();
+        parameter_backed = codegen.IsParameterBackedTile(result_tile);
       }
     }
     // A `pto.subview` source is a *strided window*, and a strided window has no
@@ -1718,7 +1724,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     // A matching declaration is sufficient only at a fixed inherited address
     // or when it is the actual source handle. Mirrors tile.reshape's no-op check.
-    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref)) {
+    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref,
+                           parameter_backed)) {
       return std::string("");
     }
 

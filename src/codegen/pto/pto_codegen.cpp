@@ -1940,8 +1940,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   // Views derived from caller-owned Vec Tiles retain the parameter backing.
   // Their view operation materializes a typed SSA view; allocating here would
   // silently redirect a later reg.load/store to compiler-owned storage.
-  auto defined_memref = ir::GetDefinedMemRef(tile_type);
-  if (defined_memref && parameter_backed_tile_bases_.count(defined_memref->base_.get()) > 0) return;
+  if (IsParameterBackedTile(tile_type)) return;
 
   // In PTOAS mode several vars may share one handle (in-place aliasing); emit
   // the alloc_tile only once per handle so the shared buffer has a single def.
@@ -2074,6 +2073,12 @@ std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) const {
   INTERNAL_CHECK_SPAN(it != fs_.memref_to_mlir.end(), memref->span_)
       << "Internal error: no MLIR mapping for MemRef base '" << memref->base_->name_hint_ << "'";
   return it->second;
+}
+
+bool PTOCodegen::IsParameterBackedTile(const std::shared_ptr<const ir::TileType>& tile_type) const {
+  if (!tile_type) return false;
+  auto memref = ir::GetDefinedMemRef(tile_type);
+  return memref && parameter_backed_tile_bases_.count(memref->base_.get()) > 0;
 }
 
 std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string, const std::string& name_hint,
@@ -2540,7 +2545,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         RegisterCommCtxFor(op->var_, comm_ctx);
         return;
       }
-    } else if (!emit_tile_addr_ && As<TileType>(op->var_->GetType())) {
+    } else if (auto tile_type = As<TileType>(op->var_->GetType());
+               tile_type && (!emit_tile_addr_ || IsParameterBackedTile(tile_type))) {
       // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
       // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
       // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /

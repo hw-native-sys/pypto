@@ -164,7 +164,7 @@ def test_review_reg_access_adds_tile_view_origin(tmp_path):
             type=ir.TileType(
                 [128],
                 DataType.FP32,
-                tile_view=ir.TileView([128], [1], integer(32)),
+                tile_view=ir.TileView([128], [1], ir.ConstInt(32, DataType.INT64, SPAN)),
                 memory_space=ir.MemorySpace.Vec,
             ),
         )
@@ -176,6 +176,24 @@ def test_review_reg_access_adds_tile_view_origin(tmp_path):
         source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN)))
     assert "arith.addi" in source
     compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+def test_review_parameter_plain_alias_keeps_caller_backing(tmp_path):
+    ib = IRBuilder()
+    with ib.function("parameter_alias", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        src = f.param("src", src_type, SPAN)
+        alias = ib.let("alias", src, type=src_type)
+        with ib.reg_scope(SPAN):
+            ib.emit_reg("x", "reg.load", [alias, integer(0)], {"lanes": 64}, SPAN)
+    with passes.PassContext([]):
+        program = ir.Program([f.get_result()], "Review", SPAN)
+        program = passes.allocate_memory_addr()(passes.init_mem_ref()(program))
+    source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    assert "pto.tile_buf_addr %src_tile" in source
+    assert "pto.tile_buf_addr %alias" not in source
+    compile_review_pto(source, tmp_path, level="level3")
 
 
 @pytest.mark.ptoas_compile
