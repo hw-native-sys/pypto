@@ -1079,8 +1079,10 @@ static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& 
                                const std::string& target, const std::string& result_type,
                                bool result_has_memref, bool parameter_backed) {
   const auto existing_type = codegen.GetSSATileBufType(target);
+  // Distinct handles alias only when compiler-owned addresses were emitted.
+  // PTOAS-planned and caller-backed views must follow the actual source SSA.
   return result_has_memref && !existing_type.empty() && existing_type == result_type &&
-         (!codegen.EmitTileAddr() || !parameter_backed || source == target);
+         ((codegen.EmitTileAddr() && !parameter_backed) || source == target);
 }
 
 // Same, resolving the source SSA and its type from the IR operand.
