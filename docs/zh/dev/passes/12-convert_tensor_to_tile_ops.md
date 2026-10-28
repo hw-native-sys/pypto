@@ -28,6 +28,11 @@ Tensor 源的 assemble，也能保留局部标量更新，避免引入不支持�
 
 **使用时机**：在 `OutlineClusterScopes` 之后、`OptimizeOrchTensors` 之前运行。
 
+`tensor.cmp` 通过打包谓词（packed predicate）和 `tile.sel` 生成数值 0/1 结果。
+对于左操作数已具有结果形状的二维比较，选择前生成的全 1/全 0 Tile
+使用左操作数的逻辑有效形状（valid shape），
+保留部分有效或动态的行列范围，不会将谓词的打包字节宽度当作元素数量。
+
 `tensor.col_sum` 默认转换为单输入的顺序归约 Tile 形式。设置
 `is_binary=True` 时，转换器创建与输入类型相同的 Vec 临时缓冲区；静态二维输入使用 `[ceil(M/2), N]`，其他形状保守使用输入大小，
 并生成 `tile.col_sum(input, scratch)`。Tensor 层的策略属性在这里消费，

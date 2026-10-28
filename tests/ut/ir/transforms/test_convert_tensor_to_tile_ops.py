@@ -6024,6 +6024,71 @@ class TestConvertGatherOp:
         _assert_convert_equal(before, expected)
 
 
+class TestConvertCmpOp:
+    """Comparison materialization must not read unwritten predicate rows or bits."""
+
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    @pytest.mark.parametrize("rhs_kind", ["scalar", "tensor"])
+    @pytest.mark.parametrize("region", ["full", "rows", "columns", "dynamic"])
+    def test_cmp_preserves_valid_region(self, rhs_kind, region, ascend_backend):
+        # GLM vision's merger compares an [8, 128] tail tile with dynamic rows.
+        # Also cover a non-byte-aligned column tail: the mask uses bytes, while
+        # the materialized 0/1 result must retain the exact element count.
+        specs = [("lhs", [8, 128], DataType.FP32)]
+        if rhs_kind == "tensor":
+            specs.append(("rhs", [8, 128], DataType.FP32))
+        extras: list[ExtraSpec] = [("rows", ir.ScalarType(DataType.INDEX))] if region == "dynamic" else []
+
+        def valid_shape(params) -> tuple[int | ir.Expr, int | ir.Expr]:
+            if region == "dynamic":
+                return params[0], 125
+            return {"full": (8, 128), "rows": (3, 128), "columns": (8, 125)}[region]
+
+        def before_body(ib, inputs, params=()):
+            lhs = ib.let("lhs_valid", tensor_ops.set_validshape(inputs[0], *valid_shape(params)))
+            rhs = inputs[1] if rhs_kind == "tensor" else ir.ConstFloat(0.0, DataType.FP32, ir.Span.unknown())
+            return ib.let("result", tensor_ops.cmp(lhs, rhs, cmp_type=5))
+
+        def expected_body(ib, inputs, params=()):
+            shape = valid_shape(params)
+            lhs = ib.let("lhs_valid", tile_ops.set_validshape(inputs[0], *shape))
+            if rhs_kind == "tensor":
+                mask = ib.let("mask", tile_ops.cmp(lhs, inputs[1], cmp_type=5))
+            else:
+                mask = ib.let("mask", tile_ops.cmps(lhs, 0.0, cmp_type=5))
+            one = ib.let("one", tile_ops.full([8, 128], dtype=DataType.FP32, value=1.0))
+            if region != "full":
+                one = ib.let("one_valid", tile_ops.set_validshape(one, *shape))
+            zero = ib.let("zero", tile_ops.full([8, 128], dtype=DataType.FP32, value=0.0))
+            if region != "full":
+                zero = ib.let("zero_valid", tile_ops.set_validshape(zero, *shape))
+            # TSEL uses a UINT32 [1, 16] scratch on A2/A3 and UINT8 [1, 32] on A5.
+            scratch_dtype, scratch_cols = (
+                (DataType.UINT32, 16) if ascend_backend == BackendType.Ascend910 else (DataType.UINT8, 32)
+            )
+            scratch = ib.let(
+                "scratch",
+                tile_ops.create([1, scratch_cols], dtype=scratch_dtype, target_memory=MemorySpace.Vec),
+            )
+            return ib.let("result", tile_ops.sel(mask, one, zero, scratch))
+
+        before = _make_before(
+            in_specs=specs,
+            out_shape=[8, 128],
+            out_dtype=DataType.FP32,
+            body=before_body,
+            extra_specs=extras,
+        )
+        expected = _make_expected(
+            in_specs=specs,
+            out_shape=[8, 128],
+            out_dtype=DataType.FP32,
+            body=expected_body,
+            extra_specs=extras,
+        )
+        _assert_convert_equal(before, expected)
+
+
 class TestConvertScatterOp:
     """Test conversion of tensor.scatter (rank-2 dim=-1 MVP) and tensor.scatter_mask."""
 

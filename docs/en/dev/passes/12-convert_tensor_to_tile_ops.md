@@ -49,6 +49,11 @@ existing lowering path and dedup identity guards.
 
 **When to use**: Run after `OutlineClusterScopes` and before `OptimizeOrchTensors`.
 
+`tensor.cmp` materializes its numeric 0/1 result with a packed predicate and
+`tile.sel`. For 2D comparisons whose lhs already has the result shape, the generated
+one/zero tiles use the lhs logical valid shape before selection, preserving partial or dynamic rows and columns without treating the
+predicate's packed byte width as an element count.
+
 `tensor.col_sum` uses the single-operand sequential tile form by default.
 With `is_binary=True`, the converter creates Vec scratch of shape `[ceil(M/2), N]` for static 2D inputs
 (full input shape otherwise), preserving the input dtype and emits `tile.col_sum(input, scratch)`. The Tensor-only

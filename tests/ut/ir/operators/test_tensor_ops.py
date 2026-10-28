@@ -789,8 +789,8 @@ def test_tensor_part_ops_keep_their_existing_valid_shape_contract(op_name):
 
 
 @pytest.mark.parametrize("rhs_kind", ["tensor", "scalar"])
-def test_tensor_cmp_does_not_claim_partial_valid_shape_before_lowering_support(rhs_kind):
-    """Comparison lowering currently materializes full one/zero value tiles."""
+def test_tensor_cmp_keeps_conservative_tensor_view(rhs_kind):
+    """Tensor inference stays conservative; lowering handles partial tile validity."""
     lhs = _partial_tensor_var([32, 256], [28, 250], name="lhs")
     rhs = _partial_tensor_var([32, 256], [28, 250], name="rhs") if rhs_kind == "tensor" else 0.0
 
