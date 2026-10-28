@@ -64,7 +64,9 @@ Per-statement handling:
 
 The nonpacked rank-3 exception preserves the address mapping independently of
 backend availability: a real page gap cannot be erased by a packed collapse.
-The final load emitter checks the backend capability and instruction limits.
+The backend registers `tile.load` instruction limits through `f_validate` in
+`RegisterLoadOps`; PTO codegen checks them against the final assignment type
+before emission.
 Currently enabled on A2/A3, this path requires a static, fully valid window with
 no clamping, and folds only its destination Tile `[B,M,N]` to `[B*M,N]`.
 Dynamic source dimensions, offsets, and strides remain caller preconditions;

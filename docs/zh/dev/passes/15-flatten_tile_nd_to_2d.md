@@ -62,7 +62,8 @@ program_2d = flatten_pass(program)
 | 1D/2D Tile 操作 | 不变 |
 
 非紧密 rank-3 情况的地址映射独立于后端能力保留：真实页间隙不能通过 packed
-折叠抹掉。最终加载 emitter 检查后端能力和指令范围。目前该路径仅在 A2/A3
+折叠抹掉。后端在 `RegisterLoadOps` 中通过 `f_validate` 注册 `tile.load` 的
+指令限制，PTO codegen 在发射前按最终赋值类型检查。目前该路径仅在 A2/A3
 启用，要求静态、完全有效且不启用 clamp 的窗口，只把目标 Tile 从 `[B,M,N]`
 展平为 `[B*M,N]`。动态源尺寸、偏移和 stride 仍由调用方保证运行时前置条件；
 编译器不生成边界 guard 或自动逐页回退。详见

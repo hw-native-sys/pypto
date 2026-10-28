@@ -4704,8 +4704,9 @@ def _strided_mat_load_program(
     clamp=False,
     fractal=512,
     source_valid_shape=None,
+    omit_valid_shape=False,
 ):
-    """Build post-flatten IR to test final-emitter checks independently of passes."""
+    """Build post-flatten IR to test final-target checks independently of passes."""
     span = ir.Span.unknown()
     shape = [max(9, window[0]), window[1], window[2]]
     source_view = ir.TensorView(
@@ -4730,7 +4731,8 @@ def _strided_mat_load_program(
         fractal=fractal,
     )
     flat_type = ir.TileType(flat_shape, dtype, None, view, ir.MemorySpace.Mat)
-    flat_call = ir.Call(call.op, call.args, call.kwargs, flat_type, span)
+    args = call.args[:3] if omit_valid_shape else call.args
+    flat_call = ir.Call(call.op, args, call.kwargs, flat_type, span)
     loaded = ir.Var("loaded", flat_type, span)
     body = ir.SeqStmts([ir.AssignStmt(loaded, flat_call, span), ir.ReturnStmt([], span)], span)
     function = ir.Function("kernel", [source], [], body, span, ir.FunctionType.InCore)
@@ -4793,6 +4795,13 @@ def test_strided_multi_nd_mat_load_backend_requires_compiler_enablement():
     backend.set_backend_type(BackendType.Ascend950)
     with pytest.raises(ValueError, match="not enabled by PyPTO on this backend"):
         _generate_mlir(_strided_mat_load_program())
+
+
+def test_strided_multi_nd_mat_load_accepts_legacy_three_operands():
+    """Omitting valid_shape still denotes the fully valid physical ND window."""
+    mlir = _generate_mlir(_strided_mat_load_program(omit_valid_shape=True))
+    assert "!pto.partition_tensor_view<2x32x128xi8>" in mlir
+    assert mlir.count("pto.tload ins(") == 1
 
 
 def test_strided_tensor_view_and_flatten_emit_original_page_stride():

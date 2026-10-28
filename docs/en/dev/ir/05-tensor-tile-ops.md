@@ -51,7 +51,8 @@ The bounded rank-3 multi-ND Mat-load path is currently enabled on A2/A3. Its
 physical window must be static and fully valid, without clamping; the source
 dimensions, offsets, and pitch may be dynamic under the caller's bounds
 contract. It preserves the three-dimensional GM window and forms a `[64,128]`
-Mat tile in this example. The backend also checks instruction ranges; A2/A3's
+Mat tile in this example. The backend's registered `tile.load` validator checks
+instruction ranges against the final destination type before PTO emission; A2/A3's
 multi-page pitch is at most 65535 **elements**, while a single-page window does
 not consume that stride. Nonpacked rank-2 ND Mat loads also check A2/A3's
 65535-element row-stride limit; A5 keeps its wider row-stride encoding.

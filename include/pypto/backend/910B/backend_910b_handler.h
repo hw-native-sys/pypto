@@ -13,7 +13,6 @@
 #define PYPTO_BACKEND_910B_BACKEND_910B_HANDLER_H_
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,8 +45,6 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool SupportsRuntimeBoundLocalSoftwarePipeline() const override { return true; }
   [[nodiscard]] bool SupportsLocalPipeDepth() const override { return true; }
-  [[nodiscard]] bool SupportsMultiNdMatLoad() const override { return true; }
-  [[nodiscard]] std::optional<int64_t> GetNd2NzMatLoadMaxRowStrideElements() const override { return 65535; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
 
   // A2/A3 has no int32 ordering compare; pto-isa substitutes an equality

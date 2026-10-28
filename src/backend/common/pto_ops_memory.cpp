@@ -27,6 +27,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -119,14 +120,22 @@ static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCo
   INTERNAL_UNREACHABLE_SPAN(op->span_) << "Internal error: invalid cache policy";
 }
 
+namespace {
+
+// Load-specific target rules are captured at backend registration, keeping
+// instruction validation separate from the shared PTO emitter.
+enum class LoadTarget { A2A3, A5 };
+
 // Validate strided ND -> NZ Mat loads, including the rank-3 source windows that
 // FlattenTileNdTo2D retains instead of discarding their physical gaps. Static
 // violations are rejected here even for hand-built IR; symbolic source strides
 // and offsets remain caller preconditions, with no implicit runtime guard.
-static void ValidateStridedNdMatLoad(const CallPtr& op, const ir::TensorTypePtr& source,
-                                     const ir::MakeTuplePtr& shapes, const ir::MakeTuplePtr& valid_shape,
-                                     codegen::PTOCodegen& codegen) {
-  auto tile = As<ir::TileType>(op->GetType());
+void ValidateStridedNdMatLoad(LoadTarget target, const CallPtr& op, const ir::TypePtr& result_type) {
+  INTERNAL_CHECK_SPAN(op->args_.size() >= 3, op->span_)
+      << "tile.load expects at least 3 arguments (tensor, offsets, shapes), but got " << op->args_.size();
+  auto source = AsTensorTypeLike(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(source, op->span_) << "tile.load tensor argument must have TensorType";
+  auto tile = As<ir::TileType>(result_type);
   const auto& maybe_source_view = source->tensor_view_;
   if (!tile || tile->memory_space_ != ir::MemorySpace::Mat || source->shape_.size() < 2 ||
       !maybe_source_view) {
@@ -145,20 +154,22 @@ static void ValidateStridedNdMatLoad(const CallPtr& op, const ir::TensorTypePtr&
       ir::tensor_view_semantics::BuildLogicalStridesFromLayout(source->shape_, source_view.layout);
   if (ir::tile_view_semantics::ShapeExprListsEquivalent(source_view.stride, packed)) return;
 
-  const auto* handler = codegen.GetBackendHandler();
-  INTERNAL_CHECK_SPAN(handler, op->span_) << "Strided ND Mat load requires a backend handler";
-  if (auto limit = handler->GetNd2NzMatLoadMaxRowStrideElements()) {
+  // A2/A3 srcDValue is a 16-bit element pitch even for a single 2D matrix;
+  // A5 passes a wider byte pitch and must not inherit this bound.
+  if (target == LoadTarget::A2A3) {
     INTERNAL_CHECK_SPAN(source_view.stride.size() == source->shape_.size(), op->span_)
         << "Strided ND Mat load source stride rank must match its shape rank";
     auto row_stride = As<ir::ConstInt>(source_view.stride[source->shape_.size() - 2]);
-    CHECK_SPAN(!row_stride || (row_stride->value_ > 0 && row_stride->value_ <= *limit), op->span_)
-        << "Strided ND2NZ Mat load row stride must be in [1, " << *limit << "] elements.";
+    CHECK_SPAN(!row_stride || (row_stride->value_ > 0 && row_stride->value_ <= 65535), op->span_)
+        << "Strided ND2NZ Mat load row stride must be in [1, 65535] elements.";
   }
   // The row-pitch field is also used by ordinary 2D ND2NZ. Its existing
   // partial-valid windows need no multi-ND capability or full-window contract.
   if (source->shape_.size() == 2) return;
 
-  CHECK_SPAN(handler->SupportsMultiNdMatLoad(), op->span_)
+  // This is PyPTO's bounded compiler contract, not the complete ISA capability:
+  // A5 hardware also supports multi-ND, but that path is not enabled here yet.
+  CHECK_SPAN(target == LoadTarget::A2A3, op->span_)
       << "Strided multi-ND Mat loads are not enabled by PyPTO on this backend. "
          "Load each matrix separately.";
   CHECK_SPAN(source->shape_.size() == 3 && !As<ir::DistributedTensorType>(source), op->span_)
@@ -179,6 +190,15 @@ static void ValidateStridedNdMatLoad(const CallPtr& op, const ir::TensorTypePtr&
       << "Strided multi-ND Mat loads support only 8/16/32-bit integers, FP16, BF16 and FP32.";
   CHECK_SPAN(tile_view.fractal == 512 && !op->GetKwarg<bool>("clamp", false), op->span_)
       << "Strided multi-ND Mat loads require a 512-byte NZ fractal and clamp=False.";
+  auto shapes = As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK_SPAN(shapes, op->span_) << "tile.load third argument must be a tuple (shapes)";
+  // Preserve the legacy three-argument form: omitting valid_shape means the
+  // entire physical source window is valid.
+  auto valid_shape = shapes;
+  if (op->args_.size() >= 4) {
+    valid_shape = As<ir::MakeTuple>(op->args_[3]);
+    INTERNAL_CHECK_SPAN(valid_shape, op->span_) << "tile.load fourth argument must be a tuple (valid_shape)";
+  }
   CHECK_SPAN(
       shapes->elements_.size() == 3 &&
           ir::tile_view_semantics::ShapeExprListsEquivalent(shapes->elements_, valid_shape->elements_) &&
@@ -217,6 +237,8 @@ static void ValidateStridedNdMatLoad(const CallPtr& op, const ir::TensorTypePtr&
   }
 }
 
+}  // namespace
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -248,7 +270,6 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
-  ValidateStridedNdMatLoad(op, tensor_type, shapes_tuple, valid_shape_tuple, codegen);
 
   // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.64 carries a
   // streaming read as a `cache_policy` attribute on `pto.tload` plus an optional
@@ -1114,6 +1135,26 @@ static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::E
   return out;
 }
 
+void RegisterLoadOps(Backend& backend, BackendType backend_type) {
+  LoadTarget target;
+  switch (backend_type) {
+    case BackendType::Ascend910:
+      target = LoadTarget::A2A3;
+      break;
+    case BackendType::Ascend950:
+      target = LoadTarget::A5;
+      break;
+    default:
+      INTERNAL_CHECK(false) << "Internal error: no load rules for backend";
+      return;
+  }
+  backend.RegisterOp("tile.load")
+      .f_validate([target](const CallPtr& op, const ir::TypePtr& result_type) {
+        ValidateStridedNdMatLoad(target, op, result_type);
+      })
+      .f_codegen(MakeTileLoadCodegenPTO);
+}
+
 void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -1315,9 +1356,6 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     return oss.str();
   });
 
-  reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeTileLoadCodegenPTO(op, codegen);
-  });
   reg("tile.store", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileStoreCodegenPTO(op, codegen);
   });

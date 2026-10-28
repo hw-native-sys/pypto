@@ -264,19 +264,6 @@ class BackendHandler {
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.
   [[nodiscard]] virtual bool SupportsLocalPipeDepth() const { return false; }
 
-  /// Whether PyPTO enables its bounded rank-3 ND -> NZ Mat load contract.
-  /// The emitter separately checks static, fully valid windows and the current
-  /// conservative instruction limits. This is compiler enablement, not the
-  /// complete hardware capability: A5 multi-ND support is not enabled here yet.
-  [[nodiscard]] virtual bool SupportsMultiNdMatLoad() const { return false; }
-
-  /// Maximum source row pitch in dtype elements for ND -> NZ Mat loads.
-  /// A2/A3 encodes srcDValue in 16 bits, even for a single 2D matrix. An
-  /// absent limit leaves targets with a wider row-stride encoding unchanged.
-  [[nodiscard]] virtual std::optional<int64_t> GetNd2NzMatLoadMaxRowStrideElements() const {
-    return std::nullopt;
-  }
-
   /**
    * @brief Whether this backend needs the MemoryReuse load + tpop_from_aic
    *        in-place hazard guard for split-AIV functions.
