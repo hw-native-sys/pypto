@@ -95,7 +95,8 @@ class SubviewVerifier : public IRVisitor {
     if (IsAffineSubviewType(op->var_->GetType())) {
       auto tensor = As<TensorType>(op->var_->GetType());
       CHECK_SPAN(tensor, op->span_) << "tensor.subview requires an ordinary Tensor alias";
-      CHECK_SPAN(!tensor->memref_, op->span_) << "tensor.subview borrowed descriptor must not own a MemRef";
+      // InitMemRef materializes the borrowed descriptor's allocation identity
+      // and cumulative byte offset; ownership remains with the GM root.
       CHECK_SPAN(alias, op->span_) << "tensor.subview requires verified caller-owned GM provenance";
       CHECK_SPAN(IsAffineSubviewType(op->value_->GetType()), op->span_)
           << "tensor.subview alias lost its addressing contract";
@@ -330,7 +331,7 @@ class SubviewVerifier : public IRVisitor {
     auto a = As<TensorType>(actual);
     auto e = As<TensorType>(expected);
     CHECK_SPAN(a && e && a->tensor_view_.has_value() && e->tensor_view_.has_value() &&
-                   IsAffineSubviewType(actual) && IsAffineSubviewType(expected) && !a->memref_ &&
+                   IsAffineSubviewType(actual) && IsAffineSubviewType(expected) &&
                    a->dtype_ == e->dtype_ && a->shape_.size() == e->shape_.size() &&
                    a->tensor_view_->layout == e->tensor_view_->layout &&
                    a->tensor_view_->pad == e->tensor_view_->pad &&
@@ -406,8 +407,7 @@ class SubviewVerifier : public IRVisitor {
     CHECK_SPAN(result->tensor_view_.has_value(), op->span_)
         << "tensor.subview result requires affine addressing metadata";
     CHECK_SPAN(result->dtype_ == parent->dtype_ && result->tensor_view_->layout == parent_view.layout &&
-                   result->tensor_view_->pad == PadValue::null && result->tensor_view_->valid_shape.empty() &&
-                   !result->memref_,
+                   result->tensor_view_->pad == PadValue::null && result->tensor_view_->valid_shape.empty(),
                op->span_)
         << "tensor.subview result must preserve parent dtype/layout with a fully valid borrowed window";
     const auto& extent = parent_view.valid_shape.empty() ? parent->shape_ : parent_view.valid_shape;

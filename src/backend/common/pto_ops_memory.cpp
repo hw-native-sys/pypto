@@ -40,6 +40,7 @@
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
@@ -1085,23 +1086,22 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     std::string result_buf = codegen.GetCurrentResultTarget();
     INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
     std::string input_base_ptr = codegen.GetTensorBasePtr(input_var);
-    if (ir::IsOp(op, "tensor.subview")) {
-      // The current parent pointer already contains earlier subview origins.
-      // Compute only this call's offset in the immediate parent's coordinates.
-      auto parent = ir::As<TensorType>(input_var->GetType());
-      auto offsets = ir::As<ir::MakeTuple>(op->args_[2]);
-      auto parent_view = parent->tensor_view_.value_or(ir::TensorView{});
-      auto parent_strides =
-          parent_view.stride.empty()
-              ? ir::tensor_view_semantics::BuildLogicalStridesFromLayout(parent->shape_, parent_view.layout)
-              : parent_view.stride;
-      ir::ExprPtr origin = std::make_shared<ir::ConstInt>(0, DataType::INDEX, op->span_);
-      for (size_t i = 0; i < parent_strides.size(); ++i) {
-        origin = ir::MakeAdd(
-            origin, ir::tensor_view_semantics::MakeIndexMul(offsets->elements_[i], parent_strides[i]));
-      }
-      auto offset_ssa = codegen.GetExprAsCode(origin);
-      offset_ssa = codegen.EmitCastToIndex(origin, offset_ssa);
+    // InitMemRef has already accumulated the alias origin.  Add only the
+    // difference from the immediate parent's MemRef because the parent pointer
+    // may itself be adjusted for an outer subview. This keeps nested aliases
+    // affine without re-reading Call geometry in codegen.
+    auto source_type = ir::AsTensorTypeLike(input_var->GetType());
+    auto source_memref = source_type ? source_type->memref_ : std::nullopt;
+    auto result_memref = lhs_type->memref_;
+    if (ir::IsOp(op, "tensor.subview") && source_memref && result_memref) {
+      auto delta = ir::MakeSub(result_memref.value()->byte_offset_, source_memref.value()->byte_offset_);
+      const auto storage_bits = ir::storage_size::GetStorageBitWidth(lhs_type->dtype_);
+      INTERNAL_CHECK_SPAN(storage_bits > 0 && storage_bits % 8 == 0, op->span_)
+          << "Internal error: tensor subview pointer arithmetic requires byte-addressable dtype";
+      auto elem_size = std::make_shared<ir::ConstInt>(static_cast<int64_t>(storage_bits / 8), DataType::INDEX,
+                                                      op->span_);
+      auto element_delta = ir::MakeFloorDiv(delta, elem_size);
+      auto offset_ssa = codegen.EmitCastToIndex(element_delta, codegen.GetExprAsCode(element_delta));
       auto pointer = codegen.NewTemp();
       const auto pointer_type = "!pto.ptr<" + codegen.GetTypeString(lhs_type->dtype_) + ">";
       codegen.Emit(pointer + " = pto.addptr " + input_base_ptr + ", " + offset_ssa + " : " + pointer_type +

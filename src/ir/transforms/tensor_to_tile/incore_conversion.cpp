@@ -237,7 +237,7 @@ std::pair<int64_t, size_t> ResolveBoxedAxis(const CallPtr& call,
 }
 
 bool IsPassthroughTensorOp(const CallPtr& call) {
-  return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
+  return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view") || IsOp(call, "tensor.subview");
 }
 
 /// Declared GM cache policy per source tensor, keyed by the param Var the
@@ -959,9 +959,21 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return HandlePassThroughAssign(op, new_value);
     }
 
+    // An affine GM subview keeps valid-shape metadata until a consuming load
+    // materializes a Tile. The tile.set_validshape lowering is only valid after
+    // that materialization; ordinary GM Tensor metadata follows the existing
+    // conversion path below.
+    if (IsOp(call, "tensor.set_validshape") && !call->args_.empty()) {
+      auto input_type = As<TensorType>(call->args_[0]->GetType());
+      if (input_type && input_type->tensor_view_ &&
+          input_type->tensor_view_->addressing_kind == TensorAddressingKind::AffineSubview) {
+        return HandlePassThroughAssign(op, new_value);
+      }
+    }
+
     const auto* entry = conv_registry_.Lookup(call->op_->name_);
     if (!entry) {
-      if (IsOp(call, "tensor.view")) {
+      if (IsOp(call, "tensor.view") || IsOp(call, "tensor.subview")) {
         CHECK_SPAN(!call->args_.empty() && AsTensorTypeLike(call->args_[0]->GetType()), call->span_)
             << "tensor.view in an InCore function requires a GM Tensor input that remains tensor-like "
                "through ConvertTensorToTileOps; viewing the result of an op lowered to Tile is not supported";
