@@ -136,8 +136,16 @@ compilations fail the job. Malformed or unreadable receipts fail their entry
 without aborting the remaining entries or losing the matrix summary.
 When an entry dispatches cases by launching its own script with the current
 Python interpreter, each child runs through the same compile-only adapter.
-Child arguments, environment, working directory, and process isolation are
-preserved, and the parent combines their compilation records. A child failure
+Child environment, working directory, and process isolation are preserved,
+and the parent combines their compilation records. For explicitly registered
+compile-output entries (currently `models/glm5_3_flash/prefill_fwd.py`), the
+adapter supplies a fresh runtime directory beside the compilation receipt.
+Intercepted children receive their own fresh directory by rewriting an inherited
+`--runtime-dir PATH` or `--runtime-dir=PATH`; their remaining case arguments are
+retained. This prevents parent or sibling manifests from bypassing compilation.
+Other entries retain their original arguments: `--runtime-dir` may identify a
+replay input or belong to a separate checkpoint mode, so merely declaring that
+option does not enable output-directory injection. A child failure
 or missing, empty, or malformed child receipt fails the entry even if the
 parent exits successfully. This interception applies to the current entry
 script launched by the same Python interpreter.
