@@ -248,8 +248,8 @@ Unit tests use real initialization state transitions, JIT passes/codegen, shared
 artifact publication/restoration and binary validation, with external compiler
 output and native/framework boundaries mocked. They do not validate optional
 adapter compilation, real taskQueue/GIL/lock behavior, allocator safety or NPU
-numerical execution. No system tests or device tests establish those properties
-in this migration step.
+numerical execution. The device-gated STs below cover numerical execution and
+queue-drain regressions; skipped cases do not establish device correctness.
 
 ## Call metadata and ownership
 
@@ -428,3 +428,22 @@ without launching a PyPTO device kernel.
 `tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
 Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and
 test-only dispatcher/compiler integration without a real kernel executor.
+
+`tests/st/runtime/kernel/test_torch_eager.py` adds numerical eager execution STs
+for a single call, eight dependent calls, and alternating Torch NPU/PyPTO calls.
+Each scenario runs on default and non-default streams with both supported
+runtimes, in a fresh interpreter to isolate process execution modes. CI uses a
+separate pytest invocation so the parent has not initialized the device. Outputs are
+checked against CPU references after one final stream synchronization; no
+synchronization separates the dependent or interleaved calls. NaN-initialized
+output buffers and changing runtime scalars detect missing or stale writes.
+
+```bash
+python -m pytest tests/st/runtime/kernel/test_torch_eager.py --platform=a2a3 --device=0 -v
+```
+
+The 12 execution cases require a real NPU, `torch_npu`, and the optional
+`pypto._torch_npu` adapter. They skip when these prerequisites are absent or
+`--codegen-only` is selected. Two separate codegen smoke cases compile the test
+kernel for both runtimes without claiming to validate device execution. A green
+job with skipped execution cases is not evidence of numerical eager correctness.

@@ -191,8 +191,8 @@ ticket 轮询不会 drain、synchronize 或等待 callback/run。已完成的 ru
 
 UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/恢复及二进制校验，
 仅模拟外部编译器输出和 native/framework 边界。UT 不证明可选 adapter 真实编译、
-实际 taskQueue/GIL/锁行为、allocator 安全或 NPU 数值正确性；本迁移阶段未通过
-ST 或设备测试验证这些性质。
+实际 taskQueue/GIL/锁行为、allocator 安全或 NPU 数值正确性。下述依赖设备的 ST
+覆盖数值执行和队列排空回归；跳过的用例不能证明设备执行正确。
 
 ## 调用元数据与所有权
 
@@ -336,3 +336,19 @@ offset view 和非连续输入拒绝行为。没有真实 NPU 或所选平台为
 `tests/ut/torch/test_registration.py` 覆盖 schema mutation/alias 契约、Fake/Meta
 与符号输入、隔离导入、重复定义，以及不依赖真实 kernel executor 的测试内
 dispatcher/compiler 集成。
+
+`tests/st/runtime/kernel/test_torch_eager.py` 新增 eager 数值执行 ST，覆盖单次调用、
+八次具有数据依赖的连续调用，以及 Torch NPU/PyPTO 交错调用。三种场景均覆盖默认和
+非默认 stream、两种受支持的 runtime，并在独立解释器中执行以隔离进程执行模式。
+CI 使用单独的 pytest 步骤，确保父进程尚未初始化设备。
+所有结果在最后一次 stream 同步后与 CPU 参考值比较，连续调用和交错调用之间不插入
+同步。输出缓冲区预填 NaN，并改变运行时 scalar，以检测漏写和过期参数。
+
+```bash
+python -m pytest tests/st/runtime/kernel/test_torch_eager.py --platform=a2a3 --device=0 -v
+```
+
+12 个执行用例需要真实 NPU、`torch_npu` 和可选 `pypto._torch_npu` adapter；缺少
+这些依赖或指定 `--codegen-only` 时跳过。另有两个 codegen 冒烟用例，分别为两种
+runtime 完整编译测试 kernel，但不验证设备执行。执行用例被跳过时，CI 通过不能
+证明 eager 数值执行正确。
