@@ -87,19 +87,27 @@ def lower(program, backend_type=BackendType.Ascend910):
 def test_subview_pipeline_emits_only_result_tile(tmp_path, sliced):
     optimized = lower(make_program(sliced=sliced))
     borrowed: set[str] = set()
+    borrowed_memrefs = []
+    root_memrefs = []
 
     class CheckBorrowedStorage(ir.IRVisitor):
         def visit_var(self, op: ir.Var) -> None:
             tensor = op.type
             if isinstance(tensor, ir.TensorType):
+                if op.name_hint.startswith("cache") and tensor.memref is not None:
+                    root_memrefs.append(tensor.memref)
                 view = tensor.tensor_view
                 if view and view.addressing_kind == ir.TensorAddressingKind.AffineSubview:
-                    assert tensor.memref is None
+                    assert tensor.memref is not None
+                    borrowed_memrefs.append(tensor.memref)
                     borrowed.add(op.name_hint)
             super().visit_var(op)
 
     CheckBorrowedStorage().visit_program(optimized)
     assert borrowed
+    assert root_memrefs
+    assert all(memref.base_ is root_memrefs[0].base_ for memref in borrowed_memrefs)
+    assert all(memref.byte_offset_ == 1024 for memref in borrowed_memrefs)
     text = str(optimized)
     assert "tensor.subview" in text
     assert "tensor.slice" not in text
