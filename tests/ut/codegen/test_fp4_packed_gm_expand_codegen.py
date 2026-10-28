@@ -576,7 +576,7 @@ def test_fp4_cacheinvalid_preserves_carrier_partition(dtype, pto_type):
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_fp4_nz_assemble_uses_native_insert(dtype):
+def test_fp4_nz_assemble_uses_native_insert(dtype, tmp_path):
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.AIV)
@@ -607,9 +607,15 @@ def test_fp4_nz_assemble_uses_native_insert(dtype):
     inserts = [line for line in mlir.splitlines() if "pto.tinsert " in line]
     assert inserts, mlir
     assert any(
-        "rows=16, cols=128" in line and "rows=32, cols=256" in line and "%c64_index" in line
+        "rows=16, cols=128" in line and "rows=64, cols=256" in line and "%c64_index" in line
         for line in inserts
     ), mlir
+    # The Vec source still counts carriers; the Mat target uses PTOAS v0.72
+    # logical dimensions. Verify that the cross-space transfer also assembles.
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "fp4_insert.pto"
+        source.write_text(mlir)
+        _run_ptoas(str(source), str(tmp_path / "fp4_insert.cpp"), ["--pto-arch=a5", "--pto-level=level3"])
 
 
 @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])

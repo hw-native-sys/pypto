@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -146,10 +147,47 @@ const char* TileLayoutToStr(ir::TileLayout layout) {
   }
 }
 
+std::optional<size_t> GetPtoFp4LogicalAxis(const std::string& loc, const std::string& dtype_str,
+                                           ir::TileLayout blayout) {
+  if ((loc != "mat" && loc != "left" && loc != "right") ||
+      (dtype_str != DataTypeToMLIR(DataType::FP4E2M1X2) &&
+       dtype_str != DataTypeToMLIR(DataType::FP4E1M2X2))) {
+    return std::nullopt;
+  }
+  return blayout == ir::TileLayout::col_major ? 0 : 1;
+}
+
+std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
+                                               const std::vector<ir::ExprPtr>& coordinates) {
+  const auto space = tile.GetMemorySpace();
+  INTERNAL_CHECK(space) << "Internal error: PTO tile coordinates require a memory space";
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(tile);
+  auto result = coordinates;
+  if (auto axis =
+          GetPtoFp4LogicalAxis(MemorySpaceToMLIR(*space), DataTypeToMLIR(tile.dtype_), view.blayout)) {
+    INTERNAL_CHECK(result.size() == 2) << "Internal error: packed Cube coordinates must be rank two";
+    result[*axis] =
+        ir::AdjustPackedFp4CastLastDim({result[*axis]}, tile.dtype_, DataType::FP32, ir::Span::unknown())[0];
+  }
+  return result;
+}
+
 std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                     int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
                                     uint64_t fractal, ir::PadValue pad, ir::CompactMode compact,
                                     int64_t v_row, int64_t v_col, bool v_row_dynamic, bool v_col_dynamic) {
+  // IR shapes and memory planning count byte carriers. PTOAS v0.72 keeps
+  // Cube tile dimensions logical (GitCode PTOAS !381); Vec/GM still count
+  // carriers. Convert only the serialized descriptor, never its allocation.
+  if (auto axis = GetPtoFp4LogicalAxis(loc, dtype_str, blayout)) {
+    if (*axis == 0) {
+      rows *= 2;
+      v_row *= 2;
+    } else {
+      cols *= 2;
+      v_col *= 2;
+    }
+  }
   std::ostringstream oss;
   oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
   oss << ", rows=" << rows << ", cols=" << cols;

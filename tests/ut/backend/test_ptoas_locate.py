@@ -35,7 +35,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pypto.backend import pto_backend
+from pypto.backend import _ptoas_fp4, pto_backend
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, find_ptoas_binary
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -452,6 +452,83 @@ def test_run_ptoas_timeout_reports_configured_deadline(monkeypatch):
     monkeypatch.setattr(pto_backend.subprocess, "run", run)
     with pytest.raises(RuntimeError, match="timed out after 180s.*PYPTO_PTOAS_TIMEOUT_SECONDS") as exc:
         pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert isinstance(exc.value.__cause__, subprocess.TimeoutExpired)
+
+
+@pytest.fixture
+def fp4_probe(tmp_path, monkeypatch):
+    binary = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setattr(_ptoas_fp4, "find_ptoas_binary", lambda: str(binary))
+    monkeypatch.setattr(_ptoas_fp4, "check_ptoas_version", lambda _: "ptoas 0.72+patched")
+    _ptoas_fp4._verified_binaries.clear()
+    return binary
+
+
+_FP4_PROBE_CPP = "\n".join(
+    (
+        "Tile<TileType::Left, float4_e2m1x2_t, 32, 128,",
+        "Tile<TileType::Right, float4_e1m2x2_t, 128, 64,",
+        "Tile<TileType::Acc, float, 32, 64,",
+        "Tile<TileType::ScaleLeft, float8_e8m0_t, 32, 4,",
+        "Tile<TileType::ScaleRight, float8_e8m0_t, 4, 64,",
+    )
+)
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_native_fp4_probe_rejects_old_geometry(fp4_probe, monkeypatch, returncode):
+    # A verifier-only fix still emits the wrong accumulator; neither that nor
+    # an incompatible assembler's verifier rejection can enable execution.
+    result = SimpleNamespace(
+        returncode=returncode,
+        stdout=_FP4_PROBE_CPP.replace("Acc, float, 32, 64,", "Acc, float, 16, 32,"),
+        stderr="" if returncode == 0 else "incompatible accumulator shape",
+    )
+    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", lambda *args, **kwargs: result)
+    with pytest.raises(RuntimeError, match=r"Native FP4 MX.*v0.72.*PTOAS #1700"):
+        _ptoas_fp4.check_native_fp4_mx_support()
+    assert not _ptoas_fp4._verified_binaries
+
+
+def test_native_fp4_probe_caches_success_and_rechecks_replaced_binary(fp4_probe, monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        source = Path(command[-1]).read_text()
+        assert "pto.tmatmul.mx.acc" in source and "pto.tmatmul.mx.bias" in source
+        assert kwargs["timeout"] > 0
+        return SimpleNamespace(returncode=0, stdout=_FP4_PROBE_CPP, stderr="")
+
+    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", run)
+    _ptoas_fp4.check_native_fp4_mx_support()
+    _ptoas_fp4.check_native_fp4_mx_support()
+    assert len(calls) == 1
+    fp4_probe.write_text("#!/bin/sh\n# replacement build\nexit 0\n")
+    _ptoas_fp4.check_native_fp4_mx_support()
+    assert len(calls) == 2
+
+
+def test_native_fp4_probe_retries_after_failure(fp4_probe, monkeypatch):
+    results = iter(
+        (
+            SimpleNamespace(returncode=1, stdout="", stderr="old verifier"),
+            SimpleNamespace(returncode=0, stdout=_FP4_PROBE_CPP, stderr=""),
+        )
+    )
+    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", lambda *args, **kwargs: next(results))
+    with pytest.raises(RuntimeError, match="old verifier"):
+        _ptoas_fp4.check_native_fp4_mx_support()
+    _ptoas_fp4.check_native_fp4_mx_support()
+
+
+def test_native_fp4_probe_timeout_is_actionable(fp4_probe, monkeypatch):
+    def run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(_ptoas_fp4.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="Native FP4 MX.*Capability probe failed") as exc:
+        _ptoas_fp4.check_native_fp4_mx_support()
     assert isinstance(exc.value.__cause__, subprocess.TimeoutExpired)
 
 

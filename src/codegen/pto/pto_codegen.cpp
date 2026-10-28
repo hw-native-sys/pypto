@@ -1967,7 +1967,11 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     dims = &tile_type->shape_;
   }
 
+  std::vector<ir::ExprPtr> logical_dims;
   if (dims != nullptr) {
+    // Match FormatTileBufTypeString for runtime constructor operands too.
+    logical_dims = GetPtoTileCoordinates(*tile_type, *dims);
+    dims = &logical_dims;
     if (dims->size() == 1) {
       // Match ExtractTileTypeInfo: 1-D tile maps to rows=1, cols=shape[0].
       fields.valid_row_ssa = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
@@ -2213,8 +2217,12 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     if (candidate.base_address) {
       region.addr_ssa = GetOrEmitConstant(*candidate.base_address, DataType::INT64);
     }
-    region.valid_row_ssa = GetOrEmitConstant(candidate.valid_row, DataType::INDEX);
-    region.valid_col_ssa = GetOrEmitConstant(candidate.valid_col, DataType::INDEX);
+    const auto region_valid = GetPtoTileCoordinates(
+        *As<TileType>(candidate.reference_tile->GetType()),
+        {std::make_shared<ir::ConstInt>(candidate.valid_row, DataType::INDEX, ir::Span::unknown()),
+         std::make_shared<ir::ConstInt>(candidate.valid_col, DataType::INDEX, ir::Span::unknown())});
+    region.valid_row_ssa = GetOrEmitConstant(As<ir::ConstInt>(region_valid[0])->value_, DataType::INDEX);
+    region.valid_col_ssa = GetOrEmitConstant(As<ir::ConstInt>(region_valid[1])->value_, DataType::INDEX);
     region.count = candidate.count;
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
