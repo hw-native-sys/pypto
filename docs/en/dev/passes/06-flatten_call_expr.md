@@ -13,6 +13,12 @@ This pass ensures that call expressions do not appear in nested contexts by extr
 5. Return values cannot be calls
 6. Yield values cannot be calls
 
+These constraints apply to evaluated expressions, not type metadata. A tensor
+shape such as `pl.tensor.dim(x, 0) * 2` stays an expression in the type; extracting
+it into a body-local temporary would invalidate loop-carried types and outlined
+signatures. `NoNestedCalls` follows the same boundary. Outlining captures tensor
+operands referenced by these types before the parameters that depend on them.
+
 **Requires**: `TypeChecked`, `SSAForm` properties. These properties are automatically verified at BASIC level once produced; use a `VerificationInstrument` via `PassContext` if you need required properties to be validated before running passes.
 
 **When to use**: Typically schedule this pass after the type-checking pass and before code generation to simplify downstream analysis and code generation; this ordering is a convention rather than an automatically enforced requirement.

@@ -25,12 +25,13 @@ import pytest
 from pypto import CacheConfig, cache_stats, ir, passes
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import ToolchainIdentity, digest_record
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
 from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
 from pypto.jit import _artifact_manifest
 from pypto.jit._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
 from pypto.jit.artifact_cache import ArtifactStore, BuildDisposition, LookupStatus
-from pypto.runtime import RunConfig, _prebuilt
+from pypto.runtime import CompileOptions, RunConfig, _prebuilt
 from pypto.runtime._artifact_runtime import ArtifactRuntime, bind_artifact, restore_artifact
 from pypto.runtime._artifact_sources import (
     UnsupportedArtifactInput,
@@ -1342,6 +1343,59 @@ def test_kernel_readonly_generated_miss_builds_privately(kernel_stage, fake_runt
     after = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
     assert before == after
     assert artifact._artifact_runtime.directory.is_relative_to(readonly.private_root)
+
+
+@pytest.mark.parametrize("kernel_mode", [False, True], ids=["program", "kernel"])
+def test_nested_validshape_compiles_without_free_vars(tmp_path, fake_runtime, monkeypatch, kernel_mode):
+    """Nested device reads in valid-shape metadata must survive lowering (#3087)."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is required to finalize a kernel artifact")
+
+    @pl.jit.incore
+    def calculate(
+        src: pl.Tensor[[1, 2048], pl.FP32],
+        valid: pl.Tensor[[1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+    ):
+        tile = pl.load(src, [0, 0], [1, 2048])
+        narrowed = pl.set_validshape(tile, 1, pl.cast(pl.read(valid, [0]), pl.INDEX))
+        result = pl.add(narrowed, 1.0)
+        pl.store(result, [0, 0], out)
+        return out
+
+    @pl.jit
+    def entry(
+        src: pl.Tensor[[1, 2048], pl.FP32],
+        valid: pl.Tensor[[1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+    ):
+        with pl.spmd(1):
+            out = calculate(src, valid, out)
+        return out
+
+    # Keep real specialization, passes, PTOAS and kernel ABI finalization.
+    # fake_runtime supplies only the optional runtime imports; no device is used.
+    monkeypatch.setenv("PYPTO_CACHE", "0")
+    config = CompileOptions(platform="a2a3", output_dir=str(tmp_path / "compiled"), dump_passes=True)
+    if kernel_mode:
+        artifact = entry._resolve_kernel_artifact((), {"config": config}, allow_signature_mode=True)
+        assert artifact.kernel_abi.return_aliases == (2,)
+    else:
+        artifact = entry.compile(config=config)
+
+    root = Path(artifact.output_dir)
+    dumps = list((root / "passes_dump").glob("*.py"))
+    assert dumps
+    for dump in dumps:
+        assert "__FREE_VAR" not in dump.read_text(), dump.name
+    kernels = list((root / "ptoas").glob("*.pto"))
+    assert len(kernels) == 1
+    code = kernels[0].read_text()
+    assert "pto.set_validshape" in code
+    # Metadata traversal must not duplicate the executable read of `valid`.
+    assert code.count(" = pto.load ") == 1
+    fake_runtime.runner._compile_and_assemble.assert_not_called()
+    fake_runtime.runner._execute_on_device.assert_not_called()
 
 
 @pytest.mark.parametrize("persistent", [False, True])

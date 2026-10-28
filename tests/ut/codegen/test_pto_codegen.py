@@ -3378,6 +3378,167 @@ def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
     )
 
 
+@pytest.mark.parametrize("extent_kind", ["constant", "symbol", "expression"])
+@pytest.mark.parametrize("axis", [0, -2])
+def test_pto_codegen_tensor_dim_in_parameter_shape(extent_kind, axis):
+    """Retained tensor.dim calls produce operands, even before the source view."""
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    one = ir.ConstInt(1, DataType.INT64, span)
+    extent = {
+        "constant": ir.ConstInt(8, DataType.INDEX, span),
+        "symbol": n,
+        "expression": ir.add(n, one, span),
+    }[extent_kind]
+    source = ir.Var(
+        "source", ir.TensorType([extent, ir.ConstInt(32, DataType.INDEX, span)], DataType.FP32), span
+    )
+    dim = tensor_ops.dim(source, axis)
+    view_type = ir.TensorType(
+        [ir.mul(dim, ir.ConstInt(2, DataType.INDEX, span), span), ir.ConstInt(16, DataType.INDEX, span)],
+        DataType.FP32,
+    )
+    view = ir.Var("view", view_type, span)
+    load = tile.load(view, [0, 0], [16, 16], target_memory=ir.MemorySpace.Vec)
+    loaded = ir.Var("loaded", load.type, span)
+    result = ir.Var("result", view_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(loaded, load, span),
+            ir.AssignStmt(result, tile.store(loaded, [0, 0], view), span),
+            ir.ReturnStmt([result], span),
+        ],
+        span,
+    )
+    # The source tensor follows the dependent view; no source tensor_view is
+    # needed to read its declared extent. Dynamic extents use scalar ABI slots.
+    func = ir.Function("dim_view", [view, source], [view_type], body, span, ir.FunctionType.InCore)
+    program = ir.Program([func], "DimView", span)
+    assert "pl.tensor.dim(" in ir.python_print(program)
+    mlir = _generate_mlir(program)
+    assert re.search(r"arith.muli %\w+, %\w+ : index", mlir), mlir
+    assert "arith.muli ," not in mlir
+    assert "pto.make_tensor_view %arg0" in mlir
+    shape_vars = codegen.collect_vars_from_shape_expr(dim)
+    assert [var.unique_id for var in shape_vars] == ([] if extent_kind == "constant" else [n.unique_id])
+    signature = _single_line(_get_mlir_lines(mlir), "func.func @dim_view")
+    assert signature.count("%arg") == (2 if extent_kind == "constant" else 3)
+    _, wrapper_args = _generate_arg_unpacking(func)
+    assert len(wrapper_args) == (2 if extent_kind == "constant" else 3)
+
+
+@pytest.mark.parametrize("dtype", [DataType.UINT8, DataType.UINT32, DataType.UINT64])
+def test_tensor_dim_unsigned_constant_extent_ptoas(tmp_path, dtype):
+    """Unsigned constant extents must become INDEX without an invalid cast."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType(
+        [ir.ConstInt(8, dtype, span), ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32
+    )
+    ib = IRBuilder()
+    with ib.function("unsigned_dim", type=ir.FunctionType.InCore) as f:
+        source = f.param("source", tensor_type)
+        ib.let("extent", tensor_ops.dim(source, 0))
+        ib.return_stmt()
+    mlir = _generate_mlir(ir.Program([f.get_result()], "UnsignedDim", span))
+    assert "arith.constant 8 : index" in mlir
+    assert not re.search(r"arith.index_cast[^\n]*: ui\d+ to index", mlir)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "unsigned_dim", str(tmp_path))
+    assert "unsigned_dim" in cpp
+
+
+def test_tensor_dim_view_loop_compiles_without_folding(tmp_path):
+    """The reported runtime loop compiles while retaining dim in tensor types."""
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.InOut[pl.Tensor[[8, 32], pl.FP32]]):
+            flat = pl.reshape(x, [pl.tensor.dim(x, 0) * 2, 16])
+            for blk in pl.spmd(1, name_hint="dim_view"):
+                for i in pl.range(2):
+                    flat[0:16, 0:16] = pl.exp(pl.slice(flat, [16, 16], [0, 0]))
+            return x
+
+    lowered = _run_default_passes(Repro)
+    printed = ir.python_print(lowered)
+    assert "__FREE_VAR" not in printed
+    assert "pl.Tensor[[pl.tensor.dim(" in printed
+    kernels = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
+    mlir = _generate_mlir(ir.Program(kernels, "DimViewKernels", ir.Span.unknown()))
+    assert "arith.muli ," not in mlir
+    # Compile the generated kernel with PTOAS when the toolchain is installed.
+    ir.compile(
+        Repro,
+        output_dir=str(tmp_path),
+        platform="a2a3",
+        dump_passes=False,
+        skip_ptoas=find_ptoas_binary() is None,
+    )
+
+
+def test_tensor_dim_in_outlined_local_type_lowers(tmp_path):
+    """A tensor referenced only by a scope-local result type must be captured."""
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, source: pl.Tensor[[8, 32], pl.FP32], out: pl.InOut[pl.Tensor[[8, 32], pl.FP32]]):
+            n = pl.tensor.dim(source, 0)
+            with pl.spmd(1):
+                block = pl.tile.get_block_idx()
+                view: pl.Tensor[
+                    [pl.tensor.dim(source, 0) * 2, 16],
+                    pl.FP32,
+                    pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND),
+                ] = pl.reshape(out, [n * 2, 16])
+                out = pl.assemble(out, pl.exp(pl.slice(view, [8, 16], [block * 8, 0])), [0, 0])
+            return out
+
+    # Exercise all IR passes and codegen. PTOAS currently rejects the dynamic
+    # reshape/subview valid-row combination independently of scope capture.
+    compiled = ir.compile(Repro, output_dir=str(tmp_path), platform="a2a3", skip_ptoas=True)
+    assert compiled.program is not None
+    assert "__FREE_VAR" not in ir.python_print(compiled.program)
+
+
+def test_nested_tensor_dim_does_not_rebind_tpop_result(tmp_path):
+    """A nested shape read must not replace the popped tile's SSA with an index."""
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(self, __gm_pipe_buffer: pl.Out[pl.Tensor[[4096], pl.FP32]]):
+            peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="consumer")
+            pl.aic_initialize_pipe(peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            source: pl.Tensor[[8, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            __gm_pipe_buffer: pl.Out[pl.Tensor[[4096], pl.FP32]],
+        ):
+            pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+            pl.aiv_initialize_pipe(dir_mask=1, slot_size=1024, c2v_consumer_buf=pipe_buf)
+            popped: pl.Tile[
+                [16, 16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.tensor.dim(source, 0), 16])
+            ] = pl.tpop_from_aic(split=0)
+            result = pl.store(popped, [0, 0], out)
+            return result
+
+    # Keep tensor.dim in the TileView: a simplifying pipeline could mask this
+    # codegen bug by folding the dimension read before the backend sees it.
+    mlir = _generate_mlir(Repro)
+    popped = re.search(r"(%\w+) = pto.tpop_from_aic", mlir)
+    assert popped is not None, mlir
+    assert f"pto.tstore ins({popped.group(1)} : !pto.tile_buf" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        cpp = pto_backend._compile_pto_module(mlir, "consumer", str(tmp_path))
+        assert "consumer" in cpp
+
+
 def test_pto_codegen_tensor_view_aliases_input_base_ptr():
     """tensor.view creates a view rooted at the input buffer and usable by downstream loads."""
     span = ir.Span.unknown()

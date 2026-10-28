@@ -549,5 +549,61 @@ def test_tensor_dim_is_not_folded_in_an_inline_callee():
     _assert_roundtrips(Prog)
 
 
+def test_retained_tensor_dim_return_type_uses_callers_tensor():
+    """Return annotations bind retained tensor operands to the actual argument."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, source: pl.Tensor[[8, 32], pl.FP32]):
+            result: pl.Tensor[
+                [pl.tensor.dim(source, 0) * 2, 16],
+                pl.FP32,
+                pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND),
+            ] = pl.reshape(source, [16, 16])
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, actual: pl.Tensor[[8, 32], pl.FP32]):
+            result = self.kernel(actual)
+            return result
+
+    (call_type,) = _user_call_types(Prog, "kernel")
+    actual = next(func for func in Prog.functions.values() if func.name == "orch").params[0]
+    assert isinstance(call_type, ir.TensorType)
+    extent = call_type.shape[0]
+    assert isinstance(extent, ir.Mul)
+    assert isinstance(extent.left, ir.Call)
+    assert extent.left.args[0] is actual
+    _assert_roundtrips(Prog)
+
+
+def test_scalar_only_return_metadata_uses_callers_argument():
+    """A scalar used only in return metadata must not retain callee identity."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, source: pl.Tensor[[8, 16], pl.FP32], rows: pl.Scalar[pl.INDEX]):
+            result: pl.Tensor[
+                [8, 16],
+                pl.FP32,
+                pl.TensorView(valid_shape=[rows, 16], stride=[16, 1], layout=pl.TensorLayout.ND),
+            ] = pl.reshape(source, [8, 16])
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, source: pl.Tensor[[8, 16], pl.FP32], actual_rows: pl.Scalar[pl.INDEX]):
+            result = self.kernel(source, actual_rows)
+            return result
+
+    (call_type,) = _user_call_types(Prog, "kernel")
+    actual_rows = next(func for func in Prog.functions.values() if func.name == "orch").params[1]
+    assert isinstance(call_type, ir.TensorType)
+    assert call_type.tensor_view is not None
+    assert call_type.tensor_view.valid_shape[0] is actual_rows
+    _assert_roundtrips(Prog)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -62,6 +62,10 @@ class NoNestedCallVerifier : public IRVisitor {
  public:
   explicit NoNestedCallVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
+  // Three-address form constrains evaluated expressions, not declarative type
+  // metadata. Shape calls must retain their operands across outlining.
+  void VisitVarLike_(const VarPtr& op) override {}
+
   void VisitExpr_(const CallPtr& op) override;
   void VisitExpr_(const AddPtr& op) override { VisitBinaryExpr(op); }
   void VisitExpr_(const SubPtr& op) override { VisitBinaryExpr(op); }

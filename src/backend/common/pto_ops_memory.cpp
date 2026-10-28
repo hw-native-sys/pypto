@@ -784,25 +784,25 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
       << "tensor.dim requires 2 arguments, but got " << op->args_.size();
-  auto input_tensor = ir::As<ir::TensorType>(op->args_[0]->GetType());
-  CHECK(input_tensor) << "tensor.dim need TensorType for first arg, but got "
-                      << op->args_[0]->GetType()->TypeName();
+  auto input_tensor = ir::AsTensorTypeLike(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(input_tensor, op->span_)
+      << "tensor.dim requires a tensor operand, got " << op->args_[0]->GetType()->TypeName();
   auto axis = codegen.GetConstIntValue(op->args_[1]);
-  CHECK(axis >= 0 && static_cast<size_t>(axis) < input_tensor->shape_.size())
+  if (axis < 0) axis += static_cast<int64_t>(input_tensor->shape_.size());
+  INTERNAL_CHECK_SPAN(axis >= 0 && static_cast<size_t>(axis) < input_tensor->shape_.size(), op->span_)
       << "tensor.dim axis " << axis << " out of range for tensor with rank " << input_tensor->shape_.size();
   auto shape = input_tensor->shape_[axis];
+  // Read the declared extent directly, including composite scalar expressions.
+  // No tensor_view needs to have been emitted for the operand yet.
   std::string shape_name;
-  if (auto dyn_shape = ir::As<ir::Var>(shape)) {
-    shape_name = codegen.GetVarName(dyn_shape);
-  } else if (auto static_shape = ir::As<ir::ConstInt>(shape)) {
-    shape_name = codegen.GetOrEmitConstant(static_shape->value_, DataType::INDEX);
+  if (auto constant = ir::As<ir::ConstInt>(shape)) {
+    // Extents are INDEX values regardless of a constant's declared signedness.
+    // arith.index_cast cannot consume the ui64 emitted for a UINT64 constant.
+    shape_name = codegen.GetOrEmitConstant(constant->value_, DataType::INDEX);
   } else {
-    INTERNAL_CHECK_SPAN(false, op->span_) << "Internal error: tensor.dim shape is neither Var nor ConstInt";
+    shape_name = codegen.EmitCastToIndex(shape, codegen.GetExprAsCode(shape));
   }
-  auto target_var = codegen.GetCurrentResultVar();
-  if (target_var != nullptr && !shape_name.empty()) {
-    codegen.RegisterVarToMlir(target_var, shape_name);
-  }
+  codegen.SetCurrentExprValue(shape_name);
 
   return "";
 }
