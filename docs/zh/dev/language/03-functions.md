@@ -18,7 +18,10 @@ JIT 实现位于 `python/pypto/jit/`。公开的 `jit` 对象和 `JITFunction` �
 | `_ast_analysis.py` | 共享只读 AST 缓存、源码名称和动态维声明 |
 | `_call_binding.py` | 调用点参数映射、constexpr 变体和跨依赖的动态维传播 |
 | `_tensor_meta.py` | 按源码顺序推导局部张量元数据、处理分支/循环绑定及递归依赖返回值 |
-| `specializer.py` | 共享专门化类型和特化程序源码生成 |
+| `specializer.py` | 专门化上下文、注解处理、程序源码组装与诊断源码位置映射 |
+| `_specialize_body.py` | 有状态 AST 函数体改写、变量重命名与词法作用域处理 |
+| `_specialize_values.py` | 专门化与缓存键共用的常量及 dtype/layout 源码渲染 |
+| `_specialize_types.py` | 共享的 `DynDim`、`ShapeDim`、`TensorMeta` 定义；原有 `specializer` 导入路径保持有效 |
 | `_source.py`、`cache.py`、`_persistent.py` | 请求命名空间快照、缓存键和持久产物解析 |
 
 `JITFunction` 持有依赖图状态、编译对象缓存及其锁。缓存键构造与专门化继续共享

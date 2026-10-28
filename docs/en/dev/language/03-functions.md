@@ -20,7 +20,10 @@ without owning compiled-object caches or dispatching kernels.
 | `_ast_analysis.py` | Shared read-only AST cache, source names, and declared dynamic dimensions |
 | `_call_binding.py` | Call-site argument mapping, constexpr variants, and dynamic-dimension propagation across dependencies |
 | `_tensor_meta.py` | Source-ordered local tensor metadata, branch/loop bindings, and recursive dependency-return inference |
-| `specializer.py` | Shared specialization types and generation of specialized program source |
+| `specializer.py` | Specialization context, annotation handling, program source assembly, and diagnostic source maps |
+| `_specialize_body.py` | Stateful AST body rewriting, variable renaming, and lexical scope handling |
+| `_specialize_values.py` | Shared constant and dtype/layout source rendering for specialization and cache keys |
+| `_specialize_types.py` | Shared `DynDim`, `ShapeDim`, and `TensorMeta` definitions; existing imports from `specializer` remain valid |
 | `_source.py`, `cache.py`, `_persistent.py` | Request namespace snapshots, cache keys, and persistent artifact resolution |
 
 `JITFunction` owns the dependency-graph state, compiled-object caches, and their

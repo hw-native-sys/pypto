@@ -26,11 +26,11 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
 from . import _arguments, _ast_analysis, _call_binding
+from ._specialize_body import BodyTransformer
 from .specializer import (
     DynDim,
     ShapeDim,
     TensorMeta,
-    _BodyTransformer,
     _classify_params,
     func_name_lookup,
 )
@@ -1139,7 +1139,7 @@ def _preview_static_unary_plus(
                 return _fold_int_arith(node.op, lhs, rhs)
         return None
 
-    class Preview(_BodyTransformer):
+    class Preview(BodyTransformer):
         def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.UnaryOp:
             position = (node.lineno, node.col_offset)
             transformed = cast("ast.UnaryOp", self.generic_visit(node))

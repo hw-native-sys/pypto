@@ -172,7 +172,7 @@ def body_local_names(func: Any) -> set[str]:
 
     A local shadows a same-named module or closure binding, so anything that
     folds a free name must consult this first. The specializer applies the same
-    rule through ``_BodyTransformer._used_names``; keeping one definition here
+    rule through ``BodyTransformer._used_names``; keeping one definition here
     is what stops a folded value and the emitted source from disagreeing.
     """
     definition = get_func_def(func)

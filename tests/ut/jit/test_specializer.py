@@ -22,20 +22,19 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto.backend import BackendType
+from pypto.jit._specialize_body import BodyTransformer
+from pypto.jit._specialize_values import layout_str, render_free_value
 from pypto.jit.specializer import (
     DynDim,
     SpecializeContext,
     Specializer,
     TensorMeta,
-    _BodyTransformer,
     _build_tensor_annotation,
     _classify_params,
     _collect_annotation_dynamic_dims,
     _collect_dynamic_dims,
     _collect_dynvar_names,
     _infer_return_type,
-    _layout_str,
-    _render_free_value,
     _unwrap_direction_annotation,
     build_specialize_context,
     specialize,
@@ -361,7 +360,7 @@ class TestClassifyParams:
 
 
 # ---------------------------------------------------------------------------
-# _BodyTransformer
+# BodyTransformer
 # ---------------------------------------------------------------------------
 
 
@@ -372,7 +371,7 @@ class TestBodyTransformer:
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
         # DynDim info now lives inside tensor_meta.shape — tests inject it there
         # directly when needed (see test_shape_unpack_expanded_dynamic / etc.).
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=tensor_meta,
             dep_names=dep_names or set(),
         )
@@ -492,7 +491,7 @@ class TestBodyTransformer:
         src = textwrap.dedent(src)
         tree = ast.parse(src)
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=tensor_meta,
             dep_names=set(),
             py_globals=py_globals,
@@ -615,7 +614,7 @@ class TestBodyTransformer:
 
 
 class TestRenderFreeValue:
-    """``_render_free_value`` — the single answer to "can this value be written as source?"."""
+    """``render_free_value`` — the single answer to "can this value be written as source?"."""
 
     @pytest.mark.parametrize(
         "value, expected",
@@ -642,7 +641,7 @@ class TestRenderFreeValue:
         ],
     )
     def test_renders_to_evaluable_source(self, value, expected):
-        rendered = _render_free_value(value)
+        rendered = render_free_value(value)
         assert rendered is not None
         assert ast.unparse(rendered) == expected
 
@@ -659,7 +658,7 @@ class TestRenderFreeValue:
     )
     def test_rendered_source_evaluates_back_to_the_value(self, value, expected):
         """The rendered text is only useful if ``pl`` can evaluate it back."""
-        rendered = _render_free_value(value)
+        rendered = render_free_value(value)
         assert rendered is not None
         assert eval(ast.unparse(rendered), {"pl": pl}) == expected  # noqa: S307
 
@@ -670,14 +669,14 @@ class TestRenderFreeValue:
     )
     def test_declines_values_with_no_source_form(self, value):
         """Declining is the safe answer: the name survives and the parser reports it."""
-        assert _render_free_value(value) is None
+        assert render_free_value(value) is None
 
     @pytest.mark.parametrize("enum_type", [pld.ReduceOp, pld.NotifyOp, pld.WaitCmp, pld.AtomicType])
     def test_distributed_enum_members_round_trip(self, enum_type):
         # AtomicType is shared with pl; its existing canonical spelling stays stable.
         prefix = "pl" if enum_type is pld.AtomicType else "pld"
         for member in enum_type:
-            rendered = _render_free_value(member)
+            rendered = render_free_value(member)
             assert rendered is not None
             source = ast.unparse(rendered)
             assert source == f"{prefix}.{enum_type.__name__}.{member.name}"
@@ -685,7 +684,7 @@ class TestRenderFreeValue:
 
     def test_nan_renders_as_a_nan_producing_expression(self):
         """NaN has no literal, but ast.unparse still writes something evaluable."""
-        rendered = _render_free_value(float("nan"))
+        rendered = render_free_value(float("nan"))
         assert rendered is not None
         assert math.isnan(eval(ast.unparse(rendered), {"__builtins__": {}}))  # noqa: S307
 
@@ -1285,7 +1284,7 @@ class TestSpecializerIntegration:
 
 
 class TestVariableRebinding:
-    """Tests for alpha-renaming of variable rebindings in _BodyTransformer."""
+    """Tests for alpha-renaming of variable rebindings in BodyTransformer."""
 
     def _transform(self, src: str, tensor_meta: dict | None = None) -> str:
         src = textwrap.dedent(src)
@@ -1297,7 +1296,7 @@ class TestVariableRebinding:
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=tensor_meta or {},
             dep_names=set(),
             param_names=param_names,
@@ -3108,12 +3107,12 @@ class TestTensorLayoutAnnotation:
     """
 
     def test_layout_str_renders_dsl_constant(self):
-        assert _layout_str(ir.TensorLayout.NZ) == "pl.NZ"
-        assert _layout_str(ir.TensorLayout.MX_A_ZZ) == "pl.MX_A_ZZ"
+        assert layout_str(ir.TensorLayout.NZ) == "pl.NZ"
+        assert layout_str(ir.TensorLayout.MX_A_ZZ) == "pl.MX_A_ZZ"
 
     def test_layout_str_omits_nd(self):
         """ND is what an absent slot already means — emitting it is noise."""
-        assert _layout_str(ir.TensorLayout.ND) is None
+        assert layout_str(ir.TensorLayout.ND) is None
 
     def test_annotation_carries_layout(self):
         meta = TensorMeta((64, 128), DataType.FP16, layout=ir.TensorLayout.NZ)
