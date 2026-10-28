@@ -24,6 +24,7 @@ import runpy
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import count
@@ -63,7 +64,7 @@ def select_entries(lib: Path, platform: str) -> list[str]:
     return entries
 
 
-def entry_args(path: Path, platform: str) -> list[str]:
+def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> list[str]:
     """Supply platform and declared logical ranks without acquiring devices."""
     source = path.read_text()
     args = [str(path), "-p", platform]
@@ -94,6 +95,11 @@ def entry_args(path: Path, platform: str) -> list[str]:
         for node in options
     ):
         args += ["--compile-only"]
+        if runtime_dir is not None and any(
+            any(isinstance(arg, ast.Constant) and arg.value == "--runtime-dir" for arg in node.args)
+            for node in options
+        ):
+            args += ["--runtime-dir", str(runtime_dir)]
     return args
 
 
@@ -205,7 +211,13 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
     runner._prepare_inputs = reject_execution
     compile_module.compile = ir_module.compile = full_compile
     subprocess.Popen = CompileOnlyPopen
-    sys.argv = [str(entry_path), *argv] if argv is not None else entry_args(entry_path, platform)
+    # A fresh per-invocation directory prevents a retained manifest from turning
+    # this audit into a cache-load check. Keep artifacts beside the receipt.
+    if argv is None:
+        runtime_dir = Path(tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent))
+        sys.argv = entry_args(entry_path, platform, runtime_dir)
+    else:
+        sys.argv = [str(entry_path), *argv]
     try:
         runpy.run_path(str(entry_path), run_name="__main__")
     finally:

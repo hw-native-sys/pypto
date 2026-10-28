@@ -366,6 +366,32 @@ def test_self_spawned_entry_preserves_audit_and_child_arguments(library, tmp_pat
     assert statuses == ([True, True, True, False] if child == "exit" else [True, True, passed])
 
 
+def test_compile_only_entry_gets_fresh_runtime_directory(library, tmp_path):
+    # Production entries require a manifest directory before invoking compile.
+    # Reusing the output root must still execute compilation on every audit.
+    (library / "models/case.py").write_text(
+        "import argparse\n"
+        "from pathlib import Path\n"
+        "from pypto.ir import compile\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "parser.add_argument('--compile-only', action='store_true')\n"
+        "parser.add_argument('--runtime-dir', type=Path)\n"
+        "args = parser.parse_args()\n"
+        "if not args.compile_only or args.runtime_dir is None:\n"
+        "    parser.error('--compile-only requires --runtime-dir')\n"
+        "assert not (args.runtime_dir / 'manifest.json').exists()\n"
+        "compile('ok')\n"
+        "(args.runtime_dir / 'manifest.json').write_text('{}')\n"
+    )
+    output = tmp_path / "out"
+    for _ in range(2):
+        result = audit.run_case(library, "models/case.py", "a2a3", output, 10)
+        assert result["passed"]
+        assert len(result["compilations"]) == 1
+    assert len(list((output / "models/case").glob("runtime-*/manifest.json"))) == 2
+
+
 def test_entry_arguments_preserve_declared_ranks(tmp_path):
     script = tmp_path / "distributed.py"
     script.write_text('# ci: devices=4\nparser.add_argument("--compile-only")\n')
