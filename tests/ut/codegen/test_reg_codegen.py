@@ -160,6 +160,80 @@ def test_frontend_register_kernel_compiles_with_vpto(tmp_path):
 
 
 @pytest.mark.ptoas_compile
+def test_frontend_fp32_8x256_muladd_register_loop_compiles_with_vpto(tmp_path):
+    @pl.function(type=pl.FunctionType.AIV)
+    def multiply_add(
+        a: pl.Tile[
+            [8, 256],
+            pl.FP32,
+            pl.MemorySpace.Vec,
+            pl.TileView(valid_shape=[8, 256], stride=[256, 1], start_offset=0),
+        ],
+        b: pl.Tile[
+            [8, 256],
+            pl.FP32,
+            pl.MemorySpace.Vec,
+            pl.TileView(valid_shape=[8, 256], stride=[256, 1], start_offset=0),
+        ],
+        c: pl.Tile[
+            [8, 256],
+            pl.FP32,
+            pl.MemorySpace.Vec,
+            pl.TileView(valid_shape=[8, 256], stride=[256, 1], start_offset=0),
+        ],
+        dst: pl.Out[
+            pl.Tile[
+                [8, 256],
+                pl.FP32,
+                pl.MemorySpace.Vec,
+                pl.TileView(valid_shape=[8, 256], stride=[256, 1], start_offset=0),
+            ]
+        ],
+    ):
+        with pl.reg_scope():
+            # One 256-byte FP32 register covers 64 elements. The 32 iterations
+            # cover all 8*256 elements; offsets are in elements, not bytes.
+            for block in pl.range(32):
+                offset = block * 64
+                x = pl.reg.load(a, offset=offset, lanes=64)
+                y = pl.reg.load(b, offset=offset, lanes=64)
+                z = pl.reg.load(c, offset=offset, lanes=64)
+                product = pl.reg.mul(x, y)
+                result = pl.reg.add(product, z)
+                _out = pl.reg.store(dst, offset=offset, value=result)
+
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    with passes.PassContext([]):
+        program = ir.Program([multiply_add], "RegisterMulAdd", SPAN)
+        program = passes.flatten_tile_nd_to_2d()(program)
+        program = passes.init_mem_ref()(program)
+        program = passes.allocate_memory_addr()(program)
+    source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    body = source.split("pto.vecscope {", 1)[1]
+    assert "scf.for" in body
+    assert "arith.muli" in body
+    assert body.count("pto.vmi.vload ") == 3
+    assert body.count("pto.vmi.vstore ") == 1
+    assert "pto.vmi.vmul " in body and "pto.vmi.vadd " in body
+    assert "!pto.vmi.vreg<64xf32>" in body
+    assert "rows=8, cols=256" in source
+    path = tmp_path / "reg_muladd_fp32_8x256.pto"
+    output = tmp_path / "reg_muladd_fp32_8x256.vpto"
+    path.write_text(source)
+    compiled = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    assert "pto.vecscope" in output.read_text()
+
+
+@pytest.mark.ptoas_compile
 def test_review_reg_access_adds_tile_view_origin(tmp_path):
     ib = IRBuilder()
     with ib.function("view_origin", span=SPAN, type=ir.FunctionType.AIV) as f:

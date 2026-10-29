@@ -47,14 +47,14 @@ def _lanes(value: object) -> int:
     return value
 
 
-def load(tile: Tile | ir.Expr, offset: int | ir.Expr = 0, *, lanes: int) -> Reg:
+def load(tile: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0, *, lanes: int) -> Reg:
     """Read lanes consecutive initialized elements from a Vec Tile."""
     return Reg(_call("load", [_expr(tile), _expr(offset)], lanes=_lanes(lanes)))
 
 
 def store(
     tile: Tile | ir.Expr,
-    offset: int | ir.Expr = 0,
+    offset: int | Scalar | ir.Expr = 0,
     value: Reg | ir.Expr | None = None,
     mask: Reg | ir.Expr | None = None,
 ) -> Tile:
