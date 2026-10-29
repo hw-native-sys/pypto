@@ -34,10 +34,16 @@
 
 namespace pypto::ir {
 namespace {
+// Half-open [begin, end) byte intervals relative to one MemRef base. Add()
+// coalesces adjacent intervals as well as overlaps, so each range is maximal.
 using Intervals = std::map<int64_t, int64_t>;
 
+// Restrict state tracking to allocations touched by Reg memory operations.
+// Views and store-result versions meet at their shared MemRef base identity.
 class RegisterRoots : public IRVisitor {
  public:
+  // Keep this separate from roots: a malformed access without MemRef must
+  // still reach the checker rather than silently disabling verification.
   bool present = false;
   std::set<const Var*> roots;
 
@@ -59,6 +65,8 @@ class RegisterRoots : public IRVisitor {
 class InitializationChecker : public IRVisitor {
  public:
   explicit InitializationChecker(const std::set<const Var*>& roots) : roots_(roots) {}
+  // Credit an input parameter or data-producing Tile result's valid region.
+  // Unknown geometry contributes no proof; this never changes Tile metadata.
   void Initialize(const ExprPtr& expr) {
     auto tile = As<TileType>(expr->GetType());
     if (!tile || !tile->memref_.has_value()) return;
@@ -109,6 +117,7 @@ class InitializationChecker : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& stmt) override {
+    // Check RHS reads before crediting the assignment's produced output.
     IRVisitor::VisitStmt_(stmt);
     auto call = As<Call>(stmt->value_);
     if (!call) return;  // Plain aliases inherit the same root's state.
@@ -167,6 +176,8 @@ class InitializationChecker : public IRVisitor {
       return;
     }
     const auto checkpoint = journal_.size();
+    // Both branches start with the incoming state. Deliberately discard all
+    // new branch facts; computing their intersection could accept more cases.
     VisitStmt(stmt->then_body_);
     Undo(checkpoint);
     if (stmt->else_body_) {
@@ -183,10 +194,14 @@ class InitializationChecker : public IRVisitor {
       return;
     }
     auto checkpoint = journal_.size();
+    // Static nonempty loops execute the body at least once; one traversal is
+    // sufficient for the currently supported static access intervals. Unknown
+    // trip counts may be zero, so their writes cannot establish outgoing facts.
     IRVisitor::VisitStmt_(stmt);
     if (!(start && stop && step && step->value_ != 0)) Undo(checkpoint);
   }
   void VisitStmt_(const WhileStmtPtr& stmt) override {
+    // Validate reads inside the body, but assume no guaranteed iteration.
     auto checkpoint = journal_.size();
     IRVisitor::VisitStmt_(stmt);
     Undo(checkpoint);
@@ -196,19 +211,31 @@ class InitializationChecker : public IRVisitor {
   struct Change {
     const Var* root;
     int64_t begin, end;
+    // Undo erases inserted intervals and restores deleted intervals.
     bool inserted;
   };
+  // Borrowed from the collector, which outlives this function-local checker.
   const std::set<const Var*>& roots_;
+  // Definite initialization, shared by all Tile aliases of a MemRef base.
   std::map<const Var*, Intervals> initialized_;
+  // Known true-prefix lane counts for direct full_mask/active_mask results.
+  // Not rolled back: SSA identity and scope/dominance validation prevent a
+  // branch-local definition from being used outside its legal scope. Carries
+  // and mask expressions are not propagated and remain unknown here.
   std::map<const Var*, int64_t> masks_;
+  // Reversible interval edits; checkpoints avoid copying the entire state.
   std::vector<Change> journal_;
 
+  // Maximal disjoint intervals make the predecessor of begin the only range
+  // that could contain the entire requested access.
   bool Contains(const Var* root, int64_t begin, int64_t end) const {
     auto state = initialized_.find(root);
     if (state == initialized_.end()) return false;
     auto it = state->second.upper_bound(begin);
     return it != state->second.begin() && std::prev(it)->second >= end;
   }
+  // Union a proven write/output region into the state, recording inverse edits.
+  // Empty writes (including unknown/empty masks) establish no new facts.
   void Add(const Var* root, int64_t begin, int64_t end) {
     if (begin >= end) return;
     auto& intervals = initialized_[root];
@@ -223,6 +250,7 @@ class InitializationChecker : public IRVisitor {
     intervals.emplace(begin, end);
     journal_.push_back({root, begin, end, true});
   }
+  // Reverse edits in LIFO order, including merges that removed old intervals.
   void Undo(size_t checkpoint) {
     while (journal_.size() > checkpoint) {
       auto change = journal_.back();
@@ -245,6 +273,8 @@ void VerifyRegMemoryInitialization(const FunctionPtr& function) {
   collector.VisitStmt(function->body_);
   if (!collector.present) return;
   InitializationChecker checker(collector.roots);
+  // In/InOut contents come from the caller. Out parameters supply storage only
+  // and must be written before a Reg load can consume their contents.
   for (size_t i = 0; i < function->params_.size(); ++i) {
     if (function->param_directions_[i] != ParamDirection::Out) checker.Initialize(function->params_[i]);
   }

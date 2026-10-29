@@ -376,14 +376,20 @@ struct RegOpSpec {
 /// Element coordinates are absolute within the root MemRef when one is known.
 /// Missing endpoints mean a conservative unknown interval, never no access.
 struct RegMemoryEffect {
+  // Accessed Tile expression; views retain their own geometry here.
   ExprPtr target;
+  // Shared allocation identity for alias analysis, or null before resolution.
   VarPtr root;
   ArgEffect access;
+  // Half-open element interval, not byte offsets; either endpoint may be unknown.
   std::optional<int64_t> begin;
   std::optional<int64_t> end;
+  // Store predicate, or null for an unmasked access. A present mask does not
+  // imply that every lane is written; initialization must inspect its meaning.
   ExprPtr mask;
 };
 
+/// Validate a Reg load/store and describe its memory effect without changing IR.
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call);
 
 /**

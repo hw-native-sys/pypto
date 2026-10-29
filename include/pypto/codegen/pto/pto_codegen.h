@@ -763,6 +763,9 @@ class PTOCodegen : public CodegenBase {
    * `pto.reserve_buffer` is emitted as `auto = true` with no `base`.
    */
   [[nodiscard]] bool EmitTileAddr() const { return emit_tile_addr_; }
+  /// Test MemRef-base ownership, including views derived from Tile parameters.
+  /// Caller-backed storage must keep its incoming handle/address instead of
+  /// receiving a new local allocation or an unrelated view handle.
   [[nodiscard]] bool IsParameterBackedTile(const std::shared_ptr<const ir::TileType>& tile_type) const;
 
   /**
@@ -802,11 +805,16 @@ class PTOCodegen : public CodegenBase {
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
 
-  /// Reg operations are schema-validated and emitted as typed VMI SSA, not
-  /// Tile callbacks. Addresses are prepared outside their owning vecscope.
+  /// Emit a registered RegOp as typed VMI SSA; return false for ordinary calls
+  /// so assignment emission can fall back to the normal Tile/scalar path.
+  /// RegOps require a named result inside their owning RegScope.
   bool TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& result);
+  /// Validate backend support and spell a vector or predicate-mask VMI type.
   std::string GetRegTypeString(const ir::RegTypePtr& type) const;
+  /// Accessed Tile variable -> UB pointer SSA hoisted before pto.vecscope.
+  /// Store-result aliases may share one pointer; cleared after each RegScope.
   std::map<const ir::Var*, std::string> reg_addresses_;
+  /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
 
   // Override visitor methods for code generation - Expressions
@@ -1366,9 +1374,12 @@ class PTOCodegen : public CodegenBase {
   /// Helper for comparison expression visitors
   void VisitCmpExpr(const ir::BinaryExprPtr& op, const std::string& predicate);
 
-  /// Get MLIR type string for a scalar iter_arg/return_var (e.g., "index", "i1", "f32")
-  // Control-flow value carries include scalars and Reg/MaskReg SSA values.
+  /// Spell scalar/vector/mask value types carried by SCF iter_args and results.
+  /// Tile handles follow the separate mutable-storage control-flow path.
   std::string GetValueCarryTypeString(const ir::TypePtr& type) const;
+  /// MemRef bases owned by Tile parameters, including their derived views.
+  /// Rebuilt per function: preserve caller storage instead of allocating locally.
+  /// Unlike reg_addresses_, this tracks ownership, not emitted pointer SSA names.
   std::set<const ir::Var*> parameter_backed_tile_bases_;
   std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
 };

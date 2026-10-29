@@ -397,6 +397,11 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   INTERNAL_CHECK_SPAN(validated_reg, call->span_)
       << "Register memory effect validation produced a non-register result";
   int64_t lanes = validated_reg->shape_;
+  // Endpoints are half-open ELEMENT coordinates relative to MemRef.base,
+  // including both byte_offset / element_bytes and the TileView origin.
+  // An absent root or endpoint means unknown, never an empty/zero access.
+  // Initialization analysis converts these coordinates to bytes; codegen uses
+  // the query as a proof and emits the pointer-relative offset separately.
   RegMemoryEffect result{call->args_[0],
                          tile->memref_ ? (*tile->memref_)->base_ : nullptr,
                          load ? ArgEffect::Read : ArgEffect::Write,

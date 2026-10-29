@@ -40,10 +40,15 @@ std::string RegisterElement(DataType dtype) {
   return "f32";
 }
 
+// Pre-scan one RegScope before emitting it: pointer extraction must dominate
+// vecscope, while SSA bindings for values defined inside must not escape it.
 class ScopeOperands : public IRVisitor {
  public:
+  // Access sites whose Tile operands need an external UB pointer.
   std::vector<CallPtr> memory;
+  // reg.store result -> destination; storing changes bytes, not Tile ownership.
   std::map<const Var*, VarPtr> aliases;
+  // Assignment-defined scalar/register bindings to discard on scope exit.
   std::vector<VarPtr> locals;
 
  protected:
@@ -88,6 +93,9 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
         continue;
       }
       if (auto iter = ir::As<ir::IterArg>(external)) {
+        // The supported Tile carry preserves backing storage. Follow the
+        // initial handle to obtain an address available before the loop/scope;
+        // this does not construct or rewrite the loop's SSA carries.
         external = ir::AsVarLike(iter->initValue_);
         CHECK_SPAN(external, call->span_) << "Cannot prove register loop address";
         continue;
@@ -171,6 +179,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
       line += " : " + operand_type(args[2]) + ", " + ptr_type;
       if (args.size() == 4) line += ", " + operand_type(args[3]);
       Emit(line);
+      // VMI stores have no SSA result. The IR's updated Tile version denotes
+      // the same mutable handle, so bind it to the destination's existing SSA.
       BindVarToMlir(result, GetExprAsCode(args[0]));
       auto ctx = GetCommCtxSSAFor(target.get());
       if (!ctx.empty()) RegisterCommCtxFor(result, ctx);
