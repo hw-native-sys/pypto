@@ -368,11 +368,9 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   `valid_shape` 部分时的填充模式。与 `TileView.pad` 对称；
   `tensor.slice(..., pad_value=PadValue.zero)` 会写入该字段。
 
-`addressing_kind` 默认为 `TensorAddressingKind.Canonical`。
-`AffineSubview` 表示由 `tensor.subview` 构造的借用仿射 GM 描述符：
-它携带显式的元素 stride，不拥有 `MemRef`。原点保留在定义调用中，
-不作为分配大小或类型中的指针。仅有标记不构成安全证明：转换与 PTO
-生成入口会重新校验来源、包含关系、严格缩小和索引边界。
+`tensor.subview` 的仿射元素 stride 保存在 `TensorView` 中；其原点和分配身份由
+`InitMemRef` 解析为借用的 MemRef 别名。Subview 来源从定义操作及其别名链推导，
+并在转换和 PTO 生成入口重新验证。
 
 #### Canonical TensorView 形式（RFC #1300）
 

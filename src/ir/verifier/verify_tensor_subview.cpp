@@ -35,26 +35,9 @@
 
 namespace pypto::ir {
 namespace {
-class BorrowedTypeCache {
- public:
-  bool Contains(const TypePtr& type) {
-    auto found = cache_.find(type.get());
-    if (found != cache_.end()) return found->second;
-    bool borrowed = IsAffineSubviewType(type);
-    if (auto tuple = As<TupleType>(type)) {
-      for (const auto& field : tuple->types_) borrowed |= Contains(field);
-    }
-    cache_[type.get()] = borrowed;
-    return borrowed;
-  }
-
- private:
-  std::unordered_map<const Type*, bool> cache_;
-};
-
 // One ordered walk, indexed provenance, scoped arithmetic facts: O(N) visits.
-// Roots are caller-owned parameters. Borrowed descriptors cannot become roots
-// by merely acquiring an AffineSubview type (including through deserialization).
+// Roots are caller-owned parameters. Borrowed descriptors are identified from
+// their defining tensor.subview call and tracked through metadata aliases.
 class SubviewVerifier : public IRVisitor {
  public:
   SubviewVerifier(const FunctionPtr& function, const std::unordered_set<const Expr*>& required_provenance)
@@ -62,13 +45,7 @@ class SubviewVerifier : public IRVisitor {
         analyzer_(std::make_shared<arith::Analyzer>()),
         required_provenance_(required_provenance) {
     for (const auto& param : function->params_) {
-      CHECK_SPAN(!ContainsBorrowedTensorType(param->GetType()), param->span_)
-          << "tensor.subview descriptors cannot be function parameters";
       if (As<TensorType>(param->GetType())) roots_.insert(param.get());
-    }
-    for (const auto& result : function->return_types_) {
-      CHECK_SPAN(!ContainsBorrowedTensorType(result), function->span_)
-          << "tensor.subview cannot escape as a function result";
     }
   }
 
@@ -76,6 +53,7 @@ class SubviewVerifier : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     VisitExpr(op->value_);
     auto call = As<Call>(op->value_);
+    const bool borrowed_value = IsBorrowedExpr(op->value_);
     bool alias = roots_.count(op->value_.get()) != 0;
     if (call &&
         (IsOp(call, "tensor.subview") || IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape"))) {
@@ -86,21 +64,16 @@ class SubviewVerifier : public IRVisitor {
     // Only demanded ancestors are checked; unrelated ordinary views retain
     // their existing contract in functions that happen to contain a subview.
     if (alias && call && (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) &&
-        required_provenance_.count(op->var_.get()) && !IsAffineSubviewType(call->args_[0]->GetType())) {
+        required_provenance_.count(op->var_.get()) && !IsBorrowedExpr(call->args_[0])) {
       CheckView(call);
     }
-    CHECK_SPAN(!IsAffineSubviewType(op->value_->GetType()) || IsAffineSubviewType(op->var_->GetType()),
-               op->span_)
-        << "tensor.subview assignment cannot discard affine addressing";
-    if (IsAffineSubviewType(op->var_->GetType())) {
+    if (borrowed_value) {
       auto tensor = As<TensorType>(op->var_->GetType());
       CHECK_SPAN(tensor, op->span_) << "tensor.subview requires an ordinary Tensor alias";
-      // InitMemRef materializes the borrowed descriptor's allocation identity
-      // and cumulative byte offset; ownership remains with the GM root.
       CHECK_SPAN(alias, op->span_) << "tensor.subview requires verified caller-owned GM provenance";
-      CHECK_SPAN(IsAffineSubviewType(op->value_->GetType()), op->span_)
-          << "tensor.subview alias lost its addressing contract";
       CheckBorrowedType(op->var_->GetType(), op->value_->GetType(), op->span_);
+      borrowed_roots_.insert(op->var_.get());
+      local_borrowed_roots_.push_back(op->var_.get());
     }
     if (alias) {
       roots_.insert(op->var_.get());
@@ -114,22 +87,13 @@ class SubviewVerifier : public IRVisitor {
   }
 
   void VisitExpr_(const CallPtr& op) override {
-    if ((IsOp(op, "tensor.view") || IsOp(op, "tensor.set_validshape")) &&
-        IsAffineSubviewType(op->GetType())) {
-      // Metadata can preserve an established borrowed contract, never create
-      // one merely through an explicit (e.g. deserialized) result type.
-      CHECK_SPAN(!op->args_.empty() && IsAffineSubviewType(op->args_[0]->GetType()), op->span_)
-          << "tensor.subview metadata aliases cannot introduce borrowed provenance";
-    }
+    IRVisitor::VisitExpr_(op);
     if (IsOp(op, "tensor.subview")) {
       CheckSubview(op);
     }
     for (size_t i = 0; i < op->args_.size(); ++i) {
       const auto& arg = op->args_[i];
-      CHECK_SPAN(!ContainsBorrowedTensorType(arg->GetType()) || IsAffineSubviewType(arg->GetType()),
-                 op->span_)
-          << "tensor.subview tuple consumers are not supported";
-      if (!IsAffineSubviewType(arg->GetType())) continue;
+      if (!IsBorrowedExpr(arg)) continue;
       CHECK_SPAN(roots_.count(arg.get()), op->span_)
           << "tensor.subview descriptor is outside its defining scope or lacks provenance";
       CHECK_SPAN(!As<GlobalVar>(op->op_), op->span_)
@@ -140,11 +104,11 @@ class SubviewVerifier : public IRVisitor {
           << "tensor.subview borrowed descriptors are not supported by Buffer IR consumers";
       CHECK_SPAN(!ArgEffectWrites(entry.GetArgEffect(i, op->kwargs_)), op->span_)
           << "tensor.subview is read-only; writer " << op->op_->name_ << " is not supported";
-      // Pure metadata aliases must preserve the tag. Other tensor operations
-      // materialize results normally and must not inherit borrowed ownership.
+      // Pure metadata aliases preserve the borrowed address map. Other tensor
+      // operations materialize results normally and do not inherit it.
       if (IsOp(op, "tensor.view") || IsOp(op, "tensor.set_validshape")) {
-        CHECK_SPAN(IsAffineSubviewType(op->GetType()), op->span_)
-            << "tensor.subview metadata alias must preserve affine addressing";
+        CHECK_SPAN(!op->args_.empty() && IsBorrowedExpr(op->args_[0]), op->span_)
+            << "tensor.subview metadata aliases cannot introduce borrowed provenance";
         auto deduced = registry.Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
         CheckBorrowedType(op->GetType(), deduced->GetType(), op->span_);
         if (IsOp(op, "tensor.set_validshape")) CheckValidShape(op);
@@ -158,12 +122,17 @@ class SubviewVerifier : public IRVisitor {
           << "tensor.subview requires an explicit load before " << op->op_->name_;
       if (IsOp(op, "tile.load")) CheckLoad(op);
     }
-    IRVisitor::VisitExpr_(op);
+    if (!op->args_.empty() &&
+        (IsOp(op, "tensor.subview") || IsOp(op, "tensor.view") || IsOp(op, "tensor.set_validshape")) &&
+        roots_.count(op->args_[0].get())) {
+      roots_.insert(op.get());
+      local_roots_.push_back(op.get());
+    }
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
     for (const auto& arg : op->args_) {
-      CHECK_SPAN(!ContainsBorrowedTensorType(arg->GetType()), op->span_)
+      CHECK_SPAN(!IsBorrowedExpr(arg), op->span_)
           << "tensor.subview cannot cross a submit boundary";
     }
     IRVisitor::VisitExpr_(op);
@@ -182,9 +151,7 @@ class SubviewVerifier : public IRVisitor {
 
   void VisitStmt_(const ForStmtPtr& op) override {
     for (const auto& arg : op->iter_args_) {
-      CHECK_SPAN(!ContainsBorrowedTensorType(arg->GetType()) &&
-                     !ContainsBorrowedTensorType(arg->initValue_->GetType()),
-                 op->span_)
+      CHECK_SPAN(!borrowed_roots_.count(arg.get()) && !IsBorrowedExpr(arg->initValue_), op->span_)
           << "tensor.subview cannot be loop carried";
     }
     auto start = analyzer_->const_int_bound(op->start_);
@@ -201,28 +168,29 @@ class SubviewVerifier : public IRVisitor {
       analyzer_->Bind(op->loop_var_, start.min_value, stop.max_value);
     }
     auto saved = local_roots_.size();
+    auto borrowed_saved = local_borrowed_roots_.size();
     VisitStmt(op->body_);
-    LeaveScope(saved);
+    LeaveScope(saved, borrowed_saved);
     analyzer_->Unbind(op->loop_var_);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& arg : op->iter_args_) {
-      CHECK_SPAN(!ContainsBorrowedTensorType(arg->GetType()) &&
-                     !ContainsBorrowedTensorType(arg->initValue_->GetType()),
-                 op->span_)
+      CHECK_SPAN(!borrowed_roots_.count(arg.get()) && !IsBorrowedExpr(arg->initValue_), op->span_)
           << "tensor.subview cannot be loop carried";
     }
     auto saved = local_roots_.size();
+    auto borrowed_saved = local_borrowed_roots_.size();
     {
       auto scope = SafeConstraintContext(op->condition_);
       VisitStmt(op->body_);
     }
-    LeaveScope(saved);
+    LeaveScope(saved, borrowed_saved);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     auto saved = local_roots_.size();
+    auto borrowed_saved = local_borrowed_roots_.size();
     auto outer_yields = std::move(yielded_bounds_);
     auto outer_safe = std::move(yielded_safe_);
     yielded_bounds_.clear();
@@ -235,11 +203,11 @@ class SubviewVerifier : public IRVisitor {
     auto then_safe = std::move(yielded_safe_);
     yielded_bounds_.clear();
     yielded_safe_.clear();
-    LeaveScope(saved);
+    LeaveScope(saved, borrowed_saved);
     if (op->else_body_) {
       auto scope = SafeConstraintContext(MakeNot(op->condition_));
       VisitStmt(*op->else_body_);
-      LeaveScope(saved);
+      LeaveScope(saved, borrowed_saved);
     }
     // Scalar phis carry the union of both branch ranges. Descriptor phis are
     // rejected by CheckEscape; geometry can be merged before constructing one.
@@ -260,7 +228,22 @@ class SubviewVerifier : public IRVisitor {
   }
 
  private:
-  bool ContainsBorrowedTensorType(const TypePtr& type) { return borrowed_types_.Contains(type); }
+  bool IsBorrowedExpr(const ExprPtr& expr) const {
+    if (!expr) return false;
+    if (borrowed_roots_.count(expr.get())) return true;
+    if (auto tuple = As<MakeTuple>(expr)) {
+      for (const auto& element : tuple->elements_) {
+        if (IsBorrowedExpr(element)) return true;
+      }
+      return false;
+    }
+    if (auto item = As<TupleGetItemExpr>(expr)) return IsBorrowedExpr(item->tuple_);
+    auto call = As<Call>(expr);
+    if (!call) return false;
+    return IsOp(call, "tensor.subview") ||
+           ((IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) && !call->args_.empty() &&
+            IsBorrowedExpr(call->args_[0]));
+  }
   std::optional<arith::ConstraintContext> SafeConstraintContext(const ExprPtr& condition) {
     // A predicate is evidence only when its original machine arithmetic agrees
     // with the mathematical expressions modeled by Analyzer. Untrusted guards
@@ -323,15 +306,18 @@ class SubviewVerifier : public IRVisitor {
     check.VisitExpr(expression);
     return check.safe;
   }
-  void LeaveScope(size_t begin) {
-    for (size_t i = begin; i < local_roots_.size(); ++i) roots_.erase(local_roots_[i]);
-    local_roots_.resize(begin);
+  void LeaveScope(size_t root_begin, size_t borrowed_begin) {
+    for (size_t i = root_begin; i < local_roots_.size(); ++i) roots_.erase(local_roots_[i]);
+    local_roots_.resize(root_begin);
+    for (size_t i = borrowed_begin; i < local_borrowed_roots_.size(); ++i) {
+      borrowed_roots_.erase(local_borrowed_roots_[i]);
+    }
+    local_borrowed_roots_.resize(borrowed_begin);
   }
   void CheckBorrowedType(const TypePtr& actual, const TypePtr& expected, const Span& span) {
     auto a = As<TensorType>(actual);
     auto e = As<TensorType>(expected);
     CHECK_SPAN(a && e && a->tensor_view_.has_value() && e->tensor_view_.has_value() &&
-                   IsAffineSubviewType(actual) && IsAffineSubviewType(expected) &&
                    a->dtype_ == e->dtype_ && a->shape_.size() == e->shape_.size() &&
                    a->tensor_view_->layout == e->tensor_view_->layout &&
                    a->tensor_view_->pad == e->tensor_view_->pad &&
@@ -356,7 +342,7 @@ class SubviewVerifier : public IRVisitor {
   }
   void CheckEscape(const std::vector<ExprPtr>& values, const Span& span) {
     for (const auto& value : values) {
-      CHECK_SPAN(!ContainsBorrowedTensorType(value->GetType()), span)
+      CHECK_SPAN(!IsBorrowedExpr(value), span)
           << "tensor.subview cannot escape through return/yield or a geometry phi";
       VisitExpr(value);
     }
@@ -379,8 +365,8 @@ class SubviewVerifier : public IRVisitor {
         << "tensor.subview requires a caller-owned ordinary GM Tensor root";
     auto parent = As<TensorType>(op->args_[0]->GetType());
     auto result = As<TensorType>(op->GetType());
-    CHECK_SPAN(parent && result && IsAffineSubviewType(op->GetType()), op->span_)
-        << "tensor.subview requires ordinary Tensor types with affine result addressing";
+    CHECK_SPAN(parent && result, op->span_)
+        << "tensor.subview requires ordinary Tensor types";
     auto shape = As<MakeTuple>(op->args_[1]);
     auto offsets = As<MakeTuple>(op->args_[2]);
     auto steps = As<MakeTuple>(op->args_[3]);
@@ -394,7 +380,7 @@ class SubviewVerifier : public IRVisitor {
                    (parent_view.layout == TensorLayout::ND || parent_view.layout == TensorLayout::DN),
                op->span_)
         << "tensor.subview requires unpadded ND/DN parent addressing";
-    if (!IsAffineSubviewType(parent)) {
+    if (!IsBorrowedExpr(op->args_[0])) {
       auto canonical = tensor_view_semantics::CheckCanonicalView(
           parent->shape_,
           parent_view.stride.empty()
@@ -614,10 +600,11 @@ class SubviewVerifier : public IRVisitor {
   std::shared_ptr<arith::Analyzer> analyzer_;
   std::unordered_set<const Expr*> roots_;
   std::vector<const Expr*> local_roots_;
+  std::unordered_set<const Expr*> borrowed_roots_;
+  std::vector<const Expr*> local_borrowed_roots_;
   std::vector<arith::ConstIntBound> yielded_bounds_;
   std::vector<bool> yielded_safe_;
   std::unordered_map<const Expr*, bool> scalar_arithmetic_safe_;
-  BorrowedTypeCache borrowed_types_;
   const std::unordered_set<const Expr*>& required_provenance_;
 };
 }  // namespace
@@ -628,7 +615,6 @@ void VerifyTensorSubviews(const FunctionPtr& function) {
   class Presence : public IRVisitor {
    public:
     bool found = false;
-    BorrowedTypeCache types;
     std::unordered_map<const Expr*, const Expr*> aliases;
     std::vector<const Expr*> pending_roots;
     void VisitStmt_(const AssignStmtPtr& op) override {
@@ -642,17 +628,15 @@ void VerifyTensorSubviews(const FunctionPtr& function) {
       }
       IRVisitor::VisitStmt_(op);
     }
-    void VisitVarLike_(const VarPtr& var) override { found |= types.Contains(var->GetType()); }
+    void VisitVarLike_(const VarPtr&) override {}
     void VisitExpr_(const CallPtr& call) override {
-      found |= IsOp(call, "tensor.subview") || IsAffineSubviewType(call->GetType());
+      found |= IsOp(call, "tensor.subview");
       if (IsOp(call, "tensor.subview") && !call->args_.empty()) {
         pending_roots.push_back(call->args_[0].get());
       }
       IRVisitor::VisitExpr_(call);
     }
   } presence;
-  for (const auto& param : function->params_) presence.found |= presence.types.Contains(param->GetType());
-  for (const auto& result : function->return_types_) presence.found |= presence.types.Contains(result);
   presence.VisitStmt(function->body_);
   if (!presence.found) return;
   // Follow each demanded alias edge once, rather than rescanning every view

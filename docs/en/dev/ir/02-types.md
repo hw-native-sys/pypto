@@ -415,12 +415,10 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   when loads/slices read outside the `valid_shape`. Peer of `TileView.pad`;
   `tensor.slice(..., pad_value=PadValue.zero)` writes this field.
 
-`addressing_kind` defaults to `TensorAddressingKind.Canonical`. The
-`AffineSubview` value identifies a borrowed affine GM descriptor created by
-`tensor.subview`; it carries explicit element strides and owns no `MemRef`.
-The origin remains in the defining call, rather than becoming an allocation
-size or a type-level pointer. The tag alone is not proof: conversion and PTO
-emission recheck provenance, containment, strict reduction, and index bounds.
+`tensor.subview` keeps its affine element strides in `TensorView`; its origin
+and allocation identity are resolved as a borrowed MemRef alias by `InitMemRef`.
+Subview provenance is derived from the defining IR operation and its alias
+chain, then revalidated at conversion and PTO emission entry.
 
 #### Canonical TensorView form (RFC #1300)
 

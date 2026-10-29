@@ -99,8 +99,7 @@ void CanonicalizeTensorViewInPlace(std::optional<TensorView>& tensor_view,
   ValidateTensorViewValues(*tensor_view);
   ClearRedundantFullValidShape(tensor_view->valid_shape, shape);
   if (tensor_view->stride.empty() && tensor_view->layout == TensorLayout::ND &&
-      tensor_view->valid_shape.empty() && tensor_view->pad == PadValue::null &&
-      tensor_view->addressing_kind == TensorAddressingKind::Canonical) {
+      tensor_view->valid_shape.empty() && tensor_view->pad == PadValue::null) {
     tensor_view.reset();
   }
 }
@@ -344,19 +343,17 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
     : ShapedType(dtype, MakeShapeExprs(shape), std::move(memref)) {}
 
 TensorView::TensorView(std::vector<ExprPtr> stride_, TensorLayout layout_, std::vector<ExprPtr> valid_shape_,
-                       PadValue pad_, TensorAddressingKind addressing_kind_)
+                       PadValue pad_)
     : stride(std::move(stride_)),
       layout(layout_),
       valid_shape(std::move(valid_shape_)),
-      pad(pad_),
-      addressing_kind(addressing_kind_) {
+      pad(pad_) {
   ValidateTensorViewValues(*this);
 }
 
 TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout layout_,
-                       const std::vector<int64_t>& valid_shape_ints, PadValue pad_,
-                       TensorAddressingKind addressing_kind_)
-    : layout(layout_), pad(pad_), addressing_kind(addressing_kind_) {
+                       const std::vector<int64_t>& valid_shape_ints, PadValue pad_)
+    : layout(layout_), pad(pad_) {
   for (int64_t s : stride_ints) {
     stride.push_back(std::make_shared<ConstInt>(s, DataType::INDEX, Span::unknown()));
   }

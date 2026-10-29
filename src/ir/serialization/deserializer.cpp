@@ -381,10 +381,6 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
                 std::static_pointer_cast<const Expr>(DeserializeNode(p->val.via.array.ptr[i], zone)));
           }
         }
-      } else if (key == "addressing_kind") {
-        int kind = p->val.as<int>();
-        CHECK(kind == 0 || kind == 1) << "Unknown TensorAddressingKind: " << kind;
-        tensor_view.addressing_kind = static_cast<TensorAddressingKind>(kind);
       } else if (key == "layout") {
         std::string layout_str;
         p->val.convert(layout_str);

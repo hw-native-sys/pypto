@@ -12,16 +12,7 @@
 #ifndef PYPTO_IR_TENSOR_SUBVIEW_H_
 #define PYPTO_IR_TENSOR_SUBVIEW_H_
 #include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
-#include "pypto/ir/type.h"
 namespace pypto::ir {
-// This tag is an addressing contract, never proof of provenance or safety.
-inline bool IsAffineSubviewType(const TypePtr& type) {
-  // Also detect an invalid distributed tag so entry verification rejects it.
-  auto tensor = AsTensorTypeLike(type);
-  return tensor && tensor->tensor_view_ &&
-         tensor->tensor_view_->addressing_kind == TensorAddressingKind::AffineSubview;
-}
 // Recompute safety at conversion and emission entry; no cached proof survives
 // transformations. Consumer hardware limits belong to their existing lowering.
 void VerifyTensorSubviews(const FunctionPtr& function);

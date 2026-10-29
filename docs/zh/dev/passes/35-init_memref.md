@@ -61,9 +61,9 @@ program_with_memrefs = init_pass(program)
 
 ### 借用的 GM 描述符
 
-借用的 affine GM 描述符（`TensorAddressingKind.AffineSubview`）始终没有 MemRef，
-包括嵌套 subview 和 metadata 别名。它们不继承根分配包络，也不分配 GM/UB；只有
-物化的消费者 Tile 按普通规则获得存储。
+借用的 affine GM 描述符通过 MemRef 别名共享根分配，并携带累计 byte offset 和有界
+视图大小。嵌套 subview 会在同一 base 上组合 offset，不会创建新分配。只有物化的
+消费者 Tile 按普通规则获得本地存储。
 
 ### 构建地址前化简常量输入
 

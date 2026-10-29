@@ -133,8 +133,7 @@ class BufferKernelSupport : public IRVisitor {
                    (backend::IsDenseBufferTransferDtype(tensor->dtype_) || tensor->dtype_ == DataType::INT8);
       if (supported && tensor->tensor_view_) {
         const auto& view = *tensor->tensor_view_;
-        supported &= view.addressing_kind == TensorAddressingKind::Canonical &&
-                     view.layout == TensorLayout::ND && view.pad == PadValue::null;
+        supported &= view.layout == TensorLayout::ND && view.pad == PadValue::null;
         supported &= view.valid_shape.empty() || SameShape(view.valid_shape, tensor->shape_);
         supported &=
             view.stride.empty() || (view.stride.size() == 2 &&

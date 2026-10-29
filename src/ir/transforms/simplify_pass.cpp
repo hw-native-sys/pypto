@@ -1329,7 +1329,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         if (view_changed) {
           changed = true;
           new_tv =
-              TensorView(std::move(new_stride), tv.layout, std::move(new_vs), tv.pad, tv.addressing_kind);
+              TensorView(std::move(new_stride), tv.layout, std::move(new_vs), tv.pad);
         }
       }
       // Remap the window_buffer_ back-reference in lockstep with the

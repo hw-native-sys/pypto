@@ -43,6 +43,7 @@
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -1086,21 +1087,20 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     std::string result_buf = codegen.GetCurrentResultTarget();
     INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
     std::string input_base_ptr = codegen.GetTensorBasePtr(input_var);
-    // InitMemRef has already accumulated the alias origin.  Add only the
-    // difference from the immediate parent's MemRef because the parent pointer
-    // may itself be adjusted for an outer subview. This keeps nested aliases
-    // affine without re-reading Call geometry in codegen.
+    // The parent pointer may already be adjusted for an outer subview. Derive
+    // this edge's adjustment from the verified tensor geometry so stale or
+    // missing MemRef metadata cannot redirect the generated load.
     auto source_type = ir::AsTensorTypeLike(input_var->GetType());
-    auto source_memref = source_type ? source_type->memref_ : std::nullopt;
-    auto result_memref = lhs_type->memref_;
-    if (ir::IsOp(op, "tensor.subview") && source_memref && result_memref) {
-      auto delta = ir::MakeSub(result_memref.value()->byte_offset_, source_memref.value()->byte_offset_);
+    if (ir::IsOp(op, "tensor.subview")) {
+      INTERNAL_CHECK_SPAN(source_type, op->span_)
+          << "Internal error: tensor.subview input must have a TensorType";
+      auto byte_delta = ir::ComputeViewByteOffset(op, source_type);
       const auto storage_bits = ir::storage_size::GetStorageBitWidth(lhs_type->dtype_);
       INTERNAL_CHECK_SPAN(storage_bits > 0 && storage_bits % 8 == 0, op->span_)
           << "Internal error: tensor subview pointer arithmetic requires byte-addressable dtype";
-      auto elem_size = std::make_shared<ir::ConstInt>(static_cast<int64_t>(storage_bits / 8), DataType::INDEX,
-                                                      op->span_);
-      auto element_delta = ir::MakeFloorDiv(delta, elem_size);
+      auto elem_size =
+          std::make_shared<ir::ConstInt>(static_cast<int64_t>(storage_bits / 8), DataType::INDEX, op->span_);
+      auto element_delta = ir::MakeFloorDiv(byte_delta, elem_size);
       auto offset_ssa = codegen.EmitCastToIndex(element_delta, codegen.GetExprAsCode(element_delta));
       auto pointer = codegen.NewTemp();
       const auto pointer_type = "!pto.ptr<" + codegen.GetTypeString(lhs_type->dtype_) + ">";

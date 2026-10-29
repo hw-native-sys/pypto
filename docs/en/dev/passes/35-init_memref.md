@@ -61,10 +61,11 @@ program_with_memrefs = init_pass(program)
 
 ### Borrowed GM descriptors
 
-Borrowed affine GM descriptors (`TensorAddressingKind.AffineSubview`) remain
-without a MemRef, including nested subviews and metadata aliases. They neither
-inherit the root allocation envelope nor allocate GM/UB storage. Only the
-materialized consumer Tile receives storage under the normal rules.
+Borrowed affine GM descriptors share the root allocation through a MemRef alias
+that carries the cumulative byte offset and bounded view size. Nested subviews
+compose offsets against the same base; they do not create another allocation.
+Only the materialized consumer Tile receives local storage under the normal
+rules.
 
 ### Constant inputs before address construction
 

@@ -19,7 +19,6 @@ from pypto.pypto_core.ir import (
     MemorySpace,
     MemRef,
     PadValue,
-    TensorAddressingKind,
     TensorLayout,
     TensorType,
     TileLayout,
@@ -191,20 +190,18 @@ class _TensorViewMeta(type):
         layout: TensorLayout | None = None,
         valid_shape: Sequence[Expr | int] | None = None,
         pad: PadValue = PadValue.null,
-        addressing_kind: TensorAddressingKind = TensorAddressingKind.Canonical,
     ) -> "_TensorViewBase":
         if (
             stride is None
             and layout is None
             and valid_shape is None
             and pad == PadValue.null
-            and addressing_kind == TensorAddressingKind.Canonical
         ):
             return _TensorViewBase()
         if layout is None:
             raise ValueError("layout is required when stride, valid_shape, or pad is provided")
         return _TensorViewBase(
-            _normalize_seq(stride), layout, _normalize_seq(valid_shape), pad, addressing_kind
+            _normalize_seq(stride), layout, _normalize_seq(valid_shape), pad
         )
 
 
