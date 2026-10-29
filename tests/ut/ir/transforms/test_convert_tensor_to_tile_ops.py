@@ -8690,5 +8690,66 @@ def test_added_output_rebinds_omitted_original_out_storage():
     ir.assert_structural_equal(statement.expr.type.types[0], output_type)
 
 
+@pytest.mark.parametrize("valid", ["[8, 128]", "[4, 128]", "[8, 73]", "[n, 73]"])
+@pytest.mark.parametrize("rhs", ["0.0", "v"])
+def test_compare_materialized_constants_preserve_valid_region(valid, rhs):
+    # A partial comparison mask must never select full-allocation constants.
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[[8, 128], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[8, 128], pl.BOOL]:
+        v = pl.slice(x, [8, 128], [0, 0], valid_shape={valid})
+        y = pl.cmp(v, {rhs}, cmp_type=5)
+        return y
+""")
+    after = passes.convert_tensor_to_tile_ops()(before)
+    func = next(iter(after.functions.values()))
+    compare = _find_calls_to(func, "tile.cmps" if rhs == "0.0" else "tile.cmp")[0]
+    select = _find_calls_to(func, "tile.sel")[0]
+    source_type = compare.args[0].type
+    assert isinstance(source_type, ir.TileType)
+    expected = source_type.get_effective_tile_view().valid_shape
+    for value in (*select.args[1:3], select):
+        value_type = value.type
+        assert isinstance(value_type, ir.TileType)
+        actual = value_type.get_effective_tile_view().valid_shape
+        assert len(actual) == len(expected)
+        for got, want in zip(actual, expected):
+            ir.assert_structural_equal(got, want)
+    # Explicit valid views must also survive the printed IR round trip.
+    ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
+
+
+@pytest.mark.parametrize("rows", ["4", "n"])
+def test_nd_compare_constants_keep_valid_region_after_flattening(rows):
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[1, 8, 128], pl.FP32], n: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[1, 8, 128], pl.BOOL]:
+        v = pl.slice(x, [1, 8, 128], [0, 0, 0], valid_shape=[1, {rows}, 128])
+        y = pl.cmp(v, 0.0, cmp_type=5)
+        return y
+""")
+    converted = passes.convert_tensor_to_tile_ops()(before)
+    flattened = passes.flatten_tile_nd_to_2d()(converted)
+    func = next(iter(flattened.functions.values()))
+    compare = _find_calls_to(func, "tile.cmps")[0]
+    source = compare.args[0].type
+    assert isinstance(source, ir.TileType)
+    expected = source.get_effective_tile_view().valid_shape
+    assert len(expected) == 2
+    select = _find_calls_to(func, "tile.sel")[0]
+    for value in (*select.args[1:3], select):
+        value_type = value.type
+        assert isinstance(value_type, ir.TileType)
+        for got, want in zip(value_type.get_effective_tile_view().valid_shape, expected):
+            ir.assert_structural_equal(got, want)
+    ir.assert_structural_equal(flattened, pl.parse_program(flattened.as_python()))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

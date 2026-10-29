@@ -2711,7 +2711,19 @@ void OpConversionRegistry::RegisterCmpOps() {
       ExprPtr val = result_dtype.IsFloat()
                         ? ExprPtr(std::make_shared<ConstFloat>(v, result_dtype, span))
                         : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), result_dtype, span));
-      auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
+      auto created = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
+      // The packed comparison mask covers the lhs valid region, not the full
+      // allocation. Materialize both branches with that same logical region;
+      // widening them makes TSEL read rows/columns the mask does not describe.
+      auto deduced = As<TileType>(created->GetType());
+      INTERNAL_CHECK_SPAN(deduced, span) << "tensor.cmp: tile.full must produce a tile";
+      TileView view;
+      view.valid_shape = GetValidShape(lhs_tile);
+      InheritTileViewLayout(view, lhs_tile);
+      auto typed = std::make_shared<TileType>(deduced->shape_, deduced->dtype_, deduced->memref_, view,
+                                              deduced->memory_space_);
+      auto call = std::make_shared<Call>(created->op_, created->args_, created->kwargs_, created->attrs_,
+                                         typed, span);
       auto var = std::make_shared<Var>(name, call->GetType(), span);
       prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
       // The packed predicate inherits the lhs valid region. Full 0/1 tiles

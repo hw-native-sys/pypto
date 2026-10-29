@@ -1953,11 +1953,12 @@ class TestFlattenTileNdTo2DCallRemapping:
             loaded = ib.let("loaded", tile_ops.load(metadata, [0], [1]))
             pitch = ib.let("pitch", ir.cast(tile_ops.read(loaded, [0]), DataType.INDEX, span))
             call = tile_ops.reshape(local, [1, pitch])
-            rhs_type = ir.TileType([1, pitch], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+            shape = [ir.ConstInt(1, DataType.INDEX, span), pitch]
+            rhs_type = ir.TileType(shape, DataType.FP32, memory_space=ir.MemorySpace.Vec)
             typed_call = ir.Call(call.op, list(call.args), call.kwargs, rhs_type, span)
             result = ir.Var(
                 "result",
-                ir.TileType([1, pitch], DataType.FP32, pinned, memory_space=ir.MemorySpace.Vec),
+                ir.TileType(shape, DataType.FP32, pinned, memory_space=ir.MemorySpace.Vec),
                 span,
             )
             ib.assign(result, typed_call)

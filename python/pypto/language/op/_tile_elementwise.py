@@ -401,6 +401,9 @@ def minimum(lhs: Tile, rhs: Tile) -> Tile:
 def cmp(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile:
     """Element-wise comparison of two tiles.
 
+    Both operands must have identical physical shapes and matching valid regions.
+    Broadcast operands explicitly before comparing.
+
     Args:
         lhs: Left-hand side tile
         rhs: Right-hand side tile

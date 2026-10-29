@@ -1555,6 +1555,10 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
     CHECK(tile_type2) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                       << args[1]->GetType()->TypeName();
 
+    CHECK_SPAN(PhysicalShapesEqual(tile_type1->shape_, tile_type2->shape_), args[0]->span_)
+        << op_name << " requires identical physical shapes; explicitly broadcast operands before comparing";
+    CHECK_SPAN(ValidExtentsEqual(GetValidShape(tile_type1), GetValidShape(tile_type2)), args[0]->span_)
+        << op_name << " requires matching valid regions for both operands";
     auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
     CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
                                     << FormatShape(tile_type1->shape_) << " and "

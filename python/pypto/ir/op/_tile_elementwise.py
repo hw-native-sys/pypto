@@ -804,6 +804,9 @@ def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
     """Element-wise comparison of two tiles (returns a packed predicate mask tile).
 
+    Both operands must have identical physical shapes and matching valid regions.
+    Broadcast operands explicitly before comparing.
+
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
