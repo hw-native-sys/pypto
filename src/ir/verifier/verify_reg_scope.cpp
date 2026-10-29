@@ -185,6 +185,9 @@ class RegionChecker : public IRVisitor {
     yield_region_ = previous;
   }
   void VisitStmt_(const WhileStmtPtr& op) override {
+    // Check lexical containment, including while nested under if/for. The
+    // two ownership walks must report this unsupported statement only once.
+    if (collecting_ && region_) Error("WhileStmt is not supported inside RegScope", op->span_);
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {

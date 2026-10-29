@@ -124,6 +124,18 @@ def test_access_bounds(offset, lanes):
         call("load", [tile(), integer(offset)], lanes=lanes)
 
 
+@pytest.mark.parametrize("dynamic_valid", [False, True])
+def test_dynamic_memory_operands_pass_through(dynamic_valid):
+    dynamic = ir.Var("dynamic", ir.ScalarType(DataType.INDEX), SPAN)
+    view = ir.TileView([dynamic if dynamic_valid else 32], [1], integer(0))
+    # Physical storage remains contiguous. Dynamic validity or access offsets
+    # are user-managed; only fully static intervals are checked for bounds.
+    target = tile(view=view)
+    offset = integer(0) if dynamic_valid else dynamic
+    call("load", [target, offset], lanes=64)
+    call("store", [target, offset, vec()])
+
+
 def test_reject_nonvec_and_noncontiguous_and_uninitialized():
     with pytest.raises(ValueError, match="Vec"):
         call("load", [tile(memory=ir.MemorySpace.Mat), integer(0)], lanes=64)

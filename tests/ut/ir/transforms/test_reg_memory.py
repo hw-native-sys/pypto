@@ -79,6 +79,39 @@ def initialize(program):
         return passes.init_mem_ref()(program)
 
 
+@pytest.mark.parametrize("dynamic_write", [False, True])
+@pytest.mark.parametrize("unrelated_static_read", [False, True])
+def test_dynamic_access_passes_through_without_disabling_other_roots(dynamic_write, unrelated_static_read):
+    ib = IRBuilder()
+    with ib.function("dynamic_memory", span=SPAN, type=ir.FunctionType.AIV) as f:
+        offset = f.param("offset", ir.ScalarType(DataType.INDEX), SPAN)
+        storage = ib.let("storage", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        other = ib.let("other", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            if dynamic_write:
+                value = ib.emit_reg(
+                    "value",
+                    "reg.broadcast",
+                    [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                    {"lanes": 64, "dtype": DataType.FP32},
+                    SPAN,
+                )
+                ib.emit_reg_store("updated", storage, value, offset=offset, span=SPAN)
+            # A dynamic write may initialize this static read. This root is
+            # outside static analysis; an unrelated static allocation is not.
+            target = other if unrelated_static_read else storage
+            read_offset = (
+                ir.ConstInt(0, DataType.INDEX, SPAN) if dynamic_write or unrelated_static_read else offset
+            )
+            ib.emit_reg("read", "reg.load", [target, read_offset], {"lanes": 64}, SPAN)
+    program = ir.Program([f.get_result()], "RegisterMemory", SPAN)
+    if unrelated_static_read:
+        with pytest.raises(ValueError, match="uninitialized"):
+            initialize(program)
+    else:
+        initialize(program)
+
+
 def test_fresh_tile_is_not_initialized_by_valid_shape():
     with pytest.raises(ValueError, match="uninitialized") as error:
         initialize(memory_program())

@@ -54,6 +54,27 @@ def test_legal_region_early(kind):
     assert verify(region(definition(r)), kind) == []
 
 
+@pytest.mark.parametrize("wrapper", ["direct", "if", "for"])
+def test_while_inside_register_scope_is_rejected(wrapper):
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    body = ir.WhileStmt(ir.ConstBool(False, SPAN), [], sequence(), [], SPAN)
+    if wrapper == "if":
+        body = ir.IfStmt(ir.ConstBool(True, SPAN), body, None, [], SPAN)
+    elif wrapper == "for":
+        body = ir.ForStmt(scalar("i"), integer(0), integer(1), integer(1), [], body, [], SPAN)
+    diagnostics = verify(region(body))
+    assert len(diagnostics) == 1
+    assert "WhileStmt is not supported inside RegScope" in diagnostics[0].message
+    function = ir.Function("kernel", [], [], region(body), SPAN, type=ir.FunctionType.AIV)
+    with pytest.raises(ValueError, match="WhileStmt.*RegScope"):
+        codegen.PTOCodegen().generate(ir.Program([function], "RegTest", SPAN))
+
+
+def test_while_outside_register_scope_is_allowed():
+    body = ir.WhileStmt(ir.ConstBool(False, SPAN), [], region(definition(register())), [], SPAN)
+    assert verify(body) == []
+
+
 @pytest.mark.parametrize(
     "kind",
     [

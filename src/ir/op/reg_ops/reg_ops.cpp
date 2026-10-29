@@ -61,10 +61,9 @@ int Lanes(const Kwargs& kw) {
 }
 
 int64_t Constant(const ExprPtr& e, const char* label) {
-  // TODO(reg-vmi-generalize): P0 keeps tile geometry and view strides static so
-  // the current register memory effect can be represented by one interval.
-  // Once reg.load/store expose dynamic geometry, this must accept symbolic
-  // expressions and defer the proof to the range analysis.
+  // TODO(reg-vmi-generalize): the P0 allocation/layout ABI still requires
+  // static physical geometry and strides. Relax this when symbolic physical
+  // layouts can be lowered; dynamic offsets and valid_shape pass through.
   auto c = As<ConstInt>(e);
   CHECK_SPAN(c, e->span_) << label << " must be a static integer in P0";
   return c->value_;
@@ -115,9 +114,6 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
     }
     if (auto start = As<ConstInt>(v.start_offset)) CHECK(start->value_ >= 0) << "Negative View offset";
     if (read && !v.valid_shape.empty()) {
-      // TODO(reg-vmi-generalize): dynamic valid_shape and dynamic offsets are
-      // legal VMI operands, but P0's initialization proof currently needs
-      // static endpoints and a rectangular contiguous interval.
       CHECK(v.valid_shape.size() == t->shape_.size()) << "valid_shape rank mismatch";
       // A contiguous read can cross rows; both endpoints and every crossed
       // row must lie in the initialized rectangular valid_shape.
@@ -126,12 +122,16 @@ TileTypePtr Memory(const Args& args, int64_t lanes, bool read) {
       for (size_t i = 0; i < t->shape_.size(); ++i) {
         auto dim = Constant(t->shape_[i], "shape");
         stride /= dim;
-        auto valid = Constant(v.valid_shape[i], "valid_shape");
+        auto valid_const = As<ConstInt>(v.valid_shape[i]);
+        // Unknown validity/offsets pass through to VMI. Check only facts that
+        // are known statically; callers own runtime bounds and initialization.
+        if (!valid_const) continue;
+        auto valid = valid_const->value_;
         CHECK(valid >= 0 && valid <= dim) << "Invalid valid_shape";
+        if (!offset_const) continue;
         bool wraps = offset / (stride * dim) != last / (stride * dim);
         int64_t max_coordinate = wraps ? dim - 1 : (last / stride) % dim;
-        CHECK((offset_const || valid == dim) && max_coordinate < valid)
-            << "Load interval is not proven initialized by valid_shape";
+        CHECK(max_coordinate < valid) << "Load interval is not proven initialized by valid_shape";
       }
     }
   } else {
@@ -400,8 +400,8 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   // Endpoints are half-open ELEMENT coordinates relative to MemRef.base,
   // including both byte_offset / element_bytes and the TileView origin.
   // An absent root or endpoint means unknown, never an empty/zero access.
-  // Initialization analysis converts these coordinates to bytes; codegen uses
-  // the query as a proof and emits the pointer-relative offset separately.
+  // Optional static initialization analysis converts these coordinates to
+  // bytes; codegen emits the pointer-relative offset independently.
   RegMemoryEffect result{call->args_[0],
                          tile->memref_ ? (*tile->memref_)->base_ : nullptr,
                          load ? ArgEffect::Read : ArgEffect::Write,
@@ -428,9 +428,8 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
       result.end = *result.begin + lanes;
     }
   }
-  // TODO(reg-vmi-generalize): a dynamic offset is valid for PTOAS vload, but
-  // this P0 memory effect has no symbolic interval. Extend it to carry a
-  // range/stride access description before relaxing the codegen precondition.
+  // TODO(reg-vmi-generalize): carry symbolic ranges for optional analysis of
+  // dynamic accesses. Unknown endpoints already pass through to PTOAS VMI.
   return result;
 }
 }  // namespace pypto::ir

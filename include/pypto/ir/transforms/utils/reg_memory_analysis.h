@@ -15,9 +15,10 @@
 #include "pypto/ir/function.h"
 
 namespace pypto::ir {
-/// Check initialized byte intervals after MemRef alias resolution. Unknown
-/// intervals never establish initialization; no Tile valid_shape is modified.
-/// Visits the function in execution order and rejects unproven Reg reads.
+/// Check initialized byte intervals after MemRef alias resolution, only for
+/// allocations whose Reg accesses and geometry are entirely static. Dynamic
+/// allocations pass through without a proof; no Tile valid_shape is modified.
+/// Visits the function in execution order and rejects uninitialized static reads.
 /// This is a conservative verifier, not an SSA rewrite or runtime bounds check;
 /// exhaustive branches retain their common facts; unknown loops add no facts.
 void VerifyRegMemoryInitialization(const FunctionPtr& function);

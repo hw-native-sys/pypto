@@ -34,11 +34,16 @@ def integer(n):
     return ir.ConstInt(n, DataType.INDEX, SPAN)
 
 
-def build_kernel(operation="add", dtype=DataType.FP32, offset: int | ir.Expr = 0, masked=False):
+def build_kernel(
+    operation="add", dtype=DataType.FP32, offset: int | ir.Expr = 0, masked=False, dynamic_valid=False
+):
     ib = IRBuilder()
-    view = ir.TileView([1, 128], [128, 1], integer(0))
-    tile_type = ir.TileType([1, 128], dtype, tile_view=view, memory_space=ir.MemorySpace.Vec)
     with ib.function("register_kernel", span=SPAN, type=ir.FunctionType.AIV) as f:
+        if isinstance(offset, ir.Var):
+            offset = f.param(offset.name_hint, offset.type, SPAN)
+        valid_col = f.param("valid_col", ir.ScalarType(DataType.INDEX), SPAN) if dynamic_valid else 128
+        view = ir.TileView([1, valid_col], [128, 1], integer(0))
+        tile_type = ir.TileType([1, 128], dtype, tile_view=view, memory_space=ir.MemorySpace.Vec)
         fill = 1.0 if dtype in (DataType.FP16, DataType.BF16, DataType.FP32) else 1
         src = ib.let("src", tile.full([1, 128], dtype=dtype, value=fill), type=tile_type)
         dst = ib.let("dst", tile.full([1, 128], dtype=dtype, value=0), type=tile_type)
@@ -64,7 +69,7 @@ def build_kernel(operation="add", dtype=DataType.FP32, offset: int | ir.Expr = 0
                 y = ib.emit_reg("y", "reg." + operation, [x, x, m] if masked else [x, x], span=SPAN)
             # This result must be bound to dst's outer tile handle. No vstore
             # result or vecscope-local tile handle is legal outside the scope.
-            out = ib.emit_reg_store("out", dst, y, mask=m if masked else None, span=SPAN)
+            out = ib.emit_reg_store("out", dst, y, offset=offset, mask=m if masked else None, span=SPAN)
         ib.let("consumer", tile.add(out, src))
     program = ir.Program([f.get_result()], "RegisterKernel", SPAN)
     with passes.PassContext([]):
@@ -316,12 +321,20 @@ def test_register_signedness_is_explicit(dtype, spelling):
     assert f"!pto.vmi.vreg<64x{spelling}>" in mlir
 
 
-def test_dynamic_offset_is_rejected_with_source_span():
-    # Schema effects may be unknown, but codegen must never silently emit an
-    # unproven pointer. Offset is legal IR until address proof is required.
+@pytest.mark.ptoas_compile
+def test_dynamic_offset_passes_through_to_vpto(tmp_path):
     offset = ir.Var("offset", ir.ScalarType(DataType.INDEX), SPAN)
-    with pytest.raises(ValueError, match="bounds|offset"):
-        generate(build_kernel(offset=offset))
+    source = generate(build_kernel(offset=offset))
+    assert "pto.vmi.vload" in source
+    assert "arith.addi %arg0," in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+def test_dynamic_valid_shape_passes_through_to_vpto(tmp_path):
+    source = generate(build_kernel(dynamic_valid=True))
+    assert "valid_col = %arg0" in source
+    compile_review_pto(source, tmp_path)
 
 
 def test_non_a5_codegen_rejects_registers():
@@ -406,7 +419,7 @@ def test_review_signed_broadcast(dtype, tmp_path):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("kind", ["for", "while", "if"])
+@pytest.mark.parametrize("kind", ["for", "if"])
 @pytest.mark.parametrize("mask_carry", [False, True])
 def test_review_register_control_flow_ssa(kind, mask_carry, tmp_path):
     ib = IRBuilder()
@@ -436,12 +449,9 @@ def test_review_register_control_flow_ssa(kind, mask_carry, tmp_path):
                     ib.emit(ir.YieldStmt([initial], SPAN))
                 result = branch.output(0)
             else:
-                context = (
-                    ib.for_loop(ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN)
-                    if kind == "for"
-                    else ib.while_loop(condition, SPAN)
-                )
-                with context as loop:
+                with ib.for_loop(
+                    ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN
+                ) as loop:
                     carry = loop.iter_arg("carry", initial, span=SPAN)
                     result = loop.return_var("result", span=SPAN)
                     value = ib.emit_reg("next", op, [carry] if mask_carry else [carry, carry], span=SPAN)
@@ -449,9 +459,6 @@ def test_review_register_control_flow_ssa(kind, mask_carry, tmp_path):
             # Consume the carried mask through select: arbitrary-mask stores
             # additionally require PTOAS to prove the UB pointer's alignment.
             if mask_carry:
-                # Keep this test's independent data producer after the loop:
-                # PTOAS 0.70 rejects vbrc spanning a mask-only scf.while with a
-                # VMI-LAYOUT-CONTRACT error. Mask carry/yield remains exercised.
                 x = ib.emit_reg(
                     "x",
                     "reg.broadcast",
@@ -529,11 +536,9 @@ def test_review_address_annotation_uses_actual_view_ssa_type(tmp_path):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("kind", ["for", "while"])
-def test_review_loop_returned_view_address(tmp_path, kind):
+def test_review_loop_returned_view_address(tmp_path):
     ib = IRBuilder()
     with ib.function("loop_view", span=SPAN, type=ir.FunctionType.AIV) as f:
-        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
         base = ib.let("base", tile.full([2, 128], dtype=DataType.FP32, value=1.0))
         view = ib.let(
             "view",
@@ -547,12 +552,7 @@ def test_review_loop_returned_view_address(tmp_path, kind):
         )
         with ib.reg_scope(SPAN):
             x = ib.emit_reg("x", "reg.load", [view, integer(0)], {"lanes": 64}, SPAN)
-            context = (
-                ib.for_loop(ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN)
-                if kind == "for"
-                else ib.while_loop(condition, SPAN)
-            )
-            with context as loop:
+            with ib.for_loop(ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN) as loop:
                 carry = loop.iter_arg("carry", view, span=SPAN)
                 result = loop.return_var("result", span=SPAN)
                 updated = ib.emit_reg_store("updated", carry, x, span=SPAN)

@@ -42,17 +42,27 @@ using Intervals = std::map<int64_t, int64_t>;
 // Views and store-result versions meet at their shared MemRef base identity.
 class RegisterRoots : public IRVisitor {
  public:
-  // Keep this separate from roots: a malformed access without MemRef must
-  // still reach the checker rather than silently disabling verification.
-  bool present = false;
   std::set<const Var*> roots;
+  // One dynamic access makes the allocation user-managed. Excluding the
+  // whole alias group avoids rejecting a static read after a dynamic write.
+  std::set<const Var*> dynamic_roots;
 
  protected:
   void VisitExpr_(const CallPtr& call) override {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
-      present = true;
-      auto tile = As<TileType>(call->args_[0]->GetType());
-      if (tile && tile->memref_) roots.insert((*tile->memref_)->base_.get());
+      auto effect = GetRegMemoryEffect(call);
+      auto tile = As<TileType>(effect.target->GetType());
+      if (effect.root) {
+        roots.insert(effect.root.get());
+        auto is_static = [](const std::vector<ExprPtr>& shape) {
+          return std::all_of(shape.begin(), shape.end(),
+                             [](const ExprPtr& dim) { return As<ConstInt>(dim) != nullptr; });
+        };
+        if (!effect.begin || !effect.end || !is_static(tile->shape_) ||
+            (tile->tile_view_ && !is_static(tile->tile_view_->valid_shape))) {
+          dynamic_roots.insert(effect.root.get());
+        }
+      }
     }
     IRVisitor::VisitExpr_(call);
   }
@@ -137,13 +147,13 @@ class InitializationChecker : public IRVisitor {
   }
   void VisitExpr_(const CallPtr& call) override {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
-      // TODO(reg-vmi-generalize): PTOAS can lower dynamic and strided VMI
-      // accesses, but P0 proves only one statically bounded contiguous byte
-      // interval. Replace this guard with symbolic range/interval reasoning
-      // when RegOp carries those access modes.
       auto effect = GetRegMemoryEffect(call);
-      CHECK_SPAN(effect.root && effect.begin && effect.end, call->span_)
-          << "Cannot prove register offset bounds and initialization";
+      if (!effect.root || !roots_.count(effect.root.get())) {
+        IRVisitor::VisitExpr_(call);
+        return;
+      }
+      INTERNAL_CHECK_SPAN(effect.begin && effect.end, call->span_)
+          << "Static register analysis requires known endpoints";
       auto tile = As<TileType>(effect.target->GetType());
       const int64_t bytes = static_cast<int64_t>(tile->dtype_.GetByte());
       INTERNAL_CHECK_SPAN(bytes > 0, call->span_) << "Register element must occupy at least one byte";
@@ -301,7 +311,8 @@ void VerifyRegMemoryInitialization(const FunctionPtr& function) {
   if (!function || !function->body_) return;
   RegisterRoots collector;
   collector.VisitStmt(function->body_);
-  if (!collector.present) return;
+  for (auto root : collector.dynamic_roots) collector.roots.erase(root);
+  if (collector.roots.empty()) return;
   InitializationChecker checker(collector.roots);
   // In/InOut contents come from the caller. Out parameters supply storage only
   // and must be written before a Reg load can consume their contents.

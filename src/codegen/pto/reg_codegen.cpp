@@ -10,6 +10,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>
@@ -180,9 +181,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
   };
   const bool store = ir::IsOp(call, "reg.store");
   if (store || ir::IsOp(call, "reg.load")) {
-    auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN(effect.root && effect.begin && effect.end, call->span_)
-        << "Cannot prove register offset bounds";
+    // Dynamic offsets pass directly to VMI; initialization analysis is an
+    // optional static check, not a precondition for emitting an address.
     auto target = ir::AsVarLike(args[0]);
     auto addr = reg_addresses_.find(target.get());
     CHECK_SPAN(addr != reg_addresses_.end(), call->span_) << "Unprepared external register address";
