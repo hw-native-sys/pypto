@@ -789,15 +789,103 @@ def test_tensor_part_ops_keep_their_existing_valid_shape_contract(op_name):
 
 
 @pytest.mark.parametrize("rhs_kind", ["tensor", "scalar"])
-def test_tensor_cmp_keeps_conservative_tensor_view(rhs_kind):
-    """Tensor inference stays conservative; lowering handles partial tile validity."""
+def test_tensor_cmp_preserves_partial_valid_shape(rhs_kind):
+    """Output allocation and return contracts must match the lowered valid region."""
     lhs = _partial_tensor_var([32, 256], [28, 250], name="lhs")
     rhs = _partial_tensor_var([32, 256], [28, 250], name="rhs") if rhs_kind == "tensor" else 0.0
 
     result_type = ir.op.tensor.cmp(lhs, rhs, cmp_type=0).type
 
     assert isinstance(result_type, ir.TensorType)
-    assert result_type.tensor_view is None
+    assert result_type.tensor_view is not None
+    assert _const_int_values(result_type.tensor_view.valid_shape) == [28, 250]
+    assert result_type.memref is None
+    assert result_type.tensor_view.stride == []
+
+
+@pytest.mark.parametrize("swap", [False, True])
+@pytest.mark.parametrize(
+    "narrow_shape,narrow_valid,wide_valid,expected",
+    [
+        ([8, 1], [8, 1], [8, 128], [8, 128]),
+        ([8, 1], [7, 1], [7, 97], [7, 97]),
+        ([1, 128], [1, 97], [7, 97], [7, 97]),
+        ([1, 1], [1, 1], [7, 97], [7, 97]),
+        ([8, 128], [6, 99], [7, 97], [6, 97]),
+        ([128], [97], [7, 97], [7, 97]),
+    ],
+)
+def test_tensor_cmp_maps_broadcast_valid_region(swap, narrow_shape, narrow_valid, wide_valid, expected):
+    narrow = _partial_tensor_var(narrow_shape, narrow_valid, name="narrow")
+    wide = _partial_tensor_var([8, 128], wide_valid, name="wide")
+    lhs, rhs = (wide, narrow) if swap else (narrow, wide)
+
+    result_type = tensor.cmp(lhs, rhs, cmp_type=5).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [8, 128]
+    assert _valid_of(result_type) == expected
+
+
+@pytest.mark.parametrize("extent_dtype", [DataType.INDEX, DataType.UINT64])
+@pytest.mark.parametrize(
+    "narrow_shape,narrow_valid,expected",
+    [([8, 1], [7, 1], [7, 128]), ([1, 128], [1, 97], [8, 97]), ([1, 1], [1, 1], [8, 128])],
+)
+@pytest.mark.parametrize("swap", [False, True])
+@pytest.mark.parametrize("empty_singleton", [False, True])
+def test_tensor_cmp_unsigned_broadcast_valid_extent(
+    extent_dtype, narrow_shape, narrow_valid, expected, swap, empty_singleton
+):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType(narrow_shape, DataType.FP32), span)
+    valid = list(narrow_valid)
+    if empty_singleton:
+        valid[valid.index(1)] = 0
+    extents = [ir.ConstInt(n, extent_dtype, span) for n in valid]
+    narrowed = tensor.set_validshape(source, extents[0], extents[1])
+    narrow = ir.Var("narrow", narrowed.type, span)
+    wide = ir.Var("wide", ir.TensorType([8, 128], DataType.FP32), span)
+    lhs, rhs = (wide, narrow) if swap else (narrow, wide)
+
+    if empty_singleton:
+        with pytest.raises(ValueError, match="requires a fully valid singleton axis"):
+            tensor.cmp(lhs, rhs, cmp_type=5)
+    else:
+        result = tensor.cmp(lhs, rhs, cmp_type=5).type
+        assert isinstance(result, ir.TensorType)
+        assert _const_int_values(result.shape) == [8, 128]
+        assert _valid_of(result) == expected
+
+
+@pytest.mark.parametrize("rhs_kind", ["tensor", "scalar"])
+def test_tensor_cmp_preserves_exact_dynamic_extent(rhs_kind):
+    span = ir.Span.unknown()
+    rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+    lhs = _partial_tensor_var([8, 128], [rows, 97], name="lhs")
+    rhs = _partial_tensor_var([8, 128], [rows, 97], name="rhs") if rhs_kind == "tensor" else 0.0
+
+    result_type = tensor.cmp(lhs, rhs, cmp_type=5).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    ir.assert_structural_equal(result_type.tensor_view.valid_shape[0], rows)
+
+
+def test_tensor_scalar_cmp_preserves_partial_distributed_window():
+    """A scalar comparison creates local data without losing window validity."""
+    lhs = _partial_distributed_tensor_var([8, 128], [7, 97])
+    result = tensor.cmp(lhs, 0.0, cmp_type=5).type
+    assert isinstance(result, ir.TensorType) and not isinstance(result, ir.DistributedTensorType)
+    assert _valid_of(result) == [7, 97]
+    assert result.memref is None
+
+
+def test_tensor_cmp_rejects_invalid_broadcast_singleton():
+    lhs = _partial_tensor_var([8, 1], [8, 0], name="lhs")
+    rhs = _tensor_var("rhs", [8, 128], DataType.FP32)
+    with pytest.raises(ValueError, match="fully valid singleton axis"):
+        tensor.cmp(lhs, rhs, cmp_type=5)
 
 
 @pytest.mark.parametrize("op_name", ["adds", "fmods", "ands", "shls"])

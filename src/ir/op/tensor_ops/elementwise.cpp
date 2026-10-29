@@ -526,9 +526,19 @@ REGISTER_OP("tensor.cmp")
       CHECK(args.size() == 2) << "The operator tensor.cmp requires exactly 2 arguments, but got "
                               << args.size();
       if (AsTensorTypeLike(args[1]->GetType())) {  // window operand routes to binary path (issue #1694)
-        return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp", false);
+        auto result = As<TensorType>(DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp", false));
+        auto lhs = AsTensorTypeLike(args[0]->GetType());
+        auto rhs = AsTensorTypeLike(args[1]->GetType());
+        auto valid =
+            InferComparisonValidShape(lhs->shape_, GetValidShape(lhs), rhs->shape_, GetValidShape(rhs));
+        CHECK(valid.success) << "tensor.cmp: " << valid.error_message;
+        return MakeFreshTensorType(result->shape_, result->dtype_, std::move(valid.shape));
       }
-      return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp", false, false);
+      auto result = As<TensorType>(DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp"));
+      auto lhs = AsTensorTypeLike(args[0]->GetType());
+      // A window is local GM here, just as in the tensor-rhs branch. The
+      // comparison produces fresh local storage with the window's valid prefix.
+      return MakeFreshTensorType(result->shape_, result->dtype_, GetValidShape(lhs));
     });
 
 // ============================================================================

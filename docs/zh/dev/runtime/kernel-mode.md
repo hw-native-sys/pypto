@@ -94,7 +94,7 @@ session 是生命周期适配层，不是独立执行引擎。Simpler 负责 cal
 Worker 的最小 1024 字节要求，不包含借用的 Tensor 存储。
 
 runtime submodule 跟随 upstream 的 Simpler revision
-`6b6b88f2353cca12cfafe809750b50b59931b0d1`。实际 native binding 的身份仍由既有
+`d2c7057ffa9afbcaa4534442fc17c3406de6a62e`。实际 native binding 的身份仍由既有
 `check_runtime_pin` 检查，包括身份缺失和显式跳过规则。能力检查要求公开 borrowed init、
 caller-stream submit、Buffer/TaskArgs、RunHandle 和 `flush_diagnostics` 接口；
 不查询旧 kernel supported bit 或私有 slot。接口检查和 UT 不构成设备执行正确性验证。

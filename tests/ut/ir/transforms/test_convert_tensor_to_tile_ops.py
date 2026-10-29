@@ -6053,7 +6053,10 @@ class TestConvertCmpOp:
             shape = valid_shape(params)
             lhs = ib.let("lhs_valid", tile_ops.set_validshape(inputs[0], *shape))
             if rhs_kind == "tensor":
-                mask = ib.let("mask", tile_ops.cmp(lhs, inputs[1], cmp_type=5))
+                rhs = inputs[1]
+                if region != "full":
+                    rhs = ib.let("rhs_valid", tile_ops.set_validshape(rhs, *shape))
+                mask = ib.let("mask", tile_ops.cmp(lhs, rhs, cmp_type=5))
             else:
                 mask = ib.let("mask", tile_ops.cmps(lhs, 0.0, cmp_type=5))
             one = ib.let("one", tile_ops.full([8, 128], dtype=DataType.FP32, value=1.0))
@@ -6072,20 +6075,32 @@ class TestConvertCmpOp:
             )
             return ib.let("result", tile_ops.sel(mask, one, zero, scratch))
 
-        before = _make_before(
-            in_specs=specs,
-            out_shape=[8, 128],
-            out_dtype=DataType.FP32,
-            body=before_body,
-            extra_specs=extras,
-        )
-        expected = _make_expected(
-            in_specs=specs,
-            out_shape=[8, 128],
-            out_dtype=DataType.FP32,
-            body=expected_body,
-            extra_specs=extras,
-        )
+        def make_program(*, lowered):
+            ib = IRBuilder()
+            with ib.program("comparison") as program:
+                with ib.function("kernel", type=ir.FunctionType.InCore) as function:
+                    inputs = [
+                        function.param(name, ir.TensorType(shape, dtype)) for name, shape, dtype in specs
+                    ]
+                    params = [function.param(name, dtype) for name, dtype in extras]
+                    view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=list(valid_shape(params)))
+                    output_type = ir.TensorType([8, 128], DataType.FP32, tensor_view=view)
+                    function.return_type(output_type)
+                    if lowered:
+                        output = function.param("out", output_type, direction=ir.ParamDirection.Out)
+                        tiles = [
+                            ib.let(f"{name}_tile", tile_ops.load(value, [0, 0], [8, 128]))
+                            for (name, _, _), value in zip(specs, inputs, strict=True)
+                        ]
+                        result = expected_body(ib, tiles, params)
+                        ib.return_stmt(ib.let("stored", tile_ops.store(result, [0, 0], output)))
+                    else:
+                        ib.return_stmt(before_body(ib, inputs, params))
+                program.add_function(function.get_result())
+            return program.get_result()
+
+        before = make_program(lowered=False)
+        expected = make_program(lowered=True)
         _assert_convert_equal(before, expected)
 
 
@@ -8688,6 +8703,1205 @@ def test_added_output_rebinds_omitted_original_out_storage():
     assert isinstance(statement, ir.EvalStmt) and isinstance(statement.expr, ir.Submit)
     assert isinstance(statement.expr.type, ir.TupleType)
     ir.assert_structural_equal(statement.expr.type.types[0], output_type)
+
+
+class TestCompareTailValidity:
+    @pytest.mark.parametrize(
+        "rows, cols", [(7, 97), (_SHARED_ROWS, 97), (8, 128)], ids=["static-tail", "dynamic-tail", "full"]
+    )
+    @pytest.mark.parametrize("scalar_rhs", [True, False], ids=["scalar", "tensor"])
+    def test_comparison_materialization_preserves_unpacked_valid_region(
+        self, rows, cols, scalar_rhs, ascend_backend
+    ):
+        # Packed tail masks must select one/zero tiles with the same logical
+        # region. In particular, 97 valid elements are not 13 * 8 elements.
+        if scalar_rhs:
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Scalar[pl.FP32],
+                ) -> pl.Tensor[
+                    [8, 128], pl.INT32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rows, cols])
+                ]:
+                    tail = pl.slice(lhs, [8, 128], [0, 0], valid_shape=[rows, cols])
+                    compared = pl.cmp(tail, rhs, cmp_type=5)
+                    casted = pl.cast(compared, pl.INT32)
+                    return casted
+        else:
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Tensor[[8, 128], pl.FP32],
+                ) -> pl.Tensor[
+                    [8, 128], pl.INT32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rows, cols])
+                ]:
+                    lhs_tail = pl.slice(lhs, [8, 128], [0, 0], valid_shape=[rows, cols])
+                    rhs_tail = pl.slice(rhs, [8, 128], [0, 0], valid_shape=[rows, cols])
+                    compared = pl.cmp(lhs_tail, rhs_tail, cmp_type=5)
+                    casted = pl.cast(compared, pl.INT32)
+                    return casted
+
+        view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rows, cols])
+        full = isinstance(rows, int) and rows == 8 and cols == 128
+        if scalar_rhs and full:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Scalar[pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.INT32, view]],
+                ) -> pl.Tensor[[8, 128], pl.INT32, view]:
+                    a = pl.tile.load(lhs, [0, 0], [8, 128], [rows, cols], target_memory=pl.Mem.Vec)
+                    mask = pl.tile.cmps(a, rhs, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    compared = pl.tile.sel(mask, one, zero, scratch)
+                    casted = pl.tile.cast(compared, target_type=pl.INT32, mode="round")
+                    stored = pl.tile.store(casted, [0, 0], out)
+                    return stored
+        elif scalar_rhs:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Scalar[pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.INT32, view]],
+                ) -> pl.Tensor[[8, 128], pl.INT32, view]:
+                    a = pl.tile.load(lhs, [0, 0], [8, 128], [rows, cols], target_memory=pl.Mem.Vec)
+                    mask = pl.tile.cmps(a, rhs, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, rows, cols)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, rows, cols)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    compared = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    casted = pl.tile.cast(compared, target_type=pl.INT32, mode="round")
+                    stored = pl.tile.store(casted, [0, 0], out)
+                    return stored
+        elif full:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Tensor[[8, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.INT32, view]],
+                ) -> pl.Tensor[[8, 128], pl.INT32, view]:
+                    a = pl.tile.load(lhs, [0, 0], [8, 128], [rows, cols], target_memory=pl.Mem.Vec)
+                    b = pl.tile.load(rhs, [0, 0], [8, 128], [rows, cols], target_memory=pl.Mem.Vec)
+                    mask = pl.tile.cmp(a, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    compared = pl.tile.sel(mask, one, zero, scratch)
+                    casted = pl.tile.cast(compared, target_type=pl.INT32, mode="round")
+                    stored = pl.tile.store(casted, [0, 0], out)
+                    return stored
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Tensor[[8, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.INT32, view]],
+                ) -> pl.Tensor[[8, 128], pl.INT32, view]:
+                    a = pl.tile.load(lhs, [0, 0], [8, 128], [rows, cols], target_memory=pl.Mem.Vec)
+                    b = pl.tile.load(rhs, [0, 0], [8, 128], [rows, cols], target_memory=pl.Mem.Vec)
+                    mask = pl.tile.cmp(a, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, rows, cols)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, rows, cols)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    compared = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    casted = pl.tile.cast(compared, target_type=pl.INT32, mode="round")
+                    stored = pl.tile.store(casted, [0, 0], out)
+                    return stored
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    @pytest.mark.parametrize("rhs_kind", ["scalar", "tensor"])
+    def test_unannotated_comparison_return_keeps_valid_region(self, rhs_kind, ascend_backend):
+        view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[7, 97])
+        if rhs_kind == "tensor":
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, lhs: pl.Tensor[[8, 128], pl.FP32], rhs: pl.Tensor[[8, 128], pl.FP32]):
+                    tail = pl.slice(lhs, [8, 128], [0, 0], valid_shape=[7, 97])
+                    result = pl.cmp(tail, rhs, cmp_type=5)
+                    return result
+        else:
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, lhs: pl.Tensor[[8, 128], pl.FP32]):
+                    tail = pl.slice(lhs, [8, 128], [0, 0], valid_shape=[7, 97])
+                    result = pl.cmp(tail, 0.0, cmp_type=5)
+                    return result
+
+        if rhs_kind == "tensor":
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    rhs: pl.Tensor[[8, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, view]:
+                    b = pl.tile.load(rhs, [0, 0], [8, 128], [8, 128])
+                    a = pl.tile.load(lhs, [0, 0], [8, 128], [7, 97], target_memory=pl.Mem.Vec)
+                    b_valid = pl.tile.set_validshape(b, 7, 97)
+                    mask = pl.tile.cmp(a, b_valid, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[8, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, view]:
+                    a = pl.tile.load(lhs, [0, 0], [8, 128], [7, 97], target_memory=pl.Mem.Vec)
+                    mask = pl.tile.cmps(a, 0.0, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    def test_comparison_return_cannot_claim_full_validity(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, lhs: pl.Tensor[[8, 128], pl.FP32]) -> pl.Tensor[[8, 128], pl.FP32]:
+                tail = pl.slice(lhs, [8, 128], [0, 0], valid_shape=[7, 97])
+                result = pl.cmp(tail, 0.0, cmp_type=5)
+                return result
+
+        # A full-shape annotation cannot promise unwritten tail elements.
+        with pytest.raises(ValueError, match="does not cover declared output valid region"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_row_broadcast_comparison_expected(self, ascend_backend):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, lhs: pl.Tensor[[8, 1], pl.FP32], rhs: pl.Tensor[[8, 128], pl.FP32]
+            ) -> pl.Tensor[[8, 128], pl.FP32]:
+                result = pl.cmp(lhs, rhs, cmp_type=5)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[8, 1], pl.FP32],
+                rhs: pl.Tensor[[8, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+            ) -> pl.Tensor[[8, 128], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [8, 1], [8, 1])
+                b = pl.tile.load(rhs, [0, 0], [8, 128], [8, 128])
+                target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                expanded = pl.tile.row_expand(target, a)
+                mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                result = pl.tile.sel(mask, one, zero, scratch)
+                stored = pl.tile.store(result, [0, 0], out)
+                return stored
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    def test_cast_comparison_return_cannot_claim_full_validity(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, lhs: pl.Tensor[[8, 128], pl.FP32]) -> pl.Tensor[[8, 128], pl.INT32]:
+                tail = pl.slice(lhs, [8, 128], [0, 0], valid_shape=[7, 97])
+                compared = pl.cmp(tail, 0.0, cmp_type=5)
+                result = pl.cast(compared, pl.INT32)
+                return result
+
+        with pytest.raises(ValueError, match="does not cover declared output valid region"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    @pytest.mark.parametrize("narrow_shape", [[8, 1], [1, 128], [1, 1]])
+    @pytest.mark.parametrize("swap", [False, True])
+    def test_comparison_expands_broadcast_operands(self, narrow_shape, swap, ascend_backend):
+        lhs_shape, rhs_shape = (narrow_shape, [8, 128]) if not swap else ([8, 128], narrow_shape)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, lhs: pl.Tensor[lhs_shape, pl.FP32], rhs: pl.Tensor[rhs_shape, pl.FP32]
+            ) -> pl.Tensor[[8, 128], pl.FP32]:
+                result = pl.cmp(lhs, rhs, cmp_type=5)
+                return result
+
+        if narrow_shape == [8, 1] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+                ) -> pl.Tensor[[8, 128], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    expanded = pl.tile.row_expand(target, a)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one, zero, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [8, 1] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+                ) -> pl.Tensor[[8, 128], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    expanded = pl.tile.row_expand(target, b)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one, zero, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 128] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+                ) -> pl.Tensor[[8, 128], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    expanded = pl.tile.col_expand(target, a)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one, zero, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 128] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+                ) -> pl.Tensor[[8, 128], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    expanded = pl.tile.col_expand(target, b)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one, zero, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 1] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+                ) -> pl.Tensor[[8, 128], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    row_target = pl.tile.full([1, 128], dtype=pl.FP32, value=0.0)
+                    row = pl.tile.row_expand(row_target, a)
+                    col_target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    expanded = pl.tile.col_expand(col_target, row)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one, zero, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32]],
+                ) -> pl.Tensor[[8, 128], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    row_target = pl.tile.full([1, 128], dtype=pl.FP32, value=0.0)
+                    row = pl.tile.row_expand(row_target, b)
+                    col_target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    expanded = pl.tile.col_expand(col_target, row)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one, zero, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(Before), Expected)
+
+    @pytest.mark.parametrize("axis", [0, 1])
+    def test_unsigned_singleton_comparison_lowers_with_expected_region(self, axis, ascend_backend):
+        narrow_shape = [8, 1] if axis == 1 else [1, 128]
+        narrow_rows = pl.const(7 if axis == 1 else 1, pl.UINT64)
+        narrow_cols = pl.const(1 if axis == 1 else 97, pl.UINT64)
+        rows = narrow_rows if axis == 1 else 8
+        cols = 128 if axis == 1 else narrow_cols
+        view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rows, cols])
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, lhs: pl.Tensor[narrow_shape, pl.FP32], rhs: pl.Tensor[[8, 128], pl.FP32]
+            ) -> pl.Tensor[[8, 128], pl.FP32, view]:
+                narrowed = pl.set_validshape(lhs, narrow_rows, narrow_cols)
+                compared = pl.cmp(narrowed, rhs, cmp_type=5)
+                return compared
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+
+        if axis == 1:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[narrow_shape, pl.FP32],
+                    rhs: pl.Tensor[[8, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, view]:
+                    a = pl.tile.load(lhs, [0, 0], narrow_shape, narrow_shape)
+                    b = pl.tile.load(rhs, [0, 0], [8, 128], [8, 128])
+                    narrowed = pl.tile.set_validshape(a, narrow_rows, narrow_cols)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, rows, cols)
+                    expanded = pl.tile.row_expand(target_valid, narrowed)
+                    b_valid = pl.tile.set_validshape(b, rows, cols)
+                    mask = pl.tile.cmp(expanded, b_valid, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, rows, cols)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, rows, cols)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[narrow_shape, pl.FP32],
+                    rhs: pl.Tensor[[8, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, view]:
+                    a = pl.tile.load(lhs, [0, 0], narrow_shape, narrow_shape)
+                    b = pl.tile.load(rhs, [0, 0], [8, 128], [8, 128])
+                    narrowed = pl.tile.set_validshape(a, narrow_rows, narrow_cols)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, rows, cols)
+                    expanded = pl.tile.col_expand(target_valid, narrowed)
+                    b_valid = pl.tile.set_validshape(b, rows, cols)
+                    mask = pl.tile.cmp(expanded, b_valid, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, rows, cols)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, rows, cols)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("narrow_shape", [[8, 1], [1, 128], [1, 1]])
+    @pytest.mark.parametrize("swap", [False, True])
+    def test_comparison_broadcast_preserves_dynamic_tail(self, narrow_shape, swap, ascend_backend):
+        narrow_rows = 1 if narrow_shape[0] == 1 else _SHARED_ROWS
+        narrow_cols = 1 if narrow_shape[1] == 1 else 97
+        lhs_shape, rhs_shape = ([8, 128], narrow_shape) if swap else (narrow_shape, [8, 128])
+        lhs_rows, rhs_rows = (_SHARED_ROWS, narrow_rows) if swap else (narrow_rows, _SHARED_ROWS)
+        lhs_cols, rhs_cols = (97, narrow_cols) if swap else (narrow_cols, 97)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[
+                    lhs_shape,
+                    pl.FP32,
+                    pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[lhs_rows, lhs_cols]),
+                ],
+                rhs: pl.Tensor[
+                    rhs_shape,
+                    pl.FP32,
+                    pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rhs_rows, rhs_cols]),
+                ],
+            ) -> pl.Tensor[
+                [8, 128], pl.FP32, pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[_SHARED_ROWS, 97])
+            ]:
+                result = pl.cmp(lhs, rhs, cmp_type=5)
+                return result
+
+        lhs_view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[lhs_rows, lhs_cols])
+        rhs_view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rhs_rows, rhs_cols])
+        out_view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[_SHARED_ROWS, 97])
+
+        if narrow_shape == [8, 1] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, out_view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, out_view]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, pl.min(_SHARED_ROWS, 8), 97)
+                    expanded = pl.tile.row_expand(target_valid, a)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, pl.min(_SHARED_ROWS, 8), 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, pl.min(_SHARED_ROWS, 8), 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [8, 1] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, out_view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, out_view]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, pl.min(_SHARED_ROWS, 8), 97)
+                    expanded = pl.tile.row_expand(target_valid, b)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, pl.min(_SHARED_ROWS, 8), 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, pl.min(_SHARED_ROWS, 8), 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 128] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, out_view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, out_view]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, pl.min(_SHARED_ROWS, 8), 97)
+                    expanded = pl.tile.col_expand(target_valid, a)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, pl.min(_SHARED_ROWS, 8), 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, pl.min(_SHARED_ROWS, 8), 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 128] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, out_view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, out_view]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, pl.min(_SHARED_ROWS, 8), 97)
+                    expanded = pl.tile.col_expand(target_valid, b)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, pl.min(_SHARED_ROWS, 8), 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, pl.min(_SHARED_ROWS, 8), 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 1] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, out_view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, out_view]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    row_target = pl.tile.full([1, 128], dtype=pl.FP32, value=0.0)
+                    row_valid = pl.tile.set_validshape(row_target, 1, 97)
+                    row = pl.tile.row_expand(row_valid, a)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, pl.min(_SHARED_ROWS, 8), 97)
+                    expanded = pl.tile.col_expand(target_valid, row)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, pl.min(_SHARED_ROWS, 8), 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, pl.min(_SHARED_ROWS, 8), 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        elif narrow_shape == [1, 1] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                    out: pl.Out[pl.Tensor[[8, 128], pl.FP32, out_view]],
+                ) -> pl.Tensor[[8, 128], pl.FP32, out_view]:
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    row_target = pl.tile.full([1, 128], dtype=pl.FP32, value=0.0)
+                    row_valid = pl.tile.set_validshape(row_target, 1, 97)
+                    row = pl.tile.row_expand(row_valid, b)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, pl.min(_SHARED_ROWS, 8), 97)
+                    expanded = pl.tile.col_expand(target_valid, row)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, pl.min(_SHARED_ROWS, 8), 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, pl.min(_SHARED_ROWS, 8), 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    stored = pl.tile.store(result, [0, 0], out)
+                    return stored
+        else:
+            raise AssertionError("Unexpected broadcast shape")
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(after, Expected)
+        kernel = _require_function(after, "kernel")
+        comparison = _find_first_call_to(kernel, "tile.cmp")
+        selection = _find_first_call_to(kernel, "tile.sel")
+        assert comparison is not None and selection is not None
+        # Loading a tensor whose signature already carries a valid region
+        # clamps that region to its allocation. Preserve the exact row symbol
+        # through that clamp, rather than accepting any non-constant extent.
+        span = ir.Span.unknown()
+        expected_rows = ir.Min(
+            _SHARED_ROWS.unwrap(), ir.ConstInt(8, DataType.INDEX, span), DataType.INDEX, span
+        )
+        for value in [*comparison.args, selection]:
+            assert isinstance(value.type, ir.TileType) and value.type.tile_view is not None
+            valid = value.type.tile_view.valid_shape
+            ir.assert_structural_equal(valid[0], expected_rows)
+            assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 97
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_scalar_comparison_of_partial_distributed_window(self, dynamic):
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[rows if dynamic else 7, 97])
+        window = ir.Var("window", ir.DistributedTensorType([8, 128], DataType.FP32, None, view), span)
+        comparison = tensor_ops.cmp(window, ir.ConstFloat(0.0, DataType.FP32, span), cmp_type=5)
+        result = ir.Var("result", comparison.type, span)
+        body = ir.SeqStmts([ir.AssignStmt(result, comparison, span), ir.ReturnStmt([result], span)], span)
+        params = [rows, window] if dynamic else [window]
+        before = ir.Program(
+            [ir.Function("kernel", params, [], body, span, type=ir.FunctionType.InCore)], "window", span
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+
+        output = _require_function(after, "kernel").params[-1].type
+        assert isinstance(output, ir.TensorType) and not isinstance(output, ir.DistributedTensorType)
+        assert output.tensor_view is not None
+        expected = rows if dynamic else ir.ConstInt(7, DataType.INDEX, span)
+        ir.assert_structural_equal(output.tensor_view.valid_shape[0], expected)
+        cols = output.tensor_view.valid_shape[1]
+        assert isinstance(cols, ir.ConstInt) and cols.value == 97
+
+    @pytest.mark.parametrize("depth", [1, 2])
+    @pytest.mark.parametrize("claim_full", [False, True])
+    def test_direct_comparison_return_projection_checks_coverage(self, depth, claim_full):
+        span = ir.Span.unknown()
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[7, 97])
+        lhs = ir.Var("lhs", ir.TensorType([8, 128], DataType.FP32, tensor_view=view), span)
+        comparison = tensor_ops.cmp(lhs, ir.ConstFloat(0.0, DataType.FP32, span), cmp_type=5)
+        result = ir.Var("result", comparison.type, span)
+        stmts: list[ir.Stmt] = [ir.AssignStmt(result, comparison, span)]
+        value: ir.Expr = result
+        for i in range(depth):
+            packed = ir.MakeTuple([value], span)
+            pair = ir.Var(f"pair{i}", packed.type, span)
+            stmts.append(ir.AssignStmt(pair, packed, span))
+            value = ir.TupleGetItemExpr(pair, 0, span)
+        stmts.append(ir.ReturnStmt([value], span))
+        returns = [ir.TensorType([8, 128], DataType.FP32)] if claim_full else []
+        before = ir.Program(
+            [
+                ir.Function(
+                    "kernel", [lhs], returns, ir.SeqStmts(stmts, span), span, type=ir.FunctionType.InCore
+                )
+            ],
+            "projection",
+            span,
+        )
+
+        if claim_full:
+            # A direct return projection must receive the same guard as a Var.
+            with pytest.raises(ValueError, match="does not cover declared output valid region"):
+                passes.convert_tensor_to_tile_ops()(before)
+        else:
+            after = passes.convert_tensor_to_tile_ops()(before)
+            output = _require_function(after, "kernel").params[-1].type
+            assert isinstance(output, ir.TensorType) and output.tensor_view is not None
+            for dim, expected in zip(output.tensor_view.valid_shape, [7, 97], strict=True):
+                assert isinstance(dim, ir.ConstInt) and dim.value == expected
+
+    @pytest.mark.parametrize("yield_form", ["assigned", "inline", "inline_nested"])
+    @pytest.mark.parametrize("wrapper", ["none", "inline", "alias", "nested"])
+    @pytest.mark.parametrize("control_flow", ["if", "for", "while"])
+    @pytest.mark.parametrize("claim_full", [False, True])
+    def test_control_flow_comparison_return_projection_checks_coverage(
+        self, control_flow, claim_full, wrapper, yield_form
+    ):
+        span = ir.Span.unknown()
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[7, 97])
+        lhs = ir.Var("lhs", ir.TensorType([8, 128], DataType.FP32, tensor_view=view), span)
+        condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+        comparison = tensor_ops.cmp(lhs, ir.ConstFloat(0.0, DataType.FP32, span), cmp_type=5)
+        result = ir.Var("result", comparison.type, span)
+        packed = ir.MakeTuple([result], span)
+        if yield_form == "inline_nested":
+            packed = ir.MakeTuple([packed], span)
+        pair = ir.Var("pair", packed.type, span)
+        yielded = pair if yield_form == "assigned" else packed
+        merged = ir.Var("merged", packed.type, span)
+        control: ir.Stmt
+        if control_flow == "if":
+            control = ir.IfStmt(
+                condition, ir.YieldStmt([yielded], span), ir.YieldStmt([yielded], span), [merged], span
+            )
+        else:
+            carried = ir.IterArg("carried", pair.type, yielded, span)
+            loop_body = ir.YieldStmt([carried if yield_form == "assigned" else packed], span)
+            if control_flow == "while":
+                control = ir.WhileStmt(condition, [carried], loop_body, [merged], span)
+            else:
+                index = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+                bounds = [ir.ConstInt(n, DataType.INDEX, span) for n in [0, 2, 1]]
+                control = ir.ForStmt(
+                    index, bounds[0], bounds[1], bounds[2], [carried], loop_body, [merged], span
+                )
+        projection: ir.Expr = ir.TupleGetItemExpr(merged, 0, span)
+        if yield_form == "inline_nested":
+            projection = ir.TupleGetItemExpr(projection, 0, span)
+        wrapper_stmts: list[ir.Stmt] = []
+        if wrapper != "none":
+            # Inline tuple syntax must not hide a control-flow projection from
+            # the output guard; aliases and nested wrappers have the same value.
+            wrapped = ir.MakeTuple([projection], span)
+            if wrapper == "alias":
+                alias = ir.Var("wrapped", wrapped.type, span)
+                wrapper_stmts.append(ir.AssignStmt(alias, wrapped, span))
+                projection = ir.TupleGetItemExpr(alias, 0, span)
+            elif wrapper == "nested":
+                nested = ir.MakeTuple([wrapped], span)
+                projection = ir.TupleGetItemExpr(ir.TupleGetItemExpr(nested, 0, span), 0, span)
+            else:
+                projection = ir.TupleGetItemExpr(wrapped, 0, span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(result, comparison, span),
+                ir.AssignStmt(pair, packed, span),
+                control,
+                *wrapper_stmts,
+                ir.ReturnStmt([projection], span),
+            ],
+            span,
+        )
+        returns = [ir.TensorType([8, 128], DataType.FP32)] if claim_full else []
+        before = ir.Program(
+            [ir.Function("kernel", [lhs, condition], returns, body, span, type=ir.FunctionType.InCore)],
+            "control_flow_projection",
+            span,
+        )
+
+        if claim_full:
+            # The tuple merge has no AssignStmt definition for the resolver.
+            with pytest.raises(ValueError, match="does not cover declared output valid region"):
+                passes.convert_tensor_to_tile_ops()(before)
+        else:
+            after = passes.convert_tensor_to_tile_ops()(before)
+            output = _require_function(after, "kernel").params[-1].type
+            assert isinstance(output, ir.TensorType) and output.tensor_view is not None
+            for dim, expected in zip(output.tensor_view.valid_shape, [7, 97], strict=True):
+                assert isinstance(dim, ir.ConstInt) and dim.value == expected
+
+    @pytest.mark.parametrize("alias", [False, True])
+    @pytest.mark.parametrize("claim_full", [False, True])
+    def test_repeated_comparison_return_checks_each_annotation(self, alias, claim_full):
+        span = ir.Span.unknown()
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[7, 97])
+        lhs = ir.Var("lhs", ir.TensorType([8, 128], DataType.FP32, tensor_view=view), span)
+        comparison = tensor_ops.cmp(lhs, ir.ConstFloat(0.0, DataType.FP32, span), cmp_type=5)
+        result = ir.Var("result", comparison.type, span)
+        stmts: list[ir.Stmt] = [ir.AssignStmt(result, comparison, span)]
+        second = result
+        if alias:
+            second = ir.Var("alias", result.type, span)
+            stmts.append(ir.AssignStmt(second, result, span))
+        stmts.append(ir.ReturnStmt([result, second], span))
+        second_type = ir.TensorType([8, 128], DataType.FP32) if claim_full else result.type
+        before = ir.Program(
+            [
+                ir.Function(
+                    "kernel",
+                    [lhs],
+                    [result.type, second_type],
+                    ir.SeqStmts(stmts, span),
+                    span,
+                    type=ir.FunctionType.InCore,
+                )
+            ],
+            "repeated_comparison_return",
+            span,
+        )
+
+        if claim_full:
+            with pytest.raises(ValueError, match="does not cover declared output valid region"):
+                passes.convert_tensor_to_tile_ops()(before)
+        else:
+            kernel = _require_function(passes.convert_tensor_to_tile_ops()(before), "kernel")
+            assert len(kernel.params) == 2  # One input and one shared output allocation.
+            assert len(kernel.return_types) == 2
+            for output in kernel.return_types:
+                assert isinstance(output, ir.TensorType) and output.tensor_view is not None
+                for dim, expected in zip(output.tensor_view.valid_shape, [7, 97], strict=True):
+                    assert isinstance(dim, ir.ConstInt) and dim.value == expected
+
+    @pytest.mark.parametrize("output_count", [1, 32])
+    @pytest.mark.parametrize("claim_full", [False, True])
+    def test_comparison_outputs_share_valid_extent(self, output_count, claim_full):
+        span = ir.Span.unknown()
+        symbols = [ir.Var(f"rows{i}", ir.ScalarType(DataType.INDEX), span) for i in range(16)]
+        rows: ir.Expr = symbols[0]
+        for symbol in symbols[1:]:
+            rows = ir.Min(rows, symbol, DataType.INDEX, span)
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[rows, 97])
+        lhs = ir.Var("lhs", ir.TensorType([8, 128], DataType.FP32, tensor_view=view), span)
+        stmts: list[ir.Stmt] = []
+        results: list[ir.Expr] = []
+        for i in range(output_count):
+            comparison = tensor_ops.cmp(lhs, ir.ConstFloat(float(i), DataType.FP32, span), cmp_type=5)
+            result = ir.Var(f"result{i}", comparison.type, span)
+            stmts.append(ir.AssignStmt(result, comparison, span))
+            results.append(result)
+        stmts.append(ir.ReturnStmt(results, span))
+        returns = [result.type for result in results] if claim_full else []
+        if claim_full:
+            # A successful cached proof for earlier outputs cannot authorize
+            # a later output that advertises a different, unwritten region.
+            returns[-1] = ir.TensorType([8, 128], DataType.FP32)
+        before = ir.Program(
+            [
+                ir.Function(
+                    "kernel",
+                    [*symbols, lhs],
+                    returns,
+                    ir.SeqStmts(stmts, span),
+                    span,
+                    type=ir.FunctionType.InCore,
+                )
+            ],
+            "shared_valid_extent",
+            span,
+        )
+
+        if claim_full:
+            with pytest.raises(ValueError, match="does not cover declared output valid region"):
+                passes.convert_tensor_to_tile_ops()(before)
+        else:
+            after = passes.convert_tensor_to_tile_ops()(before)
+            kernel = _require_function(after, "kernel")
+            outputs = kernel.params[len(symbols) + 1 :]
+            assert len(outputs) == output_count
+            for output in outputs:
+                assert isinstance(output.type, ir.TensorType) and output.type.tensor_view is not None
+                ir.assert_structural_equal(output.type.tensor_view.valid_shape[0], rows)
+
+    @pytest.mark.parametrize("region", ["two_tensors", "sum", "minimum", "negative_clamp"])
+    def test_unannotated_comparison_with_compound_valid_rows(self, region):
+        span = ir.Span.unknown()
+        a = ir.Var("a", ir.ScalarType(DataType.INDEX), span)
+        b = ir.Var("b", ir.ScalarType(DataType.INDEX), span)
+        if region == "sum":
+            rows = ir.Add(a, b, DataType.INDEX, span)
+        elif region == "minimum":
+            rows = ir.Min(a, b, DataType.INDEX, span)
+        elif region == "negative_clamp":
+            rows = ir.Max(
+                ir.Neg(a, DataType.INDEX, span), ir.ConstInt(0, DataType.INDEX, span), DataType.INDEX, span
+            )
+        else:
+            rows = a
+        view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[rows, 97])
+        lhs = ir.Var("lhs", ir.TensorType([8, 128], DataType.FP32, tensor_view=view), span)
+        params = [a, b, lhs]
+        rhs: ir.Expr = ir.ConstFloat(0.0, DataType.FP32, span)
+        if region == "two_tensors":
+            rhs_view = ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[b, 97])
+            rhs = ir.Var("rhs", ir.TensorType([8, 128], DataType.FP32, tensor_view=rhs_view), span)
+            params.append(rhs)
+        compared = tensor_ops.cmp(lhs, rhs, cmp_type=5)
+        result = ir.Var("result", compared.type, span)
+        body = ir.SeqStmts([ir.AssignStmt(result, compared, span), ir.ReturnStmt([result], span)], span)
+        before = ir.Program(
+            [ir.Function("kernel", params, [], body, span, type=ir.FunctionType.InCore)], "compound", span
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+
+        kernel = _require_function(after, "kernel")
+        output = kernel.params[-1].type
+        assert isinstance(output, ir.TensorType) and output.tensor_view is not None
+        assert isinstance(compared.type, ir.TensorType) and compared.type.tensor_view is not None
+        # Check the whole expression, including signed symbols inside a clamp.
+        ir.assert_structural_equal(
+            output.tensor_view.valid_shape[0], compared.type.tensor_view.valid_shape[0]
+        )
+
+    @pytest.mark.parametrize("swap", [False, True])
+    @pytest.mark.parametrize("broadcast_shape", [[1, 128], [8, 1], [1, 1]])
+    def test_broadcast_tail_survives_auto_split(self, swap, broadcast_shape, ascend_backend):
+        # Exercise both broadcast axes through the next consumer of validity,
+        # including source narrowing and lane-local allocation of the target.
+        lhs_shape, rhs_shape = ([8, 128], broadcast_shape) if swap else (broadcast_shape, [8, 128])
+        lhs_rows, rhs_rows = (7, broadcast_shape[0]) if swap else (broadcast_shape[0], 7)
+        lhs_cols, rhs_cols = (97, broadcast_shape[1]) if swap else (broadcast_shape[1], 97)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                lhs: pl.Tensor[
+                    lhs_shape,
+                    pl.FP32,
+                    pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[lhs_rows, lhs_cols]),
+                ],
+                rhs: pl.Tensor[
+                    rhs_shape,
+                    pl.FP32,
+                    pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rhs_rows, rhs_cols]),
+                ],
+            ):
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], target_memory=pl.Mem.Mat)
+                _result = pl.cmp(lhs, rhs, cmp_type=5)
+
+        lhs_view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[lhs_rows, lhs_cols])
+        rhs_view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[rhs_rows, rhs_cols])
+
+        if broadcast_shape == [8, 1] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                ):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Mat)
+                    narrowed = pl.tile.set_validshape(a, 7, 1)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, 7, 97)
+                    expanded = pl.tile.row_expand(target_valid, narrowed)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    _result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    return  # noqa: PLR1711 (DSL return terminator)
+        elif broadcast_shape == [8, 1] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                ):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Mat)
+                    narrowed = pl.tile.set_validshape(b, 7, 1)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, 7, 97)
+                    expanded = pl.tile.row_expand(target_valid, narrowed)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    _result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    return  # noqa: PLR1711 (DSL return terminator)
+        elif broadcast_shape == [1, 128] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                ):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Mat)
+                    narrowed = pl.tile.set_validshape(a, 1, 97)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, 7, 97)
+                    expanded = pl.tile.col_expand(target_valid, narrowed)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    _result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    return  # noqa: PLR1711 (DSL return terminator)
+        elif broadcast_shape == [1, 128] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                ):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Mat)
+                    narrowed = pl.tile.set_validshape(b, 1, 97)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, 7, 97)
+                    expanded = pl.tile.col_expand(target_valid, narrowed)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    _result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    return  # noqa: PLR1711 (DSL return terminator)
+        elif broadcast_shape == [1, 1] and not swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                ):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Mat)
+                    row_target = pl.tile.full([1, 128], dtype=pl.FP32, value=0.0)
+                    row_valid = pl.tile.set_validshape(row_target, 1, 97)
+                    row = pl.tile.row_expand(row_valid, a)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, 7, 97)
+                    expanded = pl.tile.col_expand(target_valid, row)
+                    mask = pl.tile.cmp(expanded, b, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    _result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    return  # noqa: PLR1711 (DSL return terminator)
+        elif broadcast_shape == [1, 1] and swap:
+
+            @pl.program
+            class Expected:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    cube_seed: pl.Tensor[[8, 128], pl.FP32],
+                    lhs: pl.Tensor[lhs_shape, pl.FP32, lhs_view],
+                    rhs: pl.Tensor[rhs_shape, pl.FP32, rhs_view],
+                ):
+                    pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                    a = pl.tile.load(lhs, [0, 0], lhs_shape, lhs_shape)
+                    b = pl.tile.load(rhs, [0, 0], rhs_shape, rhs_shape)
+                    _mat = pl.tile.load(cube_seed, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Mat)
+                    row_target = pl.tile.full([1, 128], dtype=pl.FP32, value=0.0)
+                    row_valid = pl.tile.set_validshape(row_target, 1, 97)
+                    row = pl.tile.row_expand(row_valid, b)
+                    target = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    target_valid = pl.tile.set_validshape(target, 7, 97)
+                    expanded = pl.tile.col_expand(target_valid, row)
+                    mask = pl.tile.cmp(a, expanded, cmp_type=5)
+                    one = pl.tile.full([8, 128], dtype=pl.FP32, value=1.0)
+                    one_valid = pl.tile.set_validshape(one, 7, 97)
+                    zero = pl.tile.full([8, 128], dtype=pl.FP32, value=0.0)
+                    zero_valid = pl.tile.set_validshape(zero, 7, 97)
+                    scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                    _result = pl.tile.sel(mask, one_valid, zero_valid, scratch)
+                    return  # noqa: PLR1711 (DSL return terminator)
+        else:
+            raise AssertionError("Unexpected broadcast shape")
+
+        converted = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(converted, Expected)
+        placed = passes.infer_tile_memory_space()(converted)
+        after = passes.lower_auto_vector_split()(placed)
+        op = "tile.row_expand" if broadcast_shape == [8, 1] else "tile.col_expand"
+        expansion = _find_first_call_to(_require_function(after, "kernel"), op)
+        assert expansion is not None
+        target, source = expansion.args
+        assert isinstance(target.type, ir.TileType) and target.type.tile_view is not None
+        assert isinstance(source.type, ir.TileType) and source.type.tile_view is not None
+        shared_axis = 0 if op == "tile.row_expand" else 1
+        ir.assert_structural_equal(
+            target.type.tile_view.valid_shape[shared_axis], source.type.tile_view.valid_shape[shared_axis]
+        )
 
 
 if __name__ == "__main__":

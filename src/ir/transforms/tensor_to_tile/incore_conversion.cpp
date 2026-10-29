@@ -24,6 +24,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -694,7 +695,8 @@ class TensorConversionAnalysis : public IRVisitor {
   void Propagate() {
     // Yield edges can precede the tuple definitions in their branch/body.
     // Resolve projections only after the complete definition index exists.
-    for (const auto& [source, target] : projection_flows_) {
+    for (const auto& [source, target] : expression_flows_) {
+      AddComparisonFlow(source, target);
       if (auto var = AsVarLike(ResolveFlowSource(source))) AddFlow(var, target);
     }
     while (!worklist_.empty()) {
@@ -711,11 +713,52 @@ class TensorConversionAnalysis : public IRVisitor {
       if (it == sources_.end()) continue;
       for (const auto* source : it->second) MarkWritten(source);
     }
+    // The same indexed value-flow graph tracks comparison-derived returns,
+    // including casts, aliases, branch results and loop carries. Each edge is
+    // processed once; no per-return scan of the function body is needed.
+    for (const auto& [target, sources] : sources_) {
+      for (const auto* source : sources) comparison_users_[source].push_back(target);
+    }
+    std::vector<const Expr*> pending(comparisons_.begin(), comparisons_.end());
+    while (!pending.empty()) {
+      const auto* source = pending.back();
+      pending.pop_back();
+      auto users = comparison_users_.find(source);
+      if (users == comparison_users_.end()) continue;
+      for (const auto* user : users->second) {
+        if (comparisons_.insert(user).second) pending.push_back(user);
+      }
+    }
   }
 
   [[nodiscard]] bool IsTile(const Var* var) const { return tiles_.count(var) != 0; }
   [[nodiscard]] bool IsTile(const VarPtr& var) const { return IsTile(var.get()); }
   [[nodiscard]] bool HasOpaqueCalls() const { return has_opaque_calls_; }
+  [[nodiscard]] bool DependsOnComparison(const ExprPtr& value) {
+    if (auto cached = comparison_dependencies_.find(value.get()); cached != comparison_dependencies_.end()) {
+      return cached->second;
+    }
+    auto var = AsVarLike(value);
+    // Direct return projections have no assignment edge of their own. Reuse
+    // the memoized tuple resolver instead of rescanning the body per return.
+    if (!var) var = AsVarLike(ResolveFlowSource(value));
+    bool depends = var && comparisons_.count(var.get()) != 0;
+    if (!var) {
+      // A control-flow tuple has no single AssignStmt definition to unwrap.
+      // Its propagated provenance still covers a projection of that tuple.
+      // Resolve concrete tuple elements first to avoid tainting a known sibling.
+      if (auto projection = As<TupleGetItemExpr>(value)) {
+        if (auto tuple = As<MakeTuple>(ResolveFlowSource(projection->tuple_))) {
+          // Inline or aliased wrappers can contain another unresolved projection.
+          depends = DependsOnComparison(tuple->elements_[projection->index_]);
+        } else {
+          depends = DependsOnComparison(projection->tuple_);
+        }
+      }
+    }
+    comparison_dependencies_.emplace(value.get(), depends);
+    return depends;
+  }
   [[nodiscard]] bool MayWriteSource(const VarPtr& var) const {
     return written_sources_.count(var.get()) != 0;
   }
@@ -746,6 +789,7 @@ class TensorConversionAnalysis : public IRVisitor {
     var_collectors::VarDefUseCollector refs;
     refs.VisitExpr(op->value_);
     sources_[op->var_.get()] = std::move(refs.var_uses_ordered);
+    if (IsOp(As<Call>(op->value_), "tensor.cmp")) comparisons_.insert(op->var_.get());
     if (As<TupleType>(op->var_->GetType())) tuple_definitions_[op->var_.get()] = op->value_;
     if (As<TileType>(op->var_->GetType())) {
       MarkTile(op->var_.get());
@@ -782,6 +826,12 @@ class TensorConversionAnalysis : public IRVisitor {
   }
 
  private:
+  std::unordered_set<const Expr*> comparisons_;
+  std::unordered_map<const Expr*, std::vector<const Expr*>> comparison_users_;
+  std::unordered_set<const Expr*> indexed_comparison_exprs_;
+  // Queried only after Propagate fixes provenance; shared projection chains
+  // are visited once across all return values in this analysis instance.
+  std::unordered_map<const Expr*, bool> comparison_dependencies_;
   void MarkTile(const Var* var) {
     if (tiles_.insert(var).second) worklist_.push_back(var);
   }
@@ -817,9 +867,26 @@ class TensorConversionAnalysis : public IRVisitor {
     return resolved;
   }
 
+  // Preserve shared tuple nodes in the provenance graph instead of flattening
+  // all their leaves for every yield. This does not mark tuple-valued phi
+  // variables as tiles; tile prediction still resolves individual projections.
+  void AddComparisonFlow(const ExprPtr& source, const ExprPtr& target) {
+    comparison_users_[source.get()].push_back(target.get());
+    if (!indexed_comparison_exprs_.insert(source.get()).second) return;
+    if (auto tuple = As<MakeTuple>(source)) {
+      for (const auto& element : tuple->elements_) AddComparisonFlow(element, source);
+    } else if (auto projection = As<TupleGetItemExpr>(source)) {
+      if (auto tuple = As<MakeTuple>(ResolveFlowSource(projection->tuple_))) {
+        AddComparisonFlow(tuple->elements_[projection->index_], source);
+      } else {
+        AddComparisonFlow(projection->tuple_, source);
+      }
+    }
+  }
+
   void AddFlow(const ExprPtr& source, const VarPtr& target) {
-    if (As<TupleGetItemExpr>(source)) {
-      projection_flows_.emplace_back(source, target);
+    if (As<TupleGetItemExpr>(source) || As<MakeTuple>(source)) {
+      expression_flows_.emplace_back(source, target);
       return;
     }
     auto var = AsVarLike(source);
@@ -852,7 +919,7 @@ class TensorConversionAnalysis : public IRVisitor {
   const OpConversionRegistry& registry_;
   std::unordered_map<const Var*, ExprPtr> tuple_definitions_;
   std::unordered_map<const Expr*, ExprPtr> resolved_flow_sources_;
-  std::vector<std::pair<ExprPtr, VarPtr>> projection_flows_;
+  std::vector<std::pair<ExprPtr, VarPtr>> expression_flows_;
   std::unordered_map<const Var*, std::vector<const Var*>> users_;
   std::unordered_set<const Var*> tiles_;
   std::vector<const Var*> worklist_;
@@ -1669,6 +1736,65 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
   return std::nullopt;
 }
 
+// A declared valid prefix is bounded by its allocation even when it is a
+// compound expression. Proving declared <= min(x, y) requires both inequalities. Keep
+// these facts about whole extents: bounding the symbols inside max(-x, 0),
+// for example, would incorrectly assume that x itself is nonnegative.
+struct ComparisonCoverageCache {
+  struct DeclaredExtent {
+    std::unordered_set<const Expr*> terms;
+    // Capacity is part of the proof context. A bound from one allocation
+    // must never authorize a different allocation with the same valid extent.
+    std::unordered_map<const Expr*, std::unordered_map<const Expr*, bool>> proofs_by_capacity;
+  };
+  std::unordered_map<const Expr*, DeclaredExtent> declared_extents;
+};
+
+bool ProveComparisonOutputCoverage(const ExprPtr& declared, const ExprPtr& capacity, const ExprPtr& written,
+                                   arith::Analyzer& analyzer, ComparisonCoverageCache& cache) {
+  auto [extent, inserted] = cache.declared_extents.try_emplace(declared.get());
+  auto& declared_terms = extent->second.terms;
+  if (inserted) {
+    std::vector<ExprPtr> pending{declared};
+    while (!pending.empty()) {
+      auto term = pending.back();
+      pending.pop_back();
+      if (!declared_terms.insert(term.get()).second) continue;
+      if (auto minimum = As<Min>(term)) {
+        pending.push_back(minimum->left_);
+        pending.push_back(minimum->right_);
+      }
+    }
+  }
+  // Cache both declared decompositions and written subproofs across outputs.
+  // Otherwise R returns sharing an E-node extent would revisit that same DAG
+  // R times. Iterative postorder also avoids recursion on deep min chains.
+  auto& covered = extent->second.proofs_by_capacity[capacity.get()];
+  std::vector<ExprPtr> pending{written};
+  while (!pending.empty()) {
+    auto term = pending.back();
+    pending.pop_back();
+    if (covered.count(term.get()) != 0) continue;
+    if (declared_terms.count(term.get()) != 0) {
+      covered.emplace(term.get(), true);
+    } else if (auto minimum = As<Min>(term)) {
+      auto left = covered.find(minimum->left_.get());
+      auto right = covered.find(minimum->right_.get());
+      if (left != covered.end() && right != covered.end()) {
+        covered.emplace(term.get(), left->second && right->second);
+      } else {
+        pending.push_back(term);
+        if (right == covered.end()) pending.push_back(minimum->right_);
+        if (left == covered.end()) pending.push_back(minimum->left_);
+      }
+    } else {
+      covered.emplace(term.get(),
+                      analyzer.CanProve(MakeLe(capacity, term)) || analyzer.CanProve(MakeLe(declared, term)));
+    }
+  }
+  return covered.at(written.get());
+}
+
 struct ReturnOutputBinding {
   size_t return_index;
   TypePtr original_type;
@@ -1880,6 +2006,10 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   TensorConversionAnalysis tile_values(conv_registry);
   tile_values.VisitStmt(canonical_body);
   tile_values.Propagate();
+  std::unordered_set<size_t> comparison_returns;
+  for (const auto& output : outputs) {
+    if (tile_values.DependsOnComparison(output.value)) comparison_returns.insert(output.return_index);
+  }
 
   TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, tile_values, cache_policies);
 
@@ -1956,20 +2086,47 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
     const auto& ret_span = return_stmt->span_;
+    // Original and rewritten IR retain all extent nodes during this function.
+    // Pointer-keyed proof caches are valid for this conversion only; the
+    // analyzer receives no additional variable bounds between output checks.
+    ComparisonCoverageCache comparison_coverage_cache;
+    arith::Analyzer comparison_coverage_analyzer;
     for (const auto& binding : outputs) {
       auto ret_expr = binding.value;
       if (auto tile_type = As<TileType>(ret_expr->GetType())) {
-        const Expr* identity =
-            binding.storage_index ? storage_roots[*binding.storage_index].get() : ret_expr.get();
+        auto orig_tensor_type = As<TensorType>(binding.original_type);
+        INTERNAL_CHECK_SPAN(orig_tensor_type, func->span_)
+            << "Internal error: return type " << binding.return_index << " should be TensorType but got "
+            << binding.original_type->TypeName();
+        // A generated comparison Out owns fresh storage. Its declared region must
+        // be written by this store, even when a return annotation is wider
+        // than the region inferred for the returned computation.
+        if (comparison_returns.count(binding.return_index) != 0) {
+          const auto output_valid = GetValidShape(orig_tensor_type);
+          const auto stored_valid = GetValidShape(tile_type);
+          CHECK_SPAN(output_valid.size() == stored_valid.size(), ret_span)
+              << "returned tile valid rank must match the declared output";
+          for (size_t axis = 0; axis < output_valid.size(); ++axis) {
+            CHECK_SPAN(ProveComparisonOutputCoverage(output_valid[axis], orig_tensor_type->shape_[axis],
+                                                     stored_valid[axis], comparison_coverage_analyzer,
+                                                     comparison_coverage_cache),
+                       ret_span)
+                << "returned tile valid region " << FormatShape(stored_valid)
+                << " does not cover declared output valid region " << FormatShape(output_valid)
+                << "; annotate the return with its actual valid_shape";
+          }
+        }
+        // Every return binding has its own annotation, including aliases that
+        // share one store. Validate above before reusing the stored output.
+        const Expr* identity = ret_expr.get();
+        if (const auto storage_index = binding.storage_index; storage_index.has_value()) {
+          identity = storage_roots[storage_index.value()].get();
+        }
         if (auto stored = stored_values.find(identity); stored != stored_values.end()) {
           new_return_types.push_back(stored->second->GetType());
           new_return_exprs.push_back(stored->second);
           continue;
         }
-        auto orig_tensor_type = As<TensorType>(binding.original_type);
-        INTERNAL_CHECK_SPAN(orig_tensor_type, func->span_)
-            << "Internal error: return type " << binding.return_index << " should be TensorType but got "
-            << binding.original_type->TypeName();
         auto out_param = add_output(orig_tensor_type);
         ExprPtr stored;
         if (auto rewrite = RewriteReturnedAssembleLoopToStore(new_stmts, ret_expr, out_param,

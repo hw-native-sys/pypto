@@ -345,6 +345,21 @@ bool IsProvablyEmptyExtent(const ExprPtr& extent) {
   const auto zero = std::make_shared<ConstInt>(0, scalar_type->dtype_, Span::unknown());
   return ProveValidExtentEqual(extent, zero) == ProofResult::kTrue;
 }
+// Whether two extents are provably the same. Constants decide by value first:
+// ProveValidExtentEqual only compares extents of matching signedness, so a
+// UINT64 valid extent (what tile.set_validshape emits) against an INDEX
+// physical extent comes back kUnknown even when both are the same literal.
+// Reading a full axis as partial rejects valid broadcasts and exact reshapes;
+// symbolic proofs retain their signedness requirements.
+bool ExtentsProvablyEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  const auto lhs_const = GetConstantDimension(lhs);
+  const auto rhs_const = GetConstantDimension(rhs);
+  if (lhs_const.has_value() && rhs_const.has_value()) {
+    return *lhs_const == *rhs_const;
+  }
+  return ProveValidExtentEqual(lhs, rhs) == ProofResult::kTrue;
+}
+
 }  // namespace
 
 ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
@@ -363,6 +378,40 @@ ProofResult ProveValidExtentEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
     return ProofResult::kFalse;
   }
   return ProofResult::kUnknown;
+}
+
+BroadcastResult InferComparisonValidShape(const std::vector<ExprPtr>& lhs_shape,
+                                          const std::vector<ExprPtr>& lhs_valid,
+                                          const std::vector<ExprPtr>& rhs_shape,
+                                          const std::vector<ExprPtr>& rhs_valid) {
+  auto result = BroadcastShapes(lhs_shape, rhs_shape);
+  if (!result.success) return result;
+  INTERNAL_CHECK(lhs_valid.size() == lhs_shape.size() && rhs_valid.size() == rhs_shape.size())
+      << "Internal error: comparison valid_shape rank must match its operand shape";
+  const auto rank = result.shape.size();
+  for (size_t axis = 0; axis < rank; ++axis) {
+    ExprPtr valid;
+    auto intersect = [&](const std::vector<ExprPtr>& shape, const std::vector<ExprPtr>& region) {
+      if (axis + shape.size() < rank) return true;  // Implicit leading singleton.
+      const auto i = axis + shape.size() - rank;
+      if (IsConstValue(shape[i], 1) && !DimensionsEqual(shape[i], result.shape[axis])) {
+        return ExtentsProvablyEqual(region[i], shape[i]);
+      }
+      // A fully valid operand imposes no extra bound on the other operand's
+      // tail. Keep its exact symbol rather than inventing min(symbol, capacity).
+      if (!valid || ExtentsProvablyEqual(valid, result.shape[axis])) {
+        valid = region[i];
+      } else if (!ExtentsProvablyEqual(region[i], shape[i])) {
+        valid = GeneralAnalyzer().Simplify(MakeMin(valid, region[i]));
+      }
+      return true;
+    };
+    if (!intersect(lhs_shape, lhs_valid) || !intersect(rhs_shape, rhs_valid)) {
+      return BroadcastResult::Failure("comparison broadcasting requires a fully valid singleton axis");
+    }
+    if (valid) result.shape[axis] = valid;
+  }
+  return result;
 }
 
 bool BroadcastValidRegionsAgree(const TileType& lhs, const TileType& rhs) {
@@ -875,21 +924,6 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
 }
 
 namespace {
-
-// Whether two extents are provably the same. Constants decide by value first:
-// ProveValidExtentEqual only compares extents of matching signedness, so a
-// UINT64 valid extent (what tile.set_validshape emits) against an INDEX
-// physical extent comes back kUnknown even when both are the same literal.
-// Reading a full axis as partial that way rejects reshapes that map exactly --
-// the same signedness caveat IsProvablyEmptyExtent documents above.
-bool ExtentsProvablyEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
-  const auto lhs_const = GetConstantDimension(lhs);
-  const auto rhs_const = GetConstantDimension(rhs);
-  if (lhs_const.has_value() && rhs_const.has_value()) {
-    return *lhs_const == *rhs_const;
-  }
-  return ProveValidExtentEqual(lhs, rhs) == ProofResult::kTrue;
-}
 
 // Align the input and target axes of a reshape that only inserts or erases
 // provably-full physical unit axes, returning the mapped valid shape.

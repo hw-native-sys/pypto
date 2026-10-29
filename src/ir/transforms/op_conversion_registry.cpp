@@ -2673,6 +2673,7 @@ void OpConversionRegistry::RegisterCmpOps() {
 
     std::string tile_cmp_op;
     std::vector<ExprPtr> result_shape;
+    auto result_valid = GetValidShape(lhs_tile);
     DataType result_dtype = lhs_tile->dtype_;
     if (auto rhs_tile = As<TileType>(args[1]->GetType())) {
       tile_cmp_op = "tile.cmp";
@@ -2681,6 +2682,10 @@ void OpConversionRegistry::RegisterCmpOps() {
           << "tensor.cmp conversion: incompatible shapes " << FormatShape(lhs_tile->shape_) << " and "
           << FormatShape(rhs_tile->shape_);
       result_shape = broadcast_result.shape;
+      auto valid = InferComparisonValidShape(lhs_tile->shape_, result_valid, rhs_tile->shape_,
+                                             GetValidShape(rhs_tile));
+      INTERNAL_CHECK_SPAN(valid.success, span) << "tensor.cmp conversion: " << valid.error_message;
+      result_valid = std::move(valid.shape);
       auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_tile->dtype_);
       INTERNAL_CHECK_SPAN(promoted, span)
           << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString() << " and "
@@ -2701,7 +2706,83 @@ void OpConversionRegistry::RegisterCmpOps() {
 
     std::vector<StmtPtr> prologue;
 
-    auto mask_call = op_reg.Create(tile_cmp_op, args, kwargs, span);
+    auto emit = [&](const std::string& op, const std::vector<ExprPtr>& operands,
+                    const std::vector<std::pair<std::string, std::any>>& kw,
+                    const std::string& name) -> VarPtr {
+      auto call = op_reg.Create(op, operands, kw, span);
+      auto var = std::make_shared<Var>(name, call->GetType(), span);
+      prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+      return var;
+    };
+    auto with_valid = [&](const VarPtr& var, const std::vector<ExprPtr>& valid) -> VarPtr {
+      auto type = As<TileType>(var->GetType());
+      if (ValidExtentsEqual(GetValidShape(type), valid)) return var;
+      CHECK_SPAN(valid.size() == 2, span)
+          << "tensor.cmp conversion currently requires rank 2 for partial valid regions";
+      return emit("tile.set_validshape", {var, valid[0], valid[1]}, {}, var->name_hint_ + "_valid");
+    };
+    std::vector<ExprPtr> cmp_args = args;
+    if (auto rhs_tile = As<TileType>(args[1]->GetType())) {
+      // TCMP reads two equally shaped flat element streams; its type deducer
+      // accepting broadcasting does not make the native instruction broadcast.
+      // Expand singleton rows/columns explicitly before creating the mask.
+      for (size_t i = 0; i < cmp_args.size(); ++i) {
+        auto source = As<TileType>(cmp_args[i]->GetType());
+        if (PhysicalShapesEqual(source->shape_, result_shape)) continue;
+        CHECK_SPAN(source->shape_.size() == 2 && result_shape.size() == 2, span)
+            << "tensor.cmp conversion currently requires rank 2 for broadcasting";
+        const auto name = "cmp_broadcast_" + std::to_string(i);
+        ExprPtr expanded = cmp_args[i];
+        // A vector generator gives AUTO split a lane-local target. tile.create
+        // is SHARED, so narrowing its full-width result inside the vector phase
+        // would leave both lanes reading an unpartitioned allocation.
+        auto make_target = [&](const std::vector<ExprPtr>& shape, const std::string& suffix) {
+          ExprPtr zero = source->dtype_.IsFloat()
+                             ? ExprPtr(std::make_shared<ConstFloat>(0.0, source->dtype_, span))
+                             : ExprPtr(std::make_shared<ConstInt>(0, source->dtype_, span));
+          return emit("tile.full", {MakeShapeTuple(shape, span), zero}, {{"dtype", source->dtype_}},
+                      name + suffix);
+        };
+        if (!DimensionsEqual(source->shape_[1], result_shape[1])) {
+          const auto source_valid = GetValidShape(source);
+          if (DimensionsEqual(source->shape_[0], result_shape[0]) &&
+              ProveValidExtentEqual(source_valid[0], result_valid[0]) != ProofResult::kTrue) {
+            expanded = emit("tile.set_validshape", {expanded, result_valid[0], source_valid[1]}, {},
+                            name + "_source_rows_valid");
+          }
+          auto shape = std::vector<ExprPtr>{source->shape_[0], result_shape[1]};
+          auto valid =
+              std::vector<ExprPtr>{GetValidShape(As<TileType>(expanded->GetType()))[0], result_valid[1]};
+          auto target = make_target(shape, "_cols");
+          target = with_valid(target, valid);
+          expanded = emit("tile.row_expand", {target, expanded}, {}, name + "_row");
+        }
+        if (!DimensionsEqual(source->shape_[0], result_shape[0])) {
+          // Column expansion reads matching column prefixes from its source
+          // and target. Narrow before the op so AUTO split sees a consistent
+          // pointwise-validity contract, rather than repairing only its result.
+          const auto source_valid = GetValidShape(As<TileType>(expanded->GetType()));
+          if (ProveValidExtentEqual(source_valid[1], result_valid[1]) != ProofResult::kTrue) {
+            expanded = emit("tile.set_validshape", {expanded, source_valid[0], result_valid[1]}, {},
+                            name + "_source_valid");
+          }
+          auto target = make_target(result_shape, "_rows");
+          target = with_valid(target, result_valid);
+          expanded = emit("tile.col_expand", {target, expanded}, {}, name + "_col");
+        }
+        cmp_args[i] = expanded;
+      }
+      for (size_t i = 0; i < cmp_args.size(); ++i) {
+        auto type = As<TileType>(cmp_args[i]->GetType());
+        if (ValidExtentsEqual(GetValidShape(type), result_valid)) continue;
+        CHECK_SPAN(result_valid.size() == 2, span)
+            << "tensor.cmp conversion currently requires rank 2 for partial valid regions";
+        cmp_args[i] = emit("tile.set_validshape", {cmp_args[i], result_valid[0], result_valid[1]}, {},
+                           "cmp_operand_" + std::to_string(i) + "_valid");
+      }
+    }
+
+    auto mask_call = op_reg.Create(tile_cmp_op, cmp_args, kwargs, span);
     auto mask_var = std::make_shared<Var>("cmp_mask", mask_call->GetType(), span);
     prologue.push_back(std::make_shared<AssignStmt>(mask_var, mask_call, span));
 
@@ -2714,22 +2795,10 @@ void OpConversionRegistry::RegisterCmpOps() {
       auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
       auto var = std::make_shared<Var>(name, call->GetType(), span);
       prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
-      // The packed predicate inherits the lhs valid region. Full 0/1 tiles
+      // The packed predicate covers the comparison's valid region. Full 0/1 tiles
       // would ask TSEL to read mask bits outside that region on a tail tile.
       // Keep the logical element extents here, not the mask's packed byte width.
-      // set_validshape is 2D-only. Do not turn an expanded lhs broadcast
-      // into a partial result; that path still needs broadcast-aware masks.
-      const auto valid_shape = GetValidShape(lhs_tile);
-      if (result_shape.size() == 2 && ValidExtentsEqual(lhs_tile->shape_, result_shape) &&
-          !ValidExtentsEqual(valid_shape, result_shape)) {
-        std::vector<ExprPtr> valid_args = {var};
-        valid_args.insert(valid_args.end(), valid_shape.begin(), valid_shape.end());
-        auto valid_call = op_reg.Create("tile.set_validshape", valid_args, span);
-        auto valid_var = std::make_shared<Var>(name + "_valid", valid_call->GetType(), span);
-        prologue.push_back(std::make_shared<AssignStmt>(valid_var, valid_call, span));
-        return valid_var;
-      }
-      return var;
+      return with_valid(var, result_valid);
     };
     auto one_var = make_full(1.0, "cmp_one");
     auto zero_var = make_full(0.0, "cmp_zero");

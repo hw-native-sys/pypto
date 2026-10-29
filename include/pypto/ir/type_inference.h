@@ -950,6 +950,15 @@ inline bool ValidExtentsEqual(const std::vector<ExprPtr>& lhs, const std::vector
  */
 bool BroadcastValidRegionsAgree(const TileType& lhs, const TileType& rhs);
 
+/// Infer a comparison's element-indexed valid region in broadcast coordinates.
+/// Broadcast singleton axes must contain their element; other axes intersect the operands'
+/// valid prefixes. Tensor inference and comparison lowering share this rule so
+/// packed predicate byte counts never become numeric result element extents.
+BroadcastResult InferComparisonValidShape(const std::vector<ExprPtr>& lhs_shape,
+                                          const std::vector<ExprPtr>& lhs_valid,
+                                          const std::vector<ExprPtr>& rhs_shape,
+                                          const std::vector<ExprPtr>& rhs_valid);
+
 /**
  * @brief Whether `cond_type` is the packed predicate mask for a `mask_model`.
  *

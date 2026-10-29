@@ -50,9 +50,33 @@ existing lowering path and dedup identity guards.
 **When to use**: Run after `OutlineClusterScopes` and before `OptimizeOrchTensors`.
 
 `tensor.cmp` materializes its numeric 0/1 result with a packed predicate and
-`tile.sel`. For 2D comparisons whose lhs already has the result shape, the generated
-one/zero tiles use the lhs logical valid shape before selection, preserving partial or dynamic rows and columns without treating the
-predicate's packed byte width as an element count.
+`tile.sel`. Tensor inference and lowering use the same logical valid region:
+scalar comparisons preserve the lhs region, including distributed windows;
+tensor comparisons map each operand
+into broadcast coordinates and intersect their valid prefixes. Generated one/zero
+tiles retain these element extents, including dynamic rows and non-byte-aligned
+columns. Packed predicate widths count bytes, not numeric result elements.
+
+For 2D broadcasting, `tile.row_expand` and `tile.col_expand` materialize singleton
+axes before `tile.cmp`, whose native instruction reads matching flat operands.
+Expansion sources are narrowed along shared axes before broadcasting, and vector
+generators provide targets that AUTO split can partition per lane.
+Broadcast singleton elements must be valid. Constant valid extents are compared
+by value even when their integer dtype differs from the physical extent (for
+example, `UINT64(1)` versus `INDEX(1)`); symbolic proofs retain their signedness
+requirements. Partial-region and broadcast lowering
+currently require rank 2. Unannotated returns retain the inferred valid region;
+an explicit return annotation must describe a region covered by the computed
+tile, including a value projected from a tuple yielded by a branch or loop and
+then wrapped in inline, aliased, or nested tuples. Output-store lowering rejects
+an annotation that would advertise unwritten
+elements. Inline tuple yields and loop initializers retain this provenance.
+Every return binding is checked before sharing a store with an earlier alias.
+Coverage proofs use the allocation bound of the whole declared valid
+extent, including compound expressions, without imposing bounds on its scalar
+subexpressions. Declared-extent decompositions and written-region subproofs are
+cached across outputs within one function conversion, with allocation capacities
+kept in separate proof contexts.
 
 `tensor.col_sum` uses the single-operand sequential tile form by default.
 With `is_binary=True`, the converter creates Vec scratch of shape `[ceil(M/2), N]` for static 2D inputs
