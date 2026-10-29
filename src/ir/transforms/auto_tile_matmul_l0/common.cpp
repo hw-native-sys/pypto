@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -16,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -100,10 +102,60 @@ uint32_t DTypeBytes(const DataType& dt) {
 void SiblingUseCounter::VisitVarLike_(const VarPtr& op) {
   vars.emplace(op.get(), op);
   ++counts[op.get()];
-  if (in_matmul_operand_) ++matmul_operand_uses[op.get()];
+  if (in_metadata_) metadata_reads_[op.get()].push_back(metadata_position_++);
+  if (in_matmul_operand_ && !in_metadata_) ++matmul_operand_uses[op.get()];
 }
 
-void SiblingUseCounter::VisitStmt_(const AssignStmtPtr& op) { VisitExpr(op->value_); }
+int SiblingUseCounter::MetadataReadsOwnedBy(const Var* value, const Var* owner) const {
+  const auto range = metadata_ranges_.find(owner);
+  const auto reads = metadata_reads_.find(value);
+  if (range == metadata_ranges_.end() || reads == metadata_reads_.end()) return 0;
+  const auto& points = reads->second;
+  const auto begin = std::lower_bound(points.begin(), points.end(), range->second.first);
+  const auto end = std::lower_bound(begin, points.end(), range->second.second);
+  return static_cast<int>(end - begin);
+}
+
+void SiblingUseCounter::VisitStmt_(const AssignStmtPtr& op) {
+  const size_t begin = metadata_position_;
+  VisitExpr(op->value_);
+  if (begin != metadata_position_) {
+    metadata_ranges_.emplace(op->var_.get(), std::make_pair(begin, metadata_position_));
+  }
+}
+
+void SiblingUseCounter::VisitExpr_(const IterArgPtr& op) { VisitVarLike_(op); }
+
+void SiblingUseCounter::VisitStmt_(const IfStmtPtr& op) {
+  VisitExpr(op->condition_);
+  VisitStmt(op->then_body_);
+  if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+}
+
+void SiblingUseCounter::VisitStmt_(const ForStmtPtr& op) {
+  VisitExpr(op->start_);
+  VisitExpr(op->stop_);
+  VisitExpr(op->step_);
+  for (const auto& iter_arg : op->iter_args_) VisitExpr(iter_arg->initValue_);
+  for (const auto& [key, value] : op->attrs_) {
+    ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+  }
+  // Only body metadata is rebuilt by the canonical retiled clone. Header
+  // references remain ordinary external uses and must not be discounted.
+  const size_t begin = metadata_position_;
+  VisitStmt(op->body_);
+  if (begin != metadata_position_) {
+    for (const auto& result : op->return_vars_) {
+      metadata_ranges_.emplace(result.get(), std::make_pair(begin, metadata_position_));
+    }
+  }
+}
+
+void SiblingUseCounter::VisitStmt_(const WhileStmtPtr& op) {
+  for (const auto& iter_arg : op->iter_args_) VisitExpr(iter_arg->initValue_);
+  VisitExpr(op->condition_);
+  VisitStmt(op->body_);
+}
 
 void SiblingUseCounter::VisitExpr_(const CallPtr& op) {
   const bool is_mm = IsOp(op, "tile.matmul");
@@ -116,6 +168,16 @@ void SiblingUseCounter::VisitExpr_(const CallPtr& op) {
     VisitExpr(op->args_[i]);
     in_matmul_operand_ = prev;
   }
+  const bool previous_metadata = in_metadata_;
+  in_metadata_ = true;
+  for (const auto& [key, value] : op->attrs_) {
+    ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+  }
+  // Value-typed keyword metadata is a real read, not a matrix operand.
+  for (const auto& [key, value] : op->kwargs_) {
+    ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+  }
+  in_metadata_ = previous_metadata;
 }
 
 }  // namespace auto_tile_matmul_l0

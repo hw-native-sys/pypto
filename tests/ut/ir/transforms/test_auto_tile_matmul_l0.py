@@ -4420,5 +4420,158 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
     ir.assert_structural_equal(After, Expected)
 
 
+@pytest.mark.parametrize("capture_is_operand", [False, True])
+def test_function_use_index_counts_nested_captures(capture_is_operand):
+    """A cast may fold only when every capture uses it as a matrix operand."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    then_body = (
+        "            product = pl.tile.matmul(cb, bt)\n            updated = pl.store(product, [0, 0], out)\n"
+        if capture_is_operand
+        else "            updated = pl.store(cb, [0, 0], out)\n"
+    )
+    columns = 16 if capture_is_operand else 32
+    source = f"""@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.BF16],
+               b: pl.Tensor[[32, 32], pl.BF16],
+               other: pl.Tensor[[32, 16], pl.BF16],
+               flag: pl.Scalar[pl.INT32],
+               out: pl.Out[pl.Tensor[[16, {columns}], pl.BF16]]) -> pl.Tensor[[16, {columns}], pl.BF16]:
+        at = pl.load(a, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        bt0 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        bt = pl.load(other, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul(at, bt0)
+        cb = pl.cast(c, pl.BF16, mode="rint")
+        if flag > 0:
+{then_body}            result = pl.yield_(updated)
+        else:
+            result = pl.yield_(out)
+        return result
+"""
+    before = passes.convert_to_ssa()(pl.parse_program(source))
+    after = passes.auto_tile_matmul_l0()(before)
+    _assert_ssa_valid(after, "nested_capture_use_index")
+
+    class Calls(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.names = []
+
+        def visit_call(self, op):
+            self.names.append(op.op.name)
+            super().visit_call(op)
+
+    calls = Calls()
+    calls.visit_program(after)
+    assert (ir.get_op("tile.cast").name not in calls.names) == capture_is_operand
+    assert (ir.get_op("tile.assemble").name in calls.names) == capture_is_operand
+
+
+def _nested_scalar_carry_program(depth):
+    """Build linear-size IR whose IterArgs refer to the enclosing carry."""
+    span = ir.Span.unknown()
+    scalar = ir.ScalarType(pl.INDEX)
+    seed = ir.Var("seed", scalar, span)
+    carries = []
+    results = []
+    for i in range(depth):
+        carries.append(ir.IterArg(f"carry_{i}", scalar, seed if i == 0 else carries[-1], span))
+        results.append(ir.Var(f"result_{i}", scalar, span))
+    body: ir.Stmt = ir.YieldStmt([carries[-1]], span)
+    for i in reversed(range(depth)):
+        loop = ir.ForStmt(
+            ir.Var(f"i_{i}", scalar, span),
+            ir.ConstInt(0, pl.INDEX, span),
+            ir.ConstInt(4, pl.INDEX, span),
+            ir.ConstInt(1, pl.INDEX, span),
+            [carries[i]],
+            body,
+            [results[i]],
+            span,
+        )
+        tail = ir.YieldStmt([results[i]], span) if i else ir.ReturnStmt([], span)
+        body = ir.SeqStmts([loop, tail], span)
+    function = ir.Function("kernel", [seed], [], body, span, type=ir.FunctionType.InCore)
+    return ir.Program([function], "NestedCarry", span)
+
+
+@pytest.mark.parametrize("depth", [1, 2, 4])
+def test_function_use_index_does_not_rewrite_scalar_carry_chains(depth):
+    before = _nested_scalar_carry_program(depth)
+    _assert_ssa_valid(before, "nested_carry_before")
+    after = passes.auto_tile_matmul_l0()(before)
+    after_fn = after.get_function("kernel")
+    before_fn = before.get_function("kernel")
+    assert after_fn is not None and before_fn is not None
+    assert after_fn.same_as(before_fn)
+    _assert_ssa_valid(after, "nested_carry_after")
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("capture_kind", ["var", "tuple"])
+@pytest.mark.parametrize("capture_surface", ["kwargs", "attrs"])
+def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, capture_surface):
+    """A retained keyword edge forbids deleting a matmul's whole result."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[256, 64], pl.BF16],
+            b: pl.Tensor[[64, 256], pl.BF16],
+            other: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            out_other: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[256, 256], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            at = pl.load(a, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(at, bt)
+            kept = pl.load(other, [0, 0], [16, 16])
+            retained = pl.store(kept, [0, 0], out_other)
+            result = pl.store(c, [0, 0], out)
+            return result, retained
+
+    class AddKeywordEdge(ir.IRMutator):
+        def __init__(self):
+            super().__init__()
+            self.producer = None
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.matmul").name:
+                self.producer = op.var
+            if op.var.name_hint.startswith("kept__"):
+                assert self.producer is not None and isinstance(op.value, ir.Call)
+                # Call permits value-typed keyword metadata. Both a direct Var
+                # and an Expr tree containing it are real def-use edges, even
+                # though this compile-only test does not lower this metadata.
+                value = self.producer if capture_kind == "var" else ir.MakeTuple([self.producer], op.span)
+                kwargs = dict(op.value.kwargs)
+                attrs = dict(op.value.attrs)
+                metadata = kwargs if capture_surface == "kwargs" else attrs
+                metadata["retained_value"] = value
+                call = ir.Call(op.value.op, op.value.args, kwargs, attrs, op.value.type, op.value.span)
+                return ir.AssignStmt(op.var, call, op.span)
+            return op
+
+    before = AddKeywordEdge().visit_program(passes.convert_to_ssa()(Before))
+    properties = passes.IRPropertySet()
+    for prop in (passes.IRProperty.SSAForm, passes.IRProperty.UseAfterDef, passes.IRProperty.TypeChecked):
+        properties.insert(prop)
+    passes.verify_properties(properties, before, "keyword edge before AutoTile")
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    # With two consumers there is no supported whole-result M/N placement.
+    # Leaving the definition intact also preserves the keyword's SSA edge.
+    ir.assert_structural_equal(after, before)
+    passes.verify_properties(properties, after, "keyword edge after AutoTile")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

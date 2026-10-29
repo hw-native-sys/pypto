@@ -171,6 +171,8 @@ propagation, and definition-site versus consumer-site copy timing in that pass.
 
 ## Cost model & design space (`ChooseL0Tile`)
 
+Result-use classification counts all reads once per function after canonical split-K rewriting, including captures in nested regions and value references in call attributes and keyword arguments. Keyword references count as reads, never as positional matrix operands. Each region then indexes only its direct stores and casts against that immutable census. This avoids rescanning every descendant at every enclosing `SeqStmts`; read indexing is linear in IR size, independent of nesting depth. Metadata remains a use unless the rewrite remaps its owning region: direct-store metadata follows the replacement source, and seed references inside a cloned canonical loop follow the new initializer. Ownership ranges are indexed by stable SSA definition Vars and queried with binary search, so eligibility analysis stays within O(N log N) without rescanning nested bodies.
+
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:
 
 - `wall ≈ max(C_load, C_mad) + C_drain` when the FIXPIPE L0C→L1 drain is exposed (single L0C), or

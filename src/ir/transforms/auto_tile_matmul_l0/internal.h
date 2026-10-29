@@ -12,11 +12,13 @@
 #ifndef SRC_IR_TRANSFORMS_AUTO_TILE_MATMUL_L0_INTERNAL_H_
 #define SRC_IR_TRANSFORMS_AUTO_TILE_MATMUL_L0_INTERNAL_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -103,10 +105,12 @@ struct MatmulTiling {
 };
 
 /// Counts reads (uses) of every Var/IterArg across a statement list, excluding
-/// AssignStmt LHS defs.  Built once per SeqStmts (see ``BuildSiblingIndex``) so
+/// AssignStmt LHS defs. Built once per function for ordinary M/N rewriting so
 /// the M/N foldability check — "is the matmul result used exactly once?" — is
-/// an O(1) lookup, keeping the pass O(N) overall rather than rescanning the
-/// siblings for every oversized matmul (.claude/rules/pass-complexity.md).
+/// an O(1) read-count lookup without rescanning siblings for every oversized
+/// matmul (.claude/rules/pass-complexity.md).
+/// Metadata ownership queries use indexed intervals, keeping analysis O(N log N).
+/// Pipeline planning also uses it for flat candidate bodies without child regions.
 /// ``VisitVarLike_`` covers both Var and IterArg (.claude/rules/ir-kind-traits.md).
 class SiblingUseCounter : public IRVisitor {
  public:
@@ -114,10 +118,21 @@ class SiblingUseCounter : public IRVisitor {
   std::unordered_map<const Var*, int> matmul_operand_uses;  ///< reads at a matmul-operand position
   std::unordered_map<const Var*, VarPtr> vars;              ///< owning pointers for type inspection
 
+  /// Metadata reads in an assignment RHS or a ForStmt body defining `owner`.
+  /// These remain real reads in `counts`. A caller may discount them only
+  /// when its rewrite remaps that exact region's metadata. Definition Vars
+  /// survive earlier SSA substitutions, unlike Call/ForStmt node addresses.
+  [[nodiscard]] int MetadataReadsOwnedBy(const Var* value, const Var* owner) const;
+
  protected:
   void VisitVarLike_(const VarPtr& op) override;
+  // Count direct SSA edges, not an IterArg's initializer on every body read.
+  void VisitExpr_(const IterArgPtr& op) override;
   // Skip the LHS (a def); count only reads in the RHS value.
   void VisitStmt_(const AssignStmtPtr& op) override;
+  void VisitStmt_(const IfStmtPtr& op) override;
+  void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const WhileStmtPtr& op) override;
   // A *direct* Var at a matrix-operand position (``tile.matmul`` /
   // ``tile.matmul_bias`` args {0,1}; ``tile.matmul_acc`` args {1,2} — arg 0 is
   // the Acc accumulator, NOT a matrix operand) is a Mat-safe consumer use: the
@@ -129,6 +144,10 @@ class SiblingUseCounter : public IRVisitor {
 
  private:
   bool in_matmul_operand_ = false;
+  bool in_metadata_ = false;
+  size_t metadata_position_ = 0;
+  std::unordered_map<const Var*, std::vector<size_t>> metadata_reads_;
+  std::unordered_map<const Var*, std::pair<size_t, size_t>> metadata_ranges_;
 };
 
 // Shared static-shape checks; these do not mutate IR or query pass configuration.
