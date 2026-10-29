@@ -1032,7 +1032,8 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   reg("tile.fillpad_inplace", [](const CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CheckArity(op, "pto.tfillpad", 1);
-    if (!codegen.EmitTileAddr()) {
+    const std::string src = codegen.GetExprAsCode(op->args_[0]);
+    if (!codegen.EmitTileAddr() || codegen.IsSelectedTileName(src)) {
       const auto& result_var = codegen.GetCurrentResultVar();
       INTERNAL_CHECK_SPAN(result_var, op->span_)
           << "Internal error: tile.fillpad_inplace requires a result variable";
@@ -1043,7 +1044,6 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       // valid. Preserve that distinction even when both use the same pad mode.
       // Local allocations support later validity updates; subviews and loop-
       // carried values keep their existing static-valid view lowering.
-      const std::string src = codegen.GetExprAsCode(op->args_[0]);
       std::optional<MutableTileViewShape> valid_shape;
       if (codegen.IsMutableTileName(src)) {
         const auto dims =

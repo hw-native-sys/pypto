@@ -28,53 +28,6 @@ MemRefs) and before the selected memory planner. It always runs. `PYPTO` follows
 it with [`MemoryReuse`](37-memory_reuse.md); `DSA_RP` consumes its allocation
 identities in [`AllocateMemoryAddr`](38-allocate_memory_addr.md).
 
-## Logical Tile selections
-
-On the Tile path, two compatible compiler-owned values selected by an If can use
-one allocation with disjoint slots. Both yields and the result carry a scalar
-slot index; `tile.create` reconstructs the selected descriptor without copying
-payloads. This also applies when a same-space move would be hardware-legal.
-An If exit barrier completes asynchronous producers before the selected view is used.
-The lowering retains full implicit descriptors in Vec/Mat/Acc and leaves explicit,
-borrowed, writeback, loop-touched and Buffer IR storage on their existing paths.
-All planners use the existing multi-buffer representation for the two slots.
-Compiler-created pools retain their full allocation capacity and slot identities,
-and participate in lifetime reuse as whole allocations.
-
-### Conditional reset storage
-
-A Vec selection with one Tile result and two compatible producers can use one
-slot when the earlier producer dominates the If and the other producer executes
-inside one arm. The old payload must have no observation reachable at or after
-the replacement producer. For example:
-
-```python
-current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
-if flag != 0:
-    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
-    selected = reset
-else:
-    selected = current
-saved = pl.tile.store(selected, [0, 0], out)
-```
-
-Here `current`, `reset` and `selected` share one 65536-byte window. With another
-independently live 65536-byte tile, the total is 131072 bytes instead of 196608.
-Both arms yield slot zero, while the reconstructed descriptor has a constant
-offset, `slot_count=1` and no `slot_index`. Synchronization for shared-window
-accesses is handled by PTOAS with `--enable-insert-sync`; this optimization does
-not insert a barrier before the replacement producer.
-
-Reads through ordinary SSA renames count as observations of the old value, even
-if the rename is created after the If. Reading the selected result is different:
-it observes the value chosen on that path. A same-arm tail read or independent
-post-If read of `current` blocks coalescing. Loop-touched storage, multiple Tile
-selection results in one component, views, pinned/borrowed storage and pipeline
-membership retain the existing behavior. Operator no-alias rules, written
-workspaces and target hazards remain hard constraints. A failed proof leaves the
-ordinary selection lowering unchanged. Cached logical origins and the existing
-two-order read index keep this additional analysis O(N log N).
-
 ## API
 
 | C++ | Python | Level |
@@ -223,6 +176,41 @@ rewrites; it can repair existing type drift independently.
 
 ## Relationship to codegen
 
+### Native Tile results from `IfStmt`
+
+A Tile-valued `IfStmt` selects the Tile handle yielded by the executed arm.
+The arms retain their own storage; neither `MaterializeSemanticAliases` nor
+`MemoryReuse` inserts a `tile.move` to make their addresses equal. PTO codegen
+uses PTOAS's native region results:
+
+```mlir
+%selected = scf.if %cond -> (!T) {
+  scf.yield %a : !T
+} else {
+  scf.yield %b : !T
+}
+```
+
+This selects a descriptor, without copying Tile contents. There is no selection
+pool, slot index, fixed two-slot layout, or restriction to a particular memory
+space. Borrowed inputs, author-declared allocations, branch-local producers,
+and dynamic valid shapes use the same path. Yielded descriptors must have the
+same PTO type; descriptor-only views reconcile compatible valid-shape type
+representations without a data transfer.
+
+The lifetime analysis records both possible sources and follows aliases and
+views. A later use of `%selected` keeps both candidates alive through that use;
+after their last use, ordinary memory reuse applies to each allocation. The
+candidates are not unconditional aliases and must not be merged just because
+one of them represents the result's MemRef metadata.
+
+`SelectBufferIRFunctions` retains loop-free functions with Tile-valued If results
+on the Tile path, including when Buffer IR is enabled: Buffer lowering currently
+erases Tile region results and cannot represent this dynamic handle choice.
+This preserves native selection for branch-only kernels in the default pipeline.
+Kernels containing For/While retain their existing Buffer eligibility and carry
+lowering; changing their whole-kernel route would also change loop semantics.
+
 ### Staged Buffer IR pipeline
 
 `PassContext(enable_buffer_ir=True)` enables the storage-legalization portion of
@@ -298,19 +286,6 @@ physical address for ptoas `PlanMemory`. See
   behavior of the former single `MemoryReuse` pass.
 - `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
   may undo a must-alias relation established by this pass.
-- On the legacy `PTOAS` path, if both branches yield the same tile byte window
-  (allocation, offset, size, slot count, and slot index), and both yields and the
-  result have the same known memory space, the merged result retains that window
-  without a copy. Semantic aliases follow the repaired result while preserving
-  their type/view metadata. Registered views rebase their relative byte offset
-  onto the repaired source, preserving their own extent and inheriting its
-  pipeline slot identity;
-  subsequent whole-window writeback results follow that view. Reusing an existing
-  mixed-type codegen handle additionally requires matching its declared SSA type,
-  both yields' window and current binding, and scope dominance. If an earlier
-  merge selected a new dominating handle, later merges use that common yielded
-  binding even when the identity map still names a rejected sibling handle.
-  Distinct branch windows keep their existing handling.
 - Accumulator-phi normalization runs for every memory planner before lifetime
   planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
   reuse can introduce a fresh carry/phi mismatch.

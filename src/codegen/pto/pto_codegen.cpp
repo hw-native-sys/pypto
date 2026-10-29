@@ -165,19 +165,14 @@ std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
   return key.str();
 }
 
-// Base Ptrs of tile phis — an `IfStmt` / `ForStmt` / `WhileStmt` return var, or a
-// loop-carried iter_arg. Under the PTOAS planner those take a handle declared in
+// Base Ptrs of loop-carried tile iter_args and results. Under the PTOAS
+// planner those take a handle declared in
 // the function head (see pto_control_flow_codegen.cpp), which a per-use
 // `pto.multi_tile_get` cannot supply: a runtime slot index is not in scope there.
 // An allocation whose slots feed one is therefore rejected, not degraded.
 class TilePhiBaseCollector : public ir::IRVisitor {
  public:
   std::set<const ir::Var*> bases;
-
-  void VisitStmt_(const ir::IfStmtPtr& op) override {
-    Record(op->return_vars_);
-    ir::IRVisitor::VisitStmt_(op);
-  }
 
   void VisitStmt_(const ir::ForStmtPtr& op) override {
     Record(op->return_vars_);
@@ -1221,16 +1216,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         ssa_name = NewNamedTemp(tile_var->name_hint_);
         fs_.memref_identity_to_mlir[ident] = ssa_name;
       }
-      // Same bytes does not mean same tile_buf type: a [1, N] row-major op result
-      // and its [N, 1] col-major reshape view share base+offset+size. They still
-      // share one handle (differently-typed reads become `pto.treshape` views of
-      // it), but an MLIR SSA value has exactly one type, so callers that want to
-      // *re-type* the handle — the IfStmt phi head-declaration — must not touch a
-      // mixed-type identity. Record which identities are uniform.
-      auto [type_it, fresh] = fs_.memref_identity_type.emplace(ident, type_str);
-      if (!fresh && type_it->second != type_str) {
-        fs_.memref_identity_mixed_types.insert(ident);
-      }
     } else {
       ssa_name = NewNamedTemp(tile_var->name_hint_);
     }
@@ -2033,7 +2018,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     } else if (!IsMultiBufferMemorySpace(tile_type->memory_space_)) {
       candidate.blocker = "ptoas multi-buffer covers the Vec, Mat and Acc memory spaces only";
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
-      candidate.blocker = "one of its slots is carried out of an if or a loop as a phi";
+      candidate.blocker = "one of its slots is carried out of a loop as a phi";
     } else if (colive_collector.bases.count(memref->base_.get()) != 0 &&
                (!emit_tile_addr_ || !use_addressed_slots ||
                 canonical_collector.unsupported_bases.count(memref->base_.get()) != 0)) {
@@ -2283,7 +2268,6 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   if (IsTileViewName(tile_buf) || !fs_.emitted_tile_alloc_names.insert(tile_buf).second) {
     return;
   }
-  fs_.tile_alloc_scope[tile_buf] = fs_.tile_alloc_scope_stack.back();
 
   // A slot of a declared multi-slot allocation is taken from its region rather
   // than allocated: one `pto.alloc_multi_tile` backs all N, and this use selects
@@ -2314,19 +2298,9 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
 std::string PTOCodegen::GetIndent() const { return std::string(static_cast<size_t>(indent_level_) * 2, ' '); }
 
-void PTOCodegen::IncreaseIndent() {
-  indent_level_++;
-  const size_t scope = ++fs_.next_tile_alloc_scope;
-  fs_.tile_alloc_scope_stack.push_back(scope);
-  fs_.active_tile_alloc_scopes.insert(scope);
-}
+void PTOCodegen::IncreaseIndent() { indent_level_++; }
 
-void PTOCodegen::DecreaseIndent() {
-  INTERNAL_CHECK(fs_.tile_alloc_scope_stack.size() > 1) << "Internal error: unbalanced MLIR region exit";
-  fs_.active_tile_alloc_scopes.erase(fs_.tile_alloc_scope_stack.back());
-  fs_.tile_alloc_scope_stack.pop_back();
-  indent_level_--;
-}
+void PTOCodegen::DecreaseIndent() { indent_level_--; }
 
 std::string PTOCodegen::GetOrEmitConstant(int64_t value, DataType dt) {
   auto key = std::make_pair(value, dt.Code());
@@ -2428,71 +2402,7 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   // Head declarations are ordinary allocations too; branch producers may
   // reuse this handle without going through EmitAllocTileForVar again.
   RegisterMutableTileName(name);
-  fs_.tile_alloc_scope[name] = 0;
   return name;
-}
-
-std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir::TileType>& tile_type,
-                                                  const std::string& expected_type,
-                                                  const ir::VarPtr& then_value,
-                                                  const ir::VarPtr& else_value) const {
-  if (emit_tile_addr_ || !tile_type || !tile_type->memref_.has_value()) {
-    return "";
-  }
-  auto memref = ir::GetDefinedMemRef(tile_type);
-  const std::string ident = MemRefIdentityKey(memref);
-  auto it = fs_.memref_identity_to_mlir.find(ident);
-  if (it == fs_.memref_identity_to_mlir.end()) return "";
-  // A mixed-type identity must never re-type the shared SSA. Its declaration
-  // must dominate this if: function-wide emitted-name dedup also contains
-  // allocations from completed sibling branches/loops, which cannot be reused.
-  // Before declaration, the pre-populated type may come from another alias.
-  if (fs_.memref_identity_mixed_types.count(ident) != 0) {
-    const auto memory_space = tile_type->GetMemorySpace();
-    if (!memory_space.has_value()) return "";
-    // InitMemRef may inherit only the then arm's storage. That does not prove
-    // the else arm aliases it: reusing an independently live outer tile here
-    // would let a re-pointed else producer overwrite that outer value.
-    // A shared binding also cannot change address spaces across the merge.
-    std::string shared_handle;
-    for (const auto& value : {then_value, else_value}) {
-      if (!value) return "";
-      auto value_tile = As<ir::TileType>(value->GetType());
-      if (!value_tile || value_tile->GetMemorySpace() != memory_space || !value_tile->memref_.has_value() ||
-          MemRefIdentityKey(ir::GetDefinedMemRef(value_tile)) != ident) {
-        return "";
-      }
-      auto source = fs_.var_to_mlir.find(GetVarKey(value));
-      if (source == fs_.var_to_mlir.end()) return "";
-      if (shared_handle.empty()) {
-        shared_handle = source->second;
-      } else if (shared_handle != source->second) {
-        return "";
-      }
-    }
-    // A previous merge may have rejected the identity's canonical sibling
-    // allocation and bound its result to a new head handle. Follow the actual
-    // common yield binding; the identity map can still name that rejected handle.
-    auto scope = fs_.tile_alloc_scope.find(shared_handle);
-    if (scope == fs_.tile_alloc_scope.end() || fs_.active_tile_alloc_scopes.count(scope->second) == 0 ||
-        GetSSATileBufType(shared_handle) != expected_type) {
-      return "";
-    }
-    return shared_handle;
-  }
-  return it->second;
-}
-
-bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields) {
-  if (!fs_.emitted_tile_alloc_names.insert(ssa_name).second) {
-    return false;  // already declared — in the head, or inline earlier in the body
-  }
-  fs_.extra_alloc_tiles.push_back(FunctionState::ExtraAllocTile{ssa_name, fields.type_str, fields.addr_ssa,
-                                                                fields.valid_row_ssa, fields.valid_col_ssa});
-  RegisterTileBufType(ssa_name, fields.type_str, fields.tile_type);
-  RegisterMutableTileName(ssa_name);
-  fs_.tile_alloc_scope[ssa_name] = 0;
-  return true;
 }
 
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { fs_.current_result_buf = buf; }
@@ -2508,11 +2418,20 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
 }
 
+void PTOCodegen::RegisterSelectedTileName(const std::string& ssa_name) {
+  fs_.selected_tile_names.insert(ssa_name);
+}
+
+bool PTOCodegen::IsSelectedTileName(const std::string& ssa_name) const {
+  return fs_.selected_tile_names.count(ssa_name) > 0;
+}
+
 void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::string& reshape_source) {
   const auto source = fs_.tile_view_names.find(reshape_source);
   fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
                                       ? source->second
                                       : (reshape_source.empty() ? ssa_name : reshape_source);
+  if (IsSelectedTileName(reshape_source)) RegisterSelectedTileName(ssa_name);
 }
 
 bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
@@ -2758,8 +2677,25 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   if (TryEmitRegCall(call, op->var_)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
+  if (const auto source = AsVarLike(op->value_); source && As<TileType>(op->var_->GetType())) {
+    const std::string source_ssa = LookupVarName(source);
+    if (IsSelectedTileName(source_ssa)) {
+      // The MemRef on a phi is only a representative allocation. Even with
+      // explicit addresses, a bare alias must retain the runtime-selected SSA.
+      BindVarToMlir(op->var_, source_ssa);
+      return;
+    }
+  }
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
-  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
+  auto writeback_arg =
+      call ? ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size()) : std::nullopt;
+  if (call && !writeback_arg && IsInPlaceInput0DpsOp(call->op_) && !call->args_.empty()) {
+    writeback_arg = 0;
+  }
+  const size_t writeback_index = writeback_arg.value_or(0);
+  const bool selected_writeback = writeback_arg && As<TileType>(op->var_->GetType()) &&
+                                  IsSelectedTileName(GetExprAsCode(call->args_[writeback_index]));
+  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op) || selected_writeback;
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
   const auto multi_tile_alias = FindMultiTileInputAlias(op);
   if (multi_tile_alias) {
@@ -2800,7 +2736,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       std::shared_ptr<const TileType> result_tile_type;
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
         if (alias_result_to_in_place_input) {
-          result_buf = GetExprAsCode(call->args_[0]);
+          result_buf = GetExprAsCode(call->args_[selected_writeback ? writeback_index : 0]);
           INTERNAL_CHECK(!result_buf.empty())
               << "Internal error: " << call->op_->name_ << " result must alias the input tile SSA";
           BindVarToMlir(op->var_, result_buf);
@@ -2821,10 +2757,11 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         // there is no MemRef to read. Register it before the op codegen runs so
         // GetCurrentResultTileBufTypeString() can emit the `-> type` annotation.
         result_tile_type = tile_type;
-        result_buf = NewNamedTemp(op->var_->name_hint_);
+        result_buf = selected_writeback ? GetExprAsCode(call->args_[writeback_index])
+                                        : NewNamedTemp(op->var_->name_hint_);
         BindVarToMlir(op->var_, result_buf);
         std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
-        if (!type_str.empty()) {
+        if (!selected_writeback && !type_str.empty()) {
           RegisterTileBufType(result_buf, type_str, tile_type);
         }
       } else if (alias_array_update_to_input) {
@@ -2874,6 +2811,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         fs_.current_result_buf = destination.name;
       }
       if (!elide_move) VisitExpr(op->value_);
+      if (selected_writeback && !fs_.current_result_buf.empty()) {
+        RegisterSelectedTileName(fs_.current_result_buf);
+      }
       // If codegen changed the result buffer (e.g., reshape allocated a new tile),
       // update variable mapping so subsequent references use the new buffer
       if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {

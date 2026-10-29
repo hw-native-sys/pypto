@@ -1072,17 +1072,18 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
   codegen.Emit(oss.str());
 }
 
-// A fixed-address result declaration already carries the view over the inherited
-// storage. Without addresses, only the actual source handle can stand in for it:
-// a same-typed MemRef representative may have become stale after an if-phi rebind.
+// A fixed-address declaration can stand in for inherited storage only when the
+// source is fixed too. A selected tile and all views derived from it must retain
+// their runtime-selected address even when the result has a representative MemRef.
 static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
                                const std::string& target, const std::string& result_type,
                                bool result_has_memref, bool parameter_backed) {
   const auto existing_type = codegen.GetSSATileBufType(target);
   // Distinct handles alias only when compiler-owned addresses were emitted.
-  // PTOAS-planned and caller-backed views must follow the actual source SSA.
+  // PTOAS-planned, caller-backed and selected views must follow the actual source SSA.
   return result_has_memref && !existing_type.empty() && existing_type == result_type &&
-         ((codegen.EmitTileAddr() && !parameter_backed) || source == target);
+         ((codegen.EmitTileAddr() && !parameter_backed && !codegen.IsSelectedTileName(source)) ||
+          source == target);
 }
 
 // Same, resolving the source SSA and its type from the IR operand.
@@ -1383,6 +1384,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     codegen.Emit(oss.str());
     codegen.RegisterTileBufType(view_ssa, view_type, codegen.GetCurrentResultTileType());
     codegen.RegisterTileViewName(view_ssa);
+    if (codegen.IsSelectedTileName(src)) codegen.RegisterSelectedTileName(view_ssa);
 
     // Lazy materialization fallback: a few downstream ops (e.g. pto.tcolexpandmul)
     // cannot consume a subview SSA directly because their hardware lowering
@@ -1628,8 +1630,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // With baked addresses, the result's own alloc_tile at the inherited
     // address is already the typed alias. PTOAS-planner mode shares one handle,
     // so it must materialize a typed SSA view below.
-    if (codegen.EmitTileAddr() && result_has_memref && !existing_type.empty() &&
-        existing_type == result_type) {
+    if (CanReuseViewTarget(codegen, codegen.GetExprAsCode(op->args_[0]), result_target, result_type,
+                           result_has_memref)) {
       return std::string("");
     }
 

@@ -529,6 +529,10 @@ class PTOCodegen : public CodegenBase {
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string,
                            const std::shared_ptr<const ir::TileType>& tile_type = nullptr);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  /// A control-flow result chooses its storage at runtime. Aliases and views
+  /// must follow that SSA instead of reconstructing its representative MemRef.
+  void RegisterSelectedTileName(const std::string& ssa_name);
+  bool IsSelectedTileName(const std::string& ssa_name) const;
   /// Record `ssa_name` as a tile *view* — the result of a `pto.subview` or a
   /// `pto.treshape`, which reinterprets another handle's bytes.
   /// Only a full-span treshape may pass its source; subviews keep a distinct origin.
@@ -1013,32 +1017,6 @@ class PTOCodegen : public CodegenBase {
                                          bool use_physical_valid_shape = false);
 
   /**
-   * @brief The tile_buf handle already bound to the buffer `tile_type` denotes.
-   *
-   * Only meaningful under the PTOAS memory planner (`emit_tile_addr_ == false`),
-   * where variables denoting the same buffer must share one handle because
-   * there is no baked `addr` to alias through. Returns "" when addresses are
-   * baked, when `tile_type` has no MemRef, or when no handle is bound yet. Mixed
-   * view types can reuse a declared tile handle only when its declaration
-   * dominates the current region, both branch yields already share it in the
-   * result's known memory space, and its actual SSA type matches `expected_type`.
-   */
-  [[nodiscard]] std::string TryGetSharedTileBufHandle(const std::shared_ptr<const ir::TileType>& tile_type,
-                                                      const std::string& expected_type,
-                                                      const ir::VarPtr& then_value,
-                                                      const ir::VarPtr& else_value) const;
-
-  /**
-   * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.
-   *
-   * The head prologue is rendered after the body and prepended, so a handle
-   * declared here dominates every use — including uses inside `scf.if` branches
-   * and reads after the region. Returns false (and declares nothing) when the
-   * handle already has an `alloc_tile`.
-   */
-  bool DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields);
-
-  /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
    */
   void EmitExtraAllocTiles();
@@ -1153,6 +1131,7 @@ class PTOCodegen : public CodegenBase {
     // physical configuration is compared here: valid extents and padding have
     // operation-specific semantics and need not equal the logical result's.
     std::map<std::string, std::shared_ptr<const ir::TileType>> ssa_to_tile_type;
+    std::set<std::string> selected_tile_names;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
     /// Constant lower bound of each enclosing loop variable, while its body is
     /// being emitted. `VisitStmt_(ForStmtPtr)` adds an entry when the loop's
@@ -1196,29 +1175,9 @@ class PTOCodegen : public CodegenBase {
     /// PlanMemory keeps them one buffer. Views (same base, different
     /// offset/size) get distinct keys and are never merged.
     std::map<std::string, std::string> memref_identity_to_mlir;
-    /// MemRef-identity key -> the tile_buf type of the first var bound to it.
-    std::map<std::string, std::string> memref_identity_type;
-    /// MemRef-identity keys whose vars do NOT all share one tile_buf type — e.g.
-    /// a `[1, N]` row-major op result and its `[N, 1]` col-major reshape view,
-    /// which occupy the same bytes. Their shared handle carries exactly one type
-    /// (differently-typed reads become `pto.treshape` views of it), so it must
-    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle` only
-    /// accepts these identities for a dominating tile handle shared by both
-    /// branch yields in the result's known memory space, whose declared type
-    /// matches the requested type.
-    std::set<std::string> memref_identity_mixed_types;
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
-    /// Declaration region for each emitted/staged alloc. Region 0 is the
-    /// function body/head; every SCF region gets a unique ID, including sibling
-    /// branches at the same nesting depth. Only active ancestor regions dominate
-    /// the current emission point. Keep this separate from function-wide dedup.
-    std::map<std::string, size_t> tile_alloc_scope;
-    std::vector<size_t> tile_alloc_scope_stack{0};
-    std::set<size_t> active_tile_alloc_scopes{0};
-    size_t next_tile_alloc_scope = 0;
-
     ir::FunctionPtr current_function;
     ir::VarPtr current_result_var;
     std::string current_result_buf;
@@ -1291,6 +1250,7 @@ class PTOCodegen : public CodegenBase {
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();
       ssa_to_tile_type.clear();
+      selected_tile_names.clear();
       subview_materializations.clear();
       tile_view_names.clear();
       mutable_tile_names.clear();
@@ -1302,13 +1262,7 @@ class PTOCodegen : public CodegenBase {
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
       memref_identity_to_mlir.clear();
-      memref_identity_type.clear();
-      memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
-      tile_alloc_scope.clear();
-      tile_alloc_scope_stack = {0};
-      active_tile_alloc_scopes = {0};
-      next_tile_alloc_scope = 0;
       multi_buffer_regions.clear();
       multi_buffer_region_order.clear();
       unsigned_slot_remainders.clear();

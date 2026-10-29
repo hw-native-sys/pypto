@@ -41,23 +41,8 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func);
 StmtPtr RefreshStorageTypes(const StmtPtr& body);
 StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body);
 
-// Function-local plan for descriptor selection. Keys are original Tile Vars;
-// indices also maps replacement Tile Vars to the same scalar slot expression.
-struct StorageSelectionPlan {
-  std::map<const Var*, VarPtr> tiles;
-  std::map<const Var*, ExprPtr> indices;
-  std::vector<StmtPtr> allocations;
-};
-StmtPtr MaterializeStorageSelections(const StmtPtr& body, const std::vector<VarPtr>& parameters,
-                                     StorageSelectionPlan plan);
-
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
-
-// Access constraints keyed by individual outputs, before allocation lifetimes
-// exist. The selection planner already excludes declared and pipeline storage;
-// it folds these output constraints by physical base without copying alias groups.
-AllocationConstraintAnalysis CollectStorageSelectionConstraints(const FunctionPtr& function);
 
 // Offsets are bytes relative to the representative's existing MemRef window.
 // The representative owns the physical allocation; members retain their views.
@@ -93,7 +78,7 @@ StmtPtr AlignLoopCarriesToInit(const StmtPtr& body);
 StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body);
 StmtPtr NormalizeIdentityCopyBuffers(const StmtPtr& body);
 // Includes any scratch allocations required to reconcile cyclic carry copies.
-StmtPtr FixupYields(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool fixup_if_stmts,
+StmtPtr FixupYields(const StmtPtr& body, const std::vector<VarPtr>& parameters,
                     bool canonical_branch_storage = false);
 StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Var*>& used_bases);
 StmtPtr StripPipelineMembership(const StmtPtr& body);

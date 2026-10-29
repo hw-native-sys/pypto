@@ -41,6 +41,12 @@ struct LifetimeInterval {
   uint64_t size;
 };
 
+// Direct descriptor bindings, rather than a must-alias equivalence relation.
+// A native If result can name either yielded allocation; its representative
+// MemRef is only a geometry hint. Renames, views and registered writebacks
+// preserve this provenance. Loop bindings retain their fixed initializer edge.
+using TileStorageSources = std::map<const Var*, std::vector<VarPtr>>;
+
 /**
  * @brief Shared result of allocation-lifetime analysis.
  */
@@ -56,6 +62,9 @@ struct LifetimeAnalysisResult {
   // must keep the legacy whole-buffer layout: subdividing other groups could
   // otherwise make an unsafe program reach codegen instead of overflowing.
   std::set<const Var*> subrange_unsafe_groups;
+  // Present on the legacy Tile path. Keep the graph compact instead of eagerly
+  // materializing every transitive root set (quadratic for growing nested phis).
+  TileStorageSources storage_sources;
 };
 
 /**

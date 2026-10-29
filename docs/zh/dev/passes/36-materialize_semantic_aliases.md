@@ -24,43 +24,6 @@ carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来�
 [`MemoryReuse`](37-memory_reuse.md)；`DSA_RP` 在
 [`AllocateMemoryAddr`](38-allocate_memory_addr.md) 中消费这些分配身份。
 
-## 逻辑 Tile 选择
-
-在 Tile 路径中，If 选择的两个兼容、由编译器拥有的值可以使用同一 allocation 的不同 slot。
-两支 yield 与返回值都传递标量 slot 索引，再用 `tile.create` 重建描述符，不复制数据；
-即使同空间 TMOV 在硬件上合法，也不因选择而插入它。If 出口的 barrier 保证异步 producer
-完成后再使用所选视图。当前处理 Vec/Mat/Acc 的完整隐式描述符；显式分配、借用、写回、
-循环涉及的存储及 Buffer IR 保持原有路径。所有 planner 均复用既有 multi-buffer 表达。
-编译器创建的池保留完整分配容量与各 slot 身份，并以整个 allocation 为单位参与生命周期复用。
-
-### 条件重置存储
-
-当 Vec 选择仅有一个 Tile 结果和两个兼容 producer，较早的 producer 支配 If，
-另一个 producer 在其中一个分支内执行时，可以共享单个槽位。必须证明在覆盖 producer
-执行时及之后，所有可达路径都不会观察旧数据。例如：
-
-```python
-current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
-if flag != 0:
-    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
-    selected = reset
-else:
-    selected = current
-saved = pl.tile.store(selected, [0, 0], out)
-```
-
-这里 `current`、`reset` 和 `selected` 共享一个 65536 字节窗口。若另有一个独立存活的
-65536 字节 Tile，总容量由 196608 降为 131072 字节。两支均 yield 槽位零，重建的描述符
-使用常量偏移、`slot_count=1`，且不带 `slot_index`。共享窗口访问的同步由 PTOAS
-通过 `--enable-insert-sync` 处理；此优化不会在覆盖 producer 前插入 barrier。
-
-普通 SSA 重命名上的读取仍算作对旧值的观察，即使重命名在 If 之后创建。读取选择结果
-则观察当前执行路径选中的值。同分支尾部或 If 之后独立读取 `current` 都会阻止合并。
-循环涉及的存储、同一分量内多个 Tile 选择结果、视图、固定/借用存储和流水线成员关系
-保持现有处理。算子 no-alias、写入工作区（written workspace）和目标 hazard 仍是硬约束。
-证明失败时保持原有选择降级。缓存逻辑来源并复用双遍历顺序的读取索引，使新增分析保持
-O(N log N)。
-
 ## API
 
 | C++ | Python | 级别 |
@@ -170,6 +133,35 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 
 ## 与 codegen 的关系
 
+### `IfStmt` 的原生 Tile 返回值
+
+返回 Tile 的 `IfStmt` 选择实际执行分支 yield 的 Tile 句柄。两支保持各自的
+存储，`MaterializeSemanticAliases` 和 `MemoryReuse` 都不再插入 `tile.move`
+来统一两支地址。PTO 代码生成直接使用 PTOAS 原生的区域返回值：
+
+```mlir
+%selected = scf.if %cond -> (!T) {
+  scf.yield %a : !T
+} else {
+  scf.yield %b : !T
+}
+```
+
+这里选择描述符，不复制 Tile 数据。不再创建选择 pool、slot 索引或固定双槽
+布局，也不限制为某个存储空间。已有输入、用户声明的存储、分支内生产的 Tile
+和动态 valid shape 都走同一路径。两支 yield 描述符必须具有相同的 PTO 类型；
+兼容的 valid-shape 类型表示差异通过仅改变描述符的 view 统一，不搬运数据。
+
+生命周期分析记录所有候选来源，并沿别名和 view 传播使用关系。对 `%selected`
+的后续使用使两支候选都保持存活；最后一次使用后，每个候选分配都能参与普通
+内存复用。候选之间不是必须别名，不能因为结果的 MemRef 元数据代表其中一支
+就合并它们的存储。
+
+`SelectBufferIRFunctions` 让不含循环且含 Tile 返回值 If 的函数保留在 Tile 路径上，
+包括启用 Buffer IR 的情况：当前 Buffer lowering 会移除 Tile 区域返回值，
+无法表达动态句柄选择。这样默认流水线中的纯分支 kernel 也使用原生选择。含 For/While 的 kernel 保留
+原有 Buffer 选择及 carry lowering，避免整函数切换路径连带改变循环语义。
+
 ### 分阶段启用的 Buffer IR 流水线
 
 `PassContext(enable_buffer_ir=True)` 启用 Buffer IR 迁移中的存储合法化部分。
@@ -232,16 +224,6 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
   `MemoryReuse` pass 的行为。
 - `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
   建立的强制别名关系。
-- 在 legacy `PTOAS` 路径中，若两个分支 yield 同一 tile 字节窗口（allocation、
-  offset、size、slot 数量及索引相同），且两个 yield 与合并结果具有相同且已确定的
-  存储空间（MemorySpace），合并结果保留该窗口，无需复制。语义别名会跟随修正后的
-  结果，同时保留各自的类型及视图元数据。已注册的视图把相对字节偏移重新关联到
-  修正后的输入，保留自身窗口大小并继承输入的流水线 slot 身份；后续完整窗口写回
-  结果继续跟随该视图。复用具有多种类型别名的 codegen 句柄时，还必须满足实际声明的 SSA 类型
-  匹配、两个 yield 的窗口及当前绑定一致，以及句柄定义支配（dominance）当前 if。
-  若先前的合并选择了新的支配句柄，后续合并使用两个 yield 当前共同绑定的句柄，
-  即使身份映射仍指向此前被拒绝的兄弟分支句柄。
-  不同分支窗口沿用原有处理。
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
   legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的
   carry/phi mismatch。
