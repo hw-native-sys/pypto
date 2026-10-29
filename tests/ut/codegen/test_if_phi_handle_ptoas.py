@@ -7,15 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Regression: if/else-yield tile phi under memory_planner=PTOAS (issue #1956).
+"""PTOAS loop-carry storage and explicit shared-storage move regressions.
 
-Under PTOAS the opportunistic MemoryReuse pass (whose YieldFixupMutator aliases a
-branch's tile yields onto the phi return_var's canonical handle) is skipped. PTO
-codegen must therefore itself point each branch's tile producer at the single
-head-declared phi handle; otherwise each branch writes its own handle and the
-post-if read of the phi handle reads a buffer no branch ever wrote — a silent
-miscompile. This test asserts both branch producers write the one phi handle and
-that handle is declared exactly once.
+Check accumulator storage, carry write-back, and each move operand's descriptor.
+Native If selection is covered by the native If transform tests.
 """
 
 # pyright: reportUndefinedVariable=false
@@ -31,81 +26,6 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
-
-
-@pl.program
-class IfPhiProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        flag: pl.Scalar[pl.INT32],
-        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        a: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
-        if flag == 0:
-            r: pl.Tile[[64, 64], pl.FP32] = pl.add(a, 1.0)
-        else:
-            r: pl.Tile[[64, 64], pl.FP32] = pl.mul(a, 2.0)
-        return pl.store(r, [0, 0], out)
-
-
-@pl.program
-class IfPhiPassThroughProgram:
-    """One branch yields a fresh producer; the other yields the outer tile `a`
-    unchanged (a pass-through). The pass-through branch has no producer writing
-    the phi buffer, so codegen must copy `a` into the phi handle (tmov)."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        flag: pl.Scalar[pl.INT32],
-        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        a: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
-        if flag == 0:
-            r: pl.Tile[[64, 64], pl.FP32] = pl.add(a, 1.0)
-        else:
-            r: pl.Tile[[64, 64], pl.FP32] = a
-        return pl.store(r, [0, 0], out)
-
-
-@pl.program
-class DynamicValidMatmulIfPhiProgram:
-    """A matmul if-phi whose logical M extent is computed in the function body.
-
-    PTO tile-phi handles must dominate both branches, so their ``alloc_tile`` is
-    emitted at the function head.  The body-local ``valid_rows`` SSA value does
-    not dominate that declaration; codegen must allocate the physical box at the
-    head and restore the logical valid shape immediately before the ``scf.if``.
-    """
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        lhs: pl.Tensor[[16, 128], pl.BF16],
-        rhs: pl.Tensor[[128, 32], pl.BF16],
-        rows: pl.Scalar[pl.INDEX],
-        flag: pl.Scalar[pl.INT32],
-        out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-    ) -> pl.Tensor[[16, 32], pl.FP32]:
-        valid_rows = pl.min(rows, 16)
-        lhs_mat = pl.load(
-            lhs,
-            [0, 0],
-            [16, 128],
-            valid_shape=[valid_rows, 128],
-            target_memory=pl.MemorySpace.Mat,
-        )
-        rhs_mat = pl.load(rhs, [0, 0], [128, 32], target_memory=pl.MemorySpace.Mat)
-        lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
-        rhs_right = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
-        if flag == 0:
-            result = pl.matmul(lhs_left, rhs_right)
-        else:
-            result = pl.matmul(lhs_left, rhs_right)
-        return pl.store(result, [0, 0], out)
 
 
 def _ptoas_pto(program) -> str:
@@ -139,71 +59,6 @@ def _first_group(pattern: str, text: str) -> str:
     m = re.search(pattern, text)
     assert m is not None, f"pattern {pattern!r} not found in:\n{text}"
     return m.group(1)
-
-
-def test_if_phi_branches_write_one_head_declared_handle():
-    mlir = _ptoas_pto(IfPhiProgram)
-    # The tile the store reads is the phi buffer.
-    store = next(ln for ln in mlir.splitlines() if "pto.tstore" in ln)
-    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
-
-    # It is declared exactly once (at the function head, dominating both branches).
-    decls = [ln for ln in mlir.splitlines() if f"{phi} = pto.alloc_tile" in ln]
-    assert len(decls) == 1, f"phi handle {phi} must be declared exactly once:\n{mlir}"
-
-    # Both branch producers (tadds / tmuls) write that same phi handle directly —
-    # a branch-local producer is re-pointed, so no copy is needed.
-    producer_outs = [
-        _first_group(r"outs\((%[A-Za-z0-9_]+)", ln)
-        for ln in mlir.splitlines()
-        if ("pto.tadds" in ln or "pto.tmuls" in ln) and "outs(" in ln
-    ]
-    assert len(producer_outs) == 2, f"expected two branch producers, got {producer_outs}:\n{mlir}"
-    for out in producer_outs:
-        assert out == phi, f"branch producer writes {out}, not the phi handle {phi}:\n{mlir}"
-    assert "pto.tmov" not in mlir, f"branch-local phi must be copy-free (no tmov):\n{mlir}"
-
-
-def test_if_phi_pass_through_branch_copies_into_phi_handle():
-    mlir = _ptoas_pto(IfPhiPassThroughProgram)
-    store = next(ln for ln in mlir.splitlines() if "pto.tstore" in ln)
-    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
-
-    # The producing branch writes the phi handle directly.
-    prod = next(ln for ln in mlir.splitlines() if "pto.tadds" in ln)
-    assert _first_group(r"outs\((%[A-Za-z0-9_]+)", prod) == phi, f"producer must write phi {phi}:\n{mlir}"
-
-    # The pass-through branch (yields the outer tile unchanged) copies it into the
-    # phi handle via tmov, so the post-if store never reads an uninitialised buffer.
-    movs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and f"outs({phi}" in ln]
-    assert len(movs) == 1, f"pass-through branch must tmov into the phi handle {phi}:\n{mlir}"
-
-
-@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
-def test_dynamic_valid_matmul_if_phi_restores_shape_at_lexical_site(planner):
-    """A body-local valid extent must not escape into the head alloc declaration."""
-    mlir = _planner_pto(DynamicValidMatmulIfPhiProgram, planner)
-    lines = mlir.splitlines()
-
-    store = next(ln for ln in lines if "pto.tstore" in ln)
-    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
-    alloc_index, alloc = next((i, ln) for i, ln in enumerate(lines) if f"{phi} = pto.alloc_tile" in ln)
-    set_index, set_shape = next(
-        (i, ln) for i, ln in enumerate(lines) if ln.strip().startswith(f"pto.set_validshape {phi},")
-    )
-    if_index = next(i for i, ln in enumerate(lines) if "scf.if" in ln)
-
-    # The head declaration uses the full 16x32 physical box, not the body-local
-    # valid_rows SSA value.  The latter is restored after its defining scalar op
-    # and before either branch writes the phi handle.
-    assert "valid_row = %c16_index" in alloc, f"phi head alloc must use physical M=16:\n{mlir}"
-    logical_row = _first_group(rf"pto\.set_validshape {re.escape(phi)}, (%[A-Za-z0-9_]+),", set_shape)
-    defining_indices = [i for i, ln in enumerate(lines) if ln.lstrip().startswith(f"{logical_row} =")]
-    assert len(defining_indices) == 1, f"expected one definition of {logical_row}:\n{mlir}"
-    assert alloc_index < defining_indices[0] < set_index < if_index, (
-        "the dynamic valid row must be defined before lexical shape restoration, "
-        f"while the physical phi alloc remains head-declared:\n{mlir}"
-    )
 
 
 @pl.program
@@ -276,7 +131,7 @@ def test_loop_carried_if_phi_keeps_baked_addr_aliasing_under_pypto(enable_buffer
     assert len(addrs) == 1, f"the aliased tiles must share one baked addr, got {addrs}:\n{mlir}"
 
 
-# ── [N, 1] col-vector carry: view yields must be copied, and the carry written ──
+# ── [N, 1] col-vector carry write-back ──
 
 COLVEC_ROWS, COLVEC_STEPS = 16, 4
 
@@ -309,70 +164,12 @@ class ColVectorCarryProgram:
         return out
 
 
-def _incore_ptoas_pto(program) -> str:
-    """Emit PTO for a `pl.at`-outlined kernel under the PTOAS planner."""
-    reset_for_testing()
-    set_backend_type(BackendType.Ascend910)
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
-    incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
-    assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
-    single = _ir.Program([incore[0]], incore[0].name, optimized.span)
-    return codegen.PTOCodegen().generate(single, emit_tile_addr=False)
-
-
 def _outs_of(line: str) -> str:
     return _first_group(r"outs\((%[A-Za-z0-9_]+)", line)
 
 
 def _ins_of(line: str) -> str:
     return _first_group(r"ins\((%[A-Za-z0-9_]+)", line)
-
-
-def test_colvec_carry_branch_views_are_copied_into_the_phi_handle():
-    """A branch that yields a zero-copy view must be copied, not re-pointed.
-
-    `tile.reshape` is a Call, so the branch-local-producer test used to accept it
-    and re-point it at the phi handle — but a view's codegen emits nothing when the
-    target already carries the result type, so the phi buffer stayed unwritten and
-    the loop became a silent no-op. Views must fall through to the tmov fallback.
-    """
-    mlir = _incore_ptoas_pto(ColVectorCarryProgram)
-
-    store = _sole_line(mlir, "pto.tstore")
-    carry = _ins_of(store)
-
-    # The final tmov of the iteration writes the carry from the phi handle.
-    into_carry = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == carry]
-    assert len(into_carry) == 1, f"the loop carry must be written back exactly once:\n{mlir}"
-    phi = _ins_of(into_carry[0])
-    assert phi != carry, f"the write-back must copy the phi handle into the carry:\n{into_carry[0]}"
-
-    # Both branches copy their (view) result into that phi handle.
-    into_phi = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == phi]
-    assert len(into_phi) == 2, f"each branch must tmov its view yield into {phi}:\n{mlir}"
-    for ln in into_phi:
-        src = _ins_of(ln)
-        assert f"{src} = pto.treshape" in mlir, f"a branch yield should be a reshape view:\n{ln}"
-
-
-def test_colvec_carry_tmov_annotates_each_operand_with_its_own_type():
-    """A `pto.treshape` view carries static valid dims; an `alloc_tile` handle does
-    not. Annotating both tmov operands with one type makes the def/use types
-    disagree and ptoas rejects the module."""
-    mlir = _incore_ptoas_pto(ColVectorCarryProgram)
-
-    store = _sole_line(mlir, "pto.tstore")
-    carry = _ins_of(store)
-    into_carry = next(ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == carry)
-    phi = _ins_of(into_carry)
-
-    into_phi = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and _outs_of(ln) == phi]
-    assert into_phi, f"no tmov into the phi handle {phi}:\n{mlir}"
-    for ln in into_phi:
-        src, dst = ln.split("ins(", 1)[1].split(") outs(", 1)
-        assert "v_row=?" not in src, f"the view operand must keep its static valid dims:\n{ln}"
-        assert "v_row=?" in dst, f"the alloc_tile handle stays dynamic-valid:\n{ln}"
 
 
 def test_colvec_carry_is_written_back_under_pypto_planner():
@@ -396,70 +193,6 @@ def test_colvec_carry_is_written_back_under_pypto_planner():
     carry_addr = addr_of(_ins_of(_sole_line(mlir, "pto.tstore")))
     written = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and addr_of(_outs_of(ln)) == carry_addr]
     assert written, f"the carry's buffer must be written before the store:\n{mlir}"
-
-
-@pl.program
-class BranchReshapeProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        x: pl.Tensor[[32, 1], pl.FP32],
-        flag: pl.Scalar[pl.INT32],
-        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
-    ) -> pl.Tensor[[1, 16], pl.FP32]:
-        base = pl.load(x, [0, 0], [32, 1])
-        if flag != 0:
-            row = pl.reshape(base, [1, 32])
-            updated = pl.add(row, 1.0)
-            column = pl.reshape(updated, [32, 1])
-            result = column
-        else:
-            result = base
-        after = pl.reshape(result, [1, 32])
-        head = pl.tile.extract(after, 0, 0, [1, 16], target_memory=pl.Mem.Vec)
-        return pl.store(head, [0, 0], out)
-
-
-@pl.program
-class BranchTransposeViewProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        x: pl.Tensor[[32, 1], pl.FP32],
-        flag: pl.Scalar[pl.INT32],
-        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
-    ) -> pl.Tensor[[1, 16], pl.FP32]:
-        base = pl.load(x, [0, 0], [32, 1])
-        if flag != 0:
-            row = pl.reshape(base, [1, 32])
-            updated = pl.add(row, 1.0)
-            column = pl.reshape(updated, [32, 1])
-            result = column
-        else:
-            result = base
-        after = pl.tile.transpose_view(result)
-        head = pl.tile.extract(after, 0, 0, [1, 16], target_memory=pl.Mem.Vec)
-        return pl.store(head, [0, 0], out)
-
-
-@pytest.mark.parametrize("program", [BranchReshapeProgram, BranchTransposeViewProgram])
-def test_post_if_view_reads_merged_phi_handle(program):
-    """A same-typed old target cannot replace a view of the actual if result (#3015)."""
-    mlir = _ptoas_pto(program)
-    lines = mlir.splitlines()
-    extract = _sole_line(mlir, "pto.textract ins(")
-    source = _ins_of(extract)
-    view = _sole_line(mlir, f"{source} =")
-    assert "= pto.treshape " in view, mlir
-    phi = _first_group(r"= pto\.treshape (%[A-Za-z0-9_]+)", view)
-
-    # Both branch yields must reach this phi, not an obsolete shared MemRef handle.
-    into_phi = [ln for ln in lines if "pto.tmov" in ln and _outs_of(ln) == phi]
-    assert len(into_phi) == 2, mlir
-    phi_decl = _sole_line(mlir, f"{phi} = pto.alloc_tile")
-    if_line = _sole_line(mlir, "scf.if ")
-    assert lines.index(phi_decl) < lines.index(if_line), mlir
-    assert lines.index(view) > max(lines.index(ln) for ln in into_phi), mlir
 
 
 @pl.program
