@@ -640,5 +640,55 @@ def test_review_loop_returned_view_address(tmp_path):
     compile_review_pto(source, tmp_path)
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("addressed", [False, True])
+@pytest.mark.parametrize("nested_loop", [False, True])
+def test_review_branch_returned_view_address(tmp_path, addressed, nested_loop):
+    ib = IRBuilder()
+    with ib.function("branch_view", span=SPAN, type=ir.FunctionType.AIV) as f:
+        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
+        base = ib.let("base", tile.full([2, 128], dtype=DataType.FP32, value=1.0))
+        view = ib.let(
+            "view",
+            tile.slice(base, [1, 128], [0, 0]),
+            type=ir.TileType(
+                [1, 128],
+                DataType.FP32,
+                tile_view=ir.TileView([1, 128], [128, 1], integer(0)),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg("x", "reg.load", [view, integer(0)], {"lanes": 64}, SPAN)
+            with ib.if_stmt(condition, SPAN) as branch:
+                branch.return_var("result", view.type, SPAN)
+                updated = ib.emit_reg_store("then_updated", view, x, span=SPAN)
+                if nested_loop:
+                    with ib.for_loop(
+                        ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN
+                    ) as loop:
+                        carry = loop.iter_arg("carry", updated, span=SPAN)
+                        updated = loop.return_var("loop_result", span=SPAN)
+                        stored = ib.emit_reg_store("loop_updated", carry, x, span=SPAN)
+                        ib.emit(ir.YieldStmt([stored], SPAN))
+                ib.emit(ir.YieldStmt([updated], SPAN))
+                branch.else_(SPAN)
+                updated = ib.emit_reg_store("else_updated", view, x, span=SPAN)
+                ib.emit(ir.YieldStmt([updated], SPAN))
+            # Hoisting precedes if-result binding. Resolve the shared external
+            # slice, not its differently shaped [2,128] allocation fallback.
+            y = ib.emit_reg("y", "reg.load", [branch.output(0), integer(0)], {"lanes": 64}, SPAN)
+            ib.emit_reg_store("out", view, y, span=SPAN)
+    with passes.PassContext([]):
+        initialized = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+        if addressed:
+            initialized = passes.allocate_memory_addr()(initialized)
+        source = codegen.PTOCodegen().generate(initialized, emit_tile_addr=addressed, emit_source_loc=False)
+    # Every store updates the shared external view; no phi-buffer copy belongs
+    # inside the register scope, under either memory-planning mode.
+    assert "pto.tmov" not in source.split("pto.vecscope {", 1)[1]
+    compile_review_pto(source, tmp_path, level="level3" if addressed else "level2")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

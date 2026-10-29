@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
@@ -25,6 +26,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::codegen {
@@ -47,8 +49,15 @@ class ScopeOperands : public IRVisitor {
  public:
   // Access sites whose Tile operands need an external UB pointer.
   std::vector<CallPtr> memory;
-  // reg.store result -> destination; storing changes bytes, not Tile ownership.
+  // Store/control-flow result -> source view. Stores change bytes, not Tile
+  // ownership; branch aliases additionally require both sources to agree.
   std::map<const Var*, VarPtr> aliases;
+  // Both arms must resolve to the same external view before an if result can
+  // use one pointer hoisted outside vecscope. Keep both sources for validation.
+  std::vector<std::pair<VarPtr, VarPtr>> branch_sources;
+  // Bind these results to the proven external handle before branch emission;
+  // a fresh phi buffer would require an unsupported Tile copy inside vecscope.
+  std::vector<VarPtr> tile_branch_results;
   // Assignment-defined scalar/register bindings to discard on scope exit.
   std::vector<VarPtr> locals;
 
@@ -72,6 +81,25 @@ class ScopeOperands : public IRVisitor {
   }
   void VisitStmt_(const WhileStmtPtr& stmt) override {
     RecordLoopResults(stmt->iter_args_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    auto then_yield = transform_utils::GetLastYieldStmt(stmt->then_body_);
+    auto else_yield = stmt->else_body_ ? transform_utils::GetLastYieldStmt(*stmt->else_body_) : nullptr;
+    for (size_t i = 0; i < stmt->return_vars_.size(); ++i) {
+      if (!As<TileType>(stmt->return_vars_[i]->GetType())) continue;
+      INTERNAL_CHECK_SPAN(
+          then_yield && else_yield && i < then_yield->value_.size() && i < else_yield->value_.size(),
+          stmt->span_)
+          << "Internal error: register Tile branch result requires yields from both arms";
+      auto then_value = AsVarLike(then_yield->value_[i]);
+      auto else_value = AsVarLike(else_yield->value_[i]);
+      INTERNAL_CHECK_SPAN(then_value && else_value, stmt->span_)
+          << "Internal error: register Tile branch yields require variables";
+      aliases.emplace(stmt->return_vars_[i].get(), then_value);
+      branch_sources.emplace_back(then_value, else_value);
+      tile_branch_results.push_back(stmt->return_vars_[i]);
+    }
     IRVisitor::VisitStmt_(stmt);
   }
 
@@ -101,11 +129,9 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
   // Path-compressed provenance avoids retracing every prefix of N chained
   // stores. Each alias is resolved once with ordered-map/set lookup cost.
   std::map<const ir::Var*, ir::VarPtr> external_roots;
-  // Hoist addresses, including the addresses used by chained store versions.
-  // A store version is an alias, never a new allocation or region result.
-  for (const auto& call : operands.memory) {
-    auto target = ir::AsVarLike(call->args_[0]);
-    CHECK_SPAN(target, call->span_) << "Register address requires a Tile variable";
+  // Resolve all control-flow/store aliases after the complete pre-scan, so a
+  // branch yield may itself refer to a nested branch or loop result.
+  auto resolve_external = [&](const ir::VarPtr& target) {
     auto external = target;
     std::set<const ir::Var*> seen;
     std::vector<ir::VarPtr> path;
@@ -114,7 +140,7 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
         external = cached->second;
         break;
       }
-      CHECK_SPAN(seen.insert(external.get()).second, call->span_) << "Cyclic register Tile alias";
+      CHECK_SPAN(seen.insert(external.get()).second, scope->span_) << "Cyclic register Tile alias";
       path.push_back(external);
       auto alias = operands.aliases.find(external.get());
       if (alias != operands.aliases.end()) {
@@ -126,12 +152,31 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
         // initial handle to obtain an address available before the loop/scope;
         // this does not construct or rewrite the loop's SSA carries.
         external = ir::AsVarLike(iter->initValue_);
-        CHECK_SPAN(external, call->span_) << "Cannot prove register loop address";
+        CHECK_SPAN(external, scope->span_) << "Cannot prove register loop address";
         continue;
       }
       break;
     }
     for (const auto& var : path) external_roots.emplace(var.get(), external);
+    return external;
+  };
+  for (const auto& [then_value, else_value] : operands.branch_sources) {
+    // Choosing only one arm without checking the other could silently access
+    // the wrong buffer. A branch-selected backing view needs a dynamic pointer
+    // carry, which this external-address ABI does not yet represent.
+    // TODO(chenyiyuan): carry a selected pointer when branch yields use different views.
+    CHECK_SPAN(resolve_external(then_value) == resolve_external(else_value), scope->span_)
+        << "Register Tile branch results require a shared external view";
+  }
+  for (const auto& result : operands.tile_branch_results) {
+    BindVarToMlir(result, GetExprAsCode(resolve_external(result)));
+  }
+  // Hoist addresses, including the addresses used by chained store versions.
+  // A store version is an alias, never a new allocation or region result.
+  for (const auto& call : operands.memory) {
+    auto target = ir::AsVarLike(call->args_[0]);
+    CHECK_SPAN(target, call->span_) << "Register address requires a Tile variable";
+    auto external = resolve_external(target);
     auto tile = ir::As<ir::TileType>(external->GetType());
     CHECK_SPAN(tile, call->span_) << "Register address requires a Vec Tile";
     auto [it, inserted] = external_addresses.emplace(external.get(), "");

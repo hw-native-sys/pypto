@@ -266,6 +266,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         scf_return_types.push_back(GetValueCarryTypeString(return_var->GetType()));
         returns_via_scf[i] = true;
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
+        if (inside_reg_scope_) {
+          // The RegScope pre-scan proved both arms alias one external view and
+          // bound this result to its dominating handle. Keep that alias rather
+          // than creating a phi buffer and copying Tiles inside vecscope.
+          INTERNAL_CHECK_SPAN(fs_.var_to_mlir.count(GetVarKey(return_var)), op->span_)
+              << "Register Tile branch result lacks a prepared external handle";
+          continue;
+        }
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
         // A tile phi handle is declared in the function head so it dominates
