@@ -5046,6 +5046,54 @@ class TestTileStoreAttrsCodegen:
             f"expected final stPhase on every pto.tstore, got:\n{tstore_lines}"
         )
 
+    @pytest.mark.parametrize("cols", [0, 64, "cols"])
+    @pytest.mark.parametrize("final", [False, True])
+    @pytest.mark.parametrize("buffer_ir", [False, True])
+    def test_empty_store_preserves_final_phase(self, tmp_path, cols, final, buffer_ir):
+        """A final store must remain paired instead of being silently elided or guarded."""
+        phase = "Final" if final else "Unspecified"
+        program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, a: pl.Tensor[[1, 128], pl.FP32], b: pl.Tensor[[128, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 64], pl.FP32]], cols: pl.Scalar[pl.INDEX]
+    ):
+        lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+        rhs = pl.load(b, [0, 0], [128, 64], valid_shape=[128, {cols}],
+                      target_memory=pl.MemorySpace.Mat)
+        result = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.{phase})
+        pl.store(result, [0, 0], out, st_phase=pl.STPhase.{phase})
+""")
+        with passes.PassContext([], enable_buffer_ir=buffer_ir):
+            mlir = self._generate_mlir(program)
+        producer = next(line for line in mlir.splitlines() if "pto.tgemv " in line)
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line]
+        if not final and cols == 0:
+            assert not stores, mlir
+        else:
+            assert len(stores) == 1, mlir
+            store = stores[0]
+            producer_indent = len(producer) - len(producer.lstrip())
+            store_indent = len(store) - len(store.lstrip())
+            if final:
+                assert "accPhase = #pto<acc_phase final>" in producer, mlir
+                assert "stPhase = #pto<st_phase final>" in store, mlir
+                # The store must remain in the producer's straight-line region;
+                # load guards may exist earlier in the same function.
+                assert store_indent == producer_indent, mlir
+            elif cols == "cols":
+                assert store_indent > producer_indent, mlir
+        # A statically zero final store retains the existing backend rejection:
+        # do not silently erase its synchronization effect to make it compile.
+        if find_ptoas_binary() is not None:
+            if final and cols == 0:
+                with pytest.raises(RuntimeError, match="must be positive"):
+                    pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            else:
+                pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+
     def test_store_phase_and_atomic_share_one_attr_dict(self):
         """PTOAS receives stPhase and atomicType in the same attribute dictionary."""
         mlir = self._generate_fp32_store(atomic=pl.AtomicType.Add, st_phase=pl.STPhase.Final)

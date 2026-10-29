@@ -337,8 +337,18 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(output_tensor.get()));
   }
 
-  if (ir::tile_view_semantics::HasZeroValidExtent(valid_shape)) return "";
-  const bool guarded = BeginNonEmptyRegion(valid_shape, codegen);
+  const int st_phase = op->GetKwarg<int>("st_phase", static_cast<int>(ir::STPhase::kUnspecified));
+  INTERNAL_CHECK_SPAN(ir::IsValidSTPhase(st_phase), op->span_)
+      << "tile.store st_phase must encode STPhase::kUnspecified or kFinal, got " << st_phase;
+  // A final store also clears the unit flag set by its final GEMV producer.
+  // Eliding or guarding only the consumer would break AccStorePhaseValid's
+  // straight-line pairing and can stall a later producer. Keep phased stores
+  // unconditional, including the backend's existing empty-window restrictions.
+  bool guarded = false;
+  if (st_phase == static_cast<int>(ir::STPhase::kUnspecified)) {
+    if (ir::tile_view_semantics::HasZeroValidExtent(valid_shape)) return "";
+    guarded = BeginNonEmptyRegion(valid_shape, codegen);
+  }
 
   std::string partition_view;
   std::string partition_type;
@@ -431,9 +441,6 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     attrs.emplace_back("reluPreMode = #pto<relu_pre_mode normal_relu>");
   }
 
-  const int st_phase = op->GetKwarg<int>("st_phase", static_cast<int>(ir::STPhase::kUnspecified));
-  INTERNAL_CHECK_SPAN(ir::IsValidSTPhase(st_phase), op->span_)
-      << "tile.store st_phase must encode STPhase::kUnspecified or kFinal, got " << st_phase;
   if (st_phase != static_cast<int>(ir::STPhase::kUnspecified)) {
     attrs.push_back("stPhase = #pto<st_phase " + ir::STPhaseToPTOString(static_cast<ir::STPhase>(st_phase)) +
                     ">");

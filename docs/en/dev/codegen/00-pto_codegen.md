@@ -306,10 +306,14 @@ immediately after `pto.treshape`. Static positive valid dimensions retain their
 static encoding. Initializing a compiler-created descriptor does not make the
 user-facing `pl.set_validshape` operation legal on arbitrary views.
 
-Tile and Buffer memory transfers omit statically empty windows. Runtime-sized
+Ordinary Tile and Buffer memory transfers omit statically empty windows. Runtime-sized
 windows are created and accessed only inside a non-empty guard. Skipping a store
 preserves its output tensor identity and leaves destination data unchanged;
 these guards do not remove cross-core communication or synchronization.
+Stores with `st_phase=Final` are excluded: they must remain in the same
+straight-line region as their `acc_phase=Final` producer to clear its unit flag.
+Their existing backend restrictions on empty windows still apply; when skipping
+an empty phased operation, guard the producer and store together in the source.
 
 Subview-derived reshape/reinterpret views remain outside this support: initializing their
 dynamic valid dimensions is blocked by [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
