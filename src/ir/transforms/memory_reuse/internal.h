@@ -41,6 +41,29 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func);
 StmtPtr RefreshStorageTypes(const StmtPtr& body);
 StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body);
 
+// A repeated producer owns a private contiguous range. Excluding every incoming
+// carry selector leaves at least one free slot when slot_count exceeds their
+// number; no other producer can overwrite a retained instance in this range.
+struct RepeatedStorageProducer {
+  std::vector<ExprPtr> protected_slots;
+  uint64_t first_slot = 0;
+  uint64_t slot_count = 0;
+};
+
+// Function-local plan for descriptor selection. Keys are original Tile Vars;
+// indices also maps replacement Tile Vars to the same scalar slot expression.
+// producers includes one-shot seeds so the rewrite can synchronize their reuse
+// when the function region itself executes inside an enclosing scalar loop.
+struct StorageSelectionPlan {
+  std::map<const Var*, VarPtr> tiles;
+  std::map<const Var*, ExprPtr> indices;
+  std::map<const Var*, RepeatedStorageProducer> repeated;
+  std::set<const Var*> producers;
+  std::vector<StmtPtr> allocations;
+};
+StmtPtr MaterializeStorageSelections(const StmtPtr& body, const std::vector<VarPtr>& parameters,
+                                     StorageSelectionPlan plan);
+
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
 

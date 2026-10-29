@@ -807,11 +807,15 @@ class OpParser:
         namespace = func.value.attr  # "tile" or "tensor"
         op_name = f"{namespace}.alloc"
 
-        # `pinned=True` is the only keyword an alloc carries — it marks an
+        # `pinned=True` is the only operator keyword an alloc carries — it marks an
         # allocation the author declared via a one-argument `pl.MemRef(...)`,
-        # which MemoryReuse must leave alone. Everything else stays positional.
+        # which MemoryReuse must leave alone. Generic IR attrs are preserved
+        # separately, including compiler-owned storage-selection metadata.
         kwargs: dict[str, Any] = {}
+        attrs = self.attrs.parse_op_attrs(call)
         for keyword in call.keywords:
+            if keyword.arg == "attrs":
+                continue
             if keyword.arg != "pinned":
                 raise InvalidOperationError(
                     f"{op_name} in printed IR accepts no keyword argument '{keyword.arg}'",
@@ -829,7 +833,11 @@ class OpParser:
                 f"{op_name} in printed IR expects 2 positional args (memory_space, size), got {len(args)}",
                 span=self.services.span_tracker.get_span(call),
             )
-        return ir.create_op_call(op_name, args, kwargs, self.services.span_tracker.get_span(call))
+        result = self.attrs.attach_op_attrs(
+            ir.create_op_call(op_name, args, kwargs, self.services.span_tracker.get_span(call)), attrs
+        )
+        assert isinstance(result, ir.Call)
+        return result
 
     def parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""

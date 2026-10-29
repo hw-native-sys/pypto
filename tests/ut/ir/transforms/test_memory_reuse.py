@@ -88,6 +88,32 @@ def _collect_named_tile_memrefs(program: ir.Program, names: set[str]) -> dict[st
     return result
 
 
+def _run_fixed_carry_pipeline(program: ir.Program, carry_names: set[str]) -> ir.Program:
+    """Keep named carry allocations fixed while testing legacy boundary copies."""
+    initialized = passes.init_mem_ref()(program)
+    carry_bases = {
+        memory.base_.unique_id for memory in _collect_named_tile_memrefs(initialized, carry_names).values()
+    }
+    pinned_bases: set[int] = set()
+    allocation_op = ir.get_op("tile.alloc").name
+
+    class PinCarryAllocations(ir.IRMutator):
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> ir.Stmt:
+            if op.var.unique_id in carry_bases:
+                call = op.value
+                assert isinstance(call, ir.Call) and call.op.name == allocation_op
+                pinned_bases.add(op.var.unique_id)
+                kwargs = dict(call.kwargs)
+                kwargs["pinned"] = True
+                allocation = ir.Call(call.op, call.args, kwargs, call.attrs, call.type, call.span)
+                return ir.AssignStmt(op.var, allocation, op.span)
+            return super().visit_assign_stmt(op)
+
+    fixed = PinCarryAllocations().visit_program(initialized)
+    assert pinned_bases == carry_bases, "every requested carry needs an explicit allocation"
+    return passes.memory_reuse()(passes.materialize_semantic_aliases()(fixed))
+
+
 def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
     """Assert every arm of every tile-typed if-phi yields into the phi's own buffer.
 
@@ -2400,7 +2426,7 @@ class TestYieldFixup:
                 val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
             ) -> pl.Tensor[[1, 2048], pl.FP32]:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 src_tile: pl.Tile[
                     [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
@@ -2440,7 +2466,8 @@ class TestYieldFixup:
                 )
                 return out_val
 
-        After = _run_pipeline(Before)
+        # A fixed carry ABI keeps this IterArg-arm regression on the copy path.
+        After = _run_fixed_carry_pipeline(Before, {"sorted_tile"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_if_phi_arms_write_the_phi_buffer(After)
 
@@ -2501,7 +2528,7 @@ class TestYieldFixup:
                 val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
             ) -> pl.Tensor[[1, 2048], pl.FP32]:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 src_tile: pl.Tile[
                     [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
@@ -2538,7 +2565,8 @@ class TestYieldFixup:
                 )
                 return out_val
 
-        After = _run_pipeline(Before)
+        # A fixed carry ABI keeps the mirrored IterArg arm on the copy path.
+        After = _run_fixed_carry_pipeline(Before, {"sorted_tile"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_if_phi_arms_write_the_phi_buffer(After)
 
@@ -2586,8 +2614,8 @@ class TestYieldFixup:
                 input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 head_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64]
@@ -2615,7 +2643,8 @@ class TestYieldFixup:
                 )
                 return result
 
-        After = _run_pipeline(Before)
+        # Fixed carry allocations require real writebacks and preserve the ordering guard.
+        After = _run_fixed_carry_pipeline(Before, {"head_0", "tail_0"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_carry_writebacks_do_not_clobber(After)
 
@@ -2662,8 +2691,8 @@ class TestYieldFixup:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_carry_spill_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 head_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64]
                 )
@@ -2691,7 +2720,8 @@ class TestYieldFixup:
                 )
                 return result
 
-        After = _run_pipeline(Before)
+        # Fixed carry allocations make this swap exercise spill-and-copy lowering.
+        After = _run_fixed_carry_pipeline(Before, {"head_0", "tail_0"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_carry_writebacks_do_not_clobber(After)
 
@@ -2902,7 +2932,8 @@ class TestYieldFixup:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(rd, [0, 0], output)
                 return result
 
-        After = _run_pipeline(Before)
+        # Both fixed-buffer swaps must retain their independent spill cycles.
+        After = _run_fixed_carry_pipeline(Before, {"a0", "b0", "c0", "d0"})
         # One scratch buffer per swap, and no more: four writebacks plus two spills.
         assert _count_carry_spill_buffers(After) == 2, "expected exactly one spill per cycle"
         assert _count_tile_moves_in_loops(After) == 6, "expected four writebacks plus two spills"
@@ -2935,8 +2966,9 @@ class TestYieldFixup:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
                 return result
 
+        # One fixed allocation cannot realize two independent carry writebacks.
         with pytest.raises(ValueError, match="share the same on-chip buffer"):
-            _run_pipeline(Before)
+            _run_fixed_carry_pipeline(Before, {"seed"})
 
     def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
         """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
@@ -4773,7 +4805,7 @@ class SharedSuffix:
                 input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 init_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
@@ -4800,7 +4832,8 @@ class SharedSuffix:
                 )
                 return result
 
-        After = _run_pipeline(Before)
+        # A fixed carry tests that retargeting preserves the later read of acc_0.
+        After = _run_fixed_carry_pipeline(Before, {"init_0"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_retargeter_declines_when_read_after_nested_if(self):
@@ -4860,7 +4893,7 @@ class SharedSuffix:
                 input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 init_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64]
@@ -4894,7 +4927,8 @@ class SharedSuffix:
                 )
                 return result
 
-        After = _run_pipeline(Before)
+        # Keep the carry fixed so the nested producer must preserve its later reader.
+        After = _run_fixed_carry_pipeline(Before, {"init_0"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_retargeter_declines_for_not_inplace_safe_op(self):
@@ -4958,7 +4992,7 @@ class SharedSuffix:
                 val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
             ) -> pl.Tensor[[1, 2048], pl.FP32]:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 src_tile: pl.Tile[
                     [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
@@ -4988,7 +5022,8 @@ class SharedSuffix:
                 )
                 return out_val
 
-        After = _run_pipeline(Before)
+        # Fixed storage exercises the copy fallback for a producer that cannot run in place.
+        After = _run_fixed_carry_pipeline(Before, {"sorted_tile"})
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_predicated_pipelined_kloop_uses_one_acc_buffer(self):
@@ -5187,6 +5222,274 @@ class SharedSuffix:
 class TestWhileNestedAliasTraversal:
     """Scalar while wrappers must preserve nested alias rules and their safety checks."""
 
+    def test_submit_tile_argument_prevents_identity_while_copy_elision(self):
+        """An unclassified Submit may write its Tile even when the carry is forwarded."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([16, 32], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        output_type = ir.TensorType([16, 32], DataType.FP32)
+        task_type = ir.ScalarType(DataType.TASK_ID)
+        borrowed = ir.Var("borrowed", tile_type, span)
+        keep_going = ir.Var("keep_going", ir.ScalarType(DataType.BOOL), span)
+        dependency = ir.Var("dependency", task_type, span)
+        output = ir.Var("out", output_type, span)
+        current = ir.IterArg("current", tile_type, borrowed, span)
+        final = ir.Var("final", tile_type, span)
+        dispatch = ir.Submit(
+            ir.GlobalVar("task"),
+            [current],
+            [dependency],
+            {"tag": "possible_writer"},
+            {"test_marker": 1},
+            task_type,
+            span,
+            core_num=ir.ConstInt(2, DataType.INDEX, span),
+            sync_start=True,
+            allow_early_resolve=True,
+            predicate=keep_going,
+        )
+        loop = ir.WhileStmt(
+            keep_going,
+            [current],
+            ir.SeqStmts([ir.EvalStmt(dispatch, span), ir.YieldStmt([current], span)], span),
+            [final],
+            span,
+        )
+        witness = ir.Var("witness", output_type, span)
+        offsets = ir.MakeTuple([ir.ConstInt(0, DataType.INDEX, span)] * 2, span)
+        store = ir.Call(ir.Op("tile.store"), [borrowed, offsets, output], {}, output_type, span)
+        kernel = ir.Function(
+            "kernel",
+            [borrowed, keep_going, dependency, (output, ir.ParamDirection.Out)],
+            [output_type],
+            ir.SeqStmts([loop, ir.AssignStmt(witness, store, span), ir.ReturnStmt([witness], span)], span),
+            span,
+            type=ir.FunctionType.InCore,
+        )
+        task_argument = ir.Var("value", tile_type, span)
+        task = ir.Function(
+            "task",
+            [(task_argument, ir.ParamDirection.InOut)],
+            [],
+            ir.ReturnStmt([], span),
+            span,
+        )
+        # This raw IR isolates the pass's Submit effect handling. It is not a
+        # claim about task execution or InCore Submit codegen support.
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False):
+            initialized = passes.init_mem_ref()(ir.Program([kernel, task], "submit_while_effect", span))
+            after = passes.materialize_semantic_aliases()(initialized)
+        function = after.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        statements = function.body.stmts
+        rewritten = next(stmt for stmt in statements if isinstance(stmt, ir.WhileStmt))
+        original = function.params[0]
+        private = rewritten.iter_args[0].initValue
+        original_window, private_window = _carry_memref(original), _carry_memref(private)
+        assert original_window is not None and private_window is not None
+        assert not ir.MemRef.may_alias(original_window, private_window)
+        entry = next(
+            stmt for stmt in statements if isinstance(stmt, ir.AssignStmt) and stmt.var.same_as(private)
+        )
+        assert isinstance(entry.value, ir.Call) and entry.value.op.name == _TILE_MOVE_OP
+        assert entry.value.args[0].same_as(original)
+        assert statements.index(entry) < statements.index(rewritten)
+        assert isinstance(rewritten.body, ir.SeqStmts)
+        invocation = next(
+            stmt.expr
+            for stmt in rewritten.body.stmts
+            if isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Submit)
+        )
+        assert invocation.args[0].same_as(rewritten.iter_args[0])
+        argument_window = _carry_memref(invocation.args[0])
+        assert argument_window is not None and _same_base_address(argument_window, private_window)
+        assert invocation.op.name == "task"
+        assert len(invocation.deps) == 1 and invocation.deps[0].same_as(function.params[2])
+        assert invocation.kwargs["tag"] == "possible_writer" and invocation.attrs["test_marker"] == 1
+        assert isinstance(invocation.core_num, ir.ConstInt) and invocation.core_num.value == 2
+        assert invocation.sync_start and invocation.allow_early_resolve
+        assert invocation.predicate is not None and invocation.predicate.same_as(function.params[1])
+        preserved = next(
+            stmt for stmt in statements if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "witness"
+        )
+        assert isinstance(preserved.value, ir.Call) and preserved.value.args[0].same_as(original)
+
+    @pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+    @pytest.mark.parametrize("buffer_ir", [False, True])
+    @pytest.mark.parametrize("mode", ["updated", "zero_trip", "identity"])
+    def test_borrowed_while_input_preserves_postloop_observation(self, planner, buffer_ir, mode):
+        """A legacy While cannot write its borrowed initializer through a backedge."""
+        if mode == "identity":
+            header = "for (current,) in pl.while_(init_values=(borrowed,)):"
+            condition = "keep_going"
+            yielded = "final = pl.yield_(current)"
+        else:
+            header = "for current, step in pl.while_(init_values=(borrowed, pl.const(0, pl.INDEX))):"
+            # Use a proven constant-false condition: LoopMayExecute does not
+            # substitute While initializers into a symbolic comparison here.
+            condition = "False" if mode == "zero_trip" else "step < 2"
+            yielded = "final, _final_step = pl.yield_(replacement, step + 1)"
+        before = pl.parse_program(
+            f"""
+@pl.program
+class BorrowedWhile:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, borrowed: pl.Tile[[16, 32], pl.FP32, pl.Mem.Vec],
+               replacement: pl.Tile[[16, 32], pl.FP32, pl.Mem.Vec],
+               keep_going: pl.Scalar[pl.BOOL],
+               out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]) -> pl.Tensor[[32, 32], pl.FP32]:
+        {header}
+            pl.cond({condition})
+            {yielded}
+        result = pl.tile.store(final, [0, 0], out)
+        witness = pl.tile.store(borrowed, [16, 0], result)
+        return witness
+""",
+            filename=f"<borrowed-while-{mode}>",
+        )
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
+            initialized = passes.init_mem_ref()(before)
+            original = initialized.get_function("kernel")
+            assert original is not None
+            borrowed_window = _carry_memref(original.params[0])
+            assert borrowed_window is not None
+            after = passes.materialize_semantic_aliases()(initialized)
+        function = after.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        statements = function.body.stmts
+        loop = next(stmt for stmt in statements if isinstance(stmt, ir.WhileStmt))
+        borrowed, replacement = function.params[:2]
+        final_borrowed_window = _carry_memref(borrowed)
+        assert final_borrowed_window is not None
+        assert _same_base_address(final_borrowed_window, borrowed_window)
+        witness = next(
+            stmt for stmt in statements if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "witness"
+        )
+        assert isinstance(witness.value, ir.Call)
+        assert witness.value.args[0].same_as(borrowed)
+        carry_window = _carry_memref(loop.iter_args[0])
+        result_window = _carry_memref(loop.return_vars[0])
+        assert carry_window is not None and result_window is not None
+        assert _same_base_address(carry_window, result_window)
+        body = loop.body.stmts if isinstance(loop.body, ir.SeqStmts) else [loop.body]
+
+        def tile_move(stmt: ir.Stmt) -> bool:
+            return (
+                isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.value, ir.Call)
+                and stmt.value.op.name == _TILE_MOVE_OP
+            )
+
+        entries = [stmt for stmt in statements if tile_move(stmt)]
+        backedges = [stmt for stmt in body if tile_move(stmt)]
+        if mode == "updated":
+            assert not ir.MemRef.may_alias(carry_window, borrowed_window)
+            assert len(entries) == 1
+            entry = entries[0]
+            assert isinstance(entry, ir.AssignStmt) and isinstance(entry.value, ir.Call)
+            assert entry.value.args[0].same_as(borrowed)
+            assert loop.iter_args[0].initValue.same_as(entry.var)
+            assert statements.index(entry) < statements.index(loop)
+            # PYPTO Tile mode finishes backedge reconciliation in MemoryReuse;
+            # the other routes already reconcile it in this semantic pass.
+            expected_backedges = int(buffer_ir or planner != passes.MemoryPlanner.PYPTO)
+            assert len(backedges) == expected_backedges
+            for backedge in backedges:
+                assert isinstance(backedge, ir.AssignStmt) and isinstance(backedge.value, ir.Call)
+                assert backedge.value.args[0].same_as(replacement)
+                destination = _carry_memref(backedge.var)
+                assert destination is not None and _same_base_address(destination, carry_window)
+                assert not ir.MemRef.may_alias(destination, borrowed_window)
+        else:
+            assert not entries and not backedges
+            assert loop.iter_args[0].initValue.same_as(borrowed)
+            assert _same_base_address(carry_window, borrowed_window)
+
+    @staticmethod
+    def _assert_private_replacement_slots(after: ir.Program, refs: dict[str, ir.MemRef]) -> None:
+        """Prove the symbolic replacement avoids seed zero and the incoming carry."""
+        seed, replacement = refs["seed"], refs["replacement"]
+        assert seed.base_.same_as(replacement.base_)
+        assert seed.slot_count_ == replacement.slot_count_ == 3
+        assert isinstance(seed.slot_index_, ir.ConstInt) and seed.slot_index_.value == 0
+        selector = replacement.slot_index_
+        assert selector is not None
+        matches: list[tuple[ir.ForStmt, ir.IfStmt]] = []
+
+        class Choices(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.loops: list[ir.ForStmt] = []
+
+            def visit_for_stmt(self, op):
+                self.loops.append(op)
+                super().visit_for_stmt(op)
+                self.loops.pop()
+
+            def visit_if_stmt(self, op):
+                if self.loops and any(result.same_as(selector) for result in op.return_vars):
+                    matches.append((self.loops[-1], op))
+                super().visit_if_stmt(op)
+
+        Choices().visit_program(after)
+        assert len(matches) == 1
+        loop, choice = matches[0]
+        assert len(loop.iter_args) == 1
+        incoming = loop.iter_args[0]
+        assert isinstance(incoming.type, ir.ScalarType) and incoming.type.dtype == DataType.INDEX
+        assert isinstance(incoming.initValue, ir.ConstInt) and incoming.initValue.value == 0
+        assert isinstance(choice.condition, ir.Eq)
+        assert choice.condition.left.same_as(incoming)
+        assert isinstance(choice.condition.right, ir.ConstInt) and choice.condition.right.value == 1
+
+        def last_yield(body: ir.Stmt) -> ir.YieldStmt:
+            statements = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+            return next(stmt for stmt in reversed(statements) if isinstance(stmt, ir.YieldStmt))
+
+        assert choice.else_body is not None
+        then_slot = last_yield(choice.then_body).value[0]
+        else_slot = last_yield(choice.else_body).value[0]
+        assert isinstance(then_slot, ir.ConstInt) and then_slot.value == 2
+        assert isinstance(else_slot, ir.ConstInt) and else_slot.value == 1
+        # This checks the complete possible carry domain, including initial seed
+        # zero. A generic MemRef overlap query cannot infer this selector range.
+        for current in (0, 1, 2):
+            selected = then_slot.value if current == 1 else else_slot.value
+            assert selected not in (0, current)
+        assert last_yield(loop.body).value[0].same_as(selector)
+
+        def barrier(stmt: ir.Stmt) -> bool:
+            return (
+                isinstance(stmt, ir.EvalStmt)
+                and isinstance(stmt.expr, ir.Call)
+                and stmt.expr.op.name == ir.get_op("system.bar_all").name
+            )
+
+        assert isinstance(loop.body, ir.SeqStmts) and barrier(loop.body.stmts[-2])
+        boundaries: list[bool] = []
+
+        def inspect_boundaries(statement: ir.Stmt) -> None:
+            if isinstance(statement, ir.SeqStmts):
+                for index, child in enumerate(statement.stmts):
+                    # The unique loop binder identifies the selected region
+                    # even if a traversal exposes a rebuilt statement wrapper.
+                    if isinstance(child, ir.ForStmt) and child.loop_var.same_as(loop.loop_var):
+                        assert child.iter_args[0].same_as(incoming)
+                        assert 0 < index < len(statement.stmts) - 1
+                        boundaries.append(
+                            barrier(statement.stmts[index - 1]) and barrier(statement.stmts[index + 1])
+                        )
+                    inspect_boundaries(child)
+            elif isinstance(statement, ir.IfStmt):
+                inspect_boundaries(statement.then_body)
+                if statement.else_body is not None:
+                    inspect_boundaries(statement.else_body)
+            elif isinstance(statement, ir.ForStmt | ir.WhileStmt | ir.ScopeStmt):
+                inspect_boundaries(statement.body)
+
+        for function in after.functions.values():
+            inspect_boundaries(function.body)
+        assert boundaries == [True]
+
     @pytest.mark.parametrize(
         "first_loop",
         ["runtime_for", "zero_for", "positive_for", "descending_for", "runtime_while", "zero_while"],
@@ -5238,7 +5541,19 @@ class Before:
             _wave_out = pl.yield_(wave + 1)
         return out
 """)
-        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        initialized = passes.init_mem_ref()(before)
+        if observe_result and not forward_carry and first_loop in {"runtime_while", "zero_while"}:
+            # This Mat family crosses two Tile-carry loops, beyond the current
+            # slot-selection contract. Preserving its independently observed
+            # initializer would require an unavailable Mat-to-Mat entry copy.
+            # The old missing While backedge write hid that storage conflict;
+            # a symbolic step comparison is not a proven constant-false loop.
+            with pytest.raises(
+                ValueError, match="cannot preserve an independently live loop input without a same-space copy"
+            ):
+                passes.materialize_semantic_aliases()(initialized)
+            return
+        after = passes.materialize_semantic_aliases()(initialized)
         refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
         can_skip = first_loop not in {"positive_for", "descending_for"}
         if observe_result and (can_skip or forward_carry):
@@ -5418,7 +5733,10 @@ class Before:
         after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
         refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
         if trips > 1 and read_handle != "carry":
-            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
+            if refs["replacement"].slot_count_ > 1:
+                self._assert_private_replacement_slots(after, refs)
+            else:
+                assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), after.as_python()
         else:
             assert _same_base_address(refs["seed"], refs["replacement"]), after.as_python()
             _assert_carry_yield_lands_in_its_buffer(after)
@@ -5715,9 +6033,12 @@ class Before:
 
         after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
         refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
-        assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), (
-            "the reload would overwrite the old carry before its extract"
-        )
+        if refs["replacement"].slot_count_ > 1:
+            self._assert_private_replacement_slots(after, refs)
+        else:
+            assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), (
+                "the reload would overwrite the old carry before its extract"
+            )
 
     def test_simultaneously_live_nested_mat_carries_remain_distinct(self):
         """Two carried results consumed after the inner For need independent storage."""
@@ -6024,16 +6345,22 @@ class Before:
             _final, _wave_out = pl.yield_(merged, wave + 1)
         return out
 """)
-        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
-        refs = _collect_named_tile_memrefs(after, {"initial", "fresh", "accumulated"})
+        initialized = passes.init_mem_ref()(before)
         if read_initial:
-            assert not ir.MemRef.may_alias(refs["initial"], refs["fresh"]), (
-                f"the fresh branch would overwrite the independently read initializer:\n{after.as_python()}"
-            )
-        else:
-            for name in ("fresh", "accumulated"):
-                assert _same_base_address(refs["initial"], refs[name]), after.as_python()
-            _assert_if_phi_arms_write_the_phi_buffer(after)
+            # Merely keeping fresh separate did not protect the old initial
+            # payload: matmul_acc updates the fixed carry every iteration.
+            # A private accumulator would need an unsupported Acc-to-Acc entry
+            # copy. Previously omitted While writeback masked this conflict.
+            with pytest.raises(
+                ValueError, match="cannot preserve an independently live loop input without a same-space copy"
+            ):
+                passes.materialize_semantic_aliases()(initialized)
+            return
+        after = passes.materialize_semantic_aliases()(initialized)
+        refs = _collect_named_tile_memrefs(after, {"initial", "fresh", "accumulated"})
+        for name in ("fresh", "accumulated"):
+            assert _same_base_address(refs["initial"], refs[name]), after.as_python()
+        _assert_if_phi_arms_write_the_phi_buffer(after)
 
 
 class TestStructuralShapeEquality:

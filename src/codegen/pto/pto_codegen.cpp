@@ -36,6 +36,7 @@
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/gm_pipe_layout.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -1675,6 +1676,22 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
 
   TilePhiBaseCollector phi_collector;
   CoLiveSlotCollector colive_collector;
+  std::set<const ir::Var*> selection_pools;
+  // InitMemRef and storage legalization hoist all allocation declarations.
+  // The marker is emitted only by Mat storage selection, whose scalar carries
+  // and explicit barriers establish the lifetime and reuse protocol.
+  if (auto body = As<ir::SeqStmts>(func->body_)) {
+    for (const auto& statement : body->stmts_) {
+      const auto assign = As<ir::AssignStmt>(statement);
+      const auto call = assign ? As<ir::Call>(assign->value_) : nullptr;
+      if (!ir::IsOp(call, "tile.alloc")) continue;
+      for (const auto& [name, value] : call->attrs_) {
+        if (name == "storage_selection" && AnyCast<bool>(value, name)) {
+          selection_pools.insert(assign->var_.get());
+        }
+      }
+    }
+  }
   if (func->body_) {
     phi_collector.VisitStmt(func->body_);
     colive_collector.VisitStmt(func->body_);
@@ -1764,7 +1781,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "tile '" + tile_var->name_hint_ + "' binds it without selecting a slot";
     } else if (memref->slot_count_ != candidate.count) {
       candidate.blocker = "its tiles disagree on how many slots it has";
-    } else if (candidate.count > kMaxMultiTileBufSlots) {
+    } else if (candidate.count > kMaxMultiTileBufSlots && !selection_pools.count(memref->base_.get())) {
       candidate.blocker = "ptoas supports " + std::to_string(kMinMultiTileBufSlots) + " to " +
                           std::to_string(kMaxMultiTileBufSlots) + " slots, and it declares " +
                           std::to_string(candidate.count);
@@ -1782,11 +1799,13 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
                           "x" + std::to_string(candidate.valid_col) + " and " +
                           std::to_string(tile_valid_row) + "x" + std::to_string(tile_valid_col) +
                           "), and a region declares one valid extent for all of them";
-    } else if (!IsMultiBufferMemorySpace(tile_type->memory_space_)) {
+    } else if (!IsMultiBufferMemorySpace(tile_type->memory_space_) &&
+               !selection_pools.count(memref->base_.get())) {
       candidate.blocker = "ptoas multi-buffer covers the Vec, Mat and Acc memory spaces only";
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
       candidate.blocker = "one of its slots is carried out of an if or a loop as a phi";
-    } else if (colive_collector.bases.count(memref->base_.get()) != 0) {
+    } else if (colive_collector.bases.count(memref->base_.get()) != 0 &&
+               !selection_pools.count(memref->base_.get())) {
       candidate.blocker =
           "two of its slots are live at once inside a loop, and ptoas mis-synchronizes one form of "
           "that — a slot filled an iteration ahead of its read — into wrong data or a device hang "
@@ -1816,6 +1835,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
     region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
+    if (selection_pools.count(base)) {
+      for (uint64_t slot = 0; slot < region.count; ++slot) {
+        region.selection_slots.push_back(NewNamedTemp(base->name_hint_ + "_bank" + std::to_string(slot)));
+      }
+    }
 
     fs_.multi_buffer_regions.emplace(base, std::move(region));
     fs_.multi_buffer_region_order.push_back(base);
@@ -1863,6 +1887,20 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::str
     }
   }
 
+  if (!region->selection_slots.empty()) {
+    std::string selected = region->selection_slots.front();
+    for (size_t slot = 1; slot < region->selection_slots.size(); ++slot) {
+      const auto constant = GetOrEmitConstant(static_cast<int64_t>(slot), DataType::INDEX);
+      const auto condition = NewTemp();
+      Emit(condition + " = arith.cmpi eq, " + slot_ssa + ", " + constant + " : index");
+      const auto result = slot + 1 == region->selection_slots.size() ? tile_buf : NewTemp();
+      Emit(result + " = arith.select " + condition + ", " + region->selection_slots[slot] + ", " + selected +
+           " : " + region->slot_type_str);
+      selected = result;
+    }
+    fs_.ssa_to_tile_buf_type[tile_buf] = region->slot_type_str;
+    return true;
+  }
   Emit(tile_buf + " = pto.multi_tile_get " + region->region_ssa + "[" + slot_ssa +
        "] : " + region->mtb_type_str + " -> " + region->slot_type_str);
   fs_.ssa_to_tile_buf_type[tile_buf] = region->slot_type_str;
@@ -1879,6 +1917,14 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
     // Region declarations are synthesized from the whole allocation rather than
     // one statement, so the base variable's span is the closest true source.
     SpanScope base_loc(this, &base->span_);
+    if (!region.selection_slots.empty()) {
+      for (const auto& slot : region.selection_slots) {
+        Emit(slot + " = pto.alloc_tile valid_row = " + region.valid_row_ssa +
+             " valid_col = " + region.valid_col_ssa + " : " + region.slot_type_str);
+        fs_.ssa_to_tile_buf_type[slot] = region.slot_type_str;
+      }
+      continue;
+    }
     Emit(region.region_ssa + " = pto.alloc_multi_tile valid_row = " + region.valid_row_ssa +
          " valid_col = " + region.valid_col_ssa + " : " + region.mtb_type_str);
   }

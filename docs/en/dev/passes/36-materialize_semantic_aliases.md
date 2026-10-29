@@ -1,21 +1,21 @@
 # MaterializeSemanticAliases Pass
 
-Forces buffers that the program *semantics require* to be the same allocation to
-share one MemRef, by propagating each loop-carried `iter_arg`/`initValue` MemRef
-down the yield/producer chain.
+Legalizes required storage contracts before memory planning. Compatible loop
+producers write directly into carried storage; compatible logical selections transport a scalar storage index without copying
+payloads, regardless of whether a same-space move would be hardware-legal.
 
 ## Overview
 
 Memory planning distinguishes two kinds of buffer sharing:
 
-- **Must-alias (semantics-required):** a loop-carried accumulator, or an in-place
-  op result, *has* to live in one buffer — writing the "next" value must update
-  the carried buffer, or the loop does not accumulate. This is correctness, not
-  optimization.
+- **Required storage contracts:** in-place results share their input storage.
+  Fixed-buffer loop lowering also requires a yielded value to reach the carry's
+  buffer. A logical loop value can alternatively select storage; it does not
+  inherently require a payload copy back to its initializer.
 - **May-alias (opportunistic):** two independent buffers with non-overlapping
   lifetimes *may* share storage to save memory. This is optimization.
 
-This pass handles only the **must-alias** case. It was split out of
+This pass handles required aliases and control-flow transfers. It was split out of
 [`MemoryReuse`](37-memory_reuse.md) (it is that pass's former "Step 0") so that
 the opportunistic lifetime coalescing can be skipped independently:
 
@@ -27,6 +27,57 @@ the opportunistic lifetime coalescing can be skipped independently:
 MemRefs) and before the selected memory planner. It always runs. `PYPTO` follows
 it with [`MemoryReuse`](37-memory_reuse.md); `DSA_RP` consumes its allocation
 identities in [`AllocateMemoryAddr`](38-allocate_memory_addr.md).
+
+## Logical storage selections
+
+A logical If result can select an existing value without copying it to the
+other arm's address. This applies to Vec as well as Mat and Acc: a hardware-legal
+move is still unnecessary when the boundary only selects storage.
+
+`BuildStorageSelectionPlan` uses the existing definition/binding index and returns
+plain maps: original Tile to rewritten Tile, Tile to scalar slot expression,
+repeated producer to its protected incoming slots and private slot range, plus new allocations.
+The selection phase of `YieldFixupMutator` retains each If condition and rewrites
+both arm yields and the matching return variable to INDEX together. It then
+reconstructs the selected Tile with `tile.create`, a descriptor-only operation.
+The phase runs regardless of the requested emission mode. Functions that acquire
+selection pools use Tile emission because the Buffer ABI cannot represent their
+indexed multi-slot descriptors; ordinary supported functions keep Buffer emission.
+
+Each compatible family has one compiler-owned pool. Distinct result positions
+may have different shapes and receive independent pools. Slots are disjoint;
+the merged Tile aliases the selected slot. Fresh registered producers, including
+arithmetic and matmul outputs, write directly to their slots. This is not limited
+to two loads, FP16/BF16, or rank two. The current pool contract requires one known
+memory space, matching physical descriptors, static shapes/valid shapes, and no
+strided views. Borrowed inputs, explicitly pinned allocations, shared windows,
+and mutating writebacks are not migrated.
+
+For and While carries transport slot indices, including their initializers and
+zero-trip results. This also covers pure permutations without an If. Current/next
+prefetch keeps the seed and gives each repeated producer K+1 private slots for K
+incoming carries, choosing a slot not referenced by any incoming carry. A single
+carry uses two slots; two carries use a bounded scalar search over three slots.
+Repeated-producer families currently support at most two carries to keep the
+generated plan linear; producer-free permutations have no such limit. A family
+cannot span multiple Tile-carry loops, and a While condition must not read its
+selected Tile payload. The producer/consumer order is preserved. Conservative
+barriers at loop entry, backedges and exit protect reuse, including enclosing
+scalar loops; optimal capacity and pipeline overlap are separate optimizations.
+
+Residual fixed-buffer For and While loops share parallel backedge repair. A
+different yielded window is copied only when the memory-space pair permits it;
+unsupported transfers are diagnosed rather than silently retaining the seed.
+Before residual Tile While backedges are repaired, borrowed or independently
+observed seeds receive a private entry snapshot. Proven zero-trip and identity
+carries need no snapshot; selected INDEX carries keep the original seed slot.
+
+PYPTO/DSA_RP use indexed addresses. PTOAS uses separate addressless allocations
+plus descriptor selection for compiler-generated pools. Author-declared
+multi-buffer regions retain their existing restrictions. Unsupported residual
+transfers are diagnosed before creating `tile.move`, including codegen fallbacks;
+that legality check is a final guard, not the criterion for deciding a copy is
+necessary. Repaired phi views and aliases are propagated before later phis.
 
 ## API
 
@@ -306,7 +357,8 @@ Mat, Left, Right, and Acc transfers receive an early diagnostic; a live Acc inpu
 by an Acc-to-Acc move. The existing guarded accumulator producer coalescing
 remains available for compatible carries. Ambiguous view addresses and
 simultaneously overlapping destination windows must be resolved before final
-Buffer lowering. Unselected kernels and explicit Off mode retain their previous Tile behavior.
+Buffer lowering. Unselected kernels and explicit Off mode use the Tile path,
+including the logical storage selections described above.
 
 The default Buffer rollout selects complete supported kernels before storage
 legalization; see [whole-kernel selection](55-lower_tile_to_buffer.md#default-whole-kernel-selection).

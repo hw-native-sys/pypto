@@ -544,9 +544,10 @@ class TestSlots:
             def main(
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
-                # `main` is not an InCore function, so InferTileMemorySpace never places
-                # this parameter; spell the DDR carry buffer the test is about.
-                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.DDR],
+                # InferTileMemorySpace does not place this non-InCore parameter.
+                # Use a Vec seed: the add writes Vec, and Tile moves cannot
+                # write a DDR Tile. The explicit l0c slot must still rotate.
+                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec],
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 for i, (acc_i,) in pl.range(4, init_values=(seed,)):

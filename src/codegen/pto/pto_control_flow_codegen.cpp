@@ -23,6 +23,7 @@
 #include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -449,6 +450,18 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
           if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
               branch_yields[i] != phi_it->second) {
+            // This fallback creates a transfer outside the IR passes. Apply the
+            // same legality check as YieldFixup instead of emitting a Mat->Mat
+            // copy for an unreconciled storage selection.
+            auto source_tile =
+                yield && i < yield->value_.size() ? As<TileType>(yield->value_[i]->GetType()) : nullptr;
+            auto target_tile = As<TileType>(op->return_vars_[i]->GetType());
+            CHECK_SPAN(source_tile && target_tile && source_tile->GetMemorySpace() &&
+                           target_tile->GetMemorySpace() &&
+                           ir::IsTileMoveEverSupported(*source_tile->GetMemorySpace(),
+                                                       *target_tile->GetMemorySpace()),
+                       op->span_)
+                << "Cannot materialize branch storage with an unsupported tile.move memory-space pair";
             const std::string& phi = phi_it->second;
             // Annotate each operand with the type its own SSA value was defined
             // with. They can differ: a `pto.treshape` view carries static valid

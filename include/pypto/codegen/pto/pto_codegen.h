@@ -936,6 +936,10 @@ class PTOCodegen : public CodegenBase {
     std::string valid_row_ssa;  ///< valid_row operand (shared by every slot)
     std::string valid_col_ssa;  ///< valid_col operand (shared by every slot)
     uint64_t count = 1;         ///< Slot count, in [2, 16] (the ptoas bound)
+    // Nonempty only for compiler-generated Mat selection pools. Keep these as
+    // separate allocations and select descriptors, avoiding multi-buffer
+    // prefetch synchronization. Explicit author regions never use this route.
+    std::vector<std::string> selection_slots;
   };
 
   /**
