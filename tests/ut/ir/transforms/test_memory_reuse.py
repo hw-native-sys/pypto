@@ -2870,9 +2870,8 @@ class TestYieldFixup:
         """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
 
         The divergent phi cannot be safely coalesced because one seed is
-        produced before the branch. Reject it before codegen rather than emit a
-        type-correct ``tile.move`` that PTOAS cannot lower for distinct L0C
-        buffers.
+        produced before the branch. Preserve the native descriptor choice
+        without an Acc-to-Acc payload transfer between distinct L0C buffers.
         """
         _assert_native_acc_selection(_run_pipeline(_divergent_acc_phi_program()))
 
@@ -4098,9 +4097,9 @@ class SharedSuffix:
         ``fillpad_inplace`` (reuses input, output aliases it), ``then`` a fresh
         seed on a different Vec buffer -- must NOT be coalesced by the seed
         retarget. ``IsInplaceAccumulatorProducer`` returns true for the Vec
-        branch, but the ``MemorySpace::Acc`` gate skips it, so the existing
-        ``YieldFixupMutator`` reconciles it with a legal Vec->Vec ``tile.move``
-        (Vec->Vec is a legal tmov pair, unlike Acc->Acc). Two Vec buffers survive.
+        branch, but the ``MemorySpace::Acc`` gate skips it. Native If forwards
+        the actual branch handle, and both Vec buffers survive without a merge
+        copy.
         """
 
         @pl.program
@@ -4136,8 +4135,8 @@ class SharedSuffix:
 
         After = _run_pipeline(Before)
         bases = {b for b in _collect_tile_memref_bases(After).values() if "vec" in b}
-        # Not acc-coalesced: the two branch buffers survive and the existing path
-        # inserts a (legal, Vec->Vec) tile.move to reconcile the phi.
+        # Not acc-coalesced: both branch buffers survive. Native selection
+        # forwards the chosen descriptor without a Vec merge copy.
         assert len(bases) == 2, f"Vec accumulator-shaped phi must not be acc-coalesced; bases={sorted(bases)}"
         assert "tile.move" not in ir.python_print(After), "native If needs no Vec merge copy"
 
@@ -4150,12 +4149,11 @@ class SharedSuffix:
         into ``prev``. Coalescing would retarget ``pre`` onto ``prev``'s buffer,
         writing it before the ``if`` and clobbering the accumulator that the else
         branch reads. Branch exclusivity does NOT hold for a pre-if producer, so
-        the coalescer must skip this phi (leaving it to YieldFixup) and keep
+        the coalescer must skip this phi (retaining native selection) and keep
         ``pre`` and ``prev`` on distinct buffers.
         """
-        # Branch-locality correctly prevents unsafe coalescing. Because Acc->Acc
-        # tile.move is unsupported, YieldFixup must then fail loudly instead of
-        # emitting invalid IR for this unlowerable control-flow shape.
+        # Branch-locality prevents unsafe coalescing. Native selection keeps
+        # both actual sources and needs no unsupported Acc-to-Acc transfer.
         _assert_native_acc_selection(_run_pipeline(_divergent_acc_phi_program()))
 
     def test_pre_if_accumulator_loop_is_not_treated_as_branch_local(self):
@@ -4191,8 +4189,8 @@ class SharedSuffix:
 
         # The pre-if loop result remains live after the if. Treating it as a
         # branch-local accumulator would retarget the sibling seed onto its
-        # buffer and clobber bypass_result on that path. Decline and fail closed
-        # because the remaining divergent Acc phi has no legal repair move.
+        # buffer and clobber bypass_result on that path. Decline the retarget
+        # and preserve the divergent Acc handles through native selection.
         _assert_native_acc_selection(_run_pipeline(Before))
 
     def test_branch_local_accumulator_loop_preserves_external_seed_after_if(self):
@@ -4233,7 +4231,7 @@ class SharedSuffix:
 
         # Retargeting ``seed`` onto ``initial`` is unsafe because ``initial``
         # remains independently observable after the if on the else path. The
-        # remaining divergent Acc phi has no legal Acc-to-Acc repair move.
+        # native descriptor result preserves the selected Acc handle instead.
         _assert_native_acc_selection(_run_pipeline(Before))
 
     def test_direct_accumulator_phi_preserves_reused_input_after_if(self):
