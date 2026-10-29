@@ -42,6 +42,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -677,6 +678,7 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto buffer = call->args_[load ? 3 : 0];
     const auto offsets = As<ir::MakeTuple>(call->args_[1]);
     const auto extents = As<ir::MakeTuple>(call->args_[2]);
+    if (ir::tile_view_semantics::HasZeroValidExtent(extents->elements_)) return true;
     std::vector<std::string> offset_values;
     std::vector<std::string> extent_values;
     for (const auto& offset : offsets->elements_) {
@@ -688,13 +690,19 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto type = As<ir::TensorType>(tensor->GetType());
     const std::string partition_type = backend::pto_ops_detail::MakePartitionTensorViewType(
         backend::pto_ops_detail::GetDimStrings(extents->elements_), GetTypeString(type->dtype_));
+    // Cache the shared tensor view outside the guard so later accesses can
+    // reuse it without referring to a value defined only in this branch.
+    const auto tensor_view = GetOrCreateTensorView(tensor);
+    const bool guarded =
+        backend::pto_ops_detail::BeginNonEmptyRegion(extents->elements_, *this, extent_values);
     const std::string partition = backend::pto_ops_detail::EmitPartitionViewPTO(
-        tensor->name_hint_, GetOrCreateTensorView(tensor), GetTensorViewTypeString(type.get()),
-        partition_type, offset_values, extent_values, *this);
+        tensor->name_hint_, tensor_view, GetTensorViewTypeString(type.get()), partition_type, offset_values,
+        extent_values, *this);
     const std::string buffer_operand = GetExprAsCode(buffer) + " : " + GetExprTypeAnnotation(buffer);
     const std::string tensor_operand = partition + " : " + partition_type;
     Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
               : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
+    backend::pto_ops_detail::EndNonEmptyRegion(guarded, *this);
   } else if (const auto* indexed = backend::FindBufferIndexedRecipe(call->op_->name_)) {
     if (indexed->compare) {
       // The complete scratch backing is an explicit effect operand. Native
