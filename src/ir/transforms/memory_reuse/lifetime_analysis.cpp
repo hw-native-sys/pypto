@@ -243,8 +243,9 @@ class LifetimeAnalyzer : public IRVisitor {
           // deeply nested choices among outer values from rescanning one DAG
           // per enclosing If merely to discover there are no local producers.
           const auto order = binding_points_.find(src.get());
-          if (start < 0 || order == binding_points_.end() || order->second < start || order->second > end)
+          if (start < 0 || order == binding_points_.end() || order->second < start || order->second > end) {
             return;
+          }
         }
         auto pit = phi_local_sources_.find(src.get());
         if (pit != phi_local_sources_.end()) {
