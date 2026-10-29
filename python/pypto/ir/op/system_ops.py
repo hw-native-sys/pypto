@@ -625,6 +625,8 @@ def _build_pipe_init_kwargs(
     slot_num: int | None,
     local_slot_num: int | None,
     id: int | None,
+    fixpipe_bf16: bool | None,
+    fixpipe_relu: bool | None,
 ) -> dict[str, int]:
     """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
 
@@ -639,6 +641,10 @@ def _build_pipe_init_kwargs(
         kwargs["local_slot_num"] = local_slot_num
     if id is not None:
         kwargs["id"] = id
+    if fixpipe_bf16 is not None:
+        kwargs["fixpipe_bf16"] = fixpipe_bf16
+    if fixpipe_relu is not None:
+        kwargs["fixpipe_relu"] = fixpipe_relu
     return kwargs
 
 
@@ -651,6 +657,8 @@ def aic_initialize_pipe(
     slot_num: int | None = None,
     local_slot_num: int | None = None,
     id: int | None = None,
+    fixpipe_bf16: bool | None = None,
+    fixpipe_relu: bool | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
@@ -666,10 +674,15 @@ def aic_initialize_pipe(
             ``<= slot_num``). On a3 the reserved/imported buffer is sized
             ``slot_size * local_slot_num``; on a5 it is ``slot_size * slot_num``.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        fixpipe_bf16: Compiler-generated A5 non-split FP32-to-BF16 C2V epilogue.
+            Both peer initializers and the producer must agree.
+        fixpipe_relu: Compiler-generated ReLU before BF16 narrowing.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id)
+    kwargs = _build_pipe_init_kwargs(
+        dir_mask, slot_size, slot_num, local_slot_num, id, fixpipe_bf16, fixpipe_relu
+    )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
@@ -683,6 +696,8 @@ def aiv_initialize_pipe(
     slot_num: int | None = None,
     local_slot_num: int | None = None,
     id: int | None = None,
+    fixpipe_bf16: bool | None = None,
+    fixpipe_relu: bool | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
@@ -698,10 +713,15 @@ def aiv_initialize_pipe(
             ``<= slot_num``). On a3 the reserved/imported buffer is sized
             ``slot_size * local_slot_num``; on a5 it is ``slot_size * slot_num``.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        fixpipe_bf16: Compiler-generated A5 non-split FP32-to-BF16 C2V epilogue.
+            Both peer initializers and the producer must agree.
+        fixpipe_relu: Compiler-generated ReLU before BF16 narrowing.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id)
+    kwargs = _build_pipe_init_kwargs(
+        dir_mask, slot_size, slot_num, local_slot_num, id, fixpipe_bf16, fixpipe_relu
+    )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
 

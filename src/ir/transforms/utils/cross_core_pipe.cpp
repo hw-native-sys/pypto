@@ -158,6 +158,8 @@ void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type) {
 
 void MergeDirectionMetadata(PipeDirectionMetadata& dst, const PipeDirectionMetadata& src) {
   dst.has_ops = dst.has_ops || src.has_ops;
+  dst.fixpipe_bf16 = dst.fixpipe_bf16 || src.fixpipe_bf16;
+  dst.fixpipe_relu = dst.fixpipe_relu || src.fixpipe_relu;
   dst.has_inconsistent_slot_size = dst.has_inconsistent_slot_size || src.has_inconsistent_slot_size;
   for (int64_t slot_size : src.observed_slot_sizes) {
     RecordObservedSlotSize(dst, slot_size);
@@ -275,7 +277,16 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
       } else if (IsOp(op, "system.aiv_initialize_pipe")) {
         metadata.has_aiv_initialize_pipe = true;
       } else if (IsOp(op, "tile.tpush_to_aiv") && call->args_.size() == 1) {
-        RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
+        auto type = As<TileType>(call->args_[0]->GetType());
+        if (type && call->GetKwarg<bool>("fixpipe_bf16", false)) {
+          metadata.c2v.fixpipe_bf16 = true;
+          metadata.c2v.fixpipe_relu = call->GetKwarg<bool>("fixpipe_relu", false);
+          RecordTileSlotSize(metadata.c2v,
+                             std::make_shared<TileType>(type->shape_, DataType::BF16, std::nullopt,
+                                                        type->tile_view_, type->memory_space_));
+        } else {
+          RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
+        }
       } else if (IsOp(op, "tile.tpush_to_aic") && call->args_.size() == 1) {
         RecordTileSlotSize(metadata.v2c, call->args_[0]->GetType());
       } else if (IsOp(op, "tile.tpop_from_aiv") && assign) {
@@ -331,21 +342,12 @@ CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtP
   return metadata;
 }
 
-AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
-                                           const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
-                                           const std::vector<StmtPtr>& aiv_stmts,
-                                           std::optional<int> slot_num_override,
-                                           std::optional<int> local_slot_num_override, const Span& span) {
-  CrossCorePipeMetadata aic_metadata;
-  CollectCrossCorePipeMetadata(aic_stmts, aic_metadata);
-  CrossCorePipeMetadata aiv_metadata;
-  CollectCrossCorePipeMetadata(aiv_stmts, aiv_metadata);
-  CrossCorePipeMetadata combined = MergeCrossCorePipeMetadata(aic_metadata, aiv_metadata);
-
-  if (!combined.HasCrossCoreOps() || aic_metadata.HasAnySetup() || aiv_metadata.HasAnySetup()) {
-    return {};
-  }
-
+namespace {
+AutomaticPipeSetup BuildPipeSetup(const std::string& func_name, const std::string& aic_name,
+                                  const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
+                                  const std::vector<StmtPtr>& aiv_stmts, std::optional<int> slot_num_override,
+                                  std::optional<int> local_slot_num_override, const Span& span,
+                                  const CrossCorePipeMetadata& combined, int pipe_id) {
   const int dir_mask = BuildDirMask(combined);
   auto common_slot_size = GetCommonSlotSizeBytes(combined);
   if (dir_mask == 0 || !common_slot_size.has_value()) {
@@ -432,16 +434,57 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   const ExprPtr aiv_c2v_arg = aiv_c2v_reserve_var ? var_as_expr(aiv_c2v_reserve_var) : ExprPtr(zero_i32());
   const ExprPtr aiv_v2c_arg = aiv_v2c_import_var ? var_as_expr(aiv_v2c_import_var) : ExprPtr(zero_i32());
 
-  setup.aic_stmts.push_back(std::make_shared<EvalStmt>(
-      CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes, aic_c2v_arg, aic_v2c_arg,
-                           effective_slot_num, local_slot_num_override, span),
-      span));
-  setup.aiv_stmts.push_back(std::make_shared<EvalStmt>(
-      CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes, aiv_c2v_arg, aiv_v2c_arg,
-                           effective_slot_num, local_slot_num_override, span),
-      span));
+  auto initialize = [&](core_affinity::CoreSide side, const ExprPtr& c2v, const ExprPtr& v2c) {
+    auto call = CreateInitializePipe(side, dir_mask, slot_size_bytes, c2v, v2c, effective_slot_num,
+                                     local_slot_num_override, span);
+    auto kwargs = call->kwargs_;
+    if (pipe_id != 0) kwargs.emplace_back("id", pipe_id);
+    if (combined.c2v.fixpipe_bf16) {
+      kwargs.emplace_back("fixpipe_bf16", true);
+      kwargs.emplace_back("fixpipe_relu", combined.c2v.fixpipe_relu);
+    }
+    return std::make_shared<EvalStmt>(
+        CreateSystemOpCall(core_side_ops::InitializePipeOp(side), call->args_, kwargs, span), span);
+  };
+  setup.aic_stmts.push_back(initialize(core_affinity::CoreSide::AIC, aic_c2v_arg, aic_v2c_arg));
+  setup.aiv_stmts.push_back(initialize(core_affinity::CoreSide::AIV, aiv_c2v_arg, aiv_v2c_arg));
 
   return setup;
+}
+}  // namespace
+
+AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
+                                           const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
+                                           const std::vector<StmtPtr>& aiv_stmts,
+                                           std::optional<int> slot_num_override,
+                                           std::optional<int> local_slot_num_override, const Span& span) {
+  CrossCorePipeMetadata aic_metadata;
+  CollectCrossCorePipeMetadata(aic_stmts, aic_metadata);
+  CrossCorePipeMetadata aiv_metadata;
+  CollectCrossCorePipeMetadata(aiv_stmts, aiv_metadata);
+  CrossCorePipeMetadata combined = MergeCrossCorePipeMetadata(aic_metadata, aiv_metadata);
+
+  if (!combined.HasCrossCoreOps() || aic_metadata.HasAnySetup() || aiv_metadata.HasAnySetup()) {
+    return {};
+  }
+
+  if (combined.c2v.fixpipe_bf16 && combined.v2c.has_ops) {
+    // PTOAS Fixpipe pipes are C2V-only. Give V2C its own identity and size,
+    // preserving both directions' original transport depth and lifetime checks.
+    auto c2v = combined;
+    c2v.v2c = {};
+    auto v2c = combined;
+    v2c.c2v = {};
+    auto setup = BuildPipeSetup(func_name, aic_name, aiv_name, aic_stmts, aiv_stmts, slot_num_override,
+                                local_slot_num_override, span, c2v, 0);
+    auto other = BuildPipeSetup(func_name, aic_name, aiv_name, aic_stmts, aiv_stmts, slot_num_override,
+                                local_slot_num_override, span, v2c, 1);
+    setup.aic_stmts.insert(setup.aic_stmts.end(), other.aic_stmts.begin(), other.aic_stmts.end());
+    setup.aiv_stmts.insert(setup.aiv_stmts.end(), other.aiv_stmts.begin(), other.aiv_stmts.end());
+    return setup;
+  }
+  return BuildPipeSetup(func_name, aic_name, aiv_name, aic_stmts, aiv_stmts, slot_num_override,
+                        local_slot_num_override, span, combined, 0);
 }
 
 std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue,

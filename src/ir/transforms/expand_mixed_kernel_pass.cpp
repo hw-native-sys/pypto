@@ -58,6 +58,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/expand_mixed_kernel/fixpipe.h"
 #include "src/ir/transforms/expand_mixed_kernel/group_abi.h"
 
 namespace pypto {
@@ -1585,6 +1586,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
 std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
                                    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
+                                   const mixed_kernel::C2VFixpipeFold& fixpipe_fold,
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
@@ -1604,6 +1606,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
   std::vector<StmtPtr> result;
 
   for (const auto& stmt : stmts) {
+    if (fixpipe_fold.erased.count(stmt.get())) continue;
+    if (side == CoreSide::AIV) {
+      auto replacement = fixpipe_fold.replacements.find(stmt.get());
+      if (replacement != fixpipe_fold.replacements.end()) {
+        result.push_back(replacement->second);
+        continue;
+      }
+    }
     auto it = stmt_map.find(stmt.get());
     CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
 
@@ -1689,8 +1699,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
             push_source = tmov_var;
           }
-          result.push_back(std::make_shared<EvalStmt>(
-              CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));
+          auto push = CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride);
+          if (bm.fixpipe_bf16) {
+            auto kwargs = push->kwargs_;
+            kwargs.emplace_back("fixpipe_bf16", true);
+            kwargs.emplace_back("fixpipe_relu", bm.fixpipe_relu);
+            push = OpRegistry::GetInstance().Create(push_op, push->args_, kwargs, push->span_);
+          }
+          result.push_back(std::make_shared<EvalStmt>(push, stmt->span_));
         } else {
           // Op-driven pop: the half/full shape comes from the op result type and
           // the memory from this side's transfer memory; the explicit follow-on
@@ -1807,20 +1823,22 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, fixpipe_fold,
+                          tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_then =
+            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves, fixpipe_fold,
+                          tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
           auto new_else_stmts =
-              BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+              BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, fixpipe_fold,
+                            tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -1828,8 +1846,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         new_if->else_body_ = new_else;
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves, fixpipe_fold,
+                          tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -2102,9 +2121,13 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // reintroduces source-tpop reuse.
   std::unordered_set<const Var*> superseded_tpop_vars;
 
+  auto fixpipe_fold = !had_regions && gm_sync_pushes.empty() && gm_sync_pops.empty()
+                          ? mixed_kernel::PlanC2VFixpipeFold(func, stmts, boundary_moves)
+                          : mixed_kernel::C2VFixpipeFold{};
+
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
-  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
+  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, fixpipe_fold, aic_tpop_remap,
                                  superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
@@ -2135,11 +2158,16 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
-  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
+  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, fixpipe_fold, aiv_tpop_remap,
                                  superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap);
+
+  if (fixpipe_fold.enabled) {
+    aic_final = mixed_kernel::RouteFixpipeV2C(aic_final);
+    aiv_final = mixed_kernel::RouteFixpipeV2C(aiv_final);
+  }
 
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery

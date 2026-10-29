@@ -32,6 +32,10 @@ namespace cross_core_pipe {
 struct PipeDirectionMetadata {
   bool has_ops = false;
   bool has_inconsistent_slot_size = false;
+  // Uniform over every push in this automatic C2V pipe. Slot bytes describe
+  // the narrowed payload, not the producer's accumulator element width.
+  bool fixpipe_bf16 = false;
+  bool fixpipe_relu = false;
   std::optional<int64_t> slot_size_bytes;
   std::vector<int64_t> observed_slot_sizes;
 };
