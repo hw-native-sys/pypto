@@ -953,6 +953,32 @@ def test_metadata_cannot_forge_subview_provenance(metadata_op):
         codegen.PTOCodegen().generate(ir.Program([function], "forged_metadata", span))
 
 
+def test_subview_rejects_forged_canonical_stride():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
+    ordinary = ir.op.tensor.view(cache, [8, 512])
+    forged_type = ir.TensorType(
+        [8, 512], DataType.BF16, tensor_view=ir.TensorView([4096, 1], ir.TensorLayout.ND)
+    )
+    forged = ir.Call(ordinary.op, ordinary.args, forged_type, span)
+    alias = ir.Var("forged", forged_type, span)
+    borrowed = ir.op.tensor.subview(alias, [2, 512], [1, 0], steps=[3, 1])
+    selected = ir.Var("selected", borrowed.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(alias, forged, span),
+            ir.AssignStmt(selected, borrowed, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    function = ir.Function("forged_stride", [cache], [], body, span, type=ir.FunctionType.InCore)
+    with pytest.raises(ValueError, match="canonical address-map stride"):
+        codegen.PTOCodegen().generate(ir.Program([function], "forged_stride", span))
+
+
 def test_subview_does_not_strengthen_unrelated_canonical_view_contract():
     span = ir.Span.unknown()
     size = ir.Var("size", ir.ScalarType(DataType.INDEX), span)
