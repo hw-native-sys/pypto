@@ -9508,10 +9508,11 @@ def test_packed_fp4_move_preserves_logical_shape_across_packing_axes(dtype):
     assert isinstance(moved.type, ir.TileType)
     assert [_const_int(dim) for dim in moved.type.shape] == [16, 128]
     assert moved.type.tile_view is None or moved.type.tile_view.blayout == ir.TileLayout.col_major
-    # PTOAS still compares raw Mat-source shapes, so a second packing-axis
-    # change cannot be expressed without its shape verifier being fixed.
-    with pytest.raises(ValueError, match="cannot change the packed FP4 axis"):
-        tile.move(moved, target_memory=ir.MemorySpace.Right)
+    # L0B packs columns: the same logical [32,128] tile becomes [32,64]
+    # carriers, without changing its byte footprint.
+    right = tile.move(moved, target_memory=ir.MemorySpace.Right)
+    assert isinstance(right.type, ir.TileType)
+    assert [_const_int(dim) for dim in right.type.shape] == [32, 64]
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])

@@ -410,7 +410,7 @@ spaces are resolved.
 | `tile.load` of `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | The source TensorLayout carries the MX scale GM layout. Dtype is FP8E8M0, and strided sources are rejected. Public `pl.load` defaults an omitted target to `Mat`; raw IR must carry `target_memory=Mat`. |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat-to-Scale move with hardware-fixed row/row/32 (left) or col/col/32 (right) layout; the source Mat tile and layout overrides must match exactly. |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | Not supported; load MX scale data into Mat and then move it into scale memory. |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; operand positions drive automatic placement, including Vec→Mat→LeftScale/RightScale staging for `quant_mx` scales. Both data operands reaching the op must be `FP8E4M3FN`, and scale is `FP8E8M0`; `lhs_scale` and `rhs_scale` must be distinct tiles. The supported packed-input form is either packed FP4 format as lhs × FP8 rhs with an explicit `pl.cast(fp4, pl.FP8E4M3FN)` before the op; native FP4×FP4 and FP8×FP4 are rejected. Physical M/K/N, valid K, and scale-group counts use the post-cast FP8 tile extents, never the packed x2 carrier shape. Physical `M % 16 == 0`, `K % 64 == 0`, and `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; both operands must be FP8E4M3FN or packed FP4 (either format). Mixed FP4/FP8 requires an explicit cast. FP4 shapes count carriers; inference expands the contiguous axis to logical M/K/N. FP8E8M0 scales use `[M, ceil(K/32)]` / `[ceil(K/32), N]`, and FP32 Acc uses `[M, N]`; scales must be distinct tiles. Physical logical `M % 16 == 0`, `K % 64 == 0`, `N % 32 == 0` (FP4 N % 64), with boxed-tile alignment also required. Valid K must preserve the physical scale-group count. Numeric checks apply to constant extents; PTOAS verifies symbolic geometry later. Native FP4 requires PTOAS #1700; see [FP4](../fp4.md). |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid M/N must match the matmul output. |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. |
 | `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` family. |
@@ -435,9 +435,10 @@ these dimensions through JIT and compiled calls without unit conversion.
 
 Explicit casts from either packed FP4 format to FP8 are legalized on A5 through
 BF16 and FP32. Scale values are unchanged because this numerically converts
-only the data operand. Native packed-FP4 matmul remains unsupported.
+only the data operand. Native packed-FP4 tile matmul retains both packed operands.
 `pl.quant_mx` supports MXFP8 and E2M1 MXFP4 quantization from FP16/BF16;
-only FP8 results can feed `matmul_mx` directly. See [FP4](../fp4.md) for
+FP4 results require supported placement into Mat and Left/Right before tile matmul.
+See [FP4](../fp4.md) for
 quantization alignment and memory-planner requirements.
 
 #### MX / Ascend950: pto-isa constraints
@@ -445,11 +446,11 @@ quantization alignment and memory-planner requirements.
 | Constraint | Detail |
 | ---------- | ------ |
 | Distinct scale buffers | Cube does not fold scales into Left/Right data. `TileType::ScaleLeft` / `ScaleRight` sidecars map to PyPTO `LeftScale` / `RightScale`. |
-| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; the emitted MX data pair is `FP8E4M3FN × FP8E4M3FN` (rejects `FP8E5M2` and native packed FP4). A packed-FP4×FP8 input first casts the packed lhs to FP8. Physical K, valid K, and `ceil(K/32)` scale groups are measured on that post-cast FP8 tile, not the packed x2 carrier; physical `K%64==0` and fractal is 32. |
+| Payload | Scale is FP8E8M0; operands are FP8E4M3FN pairs or packed FP4 pairs (E2M1/E1M2). FP8E5M2 and mixed FP4/FP8 are rejected. K and scale-group counts use logical values; scale fractal is 32. |
 | Layouts | `mx_a_zz` is row-major ZZ; `mx_b_nn` is col-major NN; loads use `TLoadMxCube*` (AZZ2ZZ). |
 | `TMov` `CommonCheckMX` | Allows UINT8 Mat → FP8E8M0 ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale. |
 | Bind then fill | Fill **after** `GetScaleAddr(Left/Right)`; writing the provisional alloc address is orphaned once rebound. |
-| Alignment | Post-cast FP8 tile extents require physical `M%16==0`, `K%64==0`, and `N%32==0`; `DeduceTileMatMulMxType` enforces these for **constant** extents only. Symbolic dims skip numeric checks. |
+| Alignment | Logical physical `M%16==0`, `K%64==0`, and `N%32==0` (FP4: `N%64==0`), plus boxed carrier-tile alignment. Numeric checks apply only to constant extents. |
 
 #### MX / Ascend950: PTOAS constraints
 

@@ -149,7 +149,7 @@ class TestUnregisteredOpError:
             codegen.generate_orchestration(program, orch_func)
 
     def test_reinterpret_view_has_explicit_orchestration_error(self):
-        """Runtime Tensor views cannot change dtype; direct users get an actionable error."""
+        """Width-changing runtime views still require an InCore operation."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
 
@@ -167,6 +167,29 @@ class TestUnregisteredOpError:
 
         with pytest.raises(ValueError, match="not supported in Orchestration functions.*InCore"):
             codegen.generate_orchestration(program, orch_func)
+
+    @pytest.mark.parametrize("packed", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("reverse", [False, True])
+    @pytest.mark.parametrize("explicit_shape", [False, True])
+    def test_fp4_orchestration_alias_preserves_byte_geometry(self, packed, reverse, explicit_shape):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        source, target = (packed, pl.UINT8) if reverse else (pl.UINT8, packed)
+        ib = IRBuilder()
+        with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+            x = orch_f.param("x", ir.TensorType([64, 64], source))
+            viewed = ib.let(
+                "viewed", tensor_ops.reinterpret_view(x, target, shape=[64, 64] if explicit_shape else None)
+            )
+            orch_f.return_type(viewed.type)
+            ib.return_stmt(viewed)
+        program = _finalize_for_codegen(ir.Program([orch_f.get_result()], "Fp4ByteView", ir.Span.unknown()))
+        generated = codegen.generate_orchestration(program, _orch_func_from_program(program)).code
+        assert "Tensor viewed" in generated
+        assert ".dtype = " in generated
+        # The runtime exposes E1M2 as UINT8 carriers; the kernel keeps its format.
+        runtime_dtype = "FP4E2M1" if not reverse and packed == pl.FP4E2M1X2 else "UINT8"
+        assert f"viewed.dtype = DataType::{runtime_dtype};" in generated
 
 
 class TestLocalAllocWAWPromotion:
