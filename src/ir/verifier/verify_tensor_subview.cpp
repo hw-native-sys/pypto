@@ -65,7 +65,11 @@ class SubviewVerifier : public IRVisitor {
     // their existing contract in functions that happen to contain a subview.
     if (alias && call && (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) &&
         required_provenance_.count(op->var_.get()) && !IsBorrowedExpr(call->args_[0])) {
-      CheckView(call);
+      if (IsOp(call, "tensor.view")) {
+        CheckView(call);
+      } else if (auto tensor = As<TensorType>(call->GetType()); tensor && tensor->tensor_view_.has_value()) {
+        CheckValidShape(call);
+      }
     }
     if (borrowed_value) {
       auto tensor = As<TensorType>(op->var_->GetType());
@@ -469,12 +473,31 @@ class SubviewVerifier : public IRVisitor {
     };
     Prove(MakeEq(count(parent->shape_), count(result->shape_)), op->span_,
           "view preserves parent element count");
+    CheckCanonicalAddressMap(op);
+  }
+  void CheckCanonicalAddressMap(const CallPtr& op) {
+    auto result = As<TensorType>(op->GetType());
+    auto deduced_expr = OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
+    auto deduced = deduced_expr ? As<TensorType>(deduced_expr->GetType()) : nullptr;
+    CHECK_SPAN(result && deduced && result->tensor_view_.has_value() && deduced->tensor_view_.has_value(),
+               op->span_)
+        << "tensor.subview metadata alias requires a deduced TensorView";
+    const auto& actual = result->tensor_view_.value();
+    const auto& expected = deduced->tensor_view_.value();
+    CHECK_SPAN(actual.layout == expected.layout && actual.pad == expected.pad, op->span_)
+        << "tensor.subview metadata alias changed the canonical address map";
+    CHECK_SPAN(actual.stride.size() == expected.stride.size(), op->span_)
+        << "tensor.subview metadata alias stride rank mismatch";
+    for (size_t i = 0; i < actual.stride.size(); ++i) {
+      Prove(MakeEq(actual.stride[i], expected.stride[i]), op->span_, "canonical address-map stride equality");
+    }
   }
   void CheckValidShape(const CallPtr& op) {
     auto parent = As<TensorType>(op->args_[0]->GetType());
     auto result = As<TensorType>(op->GetType());
     const auto& parent_metadata = parent->tensor_view_;
     const auto& result_metadata = result->tensor_view_;
+    if (!parent_metadata.has_value() || !result_metadata.has_value()) return;
     CHECK_SPAN(parent_metadata.has_value() && result_metadata.has_value(), op->span_)
         << "tensor.subview set_validshape requires affine addressing metadata";
     const auto& parent_view = parent_metadata.value();
