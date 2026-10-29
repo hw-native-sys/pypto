@@ -2076,8 +2076,10 @@ std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) const {
 }
 
 bool PTOCodegen::IsParameterBackedTile(const std::shared_ptr<const ir::TileType>& tile_type) const {
-  if (!tile_type) return false;
-  auto memref = ir::GetDefinedMemRef(tile_type);
+  // Pipe-owned handles can legitimately omit MemRef; they are not Tile
+  // parameters and must continue through their existing handle-based path.
+  if (!tile_type || !tile_type->memref_) return false;
+  auto memref = *tile_type->memref_;
   return memref && parameter_backed_tile_bases_.count(memref->base_.get()) > 0;
 }
 

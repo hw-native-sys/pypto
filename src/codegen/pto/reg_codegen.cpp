@@ -65,6 +65,24 @@ class ScopeOperands : public IRVisitor {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) memory.push_back(call);
     IRVisitor::VisitExpr_(call);
   }
+  void VisitStmt_(const ForStmtPtr& stmt) override {
+    RecordLoopResults(stmt->iter_args_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    RecordLoopResults(stmt->iter_args_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+  }
+
+ private:
+  // Tile loop carries preserve the initial backing view, including zero-trip
+  // loops. Results have no emitted SSA handle during this pre-scan, so resolve
+  // them through the corresponding initial value before address extraction.
+  void RecordLoopResults(const std::vector<IterArgPtr>& args, const std::vector<VarPtr>& results) {
+    for (size_t i = 0; i < args.size() && i < results.size(); ++i) {
+      if (As<TileType>(results[i]->GetType())) aliases.emplace(results[i].get(), args[i]);
+    }
+  }
 };
 }  // namespace
 
@@ -79,6 +97,9 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
   ScopeOperands operands;
   operands.VisitStmt(scope->body_);
   std::map<const ir::Var*, std::string> external_addresses;
+  // Path-compressed provenance avoids retracing every prefix of N chained
+  // stores. Each alias is resolved once with ordered-map/set lookup cost.
+  std::map<const ir::Var*, ir::VarPtr> external_roots;
   // Hoist addresses, including the addresses used by chained store versions.
   // A store version is an alias, never a new allocation or region result.
   for (const auto& call : operands.memory) {
@@ -86,7 +107,14 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(target, call->span_) << "Register address requires a Tile variable";
     auto external = target;
     std::set<const ir::Var*> seen;
-    while (seen.insert(external.get()).second) {
+    std::vector<ir::VarPtr> path;
+    while (true) {
+      if (auto cached = external_roots.find(external.get()); cached != external_roots.end()) {
+        external = cached->second;
+        break;
+      }
+      CHECK_SPAN(seen.insert(external.get()).second, call->span_) << "Cyclic register Tile alias";
+      path.push_back(external);
       auto alias = operands.aliases.find(external.get());
       if (alias != operands.aliases.end()) {
         external = alias->second;
@@ -102,6 +130,7 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
       }
       break;
     }
+    for (const auto& var : path) external_roots.emplace(var.get(), external);
     auto tile = ir::As<ir::TileType>(external->GetType());
     CHECK_SPAN(tile, call->span_) << "Register address requires a Vec Tile";
     auto [it, inserted] = external_addresses.emplace(external.get(), "");

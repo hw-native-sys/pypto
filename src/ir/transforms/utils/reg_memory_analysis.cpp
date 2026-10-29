@@ -61,7 +61,8 @@ class RegisterRoots : public IRVisitor {
 // Disjoint initialized byte intervals, with an undo journal for conditional
 // execution. Each insertion/deletion costs O(log N); the journal visits only
 // changed intervals instead of copying the whole function's state per branch.
-// A conditional/possibly-empty loop establishes no new definite initialization.
+// An exhaustive conditional retains only facts proved on both paths; a
+// possibly-empty loop establishes no new definite initialization.
 class InitializationChecker : public IRVisitor {
  public:
   explicit InitializationChecker(const std::set<const Var*>& roots) : roots_(roots) {}
@@ -176,13 +177,42 @@ class InitializationChecker : public IRVisitor {
       return;
     }
     const auto checkpoint = journal_.size();
-    // Both branches start with the incoming state. Deliberately discard all
-    // new branch facts; computing their intersection could accept more cases.
     VisitStmt(stmt->then_body_);
+    // Snapshot only final intervals changed by this arm, not the entire state.
+    // Merged-away insertions need no entry: their surviving interval covers
+    // them. Incoming facts already survive Undo without being intersected.
+    std::map<const Var*, Intervals> then_changes;
+    if (stmt->else_body_) {
+      for (size_t i = checkpoint; i < journal_.size(); ++i) {
+        const auto& change = journal_[i];
+        if (!change.inserted) continue;
+        const auto& state = initialized_.at(change.root);
+        auto it = state.find(change.begin);
+        if (it != state.end()) then_changes[change.root].emplace(*it);
+      }
+    }
     Undo(checkpoint);
     if (stmt->else_body_) {
       VisitStmt(*stmt->else_body_);
+      // Ordered disjoint intervals allow a linear overlap walk per changed
+      // range, with logarithmic entry lookup. Include partial overlaps, not
+      // just identical store boundaries, and leave else-only bytes unproved.
+      std::vector<Change> common;
+      for (const auto& [root, ranges] : then_changes) {
+        auto state = initialized_.find(root);
+        if (state == initialized_.end()) continue;
+        for (const auto& [begin, end] : ranges) {
+          auto it = state->second.lower_bound(begin);
+          if (it != state->second.begin() && std::prev(it)->second > begin) --it;
+          for (; it != state->second.end() && it->first < end; ++it) {
+            auto overlap_begin = std::max(begin, it->first);
+            auto overlap_end = std::min(end, it->second);
+            if (overlap_begin < overlap_end) common.push_back({root, overlap_begin, overlap_end, true});
+          }
+        }
+      }
       Undo(checkpoint);
+      for (const auto& change : common) Add(change.root, change.begin, change.end);
     }
   }
   void VisitStmt_(const ForStmtPtr& stmt) override {

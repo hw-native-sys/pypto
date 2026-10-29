@@ -25,9 +25,12 @@ def a5_backend():
     backend.reset_for_testing()
 
 
-def memory_program(*, writes=(), active=None, read_lanes=64, read_offset=0, loop_stop=None, view=False):
+def memory_program(
+    *, writes=(), active=None, read_lanes=64, read_offset=0, loop_stop=None, view=False, branch_writes=None
+):
     ib = IRBuilder()
     with ib.function("memory", span=SPAN, type=ir.FunctionType.AIV) as f:
+        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
         storage = ib.let("storage", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
         target = ib.let("view", tile.slice(storage, [64], [32])) if view else storage
         with ib.reg_scope(SPAN):
@@ -47,7 +50,14 @@ def memory_program(*, writes=(), active=None, read_lanes=64, read_offset=0, loop
                     {"lanes": 64},
                     SPAN,
                 )
-            if loop_stop is None:
+            if branch_writes is not None:
+                with ib.if_stmt(condition, SPAN) as branch:
+                    for offset in branch_writes[0]:
+                        ib.emit_reg_store("then_out", target, value, offset=offset, span=SPAN)
+                    branch.else_(SPAN)
+                    for offset in branch_writes[1]:
+                        ib.emit_reg_store("else_out", target, value, offset=offset, span=SPAN)
+            elif loop_stop is None:
                 for offset in writes:
                     ib.emit_reg_store("updated", target, value, offset=offset, mask=mask, span=SPAN)
             else:
@@ -106,6 +116,26 @@ def test_overlapping_view_updates_root_interval():
 @pytest.mark.parametrize("stop,valid", [(0, False), (1, True)])
 def test_zero_trip_loop_does_not_initialize_tile(stop, valid):
     program = memory_program(writes=(0,), loop_stop=stop)
+    if valid:
+        initialize(program)
+    else:
+        with pytest.raises(ValueError, match="uninitialized"):
+            initialize(program)
+
+
+@pytest.mark.parametrize(
+    "branches,offset,lanes,valid",
+    [
+        (((0,), (0,)), 0, 64, True),
+        (((0,), (32,)), 32, 32, True),
+        (((0,), (32,)), 0, 64, False),
+        (((0,), ()), 0, 64, False),
+        (((0, 64), (0, 64)), 0, 128, True),
+    ],
+)
+def test_exhaustive_branches_preserve_only_common_initialized_bytes(branches, offset, lanes, valid):
+    # Reads after a dynamic if are safe exactly where both paths wrote bytes.
+    program = memory_program(branch_writes=branches, read_offset=offset, read_lanes=lanes)
     if valid:
         initialize(program)
     else:

@@ -414,14 +414,16 @@ def test_review_register_control_flow_ssa(kind, mask_carry, tmp_path):
         condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
         dst = ib.let("dst", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
         with ib.reg_scope(SPAN):
-            x = ib.emit_reg(
-                "x",
-                "reg.broadcast",
-                [ir.ConstFloat(1, DataType.FP32, SPAN)],
-                {"lanes": 64, "dtype": DataType.FP32},
-                SPAN,
-            )
-            initial = ib.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN) if mask_carry else x
+            if mask_carry:
+                initial = ib.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN)
+            else:
+                initial = ib.emit_reg(
+                    "x",
+                    "reg.broadcast",
+                    [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                    {"lanes": 64, "dtype": DataType.FP32},
+                    SPAN,
+                )
             op = "reg.mask_not" if mask_carry else "reg.add"
             if kind == "if":
                 with ib.if_stmt(condition, SPAN) as branch:
@@ -447,6 +449,16 @@ def test_review_register_control_flow_ssa(kind, mask_carry, tmp_path):
             # Consume the carried mask through select: arbitrary-mask stores
             # additionally require PTOAS to prove the UB pointer's alignment.
             if mask_carry:
+                # Keep this test's independent data producer after the loop:
+                # PTOAS 0.70 rejects vbrc spanning a mask-only scf.while with a
+                # VMI-LAYOUT-CONTRACT error. Mask carry/yield remains exercised.
+                x = ib.emit_reg(
+                    "x",
+                    "reg.broadcast",
+                    [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                    {"lanes": 64, "dtype": DataType.FP32},
+                    SPAN,
+                )
                 result = ib.emit_reg("selected", "reg.select", [result, x, x], span=SPAN)
             ib.emit_reg_store("out", dst, result, span=SPAN)
     with passes.PassContext([]):
@@ -513,6 +525,44 @@ def test_review_address_annotation_uses_actual_view_ssa_type(tmp_path):
             ib.emit_reg_store("out", dst, x, span=SPAN)
     with passes.PassContext([]):
         source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN)))
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("kind", ["for", "while"])
+def test_review_loop_returned_view_address(tmp_path, kind):
+    ib = IRBuilder()
+    with ib.function("loop_view", span=SPAN, type=ir.FunctionType.AIV) as f:
+        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
+        base = ib.let("base", tile.full([2, 128], dtype=DataType.FP32, value=1.0))
+        view = ib.let(
+            "view",
+            tile.slice(base, [1, 128], [0, 0]),
+            type=ir.TileType(
+                [1, 128],
+                DataType.FP32,
+                tile_view=ir.TileView([1, 128], [128, 1], integer(0)),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg("x", "reg.load", [view, integer(0)], {"lanes": 64}, SPAN)
+            context = (
+                ib.for_loop(ib.var("i", ir.ScalarType(DataType.INDEX), SPAN), 0, 3, 1, span=SPAN)
+                if kind == "for"
+                else ib.while_loop(condition, SPAN)
+            )
+            with context as loop:
+                carry = loop.iter_arg("carry", view, span=SPAN)
+                result = loop.return_var("result", span=SPAN)
+                updated = ib.emit_reg_store("updated", carry, x, span=SPAN)
+                ib.emit(ir.YieldStmt([updated], SPAN))
+            # The loop result has the slice type, while root fallback has [2,128].
+            y = ib.emit_reg("y", "reg.load", [result, integer(0)], {"lanes": 64}, SPAN)
+            ib.emit_reg_store("out", view, y, span=SPAN)
+    with passes.PassContext([]):
+        initialized = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+        source = generate(initialized)
     compile_review_pto(source, tmp_path)
 
 

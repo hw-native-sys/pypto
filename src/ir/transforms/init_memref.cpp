@@ -913,6 +913,24 @@ class InitMemRefMutator : public IRMutator {
     return new_for;
   }
 
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    auto result = IRMutator::VisitStmt_(op);
+    auto loop = As<WhileStmt>(result);
+    if (!loop || loop->return_vars_.empty()) return result;
+    // Match the ForStmt invariant: the result is the carried storage even if
+    // the loop executes zero times. A fresh return MemRef would lose both
+    // alias identity and initialization established before the loop.
+    auto get_iter_arg_var = [&](size_t i) -> VarPtr {
+      return i < loop->iter_args_.size() ? loop->iter_args_[i] : nullptr;
+    };
+    auto [patched, changed] =
+        PatchReturnVarsFromYield(loop->return_vars_, op->return_vars_, get_iter_arg_var);
+    if (!changed) return result;
+    auto patched_loop = MutableCopy(loop);
+    patched_loop->return_vars_ = std::move(patched);
+    return patched_loop;
+  }
+
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto result = IRMutator::VisitStmt_(op);
     auto new_if = As<IfStmt>(result);
@@ -938,7 +956,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
  private:
-  // Shared logic for ForStmt/IfStmt: patch each return_var to share its yield value's MemRef.
+  // Share return storage with loop carries (For/While) or branch yield values (If).
   // get_yield_var(i) resolves the yield variable for the i-th return_var.
   using YieldVarResolver = std::function<VarPtr(size_t)>;
   std::pair<std::vector<VarPtr>, bool> PatchReturnVarsFromYield(const std::vector<VarPtr>& new_return_vars,

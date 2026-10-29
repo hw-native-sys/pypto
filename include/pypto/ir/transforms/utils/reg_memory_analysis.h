@@ -19,7 +19,7 @@ namespace pypto::ir {
 /// intervals never establish initialization; no Tile valid_shape is modified.
 /// Visits the function in execution order and rejects unproven Reg reads.
 /// This is a conservative verifier, not an SSA rewrite or runtime bounds check;
-/// conditional writes may be discarded even when a richer proof would succeed.
+/// exhaustive branches retain their common facts; unknown loops add no facts.
 void VerifyRegMemoryInitialization(const FunctionPtr& function);
 }  // namespace pypto::ir
 #endif  // PYPTO_IR_TRANSFORMS_UTILS_REG_MEMORY_ANALYSIS_H_
