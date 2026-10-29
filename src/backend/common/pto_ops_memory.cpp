@@ -1058,39 +1058,62 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   // the ``RegisterTensorView`` call below. The LHS also aliases the input base
   // pointer and CommContext so later tensor or distributed ops address the
   // original storage.
-  reg("tensor.view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto emit_tensor_descriptor = [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 3, op->span_)
-        << "tensor.view requires 1 to 3 args (input[, shape[, valid_shape]])";
+    INTERNAL_CHECK_SPAN(op->args_.size() >= 1 && op->args_.size() <= 4, op->span_)
+        << "Tensor descriptor emitter requires 1 to 4 operands";
     auto input_var = AsVarLike(op->args_[0]);
-    INTERNAL_CHECK_SPAN(input_var, op->span_) << "tensor.view input must be a Var/IterArg";
+    INTERNAL_CHECK_SPAN(input_var, op->span_) << "Tensor descriptor input must be a Var/IterArg";
 
     auto lhs_var = codegen.GetCurrentResultVar();
     INTERNAL_CHECK_SPAN(static_cast<bool>(lhs_var), op->span_)
-        << "Internal error: tensor.view result var must be set by VisitStmt_(AssignStmt)";
+        << "Internal error: Tensor descriptor result var must be set by VisitStmt_(AssignStmt)";
     auto lhs_type = ir::AsTensorTypeLike(lhs_var->GetType());
     INTERNAL_CHECK_SPAN(lhs_type, op->span_)
-        << "tensor.view output must be TensorType or DistributedTensorType, got "
+        << "Tensor descriptor output must be TensorType or DistributedTensorType, got "
         << lhs_var->GetType()->TypeName();
     INTERNAL_CHECK_SPAN(lhs_type->tensor_view_.has_value(), op->span_)
-        << "Internal error: tensor.view output must have an explicit TensorView "
-           "(set by DeduceTensorViewType + CanonicalizeView)";
+        << "Internal error: Tensor descriptor output must have an explicit TensorView "
+           "(set by type deduction and stride materialization)";
 
     const size_t rank = lhs_type->shape_.size();
     const auto& view = lhs_type->tensor_view_.value();
     INTERNAL_CHECK_SPAN(view.stride.size() == rank, op->span_)
-        << "Internal error: tensor.view output stride rank " << view.stride.size()
+        << "Internal error: Tensor descriptor output stride rank " << view.stride.size()
         << " does not match shape rank " << rank;
 
     std::string result_buf = codegen.GetCurrentResultTarget();
     INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
     std::string input_base_ptr = codegen.GetTensorBasePtr(input_var);
+    if (ir::IsOp(op, "tensor.subview")) {
+      // The current parent pointer already contains earlier subview origins.
+      // Compute only this call's offset in the immediate parent's coordinates.
+      auto parent = ir::As<TensorType>(input_var->GetType());
+      auto offsets = ir::As<ir::MakeTuple>(op->args_[2]);
+      auto parent_view = parent->tensor_view_.value_or(ir::TensorView{});
+      auto parent_strides =
+          parent_view.stride.empty()
+              ? ir::tensor_view_semantics::BuildLogicalStridesFromLayout(parent->shape_, parent_view.layout)
+              : parent_view.stride;
+      ir::ExprPtr origin = std::make_shared<ir::ConstInt>(0, DataType::INDEX, op->span_);
+      for (size_t i = 0; i < parent_strides.size(); ++i) {
+        origin = ir::MakeAdd(
+            origin, ir::tensor_view_semantics::MakeIndexMul(offsets->elements_[i], parent_strides[i]));
+      }
+      auto offset_ssa = codegen.GetExprAsCode(origin);
+      offset_ssa = codegen.EmitCastToIndex(origin, offset_ssa);
+      auto pointer = codegen.NewTemp();
+      const auto pointer_type = "!pto.ptr<" + codegen.GetTypeString(lhs_type->dtype_) + ">";
+      codegen.Emit(pointer + " = pto.addptr " + input_base_ptr + ", " + offset_ssa + " : " + pointer_type +
+                   " -> " + pointer_type);
+      input_base_ptr = pointer;
+    }
     codegen.RegisterBasePtr(lhs_var, input_base_ptr);
     codegen.RegisterCommCtxFor(lhs_var, codegen.GetCommCtxSSAFor(input_var.get()));
 
     auto input_type = ir::AsTensorTypeLike(input_var->GetType());
     INTERNAL_CHECK_SPAN(input_type, op->span_)
-        << "tensor.view input must be TensorType or DistributedTensorType";
+        << "Tensor descriptor input must be TensorType or DistributedTensorType";
 
     // The result SSA name (auto-allocated by VisitStmt_(AssignStmt) for the
     // backend-dispatched RHS Call) doubles as the tensor_view SSA name —
@@ -1149,7 +1172,10 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     }
     oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
     return oss.str();
-  });
+  };
+  reg("tensor.view", emit_tensor_descriptor);
+  reg("tensor.subview", emit_tensor_descriptor);
+  reg("tensor.set_validshape", emit_tensor_descriptor);
 
   reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileLoadCodegenPTO(op, codegen);

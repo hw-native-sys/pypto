@@ -560,6 +560,8 @@ UINT32 + INT32 → INT32 (signed precedence)
 数据算子 API、扁平 gather、有效区域语义、Tile 布局与掩码模式，参见
 [Tensor 与 Tile 算子](05-tensor-tile-ops.md)。
 
+`tensor.subview` 是只构造描述符的 TensorOp。
+
 ## SyncOp：同步操作
 
 **用途**：硬件同步与屏障，以及共用 `system.` 命名空间的 TaskId 与 SPMD 启动形状查询

@@ -81,6 +81,34 @@ with ib.function("tensor_example") as f:
     ib.return_stmt(result)
 ```
 
+### 借用的 GM 子视图
+
+`pl.tensor.subview(source, shape, offsets, *, steps=None)` 在 InCore 函数中
+描述普通 GM Tensor 的只读窗口。它不 load、不分配，并保留父视图的物理 pitch。
+与 `view` 相比，它选择严格更小的窗口；与 `slice` 相比，它在 TensorToTile
+转换时仍保留为 GM 描述符。
+
+| 参数 | 含义及约束 |
+| ---- | ---------- |
+| `source` | 调用者提供的普通 GM Tensor，或已证明的 metadata/subview 别名；不支持 Tile、DistributedTensor |
+| `shape` | 正的逻辑长度，rank 与父视图一致 |
+| `offsets` | 在直接父视图坐标系中的非负起点 |
+| `steps` | 正的采样步长，省略时每一维均为 1 |
+
+每一维的 `offset + (shape - 1) * step` 都必须位于父视图有效长度内，且至少
+一维逻辑长度严格缩小。父视图有效长度不得超过物理 shape。作为来源链的
+canonical `view` 必须保持元素数。所有几何和地址运算必须证明不溢出。
+动态参数仅在周围控制流能够证明这些条件时支持；证明为假或未知均拒绝。
+
+结果保留来源 dtype/layout，将父 stride 乘以 `steps`，整个逻辑 shape 均有效。
+支持嵌套 subview。Metadata 别名必须保持地址映射，`set_validshape` 只能缩小
+有效区。描述符逃逸、编译器分配的根存储及通过借用描述符写入均拒绝。
+
+消费者沿用已有 lowering 和设备约束。现有 ND/DN load 要求最内层存储轴连续；
+该轴上的非单位步长需要支持它的消费者。标量 `tensor.read` 须先将窗口 load 到
+Tile。N-D load 保留来源坐标，由流水线展平结果 Tile。Subview 本身不增加
+后端专属的 dtype、rank、DMA 行数、行间隔位宽或对齐限制。
+
 ## TileOp：硬件优化 Tile 操作
 
 **用途**：带有显式内存管理的硬件优化 Tile 操作

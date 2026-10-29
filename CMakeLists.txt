@@ -363,6 +363,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_graph_functions.cpp
     src/ir/verifier/verify_orchestration_references.cpp
     src/ir/verifier/verify_tensor_view_canonical.cpp
+    src/ir/verifier/verify_tensor_subview.cpp
     src/ir/verifier/diagnostic_check_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
     src/ir/verifier/warning_out_param_write_dropped.cpp

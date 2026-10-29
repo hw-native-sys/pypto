@@ -83,6 +83,13 @@ program_tiled = convert_pass(program)
 
    从未声明效应的算子仍然按"读取全部实参"处理。该默认值如今只覆盖注册表无话可说的算子（其中绝大多数是纯函数式的），而不再是一张手工维护清单的兜底——新增的写类算子曾经可以悄无声息地从这张清单里漏掉。
 
+### 借用的 GM 描述符
+
+`tensor.subview` 保留为普通 GM Tensor 描述符。转换前由共享上下文 verifier 证明
+严格包含、几何运算不溢出及只读调用者 GM 根；false/unknown 均拒绝。Affine
+`tensor.set_validshape` 别名也保留为 Tensor，只能缩小有效区。消费者
+`tensor.slice`/计算操作转换时，按描述符真实 pitch 加载。
+
 ### GM 身份与读写顺序
 
 为计算加载 GM 张量会创建一个 tile 值，不能用它替换该张量的所有引用。
