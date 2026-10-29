@@ -344,10 +344,7 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
 
 TensorView::TensorView(std::vector<ExprPtr> stride_, TensorLayout layout_, std::vector<ExprPtr> valid_shape_,
                        PadValue pad_)
-    : stride(std::move(stride_)),
-      layout(layout_),
-      valid_shape(std::move(valid_shape_)),
-      pad(pad_) {
+    : stride(std::move(stride_)), layout(layout_), valid_shape(std::move(valid_shape_)), pad(pad_) {
   ValidateTensorViewValues(*this);
 }
 
