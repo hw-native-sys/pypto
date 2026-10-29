@@ -706,9 +706,9 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
     INTERNAL_CHECK_SPAN(offsets && offsets->elements_.size() == parent->shape_.size(), call->span_)
         << "Internal error: tensor.subview offset rank does not match its parent";
     const auto view = parent->tensor_view_.value_or(TensorView{});
-    const auto strides = view.stride.empty()
-                             ? tensor_view_semantics::BuildLogicalStridesFromLayout(parent->shape_, view.layout)
-                             : view.stride;
+    const auto strides = view.stride.empty() ? tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                   parent->shape_, view.layout)
+                                             : view.stride;
     INTERNAL_CHECK_SPAN(strides.size() == offsets->elements_.size(), call->span_)
         << "Internal error: tensor.subview parent stride rank mismatch";
     ExprPtr elements = MakeZeroByteOffset();
@@ -718,9 +718,8 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
     const uint64_t storage_bits = storage_size::GetStorageBitWidth(parent->dtype_);
     INTERNAL_CHECK_SPAN(storage_bits > 0 && storage_bits % 8 == 0, call->span_)
         << "Internal error: tensor.subview requires byte-addressable storage";
-    return MulByteOffsets(
-        elements, std::make_shared<ConstInt>(static_cast<int64_t>(storage_bits / 8), DataType::INDEX,
-                                             Span::unknown()));
+    return MulByteOffsets(elements, std::make_shared<ConstInt>(static_cast<int64_t>(storage_bits / 8),
+                                                               DataType::INDEX, Span::unknown()));
   }
 
   if (IsOp(call, "tensor.slice") || IsOp(call, "tile.slice")) {

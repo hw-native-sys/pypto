@@ -132,8 +132,7 @@ class SubviewVerifier : public IRVisitor {
 
   void VisitExpr_(const SubmitPtr& op) override {
     for (const auto& arg : op->args_) {
-      CHECK_SPAN(!IsBorrowedExpr(arg), op->span_)
-          << "tensor.subview cannot cross a submit boundary";
+      CHECK_SPAN(!IsBorrowedExpr(arg), op->span_) << "tensor.subview cannot cross a submit boundary";
     }
     IRVisitor::VisitExpr_(op);
   }
@@ -365,8 +364,7 @@ class SubviewVerifier : public IRVisitor {
         << "tensor.subview requires a caller-owned ordinary GM Tensor root";
     auto parent = As<TensorType>(op->args_[0]->GetType());
     auto result = As<TensorType>(op->GetType());
-    CHECK_SPAN(parent && result, op->span_)
-        << "tensor.subview requires ordinary Tensor types";
+    CHECK_SPAN(parent && result, op->span_) << "tensor.subview requires ordinary Tensor types";
     auto shape = As<MakeTuple>(op->args_[1]);
     auto offsets = As<MakeTuple>(op->args_[2]);
     auto steps = As<MakeTuple>(op->args_[3]);
