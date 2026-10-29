@@ -190,7 +190,34 @@ class SingleLoad:
 
 
 class TestGating:
-    """The planner gate decides whether the pass does anything at all."""
+    """The planner and scheduling contracts decide whether the pass can run."""
+
+    def test_explicit_accumulator_buffering_keeps_the_replication_path(self):
+        """Rotating the loads must not discard the requested Acc scheduling."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 256], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                lhs = pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                for i, (output,) in pl.pipeline(
+                    4, stage=2, init_values=(out,), attrs={"pipeline_double_buffer_c": True}
+                ):
+                    rhs = pl.load(b, [0, i * 64], [64, 64], target_memory=pl.Mem.Mat)
+                    product = pl.matmul(lhs, rhs)
+                    drained = pl.store(product, [0, i * 64], output)
+                    final = pl.yield_(drained)
+                return final
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PTOAS)
+        assert len(_pipeline_loops(after)) == 1
+        assert _slotted_memrefs(after) == {}
+        assert _pipeline_loops(after)[0].attrs["pipeline_double_buffer_c"] is True
 
     def test_pypto_planner_leaves_the_loop_for_replication(self):
         """Under the default planner no region is emitted, so nothing is bound."""

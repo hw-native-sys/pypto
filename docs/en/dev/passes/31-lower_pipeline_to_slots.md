@@ -83,6 +83,7 @@ Codegen **refuses** a region it cannot describe rather than degrading it, becaus
 
 | Gate | Why |
 | ---- | --- |
+| No `pipeline_double_buffer_c=true` | This pass rotates loads only. Explicit Acc buffering must retain the Pipeline marker for compute/drain ordering and stage membership in the replication path |
 | `F` in `[2, 16]` | ptoas' `multi_tile_buf` slot-count bounds |
 | Memory space is Vec, Mat or Acc | The spaces ptoas accepts for a slot |
 | Static valid shape | A region declares one static extent for all its slots |

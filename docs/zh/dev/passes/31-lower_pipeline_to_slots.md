@@ -83,6 +83,7 @@ codegen 对无法描述的 region 是**硬拒**而非降级，因为退回逐 sl
 
 | 门槛 | 原因 |
 | ---- | ---- |
+| 不带 `pipeline_double_buffer_c=true` | 本 pass 只轮转 load。显式 Acc 双缓冲必须保留 Pipeline 标记，由复制路径完成计算/排空排序与 stage membership |
 | `F` 落在 `[2, 16]` | ptoas `multi_tile_buf` 的 slot 数上下界 |
 | 内存空间为 Vec / Mat / Acc | ptoas 接受的 slot 空间 |
 | 静态 valid shape | 一个 region 为其所有 slot 声明唯一的静态 extent |
