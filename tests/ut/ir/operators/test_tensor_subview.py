@@ -43,7 +43,6 @@ def test_subview_preserves_parent_pitch_and_has_no_allocation():
     assert call.op.name == ir.get_op("tensor.subview").name
     assert values(tensor_type(call).shape) == [2, 512]
     assert values(tensor_view(call).stride) == [1536, 1]
-    assert tensor_view(call).addressing_kind == ir.TensorAddressingKind.AffineSubview
     assert tensor_type(call).memref is None
 
 
@@ -70,13 +69,13 @@ def test_nested_subview_composes_immediate_parent_stride():
     assert values(tensor_view(child).stride) == [1024, 2]
 
 
-def test_subview_serialization_preserves_affine_addressing():
+def test_subview_serialization_preserves_stride_metadata():
     call = ir.op.tensor.subview(source(), [2, 512], [1, 0], steps=[3, 1])
     restored = ir.deserialize(ir.serialize(call))
     assert isinstance(restored, ir.Call)
     ir.assert_structural_equal(call.type, restored.type)
     assert restored.op.name == call.op.name
-    assert tensor_view(restored).addressing_kind == ir.TensorAddressingKind.AffineSubview
+    assert values(tensor_view(restored).stride) == [1536, 1]
 
 
 @pytest.mark.parametrize("value", [True, 1.5])

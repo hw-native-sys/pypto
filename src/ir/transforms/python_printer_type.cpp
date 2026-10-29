@@ -504,8 +504,7 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
   bool has_non_default_pad = (tensor_view.pad != PadValue::null);
 
   // If all fields are at defaults, skip TensorView entirely
-  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad &&
-      tensor_view.addressing_kind == TensorAddressingKind::Canonical) {
+  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad) {
     return "";
   }
 
@@ -542,11 +541,6 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
         oss << "min";
         break;
     }
-  }
-
-  if (tensor_view.addressing_kind == TensorAddressingKind::AffineSubview) {
-    maybe_comma();
-    oss << "addressing_kind=" << prefix_ << ".TensorAddressingKind.AffineSubview";
   }
 
   oss << ")";

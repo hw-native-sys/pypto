@@ -816,11 +816,10 @@ class InitMemRefMutator : public IRMutator {
       }
     }
 
-    // Tile alias: a = b where b is a tile Var — share b's MemRef.
-    // Without this, the alias gets a fresh MemRef that is never written to,
-    // breaking IfStmt return_vars that inherit the alias's empty MemRef.
+    // Shaped aliases: a = b shares b's MemRef so borrowed Tensor address maps
+    // and Tile storage identity survive plain SSA aliases.
     if (auto value_var = As<Var>(new_value)) {
-      if (As<TileType>(op->var_->GetType())) {
+      if (As<TileType>(op->var_->GetType()) || As<TensorType>(op->var_->GetType())) {
         auto result = ShareMemRefFrom(value_var, op, new_value);
         if (result) return result;
       }

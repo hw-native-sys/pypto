@@ -235,8 +235,7 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 `pl.tensor.subview(cache, [2, 512], [1, 0], steps=[3, 1])` 借用普通 [8,512]
 Tensor 的第 1、4 行，不读取数据或分配 buffer。结果 stride 为 [1536,1]；`pl.load`
-只物化消费者请求的 Tile。`pl.TensorAddressingKind` 在 IR dump 中区分 `Canonical`
-与编译器生成的 `AffineSubview` 描述符，后者不能用于函数形参注解。几何必须能证明
+只物化消费者请求的 Tile。原点和分配身份通过借用的 MemRef 别名解析。几何必须能证明
 严格小于且包含于父有效窗口，unknown 边界拒绝。原生消费者沿用已有设备约束，
 subview 不新增硬件 load 范围限制。`tensor.view` 保留 packed reshape 约束，`tensor.slice` 保持 InCore 物化语义。
 

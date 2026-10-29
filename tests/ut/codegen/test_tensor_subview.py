@@ -97,7 +97,7 @@ def test_subview_pipeline_emits_only_result_tile(tmp_path, sliced):
                 if op.name_hint.startswith("cache") and tensor.memref is not None:
                     root_memrefs.append(tensor.memref)
                 view = tensor.tensor_view
-                if view and view.addressing_kind == ir.TensorAddressingKind.AffineSubview:
+                if view and op.name_hint.startswith(("selected", "narrowed")):
                     assert tensor.memref is not None
                     borrowed_memrefs.append(tensor.memref)
                     borrowed.add(op.name_hint)
@@ -147,6 +147,17 @@ def test_subview_pipeline_emits_only_result_tile(tmp_path, sliced):
             assert "Tile<TileType::Vec, bfloat16_t, 2, 512," in declarations[0]
 
 
+def test_subview_direct_codegen_derives_origin_without_memrefs():
+    program = make_program()
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+
+    mlir = codegen.PTOCodegen().generate(program)
+
+    assert mlir.count("pto.addptr") == 1
+    assert "512" in mlir
+
+
 def test_subview_cpu_reference_selects_rows_one_and_four_without_snapshot():
     program = make_program()
     func = next(iter(program.functions.values()))
@@ -181,6 +192,43 @@ def test_subview_validshape_remains_a_borrowed_tensor():
 
 def test_subview_validshape_may_preserve_full_parent_validity():
     optimized = lower(make_program(narrowed=True, valid_rows=2))
+    assert "pto.tload" in codegen.PTOCodegen().generate(optimized)
+
+
+def test_canonical_validshape_alias_can_be_a_subview_parent():
+    span = ir.Span.unknown()
+    cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
+    output = ir.Var("output", ir.TensorType([2, 512], DataType.BF16), span)
+    valid_call = ir.op.tensor.set_validshape(cache, 5, 512)
+    valid = ir.Var("valid", valid_call.type, span)
+    subview_call = ir.op.tensor.subview(valid, [2, 512], [1, 0], steps=[3, 1])
+    selected = ir.Var("selected", subview_call.type, span)
+    load = ir.op.tile.load(selected, [0, 0], [2, 512], target_memory=ir.MemorySpace.Vec)
+    tile = ir.Var("tile", load.type, span)
+    store = ir.op.tile.store(tile, [0, 0], output)
+    stored = ir.Var("stored", store.type, span)
+    function = ir.Function(
+        "canonical_validshape_subview",
+        [cache, output],
+        [output.type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(valid, valid_call, span),
+                ir.AssignStmt(selected, subview_call, span),
+                ir.AssignStmt(tile, load, span),
+                ir.AssignStmt(stored, store, span),
+                ir.ReturnStmt([stored], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+
+    optimized = lower(ir.Program([function], "canonical_validshape_subview", span))
+    text = str(optimized)
+    assert "tensor.set_validshape" in text
+    assert "tile.set_validshape" not in text
     assert "pto.tload" in codegen.PTOCodegen().generate(optimized)
 
 
@@ -330,21 +378,41 @@ def test_subview_rejects_overflowing_address_arithmetic_before_conversion():
         passes.convert_tensor_to_tile_ops()(ir.Program([func], "overflow", span))
 
 
-def test_subview_assignment_cannot_discard_addressing_kind():
+def test_subview_assignment_preserves_memref_alias():
     span = ir.Span.unknown()
     func = next(iter(make_program().functions.values()))
     original = statements(func)[0]
     assert isinstance(original, ir.AssignStmt)
-    canonical = ir.Var("invalid_alias", ir.TensorType([2, 512], DataType.BF16), span)
+    alias = ir.Var("selected_alias", original.var.type, span)
+    load_assign = statements(func)[1]
+    assert isinstance(load_assign, ir.AssignStmt)
+    load = load_assign.value
+    assert isinstance(load, ir.Call)
+    aliased_load = ir.Call(load.op, [alias, *load.args[1:]], load.kwargs, load.type, span)
     body = ir.SeqStmts(
-        [original, ir.AssignStmt(canonical, original.var, span), ir.ReturnStmt([func.params[1]], span)],
+        [
+            original,
+            ir.AssignStmt(alias, original.var, span),
+            ir.AssignStmt(load_assign.var, aliased_load, span),
+            *statements(func)[2:],
+        ],
         span,
     )
-    bad = ir.Function(func.name, func.params, func.return_types, body, span, type=ir.FunctionType.InCore)
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
-    with pytest.raises(ValueError, match="subview.*discard affine"):
-        codegen.PTOCodegen().generate(ir.Program([bad], "lost_addressing", span))
+    aliased = ir.Function(func.name, func.params, func.return_types, body, span, type=ir.FunctionType.InCore)
+    optimized = lower(ir.Program([aliased], "aliased_subview", span))
+    selected_memrefs = []
+
+    class CollectSelectedMemRefs(ir.IRVisitor):
+        def visit_var(self, op: ir.Var) -> None:
+            if op.name_hint.startswith("selected") and isinstance(op.type, ir.TensorType):
+                if op.type.memref is not None:
+                    selected_memrefs.append(op.type.memref)
+            super().visit_var(op)
+
+    CollectSelectedMemRefs().visit_program(optimized)
+    assert len(selected_memrefs) >= 2
+    assert all(memref.base_ is selected_memrefs[0].base_ for memref in selected_memrefs)
+    assert all(memref.byte_offset_ == 1024 for memref in selected_memrefs)
 
 
 @pytest.mark.parametrize("control_flow", ["if", "while", "for"])
@@ -859,8 +927,7 @@ def test_subview_parent_valid_extent_cannot_exceed_physical_shape(valid_rows):
 
 
 @pytest.mark.parametrize("metadata_op", ["view", "set_validshape"])
-@pytest.mark.parametrize("result_affine", [True, False])
-def test_canonical_metadata_cannot_forge_borrowed_provenance(metadata_op, result_affine):
+def test_metadata_cannot_forge_subview_provenance(metadata_op):
     span = ir.Span.unknown()
     cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
     ordinary = (
@@ -871,22 +938,13 @@ def test_canonical_metadata_cannot_forge_borrowed_provenance(metadata_op, result
     # An explicit IR result type must not turn an ordinary metadata call into a
     # borrowed descriptor and bypass subview geometry/provenance verification.
     forged_type = ir.TensorType(
-        [16, 512],
-        DataType.BF16,
-        tensor_view=ir.TensorView(
-            [512, 1],
-            ir.TensorLayout.ND,
-            addressing_kind=(
-                ir.TensorAddressingKind.AffineSubview if result_affine else ir.TensorAddressingKind.Canonical
-            ),
-        ),
+        [16, 512], DataType.BF16, tensor_view=ir.TensorView([512, 1], ir.TensorLayout.ND)
     )
     forged = ir.Call(ordinary.op, ordinary.args, forged_type, span)
     alias = ir.Var("forged", forged_type, span)
     definitions: list[ir.Stmt] = [ir.AssignStmt(alias, forged, span)]
-    if not result_affine:
-        borrowed = ir.op.tensor.subview(alias, [2, 512], [8, 0])
-        definitions.append(ir.AssignStmt(ir.Var("selected", borrowed.type, span), borrowed, span))
+    borrowed = ir.op.tensor.subview(alias, [2, 512], [8, 0])
+    definitions.append(ir.AssignStmt(ir.Var("selected", borrowed.type, span), borrowed, span))
     body = ir.SeqStmts([*definitions, ir.ReturnStmt([], span)], span)
     function = ir.Function("forged_metadata", [cache], [], body, span, type=ir.FunctionType.InCore)
     backend.reset_for_testing()
@@ -909,7 +967,7 @@ def test_subview_does_not_strengthen_unrelated_canonical_view_contract():
     assert isinstance(converted, ir.Program)
 
 
-def test_subview_print_parse_roundtrip_keeps_keyword_steps_and_addressing():
+def test_subview_print_parse_roundtrip_keeps_keyword_steps():
     program = make_program()
     printed = ir.python_print(program)
     assert "steps=" in printed

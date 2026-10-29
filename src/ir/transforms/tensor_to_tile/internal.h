@@ -16,6 +16,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -55,6 +56,7 @@ std::string MakeOutParamName(size_t index);
 
 // Scalar staging and access analysis share the same GM alias rules.
 StmtPtr CanonicalizeScalarUpdates(const FunctionPtr& func);
+std::unordered_set<const Var*> CollectSubviewAliasVars(const StmtPtr& body);
 void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, const std::vector<VarPtr>& params,
                                          std::vector<ParamDirection>& param_directions);
 

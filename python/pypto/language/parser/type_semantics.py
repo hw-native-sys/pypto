@@ -340,7 +340,7 @@ def tensor_types_differ_only_by_valid_shape(lhs: ir.Type | None, rhs: ir.Type | 
     def without_valid_shape(tensor_type: ir.TensorType) -> ir.TensorType:
         view = tensor_type.tensor_view
         if view is not None:
-            view = ir.TensorView(view.stride, view.layout, [], view.pad, view.addressing_kind)
+            view = ir.TensorView(view.stride, view.layout, [], view.pad)
         return ir.TensorType(tensor_type.shape, tensor_type.dtype, tensor_type.memref, view)
 
     return types_match(without_valid_shape(lhs), without_valid_shape(rhs))

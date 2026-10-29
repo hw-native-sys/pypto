@@ -869,16 +869,67 @@ class TensorConversionAnalysis : public IRVisitor {
 // substitution and propagation of the resulting types.
 // ============================================================================
 
+class SubviewAliasCollector : public IRVisitor {
+ public:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    definitions_[op->var_.get()] = op->value_;
+    if (auto call = As<Call>(op->value_); call && IsOp(call, "tensor.subview") && !call->args_.empty()) {
+      pending_.push_back(call->args_[0]);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  std::unordered_set<const Var*> Finish() {
+    std::unordered_set<const Var*> result;
+    for (auto source : pending_) {
+      std::unordered_set<const Var*> seen;
+      while (auto var = AsVarLike(source)) {
+        if (!seen.insert(var.get()).second) break;
+        result.insert(var.get());
+        auto it = definitions_.find(var.get());
+        if (it == definitions_.end()) break;
+        auto call = As<Call>(it->second);
+        if (call && (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) &&
+            !call->args_.empty()) {
+          source = call->args_[0];
+        } else if (!call) {
+          source = it->second;
+        } else {
+          break;
+        }
+      }
+    }
+    return result;
+  }
+
+ private:
+  std::unordered_map<const Var*, ExprPtr> definitions_;
+  std::vector<ExprPtr> pending_;
+};
+
+}  // namespace
+
+std::unordered_set<const Var*> CollectSubviewAliasVars(const StmtPtr& body) {
+  SubviewAliasCollector collector;
+  collector.VisitStmt(body);
+  return collector.Finish();
+}
+
+namespace {
+
 class TensorToTileMutator : public TypePropagatingMutator {
  public:
   TensorToTileMutator(const OpConversionRegistry& conv_registry, const OpRegistry& op_registry,
                       const ConsumerSpaceCollector& consumer_collector,
-                      const TensorConversionAnalysis& tile_values, CachePolicyByParam cache_policies)
+                      const TensorConversionAnalysis& tile_values, CachePolicyByParam cache_policies,
+                      std::unordered_set<const Var*> required_borrowed_tensor_vars)
       : conv_registry_(conv_registry),
         op_registry_(op_registry),
         consumer_collector_(consumer_collector),
         tile_values_(tile_values),
-        cache_policies_(std::move(cache_policies)) {}
+        cache_policies_(std::move(cache_policies)),
+        required_borrowed_tensor_vars_(std::move(required_borrowed_tensor_vars)) {}
 
   /// A cached load is a compute operand, never an SSA replacement for its GM
   /// source. Only parameters proven unwritten throughout the function enter
@@ -959,23 +1010,18 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return HandlePassThroughAssign(op, new_value);
     }
 
-    // An affine GM subview keeps valid-shape metadata until a consuming load
-    // materializes a Tile. The tile.set_validshape lowering is only valid after
-    // that materialization; ordinary GM Tensor metadata follows the existing
-    // conversion path below.
-    if (IsOp(call, "tensor.set_validshape") && !call->args_.empty()) {
-      auto input_type = As<TensorType>(call->args_[0]->GetType());
-      if (input_type && input_type->tensor_view_ &&
-          input_type->tensor_view_->addressing_kind == TensorAddressingKind::AffineSubview) {
-        return HandlePassThroughAssign(op, new_value);
-      }
+    // A borrowed GM descriptor keeps valid-shape metadata until a consuming
+    // load materializes a Tile.
+    if (IsOp(call, "tensor.set_validshape") && IsBorrowedTensorExpr(call)) {
+      return HandlePassThroughAssign(op, new_value);
     }
 
     const auto* entry = conv_registry_.Lookup(call->op_->name_);
     if (!entry) {
       if (IsOp(call, "tensor.view") || IsOp(call, "tensor.subview")) {
         CHECK_SPAN(!call->args_.empty() && AsTensorTypeLike(call->args_[0]->GetType()), call->span_)
-            << "tensor.view in an InCore function requires a GM Tensor input that remains tensor-like "
+            << call->op_->name_
+            << " in an InCore function requires a GM Tensor input that remains tensor-like "
                "through ConvertTensorToTileOps; viewing the result of an op lowered to Tile is not supported";
       }
       // Verify unregistered TensorOps are expected passthroughs
@@ -1103,8 +1149,22 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto assign = As<AssignStmt>(result);
     INTERNAL_CHECK_SPAN(assign, op->span_)
         << "Internal error: pass-through assignment must stay an assignment";
+    if (IsBorrowedTensorExpr(new_value)) borrowed_tensor_vars_.insert(assign->var_.get());
     RecordPackedTile(assign->var_, assign->value_);
     return result;
+  }
+
+  [[nodiscard]] bool IsBorrowedTensorExpr(const ExprPtr& expr) const {
+    if (!expr) return false;
+    if (auto var = AsVarLike(expr)) {
+      return borrowed_tensor_vars_.count(var.get()) != 0 ||
+             required_borrowed_tensor_vars_.count(var.get()) != 0;
+    }
+    auto call = As<Call>(expr);
+    if (!call) return false;
+    return IsOp(call, "tensor.subview") ||
+           ((IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) && !call->args_.empty() &&
+            IsBorrowedTensorExpr(call->args_[0]));
   }
 
   void SetYieldTileTargets(const std::vector<VarPtr>& vars) {
@@ -1536,11 +1596,13 @@ class TensorToTileMutator : public TypePropagatingMutator {
   const ConsumerSpaceCollector& consumer_collector_;
   const TensorConversionAnalysis& tile_values_;
   std::unordered_map<const Expr*, ExprPtr> preloaded_tiles_;
+  std::unordered_set<const Expr*> borrowed_tensor_vars_;
   ConversionContext conversion_context_;
   std::vector<bool> yield_tile_targets_;
   /// Declared GM cache policies of this function's params (empty when the
   /// function carries no ``pl.set_cache_policy`` declaration).
   const CachePolicyByParam cache_policies_;
+  std::unordered_set<const Var*> required_borrowed_tensor_vars_;
 };
 
 struct ReturnedAssembleLoopRewrite {
@@ -1893,7 +1955,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   tile_values.VisitStmt(canonical_body);
   tile_values.Propagate();
 
-  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, tile_values, cache_policies);
+  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, tile_values, cache_policies,
+                              CollectSubviewAliasVars(canonical_body));
 
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;

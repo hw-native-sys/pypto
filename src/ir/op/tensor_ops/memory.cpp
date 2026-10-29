@@ -89,7 +89,6 @@ TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
   }
   CHECK(!all_equal) << "tensor.subview requires a strictly smaller parent window";
   view.valid_shape.clear();
-  view.addressing_kind = TensorAddressingKind::AffineSubview;
   // No allocation identity is attached to a borrowed descriptor.
   return std::make_shared<TensorType>(shape, source->dtype_, std::nullopt, view);
 }

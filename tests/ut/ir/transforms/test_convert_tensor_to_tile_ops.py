@@ -8182,6 +8182,20 @@ class TestRegistryDrivenParamDirections:
 
         assert self._directions(Prog)["out"] == ir.ParamDirection.InOut
 
+    def test_subview_read_keeps_parent_parameter_inout(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[8, 512], pl.FP32], out: pl.Tensor[[2, 512], pl.FP32]
+            ) -> pl.Tensor[[2, 512], pl.FP32]:
+                selected = pl.tensor.subview(x, [2, 512], [1, 0], steps=[3, 1])
+                tile = pl.load(selected, [0, 0], [2, 512])
+                pl.tensor.write(x, [0, 0], pl.const(1.0, pl.FP32))
+                return pl.store(tile, [0, 0], out)
+
+        assert self._directions(Prog)["x"] == ir.ParamDirection.InOut
+
     def test_atomic_store_destination_is_inout(self):
         """``out += x`` reads the accumulator it adds into, so the destination
         is InOut while a plain store leaves it Out. The pass reads that from the
