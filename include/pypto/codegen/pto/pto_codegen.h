@@ -520,6 +520,9 @@ class PTOCodegen : public CodegenBase {
   /// of such a handle. Subviews and control-flow arguments are not eligible.
   void RegisterMutableTileName(const std::string& ssa_name);
   bool IsMutableTileName(const std::string& ssa_name) const;
+  /// Whether a handle or full-span reshape chain originates in a local allocation.
+  /// Subviews, TPOP results and control-flow arguments have distinct origins.
+  bool IsLocallyAllocatedTileName(const std::string& ssa_name) const;
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;

@@ -2138,6 +2138,13 @@ bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
+bool PTOCodegen::IsLocallyAllocatedTileName(const std::string& ssa_name) const {
+  const auto source = fs_.tile_view_names.find(ssa_name);
+  // RegisterTileViewName flattens full-span reshape chains but deliberately
+  // starts a distinct origin for subviews, matching PTOAS locally-bound rules.
+  return IsMutableTileName(source == fs_.tile_view_names.end() ? ssa_name : source->second);
+}
+
 std::string PTOCodegen::EnsureTileView(
     const std::string& source, const std::string& source_type,
     const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,

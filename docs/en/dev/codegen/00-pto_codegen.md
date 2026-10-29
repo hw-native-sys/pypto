@@ -315,8 +315,13 @@ straight-line region as their `acc_phase=Final` producer to clear its unit flag.
 Their existing backend restrictions on empty windows still apply; when skipping
 an empty phased operation, guard the producer and store together in the source.
 
-Subview-derived reshape/reinterpret views remain outside this support: initializing their
-dynamic valid dimensions is blocked by [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
+Dynamic-valid views require an SSA source rooted in a local allocation. Codegen
+reports an unsupported-case error for TPOP, subview, and control-flow sources;
+materialize into a local tile before taking such a view. Static positive TPOP
+views remain supported. `SplitVectorKernel` replaces discarded lane-1 replay
+reshape/reinterpret/transpose views with empty local tiles, preserving the
+TPOP/TPUSH/TFREE handshakes. Subview initialization remains blocked by
+[PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
 
 ### Cross-Core Operations → PTO Instructions
 

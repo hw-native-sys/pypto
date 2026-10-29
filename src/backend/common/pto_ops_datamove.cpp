@@ -1058,6 +1058,18 @@ static std::string GetViewSourceType(codegen::PTOCodegen& codegen, const ir::Exp
 static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::string& src,
                                     const std::string& src_type, std::string result_target,
                                     const std::string& result_type, const std::string& temp_prefix) {
+  const bool needs_valid_init = result_type.find("v_row=?, v_col=?") != std::string::npos;
+  if (needs_valid_init) {
+    const auto result = codegen.GetCurrentResultVar();
+    INTERNAL_CHECK(result) << "Internal error: reshape result must have an IR variable";
+    // A MemRef on the result does not prove that the emitted source is locally
+    // bound: subviews and control-flow results may still inherit that MemRef.
+    // Follow the actual SSA origin, including intervening static reshape views.
+    CHECK_SPAN(codegen.IsLocallyAllocatedTileName(src), result->span_)
+        << "A dynamic-valid tile view requires a locally allocated source; PTOAS cannot initialize "
+           "reshape/reinterpret/transpose views of tpop, subview, or control-flow handles. "
+           "Materialize the source into a local tile before taking the view.";
+  }
   if (!result_type.empty()) {
     result_target = codegen.NewNamedTemp(temp_prefix);
     codegen.SetCurrentResultBuf(result_target);
@@ -1072,7 +1084,7 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
   codegen.Emit(oss.str());
   // TRESHAPE aliases storage only. Initialize the newly bound descriptor,
   // without mutating the source handle or exposing mutable-view DSL semantics.
-  if (result_type.find("v_row=?, v_col=?") != std::string::npos) {
+  if (needs_valid_init) {
     const auto tile = codegen.GetCurrentResultTileType();
     INTERNAL_CHECK(tile) << "Internal error: reshape result must have a tile type";
     auto valid = ir::tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
@@ -1555,9 +1567,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // per-var alloc model pre-declared it with the reshaped type at a shared
     // addr); a MemRef-less result has no alloc, so it must emit pto.treshape.
     std::string result_type;
-    // The emitted `pto.treshape` result carries STATIC valid dims: the op takes no
-    // valid_row / valid_col operands, so ptoas builds the destination tile from the
-    // result type alone and a `v_row=?` would leave its valid extent at zero.
+    // Positive constant validity is encoded statically. Dynamic/empty validity
+    // requires explicit descriptor initialization on a locally allocated source.
     std::string view_type;
     bool result_has_memref = false;
     if (auto result_var = codegen.GetCurrentResultVar()) {

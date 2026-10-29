@@ -282,8 +282,12 @@ tile 调用 `set_validshape`。
 空窗口的既有限制仍然适用；若要跳过空的 phased 操作，应在源码中同时对生产者
 和 store 添加条件保护。
 
-由 subview 派生的 reshape/reinterpret 视图尚不在此支持范围内：其动态有效维度
-初始化受 [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706) 阻塞。
+动态有效尺寸视图要求 SSA 源可追溯至本地分配。对于 TPOP、subview 或控制流结果，
+代码生成会明确报告尚不支持；应先将数据物化到本地 tile，再创建视图。
+静态正数有效尺寸的 TPOP 视图仍受支持。`SplitVectorKernel` 将 lane-1 重放中
+结果被丢弃的 reshape/reinterpret/transpose 视图替换为空的本地 tile，
+同时保留 TPOP/TPUSH/TFREE 握手。Subview 初始化仍受
+[PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706) 阻塞。
 
 ### 跨核操作到 PTO 指令
 
