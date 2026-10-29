@@ -1070,6 +1070,20 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
     oss << " : " << src_type << " -> " << result_type;
   }
   codegen.Emit(oss.str());
+  // TRESHAPE aliases storage only. Initialize the newly bound descriptor,
+  // without mutating the source handle or exposing mutable-view DSL semantics.
+  if (result_type.find("v_row=?, v_col=?") != std::string::npos) {
+    const auto tile = codegen.GetCurrentResultTileType();
+    INTERNAL_CHECK(tile) << "Internal error: reshape result must have a tile type";
+    auto valid = ir::tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
+    if (valid.size() == 1) {
+      valid.insert(valid.begin(), std::make_shared<ir::ConstInt>(1, DataType::INDEX, ir::Span::unknown()));
+    }
+    const auto dims = GetSizeCodes(valid, codegen);
+    INTERNAL_CHECK(dims.size() == 2) << "Internal error: reshape valid shape must be 2D";
+    codegen.Emit("pto.set_validshape " + result_target + ", " + dims[0] + ", " + dims[1] + " : " +
+                 result_type);
+  }
 }
 
 // A fixed-address result declaration already carries the view over the inherited

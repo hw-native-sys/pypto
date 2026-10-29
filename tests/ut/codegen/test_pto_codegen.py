@@ -802,7 +802,7 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body(enabled):
     # Buffer defines metadata at the logical load and guards the empty path;
     # the legacy Tile path initializes metadata entirely through alloc_tile.
     assert ("pto.set_validshape" in mlir_code) == enabled
-    assert ("scf.if" in mlir_code) == enabled
+    assert "scf.if" in mlir_code  # Both emitters guard runtime-empty GM windows.
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -845,7 +845,7 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body(enabled):
         f"Expected valid_col = %c16_index operand in alloc: {alloc_line}"
     )
     assert ("pto.set_validshape" in mlir_code) == enabled
-    assert ("scf.if" in mlir_code) == enabled
+    assert "scf.if" in mlir_code  # Both emitters guard runtime-empty GM windows.
 
 
 def test_pto_codegen_tile_load_lowering():

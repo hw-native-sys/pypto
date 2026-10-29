@@ -2880,30 +2880,17 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
 
   auto c = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
 
-  // `pto.alloc_tile` conveys the valid extent through `valid_row` / `valid_col`
-  // operands, so ExtractTileTypeInfo always renders `v_row=?, v_col=?`. A view op
-  // that takes NO such operands — `pto.treshape` — cannot: PTOAS default-
-  // constructs its destination tile from the result type alone, so a dynamic
-  // valid leaves the tile's valid extent at zero and every consumer silently
-  // becomes a no-op. Render static valid dims whenever the view's effective
-  // valid_shape is statically known.
-  //
-  // This static-valid type string is the PTOAS-facing half of
-  // EmitStaticValidTileView (pto.tquant.mx / X-to-ZZ requireStaticShape): the
-  // treshape result type must carry concrete v_row/v_col, not `?`.
-  //
-  // The one valid_shape that must stay dynamic is the all-zero lane-1 replay
-  // sentinel: a static `v_row=0, v_col=0` has no pto-isa GetValidRow overload
-  // (see IsZeroValidShapeSentinel). Rendering it dynamic is what the sibling
-  // subview inference already does.
+  // Static zero has no PTO-ISA GetValidRow/GetValidCol overload. A dynamic
+  // view is initialized explicitly by its emitter, including the all-zero
+  // replay marker; a default-constructed reshape alone does not initialize it.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
-  const bool zero_sentinel = ir::tile_view_semantics::IsZeroValidShapeSentinel(valid);
-  if (!zero_sentinel) {
+  const bool empty = ir::tile_view_semantics::HasZeroValidExtent(valid);
+  if (!empty) {
     if (valid.size() == 1) {
       // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
-      // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
-      // dynamic zero-valid extent and its consumers become silent no-ops.
+      // maps to rows=1, cols=shape[0]. Keep positive constant views static,
+      // including the implicit row, without a runtime metadata update.
       if (auto v_col = As<ir::ConstInt>(valid[0])) {
         c.v_row = 1;
         c.v_col = v_col->value_;

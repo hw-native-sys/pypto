@@ -268,6 +268,19 @@ PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发�
 `pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
 tile 调用 `set_validshape`。
 
+**空有效区域。** 任意有效维度为零都表示有效区域为空，与物理分配大小无关。
+以本地分配为根的普通 reshape 和 reinterpret 视图使用动态有效维度表示空区域，
+并在 `pto.treshape` 后立即通过 `pto.set_validshape` 初始化两个维度。
+静态正数有效维度仍保留静态编码。编译器初始化新描述符不代表用户可以在任意
+视图上调用 `pl.set_validshape`。
+
+Tile 和 Buffer 内存传输省略静态空窗口。运行时尺寸窗口仅在非空条件分支内
+创建并访问。跳过 store 时保留输出 tensor 的身份和目标数据；这些条件保护
+不会删除跨核通信或同步操作。
+
+由 subview 派生的 reshape/reinterpret 视图尚不在此支持范围内：其动态有效维度
+初始化受 [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706) 阻塞。
+
 ### 跨核操作到 PTO 指令
 
 | PyPTO 操作 | 生成的 PTO-ISA | 描述 |

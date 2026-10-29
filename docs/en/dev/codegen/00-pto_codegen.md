@@ -298,6 +298,22 @@ alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
 (it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
 or call `set_validshape` on the source tile before taking the view.
 
+**Empty valid regions.** A zero in either valid dimension denotes an empty
+region, independently of the physical allocation. Ordinary reshape and
+reinterpret views rooted in a local allocation use dynamic valid dimensions
+for empty regions and initialize both dimensions with `pto.set_validshape`
+immediately after `pto.treshape`. Static positive valid dimensions retain their
+static encoding. Initializing a compiler-created descriptor does not make the
+user-facing `pl.set_validshape` operation legal on arbitrary views.
+
+Tile and Buffer memory transfers omit statically empty windows. Runtime-sized
+windows are created and accessed only inside a non-empty guard. Skipping a store
+preserves its output tensor identity and leaves destination data unchanged;
+these guards do not remove cross-core communication or synchronization.
+
+Subview-derived reshape/reinterpret views remain outside this support: initializing their
+dynamic valid dimensions is blocked by [PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
+
 ### Cross-Core Operations → PTO Instructions
 
 | PyPTO Operation | Generated PTO-ISA | Description |

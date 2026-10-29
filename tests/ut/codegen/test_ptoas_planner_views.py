@@ -887,6 +887,68 @@ class ZeroValidSentinelReinterpretProgram:
         return pl.store(view, [0, 0], out)
 
 
+@pytest.mark.parametrize("valid", [(0, 0), (0, 8), (8, 0), (8, 8)])
+@pytest.mark.parametrize("buffer_ir", [False, True])
+def test_empty_reinterpret_view_initializes_valid_and_skips_store(tmp_path, valid, buffer_ir):
+    """An empty view must have initialized runtime extents and no zero-sized GM window."""
+    rows, cols = valid
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, out: pl.Out[pl.Tensor[[16, 8], pl.FP32]]) -> pl.Tensor[[16, 8], pl.FP32]:
+        src: pl.Tile[
+            [16, 8], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[{rows}, {cols}])
+        ] = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        view = pl.tile.reinterpret_view(src, pl.INT32)
+        back = pl.cast(view, pl.FP32)
+        return pl.store(back, [0, 0], out)
+""")
+    assert isinstance(program, _ir.Program)
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+    if 0 in valid:
+        assert "v_row=0" not in mlir and "v_col=0" not in mlir, mlir
+        assert "pto.set_validshape %reinterpret_view_buf" in mlir, mlir
+        assert "pto.partition_view" not in mlir and "pto.tstore" not in mlir, mlir
+    else:
+        assert "v_row=8, v_col=8" in mlir, mlir
+        assert "pto.tstore" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        cpp = pto_backend._compile_pto_module(
+            mlir, "kernel", str(tmp_path), memory_planner=passes.MemoryPlanner.PTOAS
+        )
+        if 0 in valid:
+            assert ".SetValidShape(" in cpp, cpp
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner), ids=lambda planner: planner.name)
+def test_runtime_empty_view_memory_accesses_are_guarded(tmp_path, planner):
+    """Both zero and nonzero runtime extents use initialized handles and guarded GM windows."""
+    program = pl.parse("""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self, x: pl.Tensor[[16, 8], pl.FP32], out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+        rows: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[16, 8], pl.FP32]:
+        src = pl.load(x, [0, 0], [16, 8], valid_shape=[rows, 8])
+        view = pl.tile.reinterpret_view(src, pl.INT32)
+        back = pl.cast(view, pl.FP32)
+        return pl.store(back, [0, 0], out)
+""")
+    mlir = _emit_incore_pto(program, planner)
+    assert mlir.count("scf.if") >= 2, mlir
+    if planner == passes.MemoryPlanner.PTOAS:
+        assert "pto.set_validshape %reinterpret_view_buf" in mlir, mlir
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+
+
 def test_zero_valid_sentinel_treshape_keeps_a_dynamic_valid():
     """Regression for #2870: a `pto.treshape` view must not bake the lane-1 zero.
 

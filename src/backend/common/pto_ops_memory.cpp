@@ -59,10 +59,12 @@ using ir::TensorType;
 using ir::Var;
 
 using pto_ops_detail::AsPto;
+using pto_ops_detail::BeginNonEmptyRegion;
 using pto_ops_detail::CheckArity;
 using pto_ops_detail::EmitFlatOffsetSSAFromValues;
 using pto_ops_detail::EmitIndexOperand;
 using pto_ops_detail::EmitPartitionViewPTO;
+using pto_ops_detail::EndNonEmptyRegion;
 using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
@@ -158,6 +160,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
 
+  if (ir::tile_view_semantics::HasZeroValidExtent(valid_shape_tuple->elements_)) return "";
+  const bool guarded = BeginNonEmptyRegion(valid_shape_tuple->elements_, codegen, size_codes);
   std::string partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
   std::string partition_view = EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type,
                                                     partition_type, offset_codes, size_codes, codegen);
@@ -198,6 +202,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     }
   }
   codegen.Emit(tload_line.str());
+  EndNonEmptyRegion(guarded, codegen);
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
   // already carries the desired `valid_row` / `valid_col` operands, and the
@@ -319,6 +324,21 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+  auto result_var = codegen.GetCurrentResultVar();
+  if (result_var != nullptr) {
+    codegen.RegisterTensorView(result_var, tensor_view);
+    codegen.RegisterVarToMlir(result_var, tensor_view);
+    codegen.RegisterBasePtr(result_var, codegen.GetTensorBasePtr(output_tensor));
+    // SSA-capture form ``data = pl.store(local, [0, 0], data)`` rebinds the
+    // DistributedTensor LHS to a fresh Var; mirror the base-ptr alias so
+    // ``pld.tile.remote_load`` etc. on the rebound name resolve the same
+    // CommContext as the original source.
+    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(output_tensor.get()));
+  }
+
+  if (ir::tile_view_semantics::HasZeroValidExtent(valid_shape)) return "";
+  const bool guarded = BeginNonEmptyRegion(valid_shape, codegen);
 
   std::string partition_view;
   std::string partition_type;
@@ -443,18 +463,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     tstore_line << "}";
   }
   codegen.Emit(tstore_line.str());
-
-  auto result_var = codegen.GetCurrentResultVar();
-  if (result_var != nullptr) {
-    codegen.RegisterTensorView(result_var, tensor_view);
-    codegen.RegisterVarToMlir(result_var, tensor_view);
-    codegen.RegisterBasePtr(result_var, codegen.GetTensorBasePtr(output_tensor));
-    // SSA-capture form ``data = pl.store(local, [0, 0], data)`` rebinds the
-    // DistributedTensor LHS to a fresh Var; mirror the base-ptr alias so
-    // ``pld.tile.remote_load`` etc. on the rebound name resolve the same
-    // CommContext as the original source.
-    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(output_tensor.get()));
-  }
+  EndNonEmptyRegion(guarded, codegen);
 
   return "";
 }

@@ -224,7 +224,7 @@ def test_add_kernel_valid_shape_pto_codegen(enabled):
     # Default Buffer updates metadata at definitions and skips empty data ops.
     # Off retains the legacy allocation-only initialization.
     assert ("pto.set_validshape" in mlir_code) == enabled
-    assert ("scf.if" in mlir_code) == enabled
+    assert "scf.if" in mlir_code  # Both emitters guard runtime-empty GM windows.
 
 
 def test_add_kernel_valid_shape_expr_pto_codegen():
