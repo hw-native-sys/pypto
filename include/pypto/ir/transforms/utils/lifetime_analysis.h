@@ -47,6 +47,15 @@ struct LifetimeInterval {
 // preserve this provenance. Loop bindings retain their fixed initializer edge.
 using TileStorageSources = std::map<const Var*, std::vector<VarPtr>>;
 
+/// Native choices and the loop boundaries connected to them through descriptor
+/// aliases. A carry's initializer alone does not describe all runtime storage.
+struct TileSelectionInfo {
+  std::set<const Var*> values;
+  std::set<const IterArg*> carries;
+};
+
+[[nodiscard]] TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body);
+
 /**
  * @brief Shared result of allocation-lifetime analysis.
  */

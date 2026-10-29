@@ -204,6 +204,19 @@ after their last use, ordinary memory reuse applies to each allocation. The
 candidates are not unconditional aliases and must not be merged just because
 one of them represents the result's MemRef metadata.
 
+Updating loop carries on the legacy Tile path still require one fixed buffer.
+If a carry's initializer or backedge retains an unresolved native If storage
+choice, compilation reports a diagnostic instead of treating the representative
+MemRef as the actual destination. This applies to both For and While; native
+Ifs used only within an iteration remain supported. An unchanged or statically
+zero-trip carry forwards its actual initializer. Descriptor-carry rotation is
+outside this pass's current lowering.
+
+When producers already share one physical allocation, PTO codegen declares
+that storage before sibling regions and initializes logical validity at each
+producer site. If both arms yield the exact same SSA handle, the result binds
+directly to that handle, preserving its local allocation provenance for PTOAS.
+
 `SelectBufferIRFunctions` retains loop-free functions with Tile-valued If results
 on the Tile path, including when Buffer IR is enabled: Buffer lowering currently
 erases Tile region results and cannot represent this dynamic handle choice.

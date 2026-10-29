@@ -27,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -56,6 +57,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
@@ -90,6 +92,51 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// Fixed-buffer loops cannot consume a runtime storage choice as proof of one
+// destination. Diagnose unresolved boundaries after retargeting, which may prove
+// ordinary in-place branch updates share storage. Ifs used only in the body are
+// unaffected. Full descriptor carries/rotation belong to a separate lowering.
+class CheckNativeLoopSelections : public ir::IRVisitor {
+ public:
+  explicit CheckNativeLoopSelections(const ir::StmtPtr& body) : info_(ir::AnalyzeTileSelections(body)) {}
+
+  template <typename LoopPtr>
+  void Loop(const LoopPtr& op) {
+    bool may_execute = true;
+    if constexpr (std::is_same_v<LoopPtr, ir::ForStmtPtr>) {
+      const auto start = As<ir::ConstInt>(op->start_);
+      const auto stop = As<ir::ConstInt>(op->stop_);
+      const auto step = As<ir::ConstInt>(op->step_);
+      if (start && stop && step && step->value_ != 0) {
+        may_execute = step->value_ > 0 ? start->value_ < stop->value_ : start->value_ > stop->value_;
+      }
+    } else if (const auto condition = As<ir::ConstBool>(op->condition_)) {
+      may_execute = condition->value_;
+    }
+    if (may_execute) {
+      const auto yield = ir::transform_utils::GetLastYieldStmt(op->body_);
+      for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+        if (!info_.carries.count(op->iter_args_[i].get())) continue;
+        // An unchanged carry only forwards its actual initializer, including a
+        // selected initializer. It requires no write into a fixed destination.
+        if (yield && i < yield->value_.size() && yield->value_[i] == op->iter_args_[i]) continue;
+        CHECK_SPAN(false, op->span_)
+            << "A Tile selected by an if cannot cross an updating loop-carry boundary on the "
+               "legacy Tile path yet. This loop carries '"
+            << op->iter_args_[i]->name_hint_
+            << "'. Use one fixed Tile buffer for the carry or move the selection after the loop; "
+               "native descriptor carries require separate loop lowering.";
+      }
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { Loop(op); }
+
+ private:
+  ir::TileSelectionInfo info_;
+};
 
 // Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
 // this name reserved in modules that use deferred completion so a user kernel
@@ -1096,6 +1143,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   fs_.Reset();
   fs_.current_function = func;
+  if (func->body_) CheckNativeLoopSelections(func->body_).VisitStmt(func->body_);
 
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into
@@ -1413,6 +1461,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // valid extent is emitted as constants) and before the body walk, which reads
   // the plan when it lowers each slot.
   PlanMultiBufferRegions(func);
+  DeclareSharedTileStorage();
 
   // Parameters are already bound; non-param tile vars are bound above in per-var SSA binding
 
@@ -1513,21 +1562,25 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
+  std::map<std::string, std::vector<const ir::Var*>> producers;
   class VarMemRefMapper : public ir::IRVisitor {
    public:
     std::map<const ir::Var*, const ir::Var*>& var_to_memref;    ///< tile var → base_ Ptr
     std::map<const ir::Var*, std::string>& memref_to_var_name;  ///< base_ Ptr → var name
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
     bool& has_software_pipeline_slots;
+    std::map<std::string, std::vector<const ir::Var*>>& producers;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
                     std::map<const ir::Var*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
-                    bool& software_pipeline_slots)
+                    bool& software_pipeline_slots,
+                    std::map<std::string, std::vector<const ir::Var*>>& producer_map)
         : var_to_memref(mapping),
           memref_to_var_name(reverse_mapping),
           tile_var_allocs(allocs),
-          has_software_pipeline_slots(software_pipeline_slots) {}
+          has_software_pipeline_slots(software_pipeline_slots),
+          producers(producer_map) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
@@ -1545,15 +1598,50 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
           memref_to_var_name[base_ptr] = op->var_->name_hint_;
         }
         tile_var_allocs.emplace_back(op->var_, tile_type);
+        if (memref->slot_count_ == 1 && call && call->op_ &&
+            !ir::op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+          producers[MemRefIdentityKey(memref)].push_back(op->var_.get());
+        }
       }
       ir::IRVisitor::VisitStmt_(op);
     }
   };
 
   VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs,
-                         fs_.has_software_pipeline_slots);
+                         fs_.has_software_pipeline_slots, producers);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
+  }
+  if (!emit_tile_addr_) {
+    std::map<const ir::Var*, std::string> types;
+    for (const auto& [var, type] : fs_.tile_var_allocs) {
+      types[var.get()] = GetTileBufTypeStringFromTileType(type);
+    }
+    for (const auto& entry : producers) {
+      // Mixed physical descriptors need the existing per-site destination
+      // checks (packed dtypes and dynamic reinterpretations have restrictions).
+      if (entry.second.size() > 1 &&
+          std::all_of(entry.second.begin(), entry.second.end(),
+                      [&](const ir::Var* var) { return types.at(var) == types.at(entry.second.front()); })) {
+        fs_.shared_storage_producers.insert(entry.second.begin(), entry.second.end());
+      }
+    }
+  }
+}
+
+void PTOCodegen::DeclareSharedTileStorage() {
+  for (const auto& [var, type] : fs_.tile_var_allocs) {
+    if (fs_.shared_storage_producers.count(var.get()) == 0) continue;
+    const std::string name = GetVarName(var);
+    if (!fs_.emitted_tile_alloc_names.insert(name).second) continue;
+    // Only the physical box is available at function entry. Logical valid
+    // extents may depend on a branch-local expression or loop induction var.
+    // This preserves storage already shared by the IR, not a new If buffer.
+    const auto fields = ComputeAllocTileFields(type, true);
+    fs_.extra_alloc_tiles.push_back(
+        {name, fields.type_str, fields.addr_ssa, fields.valid_row_ssa, fields.valid_col_ssa});
+    RegisterTileBufType(name, fields.type_str, type);
+    RegisterMutableTileName(name);
   }
 }
 
@@ -2263,6 +2351,19 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   // silently redirect a later reg.load/store to compiler-owned storage.
   if (IsParameterBackedTile(tile_type)) return;
 
+  if (fs_.shared_storage_producers.count(var_key)) {
+    const auto fields = ComputeAllocTileFields(tile_type);
+    const auto storage_type = GetSSATileBufType(tile_buf);
+    if (storage_type == fields.type_str) {
+      Emit("pto.set_validshape " + tile_buf + ", " + fields.valid_row_ssa + ", " + fields.valid_col_ssa +
+           " : " + storage_type);
+    } else {
+      BindVarToMlir(tile_var, EnsureTileView(tile_buf, storage_type, tile_type, "shared_storage_view",
+                                             std::make_pair(fields.valid_row_ssa, fields.valid_col_ssa)));
+    }
+    return;
+  }
+
   // In PTOAS mode several vars may share one handle (in-place aliasing); emit
   // the alloc_tile only once per handle so the shared buffer has a single def.
   if (IsTileViewName(tile_buf) || !fs_.emitted_tile_alloc_names.insert(tile_buf).second) {
@@ -2507,6 +2608,16 @@ PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var
       << op_name << " in PTOAS codegen cannot reinterpret shared destination storage from " << output.type_str
       << " to " << GetTileBufTypeStringFromTileType(tile_type);
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+  if (ir::IsOp(ir::OpRegistry::GetInstance().GetOp(op_name), "tile.create")) {
+    // A create establishes a descriptor without writing payload. Unlike an
+    // arithmetic destination, it can initialize its dynamic valid operands on
+    // a local reshape of the shared storage at the original definition site.
+    const auto fields = ComputeAllocTileFields(tile_type);
+    output.name = EnsureTileView(storage, output.type_str, tile_type, "create_view",
+                                 std::make_pair(fields.valid_row_ssa, fields.valid_col_ssa));
+    output.type_str = GetSSATileBufType(output.name);
+    return output;
+  }
   CHECK_SPAN(!view.valid_shape.empty() &&
                  std::all_of(view.valid_shape.begin(), view.valid_shape.end(),
                              [](const ir::ExprPtr& dim) { return ir::As<ir::ConstInt>(dim) != nullptr; }),

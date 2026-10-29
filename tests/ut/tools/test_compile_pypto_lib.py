@@ -52,6 +52,20 @@ def library(tmp_path):
     return lib
 
 
+def test_ptoas_blocked_entry_is_reported_as_skipped(library, tmp_path):
+    """A backend exclusion must stay visible and must never count as a passing compile."""
+    entry = "models/deepseek_v4_flash_mtp/decode_indexer.py"
+    source = library / entry
+    source.parent.mkdir()
+    source.write_text("raise AssertionError('temporarily excluded entry executed')\n")
+    output = tmp_path / "out"
+    result = audit.run_case(library, entry, "a2a3", output, 10)
+    assert result["skipped"] is True
+    assert result["passed"] is False
+    assert result["compilations"] == []
+    assert "PTOAS/issues/1708" in (output / result["log"]).read_text()
+
+
 @pytest.mark.parametrize(
     ("body", "passed", "count"),
     [

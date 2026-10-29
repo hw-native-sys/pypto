@@ -157,6 +157,16 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 内存复用。候选之间不是必须别名，不能因为结果的 MemRef 元数据代表其中一支
 就合并它们的存储。
 
+旧 Tile 路径中，会更新的循环携带值仍要求固定缓冲区。如果初始值或回边包含
+尚未消解的 native If 存储选择，编译会明确报错，避免把代表性 MemRef 当作
+实际目标地址。此限制同时覆盖 For 和 While；仅在本轮内部使用的 native If
+仍受支持。不更新或静态零次迭代的携带值直接返回实际初始值。描述符携带与
+轮转缓冲区尚不属于本 pass 的降低能力。
+
+如果多个 producer 已共享同一物理分配，PTO codegen 会在兄弟区域之前声明存储，
+并在各 producer 处设置逻辑有效形状。若两支返回完全相同的 SSA 句柄，结果会
+直接绑定该句柄，为 PTOAS 保留其本地 allocation 来源。
+
 `SelectBufferIRFunctions` 让不含循环且含 Tile 返回值 If 的函数保留在 Tile 路径上，
 包括启用 Buffer IR 的情况：当前 Buffer lowering 会移除 Tile 区域返回值，
 无法表达动态句柄选择。这样默认流水线中的纯分支 kernel 也使用原生选择。含 For/While 的 kernel 保留

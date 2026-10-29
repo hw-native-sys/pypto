@@ -947,6 +947,9 @@ class PTOCodegen : public CodegenBase {
    */
   void BuildVarToMemRefMapping(const ir::FunctionPtr& func);
 
+  /// Hoist existing single-slot storage shared by independent producers.
+  void DeclareSharedTileStorage();
+
   /**
    * @brief Get the pointer-identity key for a variable
    */
@@ -1168,6 +1171,9 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
+    /// Producer sites sharing one physical allocation. Their declaration must
+    /// dominate sibling regions; each site initializes its own logical validity.
+    std::set<const ir::Var*> shared_storage_producers;
     /// PTOAS memory-planner mode only (no addr baked): full-MemRef-identity key
     /// (base+offset+size) -> canonical tile_buf SSA. Variables that resolve to
     /// the same buffer (e.g. a loop-carried accumulator coalesced by
@@ -1261,6 +1267,7 @@ class PTOCodegen : public CodegenBase {
       memref_to_var_name.clear();
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
+      shared_storage_producers.clear();
       memref_identity_to_mlir.clear();
       emitted_tile_alloc_names.clear();
       multi_buffer_regions.clear();

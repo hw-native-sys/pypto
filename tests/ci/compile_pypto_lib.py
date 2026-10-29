@@ -46,6 +46,13 @@ NON_KERNEL_ENTRIES = {
 # No current kernel entry uses runtime-dir as a compile output.
 COMPILE_OUTPUT_ENTRIES: set[str] = set()
 
+# score_topk narrows a Tile selected between distinct branch allocations.
+# Keep this entry visible in the manifest and report SKIP until PTOAS supports
+# set_validshape on native scf.if results; other library entries still compile.
+PTOAS_BLOCKED_ENTRIES = {
+    "models/deepseek_v4_flash_mtp/decode_indexer.py": "https://github.com/hw-native-sys/PTOAS/issues/1708",
+}
+
 
 def select_entries(lib: Path, platform: str) -> list[str]:
     """Use the library's full formal-entry selector, including device-only cases."""
@@ -263,6 +270,18 @@ def run_case(lib: Path, entry: str, platform: str, output: Path, timeout: int) -
     receipt = case_dir / "compilations.json"
     receipt.unlink(missing_ok=True)
     log_path = case_dir / "compile.log"
+    if reason := PTOAS_BLOCKED_ENTRIES.get(entry):
+        log_path.write_text(f"SKIP: set_validshape on an If-selected Tile; {reason}\n")
+        return {
+            "entry": entry,
+            "platform": platform,
+            "passed": False,
+            "skipped": True,
+            "skip_reason": reason,
+            "compilations": [],
+            "seconds": 0.0,
+            "log": str(log_path.relative_to(output)),
+        }
     env = os.environ | {"PYPTO_PROG_BUILD_DIR": str(case_dir / "build_output")}
     command = [
         sys.executable,
@@ -345,22 +364,27 @@ def main() -> int:
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
-            status = "PASS" if result["passed"] else "FAIL"
+            status = "SKIP" if result.get("skipped") else ("PASS" if result["passed"] else "FAIL")
             print(f"{status} {result['entry']} ({result['seconds']}s) [{result['log']}]", flush=True)
-            if not result["passed"]:
+            if not result["passed"] and not result.get("skipped"):
                 print((output / result["log"]).read_text(errors="replace")[-12000:], flush=True)
     results.sort(key=lambda result: result["entry"])
     (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     passed = sum(result["passed"] for result in results)
+    skipped = sum(bool(result.get("skipped")) for result in results)
     summary = f"pypto-lib {args.platform}: {passed}/{len(results)} passed (library {revision})"
+    if skipped:
+        summary += f"; {skipped} skipped pending PTOAS #1708"
     print(summary, flush=True)
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_path, "a") as summary_file:
             summary_file.write(summary + "\n")
             for result in results:
-                if not result["passed"]:
+                if result.get("skipped"):
+                    summary_file.write(f"- SKIP: `{result['entry']}` — {result['skip_reason']}\n")
+                elif not result["passed"]:
                     summary_file.write(f"- FAIL: `{result['entry']}` — `{result['log']}`\n")
-    return int(passed != len(results))
+    return int(passed + skipped != len(results))
 
 
 if __name__ == "__main__":

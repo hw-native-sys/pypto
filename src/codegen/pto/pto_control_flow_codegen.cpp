@@ -325,8 +325,34 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       return result;
     };
 
-    const auto then_branch = emit_branch(op->then_body_, "then");
-    const auto else_branch = emit_branch(*op->else_body_, "else");
+    auto then_branch = emit_branch(op->then_body_, "then");
+    auto else_branch = emit_branch(*op->else_body_, "else");
+    // A shared destination already dominates the If. Returning that exact SSA
+    // from both arms adds no selection, and would unnecessarily hide its local
+    // allocation provenance from PTOAS (notably set_validshape verification).
+    // Compare actual SSA values, never the representative MemRef on a phi.
+    size_t shared_index = 0;
+    std::vector<size_t> kept_indices;
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (!returns_via_scf[i]) continue;
+      if (As<TileType>(op->return_vars_[i]->GetType()) &&
+          then_branch.yields[shared_index] == else_branch.yields[shared_index]) {
+        BindVarToMlir(op->return_vars_[i], then_branch.yields[shared_index]);
+        returns_via_scf[i] = false;
+      } else {
+        kept_indices.push_back(shared_index);
+      }
+      ++shared_index;
+    }
+    // Compact once rather than erasing per result, keeping large tuple-valued
+    // Ifs linear in their number of results.
+    for (auto* values : {&scf_return_names, &scf_return_types, &then_branch.yields, &then_branch.types,
+                         &else_branch.yields, &else_branch.types}) {
+      for (size_t i = 0; i < kept_indices.size(); ++i) {
+        if (i != kept_indices[i]) (*values)[i] = std::move((*values)[kept_indices[i]]);
+      }
+      values->resize(kept_indices.size());
+    }
     size_t result_index = 0;
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       if (!returns_via_scf[i]) continue;

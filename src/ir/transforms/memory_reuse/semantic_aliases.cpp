@@ -2749,10 +2749,16 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     // matching step in TransformMemoryReuse for why each side is needed.
     new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
+    new_body = AlignLoopCarriesToInit(new_body);
     new_body = FixupYields(new_body, func->params_);
     new_body = NormalizeIdentityCopyBuffers(new_body);
   } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+    new_body = AlignLoopCarriesToInit(new_body);
     new_body = FixupYields(new_body, func->params_);
+    // Fixup refreshes an If descriptor's representative MemRef. Its aliases and
+    // relative views must follow that hint too, just as under the DSA planner;
+    // their runtime bindings still follow the actual selected SSA in codegen.
+    new_body = NormalizeIdentityCopyBuffers(new_body);
   }
 
   if (new_body == func->body_) return func;

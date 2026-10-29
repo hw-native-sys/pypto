@@ -113,6 +113,19 @@ class TestBindExpr:
         ir.assert_structural_equal(local_analyzer.simplify(condition), condition)
         assert not local_analyzer.can_prove(condition)
 
+    @pytest.mark.parametrize(
+        ("compare", "expected"),
+        [(ir.Eq, False), (ir.Ne, True), (ir.Lt, False), (ir.Le, False), (ir.Gt, True), (ir.Ge, True)],
+    )
+    def test_exact_fp32_literal_comparison_folds(self, compare, expected):
+        """Static guards must not keep unreachable Tile candidates alive during planning."""
+        condition = compare(
+            ir.ConstFloat(10.0, DataType.FP32, S), ir.ConstFloat(0.0, DataType.FP32, S), BOOL, S
+        )
+        result = Analyzer().simplify(condition)
+        assert isinstance(result, ir.ConstBool)
+        assert result.value == expected
+
     @pytest.mark.parametrize("use_range", [False, True])
     def test_unbind_clears_symbolic_intervals(self, use_range):
         local_analyzer = Analyzer()

@@ -228,7 +228,7 @@ def _assert_tmov_operand_types(mlir: str) -> None:
     """TMOV must preserve each SSA definition and copy matching tile geometry."""
     definitions = {}
     for line in mlir.splitlines():
-        match = re.match(r"\s*(%[A-Za-z0-9_]+) = pto\.(?:alloc_tile|treshape)\b", line)
+        match = re.match(r"\s*(%[A-Za-z0-9_]+) = (?:pto\.(?:alloc_tile|treshape)|scf\.if)\b", line)
         if match:
             definitions[match.group(1)] = _tile_buf_types(line)[-1]
     moves = [line for line in mlir.splitlines() if "pto.tmov" in line]
@@ -249,8 +249,8 @@ def test_row_initialized_column_carry_writes_a_view_of_its_original_storage():
     root = _outs_of(_sole_line(mlir, "pto.texpands"))
     root_alloc = _sole_line(mlir, f"{root} = pto.alloc_tile")
     assert "rows=1, cols=32" in root_alloc and "v_row=?, v_col=?" in root_alloc, root_alloc
-    # Initializer, merged if result, and updated row are the only allocations.
-    assert mlir.count("= pto.alloc_tile") == 3, mlir
+    # Only the initializer and updated row own storage. Native If adds no phi allocation.
+    assert mlir.count("= pto.alloc_tile") == 2, mlir
 
     # Both the post-loop store and the loop write-back address the original bytes.
     store_handle = _ins_of(_sole_line(mlir, "pto.tstore"))

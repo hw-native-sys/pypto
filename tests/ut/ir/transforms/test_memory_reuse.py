@@ -88,6 +88,33 @@ def _collect_named_tile_memrefs(program: ir.Program, names: set[str]) -> dict[st
     return result
 
 
+def _assert_native_acc_selection(program: ir.Program) -> None:
+    """A declined Acc retarget remains a native choice, with no Acc-to-Acc move."""
+    checked = 0
+
+    class Checker(ir.IRVisitor):
+        def visit_if_stmt(self, op):
+            nonlocal checked
+            checked += sum(
+                isinstance(value.type, ir.TileType) and value.type.memory_space == ir.MemorySpace.Acc
+                for value in op.return_vars
+            )
+            super().visit_if_stmt(op)
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("tile.move").name:
+                source, target = op.args[0].type, op.type
+                assert not (
+                    isinstance(source, ir.TileType)
+                    and isinstance(target, ir.TileType)
+                    and source.memory_space == target.memory_space == ir.MemorySpace.Acc
+                ), "native descriptor selection must not emit an Acc-to-Acc copy"
+            super().visit_call(op)
+
+    Checker().visit_program(program)
+    assert checked > 0
+
+
 def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
     """Assert every arm of every tile-typed if-phi yields into the phi's own buffer.
 
@@ -2264,19 +2291,8 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    def test_if_phi_arm_yielding_iter_arg_still_copies_into_the_phi_buffer(self):
-        """Every arm of an if-phi must write the phi's buffer, IterArg arms included.
-
-        ``tile.mrgsort_format1`` is ``.not_inplace_safe()`` and reads
-        ``tile_iter``, so the retargeter declines to place ``merged`` on the
-        carry buffer (see ``test_retargeter_declines_for_not_inplace_safe_op``)
-        and the phi lands on its own ``mem_vec_6``.  The ``else`` arm yields the
-        loop's ``tile_iter`` unchanged -- an ``IterArg``, which has its own
-        ObjectKind and is *not* matched by ``As<Var>``.  Skipping it left
-        ``mem_vec_6`` unwritten whenever the ``else`` arm ran, and the carry
-        writeback below then copied that stale buffer back onto the carry,
-        silently destroying the loop-carried value.
-        """
+    def test_if_phi_else_iter_arg_preserves_native_source_and_loop_writeback(self):
+        """Native If forwards the unchanged carry and retains the separate loop writeback."""
 
         @pl.program
         class Before:
@@ -2311,10 +2327,8 @@ class TestYieldFixup:
                 out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
                 return out_val
 
-        # sorted_tile/tile_iter/result live on the carry buffer mem_vec_5; the
-        # phi lives on mem_vec_6.  Both arms write mem_vec_6 -- the then arm
-        # through mrgsort, the else arm through tile_iter_mv -- before phi_mv
-        # copies it back onto the carry.
+        # The then source lives on mem_vec_6 and else forwards the carry on
+        # mem_vec_5. Only the loop boundary retains its separate writeback.
         @pl.program
         class Expected:
             @pl.function
@@ -2345,11 +2359,8 @@ class TestYieldFixup:
                             pl.yield_(merged)
                         )
                     else:
-                        tile_iter_mv: pl.Tile[
-                            [1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec
-                        ] = pl.tile.move(tile_iter, target_memory=pl.Mem.Vec)
                         phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_iter_mv)
+                            pl.yield_(tile_iter)
                         )
                     phi_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.move(phi, target_memory=pl.Mem.Vec)
@@ -2367,19 +2378,12 @@ class TestYieldFixup:
 
         After = _run_pipeline(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
-        _assert_if_phi_arms_write_the_phi_buffer(After)
+        assert "tile.mrgsort_format1" in ir.python_print(After)
+        assert "tile_iter_mv" not in ir.python_print(After)
+        assert "merged_mv" not in ir.python_print(After)
 
-    def test_if_phi_arm_yielding_iter_arg_makes_the_carry_buffer_canonical(self):
-        """Mirror of the test above: the *then* arm is the one yielding the IterArg.
-
-        YieldFixup only ever inserts its reconciling move into the ``else`` arm,
-        so the then arm's buffer is the canonical one.  When that arm yields the
-        carry unchanged the phi lands on the carry buffer itself, the ``else``
-        arm's producer is copied into it, and the loop-carry writeback drops out
-        because the phi already is the carry.  Skipping the IterArg arm instead
-        put the phi on the else arm's buffer and left it unwritten whenever the
-        then arm ran.
-        """
+    def test_if_phi_then_iter_arg_preserves_native_source_without_merge_copy(self):
+        """The mirrored native If keeps both sources; codegen diagnoses its unresolved loop boundary."""
 
         @pl.program
         class Before:
@@ -2446,11 +2450,8 @@ class TestYieldFixup:
                         merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.mrgsort(tile_iter, block_len=64)
                         )
-                        merged_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.move(merged, target_memory=pl.Mem.Vec)
-                        )
                         phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(merged_mv)
+                            pl.yield_(merged)
                         )
                     result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(phi)
@@ -2465,7 +2466,9 @@ class TestYieldFixup:
 
         After = _run_pipeline(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
-        _assert_if_phi_arms_write_the_phi_buffer(After)
+        assert "tile.mrgsort_format1" in ir.python_print(After)
+        assert "tile_iter_mv" not in ir.python_print(After)
+        assert "merged_mv" not in ir.python_print(After)
 
     def test_carry_writebacks_run_before_they_are_overwritten(self):
         """A carry rename must be read before a sibling carry overwrites its buffer.
@@ -2871,8 +2874,7 @@ class TestYieldFixup:
         type-correct ``tile.move`` that PTOAS cannot lower for distinct L0C
         buffers.
         """
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(_divergent_acc_phi_program())
+        _assert_native_acc_selection(_run_pipeline(_divergent_acc_phi_program()))
 
 
 class TestNestedCarryLifetimeCarrier:
@@ -4088,8 +4090,7 @@ class SharedSuffix:
 """
 
         before = passes.init_mem_ref()(pl.parse_program(source))
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            passes.memory_reuse()(passes.materialize_semantic_aliases()(before))
+        _assert_native_acc_selection(passes.memory_reuse()(passes.materialize_semantic_aliases()(before)))
 
     def test_gating_vec_inplace_if_phi_is_not_acc_coalesced(self):
         """Gating: the accumulator coalescer is Acc-scoped. A structurally
@@ -4138,9 +4139,7 @@ class SharedSuffix:
         # Not acc-coalesced: the two branch buffers survive and the existing path
         # inserts a (legal, Vec->Vec) tile.move to reconcile the phi.
         assert len(bases) == 2, f"Vec accumulator-shaped phi must not be acc-coalesced; bases={sorted(bases)}"
-        assert "tile.move" in ir.python_print(After), (
-            f"expected the pre-existing Vec->Vec move (coalescer must skip non-Acc):\n{ir.python_print(After)}"
-        )
+        assert "tile.move" not in ir.python_print(After), "native If needs no Vec merge copy"
 
     def test_pre_if_acc_seed_not_coalesced_onto_accumulator(self):
         """Branch-locality guard: the accumulator coalescer must only retarget a
@@ -4157,8 +4156,7 @@ class SharedSuffix:
         # Branch-locality correctly prevents unsafe coalescing. Because Acc->Acc
         # tile.move is unsupported, YieldFixup must then fail loudly instead of
         # emitting invalid IR for this unlowerable control-flow shape.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(_divergent_acc_phi_program())
+        _assert_native_acc_selection(_run_pipeline(_divergent_acc_phi_program()))
 
     def test_pre_if_accumulator_loop_is_not_treated_as_branch_local(self):
         """A loop result defined before an if cannot justify branch-exclusive reuse."""
@@ -4195,8 +4193,7 @@ class SharedSuffix:
         # branch-local accumulator would retarget the sibling seed onto its
         # buffer and clobber bypass_result on that path. Decline and fail closed
         # because the remaining divergent Acc phi has no legal repair move.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(Before)
+        _assert_native_acc_selection(_run_pipeline(Before))
 
     def test_branch_local_accumulator_loop_preserves_external_seed_after_if(self):
         """A branch-local accumulator loop cannot donate an externally live buffer.
@@ -4237,8 +4234,7 @@ class SharedSuffix:
         # Retargeting ``seed`` onto ``initial`` is unsafe because ``initial``
         # remains independently observable after the if on the else path. The
         # remaining divergent Acc phi has no legal Acc-to-Acc repair move.
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(Before)
+        _assert_native_acc_selection(_run_pipeline(Before))
 
     def test_direct_accumulator_phi_preserves_reused_input_after_if(self):
         """A direct ``matmul_acc`` arm cannot donate a reused input read after the phi."""
@@ -4269,8 +4265,7 @@ class SharedSuffix:
                 result = pl.tile.store(merged, [0, 0], out)
                 return bypass_result, result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(Before)
+        _assert_native_acc_selection(_run_pipeline(Before))
 
     def test_direct_accumulator_phi_preserves_stale_bare_alias_after_if(self):
         """Bare identity remains observable even when its MemRef metadata has drifted."""
@@ -4335,8 +4330,7 @@ class SharedSuffix:
                 return super().visit_var(op)
 
         drifted = _DriftBareAlias().visit_program(initialized)
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            passes.memory_reuse()(passes.materialize_semantic_aliases()(drifted))
+        _assert_native_acc_selection(passes.memory_reuse()(passes.materialize_semantic_aliases()(drifted)))
 
     def test_direct_accumulator_phi_tracks_iter_arg_initializer_after_if(self):
         """A carried accumulator remains in the initializer's semantic alias family."""
@@ -4369,6 +4363,8 @@ class SharedSuffix:
                 result = pl.tile.store(loop_result, [0, 0], out)
                 return result
 
+        # This loop still requires a real Acc carry transfer; native If does
+        # not make the existing fixed-buffer loop boundary legal.
         with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
             _run_pipeline(Before)
 
@@ -4402,8 +4398,7 @@ class SharedSuffix:
                 result = pl.tile.store(merged, [0, 0], out)
                 return bypass_result, result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(Before)
+        _assert_native_acc_selection(_run_pipeline(Before))
 
     def test_accumulator_if_phi_same_base_disjoint_windows_are_coalesced(self):
         """Same base with a different byte window is not an aligned accumulator.
@@ -4587,8 +4582,7 @@ class SharedSuffix:
                 )
                 return result
 
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            passes.memory_reuse()(Before)
+        _assert_native_acc_selection(passes.memory_reuse()(Before))
 
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate
@@ -4733,11 +4727,8 @@ class SharedSuffix:
                             pl.yield_(tile_c)
                         )
                     else:
-                        acc_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.move(acc_0, target_memory=pl.Mem.Vec)
-                        )
                         if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(acc_0_mv)
+                            pl.yield_(acc_0)
                         )
                     _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                         acc_0, [0, 0], output

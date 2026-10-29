@@ -47,6 +47,90 @@ namespace pypto {
 namespace ir {
 namespace {
 
+// Build descriptor edges once, including loop backedges, then propagate one
+// boolean per value. Each node/edge is processed once (ordered lookups add log N).
+class SelectionCollector : public IRVisitor {
+ public:
+  TileSelectionInfo result;
+  std::map<const Var*, std::vector<const Var*>> users;
+  std::vector<IterArgPtr> arguments;
+
+  void Edge(const VarPtr& target, const ExprPtr& source) {
+    if (const auto value = AsVarLike(source); value && As<TileType>(target->GetType())) {
+      users[value.get()].push_back(target.get());
+    }
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (AsVarLike(op->value_)) Edge(op->var_, op->value_);
+    if (const auto call = As<Call>(op->value_); call && call->op_) {
+      auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      if (!index && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        index = 0;
+      }
+      if (index) Edge(op->var_, call->args_[*index]);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    const auto lhs = transform_utils::GetLastYieldStmt(op->then_body_);
+    const auto rhs = op->else_body_ ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
+    if (!lhs || !rhs) return;
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& target = op->return_vars_[i];
+      if (!As<TileType>(target->GetType())) continue;
+      // Leave malformed boundary arity to the existing verifier/codegen
+      // diagnostics instead of indexing missing operands during this analysis.
+      if (i >= lhs->value_.size() || i >= rhs->value_.size()) continue;
+      Edge(target, lhs->value_[i]);
+      Edge(target, rhs->value_[i]);
+      const auto a = GetTileTypeWithMemRef(lhs->value_[i]->GetType());
+      const auto b = GetTileTypeWithMemRef(rhs->value_[i]->GetType());
+      if (lhs->value_[i] != rhs->value_[i] &&
+          (!a || !b || a->GetMemorySpace() != b->GetMemorySpace() ||
+           (CompareBaseAddress(GetDefinedMemRef(a), GetDefinedMemRef(b)) != AddressRelation::kSame ||
+            GetDefinedMemRef(a)->size_ != GetDefinedMemRef(b)->size_))) {
+        result.values.insert(target.get());
+      }
+    }
+  }
+
+  template <typename LoopPtr>
+  void Loop(const LoopPtr& op) {
+    for (const auto& argument : op->iter_args_) {
+      arguments.push_back(argument);
+      Edge(argument, argument->initValue_);
+    }
+    IRVisitor::VisitStmt_(op);
+    const auto yield = transform_utils::GetLastYieldStmt(op->body_);
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i < op->return_vars_.size()) Edge(op->return_vars_[i], op->iter_args_[i]);
+      if (yield && i < yield->value_.size()) Edge(op->iter_args_[i], yield->value_[i]);
+    }
+  }
+  void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { Loop(op); }
+
+  TileSelectionInfo Finish() {
+    std::vector<const Var*> pending(result.values.begin(), result.values.end());
+    while (!pending.empty()) {
+      const auto* source = pending.back();
+      pending.pop_back();
+      const auto found = users.find(source);
+      if (found == users.end()) continue;
+      for (const auto* target : found->second) {
+        if (result.values.insert(target).second) pending.push_back(target);
+      }
+    }
+    for (const auto& argument : arguments) {
+      if (result.values.count(argument.get())) result.carries.insert(argument.get());
+    }
+    return std::move(result);
+  }
+};
+
 /**
  * @brief Collect all Var nodes referenced in an expression.
  */
@@ -652,6 +736,12 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 }
 
 }  // namespace
+
+TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body) {
+  SelectionCollector collector;
+  if (body) collector.VisitStmt(body);
+  return collector.Finish();
+}
 
 LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
   return AnalyzeAllocationLifetimesImpl(func_body);

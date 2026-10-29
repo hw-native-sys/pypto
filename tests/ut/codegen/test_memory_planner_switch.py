@@ -637,7 +637,7 @@ def test_ptoas_nested_mat_phi_does_not_reuse_sibling_branch_declaration(identity
         for line in lines
         if "pto.alloc_tile" in line and "loc=mat" in line and "rows=32, cols=64" in line
     ]
-    assert len(panel_allocations) == 2, mlir  # Sibling-local storage and one shared head phi.
+    assert len(panel_allocations) == 1, mlir  # One existing shared family, dominating every branch.
     assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in lines), mlir
     transposes = [line for line in lines if "pto.treshape" in line]
     assert transposes and f"pto.treshape {nested_handles[0]} :" in transposes[-1], mlir
@@ -907,8 +907,8 @@ def test_ptoas_loop_mat_identity_phi_gather_writes_nonzero_row_subview():
         "all_unknown",
     ],
 )
-def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, difference):
-    """Reuse requires an exact window and a known, matching space on both yields and phi."""
+def test_ptoas_if_selection_preserves_each_source_window(memory_space, difference):
+    """A representative hint follows then without changing either selected source."""
     span = ir.Span.unknown()
     allocation = ir.Var("allocation", ir.PtrType(), span)
     other_allocation = ir.Var("other_allocation", ir.PtrType(), span)
@@ -985,9 +985,9 @@ def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, diff
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(before)
 
-    if difference != "same_window":
-        # Sharing a pointer does not authorize cross-space or uncertain aliases,
-        # and the false switch continues to leave distinct windows to codegen.
+    if a_storage is None or phi_memref is None:
+        # Missing storage remains outside hint refresh; it is not invented by
+        # native selection. The selected source operands stay intact below.
         ir.assert_structural_equal(after, before)
         return
 
@@ -995,9 +995,15 @@ def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, diff
     new_phi, arms = phis[0]
     _assert_same_tile_window(new_phi.type.memref, a_memref)
     assert new_phi.type.memory_space == memory_space
-    assert new_phi.type.tile_view == phi_type.tile_view
-    for arm in arms:
-        _assert_same_tile_window(arm, a_memref)
+    expected_phi = ir.TileType(phi_type.shape, dtype, a_memref, phi_type.tile_view, memory_space)
+    assert new_phi.type.tile_view == expected_phi.tile_view
+    _assert_same_tile_window(arms[0], a_memref)
+    if b_storage is None:
+        assert arms[1] is None
+    else:
+        _assert_same_tile_window(arms[1], b_storage)
+    # All geometry differences remain exercised. In particular, the else
+    # allocation/offset/slot must never be rebound to then's hint.
     for name in ("reshaped", "alias"):
         tile_type = tiles[name].type
         assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None

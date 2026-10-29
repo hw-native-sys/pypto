@@ -336,5 +336,110 @@ def test_selected_written_workspace_cannot_inherit_an_earlier_read_buffer(
         assert workspace[1] <= previous[0] or previous[1] <= workspace[0], (candidate, windows)
 
 
+@pytest.mark.ptoas_compile
+def test_shared_accumulator_declaration_dominates_if_arms(tmp_path, ascend_backend):
+    """Coalesced producers need one declaration, with validity set in the loop."""
+
+    @pl.program
+    class SharedAccumulator:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flag: pl.Scalar[pl.INT32],
+            valid_rows: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            rhs = pl.load(b, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            for i in pl.range(2):
+                rows = pl.min(valid_rows + i, 16)
+                lhs = pl.load(a, [0, 0], [16, 16], valid_shape=[rows, 16], target_memory=pl.MemorySpace.Mat)
+                if flag != 0:
+                    seed = pl.matmul(lhs, rhs)
+                    result = pl.matmul_acc(seed, lhs, rhs)
+                else:
+                    result = pl.matmul(lhs, rhs)
+                out = pl.store(result, [0, 0], out)
+            return out
+
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable")
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(SharedAccumulator)
+    text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=False, emit_source_loc=False)
+    allocations = [line for line in text.splitlines() if "pto.alloc_tile" in line and "loc=acc" in line]
+    assert len(allocations) == 1, text
+    assert text.index(allocations[0]) < text.index("scf.for"), text
+    # Matching handles require no descriptor selection, and retain the local
+    # provenance PTOAS needs for subsequent mutable-validity operations.
+    assert not re.search(r"scf.if .* -> .*loc=acc", text), text
+    source = tmp_path / "shared_accumulator.pto"
+    source.write_text(text)
+    compiled = subprocess.run(
+        [
+            binary,
+            str(source),
+            "-o",
+            str(tmp_path / "shared_accumulator.cpp"),
+            *_get_ptoas_flags(passes.MemoryPlanner.PTOAS),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+
+
+@pytest.mark.parametrize("loop", ["for", "while"])
+@pytest.mark.parametrize("boundary", ["initializer", "backedge"])
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_updating_loop_rejects_unresolved_tile_selection(loop, boundary, planner, ascend_backend):
+    """Both loop kinds must diagnose storage choices their fixed carry cannot hold."""
+    select = """if flag > 0:
+    selected = a
+else:
+    selected = b"""
+    update = (
+        "selected = pl.add(selected, delta)"
+        if boundary == "initializer"
+        else """if flag > 0:
+    selected = selected
+else:
+    selected = b"""
+    )
+    before = select if boundary == "initializer" else "selected = a"
+    body = update if loop == "for" else update + "\ni = i + 1"
+    header = "for i in pl.range(count):" if loop == "for" else "while i < count:"
+
+    def indent(text, spaces):
+        return "\n".join(" " * spaces + line for line in text.splitlines())
+
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[12, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[12, 8], pl.FP32]]) -> pl.Tensor[[12, 8], pl.FP32]:
+        a = pl.load(x, [0, 0], [4, 8])
+        b = pl.load(x, [4, 0], [4, 8])
+        delta = pl.load(x, [8, 0], [4, 8])
+{indent(before, 8)}
+        i = pl.const(0, pl.INDEX)
+        {header}
+{indent(body, 12)}
+        pl.store(selected, [0, 0], out)
+        pl.store(a, [4, 0], out)
+        return pl.store(b, [8, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        with pytest.raises(ValueError, match="Tile selected by an if cannot cross"):
+            lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+            codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
