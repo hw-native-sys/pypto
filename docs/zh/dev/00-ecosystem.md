@@ -111,8 +111,12 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 **编译器 CI 覆盖：** `pypto-lib-compile` job 编译 pypto-lib 的
 `.github/scripts/detect_changes.py --all` 选出的全部正式可运行入口，
 按库的平台归属规则分别覆盖 A2/A3 和 A5。排除草稿、不可独立运行的辅助模块，
-以及仅使用 CPU 的 GLM 权重往返测试和 prefill 参考实现自测；
-辅助模块通过调用它们的入口进行覆盖。编译不需要 NPU，因此仅支持真机的入口也会纳入。
+以及仅使用 CPU 的 GLM 权重往返测试、prefill 参考实现自测和
+`models/glm5_3_flash/prefill_fwd.py` 权重检查；
+辅助模块通过调用它们的入口进行覆盖。
+该 GLM prefill CLI 默认执行 CPU 权重检查，不产生编译记录。
+其他 GLM 内核入口仍保留覆盖，包括没有 `--compile-only` 选项的入口。
+编译不需要 NPU，因此仅支持真机的入口也会纳入。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
 不构建设备二进制，也不验证数值结果；
@@ -134,11 +138,8 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 损坏或不可读的编译回执只使对应入口失败，不会中断其他入口或丢失矩阵汇总。
 若入口通过当前 Python 解释器再次运行自身脚本来分发用例，每个子进程都会进入同一仅编译适配器。
 子用例的环境、工作目录和进程隔离均保留，父进程负责汇总编译记录。
-对于明确注册的编译输出入口（目前为 `models/glm5_3_flash/prefill_fwd.py`），
-适配器会在编译回执旁创建新的 runtime 目录。
-被拦截的子进程会将继承的 `--runtime-dir PATH` 或 `--runtime-dir=PATH`
-改写为各自的新目录，其他用例参数保持不变，避免父进程或兄弟进程的 manifest 绕过实际编译。
-其他入口保留原有参数：`--runtime-dir` 可能表示回放输入，或仅属于单独的 checkpoint 模式，
+编译输出入口的允许列表（allowlist）目前为空，因此适配器不会注入或改写 runtime 目录。
+`--runtime-dir` 可能表示回放输入，或仅属于单独的 checkpoint 模式，
 因此仅声明该选项不会启用输出目录注入。
 子进程失败，或其编译记录缺失、为空、格式错误，都会使入口失败，即使父进程正常退出。
 该拦截仅作用于同一 Python 解释器启动的当前入口脚本。
