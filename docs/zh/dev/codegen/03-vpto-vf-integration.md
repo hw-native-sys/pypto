@@ -124,8 +124,14 @@ helper 加法改成减法后的失效与数值变化，以及删除原目录后�
 ```bash
 PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID="$DEVICE_ID" \
 PYPTO_VPTO_TIMEOUT=900 python -m pytest \
-  --confcutdir=tests/st/runtime/vpto tests/st/runtime/vpto -k persistent_onboard -v
+  tests/st/runtime/vpto --platform=a5 -k persistent -v
 ```
+
+每个 PR 的 `onboard-tests-a5` job 通过 `vf-tests-a5` 步骤运行此套件，
+显式开启真卡执行，并使用 `task-submit` 预约的卡号。套件核验实际设备型号，
+为每个测试分配独立输出目录，串行执行并限制子进程超时。其他平台会取消选择
+这些仅支持 A5 的测试。`vf-a5-results` CI artifact 在失败时也会保留 JUnit
+结果、设备信息、命令日志和编译产物。
 
 仅编译检查、独立 ACL launch 和常驻 Worker 执行属于不同证据。模拟器或 ACL launch
 成功不能证明生产 `.text` 已被 Worker 接收并调度。每次运行都应记录工具链版本、

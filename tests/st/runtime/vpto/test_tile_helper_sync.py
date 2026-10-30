@@ -32,6 +32,8 @@ from test_vpto_vf_onboard import FIXTURE, ROOT
 
 from examples.runtime.vf_emitc_vpto import _record_compilation
 
+pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
+
 LENGTHS = (0, 1, 63, 64, 65, 127, 128, 1023, 1024)
 
 

@@ -27,6 +27,8 @@ from pypto.runtime import ExecutionMode, RunConfig
 from pypto.runtime._artifact_sources import read_kernel_config
 from test_vpto_vf_onboard import FIXTURE, ROOT, _acceptance, _build_variants
 
+pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
+
 
 def _prepare(directory: Path):
     @pl.jit.incore

@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
@@ -17,12 +19,15 @@
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_codegen.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::codegen {
 namespace {
@@ -50,8 +55,9 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitExpr_(var);
   }
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store"))
+    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store")) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
+    }
     references.emplace(stmt->var_.get(), stmt->var_);
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
@@ -146,7 +152,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       if (origins.back() < origins[base_index]) base_index = origins.size() - 1;
       arguments.push_back(GetExprAsCode(root));
       artifact.caller_parameter_types.push_back(GetTileBufTypeStringFromTileType(tile));
-      artifact.parameter_effects.push_back("read");
+      artifact.parameter_effects.emplace_back("read");
     }
     // A masked or partial store must not be treated as overwriting the whole
     // Tile. Readwrite preserves dependencies on the untouched contents without
@@ -157,6 +163,9 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   std::vector<std::string> addresses;
   if (!capture_tiles.empty()) {
     const auto dtype = capture_tiles.front()->dtype_;
+    const auto element_bytes = static_cast<int64_t>(dtype.GetByte());
+    INTERNAL_CHECK_SPAN(element_bytes > 0, scope->span_)
+        << "VF capture element must have a positive byte size";
     // VMI memory operands carry signedness, unlike ordinary signless Tiles.
     const auto element = dtype.IsSignedInt() ? "si" + std::to_string(dtype.GetBit()) : GetTypeString(dtype);
     artifact.parameter_types.push_back("!pto.ptr<" + element + ", ub>");
@@ -167,8 +176,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       std::string address = "%arg0";
       if (relative != 0) {
         address = "%capture" + std::to_string(i);
-        const auto offset =
-            helper.GetOrEmitConstant(relative / static_cast<int64_t>(dtype.GetByte()), DataType::INDEX);
+        const auto offset = helper.GetOrEmitConstant(relative / element_bytes, DataType::INDEX);
         helper.Emit(address + " = pto.addptr %arg0, " + offset + " : <" + element + ", ub> -> <" + element +
                     ", ub>");
       }
@@ -197,7 +205,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     arguments.push_back(GetExprAsCode(var));
     artifact.parameter_types.push_back(GetTypeString(dtype));
     artifact.caller_parameter_types.push_back(GetTypeString(dtype));
-    artifact.parameter_effects.push_back("none");
+    artifact.parameter_effects.emplace_back("none");
   }
 
   helper.EmitStructural("pto.vecscope {");

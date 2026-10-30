@@ -32,6 +32,8 @@ from test_vpto_vf_onboard import FIXTURE
 
 from examples.runtime.vf_emitc_vpto import _record_compilation
 
+pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
+
 
 def _audit_machine_code(evidence: Path, kind: str, offset: int) -> dict[str, list[str]]:
     """Check the helper object and linked image, allowing observed dead-code elimination."""

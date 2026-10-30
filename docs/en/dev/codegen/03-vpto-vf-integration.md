@@ -140,8 +140,15 @@ timeout. Run them serially:
 ```bash
 PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID="$DEVICE_ID" \
 PYPTO_VPTO_TIMEOUT=900 python -m pytest \
-  --confcutdir=tests/st/runtime/vpto tests/st/runtime/vpto -k persistent_onboard -v
+  tests/st/runtime/vpto --platform=a5 -k persistent -v
 ```
+
+The per-PR `onboard-tests-a5` job runs this suite in its `vf-tests-a5` step.
+It explicitly enables hardware execution on the card reserved by `task-submit`.
+The suite checks the actual device model, gives each test its own output
+directory, and runs serially with a timeout per child process. Other platforms
+deselect these A5-only tests. The `vf-a5-results` CI artifact retains JUnit
+results, device information, command logs and compiler artifacts even on failure.
 
 Compiler-only checks, standalone ACL launches and persistent Worker execution
 are separate evidence. A successful simulator or ACL launch does not establish

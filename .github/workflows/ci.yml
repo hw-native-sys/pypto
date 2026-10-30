@@ -2147,9 +2147,10 @@ jobs:
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Two steps share one checkout / install:
+    # npu-a5 card. Three steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
     #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2310,6 +2311,35 @@ jobs:
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: vf-tests-a5
+        id: vf-tests
+        shell: bash
+        timeout-minutes: 125
+        # Each acceptance test already isolates its Worker in a bounded child
+        # process. Keep pytest serial and use the card reserved by task-submit.
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          mkdir -p build
+          output=$(mktemp -d "$PWD/build/vpto-ci.XXXXXX")
+          echo "artifacts=$output" >> "$GITHUB_OUTPUT"
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID=\$TASK_DEVICE \
+                PYPTO_VPTO_TIMEOUT=900 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 \
+                PYPTO_VPTO_RUNTIME_OUTPUT='$output' && \
+              python -m pytest tests/st/runtime/vpto --platform=a5 -k persistent -v \
+                --junitxml='$output/junit.xml'" 2>&1 | tee "$output/task-submit.log"
+
+      - name: Upload VF A5 results
+        if: always() && steps.vf-tests.outputs.artifacts != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: vf-a5-results
+          path: ${{ steps.vf-tests.outputs.artifacts }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Kill orphaned task-submit tasks
         if: always()

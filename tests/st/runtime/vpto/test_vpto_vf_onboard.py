@@ -9,7 +9,7 @@
 
 """Opt-in production .text -> CoreCallable -> persistent Worker A5 acceptance.
 
-Run in isolation with --confcutdir=tests/st/runtime/vpto, PYPTO_RUN_VPTO_ONBOARD=1,
+Run with --platform=a5, PYPTO_RUN_VPTO_ONBOARD=1,
 PYPTO_VPTO_DEVICE_ID=<verified idle card>, and PYPTO_VPTO_TIMEOUT=<seconds>.
 The subprocess bounds compilation, device initialization, dispatch, and teardown.
 No simulator fallback or runtime-pin exemption is permitted.
@@ -39,6 +39,8 @@ from pypto.runtime._artifact_sources import (
 )
 from pypto.runtime.kernel_compiler import KernelCompiler
 from pypto.runtime.runtime_pin import check_runtime_pin
+
+pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
 
 ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/ut/backend/vpto_vf_validation"
