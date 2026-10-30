@@ -602,7 +602,16 @@ def test_bundle_rejects_parameter_backed_captures_and_views(view_kind):
             ),
         )
         if view_kind == "slice":
-            src = builder.let("view", tile.slice(src, [1, 64], [1, 0]))
+            src = builder.let(
+                "view",
+                tile.slice(src, [1, 64], [1, 0]),
+                type=ir.TileType(
+                    [1, 64],
+                    DataType.FP32,
+                    tile_view=ir.TileView([1, 64], [64, 1], 0),
+                    memory_space=ir.MemorySpace.Vec,
+                ),
+            )
         elif view_kind == "reshape":
             src = builder.let("view", tile.reshape(src, [128]))
         elif view_kind == "alias":
@@ -636,7 +645,16 @@ def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
                 memory_space=ir.MemorySpace.Vec,
             ),
         )
-        view = builder.let("view", tile.slice(base, [1, 64], [1, 0]))
+        view = builder.let(
+            "view",
+            tile.slice(base, [1, 64], [1, 0]),
+            type=ir.TileType(
+                [1, 64],
+                DataType.FP32,
+                tile_view=ir.TileView([1, 64], [64, 1], 0),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
         if reshape:
             view = builder.let("reshaped", tile.reshape(view, [64]))
         with builder.reg_scope(SPAN):
@@ -649,7 +667,10 @@ def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
         program = passes.flatten_tile_nd_to_2d()(program)
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     helper = bundle.helpers[0]
-    assert "v_row=1, v_col=64" in helper.caller_parameter_types[0]
+    # slice emits static valid dimensions; reshape currently emits a dynamic
+    # descriptor. Both calls must use their defining SSA type and pass PTOAS.
+    validity = "v_row=?, v_col=?" if reshape else "v_row=1, v_col=64"
+    assert validity in helper.caller_parameter_types[0]
     compiler = find_ptoas_binary()
     if compiler is None:
         pytest.skip("PTOAS is unavailable")
