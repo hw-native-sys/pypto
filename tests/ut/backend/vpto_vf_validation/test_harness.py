@@ -7,8 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Regression checks for retaining evidence when hardware subprocesses fail."""
+"""Regression checks for worker startup and retained subprocess diagnostics."""
 
+import os
 import runpy
 import subprocess
 import sys
@@ -39,6 +40,47 @@ def test_timeout_keeps_partial_diagnostics(tmp_path):
             timeout=1,
         )
     assert (tmp_path / "timeout.log").read_text() == "TIMEOUT after 1s\nbefore launch\n"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "test_alias_helper_sync.py",
+        "test_tile_helper_sync.py",
+        "test_reg_scope_onboard.py",
+        "test_vpto_vf_onboard.py",
+    ],
+)
+def test_worker_imports_outside_checkout(tmp_path, filename):
+    root = Path(__file__).resolve().parents[4]
+    directory = root / "tests/st/runtime/vpto"
+    # Keep installed/source Python dependencies, but remove the checkout root:
+    # CI installs pypto; it does not install the examples namespace.
+    paths = [
+        str(Path(path).resolve())
+        for path in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if path and Path(path).resolve() != root
+    ]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; "
+            "assert sys.argv[3] not in sys.path; "
+            "sys.path.insert(0, sys.argv[1]); "
+            "runpy.run_path(sys.argv[2], run_name='vpto_import_probe')",
+            str(directory),
+            str(directory / filename),
+            str(root),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(paths)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":

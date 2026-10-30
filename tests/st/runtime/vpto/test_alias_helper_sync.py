@@ -27,10 +27,8 @@ from pypto import CacheConfig
 from pypto.backend import BackendType
 from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
 from pypto.runtime.runtime_pin import check_runtime_pin
-from test_tile_helper_sync import _environment
+from test_tile_helper_sync import _environment, _record_compilation
 from test_vpto_vf_onboard import FIXTURE
-
-from examples.runtime.vf_emitc_vpto import _record_compilation
 
 pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
 
