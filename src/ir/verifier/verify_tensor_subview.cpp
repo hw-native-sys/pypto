@@ -67,7 +67,7 @@ class SubviewVerifier : public IRVisitor {
         required_provenance_.count(op->var_.get()) && !IsBorrowedExpr(call->args_[0])) {
       if (IsOp(call, "tensor.view")) {
         CheckView(call);
-      } else if (auto tensor = As<TensorType>(call->GetType()); tensor && tensor->tensor_view_.has_value()) {
+      } else {
         CheckValidShape(call);
       }
     }
@@ -479,50 +479,34 @@ class SubviewVerifier : public IRVisitor {
     auto result = As<TensorType>(op->GetType());
     auto deduced_expr = OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
     auto deduced = deduced_expr ? As<TensorType>(deduced_expr->GetType()) : nullptr;
-    CHECK_SPAN(result && deduced && result->tensor_view_.has_value() && deduced->tensor_view_.has_value(),
-               op->span_)
-        << "tensor.subview metadata alias requires a deduced TensorView";
-    const auto& actual = result->tensor_view_.value();
-    const auto& expected = deduced->tensor_view_.value();
-    CHECK_SPAN(actual.layout == expected.layout && actual.pad == expected.pad, op->span_)
-        << "tensor.subview metadata alias changed the canonical address map";
-    CHECK_SPAN(actual.stride.size() == expected.stride.size(), op->span_)
-        << "tensor.subview metadata alias stride rank mismatch";
-    for (size_t i = 0; i < actual.stride.size(); ++i) {
-      Prove(MakeEq(actual.stride[i], expected.stride[i]), op->span_, "canonical address-map stride equality");
-    }
+    CHECK_SPAN(result && deduced, op->span_) << "tensor.subview metadata alias requires Tensor types";
+    auto normalize = [&](const TensorTypePtr& tensor) {
+      auto view = tensor->tensor_view_.value_or(TensorView{});
+      if (view.stride.empty()) {
+        view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, view.layout);
+      }
+      if (view.valid_shape.empty()) view.valid_shape = tensor->shape_;
+      return std::make_shared<TensorType>(tensor->shape_, tensor->dtype_, std::nullopt, view);
+    };
+    CheckBorrowedType(normalize(result), normalize(deduced), op->span_);
   }
   void CheckValidShape(const CallPtr& op) {
+    CheckCanonicalAddressMap(op);
     auto parent = As<TensorType>(op->args_[0]->GetType());
     auto result = As<TensorType>(op->GetType());
-    const auto& parent_metadata = parent->tensor_view_;
-    const auto& result_metadata = result->tensor_view_;
-    if (!parent_metadata.has_value() || !result_metadata.has_value()) return;
-    CHECK_SPAN(parent_metadata.has_value() && result_metadata.has_value(), op->span_)
-        << "tensor.subview set_validshape requires affine addressing metadata";
-    const auto& parent_view = parent_metadata.value();
-    const auto& result_view = result_metadata.value();
+    auto parent_view = parent->tensor_view_.value_or(TensorView{});
+    auto result_view = result->tensor_view_.value_or(TensorView{});
     const auto& extent = parent_view.valid_shape.empty() ? parent->shape_ : parent_view.valid_shape;
-    CHECK_SPAN(result->shape_.size() == parent->shape_.size() &&
-                   result_view.stride.size() == parent_view.stride.size() &&
-                   result_view.layout == parent_view.layout && result_view.pad == parent_view.pad,
-               op->span_)
-        << "tensor.subview set_validshape must preserve the address map";
-    for (size_t i = 0; i < parent->shape_.size(); ++i) {
-      Prove(MakeEq(result->shape_[i], parent->shape_[i]), op->span_, "metadata alias shape equality");
-      Prove(MakeEq(result_view.stride[i], parent_view.stride[i]), op->span_,
-            "metadata alias stride equality");
-    }
     const auto& result_valid = result_view.valid_shape.empty() ? result->shape_ : result_view.valid_shape;
     CHECK_SPAN(result_valid.size() == extent.size(), op->span_)
         << "tensor.subview set_validshape rank mismatch";
     for (size_t i = 0; i < extent.size(); ++i) {
-      auto dim = result_valid[i];
-      Prove(MakeGt(dim, std::make_shared<ConstInt>(0, DataType::INDEX, op->span_)), op->span_,
+      Prove(MakeGt(result_valid[i], std::make_shared<ConstInt>(0, DataType::INDEX, op->span_)), op->span_,
             "valid shape > 0");
-      Prove(MakeLe(dim, extent[i]), op->span_, "valid shape narrows the parent");
+      Prove(MakeLe(result_valid[i], extent[i]), op->span_, "valid shape narrows the parent");
     }
   }
+
   void CheckLoad(const CallPtr& op) {
     auto source = As<TensorType>(op->args_[0]->GetType());
     CHECK_SPAN(source, op->span_) << "tensor.subview load requires an ordinary Tensor";

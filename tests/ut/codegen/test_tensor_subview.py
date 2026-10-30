@@ -195,10 +195,19 @@ def test_subview_validshape_may_preserve_full_parent_validity():
     assert "pto.tload" in codegen.PTOCodegen().generate(optimized)
 
 
-def test_canonical_validshape_alias_can_be_a_subview_parent():
+@pytest.mark.parametrize("implicit_view", [False, True])
+def test_canonical_validshape_alias_can_be_a_subview_parent(implicit_view):
     span = ir.Span.unknown()
     cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
     output = ir.Var("output", ir.TensorType([2, 512], DataType.BF16), span)
+    if implicit_view:
+        cache = ir.Var(
+            "cache",
+            ir.TensorType(
+                [8, 512], DataType.BF16, tensor_view=ir.TensorView([], ir.TensorLayout.ND, [6, 512])
+            ),
+            span,
+        )
     valid_call = ir.op.tensor.set_validshape(cache, 5, 512)
     valid = ir.Var("valid", valid_call.type, span)
     subview_call = ir.op.tensor.subview(valid, [2, 512], [1, 0], steps=[3, 1])
@@ -953,18 +962,26 @@ def test_metadata_cannot_forge_subview_provenance(metadata_op):
         codegen.PTOCodegen().generate(ir.Program([function], "forged_metadata", span))
 
 
-def test_subview_rejects_forged_canonical_stride():
+@pytest.mark.parametrize("metadata_op", ["view", "set_validshape"])
+@pytest.mark.parametrize("forge_shape", [False, True])
+def test_subview_rejects_forged_canonical_stride(metadata_op, forge_shape):
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
     span = ir.Span.unknown()
     cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
-    ordinary = ir.op.tensor.view(cache, [8, 512])
+    ordinary = (
+        ir.op.tensor.view(cache, [8, 512])
+        if metadata_op == "view"
+        else ir.op.tensor.set_validshape(cache, 8, 512)
+    )
     forged_type = ir.TensorType(
-        [8, 512], DataType.BF16, tensor_view=ir.TensorView([4096, 1], ir.TensorLayout.ND)
+        [16, 256] if forge_shape else [8, 512],
+        DataType.BF16,
+        tensor_view=ir.TensorView([512, 1] if forge_shape else [4096, 1], ir.TensorLayout.ND),
     )
     forged = ir.Call(ordinary.op, ordinary.args, forged_type, span)
     alias = ir.Var("forged", forged_type, span)
-    borrowed = ir.op.tensor.subview(alias, [2, 512], [1, 0], steps=[3, 1])
+    borrowed = ir.op.tensor.subview(alias, [2, 256] if forge_shape else [2, 512], [1, 0], steps=[3, 1])
     selected = ir.Var("selected", borrowed.type, span)
     body = ir.SeqStmts(
         [
@@ -975,7 +992,7 @@ def test_subview_rejects_forged_canonical_stride():
         span,
     )
     function = ir.Function("forged_stride", [cache], [], body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="canonical address-map stride"):
+    with pytest.raises(ValueError, match="alias geometry equality|defining address map"):
         codegen.PTOCodegen().generate(ir.Program([function], "forged_stride", span))
 
 
