@@ -28,7 +28,7 @@ from pypto.backend import BackendType
 from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
 from pypto.runtime.runtime_pin import check_runtime_pin
 from test_tile_helper_sync import _environment, _record_compilation
-from test_vpto_vf_onboard import FIXTURE
+from test_vpto_vf_onboard import FIXTURE, ROOT
 
 pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
 
@@ -138,8 +138,8 @@ def _prepare(directory: Path, kind: str, offset: int):
 
 
 def _run(output: Path, device: int) -> None:
-    pin = check_runtime_pin()
-    assert pin.matches and not pin.off_pin
+    pin = check_runtime_pin(checkout_root=ROOT)
+    assert pin.matches and pin.pinned == pin.installed, pin
     (output / "executed-test-source.py").write_bytes(Path(__file__).read_bytes())
     records = []
     programs = []
@@ -465,8 +465,8 @@ def _complex_expected(out, kind, offset, reverse, split, first, second, n):
 
 def _run_complex(output: Path, device: int, *, extended: bool = False) -> None:
     selected_cases = EXTENDED_CASES if extended else COMPLEX_CASES
-    pin = check_runtime_pin()
-    assert pin.matches and not pin.off_pin
+    pin = check_runtime_pin(checkout_root=ROOT)
+    assert pin.matches and pin.pinned == pin.installed, pin
     (output / "executed-complex-test-source.py").write_bytes(Path(__file__).read_bytes())
     records, programs = [], []
     support = runpy.run_path(str(FIXTURE / "test_validation.py"))

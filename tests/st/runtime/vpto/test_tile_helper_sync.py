@@ -137,8 +137,8 @@ def _prepare_multiple(directory: Path):
 
 
 def _multiple_worker(output: Path, device: int) -> None:
-    pin = check_runtime_pin()
-    assert pin.matches and not pin.off_pin
+    pin = check_runtime_pin(checkout_root=ROOT)
+    assert pin.matches and pin.pinned == pin.installed, pin
     (output / "test_tile_helper_sync.py").write_bytes(Path(__file__).read_bytes())
     directory = output / "multiple"
     compiled = _prepare_multiple(directory)

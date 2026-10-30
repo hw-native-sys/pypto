@@ -148,7 +148,10 @@ PYPTO_VPTO_TIMEOUT=900 python -m pytest \
 The per-PR `onboard-tests-a5` job runs this suite in its `vf-tests-a5` step.
 It explicitly enables hardware execution on the card reserved by `task-submit`.
 The suite checks the selected device model through ACL in a bounded child
-process; it does not require `torch_npu`. Each test invocation gets a fresh
+process; it does not require `torch_npu`. Acceptance workers explicitly pass
+their source checkout to `check_runtime_pin(checkout_root=...)`, so wheel-based
+CI installs still compare the extension stamp, runtime HEAD and checkout gitlink.
+Unknown revisions and mismatches fail acceptance. Each test invocation gets a fresh
 output directory, and execution is serial with a timeout per child process.
 The source/cache relocation probes also preserve each direct invocation under
 a fresh `run-*` directory, with `build-result.json` pointing to the latest run. Other platforms

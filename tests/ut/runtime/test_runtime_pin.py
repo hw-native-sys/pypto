@@ -106,6 +106,50 @@ def test_matching_revision_passes(pin, recwarn):
     assert not recwarn.list
 
 
+@pytest.fixture
+def wheel_pin(pin, monkeypatch):
+    """A wheel import has no source root; the acceptance checkout is explicit."""
+    (pin.root / ".git").write_text("gitdir: ../worktree.git\n")
+    monkeypatch.setattr(runtime_pin, "_pypto_root", lambda: None)
+    return pin
+
+
+def test_explicit_checkout_checks_wheel_runtime(wheel_pin):
+    assert not runtime_pin.check_runtime_pin().comparable
+
+    status = runtime_pin.check_runtime_pin(checkout_root=wheel_pin.root)
+
+    assert status.runtime_dir == wheel_pin.root / "runtime"
+    assert status.expected == status.pinned == status.installed == PINNED
+    assert status.matches and not status.off_pin
+    # An explicit acceptance target must not replace the imported package's
+    # cached default status for subsequent unrelated callers.
+    assert runtime_pin.check_runtime_pin().runtime_dir is None
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_explicit_checkout_rejects_stale_wheel_runtime(wheel_pin, stamped):
+    wheel_pin.install(STALE, stamped=stamped)
+    with pytest.raises(runtime_pin.RuntimePinMismatch):
+        runtime_pin.check_runtime_pin(checkout_root=wheel_pin.root)
+
+
+def test_explicit_checkout_reports_off_pin_runtime(wheel_pin):
+    wheel_pin.expected = OFF_PIN
+    wheel_pin.install(OFF_PIN)
+    with pytest.warns(runtime_pin.RuntimePinWarning):
+        status = runtime_pin.check_runtime_pin(checkout_root=wheel_pin.root)
+    assert status.matches and status.off_pin
+    assert status.pinned != status.installed
+
+
+@pytest.mark.parametrize("missing_git", [".git", "runtime/.git"])
+def test_explicit_checkout_requires_initialized_repositories(wheel_pin, missing_git):
+    (wheel_pin.root / missing_git).unlink()
+    with pytest.raises(ValueError, match="initialized runtime submodule"):
+        runtime_pin.check_runtime_pin(checkout_root=wheel_pin.root)
+
+
 def test_mismatch_raises(pin):
     """A different revision is refused, with both sides and the fix in the message."""
     pin.install(STALE)

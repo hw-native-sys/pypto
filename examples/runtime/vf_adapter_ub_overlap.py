@@ -266,8 +266,8 @@ def _check_internal_sync(output: Path) -> list[str]:
 
 
 def _run(output: Path, device: int) -> None:
-    pin = check_runtime_pin()
-    assert pin.matches and not pin.off_pin, pin
+    pin = check_runtime_pin(checkout_root=Path(__file__).resolve().parents[2])
+    assert pin.matches and pin.pinned == pin.installed, pin
     directory = output / "original"
     compiled = _prepare(directory)
     config = RunConfig(

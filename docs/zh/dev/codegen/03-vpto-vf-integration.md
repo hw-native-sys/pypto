@@ -132,7 +132,10 @@ PYPTO_VPTO_TIMEOUT=900 python -m pytest \
 
 每个 PR 的 `onboard-tests-a5` job 通过 `vf-tests-a5` 步骤运行此套件，
 显式开启真卡执行，并使用 `task-submit` 预约的卡号。套件通过有超时限制的子进程
-使用 ACL 核验所选设备型号，不依赖 `torch_npu`。每次测试调用分配全新的输出目录，
+使用 ACL 核验所选设备型号，不依赖 `torch_npu`。验收 Worker 显式调用
+`check_runtime_pin(checkout_root=...)` 指定源码 checkout，因此通过 wheel 安装的
+CI 环境仍会比较扩展编译标记、runtime HEAD 和 checkout 的 gitlink。版本未知或
+不匹配都会导致验收失败。每次测试调用分配全新的输出目录，
 串行执行并限制子进程超时。源码/缓存迁移检查的直接调用也会创建独立的 `run-*`
 目录，根目录的 `build-result.json` 指向最近一次运行。其他平台会取消选择
 这些仅支持 A5 的测试。`vf-a5-results` CI artifact 在失败时也会保留 JUnit

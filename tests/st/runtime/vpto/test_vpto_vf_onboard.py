@@ -145,8 +145,8 @@ def _build_variants(output: Path, prepare=_prepare):
     # bypass pytest fixtures. A prior relocated artifact must never be replaced.
     output = Path(tempfile.mkdtemp(prefix="run-", dir=evidence_root))
     assert os.environ.get("PYPTO_SKIP_RUNTIME_PIN_CHECK", "0") == "0"
-    pin = check_runtime_pin()
-    assert pin.matches and not pin.off_pin, pin
+    pin = check_runtime_pin(checkout_root=ROOT)
+    assert pin.matches and pin.pinned == pin.installed, pin
     print(f"runtime={pin.installed} extension={pin.extension_path}", flush=True)
     directory = output / "original"
     compiled = prepare(directory)
