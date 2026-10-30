@@ -10,7 +10,6 @@
 """Regression checks for worker startup and retained subprocess diagnostics."""
 
 import ctypes
-import os
 import runpy
 import subprocess
 import sys
@@ -56,42 +55,20 @@ def test_timeout_keeps_partial_diagnostics(tmp_path):
         "examples/runtime/vf_adapter_ub_overlap.py",
     ],
 )
-def test_worker_imports_outside_checkout(tmp_path, relative_path):
+def test_worker_imports_outside_checkout(tmp_path, relative_path, run_without_optional_runtime):
     root = Path(__file__).resolve().parents[4]
     source = root / relative_path
-    directory = source.parent
-    # Keep installed/source Python dependencies, but remove the checkout root:
-    # CI installs pypto; it does not install the examples namespace.
-    paths = [
-        str(Path(path).resolve())
-        for path in os.environ.get("PYTHONPATH", "").split(os.pathsep)
-        if path and Path(path).resolve() != root
-    ]
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """import importlib.abc, runpy, sys
-class NoRuntime(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in {"simpler", "simpler_setup", "torch_npu", "_task_interface"}:
-            raise ModuleNotFoundError(f"Optional runtime dependency imported: {fullname}")
-sys.meta_path.insert(0, NoRuntime())
-assert sys.argv[3] not in sys.path
-sys.path.insert(0, sys.argv[1])
-runpy.run_path(sys.argv[2], run_name="vpto_import_probe")
-""",
-            str(directory),
-            str(source),
-            str(root),
-        ],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": os.pathsep.join(paths)},
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    # The shared guard disables installed PyTorch plugin autoload and rejects
+    # every attempted optional-runtime import, even if ImportError is caught.
+    result = run_without_optional_runtime(f"""
+import os, runpy, sys
+from pathlib import Path
+sys.path = [p for p in sys.path if p and Path(p).resolve() != Path({str(root)!r})]
+os.chdir({str(tmp_path)!r})
+assert {str(root)!r} not in sys.path
+sys.path.insert(0, {str(source.parent)!r})
+runpy.run_path({str(source)!r}, run_name="vpto_import_probe")
+""")
     assert result.returncode == 0, result.stdout + result.stderr
 
 

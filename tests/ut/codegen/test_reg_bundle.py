@@ -529,9 +529,9 @@ def test_helper_synthetic_names_do_not_collide(tmp_path, local_name):
         views = [
             builder.let(
                 name,
-                tile.full([1, 64], dtype=DataType.FP32, value=0),
+                tile.full([64], dtype=DataType.FP32, value=0),
                 type=ir.TileType(
-                    [1, 64],
+                    [64],
                     DataType.FP32,
                     ir.MemRef(name, offset, 256),
                     memory_space=ir.MemorySpace.Vec,
@@ -583,10 +583,26 @@ def test_helper_synthetic_names_do_not_collide(tmp_path, local_name):
 def test_bundle_rejects_parameter_backed_captures_and_views(view_kind):
     builder = IRBuilder()
     with builder.function("incoming", span=SPAN, type=ir.FunctionType.AIV) as f:
-        src = f.param("src", ir.TileType([1, 128], DataType.FP32, memory_space=ir.MemorySpace.Vec))
-        dst = f.param("dst", ir.TileType([1, 128], DataType.FP32, memory_space=ir.MemorySpace.Vec))
+        src = f.param(
+            "src",
+            ir.TileType(
+                [2, 64],
+                DataType.FP32,
+                tile_view=ir.TileView([2, 64], [64, 1], 0),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        dst = f.param(
+            "dst",
+            ir.TileType(
+                [2, 64],
+                DataType.FP32,
+                tile_view=ir.TileView([2, 64], [64, 1], 0),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
         if view_kind == "slice":
-            src = builder.let("view", tile.slice(src, [1, 64], [0, 32]))
+            src = builder.let("view", tile.slice(src, [1, 64], [1, 0]))
         elif view_kind == "reshape":
             src = builder.let("view", tile.reshape(src, [128]))
         elif view_kind == "alias":
@@ -613,7 +629,12 @@ def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
         base = builder.let(
             "base",
             tile.full([2, 64], dtype=DataType.FP32, value=0),
-            type=ir.TileType([2, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
+            type=ir.TileType(
+                [2, 64],
+                DataType.FP32,
+                tile_view=ir.TileView([2, 64], [64, 1], 0),
+                memory_space=ir.MemorySpace.Vec,
+            ),
         )
         view = builder.let("view", tile.slice(base, [1, 64], [1, 0]))
         if reshape:
