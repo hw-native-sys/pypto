@@ -1837,9 +1837,6 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_swa.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash decode_hca example
-        # The model invokes score_topk, which narrows an If-selected Tile.
-        # Restore with https://github.com/hw-native-sys/PTOAS/issues/1708.
-        if: false
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
@@ -1848,8 +1845,6 @@ jobs:
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_hca.py -p a2a3 -d \$TASK_DEVICE"
 
       - name: Run pypto-lib DeepSeek-V4-Flash decode_csa example
-        # Same score_topk dependency as decode_hca; PTOAS #1708.
-        if: false
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
