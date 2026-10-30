@@ -1093,6 +1093,10 @@ class PTOCodegen : public CodegenBase {
         view_ssa_to_base_ptr;  ///< tensor_view SSA → base ptr SSA (for rebinding IfStmt phi return_vars)
     std::map<const ir::Var*, std::string> memref_to_mlir;    ///< keyed by base_ Ptr
     std::map<const ir::Var*, const ir::Var*> var_to_memref;  ///< maps tile var → base_ Ptr
+    /// Plain Tile assignments recorded while emitting the surrounding function.
+    /// RegScope pre-scanning uses this provenance when an external alias is
+    /// defined before the scope and therefore is outside its statement tree.
+    std::map<const ir::Var*, ir::VarPtr> tile_aliases;
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
         memref_to_tile_type;  ///< keyed by base_ Ptr
 

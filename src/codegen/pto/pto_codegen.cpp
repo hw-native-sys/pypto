@@ -2532,6 +2532,11 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // Non-fatal: if the RHS has no registered view, fall through to the generic
   // handling rather than throwing eagerly on a view that may never be consumed.
   if (auto rhs_var = AsVarLike(op->value_)) {
+    if (As<TileType>(op->var_->GetType()) && As<TileType>(rhs_var->GetType())) {
+      // Keep this provenance even for emit_tile_addr_ codegen. RegScope may
+      // occur later in the function and needs to canonicalize this alias.
+      fs_.tile_aliases[op->var_.get()] = rhs_var;
+    }
     if (ir::AsTensorTypeLike(op->var_->GetType())) {
       const std::string view = TryGetTensorView(rhs_var);
       if (!view.empty()) {

@@ -124,6 +124,9 @@ std::string PTOCodegen::GetRegTypeString(const ir::RegTypePtr& type) const {
 void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
   CHECK_SPAN(!inside_reg_scope_, scope->span_) << "RegScope cannot nest";
   ScopeOperands operands;
+  // A plain Tile alias may have been defined before this RegScope. Preserve
+  // that handle provenance so equivalent external names compare identically.
+  operands.aliases.insert(fs_.tile_aliases.begin(), fs_.tile_aliases.end());
   operands.VisitStmt(scope->body_);
   std::map<const ir::Var*, std::string> external_addresses;
   // Path-compressed provenance avoids retracing every prefix of N chained
@@ -288,7 +291,12 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     types += type;
   }
   if (ir::IsOp(call, "reg.full_mask")) operands = "\"PAT_ALL\"";
-  if (ir::IsOp(call, "reg.index_gen")) attrs = " {order = \"ASC\"}";
+  if (ir::IsOp(call, "reg.index_gen")) {
+    const auto reg_type = ir::As<ir::RegType>(validated->GetType());
+    CHECK_SPAN(reg_type && reg_type->dtype_ != DataType::BF16, call->span_)
+        << "reg.index_gen does not support BF16 VCI in PTOAS; use an integer index dtype";
+    attrs = " {order = \"ASC\"}";
+  }
   if (ir::IsOp(call, "reg.compare")) {
     attrs = " {cmp = \"" + ir::GetStringKwarg(call->kwargs_, "predicate", "") + "\"}";
   }

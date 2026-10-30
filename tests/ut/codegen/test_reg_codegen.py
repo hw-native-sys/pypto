@@ -276,6 +276,58 @@ def test_review_parameter_plain_alias_keeps_caller_backing(tmp_path):
 
 
 @pytest.mark.ptoas_compile
+def test_review_branch_accepts_equivalent_external_tile_alias(tmp_path):
+    """Branch results compare canonical external handles, not Var identity."""
+    ib = IRBuilder()
+    with ib.function("branch_alias", span=SPAN, type=ir.FunctionType.AIV) as f:
+        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
+        src_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        src = f.param("src", src_type, SPAN)
+        alias = ib.let("alias", src, type=src_type)
+        with ib.reg_scope(SPAN):
+            value = ib.emit_reg(
+                "value",
+                "reg.broadcast",
+                [ir.ConstFloat(1.0, DataType.FP32, SPAN)],
+                {"lanes": 64, "dtype": DataType.FP32},
+                SPAN,
+            )
+            with ib.if_stmt(condition, SPAN) as branch:
+                branch.return_var("out", src_type, SPAN)
+                then_out = ib.emit_reg_store("then_out", src, value, span=SPAN)
+                ib.emit(ir.YieldStmt([then_out], SPAN))
+                branch.else_(SPAN)
+                else_out = ib.emit_reg_store("else_out", alias, value, span=SPAN)
+                ib.emit(ir.YieldStmt([else_out], SPAN))
+            out = branch.output(0)
+            ib.emit_reg("loaded", "reg.load", [out, integer(0)], {"lanes": 64}, SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+        program = passes.allocate_memory_addr()(program)
+    source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    assert source.count("pto.tile_buf_addr %src") == 1
+    assert "pto.tile_buf_addr %alias" not in source
+    compile_review_pto(source, tmp_path, level="level3")
+
+
+def test_review_index_gen_rejects_bf16_vci():
+    ib = IRBuilder()
+    with ib.function("bf16_index_gen", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with ib.reg_scope(SPAN):
+            ib.emit_reg(
+                "indices",
+                "reg.index_gen",
+                [ir.ConstFloat(0.0, DataType.BF16, SPAN)],
+                {"lanes": 64, "dtype": DataType.BF16, "order": "ascending"},
+                SPAN,
+            )
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
+    with pytest.raises(ValueError, match="index_gen.*BF16|BF16.*VCI"):
+        codegen.PTOCodegen().generate(program, emit_source_loc=False)
+
+
+@pytest.mark.ptoas_compile
 def test_review_parameter_view_keeps_caller_backing(tmp_path):
     ib = IRBuilder()
     with ib.function("parameter_view", span=SPAN, type=ir.FunctionType.AIV) as f:
