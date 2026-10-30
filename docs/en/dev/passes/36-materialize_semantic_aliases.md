@@ -99,9 +99,17 @@ its own fresh MemRef. This pass closes that gap:
    body structure, handled by tensor boundary normalization.
    Legacy Vec carries also use the shared isolation analysis for recurring
    independent seed reads: an entry copy lets the carry advance in private
-   storage while preserving the original seed. Incoming-parameter, post-loop
-   and overlapping-input policies remain specific to Buffer IR; unsupported
-   copy spaces retain the retarget guard and existing explicit copy diagnostic.
+   storage while preserving the original seed. General incoming-parameter,
+   post-loop and overlapping-input isolation remains specific to Buffer IR.
+   Legacy selected carries in destinations that accept Tile moves are rejected
+   when their initializers remain independently observable, unless recurrence
+   isolation already provides private storage: a writeback snapshot cannot
+   preserve another handle's old initializer value. Acc has no incoming move;
+   its provisional selections reach mandatory accumulator coalescing or the
+   existing divergent-Acc diagnostic instead.
+   A live native selection in the same memory space is conservatively treated
+   as a possible observer of that input, including its non-representative arm.
+   Unsupported copy spaces retain the retarget guard and existing diagnostic.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.
@@ -121,6 +129,12 @@ its own fresh MemRef. This pass closes that gap:
    considers loops entered after the read handle's definition; an accumulator
    recreated inside the loop can still be coalesced safely. These queries use
    precomputed alias and loop-interval indexes, retaining O(N log N) analysis.
+   Acc producer retargeting and coalescing also protect older native selections:
+   a later payload read may observe the input through a non-representative arm.
+   Observer provenance follows descriptor bindings and fixed loop initializers;
+   a carry marked selected only through its backedge is not an old descriptor.
+   Definition-order sweeps and branch/recurrence indexes distinguish these old
+   observers from current phi consumers without expanding candidate sets.
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
    after retargeting, rather than repairing one producer in isolation. Bare SSA
@@ -206,8 +220,10 @@ one of them represents the result's MemRef metadata.
 
 A conditional update can reuse the unchanged sibling's fixed storage when
 the fresh producer is in-place safe and no independent old value remains
-observable. This requires a proof of the actual source family, including
-earlier coalesced choices; a representative phi MemRef alone is insufficient.
+observable. Per-operand output-alias restrictions also apply: an in-place-safe
+operation may still forbid reuse of a carry or workspace operand. This requires
+a proof of the actual source family, including earlier coalesced choices; a
+representative phi MemRef alone is insufficient.
 Post-fixup alias normalization also refreshes enclosing native If hints when
 their yielded writeback aliases move, so abandoned hint allocations can be freed.
 
@@ -223,7 +239,13 @@ Before inserting multiple carry writebacks, yield fixup checks the original
 selected sources. A bounded source summary permits choices that read only
 their own destination or storage untouched by every copy. Other conditional
 multi-copy boundaries are diagnosed; inserted moves must not hide an implicit
-swap from this check. Single-copy and explicit-copy boundaries retain their
+swap from this check. A selected source that may name its own destination is
+snapshotted into independent storage before any writeback, including for a
+single carry. This prevents runtime self-moves. If every source path is proven
+to name exactly the same carry window, with unchanged shape, layout and validity,
+no transfer or scratch is needed. A fresh or unknown source prevents that proof,
+even when the representative hint matches the carry. Scratch storage is explicit
+before lifetime and address planning; explicit materializing copies retain their
 existing behavior.
 
 When producers already share one physical allocation, PTO codegen declares
@@ -237,6 +259,10 @@ In addressed PTO output, a slice of a selected flat Vec tile can derive a view
 from the actual selected handle's address. The view preserves the source's
 physical pitch without copying contents or using its representative MemRef.
 This fallback requires static inferred validity or explicit valid dimensions.
+Consumers requiring dense operands use a descriptor alias of the actual
+selected address for proven contiguous windows. Lazy materialization must not
+write into a representative branch allocation; uncertain selected windows are
+rejected unless an earlier pass has materialized independent storage.
 Unaddressed output, selections of views, and packed layouts retain the existing
 subview path and its PTOAS limitations.
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
+from pypto import InternalError
 from pypto import ir as _ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_locate import find_ptoas_binary
@@ -249,8 +250,9 @@ def test_row_initialized_column_carry_writes_a_view_of_its_original_storage():
     root = _outs_of(_sole_line(mlir, "pto.texpands"))
     root_alloc = _sole_line(mlir, f"{root} = pto.alloc_tile")
     assert "rows=1, cols=32" in root_alloc and "v_row=?, v_col=?" in root_alloc, root_alloc
-    # Only the initializer and updated row own storage. Native If adds no phi allocation.
-    assert mlir.count("= pto.alloc_tile") == 2, mlir
+    # The initializer, updated row and writeback snapshot own storage. Native If
+    # adds no phi allocation; the snapshot prevents a self-move on the unchanged arm.
+    assert mlir.count("= pto.alloc_tile") == 3, mlir
 
     # Both the post-loop store and the loop write-back address the original bytes.
     store_handle = _ins_of(_sole_line(mlir, "pto.tstore"))
@@ -480,6 +482,121 @@ def test_selected_slice_alias_assembles_with_ptoas(tmp_path, cols, col_offset, d
     cpp = output.read_text()
     assert ".data()" in cpp and "TASSIGN(" in cpp
     assert "TEXTRACT(" not in cpp
+
+
+def _selected_slice_dense_consumer_pto(rows, cols, column, dynamic_valid):
+    valid = f", valid_shape=[valid_rows, {cols}]" if dynamic_valid else ""
+    program = pl.parse_program(f"""
+@pl.program
+class SelectedSliceConsumer:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 256], pl.FP32], gamma: pl.Tensor[[1, {cols}], pl.FP32],
+               flag: pl.Scalar[pl.INT32], valid_rows: pl.Scalar[pl.INDEX],
+               saved: pl.Out[pl.Tensor[[32, 256], pl.FP32]],
+               out: pl.Out[pl.Tensor[[{rows}, {cols}], pl.FP32]]) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:
+        a = pl.load(x, [0, 0], [32, 256])
+        b = pl.load(x, [32, 0], [32, 256])
+        scale = pl.load(gamma, [0, 0], [1, {cols}])
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        window = pl.tile.slice(selected, [{rows}, {cols}], [16, {column}]{valid})
+        scaled = pl.tile.col_expand_mul(window, scale)
+        pl.store(a, [0, 0], saved)
+        return pl.store(scaled, [0, 0], out)
+""")
+    return _planner_pto(program, passes.MemoryPlanner.PYPTO)
+
+
+@pytest.mark.parametrize(("rows", "cols", "column"), [(16, 256, 0), (1, 64, 32)])
+@pytest.mark.parametrize("dynamic_valid", [False, True])
+def test_selected_slice_col_expand_preserves_live_unselected_storage(rows, cols, column, dynamic_valid):
+    """A dense consumer must not extract the selected b into independently live a."""
+    mlir = _selected_slice_dense_consumer_pto(rows, cols, column, dynamic_valid)
+    selected = _first_group(r"(%[A-Za-z0-9_]+) = scf.if .* -> .*tile_buf", mlir)
+    assert f"pto.tile_buf_addr {selected} :" in mlir, mlir
+    consumer = _sole_line(mlir, "pto.tcolexpandmul ")
+    operand = _ins_of(consumer)
+    alias = _sole_line(mlir, f"{operand} = pto.alloc_tile ")
+    assert 'pto.view_semantics = "subview"' in alias, alias
+    assert f"rows={rows}, cols={cols}" in alias, alias
+    assert "pto.textract" not in mlir, mlir
+    assert len([line for line in mlir.splitlines() if "pto.tstore " in line]) == 2, mlir
+    if dynamic_valid:
+        assert "valid_row = " in alias and f"v_row=?, v_col={cols}" in alias, alias
+    else:
+        assert f"v_row={rows}, v_col={cols}" in alias, alias
+    # A narrow one-row slice has both a parent-pitch view and a dense view.
+    # They must be descriptors of the same chosen bytes, with no scratch alloc.
+    aliases = [line for line in mlir.splitlines() if 'pto.view_semantics = "subview"' in line]
+    assert len(aliases) == (1 if cols == 256 else 2), mlir
+    view = aliases[0]
+    address = _first_group(r"addr = (%[A-Za-z0-9_]+)", alias)
+    assert f"addr = {address} " in view, mlir
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(("rows", "cols", "column"), [(16, 256, 0), (1, 64, 32)])
+def test_selected_slice_dense_consumer_assembles_with_ptoas(tmp_path, rows, cols, column):
+    """The dense runtime alias must survive PTOAS without a representative copy."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    mlir = _selected_slice_dense_consumer_pto(rows, cols, column, True)
+    assert "pto.tcolexpandmul" in mlir and "pto.textract" not in mlir
+    source, output = tmp_path / "selected_dense.pto", tmp_path / "selected_dense.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    cpp = output.read_text()
+    assert "TASSIGN(" in cpp and "TEXTRACT(" not in cpp
+
+
+def test_selected_slice_with_unproved_layout_is_not_materialized_into_representative():
+    """An inferred runtime validity cannot authorize a write to the phi's hint."""
+    program = pl.parse_program("""
+@pl.program
+class SelectedPartialSliceConsumer:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 256], pl.FP32], gamma: pl.Tensor[[1, 256], pl.FP32],
+               flag: pl.Scalar[pl.INT32], valid_rows: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 256], pl.FP32]]) -> pl.Tensor[[16, 256], pl.FP32]:
+        a = pl.tile.load(x, [0, 0], [32, 256], [valid_rows, 256])
+        b = pl.tile.load(x, [32, 0], [32, 256], [valid_rows, 256])
+        scale = pl.load(gamma, [0, 0], [1, 256])
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        window = pl.tile.slice(selected, [16, 256], [16, 0])
+        scaled = pl.tile.col_expand_mul(window, scale)
+        return pl.store(scaled, [0, 0], out)
+""")
+    with pytest.raises(InternalError, match="selected tile.slice requiring materialization"):
+        _planner_pto(program, passes.MemoryPlanner.PYPTO)
+
+
+def test_parameter_reinterpret_view_keeps_actual_caller_storage(ascend_backend):
+    """Reinterpret must pass caller ownership through the common no-op guard."""
+
+    @pl.program
+    class ParameterReinterpret:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec],
+            out: pl.Out[pl.Tensor[[1, 128], pl.INT32]],
+        ) -> pl.Tensor[[1, 128], pl.INT32]:
+            reinterpreted = pl.tile.reinterpret_view(source, pl.INT32)
+            return pl.store(reinterpreted, [0, 0], out)
+
+    with passes.PassContext([]):
+        initialized = passes.init_mem_ref()(ParameterReinterpret)
+        placed = passes.allocate_memory_addr()(initialized)
+    mlir = codegen.PTOCodegen().generate(placed, emit_source_loc=False)
+    source = _first_group(r"(%[A-Za-z0-9_]+) = pto.alloc_tile addr = %source_addr", mlir)
+    view = _sole_line(mlir, "pto.treshape ")
+    assert f"pto.treshape {source} :" in view, mlir
+    assert len([line for line in mlir.splitlines() if "= pto.alloc_tile" in line]) == 1, mlir
 
 
 if __name__ == "__main__":

@@ -251,6 +251,142 @@ def test_inplace_unsafe_update_after_coalesced_phi_keeps_separate_storage(ascend
     assert storage["sorted_value"] is not storage["a"]
 
 
+def test_conditional_addc_update_keeps_carry_storage_separate(ascend_backend):
+    """TADDC reads carry after writing its partial sum, even when carry is dead."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[8, 8], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            carry = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                update = pl.tile.addc(a, a, carry)
+                selected = pl.yield_(update)
+            else:
+                selected = pl.yield_(carry)
+            return pl.store(selected, [0, 0], out)
+
+    storage = _storage(_materialize(Before))
+    assert storage["update"] is not storage["carry"]
+
+
+def test_addc_update_after_coalesced_phi_checks_actual_carry_storage(ascend_backend):
+    """A rewritten phi's abandoned hint must not hide its forbidden carry input."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[8, 8], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            source = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                update_a = pl.tile.adds(a, 1.0)
+                first = pl.yield_(update_a)
+            else:
+                first = pl.yield_(a)
+            if flag > 1:
+                update = pl.tile.addc(source, source, first)
+                selected = pl.yield_(update)
+            else:
+                selected = pl.yield_(first)
+            return pl.store(selected, [0, 0], out)
+
+    storage = _storage(_materialize(Before))
+    assert storage["update_a"] is storage["first"] is storage["a"]
+    assert storage["update"] is not storage["a"]
+
+
+def test_loop_addc_update_keeps_carry_storage_separate(ascend_backend):
+    """Loop retargeting must preserve the same operand-specific restriction."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[8, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            carry = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+            for _i, (current,) in pl.range(2, init_values=(carry,)):
+                update = pl.tile.addc(a, a, current)
+                result = pl.yield_(update)
+            return pl.store(result, [0, 0], out)
+
+    storage = _storage(_materialize(Before))
+    # The loop has a fixed destination and copies update into it afterwards.
+    assert storage["update"] is not storage["result"]
+
+
+def test_selected_addc_carry_hint_does_not_prove_loop_destination_disjoint(ascend_backend):
+    """The non-representative carry candidate can be the loop's destination."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[12, 8], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            other = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+            carry = pl.load(x, [8, 0], [4, 8], target_memory=pl.Mem.Vec)
+            for _i, (current,) in pl.range(2, init_values=(carry,)):
+                if flag > 0:
+                    picked = pl.yield_(other)
+                else:
+                    picked = pl.yield_(current)
+                picked_alias = picked
+                update = pl.tile.addc(a, a, picked_alias)
+                result = pl.yield_(update)
+            return pl.store(result, [0, 0], out)
+
+    storage = _storage(_materialize(Before))
+    # picked's representative hint names other, but its else arm reads current.
+    assert storage["picked"] is storage["picked_alias"] is storage["other"]
+    assert storage["update"] is not storage["result"]
+
+
+def test_conditional_addc_may_reuse_source_with_disjoint_carry(ascend_backend):
+    """The carry restriction still permits overwriting a dead ordinary source."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[8, 8], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            carry = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                update = pl.tile.addc(a, a, carry)
+                selected = pl.yield_(update)
+            else:
+                selected = pl.yield_(a)
+            return pl.store(selected, [0, 0], out)
+
+    storage = _storage(_materialize(Before))
+    assert storage["update"] is storage["selected"] is storage["a"]
+    assert storage["update"] is not storage["carry"]
+
+
 def test_coalesced_value_escaping_through_another_selection_keeps_old_storage(ascend_backend):
     """A saved native choice observes the first update's value before a later update."""
 

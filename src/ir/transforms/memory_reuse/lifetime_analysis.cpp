@@ -51,6 +51,8 @@ namespace {
 // boolean per value. Each node/edge is processed once (ordered lookups add log N).
 class SelectionCollector : public IRVisitor {
  public:
+  explicit SelectionCollector(bool include_backedges) : include_backedges_(include_backedges) {}
+
   TileSelectionInfo result;
   std::map<const Var*, std::vector<const Var*>> users;
   std::vector<IterArgPtr> arguments;
@@ -107,7 +109,7 @@ class SelectionCollector : public IRVisitor {
     const auto yield = transform_utils::GetLastYieldStmt(op->body_);
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (i < op->return_vars_.size()) Edge(op->return_vars_[i], op->iter_args_[i]);
-      if (yield && i < yield->value_.size()) Edge(op->iter_args_[i], yield->value_[i]);
+      if (include_backedges_ && yield && i < yield->value_.size()) Edge(op->iter_args_[i], yield->value_[i]);
     }
   }
   void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
@@ -129,6 +131,9 @@ class SelectionCollector : public IRVisitor {
     }
     return std::move(result);
   }
+
+ private:
+  bool include_backedges_;
 };
 
 /**
@@ -737,8 +742,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
 }  // namespace
 
-TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body) {
-  SelectionCollector collector;
+TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body, bool include_backedges) {
+  SelectionCollector collector(include_backedges);
   if (body) collector.VisitStmt(body);
   return collector.Finish();
 }

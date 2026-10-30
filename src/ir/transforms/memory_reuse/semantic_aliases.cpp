@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -817,6 +818,11 @@ class LoopInputIsolation : public IRVisitor {
 
   void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool recurrence_only = false) {
     recurrence_only_ = recurrence_only;
+    if (recurrence_only_) {
+      auto selections = AnalyzeTileSelections(body);
+      selected_carries_ = std::move(selections.carries);
+      selected_values_ = std::move(selections.values);
+    }
     names_.Collect(body, parameters);
     DefMapVisitor demand;
     demand.Run(body);
@@ -836,10 +842,13 @@ class LoopInputIsolation : public IRVisitor {
       size_t position;
       size_t reverse;
       size_t definition;
+      bool selected;
+      std::optional<MemorySpace> memory;
     };
     std::vector<Observation> observations;
     std::map<const Var*, std::vector<std::pair<size_t, size_t>>> reachable_events;
     std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
+    std::map<std::optional<MemorySpace>, std::vector<std::pair<size_t, size_t>>> selected_events;
     for (const auto& [var, loop] : recurring_reads_) {
       const auto* base = GetDefinedMemRef(GetTileTypeWithMemRef(var->GetType()))->base_.get();
       recurring_events[base].emplace_back(positions_.at(loop), loop_ends_.at(loop));
@@ -851,10 +860,13 @@ class LoopInputIsolation : public IRVisitor {
       const size_t version = definition == definitions_.end() ? 0 : definition->second;
       const size_t reverse = read_reverse_.at(position);
       reachable_events[base].emplace_back(position, reverse);
-      observations.push_back({base, position, reverse, version});
+      const bool selected = selected_values_.count(var.get()) != 0;
+      if (selected) selected_events[tile->GetMemorySpace()].emplace_back(position, reverse);
+      observations.push_back({base, position, reverse, version, selected, tile->GetMemorySpace()});
     }
     for (auto& [base, values] : recurring_events) recurring_indexes_[base].Build(std::move(values));
     for (auto& [base, values] : reachable_events) reachable_indexes_[base].Build(std::move(values), false);
+    for (auto& [memory, values] : selected_events) selected_indexes_[memory].Build(std::move(values), false);
     std::sort(observations.begin(), observations.end(),
               [](const auto& a, const auto& b) { return a.definition < b.definition; });
     size_t next = 0;
@@ -864,6 +876,7 @@ class LoopInputIsolation : public IRVisitor {
       while (next < observations.size() && observations[next].definition < positions_.at(loop.get())) {
         const auto& event = observations[next++];
         reachable_indexes_[event.base].Activate(event.position, event.reverse);
+        if (event.selected) selected_indexes_[event.memory].Activate(event.position, event.reverse);
       }
       if (auto for_loop = As<ForStmt>(loop)) PlanLoop(for_loop);
       if (auto while_loop = As<WhileStmt>(loop)) PlanLoop(while_loop);
@@ -946,6 +959,8 @@ class LoopInputIsolation : public IRVisitor {
 
  private:
   bool recurrence_only_ = false;
+  std::set<const IterArg*> selected_carries_;
+  std::set<const Var*> selected_values_;
   const Stmt* current_statement_ = nullptr;
   std::map<const Stmt*, std::set<VarPtr>> payload_observations_;
   std::map<const Var*, VarPtr> identity_roots_;
@@ -1001,6 +1016,7 @@ class LoopInputIsolation : public IRVisitor {
       if (unchanged) return;
     }
     const auto position = positions_.at(loop.get());
+    const auto body_yield = transform_utils::GetLastYieldStmt(loop->body_);
     std::set<size_t> isolate;
     std::map<const Var*, std::vector<std::pair<int64_t, size_t>>> windows;
     std::set<const Var*> unknown_bases;
@@ -1017,17 +1033,46 @@ class LoopInputIsolation : public IRVisitor {
       // all such loops cannot observe this carry on a later iteration.
       const bool nested_observation =
           recurring != recurring_indexes_.end() && recurring->second.HasAfter(0, position, position - 1);
+      const bool external_observation =
+          incoming_bases_.count(base) != 0 ||
+          (reachable != reachable_indexes_.end() &&
+           reachable->second.HasAfter(position + 1, order_, reverse_order_.at(loop.get())));
       if (recurrence_only_) {
         // Legacy fixup copies yields back into the carry. Preserve independently
         // read seed payloads with a private carry when a legal entry copy exists;
         // unsupported spaces retain the retarget guard and explicit copy error.
         const auto memory = tile->GetMemorySpace();
-        if (nested_observation && memory && IsTileMoveEverSupported(*memory, *memory)) isolate.insert(i);
+        // An independently consumed native descriptor may retain this input
+        // as its non-representative candidate. Its hint cannot prove disjoint
+        // storage. There is one index per hardware space (plus unknown), so
+        // this bounded scan does not expand transitive candidate root sets.
+        const bool selected_observation =
+            std::any_of(selected_indexes_.begin(), selected_indexes_.end(), [&](const auto& entry) {
+              return (!memory || !entry.first || memory == entry.first) &&
+                     entry.second.HasAfter(position + 1, order_, reverse_order_.at(loop.get()));
+            });
+        const bool can_isolate = nested_observation && memory && IsTileMoveEverSupported(*memory, *memory);
+        const bool unchanged =
+            body_yield && i < body_yield->value_.size() && body_yield->value_[i] == loop->iter_args_[i];
+        // A later snapshot only protects the current carry value during the
+        // writeback. It cannot preserve another handle's old initializer value.
+        // Diagnose this before inserted moves hide the native selection from
+        // codegen, unless the recurrence repair already gives it private storage.
+        // Acc cannot receive a move: its still-provisional phis must reach the
+        // mandatory accumulator coalescing below, or the existing divergent-Acc
+        // diagnostic. No inserted copy can hide an unresolved Acc selection.
+        const bool can_receive_copy = !memory || IsTileMoveEverPossibleInto(*memory);
+        CHECK_SPAN(!can_receive_copy || can_isolate || (!external_observation && !selected_observation) ||
+                       unchanged || selected_carries_.count(loop->iter_args_[i].get()) == 0,
+                   loop->span_)
+            << "A Tile selected by an if cannot cross an updating loop-carry boundary while its "
+               "initializer is independently observed on the legacy Tile path. Produce an independent "
+               "initial tile for carry '"
+            << loop->iter_args_[i]->name_hint_ << "' before entering the loop.";
+        if (can_isolate) isolate.insert(i);
         continue;
       }
-      if (incoming_bases_.count(base) != 0 || nested_observation ||
-          (reachable != reachable_indexes_.end() &&
-           reachable->second.HasAfter(position + 1, order_, reverse_order_.at(loop.get())))) {
+      if (external_observation || nested_observation) {
         isolate.insert(i);
       }
       auto offset = As<ConstInt>(memref->byte_offset_);
@@ -1091,6 +1136,7 @@ class LoopInputIsolation : public IRVisitor {
   std::map<const Stmt*, size_t> reverse_order_;
   std::map<size_t, size_t> read_reverse_;
   std::map<const Var*, ReachableEventIndex> reachable_indexes_;
+  std::map<std::optional<MemorySpace>, ReachableEventIndex> selected_indexes_;
   std::vector<std::pair<size_t, const Stmt*>> loop_stack_;
   std::map<const Stmt*, size_t> loop_ends_;
   std::vector<std::pair<VarPtr, const Stmt*>> recurring_reads_;
@@ -1241,6 +1287,14 @@ class TopDownRetargeter {
   std::map<size_t, VersionedReachableEventIndex> physical_read_index_;
   std::map<const Var*, ReachableEventIndex> recurring_alias_read_index_;
   std::map<size_t, ReachableEventIndex> recurring_physical_read_index_;
+  // Actual descriptor choices, excluding selection propagated only around a
+  // carry backedge. Old advancing IterArgs are already covered by alias liveness.
+  std::set<const Var*> selected_observer_values_;
+  using ObserverSpaces = std::set<std::optional<MemorySpace>>;
+  std::map<const Stmt*, ObserverSpaces> selected_after_definition_;
+  std::map<const Stmt*, ObserverSpaces> selected_after_if_;
+  std::map<std::optional<MemorySpace>, ReachableEventIndex> recurring_selected_read_index_;
+  std::map<VarPtr, size_t> selected_definition_cache_;
   std::map<VarPtr, TypePtr> rewrites_;
   std::vector<RewriteJournalEntry> rewrite_journal_;
   std::set<VarPtr> visiting_;  // cycle guard
@@ -1272,7 +1326,9 @@ class TopDownRetargeter {
     reverse_stmt_order_ = std::move(reverse_v.stmt_order);
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
+    selected_observer_values_ = AnalyzeTileSelections(func_body, /*include_backedges=*/false).values;
     BuildAccessIndexes(def_v.reads, def_v.writes);
+    BuildSelectedObserverIndexes(def_v.observation_reads, def_v.binding_reads);
     BuildRecurringReadIndexes(def_v.condition_reads, def_v.observation_reads, def_v.binding_reads,
                               def_v.loops);
     if (!index_branch_storage) return;
@@ -1556,6 +1612,141 @@ class TopDownRetargeter {
     for (auto& [component, events] : physical_reads) physical_read_index_[component].Build(std::move(events));
   }
 
+  /// Renaming or viewing an old descriptor does not create a new payload
+  /// version. Stop at real producers and control-flow bindings: in particular,
+  /// an IterArg advances independently of its initializer's older handles.
+  size_t SelectedObservationDefinition(const VarPtr& var) {
+    std::vector<VarPtr> path;
+    std::set<const Var*> seen;
+    auto current = var;
+    size_t definition = 0;
+    while (seen.insert(current.get()).second) {
+      if (const auto cached = selected_definition_cache_.find(current);
+          cached != selected_definition_cache_.end()) {
+        definition = cached->second;
+        break;
+      }
+      path.push_back(current);
+      const auto def = defs_.find(current);
+      if (def == defs_.end()) break;
+      definition = def->second.order;
+      if (def->second.kind != VarDef::kAssign) break;
+      const auto assign = As<AssignStmt>(def->second.assign_stmt);
+      auto source = AsVarLike(assign->value_);
+      const auto call = As<Call>(assign->value_);
+      if (!source && call && call->op_ && !call->args_.empty() &&
+          op_predicates::IsBufferAliasingViewOp(call->op_->name_) &&
+          OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
+              ExecutionMemoryAccessEvidence::NoAccess) {
+        source = AsVarLike(call->args_[0]);
+      }
+      if (!source) break;
+      current = source;
+    }
+    for (const auto& value : path) selected_definition_cache_[value] = definition;
+    return definition;
+  }
+
+  /// Cache old-selected-observer liveness before Acc retargeting changes hints.
+  /// A definition-order sweep activates each demanded consumer once. Queries
+  /// use both branch orderings, so an opposite arm cannot become a false
+  /// observer. There is one range index per hardware space (plus unknown),
+  /// keeping construction and all cached queries O(N log N), without expanding
+  /// transitive sets of candidate allocations or scanning a subtree per phi.
+  void BuildSelectedObserverIndexes(const std::map<const Stmt*, std::set<VarPtr>>& observation_reads,
+                                    const DefMapVisitor::BindingReads& binding_reads) {
+    selected_after_definition_.clear();
+    selected_after_if_.clear();
+    selected_definition_cache_.clear();
+    struct Event {
+      size_t definition;
+      size_t primary;
+      size_t reverse;
+      std::optional<MemorySpace> memory;
+    };
+    std::vector<Event> events;
+    std::map<std::optional<MemorySpace>, std::vector<std::pair<size_t, size_t>>> positions;
+    const auto observations = BuildPayloadObservations(defs_, observation_reads, binding_reads);
+    for (const auto& [stmt, values] : observations) {
+      for (const auto& value : values) {
+        if (selected_observer_values_.count(value.get()) == 0) continue;
+        const auto tile = As<TileType>(value->GetType());
+        if (!tile) continue;
+        const size_t primary = stmt_order_.at(stmt);
+        const size_t reverse = reverse_stmt_order_.at(stmt);
+        const auto memory = tile->GetMemorySpace();
+        events.push_back({SelectedObservationDefinition(value), primary, reverse, memory});
+        positions[memory].emplace_back(primary, reverse);
+      }
+    }
+    std::map<std::optional<MemorySpace>, ReachableEventIndex> indexes;
+    for (auto& [memory, values] : positions) indexes[memory].Build(std::move(values), false);
+
+    struct Query {
+      const Stmt* statement;
+      size_t cutoff;
+      size_t begin;
+      size_t reverse;
+      bool after_if;
+    };
+    std::vector<Query> queries;
+    std::set<std::pair<const Stmt*, bool>> queried;
+    for (const auto& [value, def] : defs_) {
+      (void)value;
+      if (!def.definition_stmt || def.kind == VarDef::kIterArg) continue;
+      const auto* statement = def.definition_stmt.get();
+      if (queried.emplace(statement, false).second) {
+        const bool control = def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn ||
+                             def.kind == VarDef::kWhileReturn;
+        const size_t reverse =
+            control ? reverse_stmt_end_order_.at(statement) : reverse_stmt_order_.at(statement);
+        queries.push_back({statement, def.order, def.order + 1, reverse, false});
+      }
+      if (def.kind == VarDef::kIfReturn && queried.emplace(statement, true).second) {
+        queries.push_back({statement, stmt_order_.at(statement), stmt_end_order_.at(statement) + 1,
+                           reverse_stmt_end_order_.at(statement), true});
+      }
+    }
+    std::sort(events.begin(), events.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.definition < rhs.definition; });
+    std::sort(queries.begin(), queries.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.cutoff < rhs.cutoff; });
+    size_t next = 0;
+    const size_t end = stmt_end_order_.at(analysis_root_.get());
+    for (const auto& query : queries) {
+      while (next < events.size() && events[next].definition < query.cutoff) {
+        const auto& event = events[next++];
+        indexes.at(event.memory).Activate(event.primary, event.reverse);
+      }
+      auto& spaces =
+          query.after_if ? selected_after_if_[query.statement] : selected_after_definition_[query.statement];
+      for (const auto& [memory, index] : indexes) {
+        if (index.HasAfter(query.begin, end, query.reverse)) spaces.insert(memory);
+      }
+    }
+  }
+
+  static bool HasMatchingObserverSpace(const ObserverSpaces& spaces, std::optional<MemorySpace> memory) {
+    return std::any_of(spaces.begin(), spaces.end(),
+                       [&](const auto& source) { return !source || !memory || source == memory; });
+  }
+
+  /// Acc producers can erase a saved selection through mandatory coalescing,
+  /// despite having no legal writeback copy. Keep this additional conservative
+  /// proof scoped to them; Vec reuse retains its existing alias/physical and
+  /// escaped-source proofs. Unknown destination spaces must remain conservative.
+  static bool NeedsSelectedAccObserverCheck(std::optional<MemorySpace> memory) {
+    return !memory || memory == MemorySpace::Acc;
+  }
+
+  [[nodiscard]] bool HasRecurringSelectedObserver(size_t position, std::optional<MemorySpace> memory) const {
+    return std::any_of(recurring_selected_read_index_.begin(), recurring_selected_read_index_.end(),
+                       [&](const auto& entry) {
+                         return (!entry.first || !memory || entry.first == memory) &&
+                                entry.second.HasAfter(0, position, position);
+                       });
+  }
+
   /// A read of an older handle can repeat after an IfStmt through an enclosing
   /// loop's backedge, even when that read lexically precedes the IfStmt. Sweep
   /// the read sites and preorder loop intervals once, then binary-search the
@@ -1568,6 +1759,7 @@ class TopDownRetargeter {
                                  const std::vector<StmtPtr>& loops) {
     recurring_alias_read_index_.clear();
     recurring_physical_read_index_.clear();
+    recurring_selected_read_index_.clear();
     // A carry's value advances on its own backedge, but re-entering its
     // binding from an outer loop consumes the initializer again. Attribute an
     // observed carry's entry read to that binding header, not to every use in
@@ -1589,6 +1781,7 @@ class TopDownRetargeter {
     std::vector<std::pair<size_t, size_t>> loop_stack;
     std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
     std::map<size_t, std::vector<std::pair<size_t, size_t>>> physical_events;
+    std::map<std::optional<MemorySpace>, std::vector<std::pair<size_t, size_t>>> selected_events;
     auto record_physical = [&](const VarPtr& var, const std::pair<size_t, size_t>& interval) {
       // Semantic aliases may still carry stale physical metadata before the
       // first normalization. Protect their canonical allocation as well.
@@ -1626,6 +1819,15 @@ class TopDownRetargeter {
           // forwarding bindings belong only to the ordinary access indexes.
           record_physical(var, *recurring);
         }
+        if (selected_observer_values_.count(var.get()) != 0) {
+          const auto selected_recurring = std::upper_bound(
+              loop_stack.begin(), loop_stack.end(), SelectedObservationDefinition(var),
+              [](size_t definition, const auto& interval) { return definition < interval.first; });
+          if (selected_recurring != loop_stack.end()) {
+            const auto tile = As<TileType>(var->GetType());
+            selected_events[tile->GetMemorySpace()].push_back(*selected_recurring);
+          }
+        }
       }
     }
     // While conditions, unlike initializers, are evaluated again at the same
@@ -1639,6 +1841,10 @@ class TopDownRetargeter {
           recurring_events[ResolveAliasRoot(var).get()].push_back(interval);
           record_physical(var, interval);
         }
+        if (selected_observer_values_.count(var.get()) != 0 && SelectedObservationDefinition(var) < begin) {
+          const auto tile = As<TileType>(var->GetType());
+          selected_events[tile->GetMemorySpace()].emplace_back(begin, stmt_end_order_.at(loop) + 1);
+        }
       }
     }
     for (auto& [root, events] : recurring_events) {
@@ -1646,6 +1852,9 @@ class TopDownRetargeter {
     }
     for (auto& [component, events] : physical_events) {
       recurring_physical_read_index_[component].Build(std::move(events));
+    }
+    for (auto& [memory, events] : selected_events) {
+      recurring_selected_read_index_[memory].Build(std::move(events));
     }
   }
 
@@ -1966,7 +2175,7 @@ class TopDownRetargeter {
       }
       const AccumulatorTarget observation{target, MemorySpace::Vec, retained};
       if (HasIndependentExternalUseAfterIf(branch, branch->return_vars_[i], observation) ||
-          !IsTargetDeadAfterDefinition(fresh_def->second, target, branch.get())) {
+          !IsTargetDeadAfterDefinition(fresh_def->second, target, MemorySpace::Vec, branch.get())) {
         continue;
       }
       const auto root = ResolveAliasRoot(retained);
@@ -2141,7 +2350,7 @@ class TopDownRetargeter {
       // loudly rather than emit an unsupported Acc->Acc move.
       if (!seed_already_shared) {
         if (!IsInside(seed_def->second.definition_stmt, if_stmt)) continue;
-        if (!IsTargetDeadAfterDefinition(seed_def->second, target.memref,
+        if (!IsTargetDeadAfterDefinition(seed_def->second, target.memref, target.memory_space,
                                          /*stop_at=*/if_stmt.get())) {
           continue;
         }
@@ -2282,6 +2491,7 @@ class TopDownRetargeter {
     const auto& reg = OpRegistry::GetInstance();
     if (!reg.IsRegistered(call->op_->name_)) return false;
     const auto& entry = reg.GetEntry(call->op_->name_);
+    if (ForbiddenOutputAliasConflicts(*call, entry, target->base_.get(), target_memory)) return false;
 
     auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
     if (reuse_idx.has_value()) {
@@ -2289,6 +2499,8 @@ class TopDownRetargeter {
       auto input_var = AsVarLike(call->args_[*reuse_idx]);
       if (!input_var) return false;
       if (!TryRetargetVar(input_var, target, target_memory)) return false;
+      // Recursing into a producer can also move a forbidden operand.
+      if (ForbiddenOutputAliasConflicts(*call, entry, target->base_.get(), target_memory)) return false;
       // Also record that `var`'s MemRef should follow the pinned input to target.
       PlanRewrite(var, target, target_memory);
       return true;
@@ -2343,6 +2555,7 @@ class TopDownRetargeter {
         return false;
       }
       if (!TryRetargetVar(input_var, target, target_memory)) return false;
+      if (ForbiddenOutputAliasConflicts(*call, entry, target->base_.get(), target_memory)) return false;
       PlanRewrite(var, target, target_memory);
       return true;
     }
@@ -2361,9 +2574,46 @@ class TopDownRetargeter {
 
     // Unconstrained: check liveness, then plan retype.  (Skipped for if-phi
     // branch coalescing, where branch exclusivity is a stronger guarantee.)
-    if (check_liveness && !IsTargetDeadAtAssign(def, target)) return false;
+    if (check_liveness && !IsTargetDeadAtAssign(def, target, target_memory)) return false;
     PlanRewrite(var, target, target_memory);
     return true;
+  }
+
+  /// Respect operand-specific no-alias contracts even for otherwise in-place
+  /// safe ops (e.g. addc may overwrite src0, but never its carry operand).
+  /// Resolve semantic aliases before reading planned types: an earlier phi
+  /// coalesce can move the actual source away from its original MemRef hint.
+  /// An unresolved native If can still select another allocation, so decline
+  /// rather than use its representative hint as a proof of disjointness.
+  bool ForbiddenOutputAliasConflicts(const Call& call, const OpRegistryEntry& entry, const Var* target_base,
+                                     std::optional<MemorySpace> target_memory) {
+    for (const auto index : entry.ForbidOutputAliasArgs()) {
+      if (index >= call.args_.size()) continue;
+      const auto& argument = call.args_[index];
+      auto source = AsVarLike(argument);
+      if (!source) {
+        if (As<TileType>(argument->GetType())) return true;
+        continue;
+      }
+      source = ResolveAliasRoot(source);
+      const auto type = CurrentTileType(source);
+      if (!type) {
+        if (As<TileType>(source->GetType())) return true;
+        continue;
+      }
+      // Distinct memory spaces cannot overlap, including when an If chooses
+      // among multiple allocations within its declared space.
+      if (target_memory && type->GetMemorySpace() && *target_memory != *type->GetMemorySpace()) {
+        continue;
+      }
+      const auto def = defs_.find(source);
+      if (def != defs_.end() && def->second.kind == VarDef::kIfReturn &&
+          fixed_vec_phis_.count(source.get()) == 0) {
+        return true;
+      }
+      if (GetDefinedMemRef(type)->base_.get() == target_base) return true;
+    }
+    return false;
   }
 
   /// True if any argument of the call is a TileType Var whose MemRef base
@@ -2548,6 +2798,13 @@ class TopDownRetargeter {
     const auto* alias_root = ResolveAliasRoot(target.reused_input).get();
     auto if_begin = stmt_order_.find(if_stmt.get());
     if (if_begin == stmt_order_.end()) return true;
+    const auto selected = selected_after_if_.find(if_stmt.get());
+    if (NeedsSelectedAccObserverCheck(target.memory_space) &&
+        ((selected != selected_after_if_.end() &&
+          HasMatchingObserverSpace(selected->second, target.memory_space)) ||
+         HasRecurringSelectedObserver(if_begin->second, target.memory_space))) {
+      return true;
+    }
     auto recurring = recurring_alias_read_index_.find(alias_root);
     if (recurring != recurring_alias_read_index_.end() &&
         recurring->second.HasAfter(0, if_begin->second, if_begin->second)) {
@@ -2565,8 +2822,15 @@ class TopDownRetargeter {
   /// overwrite old values before the accumulator-phi coalescer runs. The dual
   /// lexical ordering excludes mutually exclusive sibling arms.
   bool IsTargetDeadAfterDefinition(const VarDef& def, const MemRefPtr& target,
-                                   const Stmt* stop_at = nullptr) {
+                                   std::optional<MemorySpace> target_memory, const Stmt* stop_at = nullptr) {
     if (!target || !def.definition_stmt) return false;
+    const auto selected = selected_after_definition_.find(def.definition_stmt.get());
+    if (NeedsSelectedAccObserverCheck(target_memory) &&
+        ((selected != selected_after_definition_.end() &&
+          HasMatchingObserverSpace(selected->second, target_memory)) ||
+         HasRecurringSelectedObserver(def.order, target_memory))) {
+      return false;
+    }
     auto component = memref_component_.find(target.get());
     if (component == memref_component_.end()) return false;
     // Include every recurrence interval spanning this producer, including its
@@ -2597,10 +2861,11 @@ class TopDownRetargeter {
     return !accesses->second.HasAfter(def.order + 1, boundary_end->second, reverse_definition->second);
   }
 
-  bool IsTargetDeadAtAssign(const VarDef& def, const MemRefPtr& target, const Stmt* stop_at = nullptr) {
+  bool IsTargetDeadAtAssign(const VarDef& def, const MemRefPtr& target,
+                            std::optional<MemorySpace> target_memory, const Stmt* stop_at = nullptr) {
     INTERNAL_CHECK(def.kind == VarDef::kAssign)
         << "Internal error: IsTargetDeadAtAssign requires an assignment definition";
-    return IsTargetDeadAfterDefinition(def, target, stop_at);
+    return IsTargetDeadAfterDefinition(def, target, target_memory, stop_at);
   }
 };
 

@@ -54,7 +54,9 @@ struct TileSelectionInfo {
   std::set<const IterArg*> carries;
 };
 
-[[nodiscard]] TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body);
+/// Exclude loop backedges when identifying independently retained descriptors:
+/// an advancing carry is not an old selection merely because its next value is.
+[[nodiscard]] TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body, bool include_backedges = true);
 
 /**
  * @brief Shared result of allocation-lifetime analysis.

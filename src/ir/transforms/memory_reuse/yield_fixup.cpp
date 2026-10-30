@@ -36,6 +36,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -205,7 +206,11 @@ class CarrySourceCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (AsVarLike(op->value_)) Bind(op->var_, {op->value_});
     if (const auto call = As<Call>(op->value_); call && call->op_) {
-      if (op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+      if (IsOp(call, "tile.assemble") && !call->args_.empty()) {
+        // Assemble returns its whole destination. Its offsets choose bytes to
+        // write, not a shifted origin for the result descriptor.
+        Bind(op->var_, {call->args_[0]});
+      } else if (op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
         const auto input = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
         const auto source = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
         const auto target = GetTileTypeWithMemRef(op->var_->GetType());
@@ -349,17 +354,36 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
+      const auto original_source = original_yield && i < original_yield->value_.size()
+                                       ? AsVarLike(original_yield->value_[i])
+                                       : nullptr;
+      const bool selected_source = original_source && selected_before_fixup_.count(original_source.get());
+      // A nested phi may be marked selected solely because its old hint has
+      // not followed producer reuse yet. Its actual sources can still all be
+      // this exact carry. Prove both storage and descriptor identity before
+      // eliding a transfer; a genuine own-or-fresh choice must keep writeback.
+      if (selected_source && IsExactOwnSource(original_source, init_memref) &&
+          SameCarryDescriptor(yield_tile, init_tile)) {
+        continue;
+      }
 
       // Compare addresses, not allocations: two slots of one pl.MemRef(slots=N)
       // share a base, so "same allocation" would skip the copy that moves the
       // value from one slot to the other and silently carry the wrong slot.
       const AddressRelation relation = CompareBaseAddress(yield_memref, init_memref);
-      if (relation == AddressRelation::kSame) continue;
+      // A selected value's hint can equal the carry on one arm while another
+      // arm yields fresh storage. Reconcile it regardless of that hint; the
+      // snapshot below makes its unchanged arm safe without a self-copy.
+      // A statically zero-trip loop forwards its initializer and needs no dead
+      // self-copy when the standalone storage passes preserve its body.
+      if (relation == AddressRelation::kSame && (!selected_source || !LoopMayExecute(op, false))) continue;
       // Two symbolic offsets into one allocation may or may not name the same
       // bytes. Copying is wrong if they coincide (a tile.move onto itself, which
       // Acc cannot lower at all) and skipping is wrong if they do not, so say so
       // rather than pick one and hope.
-      CHECK_SPAN(relation == AddressRelation::kDifferent, for_stmt->span_)
+      CHECK_SPAN(
+          relation == AddressRelation::kDifferent || (selected_source && relation == AddressRelation::kSame),
+          for_stmt->span_)
           << "Loop-carried value '" << for_stmt->iter_args_[i]->name_hint_
           << "' is yielded at a slot of its own allocation that cannot be shown equal to, or "
              "distinct from, the slot it is carried in, so whether the carry needs a copy is "
@@ -395,7 +419,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
         // untouched by every copy. Ambiguous conditional multi-copy boundaries
         // remain unsupported: a hidden sibling source could be overwritten.
         // One copy has no sibling write; explicit materializing copies own
-        // storage and stop the diagnostic provenance graph.
+        // storage and stop the diagnostic provenance graph. A permitted own
+        // source still needs the snapshot below to avoid a runtime self-copy.
         CHECK_SPAN(!source || selected_before_fixup_.count(source.get()) == 0 ||
                        IsIndependentSelectedCopy(source, copy.dst_memref, destination_index),
                    for_stmt->span_)
@@ -408,6 +433,26 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
     // it must not observe each other's writes. Order them first.
     std::vector<StmtPtr> spill_stmts;
+    if (original_yield && LoopMayExecute(op, false)) {
+      for (auto& copy : copies) {
+        const auto source = copy.index < original_yield->value_.size()
+                                ? AsVarLike(original_yield->value_[copy.index])
+                                : nullptr;
+        const auto source_tile = GetTileTypeWithMemRef(copy.source->GetType());
+        const auto source_memory = source_tile->GetMemorySpace();
+        // Distinct hardware memory spaces cannot self-alias. In particular,
+        // copying Acc into Vec must not request an unsupported Acc snapshot.
+        if (source_memory && copy.dst_memory && source_memory != copy.dst_memory) continue;
+        if (source && selected_before_fixup_.count(source.get()) != 0 &&
+            MayReadOwnDestination(source, copy.dst_memref)) {
+          // The selected SSA differs from the carry's SSA even on an unchanged
+          // arm that names the same bytes. tile.move forbids that self-copy,
+          // and exact-SSA elision cannot recognize it. Materialize into fresh
+          // storage before any carry write, including for a single-copy loop.
+          SpillCarrySource(&copy, &spill_stmts);
+        }
+      }
+    }
     const std::vector<size_t> order = OrderCarryCopies(&copies, carry_index, &spill_stmts);
 
     // Build new yield values with moved vars substituted
@@ -483,9 +528,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   }
 
  public:
-  /// Allocations this fixup had to create (cycle spills), for the caller to
-  /// hoist onto the function-body head. Empty for every loop whose carries do
-  /// not form a copy cycle, which is the overwhelmingly common case.
+  /// Allocations for selected-source snapshots and cycle spills, for the
+  /// caller to hoist onto the function-body head before memory planning.
+  /// Empty when neither runtime aliasing nor copy ordering requires scratch.
   std::vector<StmtPtr> TakePendingAllocs() { return std::move(pending_allocs_); }
 
  private:
@@ -731,6 +776,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
   struct CarrySourceSummary {
     bool unknown = false;
+    bool has_disjoint_root = false;
+    bool descriptor_changed = false;
     // Retain at most two distinct windows that overlap any loop carry in the
     // function. All other roots are fresh with respect to every carry write.
     // A bounded summary avoids transitive root-set expansion for nested phis.
@@ -738,6 +785,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
     void Merge(const CarrySourceSummary& source) {
       if (unknown) return;
+      has_disjoint_root |= source.has_disjoint_root;
+      descriptor_changed |= source.descriptor_changed;
       unknown = source.unknown;
       if (!unknown) {
         for (const auto& window : source.windows) {
@@ -769,7 +818,14 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       auto& summary = carry_sources_[value];
       summary.unknown = collector.unknown.count(value) != 0;
       remaining[value] = inputs.size();
-      for (const auto* input : inputs) users[input].push_back(value);
+      for (const auto* input : inputs) {
+        users[input].push_back(value);
+        // A phi's own type is only a representative. Every incoming alias
+        // must preserve the descriptor, including an untaken metadata-changing
+        // arm or a reshape roundtrip, before exact-own copy elision is legal.
+        summary.descriptor_changed |=
+            !SameCarryDescriptor(As<TileType>(input->GetType()), As<TileType>(value->GetType()));
+      }
       if (!inputs.empty()) continue;
       pending.push_back(value);
       const auto tile = GetTileTypeWithMemRef(value->GetType());
@@ -777,7 +833,13 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // A symbolic view offset cannot prove either independence or exact own
       // storage. Leave such sources to the existing unsupported-case diagnostic.
       if (!window || !As<ConstInt>(window->byte_offset_)) summary.unknown = true;
-      if (!summary.unknown && all_carries.AnyOverlap(window)) summary.windows.push_back(window);
+      if (!summary.unknown) {
+        if (all_carries.AnyOverlap(window)) {
+          summary.windows.push_back(window);
+        } else {
+          summary.has_disjoint_root = true;
+        }
+      }
     }
     // One topological pass processes each direct binding once. Together with
     // the range indexes and constant-size summaries this costs O(N log N),
@@ -807,6 +869,49 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       if (!SamePhysicalWindow(window, own_destination) && destinations.AnyOverlap(window)) return false;
     }
     return true;
+  }
+
+  [[nodiscard]] bool MayReadOwnDestination(const VarPtr& source, const MemRefPtr& destination) const {
+    const auto found = carry_sources_.find(source.get());
+    if (found == carry_sources_.end() || found->second.unknown) return true;
+    return std::any_of(found->second.windows.begin(), found->second.windows.end(),
+                       [&](const MemRefPtr& window) { return MemRef::MayAlias(window, destination); });
+  }
+
+  [[nodiscard]] bool IsExactOwnSource(const VarPtr& source, const MemRefPtr& destination) const {
+    const auto found = carry_sources_.find(source.get());
+    if (found == carry_sources_.end() || found->second.unknown || found->second.has_disjoint_root ||
+        found->second.descriptor_changed || found->second.windows.empty()) {
+      return false;
+    }
+    return std::all_of(found->second.windows.begin(), found->second.windows.end(),
+                       [&](const MemRefPtr& window) { return SamePhysicalWindow(window, destination); });
+  }
+
+  static bool SameCarryDescriptor(const TileTypePtr& source, const TileTypePtr& destination) {
+    if (!source || !destination || source->dtype_ != destination->dtype_ ||
+        !SameKnownTileMemorySpace(source, destination) || source->shape_.size() != 2 ||
+        destination->shape_.size() != 2) {
+      return false;
+    }
+    // Pointer identity or equal constants are sufficient proofs. Do not walk
+    // arbitrary symbolic expression DAGs once per carry merely to elide a copy.
+    auto same_expr = [](const ExprPtr& lhs, const ExprPtr& rhs) {
+      if (lhs == rhs) return true;
+      const auto a = As<ConstInt>(lhs);
+      const auto b = As<ConstInt>(rhs);
+      return a && b && a->value_ == b->value_;
+    };
+    auto same_dims = [&](const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+      return lhs.size() == rhs.size() && lhs.size() <= 2 &&
+             std::equal(lhs.begin(), lhs.end(), rhs.begin(), same_expr);
+    };
+    const auto a = tile_view_semantics::GetEffectiveTileView(*source);
+    const auto b = tile_view_semantics::GetEffectiveTileView(*destination);
+    return same_dims(source->shape_, destination->shape_) && same_dims(a.valid_shape, b.valid_shape) &&
+           same_dims(a.stride, b.stride) && same_expr(a.start_offset, b.start_offset) &&
+           a.blayout == b.blayout && a.slayout == b.slayout && a.fractal == b.fractal && a.pad == b.pad &&
+           a.compact == b.compact;
   }
 
   /// The byte range each carry owns, indexed by iter_arg position (null when the

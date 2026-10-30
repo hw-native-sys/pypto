@@ -1372,6 +1372,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         view_type_info.v_col, view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
 
     std::string view_ssa = codegen.NewNamedTemp("slice_view");
+    std::string selected_dense_ssa;
+    std::string selected_dense_type;
     auto registered_view_type = codegen.GetCurrentResultTileType();
     auto actual_source_type = codegen.GetSSATileType(src);
     if (!actual_source_type) actual_source_type = source_tile_type;
@@ -1455,14 +1457,45 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       codegen.Emit(elements + " = arith.addi " + row_elements + ", " + col_elements + " : i64");
       codegen.Emit(bytes + " = arith.muli " + elements + ", " + byte_scale + " : i64");
       codegen.Emit(address + " = arith.addi " + base + ", " + bytes + " : i64");
-      std::string allocation = view_ssa + " = pto.alloc_tile addr = " + address;
-      if (physical_view.v_row_dynamic) {
-        allocation += " valid_row = " + valid_row;
+      auto emit_alias = [&](const std::string& name, const std::string& type) {
+        std::string allocation = name + " = pto.alloc_tile addr = " + address;
+        if (physical_view.v_row_dynamic) {
+          allocation += " valid_row = " + valid_row;
+        }
+        if (physical_view.v_col_dynamic) {
+          allocation += " valid_col = " + valid_col;
+        }
+        codegen.Emit(allocation + " {pto.view_semantics = \"subview\"} : " + type);
+      };
+      emit_alias(view_ssa, view_type);
+      const bool constant_offsets = ir::As<ir::ConstInt>(offset_tuple->elements_[0]) &&
+                                    ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
+      const bool dense_window =
+          col_major ? cols_const->value_ == 1 || compact_child : rows_const->value_ == 1 || compact_child;
+      if (constant_offsets && dense_window) {
+        // A selected slice's MemRef names only one candidate. Its dense
+        // consumer must retain this runtime address, including when the other
+        // candidate is selected and the representative remains independently
+        // live. These declarations alias existing bytes; they reserve no scratch.
+        selected_dense_ssa = view_ssa;
+        selected_dense_type = view_type;
+        if (!compact_child) {
+          // A single row/column is contiguous despite the parent's wider pitch.
+          // colexpand reads physical dimensions, so give it the logical dense
+          // box instead of the pitch-preserving descriptor used by other views.
+          selected_dense_ssa = codegen.NewNamedTemp("slice_dense");
+          selected_dense_type = codegen::FormatTileBufTypeString(
+              "vec", view_type_info.dtype_str, view_type_info.rows, view_type_info.cols,
+              view_type_info.blayout, view_type_info.slayout, view_type_info.fractal, view_type_info.pad,
+              view_type_info.compact, view_type_info.v_row, view_type_info.v_col,
+              view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
+          emit_alias(selected_dense_ssa, selected_dense_type);
+          codegen.RegisterTileBufType(selected_dense_ssa, selected_dense_type,
+                                      codegen.GetCurrentResultTileType());
+          codegen.RegisterTileViewName(selected_dense_ssa);
+          codegen.RegisterSelectedTileName(selected_dense_ssa);
+        }
       }
-      if (physical_view.v_col_dynamic) {
-        allocation += " valid_col = " + valid_col;
-      }
-      codegen.Emit(allocation + " {pto.view_semantics = \"subview\"} : " + view_type);
       INTERNAL_CHECK_SPAN(registered_view_type, op->span_) << "tile.slice result must have a TileType";
       // The physical shape can retain the parent's pitch when logical columns
       // shrink. Keep that actual geometry available to a subsequent slice.
@@ -1489,7 +1522,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // Lazy materialization fallback: a few downstream ops (e.g. pto.tcolexpandmul)
     // cannot consume a subview SSA directly because their hardware lowering
     // reads physical tile dims from the operand type. MaterializeSubviewOperandIfNeeded
-    // will emit pto.textract on demand into result_target if such a consumer appears.
+    // will emit pto.textract on demand for fixed-address slices. A selected
+    // contiguous slice instead supplies a dense descriptor of its actual runtime
+    // address; an empty target rejects selected windows that lack this proof.
     codegen::PTOCodegen::SubviewMaterializationInfo mat_info;
     mat_info.source_ssa = src;
     mat_info.source_type = src_type;
@@ -1497,8 +1532,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     mat_info.col_off_ssa = col_off;
     mat_info.row_offset = offset_tuple->elements_[0];
     mat_info.col_offset = offset_tuple->elements_[1];
-    mat_info.materialize_target_ssa = result_target;
-    mat_info.materialize_target_type = result_type;
+    mat_info.materialize_target_ssa = codegen.IsSelectedTileName(src) ? selected_dense_ssa : result_target;
+    mat_info.materialize_target_type = codegen.IsSelectedTileName(src) ? selected_dense_type : result_type;
     mat_info.source_memory_space = source_tile_type->memory_space_;
     // Shapes and offset kind the materialization guard needs: the target buffer
     // aliases the source, so the lazy pto.textract may only run when its repack
@@ -1735,7 +1770,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // address is already the typed alias. PTOAS-planner mode shares one handle,
     // so it must materialize a typed SSA view below.
     if (CanReuseViewTarget(codegen, codegen.GetExprAsCode(op->args_[0]), result_target, result_type,
-                           result_has_memref)) {
+                           result_has_memref, codegen.IsParameterBackedTile(result_tile))) {
       return std::string("");
     }
 

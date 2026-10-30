@@ -562,12 +562,16 @@ class PTOCodegen : public CodegenBase {
     /// scalar SSAs, but still name the same slice/writeback window.
     ir::ExprPtr row_offset;
     ir::ExprPtr col_offset;
+    /// Fixed sources use their inherited allocation as an identity-extract
+    /// target. Selected sources use a proved dense alias of the actual runtime
+    /// address without copying payload; an empty target requires independent
+    /// materialization before codegen. No-copy aliases leave emitted false.
     std::string materialize_target_ssa;
     std::string materialize_target_type;
     std::optional<ir::MemorySpace> source_memory_space;
     /// Row and column counts of the tile the subview is taken of, and the
-    /// subview's own shape. The materialize target inherits the source's buffer,
-    /// so the lazy pto.textract writes into its own input: it is only safe when
+    /// subview's own shape. For fixed sources the target inherits the buffer,
+    /// so lazy pto.textract writes into its own input: it is only safe when
     /// the window is contiguous (view_rows == 1 or view_cols == source_cols) and
     /// the repack is therefore an identity copy. See
     /// MaterializeSubviewOperandIfNeeded (#2010).

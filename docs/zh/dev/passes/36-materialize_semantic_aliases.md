@@ -76,8 +76,13 @@ program = passes.materialize_semantic_aliases()(program)
    零次循环体规范化仅用于 Tile carry 边界；仅包含 Tensor/DistributedTensor 的循环
    保留描述符写回和循环体结构，由 tensor 边界规范化负责处理。
    Legacy Vec carry 也复用隔离分析来保护循环中重复读取的原始 seed：在入口复制到
-   私有存储，让 carry 更新时保留原 seed。输入参数、循环后读取和重叠输入的策略
-   仍专用于 Buffer IR；不支持复制的存储空间保留重定向保护和已有显式复制报错。
+   私有存储，让 carry 更新时保留原 seed。通用的输入参数、循环后读取和重叠输入
+   隔离仍专用于 Buffer IR。若 legacy 所选 carry 的目标允许 Tile move 写入，初始值
+   仍可被独立观测，且重复读取隔离尚未提供私有存储，则明确拒绝：写回快照无法
+   保留另一句柄的旧初始值。Acc 没有可写入的 move，其临时选择仍交给必需的
+   accumulator 合并处理，或由已有的 Acc 分歧诊断拒绝。
+   同一存储空间中仍存活的 native 选择也保守视为可能观测该输入，涵盖非代表分支。
+   不支持复制的存储空间保留重定向保护和已有显式复制报错。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
@@ -92,6 +97,10 @@ program = passes.materialize_semantic_aliases()(program)
    能在分支之后再次执行该读取，也会阻止合并。重复读取索引只考虑在读取句柄定义之后
    才进入的循环，因此每轮在循环体内重新生成的累加器仍可安全合并。别名和循环区间
    索引均预先建立，分析复杂度保持 O(N log N)。
+   Acc producer 重定向及合并也保护此前的 native 选择：后续数据读取可能通过非代表
+   分支观测原始输入。观测来源沿描述符绑定和固定循环初始值传播；仅因回边而标记为
+   selected 的推进中 carry 不属于旧描述符。定义顺序扫描及分支、重复读取索引区分
+   这些旧观测者与当前 phi 的 consumer，无需展开候选来源集合。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
    alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
    让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护
@@ -158,8 +167,9 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 就合并它们的存储。
 
 如果新 producer 支持原地更新，且旧值不再被独立观测，条件更新可以复用另一支
-原样转发的固定存储。这需要证明实际来源族，包括先前已安全合并的选择；仅有
-代表性的 phi MemRef 不足以作为依据。
+原样转发的固定存储。还必须满足逐操作数的输出别名限制：允许原地执行的算子
+仍可能禁止复用 carry 或 workspace 操作数。这需要证明实际来源族，包括先前
+已安全合并的选择；仅有代表性的 phi MemRef 不足以作为依据。
 写回别名在后置归一化中移动时，还会同步刷新外层 native If 的提示，释放不再
 使用的提示分配。
 
@@ -171,7 +181,11 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 
 插入多个 carry 写回前，yield fixup 会检查原始选择来源。有界来源摘要允许仅
 读取自身目标或所有复制均不写入的存储。其他条件多副本边界会明确报错，避免
-新插入的 move 隐藏隐式交换。单次写回和显式物化复制保留既有行为。
+新插入的 move 隐藏隐式交换。所选来源可能指向自身目标时，会在所有写回之前
+复制到独立快照，包括只有一个 carry 的情况，避免运行时的自复制。若证明所有
+来源路径均指向同一 carry 窗口，且形状、布局和有效维度保持一致，则无需传输或
+快照。新存储或未知来源均阻止该证明，即使代表性提示与 carry 相同也不能省略。
+快照存储在生命周期分析和地址规划之前显式建立；显式物化复制保留既有行为。
 
 如果多个 producer 已共享同一物理分配，PTO codegen 会在兄弟区域之前声明存储，
 并在各 producer 处设置逻辑有效形状。若两支返回完全相同的 SSA 句柄，结果会
@@ -183,6 +197,9 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 保留来源的物理步长，无需复制数据或使用代表性的 MemRef。此回退要求推导出的
 有效形状为静态值，或显式提供有效维度。无地址输出、视图选择及打包布局仍使用
 原有 subview 路径，并受其 PTOAS 限制。
+对于已证明连续的窗口，需要稠密操作数的 consumer 使用实际所选地址的描述符
+别名。延迟物化不能写入代表某一分支的分配；无法证明的选择窗口会被拒绝，除非
+此前的 pass 已将其物化到独立存储。
 
 `SelectBufferIRFunctions` 让不含循环且含 Tile 返回值 If 的函数保留在 Tile 路径上，
 包括启用 Buffer IR 的情况：当前 Buffer lowering 会移除 Tile 区域返回值，

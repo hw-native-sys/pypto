@@ -14,7 +14,7 @@ import subprocess
 
 import pypto.language as pl
 import pytest
-from pypto import codegen, ir, passes
+from pypto import InternalError, codegen, ir, passes
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _get_ptoas_flags
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -483,8 +483,11 @@ class Before:
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("producer", ["mrgsort", "column_stats"])
-def test_independent_conditional_carry_copies_remain_supported(planner, nested, producer, ascend_backend):
-    """Fresh-or-own choices cannot clobber a sibling's source, even when nested."""
+@pytest.mark.parametrize("fresh_then", [False, True])
+def test_independent_conditional_carry_copies_remain_supported(
+    planner, nested, producer, fresh_then, ascend_backend
+):
+    """Fresh-or-own choices snapshot unchanged arms before updating any carry."""
     if producer == "mrgsort":
         input_shape, output_shape, tile_shape = "[2, 4096]", "[2, 4096]", "[1, 4096]"
         second_offset = "[1, 0]"
@@ -509,11 +512,12 @@ fresh_right = pl.add(pl.mul(alpha, right), pl.mul(beta, delta_right))"""
     fresh += "\nnext_left, next_right = pl.yield_(fresh_left, fresh_right)"
     if nested:
         fresh = (
-            "if flag > 1:\n"
+            "if count > 1:\n"
             + indent(fresh.replace("next_left, next_right", "inner_left, inner_right"), 4)
             + "\nelse:\n    inner_left, inner_right = pl.yield_(left, right)"
             + "\nnext_left, next_right = pl.yield_(inner_left, inner_right)"
         )
+    unchanged = "next_left, next_right = pl.yield_(left, right)"
     program = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -525,9 +529,9 @@ class Before:
         b = pl.load(x, {second_offset}, {tile_shape})
         for i, (left, right) in pl.range(count, init_values=(a, b)):
             if flag > 0:
-{indent(fresh, 16)}
+{indent(fresh if fresh_then else unchanged, 16)}
             else:
-                next_left, next_right = pl.yield_(left, right)
+{indent(unchanged if fresh_then else fresh, 16)}
             result_left, result_right = pl.yield_(next_left, next_right)
         pl.store(result_left, [0, 0], out)
         return pl.store(result_right, {second_offset}, out)
@@ -535,8 +539,345 @@ class Before:
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
         lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
         text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
-    assert text.count("pto.tmov") == 2, text
+    _assert_selected_carry_sources_are_snapshotted(
+        lowered, expected_copies=2, addressed=planner != passes.MemoryPlanner.PTOAS
+    )
+    assert text.count("pto.tmov") == 4, text
     assert text.count("scf.if") >= 1 + int(nested), text
+
+
+def _assert_selected_carry_sources_are_snapshotted(program, expected_copies, addressed):
+    """Selected handles only write fresh scratch; carry writes read that scratch."""
+    checked = 0
+
+    class Checker(ir.IRVisitor):
+        allocations = set()
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.alloc").name:
+                self.allocations.add(op.var.unique_id)
+            super().visit_assign_stmt(op)
+
+        def visit_for_stmt(self, op):
+            nonlocal checked
+            carries: list[ir.MemRef] = []
+            for arg in op.iter_args:
+                initial_type = arg.initValue.type
+                assert isinstance(initial_type, ir.TileType)
+                carry = initial_type.memref
+                assert carry is not None
+                carries.append(carry)
+            body = op.body.stmts if isinstance(op.body, ir.SeqStmts) else [op.body]
+            moves = [
+                stmt
+                for stmt in body
+                if isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.value, ir.Call)
+                and stmt.value.op.name == ir.get_op("tile.move").name
+            ]
+            if not moves:
+                return super().visit_for_stmt(op)
+            snapshots = moves[:expected_copies]
+            writebacks = moves[expected_copies:]
+            assert len(snapshots) == len(writebacks) == expected_copies
+            scratch_values = {stmt.var.unique_id for stmt in snapshots}
+            for snapshot in snapshots:
+                snapshot_type = snapshot.var.type
+                assert isinstance(snapshot_type, ir.TileType)
+                scratch = snapshot_type.memref
+                assert scratch is not None
+                assert "_carry_spill_" in scratch.base_.name_hint
+                assert scratch.base_.unique_id in self.allocations, "scratch must be declared before the loop"
+                assert all(not ir.MemRef.may_alias(scratch, carry) for carry in carries)
+                if addressed:
+                    scratch_offset = scratch.byte_offset_
+                    assert isinstance(scratch_offset, ir.ConstInt)
+                    start = scratch_offset.value
+                    for carry in carries:
+                        carry_offset = carry.byte_offset_
+                        assert isinstance(carry_offset, ir.ConstInt)
+                        carry_start = carry_offset.value
+                        assert start + scratch.size_ <= carry_start or carry_start + carry.size_ <= start
+            for writeback in writebacks:
+                call = writeback.value
+                assert isinstance(call, ir.Call)
+                source = call.args[0]
+                assert isinstance(source, ir.Var)
+                source_type = source.type
+                destination_type = writeback.var.type
+                assert isinstance(source_type, ir.TileType)
+                assert isinstance(destination_type, ir.TileType)
+                source_memref = source_type.memref
+                destination = destination_type.memref
+                assert source_memref is not None and destination is not None
+                assert source.unique_id in scratch_values, "a selected handle could self-copy onto its carry"
+                assert any(ir.MemRef.may_alias(destination, carry) for carry in carries)
+                assert not ir.MemRef.may_alias(source_memref, destination)
+            checked += 1
+            super().visit_for_stmt(op)
+
+    Checker().visit_program(program)
+    assert checked == 1
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("fresh_then", [False, True])
+def test_single_conditional_carry_copy_snapshots_unchanged_branch(planner, fresh_then, ascend_backend):
+    """Even one selected writeback must avoid copying the unchanged carry onto itself."""
+
+    fresh = """fresh = pl.tile.mrgsort(carried, block_len=64)
+selected = pl.yield_(fresh)"""
+    unchanged = "selected = pl.yield_(carried)"
+
+    def indent(text):
+        return "\n".join(" " * 16 + line for line in text.splitlines())
+
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[1, 4096], pl.FP32], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[1, 4096], pl.FP32]]) -> pl.Tensor[[1, 4096], pl.FP32]:
+        initial = pl.load(x, [0, 0], [1, 4096])
+        for i, (carried,) in pl.range(count, init_values=(initial,)):
+            if flag > 0:
+{indent(fresh if fresh_then else unchanged)}
+            else:
+{indent(unchanged if fresh_then else fresh)}
+            result = pl.yield_(selected)
+        return pl.store(result, [0, 0], out)
+""")
+
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    _assert_selected_carry_sources_are_snapshotted(
+        lowered, expected_copies=1, addressed=planner != passes.MemoryPlanner.PTOAS
+    )
+    assert text.count("pto.tmov") == 2, text
+
+
+def test_zero_trip_selected_same_hint_does_not_insert_self_copy(ascend_backend):
+    """Standalone storage passes preserve the dead body without adding an illegal TMOV."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[1, 4096], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 4096], pl.FP32]],
+        ) -> pl.Tensor[[1, 4096], pl.FP32]:
+            initial = pl.load(x, [0, 0], [1, 4096], target_memory=pl.Mem.Vec)
+            for _i, (carried,) in pl.range(0, init_values=(initial,)):
+                if flag > 0:
+                    selected = pl.yield_(carried)
+                else:
+                    fresh = pl.tile.mrgsort(carried, block_len=64)
+                    selected = pl.yield_(fresh)
+                result = pl.yield_(selected)
+            return pl.store(result, [0, 0], out)
+
+    # The full pipeline simplifies zero-trip loops away before storage repair.
+    # Invoke these passes directly so elimination cannot hide a dead self-copy.
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False):
+        lowered = passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before)))
+
+    loops, branches, calls, spills = [], [], [], []
+
+    class Collector(ir.IRVisitor):
+        def visit_for_stmt(self, op):
+            loops.append(op)
+            super().visit_for_stmt(op)
+
+        def visit_if_stmt(self, op):
+            branches.append(op)
+            super().visit_if_stmt(op)
+
+        def visit_call(self, op):
+            calls.append(op.op.name)
+            super().visit_call(op)
+
+        def visit_assign_stmt(self, op):
+            if "_carry_spill_" in op.var.name_hint:
+                spills.append(op)
+            super().visit_assign_stmt(op)
+
+    Collector().visit_program(lowered)
+    assert len(loops) == len(branches) == 1, "the dead loop body must remain in this standalone regression"
+    assert ir.get_op("tile.move").name not in calls
+    assert not spills
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("update_then", [False, True])
+def test_nested_conditional_assemble_carries_need_no_snapshot(planner, update_then, ascend_backend):
+    """Nested choices among required writebacks keep one descriptor per carry."""
+    unchanged = "next_packed, next_scale, next_lanes = pl.yield_(packed, scale, lanes)"
+    updates = """if i % 2 == 0:
+    packed_update = pl.tile.assemble(packed, packed_piece, [i % 8, 0])
+    scale_update = pl.tile.assemble(scale, scale_piece, [0, 0])
+    lanes_update = pl.tile.assemble(lanes, lane_piece, [0, 0])
+    inner_packed, inner_scale, inner_lanes = pl.yield_(packed_update, scale_update, lanes_update)
+else:
+    inner_packed, inner_scale, inner_lanes = pl.yield_(packed, scale, lanes)
+next_packed, next_scale, next_lanes = pl.yield_(inner_packed, inner_scale, inner_lanes)"""
+
+    def indent(text):
+        return "\n".join(" " * 16 + line for line in text.splitlines())
+
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 64], pl.INT8], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               scale_out: pl.Out[pl.Tensor[[1, 32], pl.INT8]],
+               lanes_out: pl.Out[pl.Tensor[[1, 32], pl.INT32]],
+               out: pl.Out[pl.Tensor[[8, 64], pl.INT8]]) -> pl.Tensor[[8, 64], pl.INT8]:
+        dead = pl.load(x, [0, 0], [8, 64])
+        pl.store(dead, [0, 0], out)
+        packed_initial = pl.tile.full([8, 64], dtype=pl.INT8, value=0)
+        scale_initial = pl.tile.full([1, 32], dtype=pl.INT8, value=0)
+        lanes_initial = pl.tile.full([1, 32], dtype=pl.INT32, value=0)
+        packed_piece = pl.load(x, [0, 0], [1, 64])
+        scale_piece = pl.load(x, [1, 0], [1, 32])
+        lane_piece = pl.tile.full([1, 32], dtype=pl.INT32, value=1)
+        for i, (packed, scale, lanes) in pl.range(
+            count, init_values=(packed_initial, scale_initial, lanes_initial)
+        ):
+            if flag > 0:
+{indent(updates if update_then else unchanged)}
+            else:
+{indent(unchanged if update_then else updates)}
+            result_packed, result_scale, result_lanes = pl.yield_(next_packed, next_scale, next_lanes)
+        pl.store(result_scale, [0, 0], scale_out)
+        pl.store(result_lanes, [0, 0], lanes_out)
+        return pl.store(result_packed, [0, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    # Integer assemble uses a data TMOV into each destination window. There
+    # must be no additional loop-carry moves or snapshots around those writes.
+    assert "tile.move(" not in lowered.as_python()
+    assert "_carry_spill_" not in lowered.as_python()
+    assert text.count("pto.tmov") == 3, text
+    assert text.count("scf.if") >= 2, text
+    assert "scf.for" in text, text
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("saved_then_a", [False, True])
+@pytest.mark.parametrize("alias", ["rename", "reshape"])
+def test_selected_observer_of_loop_initializer_cannot_be_clobbered(
+    planner, saved_then_a, alias, ascend_backend
+):
+    """An old selection can observe the initializer through either runtime arm."""
+    saved_shape = "[2, 2048]" if alias == "reshape" else "[1, 4096]"
+    alias_statement = (
+        "saved_alias = pl.tile.reshape(saved, [2, 2048])" if alias == "reshape" else "saved_alias = saved"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[2, 4096], pl.FP32], saved_flag: pl.Scalar[pl.INT32],
+               update_flag: pl.Scalar[pl.INT32], count: pl.Scalar[pl.INDEX],
+               saved_out: pl.Out[pl.Tensor[{saved_shape}, pl.FP32]],
+               out: pl.Out[pl.Tensor[[1, 4096], pl.FP32]]) -> pl.Tensor[[1, 4096], pl.FP32]:
+        a = pl.load(x, [0, 0], [1, 4096])
+        b = pl.load(x, [1, 0], [1, 4096])
+        if saved_flag > 0:
+            saved = pl.yield_({"a" if saved_then_a else "b"})
+        else:
+            saved = pl.yield_({"b" if saved_then_a else "a"})
+        {alias_statement}
+        for i, (carried,) in pl.range(count, init_values=(a,)):
+            if update_flag > 0:
+                fresh = pl.tile.mrgsort(carried, block_len=64)
+                selected = pl.yield_(fresh)
+            else:
+                selected = pl.yield_(carried)
+            result = pl.yield_(selected)
+        pl.store(saved_alias, [0, 0], saved_out)
+        return pl.store(result, [0, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        with pytest.raises(ValueError, match="Tile selected by an if cannot cross"):
+            lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+            codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("saved_then_initial", [False, True])
+@pytest.mark.parametrize("alias", ["rename", "reshape"])
+def test_saved_acc_selection_blocks_destructive_carry_coalescing(
+    planner, saved_then_initial, alias, ascend_backend
+):
+    """A saved Acc descriptor can still observe the carry's non-representative input."""
+    alias_statement = (
+        "saved_alias = pl.tile.reshape(saved, [16, 64])" if alias == "reshape" else "saved_alias = saved"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[32, 64], pl.BF16], rhs: pl.Tensor[[64, 64], pl.BF16],
+               saved_flag: pl.Scalar[pl.INT32], update_flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               saved_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        other_lhs_mat = pl.tile.load(lhs, [16, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        left = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        other_left = pl.tile.extract(other_lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        right = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+        initial = pl.tile.matmul(left, right)
+        other = pl.tile.matmul(other_left, right)
+        if saved_flag > 0:
+            saved = pl.yield_({"initial" if saved_then_initial else "other"})
+        else:
+            saved = pl.yield_({"other" if saved_then_initial else "initial"})
+        {alias_statement}
+        for i, (carried,) in pl.range(count, init_values=(initial,)):
+            if update_flag > 0:
+                fresh = pl.tile.matmul(other_left, right)
+                selected = pl.yield_(fresh)
+            else:
+                accumulated = pl.tile.matmul_acc(carried, left, right)
+                selected = pl.yield_(accumulated)
+            result = pl.yield_(selected)
+        pl.store(saved_alias, [0, 0], saved_out)
+        return pl.store(result, [0, 0], out)
+""")
+    if planner == passes.MemoryPlanner.PYPTO:
+        # PYPTO postpones fixed-carry reconciliation until MemoryReuse. Check
+        # the coalescer's decision before that required Acc transfer is rejected.
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            materialized = passes.materialize_semantic_aliases()(passes.init_mem_ref()(program))
+        sources: dict[str, ir.MemRef] = {}
+
+        class CollectSources(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if op.var.name_hint in {"initial", "fresh"}:
+                    tile_type = op.var.type
+                    assert isinstance(tile_type, ir.TileType)
+                    assert tile_type.memref is not None
+                    sources[op.var.name_hint] = tile_type.memref
+                super().visit_assign_stmt(op)
+
+        CollectSources().visit_program(materialized)
+        assert set(sources) == {"initial", "fresh"}
+        assert not ir.MemRef.may_alias(sources["initial"], sources["fresh"]), materialized.as_python()
+
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+            codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
 
 
 if __name__ == "__main__":
