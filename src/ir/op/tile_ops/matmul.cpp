@@ -49,6 +49,19 @@ struct MatmulProductInfo {
   DataType accumulator_dtype;
 };
 
+// A registered in-place product writes the destination descriptor itself.
+// Preserve its complete effective configuration and window metadata rather
+// than rebuilding a merely shape-compatible accumulator. Before placement is
+// resolved, use the operation's required Acc layout as in a fresh product.
+TileView AccumulatorWritebackView(const TileTypePtr& destination) {
+  TileView view = tile_view_semantics::GetEffectiveTileView(*destination);
+  if (destination->GetMemorySpace() != MemorySpace::Acc) {
+    tile_view_semantics::SetTileLayout(
+        view, tile_view_semantics::GetImplicitTileLayout(destination->shape_, MemorySpace::Acc));
+  }
+  return view;
+}
+
 /// Validate the matrix-product contract shared by matmul-family ops.
 /// Physical boxes must agree in K because downstream L0 extraction indexes
 /// them directly. The rhs valid K may be wider than lhs, but must contain every
@@ -198,18 +211,8 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   // The output aliases the accumulator's physical storage and valid region.
   std::vector<ExprPtr> output_shape = acc_shape;
 
-  // Acc layout (Nz) — as in tile.matmul, from the destination's implicit layout.
-  TileView tile_view;
-  tile_view_semantics::SetTileLayout(
-      tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
+  TileView tile_view = AccumulatorWritebackView(acc_type);
   tile_view.valid_shape = acc_valid;
-  // Inherit the accumulator's compact mode rather than re-deriving it. This op
-  // is `set_output_reuses_input(0)`: the result *is* the accumulator's buffer,
-  // and codegen only aliases the two when their `TileBufSignature` — compact
-  // included — matches, so inheriting keeps that alias legal by construction.
-  // `tile.matmul` is where the accumulator's stride is established, so it is
-  // the only place that derives compact from the valid rows (#2470).
-  tile_view.compact = tile_view_semantics::GetEffectiveTileView(*acc_type).compact;
 
   return std::make_shared<TileType>(output_shape, geometry.accumulator_dtype, std::nullopt, tile_view,
                                     MemorySpace::Acc);
@@ -390,7 +393,8 @@ TypePtr DeduceTileGemvAccType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires accumulator valid_shape " << FormatShape(expected_valid)
         << ", but got " << FormatShape(acc_valid);
   }
-  return expected_type;
+  return std::make_shared<TileType>(acc_type->shape_, expected_type->dtype_, std::nullopt,
+                                    AccumulatorWritebackView(acc_type), MemorySpace::Acc);
 }
 
 TypePtr DeduceTileGemvBiasType(const std::vector<ExprPtr>& args,

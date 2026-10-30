@@ -2622,6 +2622,87 @@ class TestTileMatMulOps:
         result = tile.matmul_acc(ir.Var("acc", plain_acc, span), lhs, rhs).type
         assert self._compact_of(result) == ir.CompactMode.null
 
+    @pytest.mark.parametrize("operator", ["matmul_acc", "gemv_acc"])
+    @pytest.mark.parametrize("compact", [ir.CompactMode.null, ir.CompactMode.normal])
+    @pytest.mark.parametrize("block_layout", [ir.TileLayout.row_major, ir.TileLayout.col_major])
+    def test_matrix_writeback_preserves_the_exact_destination_descriptor(
+        self, operator, compact, block_layout
+    ):
+        """In-place deduction must not silently convert the registered destination view."""
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                [1 if operator == "gemv_acc" else 16, 64],
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=[1, 64]),
+                memory_space=ir.MemorySpace.Left,
+            ),
+            span,
+        )
+        rhs = ir.Var("rhs", ir.TileType([64, 64], DataType.FP16, memory_space=ir.MemorySpace.Right), span)
+        descriptor = ir.TileType(
+            [16, 64],
+            DataType.FP32,
+            tile_view=ir.TileView(
+                valid_shape=[1, 64],
+                stride=[128, 1],
+                start_offset=64,
+                blayout=block_layout,
+                slayout=ir.TileLayout.row_major,
+                fractal=1024,
+                compact=compact,
+                pad=ir.PadValue.zero,
+            ),
+            memory_space=ir.MemorySpace.Acc,
+        )
+        accumulator = ir.Var("destination", descriptor, span)
+        result = getattr(tile, operator)(accumulator, lhs, rhs)
+        ir.assert_structural_equal(result.type, descriptor)
+
+    @pytest.mark.parametrize("operator", ["matmul_acc", "gemv_acc"])
+    @pytest.mark.parametrize("space", [None, ir.MemorySpace.Vec, ir.MemorySpace.Mat])
+    def test_matrix_writeback_resolves_acc_layout_before_memory_inference(self, operator, space):
+        """A pre-placement destination must not freeze its implicit non-Acc layout."""
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                [1 if operator == "gemv_acc" else 16, 64],
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=[1, 64]),
+            ),
+            span,
+        )
+        rhs = ir.Var("rhs", ir.TileType([64, 64], DataType.FP16), span)
+        accumulator = ir.Var(
+            "acc",
+            ir.TileType(
+                [16, 64],
+                DataType.FP32,
+                tile_view=ir.TileView(valid_shape=[1, 64], stride=[128, 1], start_offset=64),
+                memory_space=space,
+            ),
+            span,
+        )
+        # An unresolved destination can be placed in Acc. Explicit Vec/Mat
+        # destinations must still fail: there is no transfer path into Acc.
+        if space is not None:
+            with pytest.raises(ValueError, match="requires argument 0 to live in Acc memory"):
+                getattr(tile, operator)(accumulator, lhs, rhs)
+            return
+        result = getattr(tile, operator)(accumulator, lhs, rhs).type
+        view = result.get_effective_tile_view()
+        assert result.memory_space == ir.MemorySpace.Acc
+        assert (view.blayout, view.slayout, view.fractal) == (
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            1024,
+        )
+        assert _shape_ints(view.valid_shape) == [1, 64]
+        assert _shape_ints(view.stride) == [128, 1]
+        assert view.start_offset.value == 64
+
     def test_set_validshape_leaves_non_accumulator_tiles_noncompact(self):
         """A narrowed Vec tile has no L0C stride contract to preserve."""
         span = ir.Span.unknown()
@@ -3244,6 +3325,70 @@ class TestTileSliceReshapeOps:
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
         assert len(result_type.shape) == 2
+
+    @pytest.mark.parametrize(
+        "space,blayout,slayout,fractal",
+        [
+            (ir.MemorySpace.Vec, ir.TileLayout.row_major, ir.TileLayout.none_box, 512),
+            (ir.MemorySpace.Mat, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Left, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Right, ir.TileLayout.row_major, ir.TileLayout.col_major, 512),
+            (ir.MemorySpace.Acc, ir.TileLayout.col_major, ir.TileLayout.row_major, 1024),
+            (ir.MemorySpace.LeftScale, ir.TileLayout.row_major, ir.TileLayout.row_major, 32),
+            (ir.MemorySpace.RightScale, ir.TileLayout.col_major, ir.TileLayout.col_major, 32),
+        ],
+    )
+    def test_slice_inherits_effective_parent_configuration(self, space, blayout, slayout, fractal):
+        """Omitted TileView syntax still denotes the parent's physical layout (#3132)."""
+        dtype = DataType.FP32 if space == ir.MemorySpace.Acc else DataType.FP16
+        parent = ir.TileType([16, 128], dtype, memory_space=space)
+        assert parent.tile_view is None
+        source = ir.Var("pool", parent, ir.Span.unknown())
+        result = tile.slice(source, [16, 64], [0, 64], valid_shape=[1, 64]).type
+        assert isinstance(result, ir.TileType)
+        view = result.get_effective_tile_view()
+        assert result.memory_space == space
+        assert (view.blayout, view.slayout, view.fractal) == (blayout, slayout, fractal)
+        assert _shape_ints(view.valid_shape) == [1, 64]
+
+    def test_slice_keeps_parent_layout_when_child_shape_has_another_implicit_layout(self):
+        parent = ir.TileType([64, 1], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        source = ir.Var("column", parent, ir.Span.unknown())
+        result = tile.slice(source, [1, 1], [16, 0]).type
+        assert isinstance(result, ir.TileType)
+        assert result.get_effective_tile_view().blayout == ir.TileLayout.col_major
+
+    @pytest.mark.parametrize("space", [ir.MemorySpace.Vec, ir.MemorySpace.Acc])
+    def test_slice_inherits_configuration_but_recomputes_window_fields(self, space):
+        parent_view = ir.TileView(valid_shape=[8, 128], stride=[128, 1], start_offset=0, pad=ir.PadValue.zero)
+        if space == ir.MemorySpace.Acc:
+            parent_view = ir.TileView(
+                valid_shape=[8, 128],
+                stride=[16, 256],
+                start_offset=1024,
+                blayout=ir.TileLayout.col_major,
+                slayout=ir.TileLayout.row_major,
+                fractal=1024,
+                compact=ir.CompactMode.normal,
+                pad=ir.PadValue.zero,
+            )
+        parent = ir.TileType([16, 128], DataType.FP32, tile_view=parent_view, memory_space=space)
+        source = ir.Var("strided", parent, ir.Span.unknown())
+        result = tile.slice(source, [8, 64], [0, 64]).type
+        assert isinstance(result, ir.TileType)
+        view = result.get_effective_tile_view()
+        assert _shape_ints(view.valid_shape) == [8, 64]
+        assert list(view.stride) == []
+        assert view.start_offset is None
+        assert view.pad == ir.PadValue.zero
+        parent_effective = parent.get_effective_tile_view()
+        assert result.memory_space == space
+        assert (view.blayout, view.slayout, view.fractal, view.compact) == (
+            parent_effective.blayout,
+            parent_effective.slayout,
+            parent_effective.fractal,
+            parent_effective.compact,
+        )
 
     def test_tile_slice_with_dynamic_valid_shape(self):
         """tile.slice keeps static allocation shape and stores dynamic valid_shape in TileView."""

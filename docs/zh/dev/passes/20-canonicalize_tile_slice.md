@@ -27,6 +27,8 @@ base + (off_row * base_cols + off_col) * storage_bits
 
 两种 Vec 实例化只要可证明等价，就把 `tile.extract` 放在 **slice 的定义处**，使拷贝留在作者书写 slice 的位置——尤其是同一个 `pl.split_aiv` 区域内——且有多个消费者的 slice 只拷贝一次。slice 是在被消费时才读取源的视图，因此在定义处拷贝只有在两处之间没有任何写入该存储时才等价；若可能有写入到达，则改为在每个消费者之前放置 extract（见[Vec extract 的放置位置](#vec-extract-的放置位置)）。
 
+类型一致性不代表后端指令支持。例如，从行主序 `[16, 8]` 父 tile 抽取隐式列主序 `[16, 1]` Vec tile，可以通过 IR 验证和 PTOAS 降低，但 A2/A3 PTO-ISA 会拒绝此 Vec→Vec `TEXTRACT`，因为源与目标布局必须相同。本 pass 不增加该布局转换能力。
+
 **Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](19-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](21-infer_tile_memory_space.md)。
 
 **前置属性 (Required)**：`SSAForm`、`SplitIncoreOrch`、`IncoreTileOps`、`TileOps2D`、`NormalizedStmtStructure`。
@@ -51,7 +53,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 ## 算法
 
-对每个 InCore 类型的 function，分四步：
+对每个 InCore 类型的 function，分五步：
 
 1. **收集 (Collect)** —— 索引每个 value 为规范 3 参数形式 `tile.slice(src, shape, offset)` 的 `AssignStmt`。若某 slice 的 `src` 本身又是一个已记录的 slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。分析前会解析直接的 `ConstInt` SSA 定义及其普通别名，避免字面量偏移在 `ConvertToSSA` 后被误判为动态值；同时保留标量 SSA 定义用于模对齐证明，例如 `block_idx * 32` 虽是动态值，但可静态确定其为 32 个元素的倍数。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
 
@@ -71,6 +73,10 @@ program_canon = passes.canonicalize_tile_slice()(program)
    Vec 消费者规则只作用于第 2 步未规划的 slice——即其存储可能在定义与消费者之间被写入的 slice。此时只有放在消费者处的拷贝才能读到视图本应读到的内容。
 
 4. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 slice 数量为上界）。结束时仍被使用的 slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
+
+5. **刷新受影响类型 (Refresh affected types)** —— 在 pass 返回并执行验证之前，用 `RebuildRegisteredCall` 重新推导发生变化的已注册 call，并保留属性。沿普通别名、下游消费者、`ForStmt`/`WhileStmt` 初始值与 `IterArg`、循环和 if 区域的 tile 结果传播右值的权威描述。非 tile 携带值保留声明类型，交由验证器校验。slice 可以继承父级的行主序布局，而新 extract 为列主序。保留无关的特化描述，并用 `WithCarriedMemRef` 携带已有分配元数据；本步骤不依赖 MemRef，也不把修复推迟到后续 pass。原始节点索引和类型传播各遍历一次。
+
+   传播前，用并查集（union-find）连接经别名、操作数/结果依赖及区域合并关联的同物理形状扁平 Vec 值。物化导致继承布局与稠密布局混合时，将受影响的分支 yield、循环初始值与回边统一到隐式 Vec 布局。分析先于循环体改写，覆盖零次循环且无需反复遍历嵌套循环。复制读取物理父窗口以保留其行距，再在新分配上恢复进一步收窄的有效范围；用使用计数工作队列仅移除被绕过的纯视图链。排除分块布局及空间未定的 Acc/MX 值，并在本 pass 验证前规范化新插入的语句序列。
 
 本 pass 是 `FunctionPass`；当不存在规范 `tile.slice` 时 function 原样返回。
 

@@ -180,7 +180,10 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -1035,8 +1038,8 @@ class CanonicalizeMutator : public IRMutator {
         const Span& sp = call->span_;
         std::vector<ExprPtr> args = {info.base, MakeCanonicalIndexAdd(call->args_[1], info.off_row, sp),
                                      MakeCanonicalIndexAdd(call->args_[2], info.off_col, sp), call->args_[3]};
-        auto& reg = OpRegistry::GetInstance();
-        auto new_call = reg.Create("tile.extract", args, call->kwargs_, sp);
+        auto new_call = transform_utils::RebuildRegisteredCall(
+            call, args, [this](const ExprPtr& expr) { return VisitExpr(expr); });
         auto new_assign = MutableCopy(assign);
         new_assign->value_ = new_call;
         return new_assign;
@@ -1163,8 +1166,8 @@ class CanonicalizeMutator : public IRMutator {
     rewrite_operand(indices->second, MemorySpace::Right);
     if (!rewrote) return std::nullopt;
 
-    auto& reg = OpRegistry::GetInstance();
-    auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    auto new_call = transform_utils::RebuildRegisteredCall(
+        call, new_args, [this](const ExprPtr& expr) { return VisitExpr(expr); });
     auto new_assign = MutableCopy(assign);
     new_assign->value_ = new_call;
     std::vector<StmtPtr> out = std::move(extracts);
@@ -1268,8 +1271,8 @@ class CanonicalizeMutator : public IRMutator {
     }
     if (!rewrote) return std::nullopt;
 
-    auto& reg = OpRegistry::GetInstance();
-    auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    auto new_call = transform_utils::RebuildRegisteredCall(
+        call, new_args, [this](const ExprPtr& expr) { return VisitExpr(expr); });
     auto new_assign = MutableCopy(assign);
     new_assign->value_ = new_call;
     std::vector<StmtPtr> out = std::move(extracts);
@@ -1387,8 +1390,8 @@ class CanonicalizeMutator : public IRMutator {
     }
     if (!rewrote) return std::nullopt;
 
-    auto& reg = OpRegistry::GetInstance();
-    auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    auto new_call = transform_utils::RebuildRegisteredCall(
+        call, new_args, [this](const ExprPtr& expr) { return VisitExpr(expr); });
     return MaterializedCall{std::move(extracts), std::move(new_call)};
   }
 
@@ -1454,6 +1457,369 @@ class CanonicalizeMutator : public IRMutator {
   const std::unordered_map<const Var*, ExprPtr>& scalar_defs_;
   /// Slice Var -> the `tile.extract` assignment that replaces its definition.
   std::unordered_map<const Var*, AssignStmtPtr> definition_site_extracts_;
+};
+
+/// Layout agreement at region boundaries must be planned before walking loop
+/// bodies: a changed backedge can otherwise require revisiting an already
+/// typed initializer, and nested loops make that approach quadratic. Connect
+/// same-geometry Vec values through aliases, operand/result dependencies
+/// and region merges, then normalize only merges in components containing both
+/// inherited and fresh/dense layouts. This is a type constraint analysis, not
+/// a storage/alias decision. Union by size and path compression bound it by
+/// O(N alpha(N)); the subsequent rewrite visits every body once.
+class SliceLayoutConstraints : public IRVisitor {
+ public:
+  bool NeedsDense(const VarPtr& var) {
+    auto it = indices_.find(var.get());
+    return it != indices_.end() && nodes_[Find(it->second)].layouts == 3;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    Add(op->var_);
+    if (auto source = AsVarLike(op->value_)) {
+      Union(op->var_, source);
+    } else if (auto call = As<Call>(op->value_)) {
+      // A rewritten call may already have a fresh layout while its LHS still
+      // has the old cached type. Account for both before type propagation.
+      if (SameGeometry(op->var_->GetType(), call->GetType())) Add(op->var_, call->GetType());
+      if (!IsOp(call, "tile.extract") && !IsOp(call, "tile.move") && !IsOp(call, "tile.transpose")) {
+        for (const auto& arg : call->args_) Union(op->var_, AsVarLike(arg));
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    Merge(op->then_body_, op->return_vars_);
+    if (op->else_body_) Merge(*op->else_body_, op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    Loop(op);
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    Loop(op);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  struct Node {
+    size_t parent;
+    size_t size = 1;
+    unsigned layouts = 0;  // 1 = implicit dense layout, 2 = inherited non-implicit layout.
+  };
+  static bool IsVec(const TileTypePtr& tile) {
+    if (!tile || tile->shape_.size() != 2 ||
+        (tile->memory_space_ && tile->memory_space_ != MemorySpace::Vec)) {
+      return false;
+    }
+    // Unplaced boxed values can be accumulator or MX tiles. They are not flat
+    // Vec values and must never acquire a Vec copy from this reconciliation.
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    return view.slayout == TileLayout::none_box &&
+           view.fractal == tile_view_semantics::GetImplicitFractal(MemorySpace::Vec);
+  }
+  static bool SameGeometry(const TypePtr& lhs, const TypePtr& rhs) {
+    auto a = As<TileType>(lhs);
+    auto b = As<TileType>(rhs);
+    return IsVec(a) && IsVec(b) && a->dtype_ == b->dtype_ &&
+           tile_view_semantics::ShapeExprListsEquivalent(a->shape_, b->shape_);
+  }
+  size_t Find(size_t index) {
+    while (nodes_[index].parent != index) {
+      nodes_[index].parent = nodes_[nodes_[index].parent].parent;
+      index = nodes_[index].parent;
+    }
+    return index;
+  }
+  void Add(const VarPtr& var, const TypePtr& type = nullptr) {
+    if (!var) return;
+    auto tile = As<TileType>(type ? type : var->GetType());
+    if (!IsVec(tile)) return;
+    auto [it, inserted] = indices_.emplace(var.get(), nodes_.size());
+    if (inserted) nodes_.push_back(Node{it->second});
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    const auto dense = tile_view_semantics::GetImplicitTileLayout(tile->shape_, MemorySpace::Vec);
+    const bool canonical =
+        view.blayout == dense.blayout && view.slayout == dense.slayout && view.fractal == dense.fractal;
+    nodes_[Find(it->second)].layouts |= canonical ? 1U : 2U;
+  }
+  void Union(const VarPtr& lhs, const VarPtr& rhs) {
+    if (!lhs || !rhs || !SameGeometry(lhs->GetType(), rhs->GetType())) return;
+    Add(lhs);
+    Add(rhs);
+    size_t a = Find(indices_.at(lhs.get()));
+    size_t b = Find(indices_.at(rhs.get()));
+    if (a == b) return;
+    if (nodes_[a].size < nodes_[b].size) std::swap(a, b);
+    nodes_[b].parent = a;
+    nodes_[a].size += nodes_[b].size;
+    nodes_[a].layouts |= nodes_[b].layouts;
+  }
+  void Merge(const StmtPtr& body, const std::vector<VarPtr>& vars) {
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield) return;
+    for (size_t i = 0; i < vars.size() && i < yield->value_.size(); ++i) {
+      Union(vars[i], AsVarLike(yield->value_[i]));
+    }
+  }
+  template <typename LoopPtr>
+  void Loop(const LoopPtr& op) {
+    for (const auto& arg : op->iter_args_) Union(arg, AsVarLike(arg->initValue_));
+    std::vector<VarPtr> args(op->iter_args_.begin(), op->iter_args_.end());
+    Merge(op->body_, args);
+    for (size_t i = 0; i < args.size() && i < op->return_vars_.size(); ++i) {
+      Union(args[i], op->return_vars_[i]);
+    }
+  }
+  std::unordered_map<const Var*, size_t> indices_;
+  std::vector<Node> nodes_;
+};
+
+/// Refresh the descriptors affected by materialization before this pass is
+/// verified. A slice inherits its parent's layout, whereas a fresh extract
+/// infers its own: replacing a row-major column window can therefore produce a
+/// col-major tile. Reference substitution alone leaves cached Call/LHS types
+/// and loop carries stale. Like InlineCallsMutator, propagate authoritative
+/// RHS types forward through SSA definitions, loop initializers and results.
+///
+/// Snapshot original nodes so unrelated, explicitly specialized descriptors
+/// are not re-deduced. Both indexing and propagation are single traversals;
+/// no MemRef allocation or fixed-point type inference is needed here.
+class SliceTypeRefresher : public IRMutator {
+ public:
+  SliceTypeRefresher(const StmtPtr& original_body, const StmtPtr& rewritten_body) {
+    originals_.VisitStmt(original_body);
+    layouts_.VisitStmt(rewritten_body);
+    SliceCollector collector;
+    collector.VisitStmt(rewritten_body);
+    windows_ = std::move(collector.windows);
+  }
+  const std::unordered_set<const Var*>& ObsoleteViews() const { return obsolete_views_; }
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto call = As<Call>(IRMutator::VisitExpr_(op));
+    if (call == op && originals_.calls.count(op.get())) return call;
+    auto& registry = OpRegistry::GetInstance();
+    if (As<GlobalVar>(call->op_) || !registry.IsRegistered(call->op_->name_) ||
+        registry.GetEntry(call->op_->name_).RequiresExplicitType()) {
+      return call;
+    }
+    auto rebuilt = transform_utils::RebuildRegisteredCall(
+        call, call->args_, [this](const ExprPtr& expr) { return VisitExpr(expr); });
+    if (As<UnknownType>(rebuilt->GetType())) return call;
+    return std::make_shared<Call>(rebuilt->op_, rebuilt->args_, rebuilt->kwargs_, rebuilt->attrs_,
+                                  WithCarriedMemRef(rebuilt->GetType(), call->GetType()), rebuilt->span_);
+  }
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto value = VisitExpr(op->value_);
+    auto var = As<Var>(VisitExpr(op->var_));
+    if (!var) return IRMutator::VisitStmt_(op);  // Allocation definitions keep their own types.
+    if (value == op->value_ && var == op->var_ && originals_.assignments.count(op.get())) return op;
+    var = Retype(op->var_, var,
+                 WithCarriedMemRef(GetAuthoritativeAssignmentType(var->GetType(), value), var->GetType()));
+    return std::make_shared<AssignStmt>(var, value, op->span_);
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto arg = As<IterArg>(IRMutator::VisitExpr_(op));
+    if (!As<TileType>(arg->GetType())) return arg;
+    auto type = WithCarriedMemRef(arg->initValue_->GetType(), arg->GetType());
+    if (structural_equal(arg->GetType(), type)) return arg;
+    auto fresh = std::make_shared<IterArg>(arg->name_hint_, type, arg->initValue_, arg->span_);
+    retained_.push_back(arg);
+    var_remap_[op.get()] = fresh;
+    return fresh;
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return RetypeLoop(op); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return RetypeLoop(op); }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto result = As<IfStmt>(IRMutator::VisitStmt_(op));
+    auto copy = MutableCopy(result);
+    std::vector<bool> dense;
+    for (const auto& var : op->return_vars_) dense.push_back(layouts_.NeedsDense(var));
+    copy->then_body_ = NormalizeYield(copy->then_body_, dense);
+    if (copy->else_body_) copy->else_body_ = NormalizeYield(*copy->else_body_, dense);
+    auto yield = transform_utils::GetLastYieldStmt(copy->then_body_);
+    if (!yield && copy->else_body_) yield = transform_utils::GetLastYieldStmt(*copy->else_body_);
+    if (!yield) return result;
+    for (size_t i = 0; i < copy->return_vars_.size() && i < yield->value_.size(); ++i) {
+      if (!As<TileType>(copy->return_vars_[i]->GetType())) continue;
+      copy->return_vars_[i] =
+          Retype(op->return_vars_[i], result->return_vars_[i],
+                 WithCarriedMemRef(yield->value_[i]->GetType(), result->return_vars_[i]->GetType()));
+    }
+    return copy;
+  }
+
+ private:
+  struct OriginalNodes : IRVisitor {
+    std::unordered_set<const Call*> calls;
+    std::unordered_set<const AssignStmt*> assignments;
+
+    void VisitExpr_(const CallPtr& op) override {
+      calls.insert(op.get());
+      IRVisitor::VisitExpr_(op);
+    }
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      assignments.insert(op.get());
+      IRVisitor::VisitStmt_(op);
+    }
+  } originals_;
+
+  VarPtr Retype(const VarPtr& original, const VarPtr& current, const TypePtr& type) {
+    if (structural_equal(current->GetType(), type) &&
+        GetTypeMemRef(current->GetType()) == GetTypeMemRef(type)) {
+      return current;
+    }
+    auto fresh = std::make_shared<Var>(current->name_hint_, type, current->span_);
+    // The remap is keyed by raw pointers, including intermediate clones.
+    retained_.push_back(current);
+    var_remap_[original.get()] = fresh;
+    if (current != original) var_remap_[current.get()] = fresh;
+    if (auto window = windows_.find(original.get()); window != windows_.end()) {
+      const auto info = window->second;
+      windows_.emplace(fresh.get(), info);
+    }
+    return fresh;
+  }
+
+  template <typename LoopPtr>
+  StmtPtr RetypeLoop(const LoopPtr& op) {
+    auto seeded = MutableCopy(op);
+    std::vector<StmtPtr> prefix;
+    std::vector<bool> dense;
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& arg = op->iter_args_[i];
+      dense.push_back(layouts_.NeedsDense(arg));
+      if (!dense.back()) continue;
+      auto init = DenseCopy(VisitExpr(arg->initValue_), prefix, arg->span_);
+      auto fresh = std::make_shared<IterArg>(
+          arg->name_hint_, WithCarriedMemRef(init->GetType(), arg->GetType()), init, arg->span_);
+      retained_.push_back(arg);
+      var_remap_[arg.get()] = fresh;
+      seeded->iter_args_[i] = fresh;
+    }
+    auto result =
+        std::static_pointer_cast<typename LoopPtr::element_type>(IRMutator::VisitStmt_(LoopPtr(seeded)));
+    auto copy = MutableCopy(result);
+    copy->body_ = NormalizeYield(copy->body_, dense);
+    for (size_t i = 0; i < copy->return_vars_.size() && i < result->iter_args_.size(); ++i) {
+      if (!As<TileType>(copy->return_vars_[i]->GetType())) continue;
+      copy->return_vars_[i] =
+          Retype(op->return_vars_[i], result->return_vars_[i],
+                 WithCarriedMemRef(result->iter_args_[i]->GetType(), result->return_vars_[i]->GetType()));
+    }
+    if (prefix.empty()) return copy;
+    prefix.push_back(copy);
+    return SeqStmts::Flatten(std::move(prefix), op->span_);
+  }
+
+  ExprPtr DenseCopy(const ExprPtr& value, std::vector<StmtPtr>& prefix, const Span& span) {
+    auto tile = As<TileType>(value->GetType());
+    INTERNAL_CHECK_SPAN(tile, span) << "Internal error: Vec layout merge requires a tile";
+    auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    auto shape = std::make_shared<MakeTuple>(tile->shape_, span);
+    auto call = OpRegistry::GetInstance().Create("tile.extract", {value, zero, zero, shape},
+                                                 {{"target_memory", MemorySpace::Vec}}, span);
+    if (structural_equal(call->GetType(), value->GetType())) return value;
+    auto source = AsVarLike(value);
+    // Extract from the physical parent, not an alias whose child shape omits
+    // the parent's pitch. The old view chain can become dead after this rebase.
+    if (auto window = source ? windows_.find(source.get()) : windows_.end(); window != windows_.end()) {
+      const auto info = window->second;
+      call = OpRegistry::GetInstance().Create(
+          "tile.extract", {VisitExpr(info.base), VisitExpr(info.off_row), VisitExpr(info.off_col), shape},
+          {{"target_memory", MemorySpace::Vec}}, span);
+      obsolete_views_.insert(source.get());
+    }
+    auto var =
+        std::make_shared<Var>((source ? source->name_hint_ : "yield") + "_layout", call->GetType(), span);
+    prefix.push_back(std::make_shared<AssignStmt>(var, call, span));
+    const auto valid = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
+    if (!tile_view_semantics::ShapeExprListsEquivalent(
+            valid, tile_view_semantics::GetEffectiveTileView(*As<TileType>(call->GetType())).valid_shape)) {
+      // A set_validshape alias may narrow the parent's window further. Restore
+      // that logical range on the fresh allocation, where the operation is legal.
+      auto narrowed =
+          OpRegistry::GetInstance().Create("tile.set_validshape", {var, valid[0], valid[1]}, {}, span);
+      var = std::make_shared<Var>(var->name_hint_ + "_valid", narrowed->GetType(), span);
+      prefix.push_back(std::make_shared<AssignStmt>(var, narrowed, span));
+    }
+    return var;
+  }
+
+  StmtPtr NormalizeYield(const StmtPtr& body, const std::vector<bool>& dense) {
+    return transform_utils::RewriteLastYieldStmt(body, [&](const YieldStmtPtr& yield) -> StmtPtr {
+      auto copy = MutableCopy(yield);
+      std::vector<StmtPtr> prefix;
+      for (size_t i = 0; i < dense.size() && i < copy->value_.size(); ++i) {
+        if (dense[i]) copy->value_[i] = DenseCopy(copy->value_[i], prefix, yield->span_);
+      }
+      if (prefix.empty()) return yield;
+      prefix.push_back(copy);
+      return SeqStmts::Flatten(std::move(prefix), yield->span_);
+    });
+  }
+
+  SliceLayoutConstraints layouts_;
+  std::unordered_map<const Var*, SliceInfo> windows_;
+  std::unordered_set<const Var*> obsolete_views_;
+  std::vector<VarPtr> retained_;
+};
+
+/// Count uses and dependencies once, then retire only the pure view chains
+/// bypassed by boundary copies. A worklist avoids a full-body scan per alias;
+/// effects and unrelated dead computations remain untouched.
+class ObsoleteViewUses : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> Dead(const std::unordered_set<const Var*>& seeds) {
+    std::vector<const Var*> pending(seeds.begin(), seeds.end());
+    std::unordered_set<const Var*> dead;
+    while (!pending.empty()) {
+      const auto* var = pending.back();
+      pending.pop_back();
+      auto found = dependencies_.find(var);
+      if (found == dependencies_.end() || uses_[var] || !dead.insert(var).second) continue;
+      for (const auto* dependency : found->second) {
+        if (--uses_[dependency] == 0) pending.push_back(dependency);
+      }
+    }
+    return dead;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    const auto* saved = owner_;
+    auto call = As<Call>(op->value_);
+    // These are metadata-only views, unlike assemble or an in-place writeback.
+    const bool pure = As<TileType>(op->var_->GetType()) &&
+                      (AsVarLike(op->value_) ||
+                       (call && (IsOp(call, "tile.slice") || IsOp(call, "tile.set_validshape") ||
+                                 IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view"))));
+    owner_ = pure ? op->var_.get() : nullptr;
+    if (pure) dependencies_.try_emplace(owner_);
+    VisitExpr(op->value_);
+    // LHS type references count as dependencies without counting its definition.
+    IRVisitor::VisitVarLike_(op->var_);
+    owner_ = saved;
+  }
+  void VisitVarLike_(const VarPtr& op) override {
+    ++uses_[op.get()];
+    if (owner_) dependencies_[owner_].push_back(op.get());
+    IRVisitor::VisitVarLike_(op);
+  }
+
+ private:
+  const Var* owner_ = nullptr;
+  std::unordered_map<const Var*, size_t> uses_;
+  std::unordered_map<const Var*, std::vector<const Var*>> dependencies_;
 };
 
 /// Phase 3a — collect every Var *used* (referenced on a statement's RHS).  An
@@ -1539,9 +1905,23 @@ Pass CanonicalizeTileSlice() {
     }
 
     if (new_body.get() == func->body_.get()) return func;
+    // Finish reference-based cleanup before retyping definitions: the slice
+    // index above is keyed by the original Vars, while type propagation may
+    // mint new SSA identities. Verification must see the refreshed descriptors.
+    SliceTypeRefresher refresher(func->body_, new_body);
+    new_body = refresher.VisitStmt(new_body);
+    if (!refresher.ObsoleteViews().empty()) {
+      ObsoleteViewUses uses;
+      uses.VisitStmt(new_body);
+      const auto dead = uses.Dead(refresher.ObsoleteViews());
+      DropDeadSliceMutator dropper(dead);
+      new_body = dropper.VisitStmt(new_body);
+    }
     auto new_func = MutableCopy(func);
     new_func->body_ = new_body;
-    return new_func;
+    // Boundary copies are spliced before yields, including transparent scopes.
+    // Restore the pass's normalized-statement contract before verification.
+    return ::pypto::ir::NormalizeStmtStructure(new_func);
   };
   return CreateFunctionPass(pass_func, kPassName, kCanonicalizeTileSliceProperties);
 }
