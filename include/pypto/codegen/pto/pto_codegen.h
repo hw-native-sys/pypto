@@ -1241,6 +1241,7 @@ class PTOCodegen : public CodegenBase {
       view_ssa_to_base_ptr.clear();
       memref_to_mlir.clear();
       var_to_memref.clear();
+      tile_aliases.clear();
       memref_to_tile_type.clear();
 
       emitted_numeric_constants.clear();

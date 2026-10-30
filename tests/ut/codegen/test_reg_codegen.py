@@ -310,6 +310,47 @@ def test_review_branch_accepts_equivalent_external_tile_alias(tmp_path):
     compile_review_pto(source, tmp_path, level="level3")
 
 
+@pytest.mark.parametrize("separate_calls", [False, True])
+def test_review_tile_alias_provenance_resets_between_functions(separate_calls):
+    """A Var reused in a later IR must not inherit an earlier alias binding."""
+    tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+    src = ir.Var("old_source", tile_type, SPAN)
+    alias = ir.Var("alias", tile_type, SPAN)
+    first = ir.Function("first", [src], [], ir.AssignStmt(alias, src, SPAN), SPAN, type=ir.FunctionType.AIV)
+    with passes.PassContext([]):
+        first_program = passes.init_mem_ref()(ir.Program([first], "First", SPAN))
+    first = first_program.get_function("first")
+    assert first is not None
+    assert isinstance(first.body, ir.SeqStmts)
+    assignment = first.body.stmts[-1]
+    assert isinstance(assignment, ir.AssignStmt)
+    alias = assignment.var
+    load = ir.create_op_call("reg.load", [alias, integer(0)], {"lanes": 64}, SPAN)
+    loaded = ir.Var("loaded", load.type, SPAN)
+    second = ir.Function(
+        "second",
+        [alias],
+        [],
+        ir.RegScopeStmt("reg", ir.AssignStmt(loaded, load, SPAN), SPAN),
+        SPAN,
+        type=ir.FunctionType.AIV,
+    )
+    # Reusing the same node deterministically exercises the stale raw-pointer
+    # key, without relying on allocator address reuse after an IR is destroyed.
+    emitter = codegen.PTOCodegen()
+    program = ir.Program([second], "Second", SPAN)
+    fresh = codegen.PTOCodegen().generate(program, emit_source_loc=False)
+    if separate_calls:
+        emitter.generate(first_program, emit_source_loc=False)
+        reused = emitter.generate(program, emit_source_loc=False)
+        assert reused == fresh
+    else:
+        reused = emitter.generate(ir.Program([first, second], "Both", SPAN), emit_source_loc=False)
+        second_body = reused.split("func.func @second", 1)[1]
+        assert "old_source" not in second_body
+        assert "pto.tile_buf_addr %alias_tile" in second_body
+
+
 def test_review_index_gen_rejects_bf16_vci():
     ib = IRBuilder()
     with ib.function("bf16_index_gen", span=SPAN, type=ir.FunctionType.AIV) as f:
