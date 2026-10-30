@@ -231,8 +231,11 @@ On a backend supporting C2V Fixpipe epilogues, an automatic unsplit Acc FP32 →
 Vec conversion can fold a sole-use BF16 cast with `mode="rint"` and no explicit
 saturation request. The target must be a two-dimensional ND row-major tile
 with a positive static column count divisible by 16 (32-byte BF16 row stride).
-Every C2V boundary sharing the pipe must qualify. Explicit pipe setups, split
-regions and GM synchronization paths keep the existing conversion.
+Every C2V boundary sharing the pipe must qualify and produce the same complete
+pop tile type. Only full static tiles qualify; partial valid extents and
+buffer-aliasing views or metadata updates on the BF16 result keep local casts.
+Explicit pipe setups, split regions and GM synchronization paths keep the
+existing conversion.
 
 A sole-use maximum with positive zero can also fold as ReLU, directly after
 narrowing or after a BF16 → FP32 widening, only when every C2V boundary matches.

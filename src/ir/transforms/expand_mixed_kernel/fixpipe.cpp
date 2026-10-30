@@ -12,9 +12,11 @@
 #include "src/ir/transforms/expand_mixed_kernel/fixpipe.h"
 
 #include <cmath>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
@@ -33,6 +35,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir::mixed_kernel {
@@ -46,6 +49,23 @@ class Consumers : public IRVisitor {
   std::unordered_map<const Var*, std::vector<AssignStmtPtr>> uses;
   bool explicit_pipe = false;
 
+  // Propagate local-storage requirements through plain SSA aliases once.
+  // Each alias edge is visited at most once, keeping planning linear in IR size.
+  void FinalizeLocalStorageUses() {
+    std::vector<const Var*> pending(local_storage_.begin(), local_storage_.end());
+    pending.reserve(local_storage_.size() + alias_sources_.size());
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+      auto found = alias_sources_.find(pending[i]);
+      if (found != alias_sources_.end() && local_storage_.insert(found->second).second) {
+        pending.push_back(found->second);
+      }
+    }
+  }
+
+  [[nodiscard]] bool RequiresLocalStorage(const VarPtr& value) const {
+    return local_storage_.count(value.get()) != 0;
+  }
+
   [[nodiscard]] AssignStmtPtr SoleUse(const VarPtr& value) const {
     auto found = uses.find(value.get());
     return found != uses.end() && found->second.size() == 1 ? found->second.front() : nullptr;
@@ -55,6 +75,9 @@ class Consumers : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& statement) override {
     // Only value uses count. A use in control flow/return is recorded with a
     // null consumer, so it can never masquerade as a foldable cast/ReLU.
+    if (auto source = AsVarLike(statement->value_)) {
+      alias_sources_[statement->var_.get()] = source.get();
+    }
     auto previous = current_;
     current_ = retained_ ? nullptr : statement;
     VisitExpr(statement->value_);
@@ -62,11 +85,33 @@ class Consumers : public IRVisitor {
   }
   // The base IterArg visitor also visits initValue_; overriding only the
   // Var-like hook preserves loop initializer readers in the sole-use analysis.
-  void VisitVarLike_(const VarPtr& value) override { uses[value.get()].push_back(current_); }
+  void VisitVarLike_(const VarPtr& value) override {
+    uses[value.get()].push_back(current_);
+    if (auto iter = As<IterArg>(value)) {
+      if (auto initial = AsVarLike(iter->initValue_)) {
+        local_storage_.insert(initial.get());
+      }
+    }
+  }
+  void VisitStmt_(const YieldStmtPtr& statement) override {
+    for (const auto& value : statement->value_) {
+      if (auto source = AsVarLike(value)) {
+        local_storage_.insert(source.get());
+      }
+    }
+    IRVisitor::VisitStmt_(statement);
+  }
   void VisitStmt_(const ForStmtPtr& statement) override { VisitCompound(statement); }
   void VisitStmt_(const IfStmtPtr& statement) override { VisitCompound(statement); }
   void VisitStmt_(const WhileStmtPtr& statement) override { VisitCompound(statement); }
   void VisitExpr_(const CallPtr& call) override {
+    // PTOAS cannot rebind valid extents or reinterpret a tpop's returned tile
+    // as a locally declared allocation. Keep the Vector cast for those uses.
+    if (!call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+      if (auto source = AsVarLike(call->args_[0])) {
+        local_storage_.insert(source.get());
+      }
+    }
     if (IsOp(call, "tile.tpush_to_aiv") || IsOp(call, "tile.tpop_from_aic") ||
         IsOp(call, "tile.tpush_to_aic") || IsOp(call, "tile.tpop_from_aiv") ||
         IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
@@ -91,6 +136,8 @@ class Consumers : public IRVisitor {
   const std::unordered_map<const Stmt*, core_affinity::CoreAffinity>& affinities_;
   bool retained_ = false;
   AssignStmtPtr current_;
+  std::unordered_map<const Var*, const Var*> alias_sources_;
+  std::unordered_set<const Var*> local_storage_;
 };
 
 bool IsCast(const AssignStmtPtr& statement, DataType source, DataType target, bool narrowing) {
@@ -163,6 +210,7 @@ C2VFixpipeFold PlanC2VFixpipeFold(
   Consumers consumers(affinities);
   for (const auto& statement : statements) consumers.VisitStmt(statement);
   if (consumers.explicit_pipe) return result;
+  consumers.FinalizeLocalStorageUses();
   std::vector<Candidate> candidates;
   bool all_relu = true;
   for (auto& [statement, boundary] : boundaries) {
@@ -195,6 +243,25 @@ C2VFixpipeFold PlanC2VFixpipeFold(
     candidates.push_back({&boundary, cast, relu, widening});
   }
   if (candidates.empty()) return result;
+  TileTypePtr wire_type;
+  for (const auto& candidate : candidates) {
+    auto value = all_relu && !candidate.widening ? candidate.relu->var_ : candidate.cast->var_;
+    auto type = As<TileType>(value->GetType());
+    if (!type || type->shape_.size() != 2) return result;
+    const auto view = tile_view_semantics::GetEffectiveTileView(*type);
+    // A Fixpipe initializer has one exact pop type. Restrict this optimization
+    // to full static tiles; preserve local casts for partial/dynamic views.
+    auto rows = As<ConstInt>(type->shape_[0]);
+    if (!rows || rows->value_ <= 0 || view.blayout != TileLayout::row_major ||
+        view.slayout != TileLayout::none_box || consumers.RequiresLocalStorage(candidate.cast->var_) ||
+        consumers.RequiresLocalStorage(value) ||
+        !tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, type->shape_) ||
+        (wire_type && (!tile_view_semantics::ShapeExprListsEquivalent(wire_type->shape_, type->shape_) ||
+                       tile_view_semantics::GetEffectiveTileView(*wire_type) != view))) {
+      return result;
+    }
+    wire_type = type;
+  }
   result.enabled = true;
   for (const auto& candidate : candidates) {
     auto& boundary = *candidate.boundary;

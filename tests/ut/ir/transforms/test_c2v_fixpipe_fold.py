@@ -593,5 +593,120 @@ def test_fold_preserves_initializer_branch_and_fifo_lifetimes(kind, slots):
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
+def test_different_pop_shapes_keep_fp32_pipe():
+    # One Fixpipe initializer cannot serve differently shaped BF16 pop types.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, out: pl.Out[pl.Tensor[[32, 16], pl.BF16]]):
+            a0 = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            v0 = pl.tile.move(
+                a0, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+            )
+            b0 = pl.tile.cast(v0, target_type=pl.BF16, mode="rint")
+            pl.tile.store(b0, [0, 0], out)
+            a1 = pl.tile.create([32, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            v1 = pl.tile.move(
+                a1, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+            )
+            b1 = pl.tile.cast(v1, target_type=pl.BF16, mode="rint")
+            pl.tile.store(b1, [0, 0], out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC, level=pl.Level.AIC, role=pl.Role.SubWorker)
+        def main_aic(self, out: pl.Out[pl.Tensor[[32, 16], pl.BF16]]):
+            buf = pl.system.import_peer_buffer(name="main_c2v_slot_buffer", peer_func="main_aiv")
+            pl.system.aic_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=2048, slot_num=2)
+            a0 = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            pl.tile.tpush_to_aiv(a0, split=0)
+            a1 = pl.tile.create([32, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            pl.tile.tpush_to_aiv(a1, split=0)
+
+        @pl.function(type=pl.FunctionType.AIV, level=pl.Level.AIV, role=pl.Role.SubWorker)
+        def main_aiv(self, out: pl.Out[pl.Tensor[[32, 16], pl.BF16]]):
+            buf = pl.system.reserve_buffer(name="main_c2v_slot_buffer", size=4096, base=-1)
+            pl.system.aiv_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=2048, slot_num=2)
+            v0: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            b0 = pl.tile.cast(v0, target_type=pl.BF16, mode="rint")
+            pl.system.tfree_to_aic(v0)
+            pl.tile.store(b0, [0, 0], out)
+            v1: pl.Tile[[32, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            b1 = pl.tile.cast(v1, target_type=pl.BF16, mode="rint")
+            pl.system.tfree_to_aic(v1)
+            pl.tile.store(b1, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+        def main(self, out: pl.Out[pl.Tensor[[32, 16], pl.BF16]]):
+            self.main_aic(out)
+            self.main_aiv(out)
+
+    ir.assert_structural_equal(expand(Before), Expected)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("buffer_ir", [False, True])
+@pytest.mark.parametrize("reinterpret", [False, True])
+def test_metadata_view_through_alias_keeps_local_cast(tmp_path, buffer_ir, reinterpret):
+    # A tpop result cannot replace the local cast allocation used by these views.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, rows: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 16], pl.BF16]]):
+            acc = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            vec = pl.tile.move(
+                acc, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+            )
+            rounded = pl.tile.cast(vec, target_type=pl.BF16, mode="rint")
+            alias = rounded
+            if reinterpret:
+                words = pl.tile.reinterpret_view(alias, pl.INT16)
+                values = pl.tile.reinterpret_view(words, pl.BF16)
+                pl.tile.store(values, [0, 0], out)
+            else:
+                partial = pl.tile.set_validshape(alias, rows, 16)
+                pl.tile.store(partial, [0, 0], out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC, level=pl.Level.AIC, role=pl.Role.SubWorker)
+        def main_aic(self, rows: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 16], pl.BF16]]):
+            buf = pl.system.import_peer_buffer(name="main_c2v_slot_buffer", peer_func="main_aiv")
+            pl.system.aic_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            acc = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            pl.tile.tpush_to_aiv(acc, split=0)
+
+        @pl.function(type=pl.FunctionType.AIV, level=pl.Level.AIV, role=pl.Role.SubWorker)
+        def main_aiv(self, rows: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 16], pl.BF16]]):
+            buf = pl.system.reserve_buffer(name="main_c2v_slot_buffer", size=2048, base=-1)
+            pl.system.aiv_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            vec: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            rounded = pl.tile.cast(vec, target_type=pl.BF16, mode="rint")
+            pl.system.tfree_to_aic(vec)
+            alias = rounded
+            if reinterpret:
+                words = pl.tile.reinterpret_view(alias, pl.INT16)
+                values = pl.tile.reinterpret_view(words, pl.BF16)
+                pl.tile.store(values, [0, 0], out)
+            else:
+                partial = pl.tile.set_validshape(alias, rows, 16)
+                pl.tile.store(partial, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Group, level=pl.Level.CORE_GROUP, role=pl.Role.SubWorker)
+        def main(self, rows: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 16], pl.BF16]]):
+            self.main_aic(rows, out)
+            self.main_aiv(rows, out)
+
+    ir.assert_structural_equal(expand(Before), Expected)
+    with passes.PassContext([], enable_buffer_ir=buffer_ir):
+        after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    kernels = [function for function in after.functions.values() if ir.is_incore_type(function.func_type)]
+    text = codegen.PTOCodegen().generate(ir.Program(kernels, "kernels", after.span))
+    assert "acc_push_epilogue" not in text
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    pto_backend._compile_pto_module(text, "main_aic", str(tmp_path))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
