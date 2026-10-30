@@ -482,6 +482,14 @@ flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列�
 
 用 `tile.sel`（而非 `input * mask`）重建保留混合，使下沉不产生 `pto.tmul`（A2/A3 对 bf16/i8 拒绝 `tmul`）。index 的 `reshape [b, s] → [n, 1]` 是 buffer 视图重命名，不是单独的 PTO 算子。
 
+## A5 按轴 Gather 的源数据
+
+A5 的末轴 `tensor.gather(..., dim=-1, index=idx)` 使用扁平索引，要求源数据紧密排列。
+片上 FP16/FP32 源通过 `tile.extract` 复制到独立的 Vec tile。`CanonicalizeTileSlice` 将前置列切片的
+偏移合并进 extract，因此 `full[:, 64:128]` 由 `pto.textract` 直接读取较宽的父 tile，
+无需嵌套的 `pto.subview` 操作数。GM 源已由 `tile.load` 紧密加载，无需额外 extract。
+INT16/INT32 源保留基于 assemble 的拷贝路径，因为 A5 `textract` 不支持这两种类型。
+
 ## 扁平 Gather 下沉
 
 `pl.gather(src, index=idx)` 和 `pl.gather(src, idx)` 生成已有的

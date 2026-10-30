@@ -1823,16 +1823,24 @@ void OpConversionRegistry::RegisterGatherOps() {
         // has stride HEAD_DIM, not ROPE_DIM), so the flat offset misaddresses
         // every row past the first — only row 0 survives. tile.load already
         // materializes TensorType sources to a fresh contiguous tile; only
-        // TileType sources — lowered to a view-only tile.slice by
-        // emit_load_or_slice — need this copy into a fresh contiguous tile.
-        auto materialize_src_contig = [&](const VarPtr& src, int64_t rows, int64_t cols, DataType dtype,
+        // TileType sources may retain a parent's wider pitch, so they need
+        // this copy into a fresh contiguous tile.
+        // Use extract so CanonicalizeTileSlice folds nested slice offsets into
+        // the read of the original tile. A create + assemble copy leaves those
+        // subviews as operands instead of explicitly repacking the source.
+        auto materialize_src_contig = [&](const ExprPtr& src, int64_t rows, int64_t cols,
                                           const std::string& name) -> VarPtr {
           auto sh = MakeShapeTuple({make_idx(rows), make_idx(cols)}, span);
-          std::vector<std::pair<std::string, std::any>> alloc_kw = {{"dtype", dtype},
-                                                                    {"target_memory", MemorySpace::Vec}};
-          auto contig = emit_to(prologue, "tile.create", {sh}, alloc_kw, name + "_alloc");
-          auto ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
-          return emit_to(prologue, "tile.assemble", {contig, src, ofs}, {}, name + "_copy");
+          auto dtype = As<TileType>(src->GetType())->dtype_;
+          if (dtype.IsInt()) {
+            // A5 TEXTRACT does not support the INT16/INT32 gather source
+            // types. Preserve their existing assemble-based packing path.
+            auto contig = emit("tile.create", {sh}, {{"dtype", dtype}, {"target_memory", MemorySpace::Vec}},
+                               name + "_alloc");
+            auto ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
+            return emit("tile.assemble", {contig, src, ofs}, {}, name + "_copy");
+          }
+          return emit("tile.extract", {src, zero, zero, sh}, {{"target_memory", MemorySpace::Vec}}, name);
         };
 
         // ================================================================
@@ -1857,13 +1865,20 @@ void OpConversionRegistry::RegisterGatherOps() {
 
             auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
             auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(S1)}, span);
-            auto inp_full = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
             // Materialize a possibly-strided TileType source (see comment on
             // materialize_src_contig) so the flat-index gather addresses it
             // correctly. TensorType sources are already contiguous (tile.load).
-            VarPtr gather_src = inp_full;
-            if (As<TileType>(input->GetType())) {
-              gather_src = materialize_src_contig(inp_full, I0, S1, input_dtype, "gather_src");
+            // Extract directly from input: an intermediate slice carrying an
+            // explicit valid_shape cannot be folded by CanonicalizeTileSlice.
+            VarPtr gather_src;
+            if (auto input_tile = As<TileType>(input->GetType())) {
+              ExprPtr source = input;
+              if (input_tile->dtype_.IsInt()) {
+                source = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
+              }
+              gather_src = materialize_src_contig(source, I0, S1, "gather_src");
+            } else {
+              gather_src = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
             }
             auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
             auto idx_full = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx");
@@ -1919,7 +1934,7 @@ void OpConversionRegistry::RegisterGatherOps() {
             // 3D slice's wider stride, which would break the flat-index gather.
             VarPtr gather_src = inp_2d;
             if (As<TileType>(input->GetType())) {
-              gather_src = materialize_src_contig(inp_2d, I0I1, S2, input_dtype, "gather_src");
+              gather_src = materialize_src_contig(inp_2d, I0I1, S2, "gather_src");
             }
             auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(K)}, span);
             auto idx_raw = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx_raw");

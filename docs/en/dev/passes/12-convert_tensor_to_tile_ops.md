@@ -557,6 +557,16 @@ Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src
 
 `tile.sel` (not `input * mask`) reconstructs the preserve blend so the lowering emits no `pto.tmul`, which A2/A3 reject for bf16/i8. The index `reshape [b, s] → [n, 1]` is a buffer-view realias, not a separate PTO op.
 
+## A5 Axis Gather Sources
+
+For last-axis `tensor.gather(..., dim=-1, index=idx)` on A5, flat indices assume
+a packed source. On-chip FP16/FP32 sources are materialized with `tile.extract` into a
+fresh Vec tile. `CanonicalizeTileSlice` folds preceding column-slice offsets
+into that extract, so `full[:, 64:128]` is read by `pto.textract` directly from
+the wider parent rather than through nested `pto.subview` operands. GM sources
+are already packed by `tile.load` and need no extra extract. INT16/INT32 sources
+keep their assemble-based copy because A5 `textract` does not support these types.
+
 ## Flat Gather Lowering
 
 `pl.gather(src, index=idx)` and `pl.gather(src, idx)` emit the existing
