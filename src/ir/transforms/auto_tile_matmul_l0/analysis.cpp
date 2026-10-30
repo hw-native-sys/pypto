@@ -99,7 +99,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment,
     const DirectDefMap* direct_defs, bool restrict_output_grid, bool keep_output_shape,
-    const ForStmtPtr& source_reduction, int64_t fixed_output_m) {
+    const ForStmtPtr& source_reduction, int64_t fixed_output_m, const char* full_output_reason) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -499,10 +499,40 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     }
   }
 
+  if (full_output_reason) {
+    // The chooser enumerates an aligned tiling grid, not every native whole
+    // matmul shape (notably M=1). Keep an already capacity-fitting operation
+    // intact rather than turning its storage contract into a tiling mandate.
+    const auto fits = [&](int64_t rows, int64_t cols, int64_t row_align, int64_t col_align, uint32_t bytes,
+                          uint64_t capacity) {
+      const auto boxed_rows = static_cast<uint64_t>(AlignStaticExtent(rows, row_align, assign->span_));
+      const auto boxed_cols = static_cast<uint64_t>(AlignStaticExtent(cols, col_align, assign->span_));
+      return boxed_rows <= capacity / bytes / boxed_cols;
+    };
+    if ((M < cfg.min_m || N < cfg.min_n || M % cfg.align_m != 0 || N % cfg.align_n != 0) &&
+        fits(M, K, left_alignment->rows, left_alignment->cols, bytes_a, l0a_bytes) &&
+        fits(K, N, right_alignment->rows, right_alignment->cols, bytes_b, l0b_bytes) &&
+        fits(M, N, cfg.l0c_align_m, cfg.align_n, bytes_c, l0c_bytes)) {
+      return std::nullopt;
+    }
+    // Selection must preserve one full accumulator when M/N subdivision
+    // would lose an output binding or postpone reads beyond an input write.
+    cfg.M = static_cast<int>(M);
+    cfg.N = static_cast<int>(N);
+    cfg.min_m = static_cast<int>(AlignStaticExtent(M, cfg.align_m, assign->span_));
+    cfg.min_n = static_cast<int>(AlignStaticExtent(N, cfg.align_n, assign->span_));
+  }
+
   utils::L0TileResult res;
   try {
     res = utils::ChooseL0Tile(cfg);
   } catch (const pypto::ValueError& e) {
+    CHECK_SPAN(!full_output_reason, assign->span_)
+        << "AutoTile cannot tile '" << assign->var_->name_hint_ << "' while preserving " << full_output_reason
+        << ": no full-output K-only plan fits. Store the result before reusing "
+           "its input storage, use separate input slots, or remove an explicit result binding when "
+           "M/N tiling is required. "
+        << e.what();
     CHECK_SPAN(fixed_output_m == 0, assign->span_)
         << "NZ tile.store has no legal N/K tiling plan that preserves all " << M
         << " destination rows. The full row extent must fit the L0A operand and a minimum-width L0C "
@@ -514,6 +544,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   }
   INTERNAL_CHECK_SPAN(fixed_output_m == 0 || res.m == M, assign->span_)
       << "Internal error: NZ output tiling selected a partial M tile";
+  INTERNAL_CHECK_SPAN(!full_output_reason || (res.m == M && res.n == N), assign->span_)
+      << "Internal error: storage-preserving selection changed the physical output shape";
 
   // Already L0-sized — nothing to do.
   if (res.m == M && res.n == N && res.k == K) return std::nullopt;
@@ -538,7 +570,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     if (!keep_output_shape) {
       std::vector<Diagnostic> fallback_hints;
       if (auto k_only = AnalyzeMatmul(assign, fallback_hints, true, output_box_alignment, direct_defs,
-                                      restrict_output_grid, true, source_reduction, fixed_output_m)) {
+                                      restrict_output_grid, true, source_reduction, fixed_output_m,
+                                      full_output_reason)) {
         for (const auto& hint : fallback_hints) hints.push_back(hint);
         return k_only;
       }

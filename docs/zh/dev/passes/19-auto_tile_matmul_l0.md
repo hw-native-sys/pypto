@@ -89,6 +89,10 @@ program_tiled = l0_tile_pass(program)
 
 8. **保留已有 L0 流水线**——分析前即禁用自动累加器缓冲识别。显式 `pipeline_double_buffer_c` 属性保持不变。
 
+Direct-store M/N 网格在消费者 store 处执行，因此操作数快照（operand snapshot）必须保留到该位置。选择前，函数级索引跟踪存储别名，按 allocation 和 slot 记录写入。不同的常量 slot 互不重叠；无法解析的别名、可能改变来源的 carry，以及未知物理 effect（含跨核 ring 复用）均保守处理。普通和 atomic GM store 不会覆写输入 tile 的片上存储。如果延后的读取会跨越可能的覆写，chooser 只考虑保留完整输出的 K-only 方案。若无合法方案，则给出可操作的错误：先 store 结果再复用输入存储，或使用不同输入 slot。本 pass 不提前执行 GM store，因为不同 tensor 参数在运行时可能互为别名。
+
+显式绑定 MemRef 的 matmul 结果同样要求完整输出方案。K 切分把绑定附到第一个分配所有者（累加器占位声明或 fresh/head-peel matmul），并保留生成的 layout 与 valid-shape 元数据；累加和尾块继承同一存储。M/N 切分不得悄悄用独立子块替换声明的完整结果存储。现有 PTOAS 限制仍以明确错误报告，包括单 slot 声明和经过不受支持循环 phi 的多 slot 值；这些组合可使用 PYPTO 或 DSA_RP。
+
 本 pass 是 `ProgramPass`，对每个函数走 `IRMutator`；当函数内没有触发任何改写时，返回原函数（不会发生 `MutableCopy` 开销）。
 
 ## NZ GM 目标
@@ -112,6 +116,8 @@ Acc tile，每块都必须放入后端 L0C 容量，列数不超过 4095。N 和
 若某个 M 找不到合法的 N/K tile，分析阶段会立即报告专用编译诊断。
 不属于受支持改写的生产者/使用模式仍受分配检查和最终 NZ store 检查约束。
 用户也可显式按列分块；NZ 写回仍不能沿 M 拆分。
+
+快照检查仅用于支持的 Mat 操作数 direct-store 切分。未知存储来源仍保留已知 memory space：Acc 写入不能覆盖 Mat 输入，而未知物理 effect 仍保守处理。已能容纳但不在切分网格上的完整 matmul 保留其声明结果存储，不强制切分。已经降低到 Buffer IR 的函数保持不变。 发射端也检查实际 direct-store 路由：bias barrier 可能禁止 N 子窗口重建，但仍允许完整 N 的 M-only 切分；后者也必须保留输入快照。
 
 ## 公共视图语义与 Call 重建
 
@@ -429,6 +435,7 @@ L0/Mat 容量与 fractal 对齐都来自当前 `BackendHandler`。Pass 优先从
 
 - `src/ir/transforms/auto_tile_matmul_l0_pass.cpp` — pass 入口、canonical split-K 重写、K-loop 与 M/N 网格生成.
 - `src/ir/transforms/auto_tile_matmul_l0/analysis.cpp` — matmul 适用性判断、显式 L0 容量诊断与 L0 调度选择.
+- `src/ir/transforms/auto_tile_matmul_l0/storage_contracts.cpp` — 存储来源与写入索引，用于检查延后读取的输入快照.
 - `src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp` — 已有流水线的累加器缓冲分析与容量规划.
 - `src/ir/transforms/auto_tile_matmul_l0/common.cpp` — 共享形状检查与同级语句使用计数.
 - `src/ir/transforms/auto_tile_matmul_l0/internal.h` — 私有切分计划与跨模块声明.

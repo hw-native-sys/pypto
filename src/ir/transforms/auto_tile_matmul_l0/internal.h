@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -143,7 +144,12 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
     const DirectDefMap* direct_defs = nullptr, bool restrict_output_grid = false,
-    bool keep_output_shape = false, const ForStmtPtr& source_reduction = nullptr, int64_t fixed_output_m = 0);
+    bool keep_output_shape = false, const ForStmtPtr& source_reduction = nullptr, int64_t fixed_output_m = 0,
+    const char* full_output_reason = nullptr);
+
+/// Matmuls whose deferred direct-store grid would read an overwritten operand.
+/// Tracks declared slots and ordinary storage aliases before InitMemRef.
+std::unordered_map<const Var*, std::string> AnalyzeDelayedInputHazards(const FunctionPtr& func);
 
 /// Plan against the post-canonical-rewrite function so loop identities and capacity agree.
 /// Automatic annotation remains disabled; explicit caller buffering is preserved.
