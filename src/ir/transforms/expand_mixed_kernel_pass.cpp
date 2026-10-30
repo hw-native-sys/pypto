@@ -2121,22 +2121,11 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // reintroduces source-tpop reuse.
   std::unordered_set<const Var*> superseded_tpop_vars;
 
+  const auto original_boundaries = boundary_moves;
   auto fixpipe_fold = !had_regions && gm_sync_pushes.empty() && gm_sync_pops.empty()
-                          ? mixed_kernel::PlanC2VFixpipeFold(func, stmts, boundary_moves)
+                          ? mixed_kernel::PlanC2VFixpipeFold(func, stmts, boundary_moves, stmt_map)
                           : mixed_kernel::C2VFixpipeFold{};
 
-  // Build AIC body (recursive — handles MIXED compound stmts)
-  std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
-  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, fixpipe_fold, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
-
-  // Remove ReturnStmt from AIC (AIC doesn't return values)
-  std::vector<StmtPtr> aic_stmts_no_return;
-  for (const auto& s : aic_stmts) {
-    if (!std::dynamic_pointer_cast<const ReturnStmt>(s)) {
-      aic_stmts_no_return.push_back(s);
-    }
-  }
   // tpop_var_remap keys are originally-defined Vars whose producers got
   // replaced on this side by a boundary tpop. A later DeepClone seeded with
   // `tpop_var_remap` substitutes them with valid in-scope Vars, so they are
@@ -2152,17 +2141,34 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // `func->params_`: both split bodies still reference the original function's
   // Var pointers at this point (DeepClone has not run yet), so the source
   // signature is what makes a yield of a parameter resolvable on either lane.
-  auto aic_final = FinalizeTpopTfrees(
-      FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map, remap_keys(aic_tpop_remap), func->params_),
-      CoreSide::AIC, aic_tpop_remap);
+  auto build_final_body = [&](CoreSide side, std::unordered_map<const Var*, VarPtr>& remap) {
+    auto body = BuildCoreBody(side, stmts, stmt_map, boundary_moves, fixpipe_fold, remap,
+                              superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+    if (side == CoreSide::AIC) {
+      body.erase(std::remove_if(body.begin(), body.end(),
+                                [](const StmtPtr& stmt) { return As<ReturnStmt>(stmt) != nullptr; }),
+                 body.end());
+    }
+    return FinalizeTpopTfrees(FinalizeSplitCoreBody(body, original_def_map, remap_keys(remap), func->params_),
+                              side, remap);
+  };
 
-  // Build AIV body (recursive — handles MIXED compound stmts)
+  // A folded cast becomes a pipe alias, extending ownership to the BF16
+  // result's last use. Preflight the finalized schedule before committing the
+  // optimization; retain the original conversion if it would need more slots,
+  // violate FIFO release order or escape a control-flow scope.
+  const int capacity = func->GetAttr<int>("slot_num", cross_core_pipe::kDefaultAutoPipeSlotNum);
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
-  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, fixpipe_fold, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
-  auto aiv_final = FinalizeTpopTfrees(
-      FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
-      CoreSide::AIV, aiv_tpop_remap);
+  auto aiv_final = build_final_body(CoreSide::AIV, aiv_tpop_remap);
+  if (fixpipe_fold.enabled &&
+      !cross_core_pipe::FitsAutomaticPipeCapacity(aiv_final, CoreSide::AIV, capacity)) {
+    boundary_moves = original_boundaries;
+    fixpipe_fold = {};
+    aiv_tpop_remap.clear();
+    aiv_final = build_final_body(CoreSide::AIV, aiv_tpop_remap);
+  }
+  std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
+  auto aic_final = build_final_body(CoreSide::AIC, aic_tpop_remap);
 
   if (fixpipe_fold.enabled) {
     aic_final = mixed_kernel::RouteFixpipeV2C(aic_final);

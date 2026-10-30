@@ -182,15 +182,34 @@ V2C pipe `id` 及出现顺序配对 push/pop，从实际消费方 `tpop` 契约�
 这些 setup 参数由拆分后的函数体自动推导：
 
 - `dir_mask`：`C2V=1`、`V2C=2`、双向=`3`
-- `id`：自动生成 setup 时省略，因此 PTOAS 使用默认 frontend pipe id `0`
-- `slot_size`：所有方向中 tile 字节大小的最大值（`shape * dtype bits / 8`）
+- `id`：通常省略，默认 `0`；A5 BF16 Fixpipe C2V 管道使用 `0`，独立的 V2C 管道使用 `1`
+- `slot_size`：共享同一管道的方向中最大的 tile 字节数（`shape * dtype bits / 8`）；折叠后的 C2V 按 BF16 载荷计算
 - `slot_num`：环形缓冲深度——每个方向默认均为 `2`，且始终显式发射；可按 scope 覆盖（见下文）
 - `local_slot_num`：可选的 A2/A3 本地消费者深度；省略时使用 `slot_num`
 - `buffer_size`：指定本地深度时为 `slot_size * local_slot_num`，否则为 `slot_size * slot_num`
 - buffer 名称：`<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer 的 `base`：插入时统一使用 `AUTO`，随后由 `AllocateMemoryAddr` 解析成显式地址
 
-当跨核方向使用了不同大小的 tile 时，Pass 会取所有观察到的 tile 字节大小的最大值作为 `initialize_pipe` 的公共 `slot_size`。较小 tile 写入时不会填满整个槽位，但不影响硬件正确性。用户手写程序仍然可以通过给 `initialize_pipe` 以及匹配的 `tpush` / `tpop` / `tfree` 传入不同 `id` 来创建多条独立 pipe。
+除下述独立 Fixpipe 管道外，当跨核方向使用了不同大小的 tile 时，Pass 会取所有观察到的 tile 字节大小的最大值作为 `initialize_pipe` 的公共 `slot_size`。较小 tile 写入时不会填满整个槽位，但不影响硬件正确性。用户手写程序仍然可以通过给 `initialize_pipe` 以及匹配的 `tpush` / `tpop` / `tfree` 传入不同 `id` 来创建多条独立 pipe。
+
+### A5 C2V Fixpipe 后处理
+
+后端支持 C2V Fixpipe 后处理时，自动生成的未分片 Acc FP32 → Vec 传输可以折叠
+唯一消费者为 BF16 cast、`mode="rint"` 且未显式指定饱和模式的转换。目标必须是二维
+ND row-major tile，列数为正静态值且能被 16 整除（BF16 行跨度为 32 字节倍数）。
+共享管道的所有 C2V 边界均须满足条件。显式管道初始化、split 区域及 GM 同步路径保留原转换。
+
+若窄化后直接或经 BF16 → FP32 扩展后，仅由与正零取最大值的操作消费，且所有 C2V
+边界均匹配，还可折叠 ReLU。循环初值等额外读取会阻止 ReLU 折叠。位于整体保留的
+纯 Vector 复合语句中的候选保持原样；若折叠后的别名超出已配置 FIFO 容量，或破坏 FIFO
+所有权，则回退到原转换，不会为启用优化而增加 `slot_num`。
+
+Push 仍消费 FP32 Acc，pop 和 C2V 槽位则承载 BF16。生成的 push/初始化携带
+`fixpipe_bf16=True` 及匹配的 `fixpipe_relu`。Fixpipe 管道要求 `dir_mask=1`；同时存在
+V2C 时，C2V 使用 `id=0`，V2C 独立使用 `id=1`、`dir_mask=2`，分别按各方向大小分配，
+二者均保留配置的传输深度。因此，这种情况下不使用跨方向最大值作为共同槽位大小。
+可选 ReLU 在 BF16 最近偶数舍入之前执行，保留的 Vector 扩展维持 BF16 舍入后的值。
+Torch 参考生成器也在入队前执行相同后处理。
 
 ### MX scale 的 V2C 传输
 

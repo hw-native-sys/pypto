@@ -11,9 +11,11 @@
 
 import pypto.language as pl
 import pytest
+import torch
 from pypto import backend, codegen, ir, passes
 from pypto.backend import pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.debug import torch_codegen
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -82,6 +84,130 @@ class Program:
     return parsed
 
 
+def make_expected(
+    *,
+    mode="rint",
+    relu=True,
+    widening=True,
+    extra_reader=False,
+    bidirectional=False,
+    cols=128,
+    folded=True,
+    saturation_mode=None,
+    dual_aiv=False,
+):
+    """Author both split bodies and the group, including every setup and free."""
+    signature = (
+        f"a: pl.Tensor[[64, 128], pl.BF16], b: pl.Tensor[[128, {cols}], pl.BF16], "
+        f"out: pl.Out[pl.Tensor[[64, {cols}], pl.BF16]]"
+    )
+    wire = "BF16" if folded else "FP32"
+    slot = 64 * cols * (2 if folded else 4)
+    split_rings = folded and bidirectional
+    mask = 1 if split_rings or not bidirectional else 3
+    epilogue = f", fixpipe_bf16=True, fixpipe_relu={relu}" if folded else ""
+    zero = "pl.const(0, pl.INT32)"
+    cube = []
+    vector = ['pl.func_attr({"dual_aiv_dispatch": True})'] if dual_aiv else []
+    cube += [
+        "c2v_import: pl.Scalar[pl.INT32] = "
+        'pl.system.import_peer_buffer(name="main_c2v_slot_buffer", peer_func="main_aiv")',
+        f"pl.system.aic_initialize_pipe(c2v_import, {zero}, dir_mask={mask}, slot_size={slot}, "
+        f"slot_num=2{epilogue})",
+    ]
+    vector += [
+        f'c2v: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="main_c2v_slot_buffer", '
+        f"size={slot * 2}, base=-1)",
+        f"pl.system.aiv_initialize_pipe(c2v, {zero}, dir_mask={mask}, slot_size={slot}, "
+        f"slot_num=2{epilogue})",
+    ]
+    if split_rings:
+        cube += [
+            'v2c: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="main_v2c_slot_buffer", '
+            "size=32768, base=-1)",
+            f"pl.system.aic_initialize_pipe({zero}, v2c, dir_mask=2, slot_size=16384, slot_num=2, id=1)",
+        ]
+        vector += [
+            "v2c_import: pl.Scalar[pl.INT32] = "
+            'pl.system.import_peer_buffer(name="main_v2c_slot_buffer", peer_func="main_aic")',
+            f"pl.system.aiv_initialize_pipe({zero}, v2c_import, dir_mask=2, slot_size=16384, "
+            f"slot_num=2, id=1)",
+        ]
+    if bidirectional:
+        pipe_id = ", id=1" if split_rings else ""
+        vector += [
+            "raw: pl.Tile[[64, 128], pl.BF16, pl.Mem.Vec] = pl.tile.full([64, 128], "
+            "dtype=pl.BF16, value=pl.const(1.0, pl.BF16))",
+            "raw_fractal: pl.Tile[[64, 128], pl.BF16, pl.Mem.Vec, "
+            "pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major)] = "
+            "pl.tile.move(raw, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, "
+            "slayout=pl.TileLayout.row_major)",
+            f"pl.tile.tpush_to_aic(raw_fractal, split=0{pipe_id})",
+        ]
+        cube += [
+            f"raw_recv: pl.Tile[[64, 128], pl.BF16, pl.Mem.Mat] = pl.tile.tpop_from_aiv(split=0{pipe_id})",
+            "left: pl.Tile[[64, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(raw_recv, "
+            "target_memory=pl.Mem.Left, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major)",
+            f"pl.system.tfree_to_aiv(raw_recv{pipe_id})",
+        ]
+    else:
+        cube += [
+            "a_mat: pl.Tile[[64, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(a, [0, 0], [64, "
+            "128], [64, 128], target_memory=pl.Mem.Mat)",
+            "left: pl.Tile[[64, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(a_mat, target_memory=pl.Mem.Left)",
+        ]
+    cube += [
+        f"b_mat: pl.Tile[[128, {cols}], pl.BF16, pl.Mem.Mat] = pl.tile.load(b, [0, 0], [128, "
+        f"{cols}], [128, {cols}], target_memory=pl.Mem.Mat)",
+        f"right: pl.Tile[[128, {cols}], pl.BF16, pl.Mem.Right] = pl.tile.move(b_mat, "
+        f"target_memory=pl.Mem.Right)",
+        f"dot: pl.Tile[[64, {cols}], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(left, right)",
+        f"pl.tile.tpush_to_aiv(dot, split=0{epilogue})",
+    ]
+    pop = "rounded" if folded else "received"
+    if folded and relu and not widening:
+        pop = "activated"
+    vector += [f"{pop}: pl.Tile[[64, {cols}], pl.{wire}, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)"]
+    if not folded:
+        sat = f", saturation_mode={saturation_mode!r}" if saturation_mode else ""
+        vector += [f"rounded = pl.tile.cast(received, target_type=pl.BF16, mode={mode!r}{sat})"]
+        if not extra_reader:
+            vector += ["pl.system.tfree_to_aic(received)"]
+    value = pop if folded else "rounded"
+    if widening:
+        vector += [f'widened = pl.tile.cast({value}, target_type=pl.FP32, mode="round")']
+        value = "widened"
+        if folded:
+            vector += [f"pl.system.tfree_to_aic({pop})"]
+    if relu:
+        if folded and widening:
+            vector += ["activated = widened"]
+        elif not folded:
+            vector += [f"activated = pl.tile.maximums({value}, 0.0)"]
+        value = "activated"
+    if extra_reader:
+        vector += [f"extra = pl.tile.add({value}, received)", "pl.system.tfree_to_aic(received)"]
+        value = "extra"
+    if widening or extra_reader:
+        vector += [f'final = pl.tile.cast({value}, target_type=pl.BF16, mode="rint")']
+        value = "final"
+    vector += [f"pl.tile.store({value}, [0, 0], out)"]
+    if folded and not widening:
+        vector += [f"pl.system.tfree_to_aic({pop})"]
+    lines = ["@pl.program", "class Program:"]
+    for name, kind, level, body in [
+        ("main_aic", "AIC", "AIC", cube),
+        ("main_aiv", "AIV", "AIV", vector),
+        ("main", "Group", "CORE_GROUP", ["self.main_aic(a, b, out)", "self.main_aiv(a, b, out)"]),
+    ]:
+        lines += [
+            f"    @pl.function(type=pl.FunctionType.{kind}, level=pl.Level.{level}, role=pl.Role.SubWorker)",
+            f"    def {name}(self, {signature}):",
+        ]
+        lines += ["        " + statement for statement in body]
+    return pl.parse("\n".join(lines))
+
+
 def expand(program):
     return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(program)))
 
@@ -95,7 +221,10 @@ def by_name(function, name):
 @pytest.mark.parametrize("widening", [False, True])
 def test_bf16_transport_and_optional_relu(relu, widening):
     backend.set_backend_type(backend.BackendType.Ascend950)
-    after = expand(make_program(relu=relu, widening=widening))
+    Before = make_program(relu=relu, widening=widening)
+    Expected = make_expected(relu=relu, widening=widening)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
     cube = after.get_function("main_aic")
     vector = after.get_function("main_aiv")
     push = by_name(cube, "tile.tpush_to_aiv")[0]
@@ -116,7 +245,10 @@ def test_bf16_transport_and_optional_relu(relu, widening):
 @pytest.mark.parametrize("mode", ["round", "floor", "ceil", "trunc"])
 def test_other_rounding_modes_keep_fp32_transport(mode):
     backend.set_backend_type(backend.BackendType.Ascend950)
-    after = expand(make_program(mode=mode))
+    Before = make_program(mode=mode)
+    Expected = make_expected(mode=mode, folded=False)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
     vector = after.get_function("main_aiv")
     assert tile_dtype(by_name(vector, "tile.tpop_from_aic")[0]) == pl.FP32
     assert by_name(vector, "tile.maximums")
@@ -124,13 +256,19 @@ def test_other_rounding_modes_keep_fp32_transport(mode):
 
 def test_fp32_reader_keeps_fp32_transport():
     backend.set_backend_type(backend.BackendType.Ascend950)
-    after = expand(make_program(extra_reader=True))
+    Before = make_program(extra_reader=True)
+    Expected = make_expected(extra_reader=True, folded=False)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
     assert tile_dtype(by_name(after.get_function("main_aiv"), "tile.tpop_from_aic")[0]) == pl.FP32
 
 
 def test_bidirectional_pipe_keeps_separate_typed_rings():
     backend.set_backend_type(backend.BackendType.Ascend950)
-    after = expand(make_program(bidirectional=True, cols=256))
+    Before = make_program(bidirectional=True, cols=256)
+    Expected = make_expected(bidirectional=True, cols=256)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
     cube = after.get_function("main_aic")
     vector = after.get_function("main_aiv")
     for fn, init in [(cube, "system.aic_initialize_pipe"), (vector, "system.aiv_initialize_pipe")]:
@@ -149,7 +287,10 @@ def test_bidirectional_pipe_keeps_separate_typed_rings():
 def test_a2a3_keeps_existing_transport():
     backend.reset_for_testing()
     backend.set_backend_type(backend.BackendType.Ascend910B)
-    after = expand(make_program())
+    Before = make_program()
+    Expected = make_expected(folded=False, dual_aiv=True)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
     assert tile_dtype(by_name(after.get_function("main_aiv"), "tile.tpop_from_aic")[0]) == pl.FP32
 
 
@@ -191,10 +332,72 @@ def test_explicit_saturation_keeps_vector_cast(saturation_mode):
             rounded = pl.cast(dot, pl.BF16, mode="rint", saturation_mode=saturation_mode)
             pl.store(rounded, [0, 0], out)
 
+    Expected = make_expected(relu=False, widening=False, folded=False, saturation_mode=saturation_mode)
     after = expand(Program)
+    ir.assert_structural_equal(after, Expected)
     vector = after.get_function("main_aiv")
     assert tile_dtype(by_name(vector, "tile.tpop_from_aic")[0]) == pl.FP32
     assert by_name(vector, "tile.cast")
+
+
+def make_uniform_pipe_expected(second_mode, second_relu):
+    folded = second_mode == "rint"
+    size = 16384 if folded else 32768
+    flags = ", fixpipe_bf16=True, fixpipe_relu=False" if folded else ""
+    signature = (
+        "a: pl.Tensor[[64, 128], pl.BF16], b: pl.Tensor[[128, 128], pl.BF16], "
+        "out0: pl.Out[pl.Tensor[[64, 128], pl.BF16]], out1: pl.Out[pl.Tensor[[64, 128], pl.BF16]]"
+    )
+    cube = [
+        "buf: pl.Scalar[pl.INT32] = "
+        'pl.system.import_peer_buffer(name="main_c2v_slot_buffer", peer_func="main_aiv")',
+        f"pl.system.aic_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, "
+        f"slot_size={size}, slot_num=2{flags})",
+        "am = pl.tile.load(a, [0, 0], [64, 128], [64, 128], target_memory=pl.Mem.Mat)",
+        "bm = pl.tile.load(b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat)",
+        "left = pl.tile.move(am, target_memory=pl.Mem.Left)",
+        "right = pl.tile.move(bm, target_memory=pl.Mem.Right)",
+    ]
+    vector = [
+        f'buf: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="main_c2v_slot_buffer", '
+        f"size={size * 2}, base=-1)",
+        f"pl.system.aiv_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, "
+        f"slot_size={size}, slot_num=2{flags})",
+    ]
+    for i, mode in enumerate(["rint", second_mode]):
+        cube += [f"dot{i} = pl.tile.matmul(left, right)", f"pl.tile.tpush_to_aiv(dot{i}, split=0{flags})"]
+        pop = f"rounded{i}" if folded else f"recv{i}"
+        dtype = "BF16" if folded else "FP32"
+        vector += [f"{pop}: pl.Tile[[64, 128], pl.{dtype}, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)"]
+        if not folded:
+            vector += [
+                f"rounded{i} = pl.tile.cast({pop}, target_type=pl.BF16, mode={mode!r})",
+                f"pl.system.tfree_to_aic({pop})",
+            ]
+        value = f"pl.tile.maximums(rounded{i}, 0.0)" if i == 0 or second_relu else f"rounded{i}"
+        vector += [f"value{i} = {value}"]
+        if folded and i == 0:
+            vector += [f"pl.system.tfree_to_aic({pop})"]
+        vector += [f"pl.tile.store(value{i}, [0, 0], out{i})"]
+        if folded and i == 1:
+            vector += [f"pl.system.tfree_to_aic({pop})"]
+    lines = ["@pl.program", "class Program:"]
+    for name, kind, level, body in [
+        ("main_aic", "AIC", "AIC", cube),
+        ("main_aiv", "AIV", "AIV", vector),
+        (
+            "main",
+            "Group",
+            "CORE_GROUP",
+            ["self.main_aic(a, b, out0, out1)", "self.main_aiv(a, b, out0, out1)"],
+        ),
+    ]:
+        lines += [
+            f"    @pl.function(type=pl.FunctionType.{kind}, level=pl.Level.{level}, role=pl.Role.SubWorker)",
+            f"    def {name}(self, {signature}):",
+        ]
+        lines += ["        " + statement for statement in body]
+    return pl.parse("\n".join(lines))
 
 
 @pytest.mark.parametrize("second_mode,second_relu", [("floor", True), ("rint", False)])
@@ -220,7 +423,9 @@ class Program:
         {activation}
         pl.store(value1, [0, 0], out1)
 """)
+    Expected = make_uniform_pipe_expected(second_mode, second_relu)
     after = expand(before)
+    ir.assert_structural_equal(after, Expected)
     vector = after.get_function("main_aiv")
     pops = by_name(vector, "tile.tpop_from_aic")
     assert len(pops) == 2
@@ -257,10 +462,135 @@ def test_invalid_fixpipe_configuration_is_rejected(target, dir_mask, bf16, relu,
 def test_bf16_row_stride_alignment_keeps_fp32_transport():
     # Eight FP32 columns have a legal 32-byte C2V stride; narrowing that FIFO
     # to BF16 would produce a 16-byte stride, rejected by A5 TMovCcToUb.
-    after = expand(make_program(cols=8))
+    Before = make_program(cols=8)
+    Expected = make_expected(cols=8, folded=False)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
     vector = after.get_function("main_aiv")
     assert tile_dtype(by_name(vector, "tile.tpop_from_aic")[0]) == pl.FP32
     assert not by_name(vector, "system.aiv_initialize_pipe")[0].kwargs.get("fixpipe_bf16", False)
+
+
+def make_lifetime_case(kind, *, expected=False, slots: int | None = 2):
+    attrs = [f'pl.func_attr({{"slot_num": {slots}}})'] if slots is not None else []
+    slots = slots if slots is not None else 2
+    signature = (
+        "a: pl.Tensor[[16, 16], pl.BF16], b: pl.Tensor[[16, 16], pl.BF16], "
+        "flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[48, 16], pl.BF16]]"
+    )
+    folded = kind == "loop" or (kind == "capacity" and slots >= 3)
+    count = 3 if kind == "capacity" else 1
+    cube_loads = [
+        "am = pl.tile.load(a, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Mat)",
+        "left = pl.tile.move(am, target_memory=pl.Mem.Left)",
+        "bm = pl.tile.load(b, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Mat)",
+        "right = pl.tile.move(bm, target_memory=pl.Mem.Right)",
+    ]
+    body = [] if expected else list(cube_loads)
+    for i in range(count):
+        if expected:
+            dtype = "BF16" if folded else "FP32"
+            name = f"r{i}" if folded else f"v{i}"
+            body += [f"{name}: pl.Tile[[16, 16], pl.{dtype}, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)"]
+        else:
+            body += [
+                f"x{i} = pl.tile.matmul(left, right)",
+                f"v{i} = pl.tile.move(x{i}, target_memory=pl.Mem.Vec, "
+                f"blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box)",
+            ]
+        if kind == "branch":
+            body += [
+                "if flag:",
+                '    r0 = pl.tile.cast(v0, target_type=pl.BF16, mode="rint")',
+                "    pl.tile.store(r0, [0, 0], out)",
+            ]
+        elif not (expected and folded):
+            body += [f'r{i} = pl.tile.cast(v{i}, target_type=pl.BF16, mode="rint")']
+        if expected and not folded:
+            body += [f"pl.system.tfree_to_aic(v{i})"]
+    if kind == "loop":
+        body += ['wide = pl.tile.cast(r0, target_type=pl.FP32, mode="round")']
+        if expected:
+            body += ["pl.system.tfree_to_aic(r0)"]
+        body += [
+            "active = pl.tile.maximums(wide, 0.0)",
+            "for i, (carry,) in pl.range(1, init_values=(wide,)):",
+            "    result = pl.yield_(carry)",
+            'negative = pl.tile.cast(result, target_type=pl.BF16, mode="rint")',
+            'positive = pl.tile.cast(active, target_type=pl.BF16, mode="rint")',
+            "pl.tile.store(negative, [0, 0], out)",
+            "pl.tile.store(positive, [16, 0], out)",
+        ]
+    elif kind == "capacity":
+        for i in range(count):
+            body += [f"pl.tile.store(r{i}, [{i * 16}, 0], out)"]
+            if expected and folded:
+                body += [f"pl.system.tfree_to_aic(r{i})"]
+    lines = ["@pl.program", "class Program:"]
+    if not expected:
+        functions = [("main", "InCore", None, attrs + body)]
+    else:
+        size = 512 if folded else 1024
+        epilogue = ", fixpipe_bf16=True, fixpipe_relu=False" if folded else ""
+        cube = [
+            "buf: pl.Scalar[pl.INT32] = "
+            'pl.system.import_peer_buffer(name="main_c2v_slot_buffer", peer_func="main_aiv")',
+            f"pl.system.aic_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, "
+            f"slot_size={size}, slot_num={slots}{epilogue})",
+        ]
+        cube += cube_loads
+        for i in range(count):
+            cube += [f"x{i} = pl.tile.matmul(left, right)", f"pl.tile.tpush_to_aiv(x{i}, split=0{epilogue})"]
+        cube += ["for i in pl.range(1):", "    pass"] if kind == "loop" else []
+        vector = [
+            f'buf: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="main_c2v_slot_buffer", '
+            f"size={size * slots}, base=-1)",
+            f"pl.system.aiv_initialize_pipe(buf, pl.const(0, pl.INT32), dir_mask=1, "
+            f"slot_size={size}, slot_num={slots}{epilogue})",
+        ] + body
+        functions = [
+            ("main_aic", "AIC", "AIC", cube),
+            ("main_aiv", "AIV", "AIV", vector),
+            (
+                "main",
+                "Group",
+                "CORE_GROUP",
+                ["self.main_aic(a, b, flag, out)", "self.main_aiv(a, b, flag, out)"],
+            ),
+        ]
+    for name, function_kind, level, statements_ in functions:
+        placement = f", level=pl.Level.{level}, role=pl.Role.SubWorker" if level else ""
+        lines += [
+            f"    @pl.function(type=pl.FunctionType.{function_kind}{placement})",
+            f"    def {name}(self, {signature}):",
+        ]
+        function_attrs = attrs if expected else []
+        lines += ["        " + line for line in function_attrs + statements_]
+    return pl.parse("\n".join(lines))
+
+
+@pytest.mark.parametrize(
+    "kind,slots", [("loop", 2), ("branch", 2), ("capacity", None), ("capacity", 2), ("capacity", 3)]
+)
+def test_fold_preserves_initializer_branch_and_fifo_lifetimes(kind, slots):
+    Before = make_lifetime_case(kind, slots=slots)
+    Expected = make_lifetime_case(kind, expected=True, slots=slots)
+    after = expand(Before)
+    ir.assert_structural_equal(after, Expected)
+    # Execute the expanded group with shape/dtype checks. Negative inputs make
+    # an incorrectly hoisted ReLU observable in the loop initializer's output.
+    ns = {}
+    exec(torch_codegen(after, check_shapes=True), ns)  # noqa: S102
+    a = torch.full((16, 16), -2.0, dtype=torch.bfloat16)
+    b = torch.eye(16, dtype=torch.bfloat16)
+    output = torch.zeros((48, 16), dtype=torch.bfloat16)
+    ns["main"](a, b, True, output)
+    expected = torch.zeros_like(output)
+    if kind == "capacity":
+        expected[:] = a.repeat(3, 1)
+    else:
+        expected[:16] = a
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

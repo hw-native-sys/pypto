@@ -47,6 +47,7 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 struct ConsumerFifo {
   std::vector<const Var*> pops;
   size_t next_free = 0;
+  bool valid = true;
 };
 
 // Inspect the finalized FIFO schedule, not merely the number of live values:
@@ -54,15 +55,19 @@ struct ConsumerFifo {
 // scopes must preserve their incoming FIFO ownership; otherwise reject the
 // unsupported schedule rather than silently releasing an enclosing tile.
 // Checkpoint/rewind avoids copying live queues at each nesting level: O(N).
-int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
-                          ConsumerFifo& fifo) {
+int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side, ConsumerFifo& fifo,
+                          bool diagnose = true) {
   int peak = static_cast<int>(fifo.pops.size() - fifo.next_free);
   auto visit_body = [&](const StmtPtr& body) {
     const size_t entry_tail = fifo.pops.size();
     const size_t entry_head = fifo.next_free;
-    const int body_peak = RequiredConsumerDepth(FlattenBody(body), side, fifo);
+    const int body_peak = RequiredConsumerDepth(FlattenBody(body), side, fifo, diagnose);
     const bool unchanged = fifo.next_free == entry_head && fifo.pops.size() == entry_tail;
     const bool empty_on_both_sides = entry_head == entry_tail && fifo.next_free == fifo.pops.size();
+    if (!diagnose && (!fifo.valid || !(unchanged || empty_on_both_sides))) {
+      fifo.valid = false;
+      return;
+    }
     CHECK_SPAN(unchanged || empty_on_both_sides, body->span_)
         << "Automatic cross-core pipe does not support FIFO ownership escaping a control-flow body; "
            "place/consume and release each gathered tile within its scope.";
@@ -82,6 +87,11 @@ int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::Core
         peak = std::max(peak, static_cast<int>(fifo.pops.size() - fifo.next_free));
       } else if (call->op_->name_ == core_side_ops::TFreeOp(side)) {
         auto tile = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
+        if (!diagnose &&
+            !(tile && fifo.next_free < fifo.pops.size() && fifo.pops[fifo.next_free] == tile.get())) {
+          fifo.valid = false;
+          return peak;
+        }
         CHECK_SPAN(tile && fifo.next_free < fifo.pops.size() && fifo.pops[fifo.next_free] == tile.get(),
                    stmt->span_)
             << "Automatic cross-core pipe requires FIFO release order; a retained earlier tile "
@@ -104,6 +114,13 @@ int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::Core
 }
 
 }  // namespace
+
+bool FitsAutomaticPipeCapacity(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
+                               int capacity) {
+  ConsumerFifo fifo;
+  const int required = RequiredConsumerDepth(stmts, side, fifo, /*diagnose=*/false);
+  return fifo.valid && required <= capacity;
+}
 
 std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr) {
   auto value = transform_utils::EvalConstInt(expr);

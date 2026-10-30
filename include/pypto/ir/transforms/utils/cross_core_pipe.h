@@ -69,6 +69,10 @@ constexpr int kAutoBufferBase = -1;
 /// deliberately independent of PTOAS's own fallback below.
 constexpr int kDefaultAutoPipeSlotNum = 2;
 
+// Non-diagnostic preflight for optional rewrites that extend popped-tile
+// lifetimes. The unfused path still runs the normal FIFO validity diagnostics.
+bool FitsAutomaticPipeCapacity(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side, int capacity);
+
 /// Compile-time integer value of @p expr, or ``nullopt`` when it is not one
 /// **or is negative**. The non-negative half of the contract is what the name
 /// carries: callers here read tile shape dimensions and slot sizes, where a

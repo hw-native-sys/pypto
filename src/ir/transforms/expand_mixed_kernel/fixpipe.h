@@ -17,6 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -31,8 +32,10 @@ struct C2VFixpipeFold {
 
 // Plan a uniform epilogue for the automatic C2V pipe. The original IR stays
 // intact: only the boundary plan and the split bodies change.
-C2VFixpipeFold PlanC2VFixpipeFold(const FunctionPtr& function, const std::vector<StmtPtr>& statements,
-                                  std::map<const Stmt*, core_affinity::CVBoundaryMove>& boundaries);
+C2VFixpipeFold PlanC2VFixpipeFold(
+    const FunctionPtr& function, const std::vector<StmtPtr>& statements,
+    std::map<const Stmt*, core_affinity::CVBoundaryMove>& boundaries,
+    const std::unordered_map<const Stmt*, core_affinity::CoreAffinity>& affinities);
 
 std::vector<StmtPtr> RouteFixpipeV2C(const std::vector<StmtPtr>& statements);
 

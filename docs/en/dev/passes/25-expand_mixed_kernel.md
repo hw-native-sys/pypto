@@ -215,15 +215,40 @@ after every consumer-side `tpop` chain.
 Setup is derived from the split bodies:
 
 - `dir_mask`: `C2V=1`, `V2C=2`, bidirectional=`3`
-- `id`: omitted for automatic setup, so PTOAS uses the default frontend pipe id `0`
-- `slot_size`: max tile byte size across all directions (`shape * dtype bits / 8`)
+- `id`: normally omitted (default `0`); an A5 BF16 Fixpipe C2V pipe uses `0` and a separate V2C pipe uses `1`
+- `slot_size`: max tile byte size across the directions sharing that pipe (`shape * dtype bits / 8`); a folded C2V pipe uses the BF16 payload size
 - `slot_num`: ring depth — `2` by default, in every direction; always emitted explicitly; overridable per scope (see below)
 - `local_slot_num`: optional A2/A3 local consumer depth; omission uses `slot_num`
 - `buffer_size`: `slot_size * local_slot_num` when supplied, otherwise `slot_size * slot_num`
 - buffer names: `<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer base: `AUTO` on insertion, then resolved to an explicit address by `AllocateMemoryAddr`
 
-When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
+Except for the separate Fixpipe pipes below, when cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
+
+### A5 C2V Fixpipe epilogues
+
+On a backend supporting C2V Fixpipe epilogues, an automatic unsplit Acc FP32 →
+Vec conversion can fold a sole-use BF16 cast with `mode="rint"` and no explicit
+saturation request. The target must be a two-dimensional ND row-major tile
+with a positive static column count divisible by 16 (32-byte BF16 row stride).
+Every C2V boundary sharing the pipe must qualify. Explicit pipe setups, split
+regions and GM synchronization paths keep the existing conversion.
+
+A sole-use maximum with positive zero can also fold as ReLU, directly after
+narrowing or after a BF16 → FP32 widening, only when every C2V boundary matches.
+Other readers, including loop initializers, prevent ReLU folding. The pass
+keeps candidates inside retained Vector-only compounds unchanged and falls
+back if folded aliases exceed the configured FIFO capacity or invalidate FIFO
+ownership. It never increases `slot_num` to make the optimization fit.
+
+The push still consumes FP32 Acc, while the pop and C2V slots carry BF16.
+Generated push/setup calls carry `fixpipe_bf16=True` and the matching
+`fixpipe_relu` flag. Fixpipe pipes require `dir_mask=1`: when V2C also exists,
+C2V uses pipe `id=0` and V2C uses `id=1`, `dir_mask=2`, with direction-specific
+slot sizes. Both retain the configured transport depth. The optional ReLU
+runs before BF16 round-to-nearest-even conversion; the retained Vector widening
+preserves the rounded BF16 values. Torch reference generation applies the
+same epilogue before queueing the payload.
 
 ### MX scale V2C transport
 
