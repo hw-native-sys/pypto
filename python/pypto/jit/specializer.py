@@ -1185,7 +1185,11 @@ def _eager_tile_annotation_data(func: Any) -> _EagerTileAnnotations:
     while independent components retain factory values from eager evaluation.
     """
     annotations = inspect.get_annotations(func, eval_str=False)
-    if not any(_contains_tile_annotation(annotation) for annotation in annotations.values()):
+    # This data describes parameter contracts only; return annotations are
+    # handled separately. A Tile return alone must not trigger source parsing.
+    if not any(
+        name != "return" and _contains_tile_annotation(annotation) for name, annotation in annotations.items()
+    ):
         return _EagerTileAnnotations()
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
     definition = _find_func_def(tree, func.__name__)
@@ -1254,6 +1258,11 @@ def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
     records in both the memory and persistent keys.
     """
     fingerprints = dict(_eager_tile_annotation_data(func).fingerprints)
+    annotations = inspect.get_annotations(func, eval_str=False)
+    # Check current annotations on every request, rather than caching absence:
+    # callers may replace them or switch an eager annotation to a string.
+    if not any(name != "return" and isinstance(value, str) for name, value in annotations.items()):
+        return fingerprints
     namespace = dict(func_name_lookup(func))
     ann_globals: dict[str, Any] = {
         "pl": importlib.import_module("pypto.language"),
@@ -1263,7 +1272,7 @@ def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
     }
     param_names = set(inspect.signature(func).parameters)
     render_globals = {name: value for name, value in namespace.items() if name not in param_names}
-    for name, annotation in inspect.get_annotations(func, eval_str=False).items():
+    for name, annotation in annotations.items():
         if name == "return" or not isinstance(annotation, str):
             continue
         try:

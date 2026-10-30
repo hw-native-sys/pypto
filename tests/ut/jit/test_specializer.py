@@ -2290,6 +2290,50 @@ def _specialized_function(ctx: SpecializeContext, source: str | None = None) -> 
 class TestInlineTileParamAnnotations:
     """Explicit Tile parameters must survive JIT signature specialization."""
 
+    def test_return_only_tile_fingerprint_does_not_read_source(self, monkeypatch):
+        def helper(x: pl.Tensor) -> pl.Tile[[8, 64], pl.FP32]:
+            raise AssertionError("Fingerprint preparation must not execute the helper")
+
+        def unexpected_source(func):
+            raise AssertionError("A return-only Tile has no parameter template to parse")
+
+        monkeypatch.setattr("inspect.getsource", unexpected_source)
+        assert tile_annotation_fingerprints(helper) == {}
+
+    def test_fingerprint_rechecks_annotations_after_empty_result(self):
+        def helper(x):
+            return x
+
+        helper = _annotation_function(helper, {}, {"SHAPE": [8, 64]})
+        assert tile_annotation_fingerprints(helper) == {}
+        # An empty result is request-local, not a permanent absence cache.
+        helper.__annotations__["x"] = "pl.Tile[SHAPE, pl.FP32]"
+        before = tile_annotation_fingerprints(helper)
+        assert "x" in before
+        helper.__globals__["SHAPE"][0] = 16
+        assert tile_annotation_fingerprints(helper) != before
+        helper.__annotations__ = {"return": "pl.Tile[SHAPE, pl.FP32]"}
+        assert tile_annotation_fingerprints(helper) == {}
+
+    def test_eager_fingerprint_rechecks_mutable_tile_contract(self):
+        def helper(x: pl.Tile[[8, 64], pl.FP32]):
+            return x
+
+        before = tile_annotation_fingerprints(helper)
+        assert "x" in before
+        helper.__annotations__["x"].shape[0] = 16
+        assert tile_annotation_fingerprints(helper) != before
+
+    def test_no_postponed_annotations_skips_signature_inspection(self, monkeypatch):
+        def helper(x: pl.Tensor):
+            return x
+
+        def unexpected_signature(func):
+            raise AssertionError("No postponed parameter annotation needs formal-name lookup")
+
+        monkeypatch.setattr("inspect.signature", unexpected_signature)
+        assert tile_annotation_fingerprints(helper) == {}
+
     @pytest.mark.parametrize(
         "label",
         [

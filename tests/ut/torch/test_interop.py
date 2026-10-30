@@ -11,6 +11,7 @@
 
 import ctypes
 import gc
+import sys
 import weakref
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
@@ -350,15 +351,7 @@ def test_invalid_scalars_fail_before_framework_queries(npu, dtype, value, error)
 
 def test_optional_torch_npu_dependency_error(monkeypatch):
     """Missing framework support gives a targeted error only when it is needed."""
-    original = interop.importlib.import_module
-
-    def import_module(name):
-        """Hide torch_npu while preserving every unrelated module import."""
-        if name == "torch_npu":
-            raise ModuleNotFoundError("torch_npu missing")
-        return original(name)
-
-    monkeypatch.setattr(interop.importlib, "import_module", import_module)
+    monkeypatch.setitem(sys.modules, "torch_npu", None)
     with pytest.raises(RuntimeError, match="requires a compatible torch_npu"):
         interop.CallSignature([_param("n", None, DataType.INT32)]).describe_call((1,))
 
@@ -433,6 +426,14 @@ def test_native_nz_requires_declared_layout_and_target(npu, monkeypatch, layout,
     with pytest.raises(ValueError, match="base format"):
         interop.CallSignature([param], platform=platform).describe_call((_tensor((32, 64), torch.bfloat16),))
     query.assert_not_called()
+
+
+@pytest.mark.parametrize("tensor_format", [0, 2])
+def test_nz_signature_rejects_unconverted_base_storage(npu, tensor_format):
+    npu.get_npu_format.return_value = tensor_format
+    param = replace(_param(shape=(32, 64), dtype=DataType.BF16), layout="NZ")
+    with pytest.raises(ValueError, match="native NZ storage"):
+        interop.CallSignature([param], platform="a2a3").describe_call((_tensor((32, 64), torch.bfloat16),))
 
 
 def test_native_nz_preserves_layout_and_validates_physical_storage(npu, monkeypatch):

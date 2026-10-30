@@ -9,9 +9,11 @@
 
 """Public initialization preflight and optional-dependency isolation."""
 
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+import pypto
 import pytest
 from pypto.runtime import _execution_mode
 from pypto.runtime.kernel import session
@@ -155,14 +157,65 @@ assert context.get_process_kernel_state().state is context.KernelState.UNINITIAL
 
 
 def test_native_loader_reports_missing_and_incomplete_adapter(monkeypatch):
-    def missing(name):
-        raise ModuleNotFoundError(name=name)
-
-    monkeypatch.setattr(launch.importlib, "import_module", missing)
+    monkeypatch.setitem(sys.modules, "pypto._torch_npu", None)
     with pytest.raises(RuntimeError, match="PYPTO_BUILD_TORCH_NPU"):
         launch._load_native()
-    monkeypatch.setattr(launch.importlib, "import_module", lambda name: SimpleNamespace())
+    native = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "pypto._torch_npu", native)
+    monkeypatch.setattr(pypto, "_torch_npu", native, raising=False)
     with pytest.raises(NotImplementedError, match="check_call"):
+        launch._load_native()
+
+
+def test_native_loader_preserves_internal_dependency_error(monkeypatch):
+    original = launch.importlib.import_module
+    error = ModuleNotFoundError("Missing adapter dependency", name="adapter_dependency")
+
+    def import_module(name, *args, **kwargs):
+        if name == "pypto._torch_npu":
+            raise error
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(launch.importlib, "import_module", import_module)
+    with pytest.raises(ModuleNotFoundError, match="Missing adapter dependency") as caught:
+        launch._load_native()
+    assert caught.value is error
+
+
+def test_native_loader_uses_current_module_not_stale_package_attribute(monkeypatch):
+    monkeypatch.setattr(pypto, "_torch_npu", SimpleNamespace(), raising=False)
+    native = SimpleNamespace(
+        check_call=lambda: None,
+        borrow_context=lambda: None,
+        bind_context=lambda: None,
+        framework_alive=lambda: None,
+        retain_until_exit=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "pypto._torch_npu", native)
+    assert launch._load_native() is native
+
+
+@pytest.mark.parametrize(
+    "capability", ["check_call", "borrow_context", "bind_context", "framework_alive", "retain_until_exit"]
+)
+def test_native_loader_rechecks_capabilities_on_warm_calls(monkeypatch, capability):
+    native = SimpleNamespace(
+        **{
+            name: lambda: None
+            for name in (
+                "check_call",
+                "borrow_context",
+                "bind_context",
+                "framework_alive",
+                "retain_until_exit",
+            )
+        }
+    )
+    monkeypatch.setitem(sys.modules, "pypto._torch_npu", native)
+    monkeypatch.setattr(pypto, "_torch_npu", native, raising=False)
+    assert launch._load_native() is native
+    setattr(native, capability, None)
+    with pytest.raises(NotImplementedError, match=capability):
         launch._load_native()
 
 

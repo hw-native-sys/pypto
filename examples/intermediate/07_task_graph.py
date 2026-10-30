@@ -83,7 +83,8 @@ if __name__ == "__main__":
     for name, kernel in _MODES.items():
         scratch = torch.zeros(ROWS, COLS, dtype=torch.float32)
         out = torch.zeros(ROWS, COLS, dtype=torch.float32)
-        kernel(x, scratch, out, config=cfg)
+        compiled = kernel.compile(x, scratch, out, config=cfg)
+        compiled(x, scratch, out, config=cfg)
         assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
             f"{name}: max diff = {(out - expected).abs().max().item()}"
         )

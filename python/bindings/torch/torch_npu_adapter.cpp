@@ -9,17 +9,21 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// Optional lifecycle bridge. No Simpler SDK implementation or submission ABI is linked.
+// Optional Torch queue bridge. Simpler execution is reached only through Python Worker.submit.
 #include <acl/acl.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
 #include <torch/csrc/autograd/python_variable.h>
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 
 #include "pypto/core/error.h"
 
@@ -59,9 +63,69 @@ c10_npu::NPUStream CallStream(int64_t stream_id, int32_t device_id) {
   return stream;
 }
 
+// Official torch_npu wheels do not export g_used_aclop. Run one real ACL-op
+// through the exported OpCommand API so the framework enables its own GIL-safe
+// queue drains before receiving a Python callback. Do not replace this with a
+// local flag: stream.query(), empty_cache() and full-queue waits read the
+// framework's flag. This cold-start compatibility work is not repeated per call.
+// The caller must release the GIL before waiting on call_once or the stream.
+void PreparePythonCallbacks(const c10_npu::NPUStream& stream) {
+  static std::once_flag ready;
+  std::call_once(ready, [&stream] {
+    auto options = at::TensorOptions().device(stream.device()).dtype(at::kFloat);
+    auto input = at::zeros({1}, options);
+    auto output = at::empty({1}, options);
+    at_npu::native::OpCommand command;
+    command.Name("Identity").Input(input).Output(output).Run();
+    // Keep the bootstrap tensors alive until their operation completes, and
+    // propagate initialization errors before admitting the first callback.
+    stream.synchronize();
+  });
+}
+
+// PendingTicket owns callback and all Tensor/Storage references before this
+// function is called. The queue captures only the native stream and a borrowed
+// callback pointer; no Python reference is destroyed on an arbitrary queue thread.
+void Enqueue(nb::list objects, int64_t stream_id, int32_t device_id, uintptr_t context, nb::handle callback) {
+  auto stream = CallStream(stream_id, device_id);
+  Require(BorrowContext(device_id) == context, "Kernel borrowed context changed before enqueue");
+  std::unordered_set<const c10::StorageImpl*> recorded;
+  for (auto object : objects) {
+    Require(THPVariable_Check(object.ptr()), "Kernel arguments must be torch tensors");
+    const at::Tensor& tensor = THPVariable_Unpack(object.ptr());
+    Require(tensor.device().type() == c10::DeviceType::PrivateUse1 && tensor.device().index() == device_id &&
+                tensor.is_contiguous(),
+            "Kernel tensors must be contiguous on the current NPU device");
+    const auto& storage = tensor.storage();
+    if (recorded.insert(storage.unsafeGetStorageImpl()).second) {
+      c10_npu::NPUCachingAllocator::recordStream(storage.data_ptr(), stream);
+    }
+  }
+  PyObject* borrowed_callback = callback.ptr();
+  // Queue admission may block. Release the caller GIL so the queue can enter
+  // Python, both when callbacks execute inline and when taskQueue is enabled.
+  nb::gil_scoped_release release;
+  PreparePythonCallbacks(stream);
+  at_npu::native::OpCommand::RunOpApiV2("PyPTOKernel", [stream, borrowed_callback]() -> int {
+    std::string error;
+    {
+      nb::gil_scoped_acquire gil;
+      try {
+        nb::borrow<nb::object>(borrowed_callback)(reinterpret_cast<uintptr_t>(stream.stream(false)));
+      } catch (nb::python_error& exc) {
+        // The Python callback retains the original exception on PendingTicket.
+        // Destroy the Python-owning exception while the GIL is still held.
+        error = exc.what();
+      }
+    }
+    if (!error.empty()) throw pypto::RuntimeError(error);
+    return 0;
+  });
+}
 }  // namespace
 
 NB_MODULE(_torch_npu, m) {
+  m.def("enqueue", &Enqueue);
   m.def("framework_alive", &FrameworkAlive);
   m.def("borrow_context", &BorrowContext);
   m.def("bind_context", &BindContext);

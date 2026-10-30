@@ -52,7 +52,8 @@ def scale(
 
 
 out = torch.zeros(256, 128, dtype=torch.float32)
-scale(X, out, config=CFG)
+compiled = scale.compile(X, out, config=CFG)
+compiled(X, out, config=CFG)
 torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
 ```
 
@@ -127,7 +128,8 @@ def spmd_add(
 
 
 out = torch.zeros(256, 128, dtype=torch.float32)
-spmd_add(X, Y, out, config=CFG)
+compiled = spmd_add.compile(X, Y, out, config=CFG)
+compiled(X, Y, out, config=CFG)
 torch.testing.assert_close(out, X + Y, rtol=1e-4, atol=1e-4)
 ```
 

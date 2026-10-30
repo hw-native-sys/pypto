@@ -301,14 +301,21 @@ prologue，或专用的 `auto_scope=` / `external_source=` 关键字——因此
 
 ### 把编译与派发拆开
 
-`@pl.jit` kernel 通常把特化 + 编译 + 派发融合进一次 `kernel(*args)` 调用。`JITFunction.compile(*sample_args)` 在编译后停下并交还 `CompiledProgram` —— 用于自行驱动 `ChipWorker`、检查 `compiled.output_dir` 下的产物，或提前做 codegen 校验。
+`JITFunction.compile(*sample_args)` 按 PROGRAM 契约特化与编译，返回 `CompiledProgram`，
+不执行派发。它适用于主机 Tensor 或模拟器执行、自行驱动 `ChipWorker`、检查
+`compiled.output_dir` 下的产物，或提前做 codegen 校验。通过 `compiled(*args)` 派发返回的对象。
+
+直接 `kernel(*args)` 要求先调用 `pypto.torch.init()` 并传入真实 NPU Tensor，按 eager
+KERNEL 契约在当前 Torch stream 上特化、编译并提交。该路径使用独立缓存项，接受
+`CompileOptions` 而非 `RunConfig`。前置条件见 [kernel 模式](../../dev/runtime/kernel-mode.md)。
 
 ```python
 compiled = my_kernel.compile(sample_x, sample_w, sample_out)
 print("artifacts in:", compiled.output_dir)
 ```
 
-返回的对象就是 JIT 缓存持有的那个，因此之后用同一特化 key 再调用会拿到完全相同的实例。
+返回的对象由 PROGRAM 缓存持有，因此以相同特化和编译配置重复调用 `.compile()` 会得到
+完全相同的实例。它不会预热直接 eager 调用使用的独立 KERNEL 缓存。
 
 `lower(*sample_args)` 比它早停一站：只跑 Pass 并返回 Pass 后的 `ir.Program`，不做代码生成、不调 `ptoas`、不写产物、不写缓存。要读降级后的 IR 就用它；要检查代码生成本身就用 `compile()`。两者都接受 `config=RunConfig(...)`，但 `lower()` 会忽略其中的运行时与产物字段。编译选项见 [编译](../execution/00-compile.md)，运行时接口见 [运行](../execution/01-run.md)。
 

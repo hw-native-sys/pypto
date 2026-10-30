@@ -1,0 +1,187 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Kernel argument packing stays independent of the program tensor adapter."""
+
+import ctypes
+from dataclasses import replace
+
+import pytest
+from pypto.ir.param_info import ParamInfo
+from pypto.pypto_core import DataType
+from pypto.pypto_core.ir import ParamDirection
+from pypto.runtime.kernel.arguments import BorrowedArguments, SourcePool
+from pypto.torch.interop import CallSignature
+
+
+def _frame(tensors, scalars=()):
+    params = [
+        ParamInfo(f"x{i}", ParamDirection.In, tuple(tensor.shape), DataType.FP32)
+        for i, tensor in enumerate(tensors)
+    ] + [ParamInfo(f"s{i}", ParamDirection.In, None, dtype) for i, (dtype, _) in enumerate(scalars)]
+    return CallSignature(params, platform="a2a3").describe_call([*tensors, *(value for _, value in scalars)])
+
+
+def test_kernel_packer_never_enters_program_helpers(eager_env, monkeypatch):
+    from pypto.runtime import runner, tensor_arg  # noqa: PLC0415
+
+    env = eager_env
+    env.init()
+    session = env.state.bound_worker(env.state.require_config())
+    first, second = env.tensor(), env.tensor()
+    frame = _frame(
+        [first, second],
+        [(DataType.INT32, -7), (DataType.UINT64, 2**63 + 1), (DataType.FP32, 1.25), (DataType.BOOL, True)],
+    )
+    monkeypatch.setattr(tensor_arg, "make_tensor_arg", lambda *a, **kw: pytest.fail("program tensor helper"))
+    monkeypatch.setattr(runner, "_coerced_to_orch_args", lambda *a, **kw: pytest.fail("program packer"))
+    arguments = BorrowedArguments(frame, session.sources, session.device_location)
+    args = arguments.task_args
+    assert [type(v) for v in args.scalars] == [ctypes.c_int32, ctypes.c_uint64, ctypes.c_float, ctypes.c_bool]
+    assert [v.value for v in args.scalars] == [-7, 2**63 + 1, 1.25, True]
+    assert [view.buffer.address for view, _ in args.tensors] == [
+        first.untyped_storage().data_ptr(),
+        second.untyped_storage().data_ptr(),
+    ]
+    assert args.transfers == ["NONE", "NONE"]
+    arguments.release()
+    env.state.close()
+
+
+def test_external_storage_leases_span_multiple_calls(eager_env):
+    env = eager_env
+    env.init()
+    worker = env.workers[0]
+    pool, location = SourcePool(worker.release_buffer), worker.device_location
+    base = env.tensor((32, 16))
+    view = base[16:]
+    first = BorrowedArguments(_frame([base, view]), pool, location)
+    second = BorrowedArguments(_frame([view]), pool, location)
+    args = first.task_args
+    assert len(env.buffers) == 1
+    assert args.tensors[0][0].buffer is args.tensors[1][0].buffer
+    assert args.tensors[1][0].byte_offset == 16 * 16 * 4
+    first.release()
+    assert not env.buffers[0].closed
+    second.release()
+    assert env.buffers[0].closed
+    env.state.close()
+
+
+def test_handoff_requires_same_owner_and_deduplicates_views(eager_env):
+    env = eager_env
+    env.init()
+    session = env.state.bound_worker(env.state.require_config())
+    base = env.tensor((32, 16))
+    frame = _frame([base, base[16:]])
+    pool = session.sources
+    arguments = BorrowedArguments(frame, pool, session.device_location)
+    source = next(iter(pool._sources.values()))
+    release = pool.hold_existing(frame.tensors)
+    assert source.uses == 2  # One hold for the allocation, not each view.
+    release()
+    assert source.uses == 1
+    # Matching addresses alone cannot authorize an owner handoff.
+    release = pool.hold_existing((replace(frame.tensors[0], storage=object()),))
+    assert source.uses == 1
+    release()
+    arguments.release()
+    assert not pool._sources and env.buffers[0].closed
+    env.state.close()
+
+
+def test_argument_construction_keeps_pin_guard(eager_env, monkeypatch):
+    from pypto.runtime.kernel import arguments as module  # noqa: PLC0415
+
+    env = eager_env
+    env.init()
+    session = env.state.bound_worker(env.state.require_config())
+    frame = _frame([env.tensor()])
+    checks = []
+    monkeypatch.setattr(module, "check_runtime_pin", lambda: checks.append(True))
+    for _ in range(2):
+        args = BorrowedArguments(frame, session.sources, session.device_location)
+        args.release()
+    assert checks == [True, True]
+
+    # A changed pin policy must fail before constructing any new native args or
+    # sources, even when the interface was successfully checked at initialization.
+    def reject_pin():
+        raise ImportError("changed runtime pin policy")
+
+    monkeypatch.setattr(module, "check_runtime_pin", reject_pin)
+    monkeypatch.setattr(env.api, "TaskArgs", lambda: pytest.fail("packed before pin check"))
+    with pytest.raises(ImportError, match="changed runtime pin policy"):
+        BorrowedArguments(frame, session.sources, session.device_location)
+    assert len(env.buffers) == 2 and all(buffer.closed for buffer in env.buffers)
+    env.state.close()
+
+
+def test_session_location_wrap_checks_validity(eager_env, monkeypatch):
+    env = eager_env
+    locations = []
+
+    def location(worker):
+        assert "init" in env.events
+        locations.append(worker.location)
+        return worker.location
+
+    monkeypatch.setattr(env.api.Worker, "device_location", property(location))
+    env.init()
+    session = env.state.bound_worker(env.state.require_config())
+    frame = _frame([env.tensor()])
+    original_wrap = env.api.Buffer.wrap
+    live = True
+
+    def checked_wrap(**kwargs):
+        assert kwargs["location"] is locations[0]
+        if not live:
+            raise ValueError("source context expired")
+        return original_wrap(**kwargs)
+
+    # Every new wrap must reject an expired source context.
+    monkeypatch.setattr(env.api.Buffer, "wrap", checked_wrap)
+    for _ in range(2):
+        args = BorrowedArguments(frame, session.sources, session.device_location)
+        args.release()
+    live = False
+    with pytest.raises(ValueError, match="source context expired"):
+        BorrowedArguments(frame, session.sources, session.device_location)
+    assert len(locations) == 3 and not session.sources._sources
+    env.state.close()
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_partial_argument_construction_rolls_back_or_retains_storage(eager_env, monkeypatch, close_fails):
+    env = eager_env
+    env.init()
+    pool = SourcePool(env.workers[0].release_buffer)
+    tensor = env.tensor()
+
+    def fail_scalar(self, value):
+        if close_fails:
+            env.buffers[0].close_error = RuntimeError("source close failed")
+        raise ValueError("scalar packing failed")
+
+    monkeypatch.setattr(env.api.TaskArgs, "add_scalar", fail_scalar)
+    with pytest.raises((ValueError, RuntimeError), match="scalar packing failed|source close failed"):
+        BorrowedArguments(_frame([tensor], [(DataType.INT32, 1)]), pool, env.workers[0].device_location)
+    assert not env.runs and not env.queue
+    assert env.buffers[0].closed is not close_fails
+    if close_fails:
+        storage = tensor.untyped_storage()
+        assert pool._sources[(storage.data_ptr(), storage.nbytes())].storage is storage
+        env.buffers[0].close_error = None
+        pool.close()
+    assert not pool._sources
+    env.state.close()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

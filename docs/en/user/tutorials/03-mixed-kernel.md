@@ -62,7 +62,8 @@ a = torch.randn(128, 256, dtype=torch.float16)
 b = torch.randn(256, 128, dtype=torch.float16)
 bias = torch.randn(128, 128, dtype=torch.float32)
 out = torch.zeros(128, 128, dtype=torch.float32)
-mixed(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
+compiled = mixed.compile(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
+compiled(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 ```
 

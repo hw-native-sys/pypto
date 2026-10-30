@@ -246,24 +246,49 @@ class _ProcessKernelState:
             if self.state is not KernelState.CLOSING:
                 self.state = KernelState.FAILED
 
-    def submit(self, registration: KernelRegistration, prepare: Callable[[Any], Any]) -> None:
+    def submit(
+        self,
+        registration: KernelRegistration,
+        prepare: Callable[[Any], Any],
+        *,
+        hold_sources: Callable[[Any], Callable[[], None]] | None = None,
+    ) -> None:
         """Serialize admission and retain native tickets before any enqueue can fail."""
         self._check_pid()
         with self._submission_lock:
             self.require_registration(registration)
             self._worker.check_context()
+            release_hold = hold_sources(self._worker) if hold_sources is not None else None
             try:
-                self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
-            except BaseException as exc:
-                self._fail_admission(exc)
-                raise RuntimeError("Kernel Worker failed after an earlier asynchronous launch error") from exc
-            ticket = prepare(self._worker)
-            self._submissions.append(ticket)
-            try:
-                ticket.enqueue()
-            except BaseException as exc:
-                self._fail_admission(exc)
+                try:
+                    self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+                except BaseException as exc:
+                    self._fail_admission(exc)
+                    raise RuntimeError(
+                        "Kernel Worker failed after an earlier asynchronous launch error"
+                    ) from exc
+                ticket = prepare(self._worker)
+                self._submissions.append(ticket)
+                try:
+                    ticket.enqueue()
+                except BaseException as exc:
+                    self._fail_admission(exc)
+                    raise
+            except BaseException as error:
+                if release_hold is not None:
+                    try:
+                        release_hold()
+                    except BaseException as cleanup_error:
+                        self._fail_admission(cleanup_error)
+                        raise error from cleanup_error
                 raise
+            else:
+                if release_hold is not None:
+                    try:
+                        release_hold()
+                    except BaseException as exc:
+                        self._fail_admission(exc)
+                        raise
 
     def drain(self) -> None:
         """Wait for admitted eager work; failed tickets remain owned for diagnosis."""

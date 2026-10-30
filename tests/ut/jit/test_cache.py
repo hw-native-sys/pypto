@@ -21,7 +21,8 @@ from typing import Any
 import pypto.language as pl
 import pytest
 from pypto.ir import DistributedConfig, OptimizationStrategy
-from pypto.jit._source import capture_namespaces, function_namespace
+from pypto.jit import _arguments
+from pypto.jit._source import capture_namespaces, function_namespace, function_signature
 from pypto.jit.cache import (
     SCALAR_SEMANTICS,
     compute_source_hash,
@@ -37,6 +38,527 @@ from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.pypto_core import DataType, ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig
+
+
+def test_request_signature_shared_by_parameter_readers(monkeypatch):
+    def implementation(x: pl.Tensor, scale: pl.constexpr = 1):
+        return x
+
+    kernel = pl.jit(implementation)
+    original = inspect.signature
+    calls = []
+
+    def counted(func, *args, **kwargs):
+        if func is implementation:
+            calls.append(func)
+        return original(func, *args, **kwargs)
+
+    monkeypatch.setattr(inspect, "signature", counted)
+    with capture_namespaces():
+        assert kernel._param_names() == ["x", "scale"]
+        assert function_signature(implementation).bind(1).arguments == {"x": 1}
+        assert _arguments.param_layouts(implementation, "implementation") == {}
+        assert _arguments.param_dtypes(implementation) == {}
+        assert _arguments.constexpr_params(implementation) == ["scale"]
+    assert len(calls) == 1
+
+    # Do not make this a permanent function-identity cache: defaults and
+    # annotations can change while the Python function itself stays the same.
+    implementation.__defaults__ = (2,)
+    implementation.__annotations__["scale"] = int
+    with capture_namespaces():
+        bound = function_signature(implementation).bind(1)
+        bound.apply_defaults()
+        assert bound.arguments == {"x": 1, "scale": 2}
+        assert _arguments.constexpr_params(implementation) == []
+    assert len(calls) == 2
+
+
+def test_parameter_readers_observe_dynamic_annotation_classification(monkeypatch):
+    namespaces = []
+
+    class Annotation:
+        as_string = False
+        layout = pl.NZ
+
+        def __getattribute__(self, name):
+            # isinstance uses this dynamic protocol even though the annotation
+            # object identity and its containing Signature remain unchanged.
+            if name == "__class__":
+                return str if self.as_string else Annotation
+            return super().__getattribute__(name)
+
+    annotation = Annotation()
+
+    def implementation(x):
+        return x
+
+    implementation.__annotations__ = {"x": annotation}
+
+    def namespace(func):
+        namespaces.append(func)
+        return {}
+
+    monkeypatch.setattr(_arguments, "func_name_lookup", namespace)
+    with capture_namespaces():
+        assert _arguments.param_layouts(implementation, "implementation") == {"x": pl.NZ}
+    assert not namespaces
+    annotation.as_string = True
+    annotation.layout = pl.DN
+    with capture_namespaces():
+        assert _arguments.param_layouts(implementation, "implementation") == {"x": pl.DN}
+    assert namespaces == [implementation]
+
+
+def test_parameter_readers_preserve_annotation_evaluation_and_mutation():
+    def implementation(x):
+        return x
+
+    declarations = [
+        types.SimpleNamespace(layout=pl.NZ),
+        types.SimpleNamespace(dtype=pl.FP4E2M1X2),
+        pl.constexpr,
+    ]
+    calls = []
+
+    def declaration():
+        calls.append(len(calls))
+        return declarations[calls[-1] % len(declarations)]
+
+    func = types.FunctionType(
+        implementation.__code__, {**implementation.__globals__, "declaration": declaration}
+    )
+    func.__annotations__ = {"x": "declaration()"}
+    # Each declaration reader must still evaluate the string in its original
+    # order. Sharing raw Parameter structure must not memoize these results.
+    with capture_namespaces():
+        assert _arguments.param_layouts(func, "implementation") == {"x": pl.NZ}
+        assert _arguments.param_dtypes(func) == {"x": pl.FP4E2M1X2}
+        assert _arguments.constexpr_params(func) == ["x"]
+    assert calls == [0, 1, 2]
+
+    annotation = types.SimpleNamespace(layout=pl.NZ, dtype=pl.FP4E2M1X2)
+    func.__annotations__ = {"x": annotation}
+    with capture_namespaces():
+        assert _arguments.param_layouts(func, "implementation") == {"x": pl.NZ}
+        annotation.layout = pl.DN
+        annotation.dtype = pl.FP4E1M2X2
+        assert _arguments.param_layouts(func, "implementation") == {"x": pl.DN}
+        assert _arguments.param_dtypes(func) == {"x": pl.FP4E1M2X2}
+    # Replacing an annotation between requests still invalidates classification.
+    func.__annotations__["x"] = pl.constexpr
+    with capture_namespaces():
+        assert _arguments.constexpr_params(func) == ["x"]
+
+
+@pytest.mark.parametrize(
+    "parameters,args,kwargs",
+    [
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_ONLY)], (1,), {}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_ONLY)], (), {"x": 1}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD)], (1,), {}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD)], (), {"x": 1}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD)], (1,), {"x": 2}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD)], (), {}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD)], (1, 2), {}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=3)], (), {}),
+        ([inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=3)], (1,), {}),
+        ([inspect.Parameter("x", inspect.Parameter.KEYWORD_ONLY)], (1,), {}),
+        ([inspect.Parameter("x", inspect.Parameter.KEYWORD_ONLY)], (), {"x": 1}),
+        ([inspect.Parameter("x", inspect.Parameter.VAR_POSITIONAL)], (1, 2), {}),
+        ([inspect.Parameter("x", inspect.Parameter.VAR_KEYWORD)], (), {"value": 1}),
+        ([], (), {}),
+    ],
+)
+def test_jit_argument_binding_matches_signature(parameters, args, kwargs, monkeypatch):
+    def implementation(x):
+        return x
+
+    signature = inspect.Signature(parameters)
+    # __signature__ is an inspect-supported declaration override; the binder
+    # must honor it, including fallback diagnostics for incomplete/invalid calls.
+    monkeypatch.setattr(implementation, "__signature__", signature, raising=False)
+    kernel = pl.jit(implementation)
+    try:
+        expected = signature.bind(*args, **kwargs)
+        expected.apply_defaults()
+    except TypeError as error:
+        with capture_namespaces(), pytest.raises(TypeError) as raised:
+            kernel._bind_args(args, kwargs)
+        assert str(raised.value) == f"@pl.jit function 'implementation': {error}"
+    else:
+        with capture_namespaces():
+            assert kernel._bind_args(args, kwargs)[1] == expected.arguments
+
+
+def test_custom_signature_parameter_reads_keep_namespace_then_declaration_order(monkeypatch):
+    reads = []
+    declarations = [
+        types.SimpleNamespace(layout=pl.NZ),
+        types.SimpleNamespace(dtype=pl.FP4E2M1X2),
+        pl.constexpr,
+    ]
+
+    class CustomSignature(inspect.Signature):
+        @property
+        def parameters(self):
+            # Original readers inspect annotations to choose a namespace, then
+            # read parameters again for classification. Do not freeze the first
+            # mapping when only ordinary immutable signatures are optimized.
+            index = len(reads)
+            reads.append(index)
+            annotation = "unused_annotation" if index % 2 == 0 else declarations[index // 2]
+            return types.MappingProxyType(
+                {"x": inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotation)}
+            )
+
+    def implementation(x):
+        return x
+
+    monkeypatch.setattr(implementation, "__signature__", CustomSignature(), raising=False)
+    with capture_namespaces():
+        assert _arguments.param_layouts(implementation, "implementation") == {"x": pl.NZ}
+        assert _arguments.param_dtypes(implementation) == {"x": pl.FP4E2M1X2}
+        assert _arguments.constexpr_params(implementation) == ["x"]
+    assert reads == list(range(6))
+
+
+@pytest.mark.parametrize("reader", ["layout", "dtype", "constexpr", "names"])
+def test_declaration_reader_uses_one_dynamic_signature_without_request(reader):
+    first_annotation = types.SimpleNamespace(layout=pl.NZ, dtype=pl.FP4E2M1X2)
+    if reader == "constexpr":
+        first_annotation = pl.constexpr
+    reads = []
+
+    class Declaration:
+        __name__ = "implementation"
+        __doc__ = "Dynamic signature fixture"
+
+        def __call__(self, x):
+            return x
+
+        @property
+        def __signature__(self):
+            reads.append(len(reads))
+            name = "x" if len(reads) == 1 else "changed"
+            annotation = first_annotation if len(reads) == 1 else int
+            return inspect.Signature(
+                [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotation)]
+            )
+
+    declaration = Declaration()
+    # These helpers are also used independently of resolver capture_namespaces.
+    # A second signature read would silently classify a different declaration.
+    if reader == "layout":
+        assert _arguments.param_layouts(declaration, "implementation") == {"x": pl.NZ}
+    elif reader == "dtype":
+        assert _arguments.param_dtypes(declaration) == {"x": pl.FP4E2M1X2}
+    elif reader == "constexpr":
+        assert _arguments.constexpr_params(declaration) == ["x"]
+    else:
+        assert pl.jit(declaration)._param_names() == ["x"]
+    assert reads == [0]
+
+
+def test_binding_keeps_dynamic_signature_read_order():
+    reads = []
+
+    class CustomSignature(inspect.Signature):
+        def bind(self, *args, **kwargs):
+            raise TypeError(f"custom binder for {next(iter(self.parameters))}")
+
+    class Declaration:
+        __name__ = "implementation"
+        __doc__ = "Dynamic signature fixture"
+
+        def __call__(self, x):
+            return x
+
+        @property
+        def __signature__(self):
+            reads.append(len(reads))
+            return CustomSignature(
+                [inspect.Parameter(f"x{len(reads)}", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+            )
+
+    # Outside a request, the original binder reads once for names and once for
+    # binding. Its custom fallback must not introduce a third signature read.
+    with pytest.raises(TypeError, match="custom binder for x2"):
+        pl.jit(Declaration())._bind_args((7,), {})
+    assert reads == [0, 1]
+
+
+def test_custom_signature_bind_is_not_bypassed(monkeypatch):
+    calls = []
+
+    class CustomSignature(inspect.Signature):
+        def bind(self, *args, **kwargs):
+            calls.append(args)
+            return super().bind(*args, **kwargs)
+
+    def implementation(x):
+        return x
+
+    monkeypatch.setattr(
+        implementation, "__signature__", CustomSignature.from_callable(implementation), raising=False
+    )
+    with capture_namespaces():
+        assert pl.jit(implementation)._bind_args((7,), {})[1] == {"x": 7}
+    assert calls == [(7,)]
+
+
+def test_compiled_lookup_binds_current_runtime_default(monkeypatch):
+    torch = pytest.importorskip("torch")
+    default_scale: Any = 1
+
+    @pl.jit
+    def entry(x: pl.Tensor[[1], pl.FP32], scale: pl.Scalar[pl.INT32] = default_scale):
+        return x
+
+    # Exercise the real request/binding/cache path without requiring a device
+    # compiler. Runtime scalar defaults change arguments, not specialization.
+    artifact = object()
+    monkeypatch.setattr(entry, "_compile", lambda *args, **kwargs: artifact)
+    sample = torch.zeros(1)
+    first, args, _ = entry._resolve_compiled((sample,), {})
+    assert first is artifact and args[1] == 1
+    entry._func.__defaults__ = (2,)
+    second, args, _ = entry._resolve_compiled((sample,), {})
+    assert second is first and args[1] == 2
+
+
+def test_request_signature_released_after_failure():
+    def implementation(*, scale=1):
+        return scale
+
+    with pytest.raises(RuntimeError, match="request failed"), capture_namespaces():
+        assert function_signature(implementation).parameters["scale"].default == 1
+        raise RuntimeError("request failed")
+    implementation.__kwdefaults__ = {"scale": 2}
+    assert function_signature(implementation).parameters["scale"].default == 2
+    implementation.__kwdefaults__ = {"scale": 3}
+    assert function_signature(implementation).parameters["scale"].default == 3
+
+
+def test_request_signatures_are_isolated_between_threads():
+    def implementation(value=1):
+        return value
+
+    captured = Event()
+    changed = Event()
+
+    def first_request():
+        with capture_namespaces():
+            before = function_signature(implementation)
+            captured.set()
+            assert changed.wait(timeout=5)
+            assert function_signature(implementation) is before
+            return before.parameters["value"].default
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(first_request)
+        assert captured.wait(timeout=5)
+        try:
+            implementation.__defaults__ = (2,)
+            with capture_namespaces():
+                assert function_signature(implementation).parameters["value"].default == 2
+        finally:
+            changed.set()
+        assert first.result(timeout=5) == 1
+
+
+def test_request_cache_keeps_dynamic_arguments_and_specialization(monkeypatch):
+    torch = pytest.importorskip("torch")
+
+    @pl.jit
+    def entry(x: pl.Tensor, scale: pl.Scalar[pl.INT32], factor: pl.constexpr):
+        return x
+
+    built = []
+
+    def compile_artifact(*args, **kwargs):
+        artifact = object()
+        built.append(artifact)
+        return artifact
+
+    monkeypatch.setattr(entry, "_compile", compile_artifact)
+    sample = torch.zeros(1)
+    first, args, _ = entry._resolve_compiled((sample, 1, 2), {})
+    second, args, _ = entry._resolve_compiled((sample, 7, 2), {})
+    assert second is first and args[1] == 7
+    changed_shape, _, _ = entry._resolve_compiled((torch.zeros(2), 7, 2), {})
+    changed_dtype, _, _ = entry._resolve_compiled((torch.zeros(1, dtype=torch.int32), 7, 2), {})
+    changed_constexpr, _, _ = entry._resolve_compiled((sample, 7, 3), {})
+    assert len({id(first), id(changed_shape), id(changed_dtype), id(changed_constexpr)}) == 4
+    with pytest.raises(TypeError):
+        entry._resolve_compiled((sample,), {})
+    with pytest.raises(TypeError):
+        entry._resolve_compiled((sample, 7, 2), {"scale": 3})
+    assert len(built) == 4
+
+
+def test_structural_source_cache_observes_current_constants(monkeypatch):
+    from pypto.jit import _ast_analysis  # noqa: PLC0415
+
+    value: Any = object()
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        return pl.add(x, value)
+
+    names = _ast_analysis.constant_dependency_names(entry._func)
+    assert "value" in names
+    original = entry._get_source_hash()
+    value = 3
+    folded = entry._get_source_hash()
+    assert folded != original
+    # A cached list of names must not retain either the binding or its contents.
+    value = [1, 2]
+    before = entry._get_source_hash()
+    value.append(3)
+    assert entry._get_source_hash() != before
+    value = 3
+    assert entry._get_source_hash() == folded
+    monkeypatch.setattr(ast, "walk", lambda _: pytest.fail("rescanned immutable names"))
+    assert _ast_analysis.constant_dependency_names(entry._func) == names
+
+
+def test_structural_indices_follow_replaced_definition(monkeypatch):
+    from pypto.jit import _ast_analysis, _call_binding  # noqa: PLC0415
+
+    def implementation(x):
+        return x
+
+    first = ast.parse("def f(x):\n    return left(x, A)\n").body[0]
+    second = ast.parse("def f(x):\n    return right(x, B)\n").body[0]
+    monkeypatch.setattr(_ast_analysis, "get_func_def", lambda _: first)
+    assert "A" in _ast_analysis.constant_dependency_names(implementation)
+    calls = _call_binding._dep_call_nodes(implementation, "left")
+    assert len(calls) == 1
+    calls.clear()
+    assert len(_call_binding._dep_call_nodes(implementation, "left")) == 1
+    monkeypatch.setattr(_ast_analysis, "get_func_def", lambda _: second)
+    assert "B" in _ast_analysis.constant_dependency_names(implementation)
+    assert "A" not in _ast_analysis.constant_dependency_names(implementation)
+    assert not _call_binding._dep_call_nodes(implementation, "left")
+    assert len(_call_binding._dep_call_nodes(implementation, "right")) == 1
+
+
+def test_call_index_reuses_all_names_without_exposing_cached_lists(monkeypatch):
+    from pypto.jit import _ast_analysis, _call_binding  # noqa: PLC0415
+
+    def implementation(x):
+        return x
+
+    definition = ast.parse("def f(x):\n    left(x); right(x); left(x)\n").body[0]
+    monkeypatch.setattr(_ast_analysis, "get_func_def", lambda _: definition)
+    left = _call_binding._dep_call_nodes(implementation, "left")
+    assert len(left) == 2
+    assert left[0].col_offset < left[1].col_offset
+    left.clear()
+    monkeypatch.setattr(ast, "walk", lambda _: pytest.fail("rescanned indexed definition"))
+    assert len(_call_binding._dep_call_nodes(implementation, "left")) == 2
+    assert len(_call_binding._dep_call_nodes(implementation, "right")) == 1
+    assert _call_binding._dep_call_nodes(implementation, "missing") == []
+
+
+def test_source_record_cache_preserves_hash_encoding():
+    from pypto.jit.decorator import _dynamic_source_hash  # noqa: PLC0415
+
+    records = ((0, "module", "entry", "value", "[1, 2]"),)
+    assert _dynamic_source_hash("static", records) == compute_source_hash(
+        ["static", '[[0,"module","entry","value","[1, 2]"]]']
+    )
+
+
+def test_constexpr_plan_rechecks_declarations_and_helper(monkeypatch):
+    from pypto.jit import _call_binding  # noqa: PLC0415
+
+    @pl.jit.inline
+    def helper(x: pl.Tensor, n: pl.Scalar[pl.INT32]):
+        return x
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        return helper(x, 16)
+
+    calls = []
+    expand = _call_binding.expand_constexpr_variants
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return expand(*args, **kwargs)
+
+    monkeypatch.setattr(_call_binding, "expand_constexpr_variants", counted)
+
+    def resolve():
+        with capture_namespaces():
+            return entry._resolve_constexpr_bindings({})
+
+    first = resolve()
+    second = resolve()
+    assert len(calls) == 2
+    assert second.call_targets == first.call_targets
+    helper._func.__annotations__["n"] = pl.constexpr
+    plan = resolve()
+    assert len(calls) == 3
+    assert plan.binding[(id(helper._func), (("n", "16"),))] == {"n": "16"}
+    helper._func.__annotations__["n"] = pl.Scalar[pl.INT32]
+    assert resolve().call_targets == first.call_targets
+
+    @pl.jit.inline
+    def helper(x: pl.Tensor, n: pl.Scalar[pl.INT32]):
+        return pl.add(x, x)
+
+    rebound = resolve()
+    assert len(calls) == 5
+    assert helper in rebound.jit_func.values()
+    assert rebound.call_targets != first.call_targets
+
+
+def test_constexpr_plan_keeps_annotation_and_expression_order(monkeypatch):
+    from pypto.jit import _call_binding  # noqa: PLC0415
+
+    @pl.jit.inline
+    def leaf(x: pl.Tensor, n: pl.constexpr):
+        return x
+
+    @pl.jit.inline
+    def middle(x: pl.Tensor, n: pl.constexpr):
+        return leaf(x, n)
+
+    @pl.jit.inline
+    def wrapper(x: pl.Tensor):
+        return middle(x, 16)
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        return wrapper(x)
+
+    events = []
+    classify = _arguments.constexpr_params
+    fold = _call_binding.resolve_call_site_constexpr
+
+    def classified(func):
+        events.append(("annotation", func.__name__))
+        return classify(func)
+
+    def folded(dep_name, *args, **kwargs):
+        events.append(("expression", dep_name))
+        return fold(dep_name, *args, **kwargs)
+
+    monkeypatch.setattr(_arguments, "constexpr_params", classified)
+    monkeypatch.setattr(_call_binding, "resolve_call_site_constexpr", folded)
+    with capture_namespaces():
+        plan = entry._resolve_constexpr_bindings({})
+    assert events == [
+        ("annotation", "wrapper"),
+        ("annotation", "middle"),
+        ("expression", "middle"),
+        ("annotation", "leaf"),
+        ("expression", "leaf"),
+    ]
+    assert plan.binding[(id(leaf._func), (("n", "16"),))] == {"n": "16"}
 
 
 class TestComputeSourceHash:

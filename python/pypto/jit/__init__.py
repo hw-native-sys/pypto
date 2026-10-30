@@ -9,13 +9,15 @@
 
 """PyPTO JIT compilation module.
 
-Provides the ``@pl.jit`` decorator for writing kernel functions that are
-automatically specialized, compiled, and executed on first call based on the
-shapes and dtypes of their torch tensor arguments.
+Provides the ``@pl.jit`` decorator for specializing and compiling kernels from
+Torch tensor shapes and dtypes. Use explicit ``compile()`` and the returned
+program for host tensors or simulation. Direct eager calls require
+``pypto.torch.init()`` and real NPU tensors, and use a separate KERNEL cache.
 
 Example::
 
     import pypto.language as pl
+    import torch
 
     @pl.jit
     def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
@@ -31,11 +33,13 @@ Example::
     b = torch.randn(128, 128)
     c = torch.empty(128, 128)
 
-    # First call: specializes, compiles, and executes on NPU.
-    tile_add(a, b, c)  # c is modified in-place on device
+    # Explicit PROGRAM compilation accepts host tensor metadata.
+    compiled = tile_add.compile(a, b, c)
+    compiled(a, b, c)  # program execution copies the result back into c
 
-    # Subsequent calls with the same shape/dtype: served from cache.
-    tile_add(a, b, c)  # no recompilation
+    # Repeated explicit compilation reuses the PROGRAM cache.
+    assert tile_add.compile(a, b, c) is compiled
+    compiled(a, b, c)  # no recompilation
 """
 
 from pypto._cache_config import CacheConfig, CacheStats, cache_stats, configure_cache

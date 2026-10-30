@@ -20,6 +20,7 @@ from typing import Any
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
+from ._source import function_signature
 from .specializer import (
     DynDim,
     ShapeDim,
@@ -250,7 +251,7 @@ def param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
         Layout per parameter name; parameters without one are absent
     """
     try:
-        sig = inspect.signature(func)
+        sig = function_signature(func)
     except (TypeError, ValueError):
         return {}
     ann_ns = _annotation_namespace(func, sig)
@@ -273,7 +274,7 @@ def param_dtypes(func: Any) -> dict[str, DataType]:
     annotations (e.g. ``pl.INDEX``) must not drive a general dtype check here.
     """
     try:
-        sig = inspect.signature(func)
+        sig = function_signature(func)
     except (TypeError, ValueError):
         return {}
     ann_ns = _annotation_namespace(func, sig)
@@ -309,7 +310,7 @@ def constexpr_params(func: Any) -> list[str]:
     from pypto.language.typing.constexpr import ConstexprMarker  # noqa: PLC0415
 
     try:
-        sig = inspect.signature(func)
+        sig = function_signature(func)
     except (TypeError, ValueError):
         return []
     ann_ns = _annotation_namespace(func, sig)

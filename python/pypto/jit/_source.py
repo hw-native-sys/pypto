@@ -9,12 +9,15 @@
 
 """Per-call namespace snapshots shared by JIT key construction and specialization."""
 
+import inspect
+import sys
 from collections import ChainMap
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
+from types import CodeType, FunctionType
 from typing import Any, TypeVar, cast
 
 T = TypeVar("T")
@@ -65,6 +68,83 @@ def cache_in_snapshot(func: Callable[[T], R]) -> Callable[[T], R]:
         return cast(R, snapshot.values[key])
 
     return wrapped
+
+
+_EMPTY = inspect.Signature.empty
+_SIGNATURE_PROTOCOLS = ("__wrapped__", "__signature__", "__text_signature__", "__annotate__")
+_SIGNATURES: dict[FunctionType, tuple[CodeType, dict[str, Any], inspect.Signature]] = {}
+
+
+@cache_in_snapshot
+def function_signature(func: Any) -> inspect.Signature:
+    """Reuse plain positional signatures while observing current metadata bindings.
+
+    Keep the request snapshot for all readers. More complex signatures retain
+    inspect's original path. On a miss, validate the returned signature against
+    the captured bindings before publishing: before/after binding equality alone
+    would allow an intervening A-to-B-to-A mutation to poison future requests.
+    """
+    if type(func) is not FunctionType or sys.version_info >= (3, 14):
+        return inspect.signature(func)
+    attrs = func.__dict__
+    if any(name in attrs for name in _SIGNATURE_PROTOCOLS):
+        return inspect.signature(func)
+    code = func.__code__
+    defaults = func.__defaults__
+    kwdefaults = func.__kwdefaults__
+    annotations = func.__annotations__
+    if (
+        defaults is not None
+        or kwdefaults is not None
+        or code.co_kwonlyargcount
+        or code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS)
+        or type(annotations) is not dict
+    ):
+        return inspect.signature(func)
+    # A shallow copy gives this guard stable keys during concurrent dict edits.
+    annotations = annotations.copy()
+    # exact str keys avoid arbitrary hash/equality callbacks, including on hits.
+    if any(type(key) is not str for key in annotations):
+        return inspect.signature(func)
+    entry = _SIGNATURES.get(func)
+    if entry is not None:
+        old_code, saved, signature = entry
+        if (
+            code is old_code
+            and len(annotations) == len(saved)
+            and all(key in annotations and annotations[key] is value for key, value in saved.items())
+        ):
+            return signature
+    # Copy before inspect. Never associate its result with this copy blindly.
+    saved = annotations
+    signature = inspect.signature(func)
+    if type(signature) is not inspect.Signature:
+        return signature
+    parameters = tuple(signature.parameters.values())
+    if len(parameters) != code.co_argcount:
+        return signature
+    for i, parameter in enumerate(parameters):
+        kind = (
+            inspect.Parameter.POSITIONAL_ONLY
+            if i < code.co_posonlyargcount
+            else inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
+        if (
+            type(parameter) is not inspect.Parameter
+            or parameter.name != code.co_varnames[i]
+            or parameter.kind != kind
+            or parameter.default is not _EMPTY
+            or parameter.annotation is not saved.get(parameter.name, _EMPTY)
+        ):
+            return signature
+    if signature.return_annotation is not saved.get("return", _EMPTY):
+        return signature
+    # Publication validates actual contents, not just before/after tokens.
+    # Eviction only affects performance; replace one complete immutable record.
+    if len(_SIGNATURES) >= 512:
+        _SIGNATURES.clear()
+    _SIGNATURES[func] = (code, saved, signature)
+    return signature
 
 
 def function_namespace(func: Any) -> Mapping[str, Any]:

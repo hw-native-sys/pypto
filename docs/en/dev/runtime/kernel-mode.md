@@ -1,8 +1,9 @@
-# Kernel-mode integration foundations
+# Torch eager kernel execution
 
-The internal torch adapter describes borrowed NPU arguments for a future kernel
-executor. It does not add a public kernel execution entry point. Existing JIT,
-compiled-program and Worker calls share the parameter contract described below.
+Direct `@pl.jit` calls execute eager kernels on the current Torch NPU stream after
+`pypto.torch.init()`. Explicit `op.compile()` retains program semantics. Both
+paths share specialization, compilation, artifact storage and the parameter
+contract described below.
 
 ## Shared signature and L2 ABI
 
@@ -38,9 +39,10 @@ and build metadata without an execution wrapper. `_compile_artifact()` accepts
 one single-chip entry and always returns `CompiledArtifact`. Public `compile()`
 owns single-program, multi-entry and distributed wrapping, including the legacy
 fallback for programs without a canonical lowered signature.
-Public `compile()` explicitly requests PROGRAM; KERNEL
-is currently requested directly by internal compilation tests. Torch submission
-has not yet been connected to that path. There is no public `compile_kernel()`.
+Public `compile()` explicitly requests PROGRAM; direct JIT calls request KERNEL.
+The common cache key, manifest capabilities and restore consumer carry that
+contract, so neither execution path can reuse an incompatible artifact.
+There is no public `compile_kernel()`.
 The `contract` selects PROGRAM/KERNEL calling rules; `execution_mode` independently
 selects SIM/ONBOARD for the target platform. Kernel validation requires one chip
 and entry, caller-supplied Out/InOut buffers, and tensor returns
@@ -80,15 +82,15 @@ run output remains outside the immutable cache. Handles, streams, input tensors
 and per-run resources never enter the common product.
 
 Program submission builds address-free `TaskArgs`; Simpler materializes those
-into `ChipStorageTaskArgs`. The future Torch adapter will also submit `TaskArgs`
+into `ChipStorageTaskArgs`. The Torch adapter submits `TaskArgs`
 through the public Worker interface, using `Buffer.wrap` and Simpler Tensor views
-for borrowed device storage. Scalar values and types will use the public
+for borrowed device storage. Scalar values and types use the public
 `TaskArgs` typed scalar interface, leaving ABI encoding to Simpler.
 `ScalarArgument` retains the validated value and dtype without encoding it.
 
 Runtime capability checks run at explicit Torch kernel initialization. The lifecycle
-layer supports Worker initialization and callable registration; JIT submission
-and the public registration/DFX APIs remain separate migration steps.
+layer supports Worker initialization, callable registration and eager submission.
+Public operator registration and DFX windows remain separate migration steps.
 
 ## Process initialization and lifecycle
 
@@ -100,6 +102,7 @@ The internal `runtime/kernel` package groups code by ownership:
 - `owner.py`: the lifecycle owner thread.
 - `callable.py`: shared artifact identity and context-bound registration records.
 - `pending.py`: callback result publication and per-call resource retention.
+- `arguments.py`: session-owned storage registrations and per-call TaskArgs leases.
 
 The session is a lifecycle adapter, not a separate execution engine. Simpler owns
 callable registration and execution; the process manager owns admission and caches.
@@ -158,7 +161,7 @@ Concurrent preparations share success or failure. Busy
 registry and capacity errors propagate without drains, waits or eviction.
 
 Pending tickets retain the registration and per-call owners before enqueue. A
-future callback adapter publishes its `RunHandle` to the ticket without taking
+callback adapter publishes its `RunHandle` to the ticket without taking
 manager locks. Ordinary admission only polls completed tickets. An unpublished
 callback is incomplete; a true `RunHandle.done` still requires `wait()` to retire
 native resources before borrowed sources are released. Explicit drain/shutdown
@@ -166,10 +169,11 @@ may synchronize the framework queue, then retire runs and release sources before
 closing the Worker. A failed callback, retirement or source release retains the
 ticket and Worker; cleanup does not assume device quiescence.
 
-The optional `_torch_npu` extension supplies only lifecycle/context and NZ
-storage queries in this step. Build it with `-DPYPTO_BUILD_TORCH_NPU=ON` using
-matching Torch, torch_npu and CANN headers/libraries. The configure-time C++11
-ABI check also runs when `PYTHONOPTIMIZE` is enabled. It links no Simpler C++
+The optional `_torch_npu` extension supplies lifecycle/context and NZ storage
+queries, allocator protection and the Torch queue bridge. Build it with
+`-DPYPTO_BUILD_TORCH_NPU=ON` using matching Torch, torch_npu and CANN
+headers/libraries. The configure-time C++11 ABI check also runs when
+`PYTHONOPTIMIZE` is enabled. It links no Simpler C++
 implementation or separate kernel ABI. The default core build does not require
 these optional dependencies. Shutdown wraps the verified framework teardown
 hooks (torch_npu `2.6.0.post2` and `2.10.0.post2`, allowing build suffixes), closing
@@ -178,11 +182,78 @@ through process exit rather than running destructors after context destruction.
 In a forked child, shutdown anchors the inherited state before framework teardown
 without acquiring inherited locks or closing the parent's Worker.
 
-Direct `@pl.jit` calls still enter program execution. Consequently, invoking
-one after `pypto.torch.init()` is rejected by the process mode gate in this
-intermediate migration stage. Initialization is independently testable; the
-JIT-to-callback-to-`Worker.submit` connection belongs to the next step. No
-public `compile_kernel`, shutdown, registration or DFX function is added here.
+## Direct JIT calls
+
+```python
+import pypto.torch
+from pypto.runtime import CompileOptions, ExecutionMode
+
+pypto.torch.init()
+# x and out are real NPU tensors; every Out/InOut buffer is supplied.
+result = op(x, out, config=CompileOptions(execution_mode=ExecutionMode.ONBOARD))
+```
+
+Initialization must succeed before argument binding or compilation. Omitting
+`config` or using the default platform in `CompileOptions` selects the initialized
+target. A non-default different platform is rejected, as are `RunConfig` and
+distributed configurations. Without an active `PassContext`, compilation uses
+the runtime bound by `init`, including HBG. An active context must select the
+same runtime. The resolved platform and runtime also identify cached artifacts.
+`op.compile(..., config=run_config)` and `op.warmup(...)` keep program semantics
+and require no kernel initialization. Program and kernel execution remain
+mutually exclusive within one process.
+
+The first eager call specializes, validates the logical signature, runs shared
+passes/codegen, loads/assembles the artifact and registers its callable. Repeated
+calls reuse compatible artifacts and handles; runtime scalar changes do not
+recompile. Returns are aliases of caller tensors, including repeated aliases.
+No business output is allocated. Capture/replay raises `NotImplementedError`
+before compilation or registration, even after eager warmup.
+
+Kernel calls use `runtime.kernel.arguments.BorrowedArguments` to build TaskArgs
+from validated NPU call frames and own the per-call storage leases. They do not
+enter the program `runtime.tensor_arg.make_tensor_arg` helper. The pending ticket
+retains BorrowedArguments until retirement, then calls its `release()` method.
+Storage is registered by its base address and full capacity with
+`Buffer.wrap(..., location=worker.device_location)`. Tensor views preserve byte
+offsets and strides; native NZ uses validated physical blocked dimensions.
+Same-storage views and overlapping pending calls share a session source. Each
+call holds a lease until retirement; the final lease calls `Worker.release_buffer()`
+to close the source and evict its cached imports. Failed release retains the lease for retry. Tensor
+arguments use INPUT/OUTPUT_EXISTING/INOUT and explicit NONE transfers. Typed
+ctypes scalars use public `TaskArgs.add_scalar`; no implicit H2D occurs.
+
+A Python pending ticket owns BorrowedArguments, the Torch stream, callback,
+configuration, Worker and callable before `RunOpApiV2` can enqueue.
+The native `enqueue` function validates the context, records allocator streams
+and captures the native stream; it creates no native ticket or Tensor owners.
+Official torch_npu wheels do not export the queue-drain flag. Before the first
+queue admission, a process-wide `std::call_once` runs an ACL `Identity` through
+the exported `OpCommand` API so torch_npu enables GIL-safe queue drains itself.
+It synchronizes that stream to retain bootstrap tensors until completion and
+propagates initialization failures; a failed initialization can be retried.
+This adds allocation, an operator and synchronization to cold initialization,
+not to successful warm calls. The caller GIL is released before initialization
+and queue admission. Its callback acquires the GIL
+and calls public
+Python `Worker.submit(..., caller_stream=...)`, then publishes the RunHandle.
+It never calls synchronous `Worker.run`, private native submit or a slot API.
+Native queue state contains no owning Python references; pending owners and
+callback closures are released under the GIL only after successful retirement.
+
+Outer JIT return, callback submission and device completion are distinct. After successful bootstrap, normal
+enqueue and incomplete-ticket polling never drain, synchronize or wait for a
+callback/run. A completed run still requires `wait()` retirement before releasing
+sources. Explicit shutdown may synchronize the retained Torch stream and wait for runs. Simpler
+submit itself can wait for capacity or a predecessor. Submission/retirement
+failures preserve owners when completion is unknown.
+
+Unit tests use real initialization state transitions, JIT passes/codegen, shared
+artifact publication/restoration and binary validation, with external compiler
+output and native/framework boundaries mocked. They do not validate optional
+adapter compilation, real taskQueue/GIL/lock behavior, allocator safety or NPU
+numerical execution. No system tests or device tests establish those properties
+in this migration step.
 
 ## Call metadata and ownership
 
@@ -203,7 +274,7 @@ Each call produces a new immutable `CallFrame`:
 | `return_tensors` | The exact caller objects selected by validated return aliases. |
 
 Tensor and scalar ordering does not define a native ABI layout. Native argument
-encoding will consume these values together with validated artifact metadata.
+encoding consumes these values together with validated artifact metadata.
 Addresses, scalar values and streams are per-call state, not compilation keys or
 persistent metadata.
 
@@ -218,6 +289,8 @@ borrowed storage while a frame is in use.
 
 - Accept real NPU torch tensors on one device. CPU, Meta/Fake tensors and
   Worker-owned objects are rejected; the adapter never selects program mode.
+- Reject BOOL tensors before compilation or source registration: the pinned runtime
+  has no borrowed BOOL tensor mapping. BOOL scalar arguments remain supported.
 - Check dtype and rank against `ParamInfo`. Static carrier dimensions must
   match; `-1` dimensions use the current extent. Packed FP4 uses the carrier
   shape already provided by `ParamInfo`, without expanding it again.
@@ -227,13 +300,17 @@ borrowed storage while a frame is in use.
   explicitly, without copying or format conversion.
 - An explicit `layout="NZ"` and `platform="a2a3"` permit native format 29 for
   read-only FP16/BF16/INT8 inputs. Physical dimensions must match the complete,
-  unpadded NZ matrix, with zero storage offset. The physical descriptor query is
+  unpadded NZ matrix, with zero storage offset. A declared NZ parameter rejects
+  base-format storage; the adapter never converts its layout. The physical descriptor query is
   lazy and requires the optional native adapter; tests replace only that query.
   Signature validation compares the logical Torch shape directly with logical
   `ParamInfo`; the physical query separately checks blocking and byte capacity.
-- Empty views access no elements, so their nonnegative storage offsets may
-  exceed storage capacity. The accessed-range upper bound applies only to
-  nonempty views.
+- `CallSignature` accepts empty views: they access no elements, so their
+  nonnegative storage offsets may exceed storage capacity. The accessed-range
+  upper bound applies only to nonempty views. Eager launch has a narrower
+  runtime descriptor contract: rank 1..5 and positive u32 extents/strides.
+  It rejects zero-sized tensors before compilation or registration, even when
+  frame validation succeeds; empty-view interop tests cover frame validation only.
 - Accept exact byte-span aliases, including different dtype/shape views, and
   disjoint views of shared storage.
   Overlapping read-only views are allowed. Partially overlapping views involving
@@ -309,17 +386,18 @@ execution, autograd and the final compiler integration remain later work.
 
 ## Optional dependencies and scope
 
-`import pypto.torch` exports `init`; it does not expose kernel submission. Importing it or its `interop`
+`import pypto.torch` exports `init`; initialized direct JIT calls submit eager kernels. Importing it or its `interop`
 or `registration` module does not request torch_npu, Simpler or a native launch
 extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
-This foundation covers shared compilation, metadata and cache loading, Python
-call-frame ownership, internal schema/Fake helpers, and process initialization.
-It does not claim kernel launch, taskQueue ordering, allocator safety, eager
-numerical execution or ACLGraph support. Those need the native adapter and
-runtime integration before a public entry-point switch.
+Shared compilation, metadata/cache loading, call-frame ownership, process
+initialization and eager submission are implemented. Direct JIT calls use the
+Torch queue bridge; explicit `compile()` retains program execution. Unit tests
+cover queue ordering and resource lifetime with mocked execution boundaries.
+Native adapter builds, real-device numerical correctness and allocator safety
+require device validation; ACLGraph capture/replay remains unsupported.
 
 ## Verification
 
@@ -346,8 +424,10 @@ imports with optional runtime dependencies forbidden.
 
 `tests/st/runtime/kernel/test_torch_interop.py` checks actual NPU tensors,
 non-default streams, offset views and noncontiguous-input rejection. It skips
-when a real NPU is unavailable or the selected platform is a simulator. These
-are metadata tests, not PyPTO kernel-execution tests.
+when a real NPU is unavailable or the selected platform is a simulator. It also
+checks GIL-held queue drains (`stream.query()` and `empty_cache()`) in fresh
+subprocesses with the native adapter. Those regressions use Python callbacks
+without launching a PyPTO device kernel.
 
 `tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
 Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and

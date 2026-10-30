@@ -192,8 +192,18 @@ def constant_dependency_names(func: Any) -> tuple[str, ...]:
     names resolve in the defining namespace independently of body locals.
     Decorators and defaults are already evaluated when the function is defined.
     """
-    definition = get_func_def(func)
-    local_names = body_local_names(func)
+    return _constant_names_in_definition(get_func_def(func))
+
+
+@functools.lru_cache(maxsize=512)
+def _constant_names_in_definition(definition: ast.FunctionDef) -> tuple[str, ...]:
+    """Cache parsed structure; resolve globals and closure values per request."""
+    local_names = {arg.arg for arg in ast.walk(definition.args) if isinstance(arg, ast.arg)}
+    local_names.update(
+        node.id
+        for node in ast.walk(definition)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    )
     names = {
         node.id
         for statement in definition.body

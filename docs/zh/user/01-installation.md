@@ -259,8 +259,9 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 里逐页讲解。
 
 **这些例子多数会派发到硬件，而不只是编译。** `beginner/01_hello_world.py`、
-`intermediate/02_softmax.py`、`models/01_ffn.py` 最后都以 `config=RunConfig()` 调用各自的
-kernel，也就是经 ptoas 汇编后真正运行 —— 因此它们需要运行时和一块设备或模拟器平台，仅有上面的
+`intermediate/02_softmax.py`、`models/01_ffn.py` 都先显式编译 kernel，
+再以 `config=RunConfig()` 调用返回的 program，也就是经 ptoas 汇编后真正运行 ——
+因此它们需要运行时和一块设备或模拟器平台，仅有上面的
 `pip install` 是不够的：
 
 ```bash

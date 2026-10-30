@@ -80,7 +80,8 @@ def many_small_tasks(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     return c
 
 c = fresh()
-many_small_tasks(A, B, c, config=CFG)
+compiled = many_small_tasks.compile(A, B, c, config=CFG)
+compiled(A, B, c, config=CFG)
 torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
@@ -99,7 +100,8 @@ def larger_tiles(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     return c
 
 c = fresh()
-larger_tiles(A, B, c, config=CFG)
+compiled = larger_tiles.compile(A, B, c, config=CFG)
+compiled(A, B, c, config=CFG)
 torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
@@ -137,7 +139,8 @@ def loop_inside(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     return c
 
 c = fresh()
-loop_inside(A, B, c, config=CFG)
+compiled = loop_inside.compile(A, B, c, config=CFG)
+compiled(A, B, c, config=CFG)
 torch.testing.assert_close(c, A + B, rtol=1e-4, atol=1e-4)
 ```
 
@@ -182,11 +185,13 @@ def merged_chain(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 expected = torch.exp(A[:LARGE] + B[:LARGE])
 scratch, out = torch.zeros(LARGE, COLS), torch.zeros(LARGE, COLS)
-two_tasks_via_gm(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
+compiled = two_tasks_via_gm.compile(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
+compiled(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
 torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 
 out = torch.zeros(LARGE, COLS)
-merged_chain(A[:LARGE], B[:LARGE], out, config=CFG)
+compiled = merged_chain.compile(A[:LARGE], B[:LARGE], out, config=CFG)
+compiled(A[:LARGE], B[:LARGE], out, config=CFG)
 torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 ```
 

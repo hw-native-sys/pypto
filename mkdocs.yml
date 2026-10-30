@@ -287,6 +287,7 @@ nav:
       - en/dev/07-ir-lower-trace.md
       - en/dev/08-entry-points.md
       - en/dev/runtime/kernel-mode.md
+      - en/dev/runtime/hbg-eager-benchmark.md
       - en/dev/distributed_ops.md
       - en/dev/ptoas-op-status.md
       - en/dev/fp4.md
