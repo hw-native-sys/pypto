@@ -11,6 +11,34 @@
 
 from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
 
+class VFHelper:
+    """No-Bridge VF helper and Tile adapter with ordered, whole-Tile effects."""
+
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def adapter_symbol(self) -> str: ...
+    @property
+    def source(self) -> str: ...
+    @property
+    def parameter_types(self) -> list[str]: ...
+    @property
+    def caller_parameter_types(self) -> list[str]: ...
+    @property
+    def parameter_effects(self) -> list[str]: ...
+    @property
+    def parameter_indices(self) -> list[int]: ...
+    @property
+    def capture_byte_offsets(self) -> list[int]: ...
+
+class PTOCodegenBundle:
+    """Execution artifacts owned by one PTO codegen invocation."""
+
+    @property
+    def caller_source(self) -> str: ...
+    @property
+    def helpers(self) -> list[VFHelper]: ...
+
 class PTOCodegen:
     """Code generator that transforms PyPTO IR to PTO assembly (.pto format).
 
@@ -23,6 +51,11 @@ class PTOCodegen:
 
     def __init__(self) -> None:
         """Create a new PTO code generator."""
+
+    def generate_bundle(
+        self, program: Program, emit_tile_addr: bool = True, emit_source_loc: bool = True
+    ) -> PTOCodegenBundle:
+        """Generate an EmitC caller and separate typed-VMI helpers for A5/AIV."""
 
     def generate(self, program: Program, emit_tile_addr: bool = True, emit_source_loc: bool = True) -> str:
         """Generate PTO assembly from PyPTO IR Program.

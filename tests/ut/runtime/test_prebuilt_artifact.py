@@ -39,6 +39,7 @@ from pypto.runtime._artifact_sources import (
     UnsupportedArtifactInput,
     package_generated_sources,
     read_kernel_config,
+    validate_generated_sources,
 )
 from pypto.runtime.distributed_runner import (
     _assemble_chip_callables,
@@ -1562,6 +1563,29 @@ def test_kernel_artifact_uses_existing_cache_promotion_and_loading(tmp_path, fak
     restored.load()
     assert restored._chip_callable is not None
     assert restored.execution_capabilities == capabilities
+
+
+def test_vpto_sources_survive_artifact_relocation(tmp_path, fake_runtime):
+    root = tmp_path / "generated"
+    _generated(root, BuildKind.SINGLE_CHIP)
+    helper = tmp_path / "helper.pto"
+    helper.write_text("module {}")
+    with (root / "kernel_config.py").open("a") as stream:
+        stream.write(f"\nKERNELS[0]['vpto_sources'] = [{str(helper)!r}]\n")
+    package_generated_sources(root, BuildKind.SINGLE_CHIP)
+    relocated = tmp_path / "relocated"
+    shutil.copytree(root, relocated)
+    shutil.rmtree(root)
+    helper.unlink()
+    validate_generated_sources(relocated, BuildKind.SINGLE_CHIP)
+    config = read_kernel_config(relocated / "kernel_config.py")
+    sources = config.KERNELS[0]["vpto_sources"]
+    assert len(sources) == 1
+    assert Path(sources[0]).read_text() == "module {}"
+    assert Path(sources[0]).is_relative_to(relocated)
+    assert json.loads((relocated / "kernel_config.json").read_text())["kernels"][0]["vpto_sources"] == [
+        "vpto/0/0/helper.pto"
+    ]
 
 
 if __name__ == "__main__":

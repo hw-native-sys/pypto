@@ -10,6 +10,7 @@
 """Build ownership, command compatibility and failure cleanup regressions."""
 
 import importlib
+import struct
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -238,6 +239,137 @@ def test_invalid_compiler_timeout_fails_before_sdk_setup(compiler_module, monkey
     with pytest.raises(ValueError, match="PYPTO_COMPILER_TIMEOUT must be positive finite seconds"):
         compiler_module.KernelCompiler()
     sdk.assert_not_called()
+
+
+def _vpto_elf(*, entry=0x1000, extra_flags=0, extra_kind=1, extra_size=0):
+    """Construct a minimal linked image to exercise loader constraints without CANN."""
+    data = bytearray(384)
+    data[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<HH", data, 16, 2, 0x1029)
+    struct.pack_into("<Q", data, 24, entry)
+    struct.pack_into("<Q", data, 40, 128)
+    struct.pack_into("<HHH", data, 58, 64, 4, 1)
+    names = b"\0.shstrtab\0.text\0.extra\0"
+    data[64 : 64 + len(names)] = names
+    struct.pack_into("<IIQQQQIIQQ", data, 192, 1, 3, 0, 0, 64, len(names), 0, 0, 1, 0)
+    struct.pack_into("<IIQQQQIIQQ", data, 256, 11, 1, 6, 0x1000, 96, 4, 0, 0, 4, 0)
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        320,
+        17,
+        extra_kind,
+        extra_flags,
+        0x2000,
+        100,
+        extra_size,
+        0,
+        0,
+        4,
+        24 if extra_kind == 2 else 0,
+    )
+    if extra_kind == 2:
+        struct.pack_into("<IBBH", data, 100, 1, 0, 0, 0)
+    return bytes(data)
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"entry": 0x1010}, "start of .text"),
+        ({"extra_flags": 2, "extra_size": 4}, "allocated section"),
+        ({"extra_kind": 4, "extra_size": 4}, "relocations"),
+        ({"extra_kind": 2, "extra_size": 24}, "unresolved symbol"),
+    ],
+)
+def test_vpto_rejects_images_that_text_loader_cannot_load(kwargs, error):
+    from pypto.runtime._vpto import validate_device_image  # noqa: PLC0415
+
+    validate_device_image(_vpto_elf())
+    with pytest.raises(ValueError, match=error):
+        validate_device_image(_vpto_elf(**kwargs))
+
+
+@pytest.mark.parametrize("platform,core", [("a5sim", "aiv"), ("a2a3", "aiv"), ("a5", "aic")])
+def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, core):
+    compiler = compiler_module.KernelCompiler(platform)
+    with pytest.raises(ValueError, match="VPTO helpers require"):
+        compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
+
+
+@pytest.mark.parametrize("bridge", [False, True])
+def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monkeypatch, tmp_path, bridge):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    helpers = [tmp_path / "first.pto", tmp_path / "second.pto"]
+    for helper in helpers:
+        helper.write_text("module {}")
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        output = Path(command[command.index("-o") + 1])
+        if command[0] == "ptoas":
+            output.write_text(
+                "declare void @bridge()" if bridge else "define void @helper() {\n  ret void\n}\n"
+            )
+        else:
+            if command[0] == "linker":
+                order = next(
+                    arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering-file=")
+                )
+                assert Path(order).read_text() == "kernel_entry\n"
+            output.write_bytes(_vpto_elf() if command[0] == "linker" else b"object")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), vpto_sources=list(map(str, helpers)))
+    if bridge:
+        with pytest.raises(ValueError, match="not self-contained: bridge"):
+            compiler.compile_incore(_source(tmp_path), **kwargs)
+        assert not any(command[0] == "linker" for command in commands)
+    else:
+        assert compiler.compile_incore(_source(tmp_path), **kwargs) == _vpto_elf()
+        assert [command[0] for command in commands] == [
+            "compiler",
+            "ptoas",
+            "bisheng",
+            "ptoas",
+            "bisheng",
+            "linker",
+        ]
+        assert [Path(p).name for p in commands[-1][-3:]] == ["kernel.o", "vpto_0.o", "vpto_1.o"]
+        assert "--cce-generic-addrspace=off" in commands[2]
+        assert "-ffunction-sections" in commands[0]
+    assert not list(tmp_path.glob("pypto-incore-*"))
+
+
+def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkeypatch, tmp_path):
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.70")
+    version = SimpleNamespace(stdout="bisheng 1", stderr="")
+    monkeypatch.setattr(compiler_module.subprocess, "run", lambda *a, **kw: version)
+    helper = tmp_path / "helper.pto"
+    helper.write_text("module {}")
+
+    def key():
+        return compiler.vpto_cache_identity((str(helper),), "aiv")
+
+    identities = [key()]
+    helper.write_text("module { /* changed */ }")
+    identities.append(key())
+    version.stdout = "bisheng 2"
+    identities.append(key())
+    monkeypatch.setattr(compiler_module._vpto, "DEVICE_FLAGS", ("-O3",))
+    identities.append(key())
+    monkeypatch.setattr(compiler_module._vpto, "CALLER_FLAGS", ())
+    identities.append(key())
+    monkeypatch.setattr(compiler_module._vpto, "LINK_SYMBOL_ORDER", ("another_entry",))
+    identities.append(key())
+    monkeypatch.setattr(compiler_module._vpto_sync, "VERSION", "next-contract")
+    identities.append(key())
+    assert len(set(identities)) == 7
 
 
 if __name__ == "__main__":

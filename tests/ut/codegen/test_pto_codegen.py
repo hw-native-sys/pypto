@@ -4632,5 +4632,33 @@ class Program:
     assert "int64_t B =" in orch
 
 
+def test_embedded_helper_forward_declaration_matches_definition():
+    source = "AICORE void helper(int32_t);\nAICORE void helper(int32_t n) {}"
+    result = _preprocess_ptoas_output(source)
+    assert result.count("static __aicore__ void helper") == 2
+
+
+def test_external_vpto_declaration_keeps_linkage():
+    source = (
+        'extern "C" AICORE void run_vf(__ubuf__ float*, int32_t);\n'
+        'extern "C" __global__ AICORE void kernel(float* p) { run_vf(nullptr, 0); }'
+    )
+    result = _preprocess_ptoas_output(source)
+    assert 'extern "C" __aicore__ void run_vf(__ubuf__ float*, int32_t);' in result
+    assert "static __aicore__ void kernel(float* p) {" in result
+    assert "static __aicore__ void run_vf" not in result
+
+
+def test_tile_adapter_existing_static_qualifier_is_preserved_once():
+    source = (
+        'extern "C" AICORE void run_vf(__ubuf__ float*, int32_t);\n'
+        "static AICORE void adapter(Tile tile, int32_t n) { run_vf(tile.data(), n); }"
+    )
+    result = _preprocess_ptoas_output(source)
+    assert "static static" not in result
+    assert "static __aicore__ void adapter(" in result
+    assert 'extern "C" __aicore__ void run_vf(' in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

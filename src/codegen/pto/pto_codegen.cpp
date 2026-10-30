@@ -747,6 +747,22 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // ========================================================================
 
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+  separate_vf_ = false;
+  return GenerateImpl(program, emit_tile_addr, emit_source_loc);
+}
+
+PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit_tile_addr,
+                                            bool emit_source_loc) {
+  separate_vf_ = true;
+  auto caller = GenerateImpl(program, emit_tile_addr, emit_source_loc);
+  return {std::move(caller), vf_helpers_};
+}
+
+std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+  vf_helpers_.clear();
+  reg_addresses_.clear();
+  inside_reg_scope_ = false;
+  single_vf_function_ = program->functions_.size() == 1;
   VerifyVFInfrastructureCodegenPreconditions(program);
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
@@ -774,7 +790,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   } detector;
   detector.VisitProgram(program);
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"";
-  if (detector.found) stream_ << ", pto.backend = \"vpto\"";
+  if (detector.found && !separate_vf_) stream_ << ", pto.backend = \"vpto\"";
   stream_ << "} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
@@ -793,6 +809,13 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   }
 
   EmitDeferredCompletionAdapterDeclaration();
+  for (const auto& helper : vf_helpers_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != helper.symbol && func->name_ != helper.adapter_symbol, func->span_)
+          << "Reserved VF helper/adapter symbol: " << func->name_;
+    }
+    EmitVFAdapter(helper);
+  }
 
   stream_ << "}\n";
   return stream_.str();

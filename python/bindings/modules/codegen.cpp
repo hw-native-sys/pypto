@@ -35,6 +35,19 @@ void BindCodegen(nb::module_& m) {
   nb::module_ codegen_module =
       m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
 
+  nb::class_<VFHelper>(codegen_module, "VFHelper")
+      .def_ro("symbol", &VFHelper::symbol)
+      .def_ro("adapter_symbol", &VFHelper::adapter_symbol)
+      .def_ro("source", &VFHelper::source)
+      .def_ro("parameter_types", &VFHelper::parameter_types)
+      .def_ro("caller_parameter_types", &VFHelper::caller_parameter_types)
+      .def_ro("parameter_effects", &VFHelper::parameter_effects)
+      .def_ro("parameter_indices", &VFHelper::parameter_indices)
+      .def_ro("capture_byte_offsets", &VFHelper::capture_byte_offsets);
+  nb::class_<PTOCodegenBundle>(codegen_module, "PTOCodegenBundle")
+      .def_ro("caller_source", &PTOCodegenBundle::caller_source)
+      .def_ro("helpers", &PTOCodegenBundle::helpers);
+
   // PTOCodegen - PTO assembly code generator
   nb::class_<PTOCodegen>(
       codegen_module, "PTOCodegen",
@@ -42,6 +55,9 @@ void BindCodegen(nb::module_& m) {
       "Generates PTO ISA instructions in SSA form with tile operations, control flow, and type "
       "annotations.")
       .def(nb::init<>(), "Create a PTO code generator (backend is always PTO)")
+      .def("generate_bundle", &PTOCodegen::GenerateBundle, nb::arg("program"),
+           nb::arg("emit_tile_addr") = true, nb::arg("emit_source_loc") = true,
+           "Generate an EmitC caller and separate typed-VMI helpers for A5/AIV execution.")
       .def("generate", &PTOCodegen::Generate, nb::arg("program"), nb::arg("emit_tile_addr") = true,
            nb::arg("emit_source_loc") = true,
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "

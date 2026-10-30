@@ -390,6 +390,7 @@ set(PYPTO_SOURCES
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
     src/codegen/pto/reg_codegen.cpp
+    src/codegen/pto/vf_codegen.cpp
     src/codegen/pto/pto_buffer_codegen.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp

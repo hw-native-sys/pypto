@@ -49,7 +49,7 @@ import torch
 from pypto._external_source import external_source_digest, kernel_binary_cache_path
 from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
-from . import _callable_identity
+from . import _callable_identity, _vpto
 from ._binary_cache import (
     BinaryCacheContext,
     binary_context_lock,
@@ -105,7 +105,10 @@ def _load_binary(path: Path) -> bytes | None:
         return None
 
 
-def _generated_code_key(kernel: dict[str, Any]) -> tuple[str, str, str, tuple[str, ...]] | None:
+_GeneratedCodeKey = tuple[str, str, str, tuple[str, ...], str]
+
+
+def _generated_code_key(kernel: dict[str, Any]) -> _GeneratedCodeKey | None:
     """Code identity within one chip/compiler context; legacy/external entries stay separate."""
     if kernel.get("external", False) or kernel.get("builtin", False) or not kernel.get("code_name"):
         return None
@@ -114,6 +117,9 @@ def _generated_code_key(kernel: dict[str, Any]) -> tuple[str, str, str, tuple[st
         str(Path(kernel["source"]).resolve()),
         kernel["core_type"],
         tuple(kernel.get("extra_include_dirs") or ()),
+        external_source_digest(_vpto.source_paths(kernel.get("vpto_sources")))
+        if kernel.get("vpto_sources")
+        else "",
     )
 
 
@@ -144,7 +150,10 @@ def _kernel_cache_file(
             *compiler.get_kernel_include_dirs(runtime_name),
             *(kernel.get("extra_include_dirs") or ()),
         ]
-    return kernel_binary_cache_path(
+    helpers = _vpto.source_paths(kernel.get("vpto_sources"))
+    if helpers:
+        _vpto.validate_target(platform, kernel["core_type"])
+    path = kernel_binary_cache_path(
         cache_dir,
         source=kernel["source"],
         core_type=kernel["core_type"],
@@ -155,6 +164,10 @@ def _kernel_cache_file(
         runtime_name=runtime_name,
         include_dirs=include_dirs,
     )
+    if helpers:
+        identity = compiler.vpto_cache_identity(helpers, kernel["core_type"])
+        path = path.with_name(f"{path.stem}_vpto_{identity[:24]}{path.suffix}")
+    return path
 
 
 def _clean_git_revision(repo_root: Path) -> tuple[bool, str | None]:
@@ -315,6 +328,9 @@ def _compile_single_kernel(
     """
     source = Path(kernel["source"])
     core_type = kernel["core_type"]
+    helpers = _vpto.source_paths(kernel.get("vpto_sources"))
+    if helpers:
+        _vpto.validate_target(platform, core_type)
 
     ext = ".so" if platform.endswith("sim") else ".o"
     # Templates and external sources keep per-registration compilation contracts.
@@ -323,15 +339,21 @@ def _compile_single_kernel(
     output_file = None if is_external else source.with_suffix(ext)
     if _generated_code_key(kernel) is not None:
         output_file = source.with_name(f"{source.stem}_{_generated_cache_identity(kernel)}{ext}")
+    # Helper builds use only the final content/toolchain-keyed cache. Legacy
+    # source-adjacent outputs do not prove which helper objects they contain.
+    if helpers:
+        output_file = None
 
     raw = None if force_rebuild or output_file is None else _load_binary(output_file)
     if raw is None:
+        helper_options: dict[str, Any] = {"vpto_sources": helpers} if helpers else {}
         raw = compiler.compile_incore(
             kernel["source"],
             core_type=core_type,
             pto_isa_root=pto_isa_root,
             runtime_name=runtime_name,
             extra_include_dirs=kernel.get("extra_include_dirs"),
+            **helper_options,
         )
         if output_file is not None:
             _save_binary(raw, output_file)
@@ -649,8 +671,8 @@ def _compile_and_assemble_locked(
 
     # Submit one compilation per code unit. Registration construction happens
     # only after every future succeeds, with no executor task waiting on a child.
-    code_units: dict[tuple[str, str, str, tuple[str, ...]] | tuple[int], dict[str, Any]] = {}
-    registration_keys: list[tuple[str, str, str, tuple[str, ...]] | tuple[int]] = []
+    code_units: dict[_GeneratedCodeKey | tuple[int], dict[str, Any]] = {}
+    registration_keys: list[_GeneratedCodeKey | tuple[int]] = []
     for index, kernel in enumerate(kernels):
         key = _generated_code_key(kernel) or (index,)
         registration_keys.append(key)

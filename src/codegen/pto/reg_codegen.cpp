@@ -123,6 +123,10 @@ std::string PTOCodegen::GetRegTypeString(const ir::RegTypePtr& type) const {
 
 void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
   CHECK_SPAN(!inside_reg_scope_, scope->span_) << "RegScope cannot nest";
+  if (separate_vf_) {
+    EmitVFHelperCall(scope);
+    return;
+  }
   ScopeOperands operands;
   // A plain Tile alias may have been defined before this RegScope. Preserve
   // that handle provenance so equivalent external names compare identically.

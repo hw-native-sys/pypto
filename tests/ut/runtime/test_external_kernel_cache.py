@@ -13,7 +13,7 @@ import importlib
 from typing import Any
 
 import pytest
-from pypto._external_source import kernel_binary_cache_path
+from pypto._external_source import external_source_digest, kernel_binary_cache_path
 
 
 class _Compiler:
@@ -27,6 +27,9 @@ class _Compiler:
     def get_kernel_include_dirs(self, runtime_name):
         del runtime_name
         return self.runtime_include_dirs
+
+    def vpto_cache_identity(self, sources, core_type):
+        return external_source_digest(sources, metadata=(core_type,))
 
     def compile_incore(self, source, **kwargs):
         self.calls.append((source, kwargs))
@@ -218,6 +221,39 @@ def test_external_cache_is_relocatable(tmp_path):
     )
 
     assert path_a == path_b
+
+
+def test_vpto_build_ignores_sidecars_and_separates_cache(tmp_path, monkeypatch):
+    pytest.importorskip("simpler_setup")
+    runner = importlib.import_module("pypto.runtime.device_runner")
+    source = tmp_path / "entry.cpp"
+    source.write_text("// generated")
+    helper = tmp_path / "helper.pto"
+    helper.write_text("module {}")
+    kernel = dict(
+        source=str(source), core_type="aiv", func_id=0, code_name="entry", vpto_sources=[str(helper)]
+    )
+    compiler = _Compiler()
+    monkeypatch.setattr(runner, "extract_text_section", lambda raw: raw)
+    source.with_suffix(".o").write_bytes(b"stale")
+    source.with_name(f"entry_{runner._generated_cache_identity(kernel)}.o").write_bytes(b"stale")
+    raw, _ = runner._compile_single_kernel(kernel, compiler, "a5", "isa", "runtime")
+    assert raw != b"stale"
+    assert compiler.calls[0][1]["vpto_sources"] == (str(helper),)
+
+    def key():
+        return runner._kernel_cache_file(tmp_path, kernel, "a5", "isa", "runtime", compiler)
+
+    first = key()
+    sharing_key = runner._generated_code_key(kernel)
+    helper.write_text("module { /* changed */ }")
+    assert key() != first
+    # Sharing within one compiler context must observe content changes too.
+    assert runner._generated_code_key(kernel) != sharing_key
+    plain = dict(kernel, vpto_sources=[])
+    assert runner._generated_code_key(plain) != runner._generated_code_key(kernel)
+    with pytest.raises(ValueError, match="VPTO helpers require"):
+        runner._kernel_cache_file(tmp_path, kernel, "a5sim", "isa", "runtime", compiler)
 
 
 if __name__ == "__main__":

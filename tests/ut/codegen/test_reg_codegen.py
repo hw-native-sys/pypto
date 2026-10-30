@@ -451,14 +451,22 @@ def test_vpto_object_artifact_is_not_wrapped_as_cpp(tmp_path, monkeypatch):
             output.write(binary)
 
     monkeypatch.setattr(pto_backend, "_run_ptoas", fake_ptoas)
-    ir.compile(
-        frontend_tile_kernel(),
-        output_dir=str(tmp_path),
-        backend_type=backend.BackendType.Ascend950,
+    # Explicit diagnostic VPTO modules retain their object-output route. The
+    # execution driver now generates an EmitC caller plus separate helpers.
+    program = build_kernel()
+    function = program.get_function("register_kernel")
+    assert function is not None
+    files = {}
+    pto_backend._emit_single_function_output(
+        files,
+        function,
+        generate(program),
+        str(tmp_path),
+        skip_ptoas=False,
     )
     assert (tmp_path / "kernels/aiv/register_kernel.o").read_bytes() == binary
     assert not (tmp_path / "kernels/aiv/register_kernel.cpp").exists()
-    assert '"artifact_kind": "fatobj"' in (tmp_path / "kernels/aiv/register_kernel.o.json").read_text()
+    assert '"artifact_kind": "fatobj"' in files["kernels/aiv/register_kernel.o.json"]
 
 
 @pytest.mark.parametrize(

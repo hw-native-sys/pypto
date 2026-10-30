@@ -76,6 +76,27 @@ std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 /// Explicit scalar parameters take precedence; identity, not name, deduplicates.
 std::vector<ir::VarPtr> CollectTensorShapeDynVars(const ir::FunctionPtr& func);
 
+/// Backend artifacts, not IR nodes. The adapter retains capture order. The
+/// caller retains Tiles for PTOAS sync; the separate VPTO helper receives UB
+/// pointers. Effects conservatively cover each entire captured Tile footprint.
+struct VFHelper {
+  std::string symbol;
+  std::string adapter_symbol;
+  std::string source;
+  std::vector<std::string> parameter_types;
+  std::vector<std::string> caller_parameter_types;
+  std::vector<std::string> parameter_effects;
+  /// Helper argument -> caller argument; memory uses the lowest static UB address.
+  std::vector<size_t> parameter_indices;
+  /// Per-caller-argument byte offset from the shared UB base (zero for scalars).
+  std::vector<int64_t> capture_byte_offsets;
+};
+
+struct PTOCodegenBundle {
+  std::string caller_source;
+  std::vector<VFHelper> helpers;
+};
+
 /**
  * @brief PTO MLIR code generator
  *
@@ -148,6 +169,11 @@ class PTOCodegen : public CodegenBase {
    */
   std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true,
                        bool emit_source_loc = true);
+
+  /// Separate explicit RegScopes into A5/AIV no-Bridge helpers for execution.
+  /// Generate() retains the combined typed-VMI diagnostic representation.
+  PTOCodegenBundle GenerateBundle(const ir::ProgramPtr& program, bool emit_tile_addr = true,
+                                  bool emit_source_loc = true);
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
@@ -816,6 +842,12 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::Var*, std::string> reg_addresses_;
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
+  bool separate_vf_ = false;
+  bool single_vf_function_ = false;
+  std::vector<VFHelper> vf_helpers_;
+  std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
+  void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
+  void EmitVFAdapter(const VFHelper& helper);
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;
