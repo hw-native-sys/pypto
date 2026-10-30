@@ -1015,6 +1015,21 @@ class MatScratchPlacer : public SubtilePlacer {
     return sv;
   }
 
+  /// A create starts fully valid, and assemble retains that target validity.
+  /// Restore the producer's logical rectangle before a chained consumer can
+  /// interpret unwritten padding as rows or reduction elements. Keep symbolic
+  /// extents intact; only a statically full window needs no metadata alias.
+  [[nodiscard]] VarPtr Finalize(std::vector<StmtPtr>& stmts, const VarPtr& scratch, const ExprPtr& valid_m,
+                                const ExprPtr& valid_n) {
+    const auto rows = As<ConstInt>(valid_m);
+    const auto cols = As<ConstInt>(valid_n);
+    if (rows && cols && rows->value_ == m_ && cols->value_ == n_) return scratch;
+    auto view = OpRegistry::GetInstance().Create("tile.set_validshape", {scratch, valid_m, valid_n}, sp_);
+    auto result = std::make_shared<Var>(base_ + "_valid", view->GetType(), sp_);
+    stmts.push_back(std::make_shared<AssignStmt>(result, view, sp_));
+    return result;
+  }
+
  private:
   int64_t m_, n_;
   DataType dtype_;
@@ -2196,18 +2211,8 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // upside is smaller here, but the mechanism is the same.)
   const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
-  const auto valid_m = As<ConstInt>(t.output_valid_m);
-  const auto valid_n = As<ConstInt>(t.output_valid_n);
-  if (valid_m && valid_n && valid_m->value_ == t.M && valid_n->value_ == t.N) {
-    return std::make_pair(std::move(stmts), scratch);
-  }
-  // The allocation keeps its physical box, but the grid wrote only the valid
-  // rectangle. A chained matmul must not read unwritten padding as K values.
-  auto view = OpRegistry::GetInstance().Create("tile.set_validshape",
-                                               {scratch, t.output_valid_m, t.output_valid_n}, sp);
-  auto valid_scratch = std::make_shared<Var>(base + "_valid", view->GetType(), sp);
-  stmts.push_back(std::make_shared<AssignStmt>(valid_scratch, view, sp));
-  return std::make_pair(std::move(stmts), valid_scratch);
+  scratch = placer.Finalize(stmts, scratch, t.output_valid_m, t.output_valid_n);
+  return std::make_pair(std::move(stmts), scratch);
 }
 
 class AutoTileMutator : public IRMutator {
@@ -2400,6 +2405,10 @@ class AutoTileMutator : public IRMutator {
                 VarPtr scratch = placer.Init(out);
                 VarPtr cmat = placer.PlaceAt(out, src, MakeIndex(0, cast_as->span_),
                                              MakeIndex(0, cast_as->span_), scratch, /*step=*/0);
+                const auto valid = tile_view_semantics::GetEffectiveTileView(*cb_ty).valid_shape;
+                INTERNAL_CHECK_SPAN(valid.size() == 2, cast_as->span_)
+                    << "Internal error: chained cast must have two valid extents";
+                cmat = placer.Finalize(out, cmat, valid[0], valid[1]);
                 remap[cb] = cmat;  // the consumer matmul now reads the Mat scratch
                 changed = true;
                 continue;  // drop the dead tile.cast

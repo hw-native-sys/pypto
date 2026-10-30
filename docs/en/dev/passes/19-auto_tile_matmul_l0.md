@@ -411,6 +411,11 @@ out     = pl.tile.store(d, [0, 0], out)
 
 The `tile.cast` is dropped. When the producer needs a K-loop (`k < K`), the K-loop is emitted as usual and its Acc result feeds the *same* single `tile.assemble` — the fold is independent of K tiling.
 
+Both the full-window cast fold and the M/N scratch path restore the producer's
+`valid_shape` after assembling into the scratch. The allocation retains its full
+physical box, while chained consumers see only the original valid rows and
+columns, including symbolic extents. Fully valid results need no extra view.
+
 ## Fractal boundary: why the tail needs no special case
 
 The chooser returns a 16-aligned `(m, n, k)` and this pass peels whatever the
