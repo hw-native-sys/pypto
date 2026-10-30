@@ -13,6 +13,7 @@ These compiler probes deliberately expose the static address relation in VMI.
 They do not claim that production PyPTO already specializes captured Tile views.
 """
 
+import importlib
 import json
 import os
 import shutil
@@ -20,7 +21,6 @@ from pathlib import Path
 
 import pytest
 from pypto.runtime import _vpto, _vpto_sync
-from pypto.runtime.kernel_compiler import KernelCompiler
 from test_validation import ROOT, run
 
 pytestmark = pytest.mark.skipif(
@@ -160,12 +160,14 @@ def test_unresolved_relation_is_not_rejected_by_ptoas(kind: str, relation: str):
 @pytest.mark.parametrize("relation", ["unknown", "dynamic"])
 @pytest.mark.parametrize("kind", ["wr", "rw", "ww"])
 def test_production_compiler_rejects_unresolved_relationship(monkeypatch, kind, relation):
+    compiler_class = importlib.import_module("pypto.runtime.kernel_compiler").KernelCompiler
+
     output = Path(os.environ.get("PYPTO_VPTO_ALIAS_OUTPUT", ROOT / "build/vf-alias-validation"))
     directory = (output / f"production-reject-{kind}-{relation}").resolve()
     directory.mkdir(parents=True, exist_ok=True)
     source = directory / "helper.pto"
     source.write_text(helper_source(kind, 32, relation))
-    compiler = KernelCompiler("a5")
+    compiler = compiler_class("a5")
     original = compiler._run
     commands = []
 

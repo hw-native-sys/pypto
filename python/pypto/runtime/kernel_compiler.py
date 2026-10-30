@@ -264,6 +264,9 @@ class KernelCompiler:
         ptoas = find_ptoas_binary()
         if ptoas is None:
             raise FileNotFoundError("VPTO helpers require ptoas; set PTOAS_ROOT or add ptoas to PATH")
+        # Discovery is relative to the caller's cwd; compiler subprocesses run
+        # from the SDK project root. Preserve the selected launcher across both.
+        ptoas = os.path.abspath(ptoas)
         check_ptoas_version(ptoas)
         assert self.sdk.ccec is not None
         bisheng = str(Path(self.sdk.ccec.cxx_path).with_name("bisheng"))

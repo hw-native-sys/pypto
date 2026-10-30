@@ -19,6 +19,7 @@ only the explicit changed stage edits helper source, from vadd to vsub.
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -29,7 +30,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import pypto.language as pl
 import torch
@@ -40,8 +41,10 @@ from pypto.jit._artifact_manifest import BuildKind
 from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
 from pypto.runtime._artifact_sources import read_kernel_config, validate_generated_sources
 from pypto.runtime.elf_parser import extract_text_section
-from pypto.runtime.kernel_compiler import KernelCompiler
 from pypto.runtime.runtime_pin import check_runtime_pin
+
+if TYPE_CHECKING:
+    from pypto.runtime.kernel_compiler import KernelCompiler
 
 LENGTHS = (0, 1, 63, 64, 65, 127, 128, 1023, 1024)
 
@@ -162,11 +165,14 @@ def _check_tile_sync(directory: Path, wrapper: str) -> None:
 @contextmanager
 def _record_compilation(root: Path) -> Iterator[list[str]]:
     """Retain real compiler inputs/outputs before temporary build cleanup."""
-    original_compile = KernelCompiler.compile_incore
-    original_run = KernelCompiler._run
+    # Importing the recorder for CPU-only tests must not require the runtime SDK.
+    compiler_class = importlib.import_module("pypto.runtime.kernel_compiler").KernelCompiler
+
+    original_compile = compiler_class.compile_incore
+    original_run = compiler_class._run
     calls: list[str] = []
 
-    def counted_compile(self: KernelCompiler, *args: Any, **kwargs: Any) -> bytes:
+    def counted_compile(self: "KernelCompiler", *args: Any, **kwargs: Any) -> bytes:
         assert kwargs.get("vpto_sources"), "JIT did not attach a VPTO helper"
         evidence = root / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
@@ -182,7 +188,7 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
         calls.append(str(args[0]))
         return binary
 
-    def recorded_run(self: KernelCompiler, cmd: list[str], output: Path, label: str) -> bytes:
+    def recorded_run(self: "KernelCompiler", cmd: list[str], output: Path, label: str) -> bytes:
         evidence = root / f"compilation-{len(calls) + 1}"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / f"{output.name}.command.txt").write_text(
@@ -198,13 +204,13 @@ def _record_compilation(root: Path) -> Iterator[list[str]]:
 
     # These hooks record the original compiler's bytes. They do not inject code
     # or replace the runtime; this single-program example restores both hooks.
-    KernelCompiler.compile_incore = counted_compile
-    KernelCompiler._run = recorded_run
+    compiler_class.compile_incore = counted_compile
+    compiler_class._run = recorded_run
     try:
         yield calls
     finally:
-        KernelCompiler.compile_incore = original_compile
-        KernelCompiler._run = original_run
+        compiler_class.compile_incore = original_compile
+        compiler_class._run = original_run
 
 
 def _check_values(worker: ChipWorker, compiled: CompiledProgram, stage: str) -> int:

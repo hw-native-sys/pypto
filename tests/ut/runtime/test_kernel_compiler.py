@@ -11,6 +11,7 @@
 
 import importlib
 import struct
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -370,6 +371,24 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     monkeypatch.setattr(compiler_module._vpto_sync, "VERSION", "next-contract")
     identities.append(key())
     assert len(set(identities)) == 7
+
+
+def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, monkeypatch, tmp_path):
+    caller = tmp_path / "caller"
+    launcher = caller / "tools/ptoas"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\nprintf 'ptoas 0.70\\n'\n")
+    launcher.chmod(0o755)
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PTOAS_ROOT", "tools")
+    compiler = compiler_module.KernelCompiler("a5")
+    ptoas, _ = compiler._vpto_toolchain()
+    assert Path(ptoas).is_absolute()
+    # The SDK cwd differs from discovery; execute the actual selected launcher.
+    result = subprocess.run(
+        [ptoas, "--version"], cwd=compiler.project_root, capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "ptoas 0.70"
 
 
 if __name__ == "__main__":

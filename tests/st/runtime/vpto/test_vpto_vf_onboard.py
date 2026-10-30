@@ -16,12 +16,14 @@ No simulator fallback or runtime-pin exemption is permitted.
 """
 
 import hashlib
+import importlib
 import json
 import os
 import runpy
 import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pypto.language as pl
@@ -37,7 +39,6 @@ from pypto.runtime._artifact_sources import (
     read_kernel_config,
     validate_generated_sources,
 )
-from pypto.runtime.kernel_compiler import KernelCompiler
 from pypto.runtime.runtime_pin import check_runtime_pin
 
 pytestmark = pytest.mark.platforms("a5", reason="VPTO helpers require the A5 AIV backend")
@@ -134,16 +135,23 @@ def _numerics(worker, compiled, *, subtract: bool, stage: str) -> None:
 
 
 def _build_variants(output: Path, prepare=_prepare):
+    # CPU-only collection/import checks do not require the optional runtime SDK.
+    compiler_class = importlib.import_module("pypto.runtime.kernel_compiler").KernelCompiler
+
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    evidence_root = output
+    # Preserve every invocation, including direct --build/--worker runs that
+    # bypass pytest fixtures. A prior relocated artifact must never be replaced.
+    output = Path(tempfile.mkdtemp(prefix="run-", dir=evidence_root))
     assert os.environ.get("PYPTO_SKIP_RUNTIME_PIN_CHECK", "0") == "0"
     pin = check_runtime_pin()
     assert pin.matches and not pin.off_pin, pin
     print(f"runtime={pin.installed} extension={pin.extension_path}", flush=True)
     directory = output / "original"
     compiled = prepare(directory)
-    original_compile = KernelCompiler.compile_incore
-    original_run = KernelCompiler._run
+    original_compile = compiler_class.compile_incore
+    original_run = compiler_class._run
     calls = []
 
     def counted_compile(self, *args, **kwargs):
@@ -176,8 +184,8 @@ def _build_variants(output: Path, prepare=_prepare):
         return binary
 
     with pytest.MonkeyPatch.context() as observer:
-        observer.setattr(KernelCompiler, "compile_incore", counted_compile)
-        observer.setattr(KernelCompiler, "_run", recorded_run)
+        observer.setattr(compiler_class, "compile_incore", counted_compile)
+        observer.setattr(compiler_class, "_run", recorded_run)
         compiled.load()
         assert len(calls) == 1
         binaries = list((directory / "cache").glob("incore_*.bin"))
@@ -209,17 +217,18 @@ def _build_variants(output: Path, prepare=_prepare):
         moved.load()
         assert len(calls) == 2, "Relocated artifact should retain its valid binary cache"
         yield "relocated", moved
-    (output / "build-result.json").write_text(
-        json.dumps(
-            {
-                "runtime": pin.installed,
-                "compile_calls": len(calls),
-                "stages": ["cold", "warm", "changed", "relocated"],
-                "evidence": "compiler_cache_and_relocation",
-            },
-            indent=2,
-        )
+    report = json.dumps(
+        {
+            "runtime": pin.installed,
+            "compile_calls": len(calls),
+            "stages": ["cold", "warm", "changed", "relocated"],
+            "evidence": "compiler_cache_and_relocation",
+            "run_directory": str(output),
+        },
+        indent=2,
     )
+    (output / "build-result.json").write_text(report)
+    (evidence_root / "build-result.json").write_text(report)
 
 
 def _acceptance(output: Path, device_id: int, prepare=_prepare) -> None:

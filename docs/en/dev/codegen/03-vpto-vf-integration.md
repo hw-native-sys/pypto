@@ -38,6 +38,8 @@ pointers denote planned MemRef bases; the VMI emitter adds each Tile view's
 element origin exactly once. Captures from different statically allocated
 views are reconstructed from one common UB base with constant displacements.
 This retains overlap information across the separate compilation boundary.
+Tile parameters and their derived views are rejected: their runtime UB pointers
+cannot be related using the planner offsets assigned to local allocations.
 
 ## Two synchronization boundaries
 
@@ -145,8 +147,11 @@ PYPTO_VPTO_TIMEOUT=900 python -m pytest \
 
 The per-PR `onboard-tests-a5` job runs this suite in its `vf-tests-a5` step.
 It explicitly enables hardware execution on the card reserved by `task-submit`.
-The suite checks the actual device model, gives each test its own output
-directory, and runs serially with a timeout per child process. Other platforms
+The suite checks the selected device model through ACL in a bounded child
+process; it does not require `torch_npu`. Each test invocation gets a fresh
+output directory, and execution is serial with a timeout per child process.
+The source/cache relocation probes also preserve each direct invocation under
+a fresh `run-*` directory, with `build-result.json` pointing to the latest run. Other platforms
 deselect these A5-only tests. The `vf-a5-results` CI artifact retains JUnit
 results, device information, command logs and compiler artifacts even on failure.
 

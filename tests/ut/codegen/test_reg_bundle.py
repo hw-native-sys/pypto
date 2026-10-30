@@ -10,10 +10,13 @@
 """Separate VF execution bundles preserve caller storage and diagnostic codegen."""
 
 import json
+import re
+import subprocess
 
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _generate_pto_bundle
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
@@ -515,6 +518,138 @@ def test_dynamic_physical_capture_address_is_explicitly_rejected():
         codegen.PTOCodegen().generate_bundle(
             ir.Program([f.get_result()], "DynamicAddress", SPAN), emit_source_loc=False
         )
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("local_name", ["arg0", "arg1", "capture1"])
+def test_helper_synthetic_names_do_not_collide(tmp_path, local_name):
+    builder = IRBuilder()
+    with builder.function("names", span=SPAN, type=ir.FunctionType.AIV) as f:
+        scale = f.param("scale", ir.ScalarType(DataType.FP32))
+        views = [
+            builder.let(
+                name,
+                tile.full([1, 64], dtype=DataType.FP32, value=0),
+                type=ir.TileType(
+                    [1, 64],
+                    DataType.FP32,
+                    ir.MemRef(name, offset, 256),
+                    memory_space=ir.MemorySpace.Vec,
+                ),
+            )
+            for name, offset in (("src", 0), ("dst", 256))
+        ]
+        with builder.reg_scope(SPAN):
+            loaded = builder.emit_reg(
+                local_name,
+                "reg.load",
+                [views[0], ir.ConstInt(0, DataType.INDEX, SPAN)],
+                {"lanes": 64},
+                SPAN,
+            )
+            factor = builder.emit_reg(
+                "factor", "reg.broadcast", [scale], {"lanes": 64, "dtype": DataType.FP32}, SPAN
+            )
+            value = builder.emit_reg("sum", "reg.add", [loaded, factor], span=SPAN)
+            builder.emit_reg_store("updated", views[1], value, span=SPAN)
+    helper = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "Names", SPAN)).helpers[0]
+    definitions = re.findall(r"^\s*(%[\w.$]+) =", helper.source, re.MULTILINE)
+    definitions += re.findall(r"(%arg\d+):", helper.source)
+    assert len(definitions) == len(set(definitions)), helper.source
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    source = tmp_path / "helper.pto"
+    source.write_text(helper.source)
+    result = subprocess.run(
+        [
+            compiler,
+            str(source),
+            "--pto-arch=a5",
+            "--pto-level=level3",
+            "--emit-vpto-llvm-ir",
+            "-o",
+            str(tmp_path / "helper.ll"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("view_kind", ["direct", "slice", "reshape", "alias"])
+def test_bundle_rejects_parameter_backed_captures_and_views(view_kind):
+    builder = IRBuilder()
+    with builder.function("incoming", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = f.param("src", ir.TileType([1, 128], DataType.FP32, memory_space=ir.MemorySpace.Vec))
+        dst = f.param("dst", ir.TileType([1, 128], DataType.FP32, memory_space=ir.MemorySpace.Vec))
+        if view_kind == "slice":
+            src = builder.let("view", tile.slice(src, [1, 64], [0, 32]))
+        elif view_kind == "reshape":
+            src = builder.let("view", tile.reshape(src, [128]))
+        elif view_kind == "alias":
+            src = builder.let("view", src, type=src.type)
+        with builder.reg_scope(SPAN):
+            value = builder.emit_reg(
+                "value", "reg.load", [src, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            builder.emit_reg_store("updated", dst, value, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Incoming", SPAN))
+    generator = codegen.PTOCodegen()
+    with pytest.raises(ValueError, match="parameter-backed Tiles"):
+        generator.generate_bundle(program)
+    # Reusing the emitter after rejection must not taint a local allocation.
+    assert len(generator.generate_bundle(build_kernel()).helpers) == 1
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("reshape", [False, True])
+def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
+    builder = IRBuilder()
+    with builder.function("static_view", span=SPAN, type=ir.FunctionType.AIV) as f:
+        base = builder.let(
+            "base",
+            tile.full([2, 64], dtype=DataType.FP32, value=0),
+            type=ir.TileType([2, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
+        )
+        view = builder.let("view", tile.slice(base, [1, 64], [1, 0]))
+        if reshape:
+            view = builder.let("reshaped", tile.reshape(view, [64]))
+        with builder.reg_scope(SPAN):
+            value = builder.emit_reg(
+                "value", "reg.load", [view, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            builder.emit_reg_store("updated", view, value, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "StaticView", SPAN))
+        program = passes.flatten_tile_nd_to_2d()(program)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    helper = bundle.helpers[0]
+    assert "v_row=1, v_col=64" in helper.caller_parameter_types[0]
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    source = tmp_path / "caller.pto"
+    source.write_text(bundle.caller_source)
+    result = subprocess.run(
+        [
+            compiler,
+            str(source),
+            "--pto-arch=a5",
+            "--pto-level=level3",
+            "--enable-insert-sync",
+            "-o",
+            str(tmp_path / "caller.cpp"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,10 +34,7 @@ def vpto_onboard_session() -> Path | None:
     probe = subprocess.run(
         [
             sys.executable,
-            "-c",
-            "import sys, torch_npu; "
-            "device = int(sys.argv[1]); torch_npu.npu.set_device(device); "
-            "print('VPTO_DEVICE_NAME=' + torch_npu.npu.get_device_name(device))",
+            str(Path(__file__).with_name("device_probe.py")),
             str(device),
         ],
         capture_output=True,
@@ -64,4 +62,5 @@ def vpto_test_output(
     if vpto_onboard_session is not None:
         # Several cases compile into 'original' and relocate it. Sharing that
         # directory would make a suite run reuse or overwrite another case's evidence.
-        monkeypatch.setenv("PYPTO_VPTO_RUNTIME_OUTPUT", str(vpto_onboard_session / request.node.name))
+        output = tempfile.mkdtemp(prefix=f"{request.node.name}-", dir=vpto_onboard_session)
+        monkeypatch.setenv("PYPTO_VPTO_RUNTIME_OUTPUT", output)

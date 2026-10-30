@@ -128,6 +128,10 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     auto root = resolve(target);
     auto tile = ir::As<ir::TileType>(root->GetType());
     INTERNAL_CHECK_SPAN(tile, call->span_) << "VF memory capture must have Tile type";
+    // Incoming Tile pointers have independent runtime addresses. Their MemRef
+    // offsets (including those of derived views) are not planned UB addresses.
+    CHECK_SPAN(!IsParameterBackedTile(tile), call->span_)
+        << "VF shared-base captures do not support parameter-backed Tiles or their views";
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
@@ -152,7 +156,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       capture_tiles.push_back(tile);
       if (origins.back() < origins[base_index]) base_index = origins.size() - 1;
       arguments.push_back(GetExprAsCode(root));
-      artifact.caller_parameter_types.push_back(GetTileBufTypeStringFromTileType(tile));
+      artifact.caller_parameter_types.push_back(GetExprTypeAnnotation(root));
       artifact.parameter_effects.emplace_back("read");
     }
     // A masked or partial store must not be treated as overwriting the whole
@@ -171,12 +175,13 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     const auto element = dtype.IsSignedInt() ? "si" + std::to_string(dtype.GetBit()) : GetTypeString(dtype);
     artifact.parameter_types.push_back("!pto.ptr<" + element + ", ub>");
     artifact.parameter_indices.push_back(base_index);
+    helper.fs_.used_ssa_names.insert("arg0");
     for (size_t i = 0; i < origins.size(); ++i) {
       const int64_t relative = origins[i] - origins[base_index];
       artifact.capture_byte_offsets.push_back(relative);
       std::string address = "%arg0";
       if (relative != 0) {
-        address = "%capture" + std::to_string(i);
+        address = helper.NewNamedTemp("capture" + std::to_string(i));
         const auto offset = helper.GetOrEmitConstant(relative / element_bytes, DataType::INDEX);
         helper.Emit(address + " = pto.addptr %arg0, " + offset + " : <" + element + ", ub> -> <" + element +
                     ", ub>");
@@ -200,7 +205,11 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
                    dtype == DataType::INDEX,
                var->span_)
         << "VF scalar capture supports i32, u32, f32 and index only";
-    helper.BindVarToMlir(var, "%arg" + std::to_string(artifact.parameter_types.size()));
+    // Reserve manually spelled parameters before body emission, just as the
+    // normal function emitter does. Local DSL names may also be argN/captureN.
+    const auto argument_name = "arg" + std::to_string(artifact.parameter_types.size());
+    helper.fs_.used_ssa_names.insert(argument_name);
+    helper.BindVarToMlir(var, "%" + argument_name);
     artifact.parameter_indices.push_back(arguments.size());
     artifact.capture_byte_offsets.push_back(0);
     arguments.push_back(GetExprAsCode(var));
