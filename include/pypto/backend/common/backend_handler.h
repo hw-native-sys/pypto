@@ -153,10 +153,6 @@ class BackendHandler {
   /// evidence that a particular installed assembler supports its lowering.
   [[nodiscard]] virtual bool SupportsRegType(const ir::RegType& /*type*/) const { return false; }
 
-  // Native load constraints used by the subview verifier before PTO emission.
-  // The default rejects native subviews until a backend profile is validated.
-  [[nodiscard]] virtual SubviewLoadLimits GetSubviewLoadLimits() const { return {}; }
-
   /**
    * @brief Borrow this backend's immutable synchronization resource catalog.
    *
