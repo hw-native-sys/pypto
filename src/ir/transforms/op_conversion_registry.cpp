@@ -1825,16 +1825,26 @@ void OpConversionRegistry::RegisterGatherOps() {
         // materializes TensorType sources to a fresh contiguous tile; only
         // TileType sources may retain a parent's wider pitch, so they need
         // this copy into a fresh contiguous tile.
-        // Use extract so CanonicalizeTileSlice folds nested slice offsets into
-        // the read of the original tile. A create + assemble copy leaves those
-        // subviews as operands instead of explicitly repacking the source.
+        // A5 Vec TEXTRACT requires both row pitches to be 32-byte aligned.
+        // Look up the original pitch: a column slice's own shape/TileView no
+        // longer describes its parent's stride. An unknown origin is not proof
+        // of alignment, so keep the existing assemble copy in that case.
+        auto can_extract_src = [&](int64_t cols) {
+          if (input_dtype.IsInt() || (cols % 32) * input_dtype.GetByte() % 32 != 0) return false;
+          auto source = context.tile_row_pitch_sources.find(input);
+          if (source == context.tile_row_pitch_sources.end()) return false;
+          auto type = As<TileType>(source->second->GetType());
+          auto source_cols = As<ConstInt>(type->shape_.back());
+          return source_cols && (source_cols->value_ % 32) * type->dtype_.GetByte() % 32 == 0;
+        };
+        // When legal, extract lets CanonicalizeTileSlice fold column offsets
+        // into the read of the parent rather than retaining source subviews.
         auto materialize_src_contig = [&](const ExprPtr& src, int64_t rows, int64_t cols,
                                           const std::string& name) -> VarPtr {
           auto sh = MakeShapeTuple({make_idx(rows), make_idx(cols)}, span);
           auto dtype = As<TileType>(src->GetType())->dtype_;
-          if (dtype.IsInt()) {
-            // A5 TEXTRACT does not support the INT16/INT32 gather source
-            // types. Preserve their existing assemble-based packing path.
+          if (!can_extract_src(cols)) {
+            // Also preserves INT16/INT32, which A5 TEXTRACT cannot read.
             auto contig = emit("tile.create", {sh}, {{"dtype", dtype}, {"target_memory", MemorySpace::Vec}},
                                name + "_alloc");
             auto ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
@@ -1873,7 +1883,9 @@ void OpConversionRegistry::RegisterGatherOps() {
             VarPtr gather_src;
             if (auto input_tile = As<TileType>(input->GetType())) {
               ExprPtr source = input;
-              if (input_tile->dtype_.IsInt()) {
+              if (!can_extract_src(S1)) {
+                // Gather permits fewer index rows than input rows. Bound the
+                // assemble source so it fits the smaller dense destination.
                 source = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
               }
               gather_src = materialize_src_contig(source, I0, S1, "gather_src");

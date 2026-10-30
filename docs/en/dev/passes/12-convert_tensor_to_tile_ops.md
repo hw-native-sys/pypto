@@ -561,7 +561,12 @@ Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src
 
 For last-axis `tensor.gather(..., dim=-1, index=idx)` on A5, flat indices assume
 a packed source. On-chip FP16/FP32 sources are materialized with `tile.extract` into a
-fresh Vec tile. `CanonicalizeTileSlice` folds preceding column-slice offsets
+fresh Vec tile when both the original parent's row pitch and the dense destination
+row pitch are provably 32-byte aligned. Conversion tracks the pitch origin through
+row-preserving views; the slice's column count alone cannot establish alignment.
+Unaligned or unknown pitches retain the assemble-based copy, with the source
+window bounded to the index's leading extent. This does not relax PTOAS's physical
+tile-extent alignment requirements. `CanonicalizeTileSlice` folds preceding column-slice offsets
 into that extract, so `full[:, 64:128]` is read by `pto.textract` directly from
 the wider parent rather than through nested `pto.subview` operands. GM sources
 are already packed by `tile.load` and need no extra extract. INT16/INT32 sources

@@ -485,7 +485,11 @@ flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列�
 ## A5 按轴 Gather 的源数据
 
 A5 的末轴 `tensor.gather(..., dim=-1, index=idx)` 使用扁平索引，要求源数据紧密排列。
-片上 FP16/FP32 源通过 `tile.extract` 复制到独立的 Vec tile。`CanonicalizeTileSlice` 将前置列切片的
+当原始父 tile 的行跨度和紧密目标的行跨度均可证明为 32 字节对齐时，片上 FP16/FP32 源通过
+`tile.extract` 复制到独立的 Vec tile。转换过程沿保留行跨度的视图记录跨度来源，不能仅根据切片列数判断对齐。
+未对齐或来源未知时保留 assemble 拷贝，并将源窗口限定到 index 的前导维度范围。
+这一选择不会放宽 PTOAS 对物理 tile 尺寸的对齐要求。
+`CanonicalizeTileSlice` 将前置列切片的
 偏移合并进 extract，因此 `full[:, 64:128]` 由 `pto.textract` 直接读取较宽的父 tile，
 无需嵌套的 `pto.subview` 操作数。GM 源已由 `tile.load` 紧密加载，无需额外 extract。
 INT16/INT32 源保留基于 assemble 的拷贝路径，因为 A5 `textract` 不支持这两种类型。
