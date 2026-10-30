@@ -379,5 +379,108 @@ def test_shared_storage_move_keeps_the_zero_valid_sentinel_dynamic():
     assert f"{_outs_of(_sole_line(mlir, 'pto.tmov'))} = pto.treshape %root " in view, mlir
 
 
+def _selected_slice_program(
+    cols: int, col_offset: int, dynamic_valid: bool, *, partial_source: bool = False
+) -> _ir.Program:
+    """Choose an outer Tile, then take a nonzero-offset alias of that actual choice."""
+    valid = f", valid_shape=[valid_rows, {cols}]" if dynamic_valid else ""
+    source_valid = ", valid_shape=[valid_rows, 256]" if partial_source else ""
+    return pl.parse_program(f"""
+@pl.program
+class SelectedSlice:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 256], pl.FP32], flag: pl.Scalar[pl.INT32],
+               valid_rows: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, {cols}], pl.FP32]]) -> pl.Tensor[[16, {cols}], pl.FP32]:
+        a = pl.load(x, [0, 0], [32, 256]{source_valid})
+        b = pl.load(x, [32, 0], [32, 256]{source_valid})
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        window = pl.tile.slice(selected, [16, {cols}], [16, {col_offset}]{valid})
+        return pl.store(window, [0, 0], out)
+""")
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("cols", [64, 256])
+def test_selected_slice_uses_actual_pointer_only_in_addressed_mode(planner, cols):
+    """Level3 can address an alias; level2 must keep its existing native view surface."""
+    mlir = _planner_pto(_selected_slice_program(cols, 0, False), planner)
+    selected = _first_group(r"(%[A-Za-z0-9_]+) = scf.if .* -> .*tile_buf", mlir)
+    if planner == passes.MemoryPlanner.PYPTO:
+        pointer = _sole_line(mlir, " = pto.tile_buf_addr ")
+        assert f"pto.tile_buf_addr {selected} :" in pointer, mlir
+        alias = _sole_line(mlir, 'pto.view_semantics = "subview"')
+        # Narrow columns retain the parent's 256-column pitch. Full-width
+        # slices can use the compact 16-row physical box instead.
+        assert f"rows={32 if cols == 64 else 16}, cols=256" in alias, alias
+        assert f"v_row=16, v_col={cols}" in alias, alias
+        assert "pto.subview" not in mlir and "pto.textract" not in mlir and "pto.tmov" not in mlir
+    else:
+        assert "pto.tile_buf_addr" not in mlir, mlir
+        assert f"pto.subview {selected}[" in mlir, mlir
+
+
+def test_selected_slice_does_not_enlarge_inferred_dynamic_validity():
+    """A partial source must not acquire full slice validity in an addressed alias."""
+    program = _selected_slice_program(64, 0, False, partial_source=True)
+    mlir = _planner_pto(program, passes.MemoryPlanner.PYPTO)
+    # Runtime validity cannot be inferred from the physical slice box. Keep the
+    # native view instead of silently replacing valid_rows with the constant 16.
+    assert "pto.tile_buf_addr" not in mlir, mlir
+    assert "pto.subview" in mlir, mlir
+    assert 'pto.view_semantics = "subview"' not in mlir, mlir
+
+
+def test_slice_of_selected_views_does_not_assume_logical_row_pitch():
+    """A selected 16x64 view can still inherit its original 256-column pitch."""
+
+    @pl.program
+    class SelectedViews:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 256], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[8, 32], pl.FP32]:
+            a = pl.load(x, [0, 0], [32, 256])
+            b = pl.load(x, [32, 0], [32, 256])
+            a_view = pl.tile.slice(a, [16, 64], [0, 32])
+            b_view = pl.tile.slice(b, [16, 64], [0, 64])
+            if flag > 0:
+                selected = pl.yield_(a_view)
+            else:
+                selected = pl.yield_(b_view)
+            window = pl.tile.slice(selected, [8, 32], [4, 0])
+            return pl.store(window, [0, 0], out)
+
+    mlir = _planner_pto(SelectedViews, passes.MemoryPlanner.PYPTO)
+    assert "pto.tile_buf_addr" not in mlir, mlir
+    assert mlir.count("pto.subview") == 3, mlir
+    assert 'pto.view_semantics = "subview"' not in mlir, mlir
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    ("cols", "col_offset", "dynamic_valid"), [(256, 0, False), (64, 32, False), (64, 32, True)]
+)
+def test_selected_slice_alias_assembles_with_ptoas(tmp_path, cols, col_offset, dynamic_valid):
+    """Actual selected pointers and inherited pitch survive the real level3 pipeline."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    mlir = _planner_pto(_selected_slice_program(cols, col_offset, dynamic_valid), passes.MemoryPlanner.PYPTO)
+    assert "pto.tile_buf_addr" in mlir and 'pto.view_semantics = "subview"' in mlir
+    assert "pto.textract" not in mlir and "pto.tmov" not in mlir
+    source, output = tmp_path / "selected_slice.pto", tmp_path / "selected_slice.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    cpp = output.read_text()
+    assert ".data()" in cpp and "TASSIGN(" in cpp
+    assert "TEXTRACT(" not in cpp
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

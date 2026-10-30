@@ -690,6 +690,90 @@ def test_ptoas_nested_mat_phi_reuses_dominating_enclosing_branch_declaration():
     assert if_indices[0] < declarations[0] < if_indices[1], mlir
 
 
+def test_ptoas_sequential_shared_accumulators_keep_local_declarations():
+    """Hoisting already-dominating creates makes independent Acc families overlap."""
+
+    @pl.program
+    class SequentialAccumulators:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP16],
+            rhs: pl.Tensor[[16, 16], pl.FP16],
+            count: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            a = pl.tile.load(lhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            first = pl.tile.create([16, 16], pl.FP32, target_memory=pl.Mem.Acc)
+            for i, (carried,) in pl.range(count, init_values=(first,)):
+                if i == 0:
+                    updated = pl.tile.matmul(a, b)
+                else:
+                    updated = pl.tile.matmul_acc(carried, a, b)
+                first_result = pl.yield_(updated)
+            pl.tile.store(first_result, [0, 0], out)
+            second = pl.tile.create([16, 16], pl.FP32, target_memory=pl.Mem.Acc)
+            for j, (carried,) in pl.range(count, init_values=(second,)):
+                if j == 0:
+                    updated = pl.tile.matmul(a, b)
+                else:
+                    updated = pl.tile.matmul_acc(carried, a, b)
+                second_result = pl.yield_(updated)
+            return pl.tile.store(second_result, [16, 0], out)
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, SequentialAccumulators, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    allocations = [i for i, line in enumerate(lines) if "pto.alloc_tile" in line and "loc=acc" in line]
+    loops = [i for i, line in enumerate(lines) if "scf.for" in line]
+    stores = [i for i, line in enumerate(lines) if "pto.tstore" in line]
+    assert len(allocations) == len(loops) == len(stores) == 2, mlir
+    # Each initial create dominates its own loop already. The second family's
+    # declaration must remain after the first family's last use for PTOAS reuse.
+    assert allocations[0] < loops[0] < stores[0] < allocations[1] < loops[1] < stores[1], mlir
+
+
+def test_ptoas_loop_local_shared_accumulator_keeps_dynamic_validity_in_scope():
+    """An existing loop-local producer dominates its nested If and binds runtime extents."""
+
+    @pl.program
+    class LoopLocalAccumulator:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP16],
+            rhs: pl.Tensor[[16, 16], pl.FP16],
+            count: pl.Scalar[pl.INDEX],
+            valid_rows: pl.Scalar[pl.INDEX],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            b = pl.tile.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            for i in pl.range(count):
+                rows = pl.min(valid_rows + i, 16)
+                a = pl.tile.load(lhs, [0, 0], [16, 16], valid_shape=[rows, 16], target_memory=pl.Mem.Mat)
+                initial = pl.tile.matmul(a, b)
+                if flag != 0:
+                    result = pl.tile.matmul(a, b)
+                else:
+                    result = pl.tile.matmul_acc(initial, a, b)
+                pl.tile.store(result, [0, 0], out)
+            return out
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, LoopLocalAccumulator, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    allocations = [i for i, line in enumerate(lines) if "pto.alloc_tile" in line and "loc=acc" in line]
+    assert len(allocations) == 1, mlir
+    allocation = allocations[0]
+    loop = next(i for i, line in enumerate(lines) if "scf.for" in line)
+    branch = next(i for i, line in enumerate(lines) if "scf.if" in line)
+    assert loop < allocation < branch, mlir
+    valid_row = re.search(r"valid_row = (%[A-Za-z0-9_]+)", lines[allocation])
+    assert valid_row and not valid_row.group(1).startswith("%c"), mlir
+
+
 def test_ptoas_repaired_mat_phi_preserves_partial_view_and_gather_storage():
     """Repair a descendant slice descriptor without changing its relative window or slot."""
     span = ir.Span.unknown()

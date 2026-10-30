@@ -46,12 +46,29 @@ NON_KERNEL_ENTRIES = {
 # No current kernel entry uses runtime-dir as a compile output.
 COMPILE_OUTPUT_ENTRIES: set[str] = set()
 
-# score_topk narrows a Tile selected between distinct branch allocations.
-# Keep this entry visible in the manifest and report SKIP until PTOAS supports
-# set_validshape on native scf.if results; other library entries still compile.
-PTOAS_BLOCKED_ENTRIES = {
-    "models/deepseek_v4_flash_mtp/decode_indexer.py": "https://github.com/hw-native-sys/PTOAS/issues/1708",
-}
+# These components narrow If-selected Tiles, including when invoked by a model
+# wrapper. Keep every affected entry visible in the manifest as SKIP while
+# PTOAS #1708 is open; unrelated compilation failures remain hard failures.
+PTOAS_BLOCKED_ENTRIES: dict[str, str] = dict.fromkeys(
+    (
+        "models/deepseek_v4_flash_dspark/prefill_metadata.py",
+        "models/deepseek_v4_flash_dspark/prefill_layer.py",
+        "models/deepseek_v4_flash_dspark/prefill_fwd.py",
+        "models/deepseek_v4_flash_mtp/decode_indexer.py",
+        "models/deepseek_v4_flash_mtp/decode_csa.py",
+        "models/deepseek_v4_flash_mtp/decode_fwd.py",
+        "models/deepseek_v4_flash_mtp/decode_fwd_mtp.py",
+        "models/deepseek_v4_flash_mtp/decode_layer.py",
+        "models/deepseek_v4_1_flash/prefill_c1a_full.py",
+        "models/deepseek_v4_1_flash/prefill_fwd.py",
+        "models/deepseek_v4_1_flash/decode_c1a_reindex.py",
+        "models/deepseek_v4_1_flash/decode_c1a_full.py",
+        "models/deepseek_v4_1_flash/decode_c2a_full.py",
+        "models/deepseek_v4_1_flash/decode_layer.py",
+        "models/deepseek_v4_1_flash/decode_fwd.py",
+    ),
+    "https://github.com/hw-native-sys/PTOAS/issues/1708",
+)
 
 
 def select_entries(lib: Path, platform: str) -> list[str]:

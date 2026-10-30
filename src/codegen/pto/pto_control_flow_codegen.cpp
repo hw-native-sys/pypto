@@ -361,6 +361,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
                                              ? then_branch.types[result_index]
                                              : GetTileBufTypeStringFromTileType(tile_type);
         RegisterTileBufType(scf_return_names[result_index], scf_return_types[result_index], tile_type);
+        // A selected view can inherit a physical pitch that is absent from
+        // its logical TileType. Preserve that provenance for address consumers.
+        if (IsTileViewName(then_branch.yields[result_index]) ||
+            IsTileViewName(else_branch.yields[result_index])) {
+          RegisterTileViewName(scf_return_names[result_index]);
+        }
       }
       ++result_index;
     }

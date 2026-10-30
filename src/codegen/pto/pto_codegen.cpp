@@ -1562,20 +1562,31 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
-  std::map<std::string, std::vector<const ir::Var*>> producers;
+  struct Producer {
+    const ir::Var* var;
+    size_t region;
+  };
+  std::map<std::string, std::vector<Producer>> producers;
   class VarMemRefMapper : public ir::IRVisitor {
    public:
     std::map<const ir::Var*, const ir::Var*>& var_to_memref;    ///< tile var → base_ Ptr
     std::map<const ir::Var*, std::string>& memref_to_var_name;  ///< base_ Ptr → var name
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
     bool& has_software_pipeline_slots;
-    std::map<std::string, std::vector<const ir::Var*>>& producers;
+    std::map<std::string, std::vector<Producer>>& producers;
+    // DFS region intervals make lexical dominance an O(1) ancestor test.
+    // The function body is region zero; each If arm and loop body has its own
+    // child region. Producers are recorded in statement order, so the first
+    // producer dominates later ones exactly when its region contains theirs.
+    std::vector<std::pair<size_t, size_t>> regions{{0, 0}};
+    size_t current_region = 0;
+    size_t region_order = 1;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
                     std::map<const ir::Var*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
                     bool& software_pipeline_slots,
-                    std::map<std::string, std::vector<const ir::Var*>>& producer_map)
+                    std::map<std::string, std::vector<Producer>>& producer_map)
         : var_to_memref(mapping),
           memref_to_var_name(reverse_mapping),
           tile_var_allocs(allocs),
@@ -1600,11 +1611,28 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
         tile_var_allocs.emplace_back(op->var_, tile_type);
         if (memref->slot_count_ == 1 && call && call->op_ &&
             !ir::op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
-          producers[MemRefIdentityKey(memref)].push_back(op->var_.get());
+          producers[MemRefIdentityKey(memref)].push_back({op->var_.get(), current_region});
         }
       }
       ir::IRVisitor::VisitStmt_(op);
     }
+
+    void VisitRegion(const ir::StmtPtr& body) {
+      const size_t parent = current_region;
+      const size_t child = regions.size();
+      regions.emplace_back(region_order++, 0);
+      current_region = child;
+      VisitStmt(body);
+      regions[child].second = region_order++;
+      current_region = parent;
+    }
+
+    void VisitStmt_(const IfStmtPtr& op) override {
+      VisitRegion(op->then_body_);
+      if (op->else_body_) VisitRegion(*op->else_body_);
+    }
+    void VisitStmt_(const ForStmtPtr& op) override { VisitRegion(op->body_); }
+    void VisitStmt_(const WhileStmtPtr& op) override { VisitRegion(op->body_); }
   };
 
   VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs,
@@ -1612,6 +1640,7 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
+  mapper.regions[0].second = mapper.region_order;
   if (!emit_tile_addr_) {
     std::map<const ir::Var*, std::string> types;
     for (const auto& [var, type] : fs_.tile_var_allocs) {
@@ -1621,9 +1650,24 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
       // Mixed physical descriptors need the existing per-site destination
       // checks (packed dtypes and dynamic reinterpretations have restrictions).
       if (entry.second.size() > 1 &&
-          std::all_of(entry.second.begin(), entry.second.end(),
-                      [&](const ir::Var* var) { return types.at(var) == types.at(entry.second.front()); })) {
-        fs_.shared_storage_producers.insert(entry.second.begin(), entry.second.end());
+          std::all_of(entry.second.begin(), entry.second.end(), [&](const Producer& item) {
+            return types.at(item.var) == types.at(entry.second.front().var);
+          })) {
+        for (const auto& item : entry.second) {
+          fs_.shared_storage_producers.insert(item.var);
+        }
+        const auto first_region = mapper.regions[entry.second.front().region];
+        const bool first_dominates =
+            std::all_of(entry.second.begin(), entry.second.end(), [&](const Producer& item) {
+              const auto region = mapper.regions[item.region];
+              return first_region.first <= region.first && region.second <= first_region.second;
+            });
+        // A create/allocation before a loop or nested If already supplies a
+        // dominating definition. Hoisting it to function entry would make
+        // sequential accumulator families interfere in PTOAS PlanMemory.
+        if (!first_dominates) {
+          fs_.shared_storage_declarations.insert(entry.second.front().var);
+        }
       }
     }
   }
@@ -1631,7 +1675,7 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
 
 void PTOCodegen::DeclareSharedTileStorage() {
   for (const auto& [var, type] : fs_.tile_var_allocs) {
-    if (fs_.shared_storage_producers.count(var.get()) == 0) continue;
+    if (fs_.shared_storage_declarations.count(var.get()) == 0) continue;
     const std::string name = GetVarName(var);
     if (!fs_.emitted_tile_alloc_names.insert(name).second) continue;
     // Only the physical box is available at function entry. Logical valid
@@ -2351,7 +2395,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   // silently redirect a later reg.load/store to compiler-owned storage.
   if (IsParameterBackedTile(tile_type)) return;
 
-  if (fs_.shared_storage_producers.count(var_key)) {
+  if (fs_.shared_storage_producers.count(var_key) && fs_.emitted_tile_alloc_names.count(tile_buf)) {
     const auto fields = ComputeAllocTileFields(tile_type);
     const auto storage_type = GetSSATileBufType(tile_buf);
     if (storage_type == fields.type_str) {
@@ -2517,6 +2561,11 @@ void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::str
 std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   auto it = fs_.ssa_to_tile_buf_type.find(ssa_name);
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
+}
+
+std::shared_ptr<const ir::TileType> PTOCodegen::GetSSATileType(const std::string& ssa_name) const {
+  const auto found = fs_.ssa_to_tile_type.find(ssa_name);
+  return found == fs_.ssa_to_tile_type.end() ? nullptr : found->second;
 }
 
 void PTOCodegen::RegisterSelectedTileName(const std::string& ssa_name) {

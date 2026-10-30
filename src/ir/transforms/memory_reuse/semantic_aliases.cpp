@@ -1168,6 +1168,20 @@ class TopDownRetargeter {
     return std::move(rewrites_);
   }
 
+  /// A conditional update can reuse its unchanged sibling's storage when the
+  /// old value has no independent observer. This is optional coalescing, not a
+  /// requirement that every native If have one destination.
+  std::map<VarPtr, TypePtr> CoalesceConditionalVecUpdates(const StmtPtr& func_body) {
+    BuildAnalysis(func_body, /*index_branch_storage=*/true);
+    if (auto body = As<SeqStmts>(func_body)) {
+      for (const auto& stmt : body->stmts_) {
+        if (auto base = GetPinnedAllocBase(stmt)) pinned_branch_bases_.insert(base.get());
+      }
+    }
+    VisitConditionalVecUpdates(func_body);
+    return std::move(rewrites_);
+  }
+
   /// Give divergent branch results independent destinations before planning.
   /// Direct, unaliased branch-local producers may write these fresh destinations;
   /// the shared YieldFixup materializes the remaining arm transfers afterwards.
@@ -1224,6 +1238,7 @@ class TopDownRetargeter {
   std::map<const MemRef*, size_t> memref_component_;
   std::map<size_t, ReachableEventIndex> physical_access_index_;
   std::map<const Var*, VersionedReachableEventIndex> alias_read_index_;
+  std::map<size_t, VersionedReachableEventIndex> physical_read_index_;
   std::map<const Var*, ReachableEventIndex> recurring_alias_read_index_;
   std::map<size_t, ReachableEventIndex> recurring_physical_read_index_;
   std::map<VarPtr, TypePtr> rewrites_;
@@ -1233,6 +1248,14 @@ class TopDownRetargeter {
   std::map<const Var*, const Var*> branch_storage_handle_bases_;
   std::set<const Var*> pinned_branch_bases_;
   uint64_t branch_storage_counter_ = 0;
+  // Only phis actually coalesced by this traversal prove one fixed storage
+  // source. An arbitrary native If's representative MemRef proves no alias.
+  std::set<const Var*> fixed_vec_phis_;
+  std::map<VarPtr, bool> fixed_vec_source_cache_;
+  // An unresolved choice can retain an older version of a proven fixed source.
+  // Its future observations are not must-alias reads in the static index, so
+  // conservatively stop reusing that source after it escapes through a choice.
+  std::set<const Var*> escaped_vec_sources_;
 
   void BuildAnalysis(const StmtPtr& func_body, bool index_branch_storage = false) {
     storage_handle_counts_.clear();
@@ -1494,6 +1517,7 @@ class TopDownRetargeter {
 
     std::map<size_t, std::vector<std::pair<size_t, size_t>>> physical_events;
     std::map<const Var*, std::vector<VersionedReachableEventIndex::Event>> alias_events;
+    std::map<size_t, std::vector<VersionedReachableEventIndex::Event>> physical_reads;
     auto record = [&](const Stmt* stmt, const VarPtr& var, bool is_read) {
       auto primary = stmt_order_.find(stmt);
       auto reverse = reverse_stmt_order_.find(stmt);
@@ -1511,6 +1535,12 @@ class TopDownRetargeter {
         const size_t definition = def == defs_.end() ? 0 : def->second.order;
         alias_events[ResolveAliasRoot(var).get()].push_back(
             VersionedReachableEventIndex::Event{primary->second, definition});
+        if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
+          auto component = memref_component_.find(GetDefinedMemRef(tile).get());
+          if (component != memref_component_.end()) {
+            physical_reads[component->second].push_back({primary->second, definition});
+          }
+        }
       }
     };
     for (const auto& [stmt, vars] : reads) {
@@ -1523,6 +1553,7 @@ class TopDownRetargeter {
       physical_access_index_[component].Build(std::move(events));
     }
     for (auto& [root, events] : alias_events) alias_read_index_[root].Build(std::move(events));
+    for (auto& [component, events] : physical_reads) physical_read_index_[component].Build(std::move(events));
   }
 
   /// A read of an older handle can repeat after an IfStmt through an enclosing
@@ -1804,6 +1835,167 @@ class TopDownRetargeter {
     // branch-local accumulator loops.
     VarPtr reused_input;
   };
+
+  bool HasFixedVecSource(const VarPtr& value) {
+    if (escaped_vec_sources_.count(ResolveAliasRoot(value).get())) return false;
+    std::vector<VarPtr> path;
+    std::set<const Var*> seen;
+    auto current = value;
+    bool fixed = false;
+    while (seen.insert(current.get()).second) {
+      if (fixed_vec_phis_.count(current.get())) {
+        fixed = true;
+        break;
+      }
+      if (auto cached = fixed_vec_source_cache_.find(current); cached != fixed_vec_source_cache_.end()) {
+        fixed = cached->second;
+        break;
+      }
+      path.push_back(current);
+      const auto def = defs_.find(current);
+      // Incoming parameters and loop carries require separate ownership proofs.
+      if (def == defs_.end() || def->second.kind != VarDef::kAssign) break;
+      const auto assign = As<AssignStmt>(def->second.assign_stmt);
+      if (auto source = AsVarLike(assign->value_)) {
+        current = source;
+        continue;
+      }
+      const auto call = As<Call>(assign->value_);
+      // Only bare renames forward an unchanged sibling. Writeback/view calls
+      // may change payload or validity, even when their allocation is known.
+      fixed = call && call->op_ && OpRegistry::GetInstance().IsRegistered(call->op_->name_) &&
+              !op_predicates::OutputInheritsSourceBuffer(call->op_->name_);
+      break;
+    }
+    for (const auto& member : path) fixed_vec_source_cache_[member] = fixed;
+    return fixed;
+  }
+
+  void VisitConditionalVecUpdates(const StmtPtr& stmt) {
+    if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& child : seq->stmts_) VisitConditionalVecUpdates(child);
+    } else if (auto loop = As<ForStmt>(stmt)) {
+      VisitConditionalVecUpdates(loop->body_);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      VisitConditionalVecUpdates(loop->body_);
+    } else if (auto scope = As<ScopeStmt>(stmt)) {
+      VisitConditionalVecUpdates(scope->body_);
+    } else if (auto branch = As<IfStmt>(stmt)) {
+      VisitConditionalVecUpdates(branch->then_body_);
+      if (branch->else_body_) VisitConditionalVecUpdates(*branch->else_body_);
+      CoalesceConditionalVecUpdate(branch);
+      const auto lhs = FindYieldStmt(branch->then_body_);
+      const auto rhs = branch->else_body_ ? FindYieldStmt(*branch->else_body_) : nullptr;
+      if (!lhs || !rhs) return;
+      const auto count = std::min({branch->return_vars_.size(), lhs->value_.size(), rhs->value_.size()});
+      for (size_t i = 0; i < count; ++i) {
+        const auto type = As<TileType>(branch->return_vars_[i]->GetType());
+        if (!type || type->GetMemorySpace() != MemorySpace::Vec ||
+            fixed_vec_phis_.count(branch->return_vars_[i].get())) {
+          continue;
+        }
+        for (const auto& source : {lhs->value_[i], rhs->value_[i]}) {
+          if (const auto value = AsVarLike(source)) {
+            escaped_vec_sources_.insert(ResolveAliasRoot(value).get());
+          }
+        }
+      }
+    }
+  }
+
+  void CoalesceConditionalVecUpdate(const IfStmtPtr& branch) {
+    if (!branch->else_body_) return;
+    const auto lhs = FindYieldStmt(branch->then_body_);
+    const auto rhs = FindYieldStmt(*branch->else_body_);
+    if (!lhs || !rhs) return;
+    const size_t count = std::min({branch->return_vars_.size(), lhs->value_.size(), rhs->value_.size()});
+    // A source escaping in another result slot must keep its own logical value.
+    // Count semantic roots once instead of rescanning all sibling slots per phi.
+    std::map<const Var*, size_t> escapes;
+    for (size_t i = 0; i < count; ++i) {
+      for (const auto& source : {lhs->value_[i], rhs->value_[i]}) {
+        if (auto value = AsVarLike(source)) ++escapes[ResolveAliasRoot(value).get()];
+      }
+    }
+    for (size_t i = 0; i < count; ++i) {
+      auto a = AsVarLike(lhs->value_[i]);
+      auto b = AsVarLike(rhs->value_[i]);
+      if (!a || !b) continue;
+      auto a_def = defs_.find(ResolveAliasRoot(a));
+      auto b_def = defs_.find(ResolveAliasRoot(b));
+      const bool a_local = a_def != defs_.end() && IsInside(a_def->second.definition_stmt, branch);
+      const bool b_local = b_def != defs_.end() && IsInside(b_def->second.definition_stmt, branch);
+      if (a_local == b_local) continue;
+      const auto& fresh = a_local ? a : b;
+      const auto& retained = a_local ? b : a;
+      const auto& active_arm = a_local ? branch->then_body_ : *branch->else_body_;
+      const auto fresh_def = defs_.find(fresh);
+      const auto fresh_type = CurrentTileType(fresh);
+      // A bare rename may still carry a pre-rewrite phi hint. The proof above
+      // follows only unchanged renames, so use the planned actual source type.
+      const auto retained_type = CurrentTileType(ResolveAliasRoot(retained));
+      if (fresh_def == defs_.end() || fresh_def->second.kind != VarDef::kAssign || !fresh_type ||
+          !retained_type || !HasFixedVecSource(retained) ||
+          fresh_type->GetMemorySpace() != MemorySpace::Vec ||
+          retained_type->GetMemorySpace() != MemorySpace::Vec ||
+          escapes[ResolveAliasRoot(fresh).get()] != 1 || escapes[ResolveAliasRoot(retained).get()] != 1) {
+        continue;
+      }
+      const auto target = GetDefinedMemRef(retained_type);
+      const auto original = GetDefinedMemRef(fresh_type);
+      if (pinned_branch_bases_.count(target->base_.get()) ||
+          pinned_branch_bases_.count(original->base_.get()) ||
+          storage_handle_counts_[original->base_.get()] != 1 || target->slot_count_ != 1 ||
+          original->slot_count_ != 1 || !As<ConstInt>(target->byte_offset_)) {
+        continue;
+      }
+      // Retarget only identical logical descriptors. In particular, do not
+      // change an input's validity before an in-place operation reads it.
+      auto comparable = MutableCopy(fresh_type);
+      comparable->memref_ = retained_type->memref_;
+      if (!structural_equal(comparable, retained_type)) continue;
+      auto call = As<Call>(As<AssignStmt>(fresh_def->second.assign_stmt)->value_);
+      if (!call || !call->op_ || op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) continue;
+      const auto& registry = OpRegistry::GetInstance();
+      if (!registry.IsRegistered(call->op_->name_) || !registry.GetEntry(call->op_->name_).IsInplaceSafe() ||
+          op_predicates::CastRequiresDisjointSource(call, !IsA5Target())) {
+        // Original operand types can predate planned phi rewrites. Refuse these
+        // optional retargets rather than let a static base comparison miss an
+        // actual input/output overlap introduced earlier in this traversal.
+        continue;
+      }
+      const AccumulatorTarget observation{target, MemorySpace::Vec, retained};
+      if (HasIndependentExternalUseAfterIf(branch, branch->return_vars_[i], observation) ||
+          !IsTargetDeadAfterDefinition(fresh_def->second, target, branch.get())) {
+        continue;
+      }
+      const auto root = ResolveAliasRoot(retained);
+      const auto reads = alias_read_index_.find(root.get());
+      if (reads != alias_read_index_.end() &&
+          reads->second.HasAfterFromHandleDefinedBefore(fresh_def->second.order + 1,
+                                                        stmt_end_order_.at(active_arm.get()),
+                                                        std::numeric_limits<size_t>::max())) {
+        continue;
+      }
+      const auto component = memref_component_.find(target.get());
+      if (component == memref_component_.end()) continue;
+      const auto physical = physical_read_index_.find(component->second);
+      if (physical != physical_read_index_.end() &&
+          physical->second.HasAfterFromHandleDefinedBefore(stmt_end_order_.at(branch.get()) + 1,
+                                                           stmt_end_order_.at(analysis_root_.get()),
+                                                           stmt_order_.at(branch.get()))) {
+        continue;
+      }
+      RewriteTransaction transaction(*this);
+      if (!RetargetAssign(fresh, fresh_def->second, target, MemorySpace::Vec,
+                          /*check_liveness=*/false)) {
+        continue;
+      }
+      PlanRewrite(branch->return_vars_[i], target, MemorySpace::Vec);
+      transaction.Commit();
+      fixed_vec_phis_.insert(branch->return_vars_[i].get());
+    }
+  }
 
   // Resolve the canonical allocation of an in-place accumulator producer. A
   // bare SSA alias may still carry a stale type after a nested child rewrite,
@@ -2710,6 +2902,18 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // pass refreshes each result. The later normalization can then follow the
   // current representative without retaining an abandoned producer allocation.
   new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
+
+  if (ctx == nullptr || !ctx->GetEnableBufferIR()) {
+    // Native conditional updates need no merge copy. Coalesce only an already
+    // proven fixed sibling source so long chains do not retain every historic
+    // candidate until their final use (online-softmax merge is a common case).
+    TopDownRetargeter conditional_updates;
+    auto conditional_rewrites = conditional_updates.CoalesceConditionalVecUpdates(new_body);
+    if (!conditional_rewrites.empty()) {
+      new_body = RetypeApplier(std::move(conditional_rewrites)).VisitStmt(new_body);
+      new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
+    }
+  }
 
   // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
   // DsaRP must therefore run the remaining correctness normalizations from

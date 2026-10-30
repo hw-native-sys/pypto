@@ -157,15 +157,32 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 内存复用。候选之间不是必须别名，不能因为结果的 MemRef 元数据代表其中一支
 就合并它们的存储。
 
+如果新 producer 支持原地更新，且旧值不再被独立观测，条件更新可以复用另一支
+原样转发的固定存储。这需要证明实际来源族，包括先前已安全合并的选择；仅有
+代表性的 phi MemRef 不足以作为依据。
+写回别名在后置归一化中移动时，还会同步刷新外层 native If 的提示，释放不再
+使用的提示分配。
+
 旧 Tile 路径中，会更新的循环携带值仍要求固定缓冲区。如果初始值或回边包含
 尚未消解的 native If 存储选择，编译会明确报错，避免把代表性 MemRef 当作
 实际目标地址。此限制同时覆盖 For 和 While；仅在本轮内部使用的 native If
 仍受支持。不更新或静态零次迭代的携带值直接返回实际初始值。描述符携带与
 轮转缓冲区尚不属于本 pass 的降低能力。
 
+插入多个 carry 写回前，yield fixup 会检查原始选择来源。有界来源摘要允许仅
+读取自身目标或所有复制均不写入的存储。其他条件多副本边界会明确报错，避免
+新插入的 move 隐藏隐式交换。单次写回和显式物化复制保留既有行为。
+
 如果多个 producer 已共享同一物理分配，PTO codegen 会在兄弟区域之前声明存储，
 并在各 producer 处设置逻辑有效形状。若两支返回完全相同的 SSA 句柄，结果会
 直接绑定该句柄，为 PTOAS 保留其本地 allocation 来源。
+若已有 producer 支配其他使用点，则保留其局部声明，让顺序执行的累加器族
+继续复用存储。
+
+带地址的 PTO 输出中，所选平坦 Vec tile 的切片可从实际所选句柄的地址派生视图，
+保留来源的物理步长，无需复制数据或使用代表性的 MemRef。此回退要求推导出的
+有效形状为静态值，或显式提供有效维度。无地址输出、视图选择及打包布局仍使用
+原有 subview 路径，并受其 PTOAS 限制。
 
 `SelectBufferIRFunctions` 让不含循环且含 Tile 返回值 If 的函数保留在 Tile 路径上，
 包括启用 Buffer IR 的情况：当前 Buffer lowering 会移除 Tile 区域返回值，
@@ -232,8 +249,8 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
   canonical window。
 - 在默认（`PYPTO`）流水线里,本 pass 加上 `MemoryReuse` 组合起来等于原来单个
   `MemoryReuse` pass 的行为。
-- `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
-  建立的强制别名关系。
+- `DSA_RP` 与 `PTOAS` 都跳过一般的生命周期 MemRef 复用。上文带保护条件的
+  条件更新仍在 native Tile 路径运行；二者都不能撤销本 pass 建立的强制别名关系。
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
   legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的
   carry/phi mismatch。

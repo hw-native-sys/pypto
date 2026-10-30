@@ -529,6 +529,8 @@ class PTOCodegen : public CodegenBase {
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string,
                            const std::shared_ptr<const ir::TileType>& tile_type = nullptr);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  /// Physical descriptor metadata registered for the actual SSA; null if unknown.
+  std::shared_ptr<const ir::TileType> GetSSATileType(const std::string& ssa_name) const;
   /// A control-flow result chooses its storage at runtime. Aliases and views
   /// must follow that SSA instead of reconstructing its representative MemRef.
   void RegisterSelectedTileName(const std::string& ssa_name);
@@ -1174,6 +1176,10 @@ class PTOCodegen : public CodegenBase {
     /// Producer sites sharing one physical allocation. Their declaration must
     /// dominate sibling regions; each site initializes its own logical validity.
     std::set<const ir::Var*> shared_storage_producers;
+    /// First producers whose regions do not dominate all shared definitions.
+    /// Only these families need a function-entry declaration; other shared
+    /// families retain a local first definition and its shorter live range.
+    std::set<const ir::Var*> shared_storage_declarations;
     /// PTOAS memory-planner mode only (no addr baked): full-MemRef-identity key
     /// (base+offset+size) -> canonical tile_buf SSA. Variables that resolve to
     /// the same buffer (e.g. a loop-carried accumulator coalesced by
@@ -1268,6 +1274,7 @@ class PTOCodegen : public CodegenBase {
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
       shared_storage_producers.clear();
+      shared_storage_declarations.clear();
       memref_identity_to_mlir.clear();
       emitted_tile_alloc_names.clear();
       multi_buffer_regions.clear();

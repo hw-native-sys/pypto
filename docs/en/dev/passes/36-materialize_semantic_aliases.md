@@ -204,6 +204,13 @@ after their last use, ordinary memory reuse applies to each allocation. The
 candidates are not unconditional aliases and must not be merged just because
 one of them represents the result's MemRef metadata.
 
+A conditional update can reuse the unchanged sibling's fixed storage when
+the fresh producer is in-place safe and no independent old value remains
+observable. This requires a proof of the actual source family, including
+earlier coalesced choices; a representative phi MemRef alone is insufficient.
+Post-fixup alias normalization also refreshes enclosing native If hints when
+their yielded writeback aliases move, so abandoned hint allocations can be freed.
+
 Updating loop carries on the legacy Tile path still require one fixed buffer.
 If a carry's initializer or backedge retains an unresolved native If storage
 choice, compilation reports a diagnostic instead of treating the representative
@@ -212,10 +219,26 @@ Ifs used only within an iteration remain supported. An unchanged or statically
 zero-trip carry forwards its actual initializer. Descriptor-carry rotation is
 outside this pass's current lowering.
 
+Before inserting multiple carry writebacks, yield fixup checks the original
+selected sources. A bounded source summary permits choices that read only
+their own destination or storage untouched by every copy. Other conditional
+multi-copy boundaries are diagnosed; inserted moves must not hide an implicit
+swap from this check. Single-copy and explicit-copy boundaries retain their
+existing behavior.
+
 When producers already share one physical allocation, PTO codegen declares
 that storage before sibling regions and initializes logical validity at each
 producer site. If both arms yield the exact same SSA handle, the result binds
 directly to that handle, preserving its local allocation provenance for PTOAS.
+An existing producer that dominates the other sites keeps its local declaration
+so sequential accumulator families can reuse storage.
+
+In addressed PTO output, a slice of a selected flat Vec tile can derive a view
+from the actual selected handle's address. The view preserves the source's
+physical pitch without copying contents or using its representative MemRef.
+This fallback requires static inferred validity or explicit valid dimensions.
+Unaddressed output, selections of views, and packed layouts retain the existing
+subview path and its PTOAS limitations.
 
 `SelectBufferIRFunctions` retains loop-free functions with Tile-valued If results
 on the Tile path, including when Buffer IR is enabled: Buffer lowering currently
@@ -297,8 +320,9 @@ physical address for ptoas `PlanMemory`. See
   window.
 - In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
   behavior of the former single `MemoryReuse` pass.
-- `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
-  may undo a must-alias relation established by this pass.
+- `DSA_RP` and `PTOAS` both skip general lifetime-based MemRef reuse. Guarded
+  conditional updates described above still run on the native Tile path;
+  neither planner may undo a must-alias relation established by this pass.
 - Accumulator-phi normalization runs for every memory planner before lifetime
   planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
   reuse can introduce a fresh carry/phi mismatch.

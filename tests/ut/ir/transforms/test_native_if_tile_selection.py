@@ -441,5 +441,103 @@ class Before:
             codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("fresh_then", [False, True])
+def test_conditional_carry_swap_is_diagnosed_before_writeback_moves(planner, fresh_then, ascend_backend):
+    """Fresh merge outputs can hide the opposite arm's carry-copy cycle."""
+    fresh = """fresh_left = pl.tile.mrgsort(left, block_len=64)
+fresh_right = pl.tile.mrgsort(right, block_len=64)
+next_left, next_right = pl.yield_(fresh_left, fresh_right)"""
+    swap = "next_left, next_right = pl.yield_(right, left)"
+
+    def indent(text):
+        return "\n".join(" " * 16 + line for line in text.splitlines())
+
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[2, 4096], pl.FP32], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[2, 4096], pl.FP32]]) -> pl.Tensor[[2, 4096], pl.FP32]:
+        a = pl.load(x, [0, 0], [1, 4096])
+        b = pl.load(x, [1, 0], [1, 4096])
+        for i, (left, right) in pl.range(count, init_values=(a, b)):
+            if flag > 0:
+{indent(fresh if fresh_then else swap)}
+            else:
+{indent(swap if fresh_then else fresh)}
+            result_left, result_right = pl.yield_(next_left, next_right)
+        pl.store(result_left, [0, 0], out)
+        return pl.store(result_right, [1, 0], out)
+""")
+    # mrgsort is not inplace-safe, so the fresh arm forces separate storage.
+    # Its representative addresses used to conceal the sibling arm's swap when
+    # two generated writebacks were ordered, then to hide it from codegen too.
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        with pytest.raises(ValueError, match="conditional Tile selection cannot feed multiple loop-carry"):
+            lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+            codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("producer", ["mrgsort", "column_stats"])
+def test_independent_conditional_carry_copies_remain_supported(planner, nested, producer, ascend_backend):
+    """Fresh-or-own choices cannot clobber a sibling's source, even when nested."""
+    if producer == "mrgsort":
+        input_shape, output_shape, tile_shape = "[2, 4096]", "[2, 4096]", "[1, 4096]"
+        second_offset = "[1, 0]"
+        fresh = """fresh_left = pl.tile.mrgsort(left, block_len=64)
+fresh_right = pl.tile.mrgsort(right, block_len=64)"""
+    else:
+        input_shape, output_shape, tile_shape = "[32, 4]", "[32, 2]", "[32, 1]"
+        second_offset = "[0, 1]"
+        # Like CSA's online softmax, both statistics become column vectors
+        # after arithmetic on row vectors. The maximum must preserve old left
+        # until alpha is computed, and both outputs need independent writeback.
+        fresh = """delta_left = pl.load(x, [0, 2], [32, 1])
+delta_right = pl.load(x, [0, 3], [32, 1])
+fresh_left = pl.maximum(left, delta_left)
+alpha = pl.exp(pl.sub(left, fresh_left))
+beta = pl.exp(pl.sub(delta_left, fresh_left))
+fresh_right = pl.add(pl.mul(alpha, right), pl.mul(beta, delta_right))"""
+
+    def indent(text, spaces):
+        return "\n".join(" " * spaces + line for line in text.splitlines())
+
+    fresh += "\nnext_left, next_right = pl.yield_(fresh_left, fresh_right)"
+    if nested:
+        fresh = (
+            "if flag > 1:\n"
+            + indent(fresh.replace("next_left, next_right", "inner_left, inner_right"), 4)
+            + "\nelse:\n    inner_left, inner_right = pl.yield_(left, right)"
+            + "\nnext_left, next_right = pl.yield_(inner_left, inner_right)"
+        )
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[{input_shape}, pl.FP32], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[{output_shape}, pl.FP32]]) -> pl.Tensor[{output_shape}, pl.FP32]:
+        a = pl.load(x, [0, 0], {tile_shape})
+        b = pl.load(x, {second_offset}, {tile_shape})
+        for i, (left, right) in pl.range(count, init_values=(a, b)):
+            if flag > 0:
+{indent(fresh, 16)}
+            else:
+                next_left, next_right = pl.yield_(left, right)
+            result_left, result_right = pl.yield_(next_left, next_right)
+        pl.store(result_left, [0, 0], out)
+        return pl.store(result_right, {second_offset}, out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert text.count("pto.tmov") == 2, text
+    assert text.count("scf.if") >= 1 + int(nested), text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

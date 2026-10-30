@@ -1335,7 +1335,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string result_type = codegen.GetCurrentResultTileBufTypeString();
     INTERNAL_CHECK_SPAN(!result_target.empty(), op->span_) << "tile.slice requires assignment target";
 
-    // tile.slice is always a pure pto.subview view of its source. The 4-arg
+    // tile.slice is always an aliasing view of its source. The 4-arg
     // form (explicit valid_shape) encodes the result valid into pto.subview's
     // `valid [...]` clause; no pto.tmov / pto.set_validshape is emitted. This
     // keeps tile.slice consistent with its set_output_memory_inherit_input
@@ -1372,17 +1372,117 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         view_type_info.v_col, view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
 
     std::string view_ssa = codegen.NewNamedTemp("slice_view");
-    std::ostringstream oss;
-    oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
-        << rows_const->value_ << ", " << cols_const->value_ << "]";
-    if (has_explicit_valid_shape) {
-      oss << " valid [" << valid_row << ", " << valid_col << "]";
+    auto registered_view_type = codegen.GetCurrentResultTileType();
+    auto actual_source_type = codegen.GetSSATileType(src);
+    if (!actual_source_type) actual_source_type = source_tile_type;
+    const auto source_components =
+        codegen::ExtractTileTypeInfo(*actual_source_type, codegen.GetTypeString(actual_source_type->dtype_));
+    const auto source_rows = actual_source_type->shape_.size() == 2
+                                 ? ir::As<ir::ConstInt>(actual_source_type->shape_[0])
+                                 : nullptr;
+    const auto source_cols = actual_source_type->shape_.size() == 2
+                                 ? ir::As<ir::ConstInt>(actual_source_type->shape_[1])
+                                 : nullptr;
+    const auto source_storage_bits = ir::storage_size::GetStorageBitWidth(actual_source_type->dtype_);
+    const bool addressed_alias =
+        codegen.EmitTileAddr() && codegen.IsSelectedTileName(src) && !codegen.IsTileViewName(src) &&
+        source_rows && source_cols && actual_source_type->GetMemorySpace() == ir::MemorySpace::Vec &&
+        source_components.slayout == ir::TileLayout::none_box &&
+        source_components.compact == ir::CompactMode::null &&
+        (source_components.blayout == ir::TileLayout::row_major ||
+         source_components.blayout == ir::TileLayout::col_major) &&
+        source_storage_bits > 0 && source_storage_bits % 8 == 0 &&
+        (has_explicit_valid_shape || (!view_type_info.v_row_dynamic && !view_type_info.v_col_dynamic));
+    if (addressed_alias) {
+      // PTOAS 0.70 cannot normalize subview(scf.if(...)): its address resolver
+      // only follows local allocation/declaration roots. In level3, extract the
+      // actual selected pointer and build the same addressed alias it would
+      // have produced for a local root. Never reconstruct the representative
+      // MemRef address, and never copy payload into overlapping view storage.
+      // Level2 rejects explicit alloc addresses, so its native subview path is
+      // deliberately unchanged until the backend supports selected roots.
+      // Inferred dynamic validity stays on that path as well: substituting the
+      // full slice extent could enlarge a partially valid selected descriptor.
+      // An If selecting views also stays native: its logical shape need not
+      // expose the branches' inherited physical pitch.
+      const bool col_major = source_components.blayout == ir::TileLayout::col_major;
+      const auto row_stride = col_major ? 1 : source_components.cols;
+      const auto col_stride = col_major ? source_components.rows : 1;
+      const bool compact_child = col_major ? rows_const->value_ == source_components.rows
+                                           : cols_const->value_ == source_components.cols;
+      auto physical_view = view_type_info;
+      if (!compact_child) {
+        physical_view.rows = source_components.rows;
+        physical_view.cols = source_components.cols;
+      }
+      view_type = codegen::FormatTileBufTypeString(
+          "vec", physical_view.dtype_str, physical_view.rows, physical_view.cols, physical_view.blayout,
+          physical_view.slayout, physical_view.fractal, physical_view.pad, physical_view.compact,
+          physical_view.v_row, physical_view.v_col, physical_view.v_row_dynamic, physical_view.v_col_dynamic);
+      auto offset_i64 = [&](const ir::ExprPtr& offset, const std::string& ssa) {
+        if (auto constant = ir::As<ir::ConstInt>(offset)) {
+          return codegen.GetOrEmitConstant(constant->value_, DataType::INT64);
+        }
+        const auto type = codegen.GetExprTypeAnnotation(offset);
+        if (type == "i64") return ssa;
+        std::string index = ssa;
+        if (type != "index") {
+          index = codegen.NewTemp();
+          codegen.Emit(index + " = arith.index_cast " + ssa + " : " + type + " to index");
+        }
+        const auto widened = codegen.NewTemp();
+        codegen.Emit(widened + " = arith.index_cast " + index + " : index to i64");
+        return widened;
+      };
+      const auto row = offset_i64(offset_tuple->elements_[0], row_off);
+      const auto col = offset_i64(offset_tuple->elements_[1], col_off);
+      const auto row_scale = codegen.GetOrEmitConstant(row_stride, DataType::INT64);
+      const auto col_scale = codegen.GetOrEmitConstant(col_stride, DataType::INT64);
+      const auto byte_scale =
+          codegen.GetOrEmitConstant(static_cast<int64_t>(source_storage_bits / 8), DataType::INT64);
+      const auto ptr = codegen.NewNamedTemp("selected_slice_ptr");
+      const auto base = codegen.NewTemp();
+      const auto row_elements = codegen.NewTemp();
+      const auto col_elements = codegen.NewTemp();
+      const auto elements = codegen.NewTemp();
+      const auto bytes = codegen.NewTemp();
+      const auto address = codegen.NewTemp();
+      const auto ptr_type = "!pto.ptr<" + source_components.dtype_str + ", ub>";
+      codegen.Emit(ptr + " = pto.tile_buf_addr " + src + " : " + src_type + " -> " + ptr_type);
+      codegen.Emit(base + " = pto.castptr " + ptr + " : " + ptr_type + " -> i64");
+      codegen.Emit(row_elements + " = arith.muli " + row + ", " + row_scale + " : i64");
+      codegen.Emit(col_elements + " = arith.muli " + col + ", " + col_scale + " : i64");
+      codegen.Emit(elements + " = arith.addi " + row_elements + ", " + col_elements + " : i64");
+      codegen.Emit(bytes + " = arith.muli " + elements + ", " + byte_scale + " : i64");
+      codegen.Emit(address + " = arith.addi " + base + ", " + bytes + " : i64");
+      std::string allocation = view_ssa + " = pto.alloc_tile addr = " + address;
+      if (physical_view.v_row_dynamic) {
+        allocation += " valid_row = " + valid_row;
+      }
+      if (physical_view.v_col_dynamic) {
+        allocation += " valid_col = " + valid_col;
+      }
+      codegen.Emit(allocation + " {pto.view_semantics = \"subview\"} : " + view_type);
+      INTERNAL_CHECK_SPAN(registered_view_type, op->span_) << "tile.slice result must have a TileType";
+      // The physical shape can retain the parent's pitch when logical columns
+      // shrink. Keep that actual geometry available to a subsequent slice.
+      registered_view_type = std::make_shared<ir::TileType>(
+          std::vector<int64_t>{physical_view.rows, physical_view.cols}, registered_view_type->dtype_,
+          registered_view_type->memref_, registered_view_type->tile_view_,
+          registered_view_type->GetMemorySpace());
+    } else {
+      std::ostringstream oss;
+      oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
+          << rows_const->value_ << ", " << cols_const->value_ << "]";
+      if (has_explicit_valid_shape) {
+        oss << " valid [" << valid_row << ", " << valid_col << "]";
+      }
+      if (!src_type.empty() && !view_type.empty()) {
+        oss << " : " << src_type << " -> " << view_type;
+      }
+      codegen.Emit(oss.str());
     }
-    if (!src_type.empty() && !view_type.empty()) {
-      oss << " : " << src_type << " -> " << view_type;
-    }
-    codegen.Emit(oss.str());
-    codegen.RegisterTileBufType(view_ssa, view_type, codegen.GetCurrentResultTileType());
+    codegen.RegisterTileBufType(view_ssa, view_type, registered_view_type);
     codegen.RegisterTileViewName(view_ssa);
     if (codegen.IsSelectedTileName(src)) codegen.RegisterSelectedTileName(view_ssa);
 
@@ -1413,6 +1513,10 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         source_tile_type->shape_.size() == 2 ? ir::As<ir::ConstInt>(source_tile_type->shape_[1]) : nullptr;
     mat_info.source_rows = source_rows_const ? source_rows_const->value_ : 0;
     mat_info.source_cols = source_cols_const ? source_cols_const->value_ : 0;
+    if (addressed_alias) {
+      mat_info.source_rows = source_components.rows;
+      mat_info.source_cols = source_components.cols;
+    }
     mat_info.view_rows = rows_const->value_;
     mat_info.view_cols = cols_const->value_;
     auto row_offset_const = ir::As<ir::ConstInt>(offset_tuple->elements_[0]);

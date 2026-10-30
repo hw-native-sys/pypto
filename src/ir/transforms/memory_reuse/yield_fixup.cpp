@@ -38,7 +38,9 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -182,6 +184,92 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return AlignLoop(op); }
 };
 
+// Compact descriptor bindings for the carry-copy diagnostic. Copies are roots,
+// fixed loop storage follows its initializer, and views require a separate
+// geometry proof, so they deliberately make this diagnostic conservative.
+class CarrySourceCollector : public IRVisitor {
+ public:
+  std::map<const Var*, std::vector<const Var*>> sources;
+  std::set<const Var*> unknown;
+  std::vector<MemRefPtr> carry_ranges;
+
+ protected:
+  void VisitVarLike_(const VarPtr& value) override {
+    if (As<TileType>(value->GetType())) sources.try_emplace(value.get());
+  }
+
+  // A carry's initializer is visited once at its loop definition, rather than
+  // recursively on every IterArg use in a nested loop body.
+  void VisitExpr_(const IterArgPtr& value) override { VisitVarLike_(value); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (AsVarLike(op->value_)) Bind(op->var_, {op->value_});
+    if (const auto call = As<Call>(op->value_); call && call->op_) {
+      if (op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        const auto input = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
+        const auto source = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
+        const auto target = GetTileTypeWithMemRef(op->var_->GetType());
+        // Reshape preserves byte origin, including the row/column-vector
+        // legalization around arithmetic. Do not infer this for slices from
+        // representative hints: their deferred view offsets may still be stale.
+        if (call->op_->name_ == "tile.reshape" && source && target && source->dtype_ == target->dtype_ &&
+            source->GetMemorySpace() == target->GetMemorySpace() &&
+            SamePhysicalWindow(GetDefinedMemRef(source), GetDefinedMemRef(target))) {
+          Bind(op->var_, {input});
+        } else {
+          unknown.insert(op->var_.get());
+        }
+      } else if (const auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+        Bind(op->var_, {call->args_[*index]});
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    const auto lhs = transform_utils::GetLastYieldStmt(op->then_body_);
+    const auto rhs = op->else_body_ ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      Bind(op->return_vars_[i], {lhs && i < lhs->value_.size() ? lhs->value_[i] : nullptr,
+                                 rhs && i < rhs->value_.size() ? rhs->value_[i] : nullptr});
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { Loop(op); }
+
+ private:
+  void Bind(const VarPtr& target, const std::vector<ExprPtr>& inputs) {
+    if (!As<TileType>(target->GetType())) return;
+    VisitVarLike_(target);
+    auto& binding = sources.at(target.get());
+    for (const auto& input : inputs) {
+      const auto source = AsVarLike(input);
+      if (!source || !As<TileType>(source->GetType())) {
+        unknown.insert(target.get());
+        continue;
+      }
+      VisitVarLike_(source);
+      binding.push_back(source.get());
+    }
+  }
+
+  template <typename LoopPtr>
+  void Loop(const LoopPtr& op) {
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& argument = op->iter_args_[i];
+      Bind(argument, {argument->initValue_});
+      VisitExpr(argument->initValue_);
+      const auto source = AsVarLike(argument->initValue_);
+      const auto tile = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
+      if (tile) carry_ranges.push_back(GetDefinedMemRef(tile));
+      if (i < op->return_vars_.size()) Bind(op->return_vars_[i], {argument});
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
 /**
  * @brief Fix yield/return_var MemRef mismatch after MemoryReuse.
  *
@@ -197,6 +285,13 @@ class YieldFixupMutator : public StorageBoundaryMutator {
  public:
   StmtPtr Run(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
     if (canonical_branch_storage_) names_.Collect(body, parameters);
+    // Index native selections once, before inserted carry moves materialize
+    // their results and hide the selected sources from the codegen guard.
+    // This is diagnostic provenance, not an assertion that copies alias inputs.
+    if (!canonical_branch_storage_) {
+      selected_before_fixup_ = AnalyzeTileSelections(body).values;
+      if (!selected_before_fixup_.empty()) IndexCarrySources(body);
+    }
     return VisitStmt(body);
   }
 
@@ -209,6 +304,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     if (canonical_branch_storage_ && !LoopMayExecute(op, false)) {
       return IRMutator::VisitStmt_(As<ForStmt>(FixupCanonicalLoop(op)));
     }
+    // If hint refresh replaces result Vars while visiting the body, retain the
+    // original yield slots for queries against the pre-mutation selection index.
+    const auto original_yield = FindYieldStmt(op->body_);
     // First recurse into nested control flow
     auto result = IRMutator::VisitStmt_(op);
     auto for_stmt = As<ForStmt>(result);
@@ -281,6 +379,30 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // (MemoryReuse updates initValue/yield but not iter_arg/return_var types).
       // Ensure all 4 loop-carry variables share the same MemRef (= initValue's).
       return PatchIterArgsAndReturnVars(for_stmt, yield_stmt);
+    }
+
+    if (copies.size() > 1 && original_yield && LoopMayExecute(op, false)) {
+      std::vector<MemRefPtr> destinations;
+      destinations.reserve(copies.size());
+      for (const auto& copy : copies) destinations.push_back(copy.dst_memref);
+      const CarryRangeIndex destination_index(destinations);
+      for (const auto& copy : copies) {
+        const auto source = copy.index < original_yield->value_.size()
+                                ? AsVarLike(original_yield->value_[copy.index])
+                                : nullptr;
+        // The static ordering below only sees representative addresses. Permit
+        // conditional sources proven to read their own destination or storage
+        // untouched by every copy. Ambiguous conditional multi-copy boundaries
+        // remain unsupported: a hidden sibling source could be overwritten.
+        // One copy has no sibling write; explicit materializing copies own
+        // storage and stop the diagnostic provenance graph.
+        CHECK_SPAN(!source || selected_before_fixup_.count(source.get()) == 0 ||
+                       IsIndependentSelectedCopy(source, copy.dst_memref, destination_index),
+                   for_stmt->span_)
+            << "A conditional Tile selection cannot feed multiple loop-carry copies on the legacy "
+               "Tile path yet. Materialize the selected values in independent buffers before "
+               "updating any carry, or use one fixed destination per carry.";
+      }
     }
 
     // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
@@ -368,6 +490,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
  private:
   bool canonical_branch_storage_ = false;
+  std::set<const Var*> selected_before_fixup_;
   StorageNameSupply names_;
 
   // The enabled pipeline establishes each phi's target before planning. Never
@@ -605,6 +728,86 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     std::map<const Var*, std::vector<int64_t>> prefix_end_;
     std::map<const Var*, std::vector<size_t>> unpositioned_;
   };
+
+  struct CarrySourceSummary {
+    bool unknown = false;
+    // Retain at most two distinct windows that overlap any loop carry in the
+    // function. All other roots are fresh with respect to every carry write.
+    // A bounded summary avoids transitive root-set expansion for nested phis.
+    std::vector<MemRefPtr> windows;
+
+    void Merge(const CarrySourceSummary& source) {
+      if (unknown) return;
+      unknown = source.unknown;
+      if (!unknown) {
+        for (const auto& window : source.windows) {
+          if (std::any_of(windows.begin(), windows.end(),
+                          [&](const MemRefPtr& existing) { return SamePhysicalWindow(existing, window); })) {
+            continue;
+          }
+          if (windows.size() == 2) {
+            unknown = true;
+            break;
+          }
+          windows.push_back(window);
+        }
+      }
+      if (unknown) windows.clear();
+    }
+  };
+
+  std::map<const Var*, CarrySourceSummary> carry_sources_;
+
+  void IndexCarrySources(const StmtPtr& body) {
+    CarrySourceCollector collector;
+    collector.VisitStmt(body);
+    const CarryRangeIndex all_carries(collector.carry_ranges);
+    std::map<const Var*, size_t> remaining;
+    std::map<const Var*, std::vector<const Var*>> users;
+    std::vector<const Var*> pending;
+    for (const auto& [value, inputs] : collector.sources) {
+      auto& summary = carry_sources_[value];
+      summary.unknown = collector.unknown.count(value) != 0;
+      remaining[value] = inputs.size();
+      for (const auto* input : inputs) users[input].push_back(value);
+      if (!inputs.empty()) continue;
+      pending.push_back(value);
+      const auto tile = GetTileTypeWithMemRef(value->GetType());
+      const auto window = tile ? GetDefinedMemRef(tile) : nullptr;
+      // A symbolic view offset cannot prove either independence or exact own
+      // storage. Leave such sources to the existing unsupported-case diagnostic.
+      if (!window || !As<ConstInt>(window->byte_offset_)) summary.unknown = true;
+      if (!summary.unknown && all_carries.AnyOverlap(window)) summary.windows.push_back(window);
+    }
+    // One topological pass processes each direct binding once. Together with
+    // the range indexes and constant-size summaries this costs O(N log N),
+    // including deeply nested choices or many carries sharing source ancestry.
+    while (!pending.empty()) {
+      const auto* source = pending.back();
+      pending.pop_back();
+      const auto found = users.find(source);
+      if (found == users.end()) continue;
+      for (const auto* target : found->second) {
+        carry_sources_.at(target).Merge(carry_sources_.at(source));
+        if (--remaining.at(target) == 0) pending.push_back(target);
+      }
+    }
+    for (const auto& [value, count] : remaining) {
+      // The graph follows fixed loop initializers and should be acyclic. Do
+      // not accidentally approve a malformed/cyclic descriptor dependency.
+      if (count != 0) carry_sources_.at(value).unknown = true;
+    }
+  }
+
+  [[nodiscard]] bool IsIndependentSelectedCopy(const VarPtr& source, const MemRefPtr& own_destination,
+                                               const CarryRangeIndex& destinations) const {
+    const auto found = carry_sources_.find(source.get());
+    if (found == carry_sources_.end() || found->second.unknown) return false;
+    for (const auto& window : found->second.windows) {
+      if (!SamePhysicalWindow(window, own_destination) && destinations.AnyOverlap(window)) return false;
+    }
+    return true;
+  }
 
   /// The byte range each carry owns, indexed by iter_arg position (null when the
   /// carry is not a tile with a MemRef).
@@ -1066,7 +1269,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   /// the traversal grows it with every required alias. See
   /// `ReanchorAliasingOutput` for why anchoring onto one is wrong.
   explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
-      : unsettled_(std::move(unsettled)) {}
+      : unsettled_(std::move(unsettled)), refresh_native_phi_hints_(false) {}
 
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = subst_.find(op);
@@ -1095,6 +1298,37 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override { return NormalizeTensorLoop(op); }
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return NormalizeTensorLoop(op); }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto visited = As<IfStmt>(IRMutator::VisitStmt_(op));
+    const auto* context = PassContext::Current();
+    if (!refresh_native_phi_hints_ || (context && context->GetEnableBufferIR())) return visited;
+    const auto yield = transform_utils::GetLastYieldStmt(visited->then_body_);
+    if (!yield) return visited;
+    auto result = MutableCopy(visited);
+    bool changed = false;
+    for (size_t i = 0; i < visited->return_vars_.size() && i < yield->value_.size(); ++i) {
+      const auto& var = visited->return_vars_[i];
+      const auto tile = GetTileTypeWithMemRef(var->GetType());
+      const auto source = GetTileTypeWithMemRef(yield->value_[i]->GetType());
+      if (!tile || !source ||
+          (SamePhysicalWindow(GetDefinedMemRef(tile), GetDefinedMemRef(source)) &&
+           tile->GetMemorySpace() == source->GetMemorySpace())) {
+        continue;
+      }
+      // Writeback aliases in the then arm may have moved during this very
+      // normalization walk. Refresh only the native descriptor's hint, without
+      // coalescing its candidates. Otherwise an abandoned hint allocation stays
+      // artificially live and downstream aliases can address stale storage.
+      auto replacement = std::make_shared<Var>(
+          var->name_hint_, CloneTypeWithMemRef(var->GetType(), source->memref_, source->GetMemorySpace()),
+          var->span_);
+      result->return_vars_[i] = replacement;
+      subst_[op->return_vars_[i]] = replacement;
+      changed = true;
+    }
+    return changed ? result : visited;
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // Only bare-Var identity copies are pure renames; Call producers are not.
@@ -1225,6 +1459,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
 
   std::map<VarPtr, ExprPtr> subst_;
   std::set<const Var*> unsettled_;
+  bool refresh_native_phi_hints_ = true;
 };
 
 /// Every IfStmt return_var whose MemRef has not been refreshed by YieldFixup.
