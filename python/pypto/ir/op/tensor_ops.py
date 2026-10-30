@@ -2032,10 +2032,11 @@ def view(
     if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
     elif strides is not None:
-        # Keep the legacy three-operand valid_shape form unambiguous. Strides
-        # are an Expr operand so substitution and serialization visit them.
+        # Explicit strides require a fully valid target. The empty valid_shape
+        # encodes that default in operand three, keeping strides in operand four.
         args.append(_to_make_tuple([], actual_span))
     if strides is not None:
+        # Keep dynamic strides as Expr operands for substitution and serialization.
         args.append(_to_make_tuple(strides, actual_span))
     kwargs: dict[str, Any] = {}
     if layout is not None:

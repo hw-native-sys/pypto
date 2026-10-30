@@ -616,13 +616,16 @@ TypePtr DeduceExplicitStridedTensorViewType(const std::vector<ExprPtr>& args, co
 
 TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.view(src[, shape[, valid_shape]], *, layout=None) reinterprets a tensor over the
-  // same physical memory. shape-only derives a canonical view for that shape
-  // with the source layout; layout-only preserves the legacy layout-only trailing
-  // pair flip; both derive canonical strides from the requested shape+layout.
+  // Operand positions are fixed: src[, shape[, valid_shape[, strides]]].
+  // Omit trailing optional operands; when strides are supplied, an empty
+  // valid_shape denotes a fully valid target. Shape-only derives canonical
+  // strides, while layout-only preserves the legacy trailing-pair flip.
   CHECK(args.size() >= 1 && args.size() <= 4)
       << "tensor.view requires 1 to 4 operands (src[, shape[, valid_shape[, strides]]]), but got "
       << args.size();
+  const bool has_shape = args.size() >= 2;
+  const bool has_valid_shape = args.size() >= 3;
+  const bool has_strides = args.size() == 4;
 
   auto src_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(src_type) << "tensor.view: src must be TensorType or DistributedTensorType, got "
@@ -635,16 +638,14 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       break;
     }
   }
-  CHECK(args.size() >= 2 || requested_layout.has_value())
-      << "tensor.view requires at least one of shape or layout";
+  CHECK(has_shape || requested_layout.has_value()) << "tensor.view requires at least one of shape or layout";
 
   TensorLayout src_layout =
       src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
   TensorLayout new_layout = requested_layout.value_or(src_layout);
-  // The four-operand form has a storage-span contract, rather than the
+  // Explicit strides have a storage-span contract, rather than the
   // equal-element-count contract of ordinary shape reinterprets below.
-  if (args.size() == 4) return DeduceExplicitStridedTensorViewType(args, src_type, new_layout);
-  const bool has_shape = args.size() >= 2;
+  if (has_strides) return DeduceExplicitStridedTensorViewType(args, src_type, new_layout);
   // FP8E8M0 scale buffers may alias between packed ND storage and the Cube
   // consumer layouts. MX_A_ZZ covers LeftScale boxes; MX_B_NN covers RightScale.
   const bool is_mx_scale_backing_nd_view =
@@ -679,7 +680,6 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   }
 
   std::vector<ExprPtr> new_shape;
-  const bool has_explicit_valid_shape = args.size() == 3;
   if (has_shape && src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
     auto packed_stride = tensor_view_semantics::BuildLogicalStridesFromLayout(src_type->shape_, src_layout);
     const auto& src_stride = src_type->tensor_view_->stride;
@@ -753,7 +753,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
 
   if (src_type->tensor_view_.has_value()) {
     const auto& src_view = src_type->tensor_view_.value();
-    if (has_shape && !has_explicit_valid_shape && !src_view.valid_shape.empty()) {
+    if (has_shape && !has_valid_shape && !src_view.valid_shape.empty()) {
       bool is_fully_valid =
           src_view.valid_shape.size() == src_type->shape_.size() &&
           std::equal(src_view.valid_shape.begin(), src_view.valid_shape.end(), src_type->shape_.begin(),
@@ -775,12 +775,12 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
     }
     // An explicit valid_shape identifies the intended shape mapping, so the
     // source padding metadata remains meaningful for that view as well.
-    if (!has_shape || has_explicit_valid_shape) {
+    if (!has_shape || has_valid_shape) {
       new_view.pad = src_view.pad;
     }
   }
 
-  if (has_explicit_valid_shape) {
+  if (has_valid_shape) {
     auto valid_shape_tuple = As<MakeTuple>(args[2]);
     CHECK(valid_shape_tuple) << "tensor.view valid_shape (3rd argument) must be a MakeTuple";
     const auto& valid_shape = valid_shape_tuple->elements_;
