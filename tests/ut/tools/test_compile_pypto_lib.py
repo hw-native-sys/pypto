@@ -366,65 +366,18 @@ def test_self_spawned_entry_preserves_audit_and_child_arguments(library, tmp_pat
     assert statuses == ([True, True, True, False] if child == "exit" else [True, True, passed])
 
 
-def test_compile_only_entry_gets_fresh_runtime_directory(library, tmp_path):
-    # Production entries require a manifest directory before invoking compile.
-    # Reusing the output root must still execute compilation on every audit.
-    (library / "models/glm5_3_flash").mkdir()
-    (library / "models/glm5_3_flash/prefill_fwd.py").write_text(
-        "import argparse\n"
-        "from pathlib import Path\n"
-        "from pypto.ir import compile\n"
-        "parser = argparse.ArgumentParser()\n"
-        "parser.add_argument('-p')\n"
-        "parser.add_argument('--compile-only', action='store_true')\n"
-        "parser.add_argument('--runtime-dir', type=Path)\n"
-        "args = parser.parse_args()\n"
-        "if not args.compile_only or args.runtime_dir is None:\n"
-        "    parser.error('--compile-only requires --runtime-dir')\n"
-        "assert not (args.runtime_dir / 'manifest.json').exists()\n"
-        "compile('ok')\n"
-        "(args.runtime_dir / 'manifest.json').write_text('{}')\n"
-    )
+def test_cpu_prefill_entry_without_compilations_still_fails(library, tmp_path):
+    # Bypassing selection must not turn a successful CPU check into kernel coverage.
+    entry = "models/glm5_3_flash/prefill_fwd.py"
+    path = library / entry
+    path.parent.mkdir(parents=True)
+    path.write_text("raise SystemExit(0)\n")
     output = tmp_path / "out"
-    for _ in range(2):
-        result = audit.run_case(library, "models/glm5_3_flash/prefill_fwd.py", "a2a3", output, 10)
-        assert result["passed"]
-        assert len(result["compilations"]) == 1
-    assert len(list((output / "models/glm5_3_flash/prefill_fwd").glob("runtime-*/manifest.json"))) == 2
-
-
-@pytest.mark.parametrize("equals_form", [False, True])
-def test_self_dispatch_uses_fresh_runtime_directories(library, tmp_path, equals_form):
-    # A parent and two children must compile even when all inherit the same
-    # runtime-dir argument; a retained manifest would skip the child's compile.
-    (library / "models/glm5_3_flash").mkdir()
-    (library / "models/glm5_3_flash/prefill_fwd.py").write_text(
-        "import argparse, subprocess, sys\n"
-        "from pathlib import Path\n"
-        "from pypto.ir import compile\n"
-        "parser = argparse.ArgumentParser()\n"
-        "parser.add_argument('-p')\n"
-        "parser.add_argument('--compile-only', action='store_true')\n"
-        "parser.add_argument('--runtime-dir', type=Path)\n"
-        "parser.add_argument('--case', default='all')\n"
-        "args = parser.parse_args()\n"
-        "manifest = args.runtime_dir / 'manifest.json'\n"
-        "if not manifest.exists():\n"
-        "    compile('ok')\n"
-        "    manifest.write_text(args.case)\n"
-        "if args.case == 'all':\n"
-        f"    runtime_args = ['--runtime-dir=' + str(args.runtime_dir)] if {equals_form!r} "
-        "else ['--runtime-dir', str(args.runtime_dir)]\n"
-        "    for case in ('first', 'second'):\n"
-        "        subprocess.run([sys.executable, __file__, '-p', args.p, '--compile-only', "
-        "*runtime_args, '--case', case], check=True)\n"
-    )
-    output = tmp_path / "out"
-    result = audit.run_case(library, "models/glm5_3_flash/prefill_fwd.py", "a2a3", output, 10)
-    assert result["passed"]
-    assert len(result["compilations"]) == 3
-    manifests = list((output / "models/glm5_3_flash/prefill_fwd").glob("runtime-*/manifest.json"))
-    assert sorted(path.read_text() for path in manifests) == ["all", "first", "second"]
+    result = audit.run_case(library, entry, "a2a3", output, 10)
+    assert result["exit_code"] == 0
+    assert not result["passed"]
+    assert result["compilations"] == []
+    assert not list((output / Path(entry).with_suffix("")).glob("runtime-*"))
 
 
 @pytest.mark.parametrize("entry", ["hc", "prefill_fwd", "sparse_attention"])
@@ -490,26 +443,39 @@ def test_selector_failure_is_not_empty_success(library):
         audit.select_entries(library, "a5")
 
 
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
 @pytest.mark.parametrize("include_kernel", [False, True])
-def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, include_kernel):
+def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, include_kernel, platform):
     # These CPU-only self-tests can pass without compiling a PyPTO kernel.
-    entries = ["models/glm5_3_flash/weights.py", "models/glm5_3_flash/prefill_ref.py"]
-    if include_kernel:
-        entries.append("models/case.py")
-        (library / "models/case.py").write_text("from golden import run\nrun('ok', [])")
-    for entry in entries[:2]:
+    entries = [
+        "models/glm5_3_flash/weights.py",
+        "models/glm5_3_flash/prefill_ref.py",
+        "models/glm5_3_flash/prefill_fwd.py",
+    ]
+    for entry in entries:
         path = library / entry
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("raise SystemExit(0)\n")
+    if include_kernel:
+        # Real GLM kernels need coverage even when they lack --compile-only.
+        kernels = ["attention", "kda", "prefill_layer"]
+        for kernel in kernels:
+            entry = f"models/glm5_3_flash/{kernel}.py"
+            entries.append(entry)
+            (library / entry).write_text("from golden import run\nrun('ok', [])")
     selector = library / ".github/scripts/detect_changes.py"
     selector.parent.mkdir(parents=True)
     selector.write_text(f"print({' '.join(entries)!r})\n")
 
     if include_kernel:
-        assert audit.select_entries(library, "a2a3") == ["models/case.py"]
+        assert audit.select_entries(library, platform) == [
+            "models/glm5_3_flash/attention.py",
+            "models/glm5_3_flash/kda.py",
+            "models/glm5_3_flash/prefill_layer.py",
+        ]
     else:
         with pytest.raises(ValueError, match="No formal pypto-lib entries"):
-            audit.select_entries(library, "a2a3")
+            audit.select_entries(library, platform)
 
 
 @pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1), ("truncated", 1)])
@@ -518,7 +484,8 @@ def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, 
     selector.parent.mkdir(parents=True)
     selector.write_text(
         "import sys\nassert sys.argv[1:] == ['--all', '--platform', 'a5']\n"
-        "print('models/case.py models/glm5_3_flash/weights.py models/glm5_3_flash/prefill_ref.py')\n"
+        "print('models/case.py models/glm5_3_flash/weights.py '\n"
+        "      'models/glm5_3_flash/prefill_ref.py models/glm5_3_flash/prefill_fwd.py')\n"
     )
     body = f"from golden import run\nrun({kernel!r}, [])"
     if kernel == "truncated":

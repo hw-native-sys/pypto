@@ -32,8 +32,9 @@ from pathlib import Path
 from typing import Any
 
 # The library selector also includes these CPU-only reference and checkpoint tests.
-# They define no PyPTO kernels and cannot contribute compilation coverage.
+# Their default CLI paths run CPU checks and cannot contribute compilation coverage.
 NON_KERNEL_ENTRIES = {
+    "models/glm5_3_flash/prefill_fwd.py",  # main() defaults to CPU weight checks.
     "models/glm5_3_flash/prefill_ref.py",
     "models/glm5_3_flash/weights.py",
 }
@@ -42,7 +43,8 @@ NON_KERNEL_ENTRIES = {
 # These entry contracts use runtime-dir as a compile OUTPUT. Other library
 # CLIs use that spelling for replay inputs or only in checkpoint branches;
 # discovering an add_argument call is not sufficient to enable it (#3205).
-COMPILE_OUTPUT_ENTRIES = {"models/glm5_3_flash/prefill_fwd.py"}
+# No current kernel entry uses runtime-dir as a compile output.
+COMPILE_OUTPUT_ENTRIES: set[str] = set()
 
 
 def select_entries(lib: Path, platform: str) -> list[str]:
