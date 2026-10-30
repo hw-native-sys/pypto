@@ -240,8 +240,8 @@ bool IsPassthroughTensorOp(const CallPtr& call) {
   return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
 }
 
-/// Declared GM cache policy per source tensor, keyed by the param Var the
-/// declaration resolved to. ``CachePolicy`` stored as ``int``, the type the
+/// Declared GM cache policy per source tensor, including SSA aliases of the
+/// parameter the declaration resolved to. ``CachePolicy`` stored as ``int``, the type the
 /// ``tile.load`` ``cache`` kwarg is registered with.
 using CachePolicyByParam = std::unordered_map<const Var*, int>;
 
@@ -899,8 +899,22 @@ class TensorToTileMutator : public TypePropagatingMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto saved_targets = std::move(yield_tile_targets_);
     SetYieldTileTargets(op->return_vars_);
-    auto result = TypePropagatingMutator::VisitStmt_(op);
+    auto result = As<IfStmt>(TypePropagatingMutator::VisitStmt_(op));
+    INTERNAL_CHECK_SPAN(result, op->span_) << "Internal error: if conversion changed statement kind";
     yield_tile_targets_ = std::move(saved_targets);
+    if (cache_policies_.empty() || !result->else_body_) return result;
+    auto then_yield = transform_utils::GetLastYieldStmt(result->then_body_);
+    auto else_yield = transform_utils::GetLastYieldStmt(*result->else_body_);
+    if (!then_yield || !else_yield) return result;
+    for (size_t i = 0;
+         i < result->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
+         ++i) {
+      // The merged GM handle can carry only a policy shared by both paths.
+      auto policy = GetCachePolicy(then_yield->value_[i]);
+      if (policy && policy == GetCachePolicy(else_yield->value_[i])) {
+        InheritCachePolicy(result->return_vars_[i], then_yield->value_[i]);
+      }
+    }
     return result;
   }
 
@@ -1025,6 +1039,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, new_result->GetType(), op->var_->span_);
     RecordPackedTile(tile_var, new_result);
+    InheritCachePolicy(tile_var, new_result);
     stmts.push_back(std::make_shared<AssignStmt>(tile_var, new_result, op->span_));
     var_remap_[op->var_.get()] = tile_var;
 
@@ -1064,6 +1079,29 @@ class TensorToTileMutator : public TypePropagatingMutator {
   }
 
  private:
+  std::optional<int> GetCachePolicy(const ExprPtr& value) const {
+    if (cache_policies_.empty()) return std::nullopt;
+    auto source = value;
+    if (auto call = As<Call>(value)) {
+      auto index = ResultAliasedArgIndex(call);
+      if (!index) return std::nullopt;
+      source = call->args_[*index];
+    }
+    auto root = ResolveToRootParam(source);
+    if (!root) return std::nullopt;
+    auto policy = cache_policies_.find(root.get());
+    return policy == cache_policies_.end() ? std::nullopt : std::optional<int>(policy->second);
+  }
+
+  /// Stores return a new SSA handle to their destination's GM storage. Keep
+  /// scope read policies on that handle, without applying them to the store.
+  void InheritCachePolicy(const VarPtr& var, const ExprPtr& value) {
+    if (!AsTensorTypeLike(var->GetType())) return;
+    if (auto policy = GetCachePolicy(value)) {
+      cache_policies_.insert_or_assign(var.get(), *policy);
+    }
+  }
+
   /// Track packed storage in O(N); views can inherit pitch absent from TileView.
   void RecordPackedTile(const VarPtr& var, const ExprPtr& value) {
     auto type = As<TileType>(var->GetType());
@@ -1092,6 +1130,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     INTERNAL_CHECK_SPAN(assign, op->span_)
         << "Internal error: pass-through assignment must stay an assignment";
     RecordPackedTile(assign->var_, assign->value_);
+    InheritCachePolicy(assign->var_, assign->value_);
     return result;
   }
 
@@ -1119,7 +1158,23 @@ class TensorToTileMutator : public TypePropagatingMutator {
         loop->iter_args_[i] = std::move(new_iter);
       }
     }
-    stmts.push_back(TypePropagatingMutator::VisitStmt_(LoopPtr(loop)));
+    auto converted = std::dynamic_pointer_cast<typename LoopPtr::element_type>(
+        TypePropagatingMutator::VisitStmt_(LoopPtr(loop)));
+    INTERNAL_CHECK_SPAN(converted, op->span_) << "Internal error: loop conversion changed statement kind";
+    if (!cache_policies_.empty()) {
+      auto yield = transform_utils::GetLastYieldStmt(converted->body_);
+      if (yield) {
+        for (size_t i = 0; i < converted->return_vars_.size() && i < yield->value_.size(); ++i) {
+          // A zero-trip loop returns its initializer. Only propagate a policy
+          // shared by both that value and the yielded GM handle.
+          auto initial_policy = GetCachePolicy(converted->iter_args_[i]->initValue_);
+          if (initial_policy && initial_policy == GetCachePolicy(yield->value_[i])) {
+            InheritCachePolicy(converted->return_vars_[i], yield->value_[i]);
+          }
+        }
+      }
+    }
+    stmts.push_back(converted);
     for (const auto& iter : op->iter_args_) var_remap_.erase(iter.get());
     yield_tile_targets_ = std::move(saved_targets);
     return SeqStmts::Flatten(std::move(stmts), op->span_);
@@ -1528,7 +1583,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
   std::vector<bool> yield_tile_targets_;
   /// Declared GM cache policies of this function's params (empty when the
   /// function carries no ``pl.set_cache_policy`` declaration).
-  const CachePolicyByParam cache_policies_;
+  CachePolicyByParam cache_policies_;
 };
 
 struct ReturnedAssembleLoopRewrite {

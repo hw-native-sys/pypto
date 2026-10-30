@@ -142,12 +142,66 @@ bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprP
   return true;
 }
 
+std::string LoadL2HintToString(LoadL2Hint hint) {
+  switch (hint) {
+    case LoadL2Hint::NormalFirstVictim:
+      return "NormalFirstVictim";
+    case LoadL2Hint::NormalLastVictim:
+      return "NormalLastVictim";
+    case LoadL2Hint::NormalPersistent:
+      return "NormalPersistent";
+    case LoadL2Hint::NotAllocKeep:
+      return "NotAllocKeep";
+    case LoadL2Hint::NotAllocClean:
+      return "NotAllocClean";
+    case LoadL2Hint::NotAllocDrop:
+      return "NotAllocDrop";
+  }
+  throw TypeError("Unknown LoadL2Hint value: " + std::to_string(static_cast<int>(hint)));
+}
+
+std::string StoreL2HintToString(StoreL2Hint hint) {
+  switch (hint) {
+    case StoreL2Hint::NormalFirstVictim:
+      return "NormalFirstVictim";
+    case StoreL2Hint::NormalLastVictim:
+      return "NormalLastVictim";
+    case StoreL2Hint::NormalPersistent:
+      return "NormalPersistent";
+    case StoreL2Hint::NotAllocClean:
+      return "NotAllocClean";
+  }
+  throw TypeError("Unknown StoreL2Hint value: " + std::to_string(static_cast<int>(hint)));
+}
+
+bool IsValidCachePolicy(int policy) {
+  return policy >= static_cast<int>(CachePolicy::kDefault) &&
+         policy <= static_cast<int>(CachePolicy::kNotAllocDrop);
+}
+
+bool IsNonAllocatingCachePolicy(CachePolicy policy) {
+  return policy == CachePolicy::kBypass || policy == CachePolicy::kNotAllocKeep ||
+         policy == CachePolicy::kNotAllocClean || policy == CachePolicy::kNotAllocDrop;
+}
+
 std::string CachePolicyToString(CachePolicy policy) {
   switch (policy) {
     case CachePolicy::kDefault:
       return "default";
     case CachePolicy::kBypass:
       return "bypass";
+    case CachePolicy::kNormalFirstVictim:
+      return "normal_first_victim";
+    case CachePolicy::kNormalLastVictim:
+      return "normal_last_victim";
+    case CachePolicy::kNormalPersistent:
+      return "normal_persistent";
+    case CachePolicy::kNotAllocKeep:
+      return "not_alloc_keep";
+    case CachePolicy::kNotAllocClean:
+      return "not_alloc_clean";
+    case CachePolicy::kNotAllocDrop:
+      return "not_alloc_drop";
   }
   throw TypeError("Unknown CachePolicy value: " + std::to_string(static_cast<int>(policy)));
 }
@@ -157,6 +211,18 @@ CachePolicy StringToCachePolicy(const std::string& str) {
     return CachePolicy::kDefault;
   } else if (str == "bypass") {
     return CachePolicy::kBypass;
+  } else if (str == "normal_first_victim") {
+    return CachePolicy::kNormalFirstVictim;
+  } else if (str == "normal_last_victim") {
+    return CachePolicy::kNormalLastVictim;
+  } else if (str == "normal_persistent") {
+    return CachePolicy::kNormalPersistent;
+  } else if (str == "not_alloc_keep") {
+    return CachePolicy::kNotAllocKeep;
+  } else if (str == "not_alloc_clean") {
+    return CachePolicy::kNotAllocClean;
+  } else if (str == "not_alloc_drop") {
+    return CachePolicy::kNotAllocDrop;
   }
   throw TypeError("Unknown CachePolicy string: " + str);
 }

@@ -18,6 +18,7 @@ import pytest
 from pypto import DataType, ir
 from pypto.ir.op import tile
 from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.pypto_core.ir import LoadL2Hint, StoreL2Hint
 
 _OP_TILE_EXTRACT = ir.get_op("tile.extract").name
 _OP_TILE_FILLPAD_EXPAND = ir.get_op("tile.fillpad_expand").name
@@ -9710,6 +9711,80 @@ def test_matmul_tf32_mode_rejects_unsupported_inputs(namespace, accumulate, mode
             ops.matmul_acc(acc, lhs, rhs, tf32_mode=mode)
         else:
             ops.matmul(lhs, rhs, tf32_mode=mode)
+
+
+@pytest.mark.parametrize("policy", [-1, 8, 255, 256])
+def test_load_rejects_invalid_cache_policy(policy):
+    src = ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="invalid CachePolicy value"):
+        tile.load(src, [0, 0], [32, 32], cache=policy)
+
+
+@pytest.mark.parametrize("policy", [-1, 8, 255, 256])
+def test_store_rejects_invalid_cache_policy(policy):
+    src = _partial_tile([32, 32], [32, 32])
+    dst = ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="invalid CachePolicy value"):
+        tile.store(src, [0, 0], dst, cache=policy)
+
+
+@pytest.mark.parametrize("policy", [pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP])
+def test_store_rejects_load_only_cache_policy(policy):
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    with pytest.raises(ValueError, match="load-only CachePolicy"):
+        pl.store(src, [0, 0], dst, cache=policy)
+
+
+@pytest.mark.parametrize("policy", list(pl.CachePolicy))
+def test_dsl_load_preserves_semantic_cache_policy(policy):
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    call = pl.load(src, [0, 0], [32, 32], cache=policy).unwrap()
+    assert isinstance(call, ir.Call)
+    assert dict(call.kwargs)["cache"] == int(policy)
+    assert "l2_hint" not in dict(call.kwargs)
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [p for p in pl.CachePolicy if p not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)],
+)
+def test_dsl_store_preserves_semantic_cache_policy(policy):
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    call = pl.store(src, [0, 0], dst, cache=policy).unwrap()
+    assert isinstance(call, ir.Call)
+    assert dict(call.kwargs)["cache"] == int(policy)
+    assert "l2_hint" not in dict(call.kwargs)
+
+
+def test_dsl_cache_rejects_raw_isa_enums():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    value = pl.load(src, [0, 0], [32, 32])
+    for hint in (LoadL2Hint.NotAllocClean, StoreL2Hint.NotAllocClean):
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
+            pl.load(src, [0, 0], [32, 32], cache=cast(Any, hint))
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
+            pl.store(value, [0, 0], src, cache=cast(Any, hint))
+
+
+def test_cache_policy_keeps_legacy_values_and_single_frontend_enum():
+    assert int(pl.CachePolicy.DEFAULT) == 0
+    assert int(pl.CachePolicy.BYPASS) == 1
+    assert len(list(pl.CachePolicy)) == 8
+    assert not hasattr(pl, "LoadL2Hint")
+    assert not hasattr(pl, "StoreL2Hint")
+
+
+def test_omitted_cache_policy_stays_absent():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    value = pl.load(src, [0, 0], [32, 32])
+    load_call = value.unwrap()
+    store_call = pl.store(value, [0, 0], src).unwrap()
+    assert isinstance(load_call, ir.Call)
+    assert isinstance(store_call, ir.Call)
+    assert "cache" not in dict(load_call.kwargs)
+    assert "cache" not in dict(store_call.kwargs)
 
 
 if __name__ == "__main__":

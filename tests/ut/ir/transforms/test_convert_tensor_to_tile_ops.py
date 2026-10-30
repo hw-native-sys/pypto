@@ -8087,6 +8087,156 @@ class TestCachePolicyConversion:
         for load in carried_loads:
             assert load.kwargs["cache"] == self._BYPASS
 
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            pl.CachePolicy.DEFAULT,
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
+        ],
+    )
+    @pytest.mark.parametrize("explicit_default", [False, True])
+    def test_matching_branch_result_inherits_the_scope_policy(self, policy, explicit_default):
+        """A GM phi retains the common read policy after either kind of writeback."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        override = ", cache=pl.CachePolicy.DEFAULT" if explicit_default else ""
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]],
+               cond: pl.Scalar[pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
+        pl.func_attr({{"cache_policy": [(1, {int(policy)})]}})
+        if cond > 0:
+            value = pl.add(x, x)
+            updated = pl.assemble(out, value, [0])
+            merged = pl.yield_(updated)
+        else:
+            value = pl.load(x, [0], [64])
+            updated = pl.store(value, [0], out)
+            merged = pl.yield_(updated)
+        second = pl.load(merged, [0], [64]{override})
+        result = pl.store(second, [0], merged)
+        return result
+""")
+        expected_policy = pl.CachePolicy.DEFAULT if explicit_default else policy
+        expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]],
+               cond: pl.Scalar[pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
+        if cond > 0:
+            x_tile = pl.load(x, [0], [64])
+            value_tile = pl.tile.add(x_tile, x_tile)
+            updated = pl.store(value_tile, [0], out)
+            merged = pl.yield_(updated)
+        else:
+            value = pl.load(x, [0], [64])
+            updated = pl.store(value, [0], out)
+            merged = pl.yield_(updated)
+        second = pl.load(merged, [0], [64], cache=pl.CachePolicy.{expected_policy.name})
+        result = pl.store(second, [0], merged)
+        return result
+""")
+        _assert_convert_equal(before, expected)
+
+    @pytest.mark.parametrize(
+        "other_policy",
+        [None, pl.CachePolicy.DEFAULT, pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NORMAL_LAST_VICTIM],
+    )
+    @pytest.mark.parametrize("swap_branches", [False, True])
+    def test_branch_policy_join_requires_a_policy_on_both_storages(self, other_policy, swap_branches):
+        """Distinct GM roots may merge only when their declared policies agree."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        policy = pl.CachePolicy.NORMAL_FIRST_VICTIM
+        declarations = [(1, int(policy))]
+        if other_policy is not None:
+            declarations.append((2, int(other_policy)))
+        then_storage, else_storage = ("right", "left") if swap_branches else ("left", "right")
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32], left: pl.Out[pl.Tensor[[64], pl.FP32]],
+               right: pl.Out[pl.Tensor[[64], pl.FP32]], cond: pl.Scalar[pl.INT32]
+               ) -> pl.Tensor[[64], pl.FP32]:
+        pl.func_attr({{"cache_policy": {declarations}}})
+        value = pl.load(x, [0], [64])
+        if cond > 0:
+            updated = pl.store(value, [0], {then_storage})
+            merged = pl.yield_(updated)
+        else:
+            updated = pl.store(value, [0], {else_storage})
+            merged = pl.yield_(updated)
+        second = pl.load(merged, [0], [64])
+        result = pl.store(second, [0], merged)
+        return result
+""")
+        expected_cache = f", cache=pl.CachePolicy.{policy.name}" if other_policy == policy else ""
+        expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32], left: pl.Out[pl.Tensor[[64], pl.FP32]],
+               right: pl.Out[pl.Tensor[[64], pl.FP32]], cond: pl.Scalar[pl.INT32]
+               ) -> pl.Tensor[[64], pl.FP32]:
+        value = pl.load(x, [0], [64])
+        if cond > 0:
+            updated = pl.store(value, [0], {then_storage})
+            merged = pl.yield_(updated)
+        else:
+            updated = pl.store(value, [0], {else_storage})
+            merged = pl.yield_(updated)
+        second = pl.load(merged, [0], [64]{expected_cache})
+        result = pl.store(second, [0], merged)
+        return result
+""")
+        _assert_convert_equal(before, expected)
+
+    def test_resultless_if_without_else_keeps_the_enclosing_policy(self):
+        """An optional write has no phi and must leave the original handle usable."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                cond: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.func_attr({"cache_policy": [(1, 4)]})  # NORMAL_PERSISTENT after scope outlining.
+                value = pl.load(x, [0], [64])
+                if cond > 0:
+                    pl.store(value, [0], out)
+                second = pl.load(out, [0], [64])
+                result = pl.store(second, [0], out)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                cond: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                value = pl.load(x, [0], [64])
+                if cond > 0:
+                    pl.store(value, [0], out)
+                second = pl.load(out, [0], [64], cache=pl.CachePolicy.NORMAL_PERSISTENT)
+                result = pl.store(second, [0], out)
+                return result
+
+        _assert_convert_equal(Before, Expected)
+
 
 class TestRegistryDrivenParamDirections:
     """Parameter directions derived from registry-declared argument effects.

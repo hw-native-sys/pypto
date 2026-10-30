@@ -407,9 +407,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // parser and hand-built or deserialized IR can hand over any int, and an
   // unknown one would otherwise surface at codegen with no context.
   const int cache = GetKwarg<int>(kwargs, "cache", static_cast<int>(CachePolicy::kDefault));
-  CHECK(cache == static_cast<int>(CachePolicy::kDefault) || cache == static_cast<int>(CachePolicy::kBypass))
-      << "The operator " << op_name
-      << " cache kwarg must be CachePolicy.DEFAULT or CachePolicy.BYPASS, but got int " << cache;
+  CHECK(IsValidCachePolicy(cache)) << "The operator " << op_name << " has invalid CachePolicy value "
+                                   << cache;
 
   RetargetPackedFp4Geometry(tensor_type->dtype_, source_is_dn ? TileLayout::col_major : TileLayout::row_major,
                             tile_view.blayout, tile_shape, tile_view, args[0]->span_, op_name);
@@ -529,6 +528,12 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
         << dt.ToString();
   }
 
+  const int cache = GetKwarg<int>(kwargs, "cache", 0);
+  CHECK(IsValidCachePolicy(cache)) << "The operator " << op_name << " has invalid CachePolicy value "
+                                   << cache;
+  CHECK(cache != static_cast<int>(CachePolicy::kNotAllocKeep) &&
+        cache != static_cast<int>(CachePolicy::kNotAllocDrop))
+      << "tile.store does not support load-only CachePolicy.NOT_ALLOC_KEEP/NOT_ALLOC_DROP";
   const int st_phase = GetKwarg<int>(kwargs, "st_phase", static_cast<int>(STPhase::kUnspecified));
   CHECK(IsValidSTPhase(st_phase))
       << "The operator " << op_name
@@ -1390,6 +1395,7 @@ REGISTER_OP("tile.store")
                   "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_attr<int>("atomic")
     .set_attr<int>("st_phase")
+    .set_attr<int>("cache")
     // FIXPIPE pre-ops on an Acc->GM writeback (`pto.tstore`): `pre_quant` is an
     // FP32 scale the accumulator is multiplied by on the way out, `pre_relu` an
     // activation applied after that multiply and the destination clamp. Both are

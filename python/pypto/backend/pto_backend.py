@@ -1568,7 +1568,12 @@ def _compile_pto_module(
         # Binary output is persisted directly; the text-file API returns a marker.
         return ""
     with open(compiled_path) as f:
-        return f.read()
+        raw_cpp = f.read()
+    cpp = apply_l2_hints(raw_cpp)
+    if cpp != raw_cpp:
+        with open(compiled_path, "w") as f:
+            f.write(cpp)
+    return cpp
 
 
 def _emit_vpto_object(result_files: dict[str, str], object_rel: str, content: bytes, output_dir: str) -> None:
