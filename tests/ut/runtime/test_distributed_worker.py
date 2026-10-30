@@ -2402,6 +2402,32 @@ class TestSubmitChip:
         for name in ("d0", "d1", "d2"):
             assert (tmp_path / "rank0" / name / "dispatch_program.json").is_file()
 
+    def test_rejected_submit_does_not_advance_the_shared_counter(self, tmp_path):
+        # A synchronous rejection creates no capture. Counting it would put every
+        # later marker one directory ahead of the child's numbering -- which the
+        # per-run reset used to hide and a prepared worker's shared counter would
+        # not (plan 135 review, codex P2).
+        chip_cids = {"chip": object()}
+        shared: dict[str, int] = {}
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+
+        class _RejectingOrch(_RecordingOrch):
+            def submit_next_level(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+                raise RuntimeError("stale simpler tensor")
+
+        orch = _RejectingOrch()
+        _reset_dfx_dispatch_state(orch, chip_cids, dispatch_idx=shared)
+        with pytest.raises(RuntimeError, match="stale simpler tensor"):
+            _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)
+        assert shared.get("rank0", 0) == 0, shared
+
+        # The next accepted submit reuses d0 and overwrites the stale marker.
+        ok = _RecordingOrch()
+        _reset_dfx_dispatch_state(ok, chip_cids, dispatch_idx=shared)
+        _submit_chip(ok, chip_cids["chip"], "ta", cfg, 0)
+        assert shared["rank0"] == 1
+        assert [d.name for d in (tmp_path / "rank0").iterdir()] == ["d0"]
+
     def test_dfx_off_forwards_unchanged(self):
         orch = _RecordingOrch()
         cfg = _SpyDfxConfig(output_prefix="")
@@ -2955,6 +2981,33 @@ class TestCollectL3Swimlane:
         assert json.loads((graph / "dispatch_program.json").read_text()) == {"program": "only_chip"}
         assert json.loads((graph / "dispatch_program.timing.json").read_text()) == {"program": "only_chip"}
         assert [s.out_dir for s in seen] == [graph]
+
+    def test_folding_promotes_the_timing_marker_when_the_graph_pass_left_none(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # ``_record_dispatch_program`` is best-effort, so the graph pass can fail
+        # to write its marker while the timing pass succeeds. Filing the survivor
+        # as ``dispatch_program.timing.json`` would hide it from
+        # ``_read_dispatch_program`` and lose the labels (plan 135 review).
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "first_prog", "first_kernel")
+        _write_chip_program(tmp_path, "second_prog", "second_kernel")
+        rank = tmp_path / "dfx_outputs" / "rank0"
+        graph = _write_capture(rank, "d0", deps=True, run_id=1, capture_index=0)
+        timing = _write_capture(rank, "d1", records=True, run_id=2, capture_index=1)
+        _mark_dispatch_program(timing, "second_prog")  # graph pass wrote none
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert not timing.exists()
+        assert json.loads((graph / "dispatch_program.json").read_text()) == {"program": "second_prog"}
+        assert not (graph / "dispatch_program.timing.json").exists()
+        assert [s.out_dir for s in seen] == [graph]
+        # The promoted marker is what lets the converter resolve the labels.
+        assert seen[0].work_dir == tmp_path / "next_levels" / "second_prog"
+        assert json.loads((graph / "name_map.json").read_text())["callable_id_to_name"] == {
+            "0": "second_kernel"
+        }
 
     def test_pairing_follows_the_dispatch_not_the_directory_order(
         self, tmp_path, monkeypatch, fake_swimlane_converter

@@ -1049,9 +1049,15 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
         idx_map = orch._dfx_dispatch_idx = cast("dict[str, int]", {})
     rank_label = _dfx_rank_label(worker)
     k = idx_map.get(rank_label, 0)
-    idx_map[rank_label] = k + 1
     _record_dispatch_program(orch, callable_id, Path(f"{base}/{rank_label}/d{k}"))
-    return orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    handle = orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    # Advance only once the submit is accepted. A synchronous rejection creates
+    # no capture, so counting it would leave every later marker one directory
+    # ahead of the child's own numbering -- self-correcting when the counter was
+    # reset per run, permanent now that a prepared worker carries it across
+    # runs. The marker already at ``d{k}`` is overwritten by the next submit.
+    idx_map[rank_label] = k + 1
+    return handle
 
 
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
@@ -1256,9 +1262,16 @@ def _consolidate_two_pass_captures(rank_dir: Path, pairs: dict[Path, Path]) -> N
                     target = graph_dir / "dispatch_identity.timing.json"
                 elif artifact.name == _DISPATCH_PROGRAM_FILE:
                     # Both passes are marked now that the counter spans the child
-                    # process. Keep the timing pass's marker as evidence rather
-                    # than colliding with the graph pass's.
-                    target = graph_dir / "dispatch_program.timing.json"
+                    # process. Keep the timing pass's marker beside the graph
+                    # pass's rather than colliding with it -- unless the graph
+                    # pass left none (that write is best-effort), in which case
+                    # this is the only program name the capture has and it must
+                    # land where :func:`_read_dispatch_program` looks for it.
+                    target = (
+                        graph_dir / "dispatch_program.timing.json"
+                        if (graph_dir / _DISPATCH_PROGRAM_FILE).exists()
+                        else graph_dir / _DISPATCH_PROGRAM_FILE
+                    )
                 else:
                     target = graph_dir / artifact.name
                 if target.exists():

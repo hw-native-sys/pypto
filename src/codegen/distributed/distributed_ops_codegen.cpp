@@ -212,11 +212,11 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   }
 
   // Per-rank comm ordering token, appended as the LAST TENSOR (before the scalars, which
-  // TaskArgs requires). The token itself is what the dispatch below carries into the
-  // ordering chain that EmitCallToWorker builds: a rank
-  // mixing a builtin barrier/collective with a custom comm kernel — or issuing builtins
-  // across separate dispatches — would still let a waiting dispatch be routed ahead of its
-  // producer, which is the deadlock this token exists to prevent. All window args here are
+  // TaskArgs requires). The token is what carries this dispatch into the ordering chain
+  // EmitCallToWorker builds. Without it, a rank mixing a builtin barrier/collective with a
+  // custom comm kernel — or issuing builtins across separate dispatches — could have a
+  // waiting dispatch routed ahead of its producer, which is the deadlock the token exists
+  // to prevent. All window args here are
   // checked above to share one comm domain, so a single token is enough.
   codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + *handle_var + "_ord\"][" +
                rank_expr + "]), TensorArgType.INOUT)");
