@@ -442,24 +442,16 @@ class StoreL2Hint(enum.IntEnum):
     NormalPersistent = 2
     NotAllocClean = 4
 
-class CachePolicy(enum.IntEnum):
-    """Semantic GM cache policy, lowered according to the backend and direction.
-
-    A semantic contract the author states, never a hint the compiler invents.
-    Stored as ``int`` in transfer ``cache`` kwargs. New modes require A5.
-    """
+class A2A3CachePolicy(enum.IntEnum):
+    """A2/A3 runtime address-alias policy. BYPASS adds the device's nocache offset."""
 
     DEFAULT = 0
-    """Ordinary cached GM access."""
-
     BYPASS = 1
-    """Streaming access declared to bypass the cache.
 
-    Asserts this tensor has no reuse worth caching. For reads, also asserts
-    that nothing writes those bytes while the kernel runs — mixing a cached
-    write and a bypassing read of the same bytes is a coherency bug. A per-store
-    BYPASS policy controls that write and does not assert the absence of writes.
-    """
+CachePolicy = A2A3CachePolicy
+
+class A5CachePolicy(enum.IntEnum):
+    """A5 DMA modes. Values are semantic IDs, not ISA encodings."""
 
     NORMAL_FIRST_VICTIM = 2
     NORMAL_LAST_VICTIM = 3

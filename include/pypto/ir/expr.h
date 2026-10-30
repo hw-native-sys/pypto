@@ -812,6 +812,16 @@ enum class CachePolicy : uint8_t {
   kNotAllocDrop = 7,
 };
 
+/** @brief A5 DMA cache modes, stored with disjoint semantic IDs in transfer IR. */
+enum class A5CachePolicy : uint8_t {
+  kNormalFirstVictim = 2,
+  kNormalLastVictim = 3,
+  kNormalPersistent = 4,
+  kNotAllocKeep = 5,
+  kNotAllocClean = 6,
+  kNotAllocDrop = 7,
+};
+
 bool IsValidCachePolicy(int policy);
 bool IsNonAllocatingCachePolicy(CachePolicy policy);
 

@@ -8091,9 +8091,9 @@ class TestCachePolicyConversion:
         "policy",
         [
             pl.CachePolicy.DEFAULT,
-            pl.CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.CachePolicy.NORMAL_LAST_VICTIM,
-            pl.CachePolicy.NORMAL_PERSISTENT,
+            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+            pl.A5CachePolicy.NORMAL_PERSISTENT,
         ],
     )
     @pytest.mark.parametrize("explicit_default", [False, True])
@@ -8137,7 +8137,7 @@ class Expected:
             value = pl.load(x, [0], [64])
             updated = pl.store(value, [0], out)
             merged = pl.yield_(updated)
-        second = pl.load(merged, [0], [64], cache=pl.CachePolicy.{expected_policy.name})
+        second = pl.load(merged, [0], [64], cache=pl.{type(expected_policy).__name__}.{expected_policy.name})
         result = pl.store(second, [0], merged)
         return result
 """)
@@ -8145,14 +8145,19 @@ class Expected:
 
     @pytest.mark.parametrize(
         "other_policy",
-        [None, pl.CachePolicy.DEFAULT, pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NORMAL_LAST_VICTIM],
+        [
+            None,
+            pl.CachePolicy.DEFAULT,
+            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+        ],
     )
     @pytest.mark.parametrize("swap_branches", [False, True])
     def test_branch_policy_join_requires_a_policy_on_both_storages(self, other_policy, swap_branches):
         """Distinct GM roots may merge only when their declared policies agree."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
-        policy = pl.CachePolicy.NORMAL_FIRST_VICTIM
+        policy = pl.A5CachePolicy.NORMAL_FIRST_VICTIM
         declarations = [(1, int(policy))]
         if other_policy is not None:
             declarations.append((2, int(other_policy)))
@@ -8176,7 +8181,7 @@ class Before:
         result = pl.store(second, [0], merged)
         return result
 """)
-        expected_cache = f", cache=pl.CachePolicy.{policy.name}" if other_policy == policy else ""
+        expected_cache = f", cache=pl.{type(policy).__name__}.{policy.name}" if other_policy == policy else ""
         expected = pl.parse_program(f"""
 @pl.program
 class Expected:
@@ -8231,7 +8236,7 @@ class Expected:
                 value = pl.load(x, [0], [64])
                 if cond > 0:
                     pl.store(value, [0], out)
-                second = pl.load(out, [0], [64], cache=pl.CachePolicy.NORMAL_PERSISTENT)
+                second = pl.load(out, [0], [64], cache=pl.A5CachePolicy.NORMAL_PERSISTENT)
                 result = pl.store(second, [0], out)
                 return result
 

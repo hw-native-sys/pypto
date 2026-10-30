@@ -15,18 +15,29 @@ unchanged from the DSL to codegen.
 > source address. See [What codegen emits](#what-codegen-emits) and
 > [Architectures](#architectures).
 
-## Unified CachePolicy interface
+## Architecture-specific cache policies
 
-Use `cache=pl.CachePolicy...` for both `pl.load` and `pl.store`.
-`DEFAULT=0` and `BYPASS=1` retain their public values. Six additional semantic
-policies select A5 modes. Public enum values are not ISA bit encodings:
-backend code generation selects the load or store ISA enum.
+`A2A3CachePolicy` has two modes: `DEFAULT=0` and `BYPASS=1`.
+`CachePolicy` remains an alias for compatibility. On A2/A3, BYPASS adds the
+runtime-provided nocache offset to the load address; no A5 hint parameter is
+used. Stores support DEFAULT only.
 
-| CachePolicy | A5 load ISA mode | A5 store ISA mode |
-| ----------- | ---------------- | ----------------- |
-| DEFAULT | Ordinary TLOAD, default mode 0 | Ordinary TSTORE, default mode 0 |
-| BYPASS | NotAllocKeep (4) | NotAllocClean (4) |
+`A5CachePolicy` has six modes, listed below. These semantic IDs are disjoint
+from the A2/A3 policies and are translated to the direction-specific PTO-ISA
+encoding. A5 rejects A2/A3 BYPASS; A2/A3 rejects all A5 modes. Omitting `cache`
+uses the ordinary transfer on either architecture. An explicit DEFAULT can
+also reset an inherited scope policy.
+
+| A5CachePolicy | A5 load ISA mode | A5 store ISA mode |
+| ------------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
+| NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
+| NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
+| NOT_ALLOC_KEEP | NotAllocKeep (4) | Rejected: load-only |
+| NOT_ALLOC_CLEAN | NotAllocClean (5) | NotAllocClean (4) |
+| NOT_ALLOC_DROP | NotAllocDrop (6) | Rejected: load-only |
+
+FirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
 | NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
 | NOT_ALLOC_KEEP | NotAllocKeep (4) | Rejected: load-only |
@@ -40,11 +51,9 @@ cache-line state, Clean retains an existing line but marks it clean so eviction
 requires no writeback, and Drop discards an existing line at the same address.
 The store interface exposes only the Clean non-allocate mode.
 
-With the pinned PTO-ISA, A5 ACC-to-GM stores support only DEFAULT and
-NORMAL_FIRST_VICTIM. Other store policies are rejected before dispatch because
-the ISA's ACC path ignores `l2Control`, including ReLU and quantized writeback
-([PTO-ISA #349](https://github.com/hw-native-sys/pto-isa/issues/349)). The store
-modes in the table apply to Vec-to-GM transfers.
+The pinned PTO-ISA forwards `l2Control` through A5 Vec-to-GM and ACC-to-GM
+stores, including ReLU and scalar/vector-quantized ACC writeback. Both paths
+support the four store modes in the table; KEEP/DROP remain load-only.
 
 On A2/A3, load DEFAULT/BYPASS keeps the existing implementation: BYPASS carries
 the runtime nocache offset to PTOAS, which adjusts that load's source address.
@@ -52,12 +61,12 @@ Only DEFAULT is supported for stores. The six additional policies are rejected
 on A2/A3 instead of silently approximating A5 semantics.
 
 ```python
-# The backend chooses the implementation of semantic BYPASS.
-streamed = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
+# A2/A3 uses the runtime nocache address offset.
+streamed = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
 
-# Explicit A5 load and store policies use the same frontend enum.
-retained = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_PERSISTENT)
-out = pl.store(retained, [0, 0], out, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
+# A5 selects a direction-specific ISA mode.
+retained = pl.load(x, [0, 0], [32, 32], cache=pl.A5CachePolicy.NORMAL_PERSISTENT)
+out = pl.store(retained, [0, 0], out, cache=pl.A5CachePolicy.NOT_ALLOC_CLEAN)
 ```
 
 `cache=None` omits the policy. An explicit per-load policy overrides
@@ -109,7 +118,7 @@ class Demo:
 ### Per-access kwarg
 
 ```python
-tile = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
+tile = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
 ```
 
 ## The contract
@@ -353,9 +362,9 @@ The double mapping is an a2a3 property, and so is everything built on it:
 | ------ | -------------------------------------- |
 | a2a3 device | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)`. This is the case the feature exists for |
 | a2a3 device with no alias | The driver reports `0`, `addr + 0` is the ordinary address, and the read is cached — correct, one optimisation short. The simulator is this case by construction |
-| a5 | BYPASS selects ISA NotAllocKeep, without a runtime address offset |
+| a5 | Rejects A2/A3 BYPASS; use A5CachePolicy for DMA modes |
 
-A5 uses the same CachePolicy interface and lowers it to ISA cache-control modes.
+A5 uses A5CachePolicy and lowers it to ISA cache-control modes.
 
 ### Older assemblers
 

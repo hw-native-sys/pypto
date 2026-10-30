@@ -12,17 +12,26 @@
 > 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条
 > load 的源地址上。参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。
 
-## 统一的 CachePolicy 接口
+## 按架构区分缓存策略
 
-`pl.load` 和 `pl.store` 都使用 `cache=pl.CachePolicy...`。
-原有 `DEFAULT=0`、`BYPASS=1` 的枚举值不变，增加六种 A5 策略。
-前端枚举表达语义，不等于 ISA 位编码；后端根据架构和读写方向转换。
+`A2A3CachePolicy` 只有 `DEFAULT=0` 和 `BYPASS=1` 两种模式。
+保留 `CachePolicy` 作为兼容别名。A2/A3 的 BYPASS 将运行时取得的 nocache offset
+加到 load 地址上，不使用 A5 hint 参数；store 只支持 DEFAULT。
 
-| CachePolicy | A5 load ISA 模式 | A5 store ISA 模式 |
-| ----------- | ---------------- | ----------------- |
-| DEFAULT | 普通 TLOAD，默认模式 0 | 普通 TSTORE，默认模式 0 |
-| BYPASS | NotAllocKeep (4) | NotAllocClean (4) |
+`A5CachePolicy` 提供以下六种模式。其语义 ID 与 A2/A3 策略互不重叠，后端按
+load/store 方向转换成 PTO-ISA 编码。A5 拒绝 A2/A3 BYPASS，A2/A3 拒绝全部 A5 模式。
+不指定 `cache` 时，两种架构都使用普通搬运；显式 DEFAULT 也可覆盖继承的作用域策略。
+
+| A5CachePolicy | A5 load ISA 模式 | A5 store ISA 模式 |
+| ------------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
+| NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
+| NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
+| NOT_ALLOC_KEEP | NotAllocKeep (4) | 拒绝：仅支持 load |
+| NOT_ALLOC_CLEAN | NotAllocClean (5) | NotAllocClean (4) |
+| NOT_ALLOC_DROP | NotAllocDrop (6) | 拒绝：仅支持 load |
+
+FirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
 | NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
 | NOT_ALLOC_KEEP | NotAllocKeep (4) | 拒绝：仅支持 load |
@@ -34,22 +43,21 @@ FirstVictim 倾向更早替换，LastVictim 倾向更晚替换；Persistent 使�
 Clean 保留已有缓存行但标记为干净，后续淘汰无需回写，Drop 丢弃同地址已有缓存行。
 store 仅提供 Clean 这一种非分配模式。
 
-固定版本的 PTO-ISA 在 A5 ACC → GM store 上仅支持 DEFAULT 和 NORMAL_FIRST_VICTIM。
-ISA 的 ACC 路径会忽略 `l2Control`（包括 ReLU 和量化写回），因此其他 store 策略在
-发射内核前报错，见 [PTO-ISA #349](https://github.com/hw-native-sys/pto-isa/issues/349)。
-上表中的完整 store 模式适用于 Vec → GM 搬运。
+当前固定版本的 PTO-ISA 在 A5 Vec → GM 和 ACC → GM store 中都会传递
+`l2Control`，包括 ReLU 和标量/向量量化 ACC 写回。两种路径均支持上表的四种
+store 模式；KEEP/DROP 仍仅支持 load。
 
 A2/A3 的 load DEFAULT/BYPASS 保留原实现：BYPASS 将运行时 nocache offset
 传给 PTOAS，再调整对应 load 的源地址。A2/A3 的 store 只支持 DEFAULT；
 新增六种策略在 A2/A3 上报错，不会静默近似成其他模式。
 
 ```python
-# The backend chooses the implementation of semantic BYPASS.
-streamed = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
+# A2/A3 uses the runtime nocache address offset.
+streamed = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
 
-# Explicit A5 load and store policies use the same frontend enum.
-retained = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_PERSISTENT)
-out = pl.store(retained, [0, 0], out, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
+# A5 selects a direction-specific ISA mode.
+retained = pl.load(x, [0, 0], [32, 32], cache=pl.A5CachePolicy.NORMAL_PERSISTENT)
+out = pl.store(retained, [0, 0], out, cache=pl.A5CachePolicy.NOT_ALLOC_CLEAN)
 ```
 
 `cache=None` 不记录策略；显式 load 策略优先于 `pl.set_cache_policy`。
@@ -96,7 +104,7 @@ class Demo:
 ### 单次访问的 kwarg
 
 ```python
-tile = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
+tile = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
 ```
 
 ## 契约
@@ -315,9 +323,9 @@ PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —
 | ---- | -------------------------------- |
 | a2a3 设备 | load 对 uncached 别名发起，即 `addr + get_l2_cache_offset(args)`。这正是该特性存在的场景 |
 | 无别名的 a2a3 设备 | 驱动返回 `0`，`addr + 0` 即原地址，读取照常带缓存 —— 结果正确，只是少了一项优化。模拟器天然如此 |
-| a5 | BYPASS 使用 ISA NotAllocKeep，不使用运行时地址偏移 |
+| a5 | 拒绝 A2/A3 BYPASS，使用 A5CachePolicy 选择 DMA 模式 |
 
-A5 使用相同的 CachePolicy 接口，由后端转换为 ISA 缓存控制模式。
+A5 使用 A5CachePolicy 接口，由后端转换为 ISA 缓存控制模式。
 
 ### 更旧的汇编器
 

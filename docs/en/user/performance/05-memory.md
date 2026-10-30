@@ -278,14 +278,19 @@ nothing is unaffected on every target, byte for byte.
 
 ### A5 cache modes
 
-Use the same `CachePolicy` enum with `cache=` on loads and stores. A5 adds
-NORMAL_FIRST_VICTIM, NORMAL_LAST_VICTIM, NORMAL_PERSISTENT, NOT_ALLOC_KEEP,
-NOT_ALLOC_CLEAN and NOT_ALLOC_DROP. KEEP/DROP are load-only. The backend maps
-NOT_ALLOC_CLEAN to load ISA encoding 5 or store encoding 4; frontend enum values
-are semantic and must not be used as ISA bit fields. BYPASS selects NotAllocKeep
-for A5 loads and NotAllocClean for A5 stores. A2/A3 retains the runtime-offset
-load path and rejects the additional modes. Scope declarations use the same
-enum for reads; explicit per-load policies take precedence. See
+Use `A5CachePolicy` with `cache=` on A5 loads and stores. Its six load modes
+are NORMAL_FIRST_VICTIM, NORMAL_LAST_VICTIM, NORMAL_PERSISTENT,
+NOT_ALLOC_KEEP, NOT_ALLOC_CLEAN and NOT_ALLOC_DROP. Vec-to-GM stores support
+the three NORMAL modes and NOT_ALLOC_CLEAN; KEEP/DROP are load-only.
+The pinned PTO-ISA supports the same four modes for ACC-to-GM stores,
+including ReLU and quantized writeback. NOT_ALLOC_CLEAN maps to load encoding 5 and store encoding 4.
+
+A2/A3 uses `A2A3CachePolicy.DEFAULT` or `A2A3CachePolicy.BYPASS` instead.
+BYPASS adds the runtime-provided nocache offset to the load address and does
+not select an A5 ISA mode. A2/A3 stores support DEFAULT only. `CachePolicy`
+is a compatibility alias for `A2A3CachePolicy`. A5 rejects A2/A3 BYPASS and
+A2/A3 rejects all A5 modes. Scope declarations control reads; explicit
+per-load policies take precedence. See
 [GM cache policy](../../dev/language/05-cache-policy.md) for the full mode table.
 
 ## See also

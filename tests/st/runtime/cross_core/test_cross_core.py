@@ -61,11 +61,11 @@ SLOTNUM_LOCAL_SLOT_NUM = 4
 SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
 
 
-_LOAD_POLICIES = list(pl.CachePolicy)
+_LOAD_POLICIES = list(pl.A5CachePolicy)
 _STORE_POLICIES = [
     policy
-    for policy in pl.CachePolicy
-    if policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
+    for policy in pl.A5CachePolicy
+    if policy not in (pl.A5CachePolicy.NOT_ALLOC_KEEP, pl.A5CachePolicy.NOT_ALLOC_DROP)
 ]
 
 
@@ -967,8 +967,18 @@ def _l2_hint_case(load_hint, store_hint, planner):
     ]
 )
 def test_l2_hints_preserve_results(case_run):
-    """Every A5 load/store hint pair preserves exact results."""
+    """Check numerical results and the selected ISA modes on A5 CI."""
     case_run.assert_passed()
+    assert case_run.work_dir is not None
+    cpp = "\n".join(path.read_text() for path in case_run.work_dir.rglob("*.cpp"))
+    load_policy = next(p for p in _LOAD_POLICIES if case_run.case.name.startswith(f"l2_{p.name}_"))
+    suffix = case_run.case.name.removeprefix(f"l2_{load_policy.name}_")
+    store_policy = next(p for p in _STORE_POLICIES if suffix.startswith(f"{p.name}_"))
+    load_hint = "".join(word.title() for word in load_policy.name.split("_"))
+    store_hint = "".join(word.title() for word in store_policy.name.split("_"))
+    assert f"TLOAD<pto::TLoadL2Hint::{load_hint}" in cpp
+    assert f"TSTORE<pto::TStoreL2Hint::{store_hint}" in cpp
+    assert "__pypto_l2_hint" not in cpp
 
 
 def _scope_rebind_case(policy, planner, explicit_default):
@@ -1016,9 +1026,9 @@ def _scope_rebind_run(_st_case, test_runner, tmp_path, monkeypatch):
     [
         _scope_rebind_case(policy, planner, explicit_default)
         for policy in (
-            pl.CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.CachePolicy.NORMAL_LAST_VICTIM,
-            pl.CachePolicy.NORMAL_PERSISTENT,
+            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+            pl.A5CachePolicy.NORMAL_PERSISTENT,
         )
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for explicit_default in (False, True)
@@ -1036,9 +1046,9 @@ def _assert_scope_rebind_hints(scope_rebind_run, policy, explicit_default):
     assert sources, "the compiled case must retain its kernel sources"
     cpp = "\n".join(path.read_text() for path in sources)
     hint = {
-        pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
-        pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
-        pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+        pl.A5CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+        pl.A5CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+        pl.A5CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
     }[policy]
     assert cpp.count(f"TLOAD<pto::TLoadL2Hint::{hint}>") == (1 if explicit_default else 2)
     assert "TSTORE<pto::TStoreL2Hint" not in cpp, "scope policies govern reads only"
@@ -1087,9 +1097,9 @@ def _scope_conditional_rebind_case(policy, planner, take_then):
     [
         _scope_conditional_rebind_case(policy, planner, take_then)
         for policy in (
-            pl.CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.CachePolicy.NORMAL_LAST_VICTIM,
-            pl.CachePolicy.NORMAL_PERSISTENT,
+            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+            pl.A5CachePolicy.NORMAL_PERSISTENT,
         )
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for take_then in (False, True)
@@ -1166,9 +1176,9 @@ def _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps)
     [
         _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps)
         for policy in (
-            pl.CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.CachePolicy.NORMAL_LAST_VICTIM,
-            pl.CachePolicy.NORMAL_PERSISTENT,
+            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+            pl.A5CachePolicy.NORMAL_PERSISTENT,
         )
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for explicit_default in (False, True)
@@ -1238,15 +1248,9 @@ def _acc_store_cache_case(policy, planner, quantized, with_relu):
         for with_relu in (False, True)
     ],
 )
-def test_acc_store_cache_policy_is_honored_or_rejected(case_run, policy):
-    """Do not mistake a numerically correct ACC store for an honored cache hint."""
-    if policy in (pl.CachePolicy.DEFAULT, pl.CachePolicy.NORMAL_FIRST_VICTIM):
-        case_run.assert_passed()
-    else:
-        assert not case_run.passed, "unsupported ACC cache modes must fail before dispatch"
-        error = case_run.error or ""
-        assert "A5 ACC-to-GM store cache policy" in error, error
-        assert "PTO-ISA" in error and "l2Control" in error, error
+def test_acc_store_cache_policy_preserves_results(case_run, policy):
+    """All four A5 store modes preserve plain/ReLU/quantized ACC writeback."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

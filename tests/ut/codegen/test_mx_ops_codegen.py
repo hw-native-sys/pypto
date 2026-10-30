@@ -48,7 +48,7 @@ def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
 
 class TestMxMatmulCodegen:
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
-    @pytest.mark.parametrize("hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NOT_ALLOC_KEEP])
+    @pytest.mark.parametrize("hint", [pl.A5CachePolicy.NORMAL_FIRST_VICTIM, pl.A5CachePolicy.NOT_ALLOC_KEEP])
     def test_mx_scale_load_preserves_layout_with_explicit_l2_hint(self, tmp_path, planner, hint):
         if find_ptoas_binary() is None:
             pytest.skip("PTOAS is not available")
@@ -67,7 +67,7 @@ class TestMxMatmulCodegen:
         cpp = pto_backend._compile_pto_module(mlir, "mx_hinted_load", str(tmp_path), planner)
         assert "{layout = #pto.layout<mx_a_zz>}" in mlir
         assert "cache_policy" not in mlir
-        expected = "NormalFirstVictim" if hint == pl.CachePolicy.NORMAL_FIRST_VICTIM else "NotAllocKeep"
+        expected = "NormalFirstVictim" if hint == pl.A5CachePolicy.NORMAL_FIRST_VICTIM else "NotAllocKeep"
         assert f"TLOAD<pto::TLoadL2Hint::{expected}>" in cpp
         assert "__pypto_l2_hint" not in cpp
 
@@ -142,7 +142,7 @@ class TestMxMatmulCodegen:
         )
 
     def test_mx_scale_load_preserves_layout_with_a5_bypass(self):
-        """A5 BYPASS keeps the MX layout and selects an ISA hint without an offset."""
+        """A5 NOT_ALLOC_KEEP keeps the MX layout and selects an ISA hint without an offset."""
 
         @pl.program
         class Program:
@@ -151,7 +151,9 @@ class TestMxMatmulCodegen:
                 self,
                 a_s: pl.Tensor[[128, 8], pl.FP8E8M0, pl.MX_A_ZZ],
             ):
-                _ = pl.load(a_s, [0, 0], [16, 2], target_memory=pl.Mem.Mat, cache=pl.CachePolicy.BYPASS)
+                _ = pl.load(
+                    a_s, [0, 0], [16, 2], target_memory=pl.Mem.Mat, cache=pl.A5CachePolicy.NOT_ALLOC_KEEP
+                )
 
         mlir = _emit_incore_mlir(Program)
         tloads = [line for line in mlir.splitlines() if "pto.tload" in line]

@@ -65,21 +65,19 @@ ROWS, COLS = 32, 128
 
 _LOAD_HINTS = {
     pl.CachePolicy.DEFAULT: None,
-    pl.CachePolicy.BYPASS: "NotAllocKeep",
-    pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
-    pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
-    pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
-    pl.CachePolicy.NOT_ALLOC_KEEP: "NotAllocKeep",
-    pl.CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
-    pl.CachePolicy.NOT_ALLOC_DROP: "NotAllocDrop",
+    pl.A5CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+    pl.A5CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+    pl.A5CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+    pl.A5CachePolicy.NOT_ALLOC_KEEP: "NotAllocKeep",
+    pl.A5CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
+    pl.A5CachePolicy.NOT_ALLOC_DROP: "NotAllocDrop",
 }
 _STORE_HINTS = {
     pl.CachePolicy.DEFAULT: None,
-    pl.CachePolicy.BYPASS: "NotAllocClean",
-    pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
-    pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
-    pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
-    pl.CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
+    pl.A5CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+    pl.A5CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+    pl.A5CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+    pl.A5CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
 }
 _LOAD_POLICIES = list(_LOAD_HINTS)
 _STORE_POLICIES = list(_STORE_HINTS)
@@ -359,14 +357,12 @@ def test_one_parameter_serves_every_declared_load():
     assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, _signature_line(mlir)
 
 
-def test_a5_bypass_uses_isa_without_an_address_offset():
-    """The same semantic BYPASS uses ISA NotAllocKeep on A5, not an address alias."""
+def test_a5_rejects_a2a3_runtime_bypass():
+    """A2/A3 address aliases cannot request an A5 instruction mode."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
-    mlir = _incore_mlir(TwoBypassingLoadsOfOneTensor)
-    assert "__pypto_l2_hint_begin load NotAllocKeep" in mlir
-    assert BYPASS_ATTR not in mlir
-    assert OFFSET_PARAM not in mlir
+    with pytest.raises(ValueError, match="use A5CachePolicy on A5"):
+        _incore_mlir(TwoBypassingLoadsOfOneTensor)
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +459,7 @@ def test_explicit_hint_overrides_scope_cache_declaration():
             self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
         ) -> pl.Tensor[[32, 32], pl.FP32]:
             pl.func_attr({"cache_policy": [(0, 1)]})
-            t = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_FIRST_VICTIM)
+            t = pl.load(x, [0, 0], [32, 32], cache=pl.A5CachePolicy.NORMAL_FIRST_VICTIM)
             return pl.store(t, [0, 0], out)
 
     backend.reset_for_testing()
@@ -483,14 +479,15 @@ class ScopedPolicy:
     def main(self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
              ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="scoped"):
-            pl.set_cache_policy(x, pl.CachePolicy.{policy.name})
+            pl.set_cache_policy(x, pl.{type(policy).__name__}.{policy.name})
             value = pl.load(x, [0, 0], [32, 32])
             out = pl.store(value, [0, 0], out)
         return out
 """)
     restored = ir.deserialize(ir.serialize(program))
     assert ir.python_print(restored) == ir.python_print(program)
-    assert f"pl.set_cache_policy(x, pl.CachePolicy.{policy.name})" in ir.python_print(restored)
+    enum_name = "A5CachePolicy" if type(policy) is pl.A5CachePolicy else "CachePolicy"
+    assert f"pl.set_cache_policy(x, pl.{enum_name}.{policy.name})" in ir.python_print(restored)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
     mlir = _incore_mlir(restored)
@@ -511,7 +508,7 @@ class ReadWritePolicy:
     @pl.function
     def main(self, x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="read_write"):
-            pl.set_cache_policy(x, pl.CachePolicy.{policy.name})
+            pl.set_cache_policy(x, pl.{type(policy).__name__}.{policy.name})
             value = pl.load(x, [0, 0], [32, 32])
             x = pl.store(value, [0, 0], x)
         return x
@@ -520,9 +517,9 @@ class ReadWritePolicy:
     backend.set_backend_type(BackendType.Ascend950)
     nonallocating = (
         pl.CachePolicy.BYPASS,
-        pl.CachePolicy.NOT_ALLOC_KEEP,
-        pl.CachePolicy.NOT_ALLOC_CLEAN,
-        pl.CachePolicy.NOT_ALLOC_DROP,
+        pl.A5CachePolicy.NOT_ALLOC_KEEP,
+        pl.A5CachePolicy.NOT_ALLOC_CLEAN,
+        pl.A5CachePolicy.NOT_ALLOC_DROP,
     )
     if policy in nonallocating:
         with pytest.raises(ValueError, match="is not allowed on a tensor this scope writes"):
@@ -533,7 +530,11 @@ class ReadWritePolicy:
 
 @pytest.mark.parametrize(
     "policy",
-    [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NORMAL_LAST_VICTIM, pl.CachePolicy.NORMAL_PERSISTENT],
+    [
+        pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+        pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+        pl.A5CachePolicy.NORMAL_PERSISTENT,
+    ],
 )
 @pytest.mark.parametrize("explicit_default", [False, True])
 def test_scope_cache_policy_survives_assemble_and_store_rebindings(policy, explicit_default):
@@ -545,7 +546,7 @@ class ScopedRebind:
     def main(self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
              ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            pl.set_cache_policy(out, pl.CachePolicy.{policy.name})
+            pl.set_cache_policy(out, pl.{type(policy).__name__}.{policy.name})
             value = pl.add(x, x)
             out = pl.assemble(out, value, [0, 0])
             first = pl.load(out, [0, 0], [32, 32])
@@ -564,7 +565,11 @@ class ScopedRebind:
 
 @pytest.mark.parametrize(
     "policy",
-    [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NORMAL_LAST_VICTIM, pl.CachePolicy.NORMAL_PERSISTENT],
+    [
+        pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
+        pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+        pl.A5CachePolicy.NORMAL_PERSISTENT,
+    ],
 )
 @pytest.mark.parametrize("loop_kind", ["for", "while"])
 @pytest.mark.parametrize("read_kind", ["explicit", "explicit_default", "synthesized"])
@@ -590,7 +595,7 @@ class ScopedLoopRebind:
     def main(self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
              steps: pl.Scalar[pl.INT32]) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            pl.set_cache_policy(out, pl.CachePolicy.{policy.name})
+            pl.set_cache_policy(out, pl.{type(policy).__name__}.{policy.name})
             out = pl.assemble(out, pl.add(x, x), [0, 0])
             {loop}
                 updated = pl.assemble(carried, pl.add(carried, x), [0, 0])
@@ -607,7 +612,7 @@ class ScopedLoopRebind:
     assert "__pypto_l2_hint_begin store" not in mlir
 
 
-@pytest.mark.parametrize("hint", _LOAD_POLICIES[2:])
+@pytest.mark.parametrize("hint", [p for p in _LOAD_POLICIES if type(p) is pl.A5CachePolicy])
 def test_a2a3_rejects_all_explicit_load_hints(hint):
     @pl.program
     class HintedLoad:
@@ -623,7 +628,7 @@ def test_a2a3_rejects_all_explicit_load_hints(hint):
         _incore_mlir(HintedLoad)
 
 
-@pytest.mark.parametrize("hint", _STORE_POLICIES[1:])
+@pytest.mark.parametrize("hint", [p for p in _STORE_POLICIES if type(p) is pl.A5CachePolicy])
 def test_a2a3_rejects_all_explicit_store_hints(hint):
     @pl.program
     class HintedStore:
@@ -676,7 +681,9 @@ def test_l2_hints_reach_isa_with_stock_ptoas(tmp_path, planner, load_hint, store
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
-@pytest.mark.parametrize("load_hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NORMAL_LAST_VICTIM])
+@pytest.mark.parametrize(
+    "load_hint", [pl.A5CachePolicy.NORMAL_FIRST_VICTIM, pl.A5CachePolicy.NORMAL_LAST_VICTIM]
+)
 def test_l2_hints_stay_with_transfers_in_control_flow(tmp_path, planner, load_hint):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
@@ -696,7 +703,7 @@ def test_l2_hints_stay_with_transfers_in_control_flow(tmp_path, planner, load_hi
                     tile = pl.load(x, [offset, 0], [32, 32], cache=load_hint)
                 else:
                     tile = pl.load(x, [offset, 0], [32, 32])
-                updated = pl.store(tile, [offset, 0], out_iter, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
+                updated = pl.store(tile, [offset, 0], out_iter, cache=pl.A5CachePolicy.NOT_ALLOC_CLEAN)
                 result = pl.yield_(updated)
             return result
 
@@ -748,15 +755,11 @@ def test_store_l2_hint_preserves_epilogue_with_stock_ptoas(tmp_path, planner, wi
     backend.set_backend_type(BackendType.Ascend950)
     with passes.PassContext([], memory_planner=planner):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(HintedWriteback)
-    if policy not in (pl.CachePolicy.DEFAULT, pl.CachePolicy.NORMAL_FIRST_VICTIM):
-        with pytest.raises(ValueError, match="ACC stores ignore l2Control"):
-            codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
-        return
     mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
     cpp = pto_backend._compile_pto_module(mlir, "hinted_writeback", str(tmp_path), planner)
     store = next(line for line in cpp.splitlines() if "TSTORE<" in line)
-    if policy == pl.CachePolicy.NORMAL_FIRST_VICTIM:
-        assert "TSTORE<pto::TStoreL2Hint::NormalFirstVictim," in store
+    if type(policy) is pl.A5CachePolicy:
+        assert f"TSTORE<pto::TStoreL2Hint::{_STORE_HINTS[policy]}," in store
     else:
         assert "TStoreL2Hint" not in store
     assert "AtomicType::AtomicAdd" in store
@@ -787,7 +790,7 @@ def test_store_l2_hint_preserves_phase_in_pto_ir(planner):
             rhs = pl.load(y, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
             acc = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
             return pl.store(
-                acc, [0, 0], out, st_phase=pl.STPhase.Final, cache=pl.CachePolicy.NORMAL_FIRST_VICTIM
+                acc, [0, 0], out, st_phase=pl.STPhase.Final, cache=pl.A5CachePolicy.NORMAL_FIRST_VICTIM
             )
 
     backend.reset_for_testing()

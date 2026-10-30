@@ -92,13 +92,9 @@ static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PT
         << " is only supported on A5; A2/A3 supports load DEFAULT/BYPASS and store DEFAULT";
     return std::nullopt;
   }
-  if (store && policy != ir::CachePolicy::kNormalFirstVictim) {
-    auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
-    CHECK_SPAN(!tile_type || tile_type->memory_space_ != ir::MemorySpace::Acc, op->span_)
-        << "A5 ACC-to-GM store cache policy " << ir::CachePolicyToString(policy)
-        << " is not supported by the pinned PTO-ISA: ACC stores ignore l2Control; "
-           "use CachePolicy.DEFAULT or CachePolicy.NORMAL_FIRST_VICTIM";
-  }
+  CHECK_SPAN(policy != ir::CachePolicy::kBypass, op->span_)
+      << "A2A3CachePolicy.BYPASS requires the A2/A3 runtime offset path; "
+         "use A5CachePolicy on A5";
   switch (policy) {
     case ir::CachePolicy::kNormalFirstVictim:
       return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalFirstVictim)
@@ -110,16 +106,15 @@ static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PT
       return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalPersistent)
                    : ir::LoadL2HintToString(ir::LoadL2Hint::NormalPersistent);
     case ir::CachePolicy::kBypass:
-      return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NotAllocClean)
-                   : ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
+      break;  // Rejected above: the runtime address-alias policy is A2/A3-only.
     case ir::CachePolicy::kNotAllocKeep:
-      CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_KEEP";
+      CHECK_SPAN(!store, op->span_) << "store does not support A5CachePolicy.NOT_ALLOC_KEEP";
       return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
     case ir::CachePolicy::kNotAllocClean:
       return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NotAllocClean)
                    : ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocClean);
     case ir::CachePolicy::kNotAllocDrop:
-      CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_DROP";
+      CHECK_SPAN(!store, op->span_) << "store does not support A5CachePolicy.NOT_ALLOC_DROP";
       return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocDrop);
     case ir::CachePolicy::kDefault:
       break;

@@ -1011,7 +1011,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       } else if (key == "acc_phase") {
         stream_ << prefix_ << ".AccPhase." << AccPhaseToString(static_cast<AccPhase>(int_val));
       } else if (key == "cache" && (int_val > 1 || IsOp(op, "tile.store"))) {
-        stream_ << prefix_ << ".CachePolicy."
+        stream_ << prefix_ << (int_val > 1 ? ".A5CachePolicy." : ".CachePolicy.")
                 << AttrValueToEnumMember(CachePolicyToString(static_cast<CachePolicy>(int_val)));
       } else if (key == "st_phase") {
         stream_ << prefix_ << ".STPhase." << STPhaseToString(static_cast<STPhase>(int_val));

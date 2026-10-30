@@ -130,7 +130,15 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, CachePolicy, Expr, MemorySpace, PadValue, TensorLayout
+from pypto.pypto_core.ir import (
+    A2A3CachePolicy,
+    A5CachePolicy,
+    AtomicType,
+    Expr,
+    MemorySpace,
+    PadValue,
+    TensorLayout,
+)
 
 from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, Tile, predicate_to_expr
 from ._utils import _normalize_intlike
@@ -355,7 +363,7 @@ def dump_tag(tensor: Tensor) -> Tensor:
     return tensor
 
 
-def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
+def set_cache_policy(tensor: Tensor, policy: A2A3CachePolicy | A5CachePolicy) -> None:
     """Declare the GM cache-access policy for every read of ``tensor`` in this scope.
 
     The scope-level surface of the cache policy, for tensor programming — where
@@ -411,7 +419,7 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
         tensor: The tensor whose reads the policy applies to. Must be a
             ``Tensor`` value bound outside the scope and read inside it.
         policy: ``CachePolicy.BYPASS`` to declare a streaming, non-cached read;
-            ``CachePolicy.DEFAULT`` for an ordinary cached read, or an explicit
+            ``CachePolicy.DEFAULT`` for an ordinary cached read, or an A5CachePolicy
             NORMAL_* / NOT_ALLOC_* policy on A5.
 
     Returns:

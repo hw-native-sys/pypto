@@ -19,11 +19,10 @@ from pypto.ir.utils import (
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    A2A3CachePolicy,
+    A5CachePolicy,
     AtomicType,
-    CachePolicy,
     Expr,
-    LoadL2Hint,
-    StoreL2Hint,
     MemorySpace,
     PadValue,
     STPhase,
@@ -160,7 +159,7 @@ def load(
     valid_shape: Sequence[IntLike] | None = None,
     target_memory: MemorySpace | None = None,
     clamp: bool = False,
-    cache: CachePolicy | None = None,
+    cache: A2A3CachePolicy | A5CachePolicy | None = None,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -202,10 +201,10 @@ def load(
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
             back into the cache inside a bypassing scope. Requires PTOAS >= v0.72,
             where a BYPASS read compiles to a load issued against the page's
-            uncached alias on A2/A3. On A5, BYPASS selects ISA NotAllocKeep;
-            DEFAULT emits an ordinary load.
-            A5 also supports the explicit NORMAL_* and NOT_ALLOC_* policies.
-            Their ISA encodings are selected by backend code generation.
+            uncached alias on A2/A3. A5 uses the six modes in A5CachePolicy
+            instead; A2/A3 BYPASS is rejected on A5. Their ISA encodings are
+            selected by backend code generation. DEFAULT resets an inherited
+            scope policy to an ordinary load on either architecture.
 
     Returns:
         Tile wrapping the load operation
@@ -216,8 +215,8 @@ def load(
         >>> # streaming read, no cache reuse expected
         >>> tile = load(tensor, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
     """
-    if isinstance(cache, (LoadL2Hint, StoreL2Hint)):
-        raise TypeError("load cache must be CachePolicy, not a raw ISA hint")
+    if cache is not None and type(cache) not in (A2A3CachePolicy, A5CachePolicy, int):
+        raise TypeError("load cache must be A2A3CachePolicy or A5CachePolicy")
     if valid_shape is None:
         valid_shape = shapes
     call_expr = _ir_ops.load(
@@ -242,7 +241,7 @@ def store(
     st_phase: STPhase = STPhase.Unspecified,
     pre_quant: float | None = None,
     pre_relu: bool = False,
-    cache: CachePolicy | None = None,
+    cache: A2A3CachePolicy | A5CachePolicy | None = None,
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -283,12 +282,9 @@ def store(
             ``maximum(tile, 0) * pre_quant`` and not
             ``maximum(tile * pre_quant, 0)``. The two agree for every positive
             scale and differ at every element for a negative one.
-        cache: Optional cache policy. A5 Vec-to-GM stores support DEFAULT,
-            BYPASS, NORMAL_* and NOT_ALLOC_CLEAN. A5 Acc-to-GM stores support
-            only DEFAULT and NORMAL_FIRST_VICTIM with the pinned PTO-ISA;
-            other policies are rejected, including for ReLU and quantized
-            writeback. NOT_ALLOC_KEEP/DROP are load-only. A2/A3 supports
-            DEFAULT stores only.
+        cache: A5CachePolicy.NORMAL_* or NOT_ALLOC_CLEAN for Vec/Acc-to-GM
+            stores, including ReLU and quantized writeback. NOT_ALLOC_KEEP
+            and NOT_ALLOC_DROP are load-only. On A2/A3 only DEFAULT is supported.
 
     Returns:
         Tensor wrapping the store operation
@@ -305,8 +301,8 @@ def store(
         >>> # INT32 accumulator dequantized and ReLU'd straight into FP16 GM
         >>> result = store(acc_i32, [0, 0], out_f16, pre_quant=1.0 / 1024, pre_relu=True)
     """
-    if cache is not None and type(cache) is not CachePolicy:
-        raise TypeError(f"store cache must be CachePolicy, got {type(cache).__name__}")
+    if cache is not None and type(cache) not in (A2A3CachePolicy, A5CachePolicy):
+        raise TypeError("store cache must be A2A3CachePolicy or A5CachePolicy")
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
     call_expr = _ir_ops.store(
