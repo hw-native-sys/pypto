@@ -665,6 +665,7 @@ def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "StaticView", SPAN))
         program = passes.flatten_tile_nd_to_2d()(program)
+        program = passes.allocate_memory_addr()(program)
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     helper = bundle.helpers[0]
     # slice emits static valid dimensions; reshape currently emits a dynamic
