@@ -57,6 +57,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.core.test_runner import TestRunner
 from pypto.ir.pass_manager import OptimizationStrategy
 
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
@@ -399,24 +400,34 @@ class TestSubmitDumpsCorrectness:
 
 
 def _dump_pipeline_manifest(test_runner, case: PTOTestCase, label: str) -> Path:
-    """Run one ``dumps=`` pipeline with ``--dump-args`` and return the new manifest.
+    """Run one ``dumps=`` pipeline with ``--dump-args`` and return its manifest.
 
     ``label`` names the front-end (``submit`` / ``spmd``) in skip and assertion messages.
+
+    The caller passes a case with its own ``get_name()`` (hence its own compile
+    cache key), and the work dir is pinned to a retained ``build_output`` path,
+    so this fixture always performs its own execution and reads the manifest it
+    just wrote. Sharing the correctness run's case would let
+    ``--precompile-workers`` hand back an already-executed batch: the dump is
+    written once, into that batch's work dir, so no fresh ``args_dump.json``
+    appears and a glob-the-newest-file check would fail.
     """
     if not test_runner.config.enable_dump_args:
         pytest.skip(f"pass --dump-args to validate the {label} dumps= manifest")
     if test_runner.config.codegen_only:
         pytest.skip("--codegen-only skips device execution; no manifest is written")
 
-    pattern = "*/dfx_outputs/args_dump/args_dump.json"
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
-    result = test_runner.run(case)
+    work_dir = _BUILD_OUTPUT_DIR / f"{label}_dumps_manifest"
+    case_dir = work_dir / case.get_name()
+    shutil.rmtree(case_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    config = dataclasses.replace(test_runner.config, save_kernels=True, save_kernels_dir=str(work_dir))
+    result = TestRunner(config).run(case)
     assert result.passed, f"{label} dumps= pipeline failed: {result.error}"
 
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
-    new_files = after - before
-    assert new_files, f"No args_dump.json was generated for the {label} dumps= run"
-    return max(new_files, key=lambda p: p.stat().st_mtime)
+    manifest = case_dir / "dfx_outputs" / "args_dump" / "args_dump.json"
+    assert manifest.exists(), f"No args_dump.json was generated for the {label} dumps= run at {manifest}"
+    return manifest
 
 
 def _read_dump_manifest(manifest_file: Path, label: str) -> list[dict]:
@@ -430,9 +441,20 @@ def _read_dump_manifest(manifest_file: Path, label: str) -> list[dict]:
     return entries
 
 
+class _SubmitDumpsManifestPTO(_SubmitDumpsPipelinePTO):
+    """Same program as the correctness case, but a distinct name so it keys its
+    own compile cache entry — the manifest fixture must execute, not reuse the
+    correctness run's already-dumped batch (see ``_dump_pipeline_manifest``)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"{super().get_name()}_manifest"
+
+
 @pytest.fixture(scope="module")
 def submit_dumps_manifest_file(test_runner) -> Path:
-    return _dump_pipeline_manifest(test_runner, _SubmitDumpsPipelinePTO(), "submit")
+    return _dump_pipeline_manifest(test_runner, _SubmitDumpsManifestPTO(), "submit")
 
 
 @pytest.fixture(scope="module")
@@ -585,9 +607,20 @@ class TestSpmdDumpsCorrectness:
         assert result.passed, f"spmd dumps= pipeline execution failed: {result.error}"
 
 
+class _SpmdDumpsManifestPTO(_SpmdDumpsPipelinePTO):
+    """Distinct-name twin of the SPMD correctness case, so the manifest fixture
+    keys its own compile cache entry and executes instead of reusing the
+    correctness run's already-dumped batch (see ``_dump_pipeline_manifest``)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"{super().get_name()}_manifest"
+
+
 @pytest.fixture(scope="module")
 def spmd_dumps_manifest_file(test_runner) -> Path:
-    return _dump_pipeline_manifest(test_runner, _SpmdDumpsPipelinePTO(), "spmd")
+    return _dump_pipeline_manifest(test_runner, _SpmdDumpsManifestPTO(), "spmd")
 
 
 @pytest.fixture(scope="module")
