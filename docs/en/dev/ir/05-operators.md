@@ -696,19 +696,25 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `split`, optional `id` |
+| `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `split`, optional `id`, optional `fixpipe_bf16`, `fixpipe_relu` |
 | `tile.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `split`, optional `id` |
 | `tile.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `split`, optional `id` |
 | `tile.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `split`, optional `id` |
 | `system.tfree_to_aic` | 1 (tile) | Release slot back to Cube producer | optional `id` |
 | `system.tfree_to_aiv` | 1 (tile) | Release slot back to Vector producer | optional `id` |
 
+On A5, `fixpipe_bf16=True` on C2V push/setup requests FP32 Acc → BF16
+round-to-nearest-even transport; `fixpipe_relu=True` additionally clamps with
+positive zero before conversion and requires BF16. The setup must use
+`dir_mask=1`; any V2C traffic uses a separate pipe ID. Pops carry BF16 and
+slot sizes describe that payload. See [automatic folding](../passes/25-expand_mixed_kernel.md#a5-c2v-fixpipe-epilogues).
+
 ### Pipe Initialization Operations
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id` |
-| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id` |
+| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `fixpipe_bf16`, `fixpipe_relu` |
+| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `fixpipe_bf16`, `fixpipe_relu` |
 
 - `slot_num` (when set, must be > 0) pins the GM ring-buffer slot count; omit it to let PTOAS pick its default (8 unidirectional, 4 per direction bidirectional).
 - `local_slot_num` (a2/a3 only, must be > 0 and `<= slot_num`) pins the local slot count.

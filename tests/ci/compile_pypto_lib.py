@@ -46,6 +46,13 @@ NON_KERNEL_ENTRIES = {
 # No current kernel entry uses runtime-dir as a compile output.
 COMPILE_OUTPUT_ENTRIES: set[str] = set()
 
+# pypto-lib #1622 retained these kernels but changed the module CLI to bounded
+# CPU reference/weight checks. Audit its HOST roots directly from their annotated
+# signatures; each root compiles the associated CHIP kernel as a dependency.
+SIGNATURE_ENTRIES = {
+    "models/glm5_3_flash/prefill_fwd.py": ("l3_copy_request_snapshot", "l3_reset_request_caches"),
+}
+
 
 def select_entries(lib: Path, platform: str) -> list[str]:
     """Use the library's full formal-entry selector, including device-only cases."""
@@ -237,8 +244,33 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
             elif arg.startswith("--runtime-dir="):
                 child_args[index] = "--runtime-dir=" + tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent)
         sys.argv = [str(entry_path), *child_args]
+    signature_entries = SIGNATURE_ENTRIES.get(entry, ())
+    if signature_entries:
+        tree = ast.parse(entry_path.read_text())
+        definitions = {
+            node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        } | {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
+        if not set(signature_entries) <= definitions:
+            signature_entries = ()
     try:
-        runpy.run_path(str(entry_path), run_name="__main__")
+        if signature_entries and "--compile-only" not in sys.argv:
+            from pypto.backend import BackendType  # noqa: PLC0415
+            from pypto.runtime import RunConfig  # noqa: PLC0415
+
+            namespace = runpy.run_path(str(entry_path), run_name="_pypto_compile_audit_")
+            backend = BackendType.Ascend950 if platform == "a5" else BackendType.Ascend910
+            config = RunConfig(backend_type=backend)
+            for name in signature_entries:
+                function = namespace.get(name)
+                if function is None or not callable(getattr(function, "compile", None)):
+                    raise ValueError(f"Missing compile-only entry {name} in {entry}")
+                function.compile(config=config)
+        else:
+            runpy.run_path(str(entry_path), run_name="__main__")
     finally:
         subprocess.Popen = original_popen
         for child_receipt, child in children:

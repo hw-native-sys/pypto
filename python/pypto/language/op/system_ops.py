@@ -331,6 +331,8 @@ def tpush_to_aiv(
     split: int,
     lane_stride: int | None = None,
     id: int | None = None,
+    fixpipe_bf16: bool | None = None,
+    fixpipe_relu: bool | None = None,
     span: Span | None = None,
 ) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
@@ -347,9 +349,19 @@ def tpush_to_aiv(
         lane_stride: Partition stride carried when a ragged boundary was balanced
             across the two AIV lanes; omit for the default box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        fixpipe_bf16: Compiler-generated A5 BF16 C2V payload; must match the pipe initializers.
+        fixpipe_relu: Compiler-generated ReLU before BF16 narrowing.
         span: Optional source span
     """
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, lane_stride=lane_stride, id=id, span=span)
+    return _ir_ops.tpush_to_aiv(
+        tile.unwrap(),
+        split=split,
+        lane_stride=lane_stride,
+        id=id,
+        fixpipe_bf16=fixpipe_bf16,
+        fixpipe_relu=fixpipe_relu,
+        span=span,
+    )
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:

@@ -62,6 +62,7 @@ class TestBackendHandlerValues:
         assert handler.honors_high_precision_algorithm() is False
         assert handler.requires_gm_pipe_buffer() is True
         assert handler.supports_local_pipe_depth() is True
+        assert handler.supports_c2v_fixpipe_epilogue() is False
         assert handler.requires_split_load_tpop_workaround() is True
         assert handler.requires_level3_tmp_scratch() is True
         assert handler.requires_vto_c_fractal_adapt() is False
@@ -80,6 +81,7 @@ class TestBackendHandlerValues:
         assert handler.honors_high_precision_algorithm() is True
         assert handler.requires_gm_pipe_buffer() is False
         assert handler.supports_local_pipe_depth() is False
+        assert handler.supports_c2v_fixpipe_epilogue() is True
         assert handler.requires_split_load_tpop_workaround() is False
         assert handler.requires_level3_tmp_scratch() is False
         assert handler.requires_vto_c_fractal_adapt() is True

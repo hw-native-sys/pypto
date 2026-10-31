@@ -919,6 +919,43 @@ def test_pipe_ops():
     assert "_cross_core_rt.push_to_aiv(tile, 0)" in code
 
 
+@pytest.mark.parametrize("relu", [False, True])
+def test_fixpipe_reference_epilogue(relu):
+    """Queue rounded BF16, retain shape metadata and leave the Acc untouched."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def send(self, src: pl.Tile[[1, 16], pl.FP32, pl.Mem.Acc]):
+            pl.tpush_to_aiv(src, split=0, fixpipe_bf16=True, fixpipe_relu=relu)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def receive(self) -> pl.Tile[[1, 16], pl.BF16, pl.Mem.Vec]:
+            value: pl.Tile[[1, 16], pl.BF16, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            return value
+
+    ns = {}
+    exec(torch_codegen(Program, check_shapes=True), ns)  # noqa: S102
+    values: Any = torch.tensor(
+        [-2.0, -0.0, 0.0, 1.00390625, 1.01171875, float("nan"), float("inf"), -float("inf")] * 2,
+        dtype=torch.float32,
+    ).reshape(1, 16)
+    original = values.clone()
+    values._pypto_valid_shape = (1, 13)
+    values._pypto_full_shape = (1, 16)
+    ns["send"](values)
+    actual = ns["receive"]()
+    expected = torch.maximum(original, torch.zeros_like(original)) if relu else original
+    expected = expected.to(torch.bfloat16)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+    assert torch.equal(
+        actual[~actual.isnan()].view(torch.int16), expected[~expected.isnan()].view(torch.int16)
+    )
+    assert torch.equal(values.view(torch.int32), original.view(torch.int32))
+    assert actual._pypto_valid_shape == (1, 13)
+    assert actual._pypto_full_shape == (1, 16)
+
+
 def test_get_subblock_idx():
     """tile.get_subblock_idx should emit thread-local lane helper."""
     idx = _scalar("idx", DataType.INDEX)

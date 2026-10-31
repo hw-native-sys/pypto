@@ -32,6 +32,10 @@ namespace cross_core_pipe {
 struct PipeDirectionMetadata {
   bool has_ops = false;
   bool has_inconsistent_slot_size = false;
+  // Uniform over every push in this automatic C2V pipe. Slot bytes describe
+  // the narrowed payload, not the producer's accumulator element width.
+  bool fixpipe_bf16 = false;
+  bool fixpipe_relu = false;
   std::optional<int64_t> slot_size_bytes;
   std::vector<int64_t> observed_slot_sizes;
 };
@@ -64,6 +68,10 @@ constexpr int kAutoBufferBase = -1;
 /// always emits this value explicitly on `initialize_pipe`, so it is a pypto policy number and is
 /// deliberately independent of PTOAS's own fallback below.
 constexpr int kDefaultAutoPipeSlotNum = 2;
+
+// Non-diagnostic preflight for optional rewrites that extend popped-tile
+// lifetimes. The unfused path still runs the normal FIFO validity diagnostics.
+bool FitsAutomaticPipeCapacity(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side, int capacity);
 
 /// Compile-time integer value of @p expr, or ``nullopt`` when it is not one
 /// **or is negative**. The non-negative half of the contract is what the name

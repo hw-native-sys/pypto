@@ -224,7 +224,13 @@ static std::string FormatFrontendPipeAttrs(const CallPtr& op, int split) {
   return oss.str();
 }
 
-static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, int slot_size) {
+static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, int slot_size,
+                                             const BackendHandler& handler) {
+  const bool bf16 = op->GetKwarg<bool>("fixpipe_bf16", false);
+  CHECK_SPAN(!op->GetKwarg<bool>("fixpipe_relu", false) || bf16, op->span_)
+      << "fixpipe_relu requires fixpipe_bf16 on the C2V pipe";
+  CHECK_SPAN(!bf16 || (dir_mask == 1 && handler.SupportsC2VFixpipeEpilogue()), op->span_)
+      << "Fixpipe BF16 epilogues require an A5 C2V-only pipe (dir_mask=1)";
   std::ostringstream oss;
   oss << "{";
   if (op->HasKwarg("id")) {
@@ -243,6 +249,11 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
     CHECK(local_slot_num > 0) << "Frontend initialize_pipe 'local_slot_num' attribute must be positive, got "
                               << local_slot_num;
     oss << ", local_slot_num = " << local_slot_num;
+  }
+  if (bf16) {
+    oss << ", nosplit = true, acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, "
+           "quant = f32_bf16, relu = "
+        << (op->GetKwarg<bool>("fixpipe_relu", false) ? "normal_relu" : "no_relu") << ">";
   }
   oss << "}";
   return oss.str();
@@ -497,7 +508,8 @@ static std::string MakeInitializePipeCodegenPTO(const char* target, const CallPt
   CHECK(!c2v_ssa.empty() && !v2c_ssa.empty()) << op_name << ": failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
-  oss << "pto." << target << "_initialize_pipe " << FormatInitializePipeAttrs(op, dir_mask, slot_size);
+  oss << "pto." << target << "_initialize_pipe "
+      << FormatInitializePipeAttrs(op, dir_mask, slot_size, *codegen.GetBackendHandler());
   const int pipe_id = op->GetKwarg<int>("id", 0);
   EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSAForPipe(pipe_id, dir_mask), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());

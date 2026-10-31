@@ -80,6 +80,10 @@ struct CVBoundaryMove {
   // `lane_stride` attr (see split_axis::ResolveLaneStride). 0 = the default box
   // partition, where the stride is the tile's own physical half.
   int lane_stride = 0;
+  // Automatic no-split epilogue: the producer remains FP32 Acc while the
+  // FIFO and consumer carry BF16, optionally clamped before narrowing.
+  bool fixpipe_bf16 = false;
+  bool fixpipe_relu = false;
 };
 
 }  // namespace core_affinity

@@ -449,6 +449,8 @@ REGISTER_OP("tile.tpush_to_aiv")
     // reference runtime, ignored by PTO codegen.
     .set_attr<int>("lane_stride")
     .set_attr<int>("id")
+    .set_attr<bool>("fixpipe_bf16")
+    .set_attr<bool>("fixpipe_relu")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 

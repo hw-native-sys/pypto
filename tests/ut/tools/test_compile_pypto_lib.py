@@ -478,6 +478,44 @@ def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, inc
             audit.select_entries(library, platform)
 
 
+@pytest.mark.parametrize("second,passed", [("ok", True), ("bad", False), (None, False)])
+def test_glm_reference_cli_audits_kernel_signatures(library, tmp_path, second, passed):
+    entry = library / "models/glm5_3_flash/prefill_fwd.py"
+    entry.parent.mkdir(parents=True)
+    (library / "pypto/backend.py").write_text(
+        "class BackendType:\n    Ascend910 = 'a2a3'\n    Ascend950 = 'a5'\n"
+    )
+    (library / "pypto/runtime.py").write_text(
+        "class RunConfig:\n"
+        "    def __init__(self, *, backend_type):\n"
+        "        self.backend_type = backend_type\n"
+    )
+    entry.write_text(
+        "from pypto.ir import compile\n"
+        "class Kernel:\n"
+        "    def __init__(self, value):\n        self.value = value\n"
+        "    def compile(self, *, config):\n"
+        "        assert config.backend_type == 'a2a3'\n"
+        "        compile(self.value)\n"
+        "l3_copy_request_snapshot = Kernel('ok')\n"
+        f"l3_reset_request_caches = Kernel({second!r}) if {second!r} is not None else None\n"
+        "if __name__ == '__main__':\n"
+        "    raise AssertionError('CPU reference CLI must not stand in for kernel compilation')\n"
+    )
+    result = audit.run_case(library, "models/glm5_3_flash/prefill_fwd.py", "a2a3", tmp_path / "out", 30)
+    assert result["passed"] is passed
+    assert len(result["compilations"]) == (1 if second is None else 2)
+
+
+def test_glm_legacy_entry_keeps_cli_compilation(library, tmp_path):
+    entry = library / "models/glm5_3_flash/prefill_fwd.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("from golden import run\nrun('ok', [])\n")
+    result = audit.run_case(library, "models/glm5_3_flash/prefill_fwd.py", "a2a3", tmp_path / "out", 30)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
 @pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1), ("truncated", 1)])
 def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, status):
     selector = library / ".github/scripts/detect_changes.py"

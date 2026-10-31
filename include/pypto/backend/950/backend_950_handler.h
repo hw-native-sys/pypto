@@ -49,6 +49,7 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] bool HonorsHighPrecisionAlgorithm() const override { return true; }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
+  [[nodiscard]] bool SupportsC2VFixpipeEpilogue() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }
 
   // A5 dispatches all six compare modes generically over the element type.

@@ -957,7 +957,14 @@ def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any]) -> str:
     # other kernel keeps the two-argument form.
     stride = _lane_stride_kwarg(kw)
     stride_arg = f", {stride}" if stride else ""
-    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg})"
+    payload = a[0]
+    if kw.get("fixpipe_bf16", False):
+        if kw.get("fixpipe_relu", False):
+            payload = f"torch.maximum({payload}, torch.zeros_like({payload}))"
+        # Tensor.to(BF16) uses round-to-nearest-even. Preserve region metadata
+        # and the original FP32 accumulator for any other producer-side use.
+        payload = f"_copy_region_attrs({a[0]}, ({payload}).to(torch.bfloat16))"
+    return f"_cross_core_rt.push_to_aiv({payload}, {_split_kwarg(kw)}{stride_arg})"
 
 
 def _handle_tpush_to_aic(a: list[str], kw: dict[str, Any]) -> str:
@@ -1177,7 +1184,9 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.subs"] = _binop("-")
         m[f"{prefix}.muls"] = _binop("*")
         m[f"{prefix}.divs"] = _binop("/")
-        m[f"{prefix}.maximums"] = _torch_fn("maximum", 2)
+        m[f"{prefix}.maximums"] = lambda a, _kw: (
+            f"torch.maximum({a[0]}, torch.as_tensor({a[1]}, dtype={a[0]}.dtype, device={a[0]}.device))"
+        )
         m[f"{prefix}.minimums"] = _torch_fn("minimum", 2)
         m[f"{prefix}.rems"] = _binop("%")
         m[f"{prefix}.fmods"] = _torch_fn("fmod", 2)

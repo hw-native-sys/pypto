@@ -258,6 +258,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/outline_hierarchy_scopes_pass.cpp
     src/ir/transforms/outline_graph_scopes_pass.cpp
     src/ir/transforms/expand_mixed_kernel/group_abi.cpp
+    src/ir/transforms/expand_mixed_kernel/fixpipe.cpp
     src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/lower_auto_vector_split_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp

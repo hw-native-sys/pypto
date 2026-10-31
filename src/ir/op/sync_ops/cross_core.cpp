@@ -183,6 +183,8 @@ REGISTER_OP("system.aic_initialize_pipe")
     .set_attr<int>("slot_num")
     .set_attr<int>("local_slot_num")
     .set_attr<int>("id")
+    .set_attr<bool>("fixpipe_bf16")
+    .set_attr<bool>("fixpipe_relu")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIV side
@@ -198,6 +200,8 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .set_attr<int>("slot_num")
     .set_attr<int>("local_slot_num")
     .set_attr<int>("id")
+    .set_attr<bool>("fixpipe_bf16")
+    .set_attr<bool>("fixpipe_relu")
     .f_deduce_type(DeduceUnknownType);
 
 // Reserve a named buffer in a kernel
