@@ -1068,6 +1068,27 @@ class TensorToTileMutator : public TypePropagatingMutator {
   void RecordPackedTile(const VarPtr& var, const ExprPtr& value) {
     auto type = As<TileType>(var->GetType());
     if (!type) return;
+    // Record backing storage independently of packing: a narrow/strided view
+    // still keeps its full parent allocation live beside a materialized copy.
+    ExprPtr origin;
+    auto known = conversion_context_.storage_origins.find(value);
+    if (known != conversion_context_.storage_origins.end()) origin = known->second;
+    if (auto call = As<Call>(value)) {
+      const auto* entry = LookupOpEntry(call->op_);
+      if (entry && entry->GetOpCategory() == "TileOp") {
+        auto source = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+        if (!source && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+          source = 0;
+        }
+        if (source) {
+          auto backing = conversion_context_.storage_origins.find(call->args_[*source]);
+          if (backing != conversion_context_.storage_origins.end()) origin = backing->second;
+        } else if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+          origin = var;
+        }
+      }
+    }
+    if (origin) conversion_context_.storage_origins.emplace(var, origin);
     const auto view = tile_view_semantics::GetEffectiveTileView(*type);
     if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
         !view.stride.empty()) {
@@ -1079,8 +1100,31 @@ class TensorToTileMutator : public TypePropagatingMutator {
       packed = entry && entry->GetOpCategory() == "TileOp" &&
                entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional &&
                !op_predicates::OutputInheritsSourceBuffer(call->op_->name_);
-      if (entry && IsOp(call, "tile.set_validshape")) {
-        packed = conversion_context_.packed_tiles.count(call->args_[0]) != 0;
+      if (entry && !call->args_.empty() && conversion_context_.packed_tiles.count(call->args_[0])) {
+        auto source = As<TileType>(call->args_[0]->GetType());
+        if (IsOp(call, "tile.set_validshape")) {
+          packed = true;
+        } else if (IsOp(call, "tile.slice") && source && call->args_.size() >= 3) {
+          auto offsets = As<MakeTuple>(call->args_[2]);
+          packed = tile_view_semantics::ShapeExprListsEquivalent(source->shape_, type->shape_) && offsets &&
+                   offsets->elements_.size() == source->shape_.size() &&
+                   std::all_of(offsets->elements_.begin(), offsets->elements_.end(), [](const auto& e) {
+                     auto offset = As<ConstInt>(e);
+                     return offset && offset->value_ == 0;
+                   });
+        } else if (IsOp(call, "tile.reshape") && source) {
+          // A reshape preserves packing only when physical row padding cannot
+          // separate the logical rows in either descriptor.
+          auto aligned_row = [](const std::shared_ptr<const TileType>& tile) {
+            auto cols = tile->shape_.size() == 2 ? As<ConstInt>(tile->shape_.back()) : nullptr;
+            return cols && cols->value_ > 0 && !tile->dtype_.IsPackedFp4() &&
+                   (cols->value_ % 32) * tile->dtype_.GetByte() % 32 == 0;
+          };
+          const auto source_view = tile_view_semantics::GetEffectiveTileView(*source);
+          auto offset = As<ConstInt>(source_view.start_offset);
+          packed = aligned_row(source) && aligned_row(type) &&
+                   (!source_view.start_offset || (offset && offset->value_ == 0));
+        }
       }
     }
     if (packed) conversion_context_.packed_tiles.insert(var);

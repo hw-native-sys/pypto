@@ -245,7 +245,13 @@ In straight-line code the guard is **directional**, which keeps the legal opposi
 
 Inside a loop that direction collapses. The back edge re-writes the workspace from the scalar pipe on iteration *i+1* while iteration *i*'s vector reads of anything sharing that buffer — the `dst`, and whatever consumes it — can still be in flight, so lifetime order within one iteration proves nothing about the next. A workspace enclosed in a `ForStmt` or `WhileStmt` therefore takes an **exclusive** buffer, blocked in both directions. Those two are the only statements that repeat a body by the time MemoryReuse runs: `pl.pipeline` is lowered to a loop by [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) / [`LowerPipelineLoops`](32-lower_pipeline_loops.md).
 
-It is keyed on the registry rather than on operator names or a backend flag, and is **not** backend-gated: PyPTO cannot know which pipe a given intrinsic writes a workspace from, so every declared one is isolated. A5's TSELS happens to leave `tmp` untouched (it dups the scalar into a vector register via `vdup`), and paying a small buffer there is the price of not encoding per-intrinsic pipe knowledge in the pass. The same fact is consumed by DSA-RP as a `TargetHazard` separation, so both planners agree.
+The default guard is keyed on registry-declared workspaces and is backend-independent.
+Index-form `tile.gather` is exempt: PTOAS v0.70 and later expose A2/A3 scratch
+reads and writes on `PIPE_V`, while A5 leaves the scratch unused. Ordinary lifetime
+interference, output alias restrictions, and downstream synchronization therefore
+cover its scratch reuse, including across loop iterations. Other workspaces retain
+the conservative guard; DSA-RP consumes the same classification as `TargetHazard`
+constraints.
 
 Without the guard, `pl.tile.select`-built clamps corrupt exactly element 0 of the compare source: the composite's synthesized workspace is born and dies inside one statement, which makes it the prime reuse candidate for the buffer the preceding `tile.cmps` is still reading.
 

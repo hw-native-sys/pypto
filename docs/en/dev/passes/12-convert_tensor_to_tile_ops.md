@@ -577,11 +577,21 @@ explicitly for `tile.gather`. See the [operator contract](../ir/05-tensor-tile-o
 for dtype, shape, alignment, and bounds requirements.
 
 Strided sources are packed using `tile.extract` for floating point or exact integer
-`tile.adds(..., 0)` for INT16/INT32, which A2/A3 TEXTRACT cannot copy.
+`tile.adds(..., 0)` for INT16/INT32, which TEXTRACT cannot copy.
+Last-axis gather shares this packing and full-tile flat-index lowering on A2/A3 and A5.
+When the estimated full-tile working set exceeds Vec capacity, GM and local
+sources use a shared row-at-a-time lowering instead, as do sources whose
+logical row width is not 32-byte aligned; the output accumulator and
+any existing local source still need to fit. Local rank-3 sources and indices
+require packed-storage proof before merging their leading dimensions.
 The converter receives a read-only `ConversionContext` containing packed-storage
-facts collected from earlier lowered producers in one SSA traversal. Registered
+facts collected from earlier lowered producers in one SSA traversal. A separate
+allocation-origin fact follows aliases and views so capacity checks count the
+full backing storage of local source/index windows, plus required source copies
+when the requested shape differs, even for a packed producer. Registered
 functional tile results with fresh storage are proven packed; plain aliases and
-`tile.set_validshape` preserve that proof. Other views, parameters, and control-flow
+`tile.set_validshape`, full-shape zero-offset slices, and reshapes with 32-byte-aligned
+source and destination rows preserve that proof. Other views, parameters, and control-flow
 results remain unknown and keep the copy. An empty `TileView.stride` alone is not
 proof: `tile.slice` can retain its parent's physical pitch without storing it there.
 

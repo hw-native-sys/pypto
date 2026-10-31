@@ -5532,15 +5532,34 @@ class TestConvertFlatGatherOp:
 
     @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
     @pytest.mark.parametrize(
-        "source_mode", ["computed", "alias", "valid", "strided", "strided_alias", "strided_valid"]
+        "source_mode",
+        [
+            "computed",
+            "alias",
+            "valid",
+            "full_slice",
+            "reshape",
+            "full_slice_reshape",
+            "strided",
+            "strided_alias",
+            "strided_valid",
+            "strided_reshape",
+        ],
     )
     def test_computed_source_uses_tile_gather(self, dtype, source_mode):
         specs = [("src", [4, 32], dtype), ("idx", [1, 16], DataType.INT32)]
 
         def before_body(ib, ins):
             local = ib.let("local", tensor_ops.add(ins[0], 1))
+            if source_mode.startswith("full_slice"):
+                local = ib.let("window", tensor_ops.slice(local, [4, 32], [0, 0]))
             if source_mode.startswith("strided"):
                 local = ib.let("window", tensor_ops.slice(local, [4, 16], [0, 16]))
+            if source_mode.endswith("reshape"):
+                local = ib.let(
+                    "reshaped",
+                    tensor_ops.reshape(local, [1, 64 if source_mode.startswith("strided") else 128]),
+                )
             if source_mode.endswith("alias"):
                 local = ib.let("alias", local)
             if source_mode.endswith("valid"):
@@ -5556,8 +5575,13 @@ class TestConvertFlatGatherOp:
             src = ib.let("src_tile", tile_ops.load(ins[0], [0, 0], [4, 32]))
             local = ib.let("local_tile", tile_ops.add(src, 1))
             shape = [4, 16] if source_mode.startswith("strided") else [4, 32]
+            if source_mode.startswith("full_slice"):
+                local = ib.let("window_tile", tile_ops.slice(local, [4, 32], [0, 0]))
             if source_mode.startswith("strided"):
                 local = ib.let("window_tile", tile_ops.slice(local, shape, [0, 16]))
+            if source_mode.endswith("reshape"):
+                shape = [1, 64 if source_mode.startswith("strided") else 128]
+                local = ib.let("reshaped_tile", tile_ops.reshape(local, shape))
             if source_mode.endswith("alias"):
                 local = ib.let("alias", local)
             if source_mode.endswith("valid"):
@@ -5638,15 +5662,11 @@ class TestConvertFlatGatherOp:
 
 
 class TestConvertGatherOp:
-    """Test conversion of tensor.gather (MVP: 2D + dim=-1).
+    """Test full-tile axis gather lowering shared by A2/A3 and A5."""
 
-    UT transforms conftest pins Ascend950 (A5), so the default path is the
-    full-tile flat-index lowering. A separate test switches to Ascend910 to
-    lock the legacy per-row loop.
-    """
-
-    def test_gather_conversion(self):
-        """A5: tensor.gather -> full-tile load + flat index + one tile.gather."""
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion(self, ascend_backend):
+        """tensor.gather -> full-tile load + flat index + one tile.gather."""
 
         @pl.program
         class Before:
@@ -5738,8 +5758,9 @@ class TestConvertGatherOp:
         for cast in casts:
             assert dict(cast.kwargs)["mode"] == 0
 
-    def test_gather_conversion_expand(self):
-        """A5 expand gather (K > S1): flat uses src cols, not output cols."""
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion_expand(self, ascend_backend):
+        """Expand gather (K > S1): flat uses src cols, not output cols."""
 
         @pl.program
         class Before:
@@ -5797,80 +5818,14 @@ class TestConvertGatherOp:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_gather_conversion_a2a3_per_row(self):
-        """Non-A5 keeps the legacy per-row single-row gather loop."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-        try:
-
-            @pl.program
-            class Before:
-                @pl.function(type=pl.FunctionType.InCore)
-                def main_incore_0(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    out: pl.Tensor[[4, 3], pl.FP32] = pl.tensor.gather(inp, dim=-1, index=idx)
-                    return out
-
-                @pl.function
-                def main(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(inp, idx)
-                    return out
-
-            @pl.program
-            class Expected:
-                @pl.function(type=pl.FunctionType.InCore)
-                def main_incore_0(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                    ret0__out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    gather_acc_init = pl.tile.create([4, 3], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                    for gather_lv, (gather_ia,) in pl.range(4, init_values=(gather_acc_init,)):
-                        gather_inp_row = pl.tile.load(
-                            inp, [gather_lv, 0], [1, 16], [1, 16], target_memory=pl.Mem.Vec
-                        )
-                        gather_idx_row = pl.tile.load(
-                            idx, [gather_lv, 0], [1, 3], [1, 3], target_memory=pl.Mem.Vec
-                        )
-                        gather_row_tmp = pl.tile.create([1, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                        gather_row = pl.tile.gather(gather_inp_row, gather_idx_row, gather_row_tmp)
-                        gather_asmbl = pl.tile.assemble(gather_ia, gather_row, [gather_lv, 0])
-                        gather_rv = pl.yield_(gather_asmbl)
-                    out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather_rv
-                    ret0__store = pl.tile.store(out__tile, [0, 0], ret0__out)
-                    return ret0__store
-
-                @pl.function
-                def main(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    ret0__out = pl.tensor.create([4, 3], dtype=pl.FP32, layout=pl.TensorLayout.ND)
-                    out = self.main_incore_0(inp, idx, ret0__out)
-                    return out
-
-            After = passes.convert_tensor_to_tile_ops()(Before)
-            ir.assert_structural_equal(After, Expected)
-        finally:
-            backend.reset_for_testing()
-            backend.set_backend_type(BackendType.Ascend950)
-
-    def test_gather_conversion_with_tile_input(self):
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion_with_tile_input(self, ascend_backend):
         """tensor.gather whose input was already demoted to a tile by an upstream conversion.
 
         Regression test for the case the converter previously crashed with
         CHECK(input_tensor_type): a local tensor.create + tensor.assemble feeds
         tensor.gather, so by the time gather is visited its `input` arg is a
-        TileType. On A5 the converter emits a full-tile slice + flat gather.
+        TileType. The converter extracts a packed source for flat gather.
         """
 
         @pl.program
@@ -5907,16 +5862,14 @@ class TestConvertGatherOp:
                 tmp__tile = pl.tile.create([4, 16], dtype=pl.FP32)
                 assemble_src = pl.tile.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
                 tmp_1__tile = pl.tile.assemble(tmp__tile, assemble_src, [0, 0])
-                gather_inp = pl.tile.slice(tmp_1__tile, [4, 16], [0, 0], [4, 16])
-                gather_src_alloc = pl.tile.create([4, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                gather_src_copy = pl.tile.assemble(gather_src_alloc, gather_inp, [0, 0])
+                gather_src = pl.tile.extract(tmp_1__tile, 0, 0, [4, 16], target_memory=pl.Mem.Vec)
                 gather_idx = pl.tile.load(idx, [0, 0], [4, 3], [4, 3], target_memory=pl.Mem.Vec)
                 gather_ci_rows = pl.tile.ci(pl.const(0, pl.INT32), [1, 4], dtype=pl.INT32, descending=False)
                 gather_row_arange = pl.tile.reshape(gather_ci_rows, [4, 1])
                 gather_row_base = pl.tile.muls(gather_row_arange, pl.const(16, pl.INT32))
                 gather_flat_idx = pl.tile.row_expand_add(gather_idx, gather_row_base)
                 gather_tmp = pl.tile.create([4, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                gather = pl.tile.gather(gather_src_copy, gather_flat_idx, gather_tmp)
+                gather = pl.tile.gather(gather_src, gather_flat_idx, gather_tmp)
                 out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather
                 ret0__store = pl.tile.store(out__tile, [0, 0], ret0__out)
                 return ret0__store
@@ -5934,15 +5887,16 @@ class TestConvertGatherOp:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_gather_conversion_strided_tile_source_materializes(self):
-        """A5 flat-index gather materializes a strided tile.slice source.
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion_strided_tile_source_materializes(self, ascend_backend):
+        """Flat-index gather materializes a strided tile.slice source.
 
         Regression for the strided-source corruption (DeepSeek sparse_attn
         inverse-RoPE): flat[i,j] = i*src_cols + idx assumes the source is stored
         row-major with stride == src_cols, but a tile.slice view of a wider tile
         (rope = full[:, nope:head]) keeps the parent's wider stride, so every row
         past the first is misaddressed. The converter now copies the TileType
-        source into a fresh contiguous tile (tile.create + tile.assemble) before
+        source into a fresh contiguous tile (tile.extract) before
         the flat-index tile.gather. The contiguous TensorType path
         (test_gather_conversion) already materializes via tile.load and is not
         copied.
@@ -5984,9 +5938,7 @@ class TestConvertGatherOp:
                 assemble_src = pl.tile.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
                 full_1__tile = pl.tile.assemble(full__tile, assemble_src, [0, 0])
                 rope__tile = pl.tile.slice(full_1__tile, [4, 8], [0, 8])
-                gather_inp = pl.tile.slice(rope__tile, [4, 8], [0, 0], [4, 8])
-                gather_src_alloc = pl.tile.create([4, 8], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                gather_src_copy = pl.tile.assemble(gather_src_alloc, gather_inp, [0, 0])
+                gather_src = pl.tile.extract(rope__tile, 0, 0, [4, 8], target_memory=pl.Mem.Vec)
                 gather_idx = pl.tile.load(idx, [0, 0], [4, 8], [4, 8], target_memory=pl.Mem.Vec)
                 gather_lin = pl.tile.ci(pl.const(0, pl.INT32), [1, 32], dtype=pl.INT32, descending=False)
                 gather_lin2d = pl.tile.reshape(gather_lin, [4, 8])
@@ -5994,7 +5946,7 @@ class TestConvertGatherOp:
                 gather_row_base = pl.tile.muls(gather_row_ids, pl.const(8, pl.INT32))
                 gather_flat_idx = pl.tile.add(gather_idx, gather_row_base)
                 gather_tmp = pl.tile.create([4, 8], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                gather = pl.tile.gather(gather_src_copy, gather_flat_idx, gather_tmp)
+                gather = pl.tile.gather(gather_src, gather_flat_idx, gather_tmp)
                 out__tile: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = gather
                 ret0__store = pl.tile.store(out__tile, [0, 0], ret0__out)
                 return ret0__store

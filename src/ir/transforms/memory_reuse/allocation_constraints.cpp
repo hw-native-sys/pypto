@@ -382,9 +382,8 @@ class ForbidAliasCollector : public IRVisitor {
 /// insertion can see the WAR. The buffer therefore must not be inherited from a
 /// value that dies before the workspace is defined.
 ///
-/// Keyed on the registry rather than on operator names or a backend flag: any
-/// operator declaring a written workspace is exposed to the same hazard, and
-/// PyPTO has no way to know which pipe a given intrinsic writes from.
+/// Registry-declared written workspaces are isolated conservatively unless
+/// their scratch effects are known to be visible to downstream synchronization.
 class WrittenWorkspaceCollector : public IRVisitor {
  public:
   void VisitExpr_(const CallPtr& op) override {
@@ -427,6 +426,10 @@ class WrittenWorkspaceCollector : public IRVisitor {
     // workspace contract.
     const auto* entry = LookupOpEntry(op);
     if (entry == nullptr) return;
+    // Index TGATHER's scratch writes are visible PIPE_V effects in PTOAS
+    // (A2/A3), or unused (A5). Normal lifetime/dependency handling covers them;
+    // the hidden scalar-pipe workspace hazard does not apply.
+    if (IsOp(op, "tile.gather")) return;
     for (const size_t index : entry->GetWorkspaceArgs()) {
       if (index >= args.size() || !entry->MayWriteArg(index)) continue;
       // AsVarLike, not As<Var>: a workspace can reach the op as a loop IterArg
