@@ -867,6 +867,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // compiler-generated scratch operand likewise prints as keyword-only tmp.
   const bool cast_kw_tmp = IsOp(op, "tile.cast") && op->args_.size() == 2;
   const bool sort32_kw_tmp = IsOp(op, "tile.sort32") && op->args_.size() == 3;
+  // Strides are an operand (so SSA substitution sees dynamic pitches), but the
+  // public view API keeps them keyword-only. Preserve the empty valid_shape
+  // placeholder in slot three so the ordinary parser rebuilds all four args.
+  const bool view_kw_strides = IsOp(op, "tensor.view") && op->args_.size() == 4;
   // pld.tensor.all_to_all_v carries its requested block limit as a keyword-only
   // 6th operand; printing it positionally would re-parse as too many arguments.
   const bool a2av_kw_core_num = (IsOp(op, "pld.tensor.all_to_all_v") && op->args_.size() == 6) ||
@@ -884,6 +888,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (ci_kw_tmp && i == 2) continue;
     if (cast_kw_tmp && i == 1) continue;
     if (sort32_kw_tmp && i == 2) continue;
+    if (view_kw_strides && i == 3) continue;
     if (a2av_kw_core_num && i + 1 == op->args_.size()) continue;
     if (mgather && i >= 2) continue;
     if (i > 0) stream_ << ", ";
@@ -904,6 +909,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
+  if (view_kw_strides) {
+    stream_ << ", strides=";
+    VisitExpr(op->args_[3]);
+    need_comma = true;
+  }
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);

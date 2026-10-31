@@ -21,11 +21,11 @@ namespace pypto {
 namespace backend {
 
 /**
- * @brief Register shared PTO ops other than the target-specific select and cast families
+ * @brief Register shared PTO ops other than target-specific select, cast and load ops
  *
- * RegisterSelectOps and RegisterCastOps register their families separately. Registers the remaining
- * PTO operator codegen functions to the specified
- * backend. Ops listed in exclude_ops are skipped, allowing a backend to
+ * RegisterSelectOps, RegisterCastOps and RegisterLoadOps register their ops separately.
+ * Registers the remaining PTO operator codegen functions to the specified backend.
+ * Ops listed in exclude_ops are skipped, allowing a backend to
  * override specific ops with its own REGISTER_BACKEND_OP calls before
  * invoking this function.
  *
@@ -41,6 +41,7 @@ namespace backend {
  * static bool kOpsRegistered = [] {
  *   RegisterSelectOps(MyBackend::Instance(), BackendType::Ascend950);
  *   RegisterCastOps(MyBackend::Instance(), BackendType::Ascend950);
+ *   RegisterLoadOps(MyBackend::Instance(), BackendType::Ascend950);
  *   RegisterPTOOps(MyBackend::Instance(), {"tile.matmul"});
  *   return true;
  * }();
@@ -57,6 +58,9 @@ void RegisterSelectOps(Backend& backend, BackendType backend_type);
 
 /// Register cast scratch planning and codegen for an explicit target.
 void RegisterCastOps(Backend& backend, BackendType backend_type);
+
+/// Register tile.load with target validation and shared codegen.
+void RegisterLoadOps(Backend& backend, BackendType backend_type);
 
 }  // namespace backend
 }  // namespace pypto

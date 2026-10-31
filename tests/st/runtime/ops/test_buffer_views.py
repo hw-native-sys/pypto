@@ -16,6 +16,7 @@ import pytest
 import torch
 from harness import st
 from pypto import ir, passes
+from pypto.runtime import ChipWorker
 
 _PLANNERS = (passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS)
 
@@ -578,6 +579,97 @@ def test_default_dynamic_buffer_windows(case_run, request):
             or "mixed" in case_run.case.name
         ):
             assert "pto.subview" in text
+
+
+_NATIVE_PAGES = pl.dynamic("native_pages")
+_NATIVE_PAGE_BYTES = pl.dynamic("native_page_bytes")
+
+
+@pl.jit.incore
+def _strided_key_view_kernel(
+    native_cache: pl.InOut[pl.Tensor[[_NATIVE_PAGES, _NATIVE_PAGE_BYTES], pl.INT8]],
+    query: pl.Tensor[[16, 128], pl.INT8],
+    first_page: pl.Tensor[[1], pl.INT32],
+    output: pl.InOut[pl.Tensor[[18, 96], pl.INT32]],
+):
+    pages = pl.tensor.dim(native_cache, 0)
+    pitch = pl.tensor.dim(native_cache, 1)
+    keys = pl.tensor.view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
+    page = pl.tensor.read(first_page, [0])
+    pair = pl.load(keys, [page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
+    flat = pl.tile.reshape(pair, [64, 128])
+    right = pl.move(pl.tile.transpose_view(flat), target_memory=pl.Mem.Right)
+    query_mat = pl.load(query, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+    left = pl.move(query_mat, target_memory=pl.Mem.Left)
+    product = pl.matmul(left, right, out_dtype=pl.INT32)
+    output = pl.store(product, [1, 16], output)
+    return native_cache, output
+
+
+@pl.jit
+def _strided_key_view_entry(
+    native_cache: pl.InOut[pl.Tensor[[_NATIVE_PAGES, _NATIVE_PAGE_BYTES], pl.INT8]],
+    query: pl.Tensor[[16, 128], pl.INT8],
+    first_page: pl.Tensor[[1], pl.INT32],
+    output: pl.InOut[pl.Tensor[[18, 96], pl.INT32]],
+):
+    return _strided_key_view_kernel(native_cache, query, first_page, output)
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@pytest.mark.parametrize("page_bytes", [4160, 4224, 8192])
+def test_strided_gm_view_multi_nd_mat_load_and_replay(test_config, page_bytes):
+    """Issue #3038: load adjacent Key pages from a contiguous Native cache.
+
+    Each page starts with 4096 INT8 Key bytes; its scale/padding tail must be
+    skipped. Include odd starts, the last legal pair, and same-graph replay.
+    """
+    native_cache = torch.full((9, page_bytes), -101, dtype=torch.int8)
+    # Every page/row/column influences the exact dot product. Padding differs
+    # from all keys, so treating the page pitch as packed corrupts the result.
+    keys = (
+        11 * torch.arange(9)[:, None, None]
+        + 5 * torch.arange(32)[None, :, None]
+        + 3 * torch.arange(128)[None, None, :]
+    ) % 31 - 15
+    native_cache[:, :4096] = keys.reshape(9, 4096).to(torch.int8)
+    original_cache = native_cache.clone()
+    query = ((7 * torch.arange(16)[:, None] + 11 * torch.arange(128)[None, :]) % 17 - 8).to(torch.int8)
+    first_page = torch.zeros(1, dtype=torch.int32)
+    output = torch.full((18, 96), -2000000001, dtype=torch.int32)
+    compiled = _strided_key_view_entry.compile(native_cache, query, first_page, output, config=test_config)
+    sources = list((compiled.output_dir / "ptoas").glob("*.pto"))
+    assert len(sources) == 1
+    # Check the actual JIT pipeline as well as the values: one Key TLOAD keeps
+    # its 3D GM window and writes the flattened Mat. The query has its own load.
+    key_loads = [
+        line
+        for line in sources[0].read_text().splitlines()
+        if "pto.tload ins(" in line and "partition_tensor_view<2x32x128xi8>" in line
+    ]
+    assert len(key_loads) == 1 and "rows=64, cols=128" in key_loads[0]
+    if test_config.codegen_only:
+        return
+
+    # Keep one registered program and the same argument objects while the
+    # device-read page number changes A -> B -> C -> A. InOut on native_cache
+    # requests a readback even for CPU-backed arguments, making this input
+    # immutability check observe device writes rather than an untouched host copy.
+    with ChipWorker(config=test_config, runtime=compiled.runtime_name) as worker:
+        replay = worker.register(compiled)
+        for page in (0, 1, 7, 0):
+            first_page.fill_(page)
+            output.fill_(-2000000001)
+            expected = output.clone()
+            pair = keys[page : page + 2].reshape(64, 128).to(torch.int32)
+            expected[1:17, 16:80] = query.to(torch.int32) @ pair.T
+            replay(native_cache, query, first_page, output, config=test_config)
+            assert torch.equal(output, expected), (
+                f"Wrong pair or damaged guards: pitch={page_bytes}, page={page}"
+            )
+            assert torch.equal(native_cache, original_cache), (
+                f"Native keys or page tails changed: pitch={page_bytes}, page={page}"
+            )
 
 
 if __name__ == "__main__":

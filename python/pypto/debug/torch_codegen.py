@@ -525,7 +525,7 @@ def _mask_valid_region(tensor, shapes, valid_shape):
         tensor._pypto_full_shape = shapes_t
     return tensor
 
-def _tile_load(tensor, offsets, shapes, valid_shape=None):
+def _tile_load(tensor, offsets, shapes, valid_shape=None, result_shape=None):
     offsets_t = _coerce_shape(offsets)
     shapes_t = _coerce_shape(shapes)
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, shapes_t))
@@ -537,6 +537,13 @@ def _tile_load(tensor, offsets, shapes, valid_shape=None):
         pad_slices = tuple(slice(0, s) for s in actual_shape)
         padded[pad_slices] = tile
         tile = padded
+    # Only the fully valid multi-ND Mat path supplies a flattened result shape.
+    # Its source window retains the page pitch, while the Tile stores packed rows.
+    if result_shape is not None:
+        if actual_shape != shapes_t or (valid_shape is not None and _coerce_shape(valid_shape) != shapes_t):
+            raise ValueError("torch_codegen requires a fully valid multi-ND Mat window")
+        result_shape = _coerce_shape(result_shape)
+        return _mask_valid_region(tile.reshape(result_shape), result_shape, result_shape)
     # Use provided valid_shape or fall back to the physical boundary; cap by actual data bounds.
     v_shape = _coerce_shape(valid_shape) if valid_shape is not None else actual_shape
     v_shape = tuple(min(v, a) for v, a in zip(v_shape, actual_shape))
@@ -685,20 +692,27 @@ def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
         sliced._pypto_full_shape = shapes_t
     return sliced
 
-def _tensor_view(tensor, shape, is_dn, valid_shape=None):
+def _tensor_view(tensor, shape, is_dn, valid_shape=None, strides=None):
     shape = _coerce_shape(shape)
-    strides = [1] * len(shape)
-    if is_dn:
-        strides[-2] = 1
-        strides[-1] = shape[-2]
-        running = shape[-2] * shape[-1]
-        for i in range(len(shape) - 3, -1, -1):
-            strides[i] = running
-            running *= shape[i]
+    if strides is not None:
+        # The explicit IR operand defines the physical address map, including
+        # page gaps. Reconstructing packed strides would read metadata as data.
+        strides = _coerce_shape(strides)
     else:
-        for i in range(len(shape) - 2, -1, -1):
-            strides[i] = strides[i + 1] * shape[i + 1]
-    result = torch.as_strided(tensor, shape, strides)
+        strides = [1] * len(shape)
+        if is_dn:
+            strides[-2] = 1
+            strides[-1] = shape[-2]
+            running = shape[-2] * shape[-1]
+            for i in range(len(shape) - 3, -1, -1):
+                strides[i] = running
+                running *= shape[i]
+        else:
+            for i in range(len(shape) - 2, -1, -1):
+                strides[i] = strides[i + 1] * shape[i + 1]
+    # A sliced source already has an offset into its storage. Retain that
+    # origin and the allocation itself so mutations remain zero-copy aliases.
+    result = torch.as_strided(tensor, shape, strides, storage_offset=tensor.storage_offset())
     if valid_shape:
         result._pypto_valid_shape = _coerce_shape(valid_shape)
         result._pypto_full_shape = shape
@@ -1764,8 +1778,11 @@ class TorchCodegen(_ir.IRVisitor):
             if len(arg_strs) >= 2:
                 result_view = getattr(op.type, "tensor_view", None)
                 is_dn = result_view is not None and result_view.layout == _ir.TensorLayout.DN
-                valid_shape = f", {arg_strs[2]}" if len(arg_strs) == 3 else ""
-                self._expr_result = f"_tensor_view({arg_strs[0]}, {arg_strs[1]}, {is_dn}{valid_shape})"
+                valid_shape = f", {arg_strs[2]}" if len(arg_strs) >= 3 else ""
+                strides = f", strides={arg_strs[3]}" if len(arg_strs) == 4 else ""
+                self._expr_result = (
+                    f"_tensor_view({arg_strs[0]}, {arg_strs[1]}, {is_dn}{valid_shape}{strides})"
+                )
             else:
                 src_view = getattr(op.args[0].type, "tensor_view", None)
                 result_view = getattr(op.type, "tensor_view", None)
@@ -1774,6 +1791,23 @@ class TorchCodegen(_ir.IRVisitor):
                     self._expr_result = f"{arg_strs[0]}.mT"
                 else:
                     self._expr_result = arg_strs[0]
+        elif (
+            op_name == _ir.get_op("tile.load").name
+            and isinstance(op.type, _ir.TileType)
+            and op.type.memory_space == _ir.MemorySpace.Mat
+            and isinstance(op.args[2], _ir.MakeTuple)
+            and len(op.type.shape) == 2
+            and len(op.args[2].elements) == 3
+        ):
+            # Multi-ND Mat loads retain their 3D GM window after flattening.
+            # The enabled path requires full validity, so the copied data can
+            # be reshaped directly to the declared 2D destination.
+            result_shape = _ir.MakeTuple(list(op.type.shape), op.span)
+            valid = arg_strs[3] if len(arg_strs) >= 4 else arg_strs[2]
+            self._expr_result = (
+                f"_tile_load({arg_strs[0]}, {arg_strs[1]}, {arg_strs[2]}, {valid}, "
+                f"result_shape={self._visit_expr_str(result_shape)})"
+            )
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):

@@ -1935,6 +1935,46 @@ def test_reinterpret_view_public_api_print_parse_roundtrip():
     assert python_print(reparsed, format=False) == printed
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("with_storage", [False, True])
+def test_explicit_stride_view_print_parse_roundtrip(dynamic, with_storage):
+    """Both public-call and recorded-storage dumps retain stride operands.
+
+    In the public form operand four must print as a keyword, while operand
+    three is the empty valid_shape placeholder. Dynamic pitch values must
+    remain the same SSA values after parsing the printed program.
+    """
+    span = ir.Span.unknown()
+    pages = ir.Var("pages", ir.ScalarType(DataType.INDEX), span)
+    pitch = ir.Var("pitch", ir.ScalarType(DataType.INDEX), span)
+    shape = [pages, pitch] if dynamic else [9, 4160]
+    storage = ir.MemRef("cache", 64, 37440, span) if with_storage else None
+    data = ir.Var("data", ir.TensorType(shape, DataType.INT8, storage), span)
+    value = ir.op.tensor.view(
+        data,
+        [pages if dynamic else 9, 32, 128],
+        strides=[pitch if dynamic else 4160, 128, 1],
+    )
+    viewed = ir.Var("viewed", value.type, span)
+    function = ir.Function(
+        "main",
+        [pages, pitch, data] if dynamic else [data],
+        [value.type],
+        ir.SeqStmts([ir.AssignStmt(viewed, value, span), ir.ReturnStmt([viewed], span)], span),
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([function], "StridedView", span)
+    printed = python_print(program, format=False)
+    if with_storage:
+        assert 'pl._dump.call("tensor.view"' in printed
+    else:
+        assert "strides=" in printed
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+
 def test_acc_init_cond_print_parse_roundtrip():
     """The accumulate ops' predicate must print in the form its DSL signature takes.
 
@@ -2350,3 +2390,7 @@ class Example:
 """
     with pytest.raises(ParserSyntaxError, match="types must match the number of results"):
         pl.parse_program(source)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

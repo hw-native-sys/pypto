@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -828,8 +829,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // ---- tile.load on >2D tile: flatten the result tile to 2D (hardware tiles
     //      are always 2D), keeping the tensor-rank source window for codegen —
-    //      except a natural Mat load with a real batch (>1) collapses its window
-    //      to 2D as well (the ND2NZ path rejects rank>2 GlobalTensors). ----
+    //      except a packed natural Mat load also collapses its window to 2D.
+    //      Strided rank-3 ND sources need the multi-ND window to retain gaps. ----
     if (IsOp(call, "tile.load")) {
       // A batch_matmul operand load is KEPT here and sliced per batch by
       // ExtractBatchPage (the fit path) — both operands, transposed or not, are
@@ -892,16 +893,12 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
                                        flat_tile_view, flat_memory_space),
             ctx);
 
-        // A natural Mat load lowers to ND2NZ, which requires a 2D GlobalTensor.
-        // Materialize that source-window collapse in IR with tensor.view; plain
-        // Vec loads and transposed Mat loads keep their tensor-rank source window.
-        // The collapse below exists because a natural Mat load lowers to ND2NZ,
-        // which pto-isa only accepts on a 2D GlobalTensor. An NZ *source* takes
-        // the NZ2NZ path instead, and BlockNzTensorViews (which runs right after
-        // this pass) will give it the blocked rank-5 window that path wants.
-        // Collapsing here would flatten the fractal dims into a row count and
-        // destroy that structure, so leave the window at tensor rank and only
-        // flatten the tile.
+        // Preserve the historical 2D source alias for packed ND2NZ loads. A
+        // padded rank-3 ND source cannot use that alias: multi-ND TLOAD must see
+        // the original page/row strides while only its destination becomes 2D.
+        // Backend enablement and instruction bounds are checked by the final
+        // emitter, so this representation never discards gaps on other targets.
+        // NZ sources keep their blocked window for BlockNzTensorViews as before.
         if (IsNaturalNzMatLoad(result_tile, pending_batch_matmul_mat) && !IsNzSourceLoad(sub_args)) {
           auto tensor = AsVarLike(sub_args[0]);
           auto tensor_type = tensor ? AsTensorTypeLike(tensor->GetType()) : nullptr;
@@ -910,44 +907,57 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           INTERNAL_CHECK_SPAN(tensor_type->shape_.size() == result_tile->shape_.size(), span)
               << "FlattenTileNdTo2D: tile.load source rank must match result tile rank for NZ 2D collapse";
 
-          auto offsets_tuple = As<MakeTuple>(sub_args[1]);
-          auto shapes_tuple = As<MakeTuple>(sub_args[2]);
-          INTERNAL_CHECK_SPAN(offsets_tuple && shapes_tuple, span)
-              << "FlattenTileNdTo2D: tile.load offsets and shapes must be tuples";
-          auto valid_shape_tuple = shapes_tuple;
-          if (sub_args.size() >= 4) {
-            valid_shape_tuple = As<MakeTuple>(sub_args[3]);
-            INTERNAL_CHECK_SPAN(valid_shape_tuple, span)
-                << "FlattenTileNdTo2D: tile.load valid_shape must be a tuple";
-          }
-          INTERNAL_CHECK_SPAN(offsets_tuple->elements_.size() == tensor_type->shape_.size() &&
-                                  shapes_tuple->elements_.size() == tensor_type->shape_.size() &&
-                                  valid_shape_tuple->elements_.size() == tensor_type->shape_.size(),
-                              span)
-              << "FlattenTileNdTo2D: tile.load offset/shape ranks must match tensor rank";
-          INTERNAL_CHECK_SPAN(tile_conversion_utils::IsRowMajorCollapseContiguous(
-                                  valid_shape_tuple->elements_, tensor_type->shape_),
-                              span)
-              << "FlattenTileNdTo2D: tile.load NZ 2D source-window collapse requires the valid "
-                 "sub-box of the leading dims to be contiguous in row-major order";
+          const auto& source_view = tensor_type->tensor_view_;
+          const auto layout = source_view ? source_view->layout : TensorLayout::ND;
+          const bool packed_source =
+              !source_view || source_view->stride.empty() ||
+              tile_view_semantics::ShapeExprListsEquivalent(
+                  source_view->stride,
+                  tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, layout));
+          CHECK_SPAN(packed_source || (layout == TensorLayout::ND && tensor_type->shape_.size() == 3), span)
+              << "Strided ND2NZ Mat loads currently require a rank-3 ND source. "
+                 "Load each matrix separately for other ranks or layouts.";
+          if (packed_source) {
+            auto offsets_tuple = As<MakeTuple>(sub_args[1]);
+            auto shapes_tuple = As<MakeTuple>(sub_args[2]);
+            INTERNAL_CHECK_SPAN(offsets_tuple && shapes_tuple, span)
+                << "FlattenTileNdTo2D: tile.load offsets and shapes must be tuples";
+            auto valid_shape_tuple = shapes_tuple;
+            if (sub_args.size() >= 4) {
+              valid_shape_tuple = As<MakeTuple>(sub_args[3]);
+              INTERNAL_CHECK_SPAN(valid_shape_tuple, span)
+                  << "FlattenTileNdTo2D: tile.load valid_shape must be a tuple";
+            }
+            INTERNAL_CHECK_SPAN(offsets_tuple->elements_.size() == tensor_type->shape_.size() &&
+                                    shapes_tuple->elements_.size() == tensor_type->shape_.size() &&
+                                    valid_shape_tuple->elements_.size() == tensor_type->shape_.size(),
+                                span)
+                << "FlattenTileNdTo2D: tile.load offset/shape ranks must match tensor rank";
+            INTERNAL_CHECK_SPAN(tile_conversion_utils::IsRowMajorCollapseContiguous(
+                                    valid_shape_tuple->elements_, tensor_type->shape_),
+                                span)
+                << "FlattenTileNdTo2D: tile.load NZ 2D source-window collapse requires the valid "
+                   "sub-box of the leading dims to be contiguous in row-major order";
 
-          auto view_call = CreateCollapsedTensorView(tensor, tensor_type, span);
-          auto view_var =
-              std::make_shared<Var>(assign->var_->name_hint_ + "_view2d", view_call->GetType(), span);
-          result.push_back(std::make_shared<AssignStmt>(view_var, view_call, assign->span_));
+            auto view_call = CreateCollapsedTensorView(tensor, tensor_type, span);
+            auto view_var =
+                std::make_shared<Var>(assign->var_->name_hint_ + "_view2d", view_call->GetType(), span);
+            result.push_back(std::make_shared<AssignStmt>(view_var, view_call, assign->span_));
 
-          auto row_offset = CollapseLeadingOffsetsToRow(offsets_tuple->elements_, tensor_type->shape_, span);
-          sub_args[0] = view_var;
-          sub_args[1] = std::make_shared<MakeTuple>(
-              std::vector<ExprPtr>{row_offset, offsets_tuple->elements_.back()}, span);
-          sub_args[2] =
-              std::make_shared<MakeTuple>(CollapseLeadingDimsTo2D(shapes_tuple->elements_, span), span);
-          auto flat_valid_shape =
-              std::make_shared<MakeTuple>(CollapseLeadingDimsTo2D(valid_shape_tuple->elements_, span), span);
-          if (sub_args.size() >= 4) {
-            sub_args[3] = flat_valid_shape;
-          } else {
-            sub_args.push_back(flat_valid_shape);
+            auto row_offset =
+                CollapseLeadingOffsetsToRow(offsets_tuple->elements_, tensor_type->shape_, span);
+            sub_args[0] = view_var;
+            sub_args[1] = std::make_shared<MakeTuple>(
+                std::vector<ExprPtr>{row_offset, offsets_tuple->elements_.back()}, span);
+            sub_args[2] =
+                std::make_shared<MakeTuple>(CollapseLeadingDimsTo2D(shapes_tuple->elements_, span), span);
+            auto flat_valid_shape = std::make_shared<MakeTuple>(
+                CollapseLeadingDimsTo2D(valid_shape_tuple->elements_, span), span);
+            if (sub_args.size() >= 4) {
+              sub_args[3] = flat_valid_shape;
+            } else {
+              sub_args.push_back(flat_valid_shape);
+            }
           }
         }
 
