@@ -19,6 +19,74 @@
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
+### 已知限制：自动拆分时的参数身份
+
+在版本 `125788cf85fa1c184700de4aa5ee3e8c59c46477` 中，自动 MIX 拆分可能
+让 Tensor 参数的 shape 仍引用原函数的 scalar 参数，克隆后的循环携带值
+（loop carry）声明却引用新 scalar 参数。两边打印相同名称，但实际是不同的
+IR 变量，因而生成的程序被 `TypeCheck` 拒绝。该限制正在分析，修复和回归测试尚待完成。
+
+#### 原因
+
+`src/ir/transforms/expand_mixed_kernel_pass.cpp` 中的 `make_param_map` 用
+原 `var->GetType()` 创建 fresh 参数，建立旧到新参数的映射，却未重绑该类型内嵌的
+表达式。后续 `DeepClone` 对循环两端的处理不同：
+
+- 命中映射的 Tensor 参数直接返回，保留原类型。
+- `CloneIterArg` 替换初值，同时重绑其声明类型。
+
+以下是实际结果的身份示意，不是可执行 DSL：
+
+```text
+source:      n_old, out_old : Tensor[n_old, N]
+split:       n_new, out_new : Tensor[n_old, N]
+loop carry:  declared Tensor[n_new, N], initial value out_new
+```
+
+两边维度的 dtype 都是 `INDEX`。身份不同且没有显式绑定，导致等式证明失败。
+Verifier 在执行既有类型合同；将 `name_hint` 相等当作值相等会掩盖非法引用。
+
+#### 实际观测边界
+
+decode-layer 模型的 CPU 编译在 `kv_proj_matmul` 和 `qr_proj_matmul` 中暴露了
+两个外层循环携带值。只读 callback 跨 pass 保留底层节点，并通过
+`IRNode.same_as` 比较身份；其绑定比较底层 shared pointer。实际
+`PropertyVerifierRegistry.verify` 结果另行记录，不用辅助算术证明替代。
+
+| 边界 | KV 初值 / 声明维度 | QR 初值 / 声明维度 | TypeCheck 诊断数 |
+| ---- | ------------------ | ------------------ | ---------------- |
+| `LowerAutoVectorSplit` 后 | node 0 / node 0 | node 4 / node 4 | 0 |
+| `ExpandMixedKernel` 后 | node 0 / node 10 | node 4 / node 16 | 4 |
+| `LowerTileToBuffer` 前 | node 0 / node 10 | node 4 / node 16 | 4 |
+
+节点编号仅是一次观测进程内的等价类标记。node 0/4 对应原 scalar 参数，
+node 10/16 对应新 AIC scalar 参数；fresh Tensor 参数却仍引用 node 0/4。
+每个循环各产生一条物理 shape 和一条有效 shape 诊断。生成的 AIV 和 Group
+签名也保留旧维度引用。
+
+全部 62 份 pass dump 与此前不带该 callback 的编译逐字节相同，最终四条诊断的
+message、location 和 code 也不变。选中的 `BufferIR` verifier 后来会检查整个
+program，暴露在 MIX 拆分后已经存在的失配。
+
+触发模型将五条不随循环变化的行数表达式移到 fresh 累加器 seed 之前，以满足
+已有 carry 归一化合同。这消除了另一组 12 条 If 合流有效形状错误，并激活了不同的
+混合核路径。本次并非此前失败的原源码零改动复现。
+
+#### 修复与验收边界
+
+修复须在一致的参数映射下，重绑每个新 AIC、AIV 和 Group 签名中的 shape、view、
+storage 表达式，并覆盖 body 引用、循环状态、声明返回及调用类型。保持参数顺序、
+directions、布局、存储归属和函数内身份。若要全局改变预置映射的 `DeepClone`
+替换合同，须另行核查其它调用方。
+
+待完成的验收包括：scalar 依赖 Tensor 参数及循环携带值的独立回归；
+AIC/AIV/Group 签名、参数顺序及返回类型覆盖；完整模型编译、ABI/装配及数值控制。
+保留全部现有校验。
+
+该编译失败发现于 [simpler #2136](https://github.com/hw-native-sys/simpler/issues/2136)
+的八设备调查准备阶段，阻挡当前整栈验证开始。历史设备挂死的根因仍未定位；
+这次 CPU 失败不能证明该挂死已经修复。
+
 ### 手写 Group 的共享参数 ABI
 
 一次运行时 `MixedKernels` 提交会创建一个协同调度的 AIC/AIV task，其中所有

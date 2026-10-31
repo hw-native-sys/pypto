@@ -19,6 +19,91 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+### Known limitation: parameter identity during automatic splitting
+
+At revision `125788cf85fa1c184700de4aa5ee3e8c59c46477`, automatic MIX
+splitting can leave a Tensor parameter's shape referring to the original
+function's scalar parameter. A cloned loop carry can instead refer to the
+new scalar parameter. The two dimensions print the same name but denote
+different IR variables, so `TypeCheck` rejects the generated program.
+This limitation is under investigation; a fix and regression test are pending.
+
+#### Cause
+
+In `src/ir/transforms/expand_mixed_kernel_pass.cpp`, `make_param_map` creates
+a fresh parameter with the original `var->GetType()`. It records the old-to-new
+parameter mapping without rebinding expressions embedded in that type.
+The subsequent `DeepClone` handles the two sides of a loop differently:
+
+- A mapped Tensor parameter is returned directly, retaining its original type.
+- `CloneIterArg` substitutes the initial value and remaps its declared type.
+
+The following identity sketch describes the observed result; it is not
+executable DSL:
+
+```text
+source:      n_old, out_old : Tensor[n_old, N]
+split:       n_new, out_new : Tensor[n_old, N]
+loop carry:  declared Tensor[n_new, N], initial value out_new
+```
+
+Both dimensions have dtype `INDEX`. Their different identities, without an
+explicit binding, explain the failed equality proof. The verifier is enforcing
+the existing type contract. Treating `name_hint` equality as value equality
+would hide the invalid reference.
+
+#### Observed boundary
+
+A CPU compilation of the decode-layer model exposed two outer loop carries in
+`kv_proj_matmul` and `qr_proj_matmul`. A read-only callback retained native
+nodes across pass boundaries and compared them with `IRNode.same_as`, whose
+binding compares the underlying shared pointers. The actual
+`PropertyVerifierRegistry.verify` result was recorded separately from any
+auxiliary arithmetic proof.
+
+| Boundary | KV initial / declared dimension | QR initial / declared dimension | TypeCheck diagnostics |
+| -------- | ------------------------------- | ------------------------------- | --------------------- |
+| After `LowerAutoVectorSplit` | node 0 / node 0 | node 4 / node 4 | 0 |
+| After `ExpandMixedKernel` | node 0 / node 10 | node 4 / node 16 | 4 |
+| Before `LowerTileToBuffer` | node 0 / node 10 | node 4 / node 16 | 4 |
+
+Node numbers are equivalence-class labels within one observation process.
+Nodes 0 and 4 are the original scalar parameters; nodes 10 and 16 are the new
+AIC scalar parameters. Fresh Tensor parameters still reference nodes 0 and 4.
+Each loop produces one physical-shape and one effective-valid-shape diagnostic.
+The generated AIV and Group signatures also retain the old dimension references.
+
+All 62 pass dumps were byte-identical to the preceding compilation without
+this callback, and the final four diagnostic messages, locations and codes
+were unchanged. The selected `BufferIR` verifier later checks the whole
+program, exposing the mismatch that already exists after MIX splitting.
+
+The triggering model used five loop-invariant row-extent definitions moved
+before their fresh accumulator seeds to satisfy the existing carry-normalization
+contract. This removed a separate set of 12 If-join valid-shape errors and
+activated a different mixed-kernel path. This is not an unchanged-source
+reproduction of that earlier failure.
+
+#### Repair and acceptance boundary
+
+A repair must rebind shape, view and storage expressions throughout each new
+AIC, AIV and Group signature using a consistent parameter mapping, including
+body references, loop state, declared returns and call types. Preserve parameter
+order, directions, layout, storage ownership and function-local identities.
+Changing the global contract for pre-seeded `DeepClone` substitutions requires
+separate analysis of its other callers.
+
+Pending acceptance includes a self-contained regression with a scalar-dependent
+Tensor parameter and a loop carry; coverage of AIC/AIV/Group signatures,
+parameter order and returns; and full-model compilation, ABI/assembly and
+numerical controls. Keep all existing verification enabled.
+
+This compiler failure was found while preparing the eight-device investigation
+of [simpler #2136](https://github.com/hw-native-sys/simpler/issues/2136).
+It prevents that investigation's current-stack validation from starting.
+The historical device stall remains unattributed; this CPU failure provides
+no evidence that the stall has been fixed.
+
 ### Shared argument ABI for hand-written Groups
 
 One runtime `MixedKernels` submission creates a co-scheduled AIC/AIV task whose
