@@ -14,17 +14,31 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pypto.backend._ptoas_preprocess import preprocess_ptoas_output
 from pypto.backend.pto_backend import _DEFERRED_COMPLETION_ADAPTER
 
 
 @pytest.mark.parametrize("runtime_name", ["tensormap_and_ringbuffer", "host_build_graph"])
-def test_invalid_task_handle_reports_error_without_fabricating_identity(tmp_path, runtime_name):
+@pytest.mark.parametrize("with_ptoas_declaration", [False, True])
+def test_invalid_task_handle_reports_error_without_fabricating_identity(
+    tmp_path, runtime_name, with_ptoas_declaration
+):
     runtime = Path(__file__).resolve().parents[3] / "runtime" / "src" / "common"
     if not (runtime / runtime_name / "task_id.h").is_file():
         pytest.skip("runtime submodule is unavailable")
     compiler = shutil.which("g++") or shutil.which("clang++")
     if compiler is None:
         pytest.skip("C++ compiler is unavailable")
+    # PTOAS emits this prototype for the private IR declaration. The wrapper
+    # inserts its adapter definition separately, before the processed output.
+    declaration = (
+        preprocess_ptoas_output(
+            'extern "C" AICORE void pypto_register_counter_completion('
+            "__gm__ int64_t*, __gm__ int32_t*, int64_t, int64_t);\n"
+        )
+        if with_ptoas_declaration
+        else ""
+    )
     source = tmp_path / "adapter.cpp"
     source.write_text(
         r"""
@@ -66,6 +80,7 @@ void defer_error(AsyncCtx& ctx, int32_t code) { *ctx.completion_error_code = cod
 void save_expected_notification_counter(AsyncCtx&, volatile void*, uint32_t) {}
 """
         + _DEFERRED_COMPLETION_ADAPTER
+        + declaration
         + r"""
 int main() {
     pypto_register_counter_completion(nullptr, nullptr, 0, 0);
@@ -93,3 +108,7 @@ int main() {
     )
     assert result.returncode == 0, result.stderr
     subprocess.run([str(binary)], check=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
