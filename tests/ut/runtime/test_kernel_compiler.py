@@ -298,6 +298,55 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
+def _vpto_object(symbols=("helper.vector",)):
+    """Native relocatable object with actual global-function symbol records."""
+    names = b"\0"
+    records = bytearray(24)
+    for name in symbols:
+        records.extend(struct.pack("<IBBHQQ", len(names), 0x12, 0, 1, 0, 4))
+        names += name.encode() + b"\0"
+    sym_start = 68 + len(names)
+    table_start = sym_start + len(records)
+    data = bytearray(table_start + 4 * 64)
+    data[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<HH", data, 16, 1, 0x1029)
+    struct.pack_into("<Q", data, 40, table_start)
+    struct.pack_into("<HH", data, 58, 64, 4)
+    data[68:sym_start] = names
+    data[sym_start:table_start] = records
+    struct.pack_into("<IIQQQQIIQQ", data, table_start + 64, 0, 1, 6, 0, 64, 4, 0, 0, 4, 0)
+    struct.pack_into("<IIQQQQIIQQ", data, table_start + 128, 0, 3, 0, 0, 68, len(names), 0, 0, 1, 0)
+    struct.pack_into("<IIQQQQIIQQ", data, table_start + 192, 0, 2, 0, 0, sym_start, len(records), 2, 1, 8, 24)
+    return bytes(data)
+
+
+@pytest.mark.parametrize("suffix", [".vector", "_mix_aiv"])
+def test_vpto_native_aliases_follow_actual_exports(suffix):
+    from pypto.runtime._vpto import device_object_aliases  # noqa: PLC0415
+
+    # Multiple exports in one ELF are supported; CANN version guessing is unnecessary.
+    names = (f"helper{suffix}", f"other{suffix}")
+    assert device_object_aliases(_vpto_object(names)) == {"helper": names[0], "other": names[1]}
+
+
+@pytest.mark.parametrize(
+    "binary,error",
+    [
+        (b"fatobj", "ELF64"),
+        (_vpto_elf(), "relocatable AI Core"),
+        (_vpto_object()[:-1], "section table"),
+        (_vpto_object() + b"\0" * 8 + _vpto_object(), "multiple device objects"),
+        (_vpto_object(("helper.cube",)), "no supported native AIV"),
+        (_vpto_object(("helper.vector", "helper_mix_aiv")), "ambiguous export"),
+    ],
+)
+def test_vpto_native_object_rejects_incompatible_payloads(binary, error):
+    from pypto.runtime._vpto import device_object_aliases  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match=error):
+        device_object_aliases(binary)
+
+
 @pytest.mark.parametrize("bridge", [False, True])
 def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monkeypatch, tmp_path, bridge):
     compiler = compiler_module.KernelCompiler("a5")
@@ -309,8 +358,13 @@ def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monk
 
     def run(command, **kwargs):
         commands.append(command)
+        if command[0] == "llvm-objcopy":
+            section = command[1].split("=", 2)
+            assert section[1] == "__aicore_rel_binary"
+            Path(section[2]).write_bytes(_vpto_object())
+            return SimpleNamespace(returncode=0)
         output = Path(command[command.index("-o") + 1])
-        if command[0] == "ptoas":
+        if command[0] == "ptoas" and "--emit-vpto-llvm-ir" in command:
             output.write_text(
                 "declare void @bridge()" if bridge else "define void @helper() {\n  ret void\n}\n"
             )
@@ -334,13 +388,20 @@ def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monk
         assert [command[0] for command in commands] == [
             "compiler",
             "ptoas",
-            "bisheng",
             "ptoas",
-            "bisheng",
+            "llvm-objcopy",
+            "ld.lld",
+            "ptoas",
+            "ptoas",
+            "llvm-objcopy",
+            "ld.lld",
             "linker",
         ]
         assert [Path(p).name for p in commands[-1][-3:]] == ["kernel.o", "vpto_0.o", "vpto_1.o"]
-        assert "--cce-generic-addrspace=off" in commands[2]
+        assert "--emit-vpto-llvm-ir" in commands[1]
+        assert "--emit-vpto-llvm-ir" not in commands[2]
+        assert "--defsym=helper=helper.vector" in commands[4]
+        assert "-r" in commands[4]
         assert "-ffunction-sections" in commands[0]
     assert not list(tmp_path.glob("pypto-incore-*"))
 
@@ -362,7 +423,9 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     version.stdout = "bisheng 2"
     identities.append(key())
-    monkeypatch.setattr(compiler_module._vpto, "DEVICE_FLAGS", ("-O3",))
+    monkeypatch.setattr(compiler_module._vpto, "OBJECT_ABI_VERSION", "next-object-contract")
+    identities.append(key())
+    monkeypatch.setattr(compiler_module._vpto, "PTOAS_FLAGS", ("--vmi-fastmath=true",))
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto, "CALLER_FLAGS", ())
     identities.append(key())
@@ -370,7 +433,7 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto_sync, "VERSION", "next-contract")
     identities.append(key())
-    assert len(set(identities)) == 7
+    assert len(set(identities)) == 8
 
 
 def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, monkeypatch, tmp_path):
@@ -382,6 +445,8 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
     monkeypatch.chdir(caller)
     monkeypatch.setenv("PTOAS_ROOT", "tools")
     compiler = compiler_module.KernelCompiler("a5")
+    compiler.sdk.ccec.cxx_path = str(tmp_path / "cann/bin/ccec")
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(tmp_path / "cann"))
     ptoas, _ = compiler._vpto_toolchain()
     assert Path(ptoas).is_absolute()
     # The SDK cwd differs from discovery; execute the actual selected launcher.
@@ -389,6 +454,9 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
         [ptoas, "--version"], cwd=compiler.project_root, capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == "ptoas 0.70"
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(tmp_path / "another-cann"))
+    with pytest.raises(ValueError, match="match the runtime SDK"):
+        compiler._vpto_toolchain()
 
 
 if __name__ == "__main__":

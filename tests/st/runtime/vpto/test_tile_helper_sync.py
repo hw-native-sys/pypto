@@ -53,9 +53,12 @@ def _environment() -> tuple[int, int, Path]:
     return device, timeout, output.resolve()
 
 
-def test_tile_adapter_persistent_onboard():
+@pytest.mark.parametrize(
+    "example_name,checks", [("vf_emitc_vpto.py", 108), ("vf_adapter_ub_overlap.py", 192)]
+)
+def test_tile_adapter_persistent_onboard(example_name, checks):
     device, timeout, output = _environment()
-    example = ROOT / "examples/runtime/vf_emitc_vpto.py"
+    example = ROOT / "examples/runtime" / example_name
     runpy.run_path(str(FIXTURE / "test_validation.py"))["run"](
         output,
         "production-example",
@@ -63,9 +66,16 @@ def test_tile_adapter_persistent_onboard():
         timeout=timeout + 30,
     )
     result = json.loads((output / "example/result.json").read_text())
-    assert result["numerical_checks"] == 108
+    assert result["numerical_checks"] == checks
     assert result["production_tile_adapter"]
     assert result["compile_calls"] == 2
+    # Both cold and helper-mutated builds must use PTOAS's native object path.
+    # These are recorder copies of production outputs, not injected binaries.
+    for index in (1, 2):
+        compilation = output / f"example/compilation-{index}"
+        assert (compilation / "vpto_0.fatobj.o").read_bytes().startswith(b"\x7fELF")
+        command = (compilation / "vpto_0.fatobj.o.command.txt").read_text()
+        assert "--pto-backend=vpto" in command and "--emit-vpto-llvm-ir" not in command
 
 
 def _prepare_multiple(directory: Path):
