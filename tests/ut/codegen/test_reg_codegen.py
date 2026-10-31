@@ -351,21 +351,18 @@ def test_review_tile_alias_provenance_resets_between_functions(separate_calls):
         assert "pto.tile_buf_addr %alias_tile" in second_body
 
 
-def test_review_index_gen_rejects_bf16_vci():
+def test_index_gen_bf16_rejected_by_builder_before_codegen():
     ib = IRBuilder()
-    with ib.function("bf16_index_gen", span=SPAN, type=ir.FunctionType.AIV) as f:
-        with ib.reg_scope(SPAN):
-            ib.emit_reg(
-                "indices",
-                "reg.index_gen",
-                [ir.ConstFloat(0.0, DataType.BF16, SPAN)],
-                {"lanes": 64, "dtype": DataType.BF16, "order": "ascending"},
-                SPAN,
-            )
-    with passes.PassContext([]):
-        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
     with pytest.raises(ValueError, match="index_gen.*BF16|BF16.*VCI"):
-        codegen.PTOCodegen().generate(program, emit_source_loc=False)
+        with ib.function("bf16_index_gen", span=SPAN, type=ir.FunctionType.AIV):
+            with ib.reg_scope(SPAN):
+                ib.emit_reg(
+                    "indices",
+                    "reg.index_gen",
+                    [ir.ConstFloat(0.0, DataType.BF16, SPAN)],
+                    {"lanes": 64, "dtype": DataType.BF16, "order": "ascending"},
+                    SPAN,
+                )
 
 
 @pytest.mark.ptoas_compile

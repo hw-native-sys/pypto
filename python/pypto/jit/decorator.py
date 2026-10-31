@@ -83,7 +83,7 @@ from pypto.pypto_core.passes import runtime_kind_to_name
 
 from . import _arguments, _ast_analysis, _call_binding, _tensor_meta
 from ._source import cache_in_snapshot, capture_namespaces
-from .cache import CacheKey, compute_source_hash, make_cache_key
+from .cache import CacheKey, compute_source_hash, hardware_loop_cache_identity, make_cache_key
 from .specializer import (
     DynDim,
     SpecializeContext,
@@ -1133,6 +1133,7 @@ class JITFunction:
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             enable_buffer_ir=_resolve_enable_buffer_ir(),
             runtime=_resolve_runtime(),
+            hardware_loop_identity=hardware_loop_cache_identity(compile_kwargs["backend_type"]),
         )
 
         with self._cache_lock:

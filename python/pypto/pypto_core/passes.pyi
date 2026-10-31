@@ -14,7 +14,7 @@ from types import TracebackType
 from typing import Any, overload
 
 from pypto.pypto_core.backend import Backend
-from pypto.pypto_core.ir import Function, Program, Span, Stmt
+from pypto.pypto_core.ir import Function, HardwareLoopProfile, HardwareLoopQualification, Program, Span, Stmt
 
 class IRProperty(Enum):
     """Verifiable IR properties."""
@@ -71,6 +71,7 @@ class IRProperty(Enum):
     TileStorageLegalized = ...
     TileStorageAllocated = ...
     RegScopeValid = ...
+    HardwareLoopContractValid = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -300,6 +301,7 @@ class PassContext:
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir: bool = True,
+        report_hardware_loops: bool = False,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -349,6 +351,9 @@ class PassContext:
         """Get the target Simpler runtime ABI for this context."""
         ...
 
+    def get_report_hardware_loops(self) -> bool: ...
+    def get_hardware_loop_profile(self) -> HardwareLoopProfile: ...
+    def get_hardware_loop_reports(self) -> list[HardwareLoopQualification]: ...
     def get_enable_buffer_ir(self) -> bool:
         """Whether supported whole kernels use Buffer IR."""
         ...

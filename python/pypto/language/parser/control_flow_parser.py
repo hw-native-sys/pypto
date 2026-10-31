@@ -32,19 +32,21 @@ from .type_resolver import (
     _is_dump_call,  # noqa: PLC2701
 )
 
-VALID_ITERATORS = {"range", "parallel", "unroll", "pipeline", "while_", "spmd", "split_aiv"}
+VALID_ITERATORS = {"hardware_loop", "range", "parallel", "unroll", "pipeline", "while_", "spmd", "split_aiv"}
 
 ITERATOR_ERROR = (
-    "For loop must use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), "
+    "For loop must use pl.range(), pl.hardware_loop(), pl.parallel(), pl.unroll(), "
+    "pl.pipeline(), pl.while_(), "
     "pl.spmd(), or pl.split_aiv()"
 )
 
 ITERATOR_HINT = (
-    "Use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), pl.spmd(), "
+    "Use pl.range(), pl.hardware_loop(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), pl.spmd(), "
     "or pl.split_aiv() as the iterator"
 )
 
 ITERATOR_KEYWORDS = {
+    "hardware_loop": ("init_values", "attrs"),
     "range": ("init_values", "attrs"),
     "parallel": ("init_values", "attrs"),
     "unroll": ("init_values", "attrs"),
@@ -53,6 +55,7 @@ ITERATOR_KEYWORDS = {
 
 # Maps iterator type name to ForKind enum value.
 ITERATOR_TO_KIND = {
+    "hardware_loop": ir.ForKind.Sequential,
     "range": ir.ForKind.Sequential,
     "parallel": ir.ForKind.Parallel,
     "unroll": ir.ForKind.Unroll,
@@ -156,11 +159,11 @@ class ControlFlowParser:
                     self.services.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
     def validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, str]:
-        """Validate that for loop uses pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_().
+        """Validate the range, hardware_loop, parallel, unroll, pipeline and while iterators.
 
         Returns:
             Tuple of (call_node, iterator_type) where iterator_type is
-            "range", "parallel", "unroll", "pipeline", or "while_"
+            "range", "hardware_loop", "parallel", "unroll", "pipeline", or "while_"
         """
         if not isinstance(stmt.iter, ast.Call):
             raise ParserSyntaxError(
@@ -247,6 +250,12 @@ class ControlFlowParser:
         The C++ ConvertToSSA pass handles converting to SSA form.
         """
         iter_call, iterator_type = self.validate_for_loop_iterator(stmt)
+
+        if iterator_type == "hardware_loop" and not self.scopes.regions.is_inside_scope(ir.ScopeKind.Reg):
+            raise ParserSyntaxError(
+                "pl.hardware_loop() requires an enclosing pl.reg_scope()",
+                span=self.services.span_tracker.get_span(iter_call),
+            )
 
         # Handle pl.while_() case
         if iterator_type == "while_":
@@ -365,6 +374,11 @@ class ControlFlowParser:
             span,
             kind,
             attrs=attrs_dict,
+            hardware_loop_policy=(
+                ir.HardwareLoopPolicy.Require
+                if iterator_type == "hardware_loop"
+                else ir.HardwareLoopPolicy.Auto
+            ),
         ) as loop:
             self.flow.current_loop_builder = loop
             self.flow.in_for_loop = True

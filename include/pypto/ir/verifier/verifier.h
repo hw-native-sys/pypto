@@ -415,6 +415,7 @@ PropertyVerifierPtr CreateArrayNotEscapedPropertyVerifier();
  */
 PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
 PropertyVerifierPtr CreateRegScopePropertyVerifier();
+PropertyVerifierPtr CreateHardwareLoopContractPropertyVerifier();
 
 /**
  * @brief Factory function for creating InOutUseValid property verifier

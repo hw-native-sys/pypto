@@ -50,6 +50,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `OutParamNotShadowed` | Out/InOut params are not reassigned with tensor-creating ops |
 | `NoNestedInCore` | No nested InCore scopes (ScopeStmt inside ScopeStmt) |
 | `InOutUseValid` | No reads of InOut/Out-passed variables after the call (RFC #1026) |
+| `HardwareLoopContractValid` | Require policy is valid and only used with Sequential loops; qualification and artifact evidence are checked at codegen |
 | `PipelineLoopValid` | Bidirectional invariant: `ForStmt.kind_ == Pipeline` ⇔ has a `pipeline_stages` attr |
 | `PipelineResolved` | No `ForKind::Pipeline` survives; produced by CanonicalizeIOOrder |
 | `CallDirectionsResolved` | Every non-builtin Call has explicit `attrs['arg_directions']` |

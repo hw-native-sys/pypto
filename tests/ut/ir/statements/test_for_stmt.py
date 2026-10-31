@@ -13,7 +13,7 @@ from typing import cast
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, backend, ir, passes
 
 
 class TestForStmt:
@@ -901,7 +901,8 @@ def test_for_stmt_rejects_unknown_serialized_policy(policy):
 
 
 @pytest.mark.parametrize("stop", [1, 8])
-def test_simplify_preserves_required_loop(stop):
+@pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
+def test_simplify_preserves_required_loop(stop, ascend_backend):
     # Nonempty Require loops must survive for later qualification, even when
     # Simplify could otherwise unfold a single trip.
     span = ir.Span.unknown()
@@ -917,7 +918,9 @@ def test_simplify_preserves_required_loop(stop):
         span,
         hardware_loop_policy=ir.HardwareLoopPolicy.Require,
     )
-    function = ir.Function("main", [], [], required, span)
+    function = ir.Function(
+        "main", [], [], ir.RegScopeStmt("", required, span), span, type=ir.FunctionType.AIV
+    )
     program = ir.Program([function], "Required", span)
     # Text roundtrip support is PR2; retain property verification for this IR-only fixture.
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
@@ -941,7 +944,8 @@ def test_simplify_preserves_required_loop(stop):
 
 @pytest.mark.parametrize("policy", [ir.HardwareLoopPolicy.Auto, ir.HardwareLoopPolicy.Require])
 @pytest.mark.parametrize("stop", [0, -1])
-def test_simplify_eliminates_empty_loop_and_preserves_initial_carry(policy, stop):
+@pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
+def test_simplify_eliminates_empty_loop_and_preserves_initial_carry(policy, stop, ascend_backend):
     span = ir.Span.unknown()
     index_type = ir.ScalarType(DataType.INDEX)
     initial = ir.Var("initial", index_type, span)
@@ -961,16 +965,20 @@ def test_simplify_eliminates_empty_loop_and_preserves_initial_carry(policy, stop
     function = ir.Function(
         "main",
         [initial],
-        [index_type],
-        ir.SeqStmts([loop, ir.ReturnStmt([result], span)], span),
+        [],
+        ir.RegScopeStmt("", ir.SeqStmts([loop, ir.EvalStmt(result, span)], span), span),
         span,
+        type=ir.FunctionType.AIV,
     )
     expected = ir.Function(
         "main",
         [initial],
-        [index_type],
-        ir.SeqStmts([ir.AssignStmt(result, initial, span), ir.ReturnStmt([result], span)], span),
+        [],
+        ir.RegScopeStmt(
+            "", ir.SeqStmts([ir.AssignStmt(result, initial, span), ir.EvalStmt(result, span)], span), span
+        ),
         span,
+        type=ir.FunctionType.AIV,
     )
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         changed = passes.simplify()(ir.Program([function], "Empty", span))

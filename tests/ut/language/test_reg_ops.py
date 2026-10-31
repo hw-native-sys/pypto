@@ -226,5 +226,58 @@ def test_raw_create_op_rejects_same_dtype_convert():
         ir.create_op_call("reg.convert", [value], {"dtype": pl.FP32}, span)
 
 
+def test_extended_vf_frontend_roundtrip():
+    @pl.function(type=pl.FunctionType.AIV)
+    def extended(
+        src: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec],
+        dst: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec],
+        amount: pl.Scalar[pl.FP32],
+    ):
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=64)
+            mask = pl.reg.active_mask(32, lanes=64)
+            y = pl.reg.abs(x, mask)
+            y = pl.reg.neg(y)
+            y = pl.reg.relu(y)
+            y = pl.reg.exp(y, mask)
+            y = pl.reg.log(y)
+            y = pl.reg.sqrt(y)
+            y = pl.reg.adds(y, amount, mask)
+            y = pl.reg.muls(y, 2.0, mask)
+            y = pl.reg.maximums(y, 0.0, mask)
+            y = pl.reg.minimums(y, 4.0, mask)
+            idx = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+            idx = pl.reg.bitwise_and(idx, idx, mask)
+            idx = pl.reg.bitwise_or(idx, idx)
+            idx = pl.reg.bitwise_xor(idx, idx)
+            idx = pl.reg.bitwise_not(idx)
+            idx = pl.reg.shift_left(idx, idx, mask)
+            idx = pl.reg.shift_right(idx, idx)
+            idx = pl.reg.shift_lefts(idx, 1, mask)
+            idx = pl.reg.shift_rights(idx, 1, mask)
+            y = pl.reg.gather_lanes(y, idx)
+            condition = pl.reg.compares(y, 0.0, mask, predicate="gt")
+            selected = pl.reg.select(condition, y, x)
+            total = pl.reg.reduce_sum(selected, mask, reassoc=True)
+            _max = pl.reg.reduce_max(selected, mask)
+            _min = pl.reg.reduce_min(selected, mask)
+            out = pl.reg.store(dst, value=total)
+        _consumer = pl.tile.add(out, out)
+
+    printed = python_print(extended, format=False)
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(extended, restored, enable_auto_mapping=True)
+
+
+def test_index_gen_bf16_rejected_by_frontend():
+    # Parse-time type deduction must reject the unsupported VCI dtype.
+    with pytest.raises((ValueError, ParserError), match="index_gen.*BF16|BF16.*VCI"):
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel():
+            with pl.reg_scope():
+                _indices = pl.reg.index_gen(0.0, lanes=64, dtype=pl.BF16)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -3661,6 +3661,7 @@ class IRBuilder:
         span: Span,
         kind: ForKind = ForKind.Sequential,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
+        hardware_loop_policy: HardwareLoopPolicy = HardwareLoopPolicy.Auto,
     ) -> None:
         """Begin building a for loop.
 
@@ -4479,4 +4480,52 @@ def get_reg_memory_effect(call: Call) -> dict[str, Any]:
 
 def get_reg_op_spec(op_name: str) -> dict[str, Any]:
     """Get register schema scope and emitter requirements."""
+    ...
+
+class HardwareLoopState(enum.Enum):
+    """Static qualification, independent of final artifact evidence."""
+
+    Eligible = 0
+    Ineligible = 1
+    Unknown = 2
+
+class HardwareLoopProfile:
+    """Versioned target resource and dependency-preservation contract."""
+
+    profile_id: str
+    toolchain_id: str
+    supported: bool
+    counter_bits: int
+    allow_negative_step: bool
+    max_trip_count: int
+    max_depth: int
+    max_body_nodes: int
+    allow_scalar_carry: bool
+    allow_reg_carry: bool
+    allow_tile_carry: bool
+    allowed_ops: list[str]
+    def __init__(self) -> None: ...
+
+class HardwareLoopQualification:
+    state: Final[HardwareLoopState]
+    reason: Final[str]
+    trip_count: Final[int | None]
+    post_iv: Final[int | None]
+    profile_id: Final[str]
+    toolchain_id: Final[str]
+    loop_id: Final[str]
+    lower: Final[int | None]
+    upper: Final[int | None]
+    step: Final[int | None]
+
+def analyze_hardware_loop(loop: ForStmt, profile: HardwareLoopProfile) -> HardwareLoopQualification:
+    """Reanalyze current loop and profile without persistent caches."""
+    ...
+
+def analyze_hardware_loops(program: Program, profile: HardwareLoopProfile) -> list[HardwareLoopQualification]:
+    """Analyze a program in one bottom-up walk, with deterministic loop IDs."""
+    ...
+
+def verify_hardware_loop_requirement(loop: ForStmt, profile: HardwareLoopProfile) -> None:
+    """Reject unqualified Require or missing hardware evidence, except static empty loops."""
     ...

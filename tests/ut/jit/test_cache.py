@@ -25,6 +25,7 @@ from pypto.jit._source import capture_namespaces, function_namespace
 from pypto.jit.cache import (
     SCALAR_SEMANTICS,
     compute_source_hash,
+    hardware_loop_cache_identity,
     make_cache_key,
 )
 from pypto.jit.decorator import (
@@ -34,7 +35,7 @@ from pypto.jit.decorator import (
     _resolve_runtime,
 )
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
-from pypto.pypto_core import DataType, ir, passes
+from pypto.pypto_core import DataType, backend, ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig
 
@@ -127,6 +128,7 @@ class TestMakeCacheKey:
             ("runtime", "tensormap_and_ringbuffer"),
             ("enable_buffer_ir", False),
             ("buffer_ir_version", 0),
+            ("hardware_loop_identity", ()),
         )
 
     def test_tensor_shape_in_key(self):
@@ -1367,6 +1369,43 @@ class TestConstexprParameters:
 
         assert records, "the dep's own binding must still be recorded"
         assert all(len(record) == 5 for record in records)
+
+
+def test_hardware_loop_identity_separates_cached_compilation():
+    def key(identity: tuple[str, ...]):
+        return make_cache_key(
+            source_hash="loop",
+            param_names=[],
+            tensor_shapes={},
+            tensor_dtypes={},
+            dynamic_dims=set(),
+            platform="a5",
+            strategy=OptimizationStrategy.Default,
+            hardware_loop_identity=identity,
+        )
+
+    first = key(("profile-v1", "toolchain-v1"))
+    changed_profile = key(("profile-v2", "toolchain-v1"))
+    changed_toolchain = key(("profile-v1", "toolchain-v2"))
+    assert first != changed_profile
+    assert first != changed_toolchain
+
+
+def test_selected_ptoas_changes_hardware_loop_cache_identity(tmp_path, monkeypatch):
+    # Downloaded PTOAS_ROOT archives need not have Python package metadata.
+    # The selected executable must still distinguish their complete versions.
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root, suffix in ((first, "release"), (second, "dev")):
+        root.mkdir()
+        launcher = root / "ptoas"
+        launcher.write_text(f"#!/bin/sh\necho 'ptoas 0.70-{suffix}'\n")
+        launcher.chmod(0o755)
+    monkeypatch.setenv("PTOAS_ROOT", str(first))
+    initial = hardware_loop_cache_identity(backend.BackendType.Ascend950)
+    monkeypatch.setenv("PTOAS_ROOT", str(second))
+    changed = hardware_loop_cache_identity(backend.BackendType.Ascend950)
+    assert initial != changed
 
 
 if __name__ == "__main__":

@@ -16,9 +16,11 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/analysis/hardware_loop_analysis.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
@@ -310,7 +312,7 @@ class PassContext {
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
-                       bool enable_buffer_ir = true);
+                       bool enable_buffer_ir = true, bool report_hardware_loops = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -406,7 +408,21 @@ class PassContext {
    */
   [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
 
+  /// Host-only codegen may run without a device backend; its profile is unsupported.
+  [[nodiscard]] HardwareLoopProfile GetHardwareLoopProfile() const;
+
+  [[nodiscard]] bool GetReportHardwareLoops() const { return report_hardware_loops_; }
+  [[nodiscard]] const std::vector<HardwareLoopQualification>& GetHardwareLoopReports() const {
+    return hardware_loop_reports_;
+  }
+  /// Replace, never accumulate, reports at each codegen boundary. No cached proof.
+  void SetHardwareLoopReports(std::vector<HardwareLoopQualification> reports) {
+    hardware_loop_reports_ = std::move(reports);
+  }
+
  private:
+  bool report_hardware_loops_ = false;
+  std::vector<HardwareLoopQualification> hardware_loop_reports_;
   std::vector<PassInstrumentPtr> instruments_;
   VerificationLevel verification_level_;
   DiagnosticPhase diagnostic_phase_;

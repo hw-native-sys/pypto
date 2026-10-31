@@ -307,8 +307,9 @@ RuntimeKind RuntimeKindFromName(const std::string& name) {
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
                          MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
-                         RuntimeKind runtime, bool enable_buffer_ir)
-    : instruments_(std::move(instruments)),
+                         RuntimeKind runtime, bool enable_buffer_ir, bool report_hardware_loops)
+    : report_hardware_loops_(report_hardware_loops),
+      instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
@@ -375,6 +376,11 @@ const backend::BackendHandler* PassContext::GetBackendHandler() const {
   // Handler ownership lives with the Backend itself; PassContext is just a
   // convenient access path that satisfies the "pass-context-config" rule.
   return GetBackend()->GetHandler();
+}
+
+HardwareLoopProfile PassContext::GetHardwareLoopProfile() const {
+  if (!backend::BackendConfig::IsConfigured()) return {};
+  return GetBackendHandler()->GetHardwareLoopProfile();
 }
 
 }  // namespace ir
