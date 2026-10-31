@@ -70,7 +70,10 @@ dispatch——若共用同一 prefix，各次 dispatch 会互相覆盖同名产�
 └── rank1/d0/
 ```
 
-`d{k}` 是该卡在本次 run 内的第 k 次 dispatch，每次 run 从 `d0` 重新计数。
+`d{k}` 是该卡的第 k 次 dispatch，与 worker 子进程内的 capture 计数保持一致。
+one-shot worker 每次 run 都会 fork 新的子进程，因此计数从 `d0` 重新开始；
+prepared / persistent worker 跨 run 复用同一个子进程，因此计数会**延续**，
+后续 run 的目录编号不从 0 开始。
 每次 dispatch 都归档在实际运行它的芯片下：带 `device=` 的按自身 rank，
 comm-less 的（没有 `device=`）则按被分配到的芯片——这类 dispatch 按提交
 顺序在程序的各芯片间轮询分配。每个叶子目录内是上表所述的扁平产物，
@@ -112,8 +115,11 @@ join——device 热路径不再记录 per-task fanout，因此没有 dep_gen �
 分布式 L3 使用相同的抓图/计时拆分，但不经过 L2 抓图子进程。one-shot
 路径为每趟创建新的 Worker 生命周期；prepared `DistributedWorker` 保留
 resident handle 和已 fork 的层级，但进入两个独立的 `Worker.run()` fence：
-先仅开 dep-gen，再开泳道并强制关闭 dep-gen。两趟都会重置每张卡的 dispatch
-计数，因此图和计时产物会合并到相同的 `rank{r}/d{k}` 目录。两趟都会实际
+先仅开 dep-gen，再开泳道并强制关闭 dep-gen。每张卡的 dispatch 计数跨子进程
+延续，因此两趟会落在**不同**的 `rank{r}/d{k}` 目录；随后的后处理依据子进程的
+身份 sidecar 将两者配对，并把计时产物前向折叠进抓图目录，从而恢复「每次
+dispatch 一个目录」的布局。计时趟自身的 program 标记以
+`dispatch_program.timing.json` 的名字一并保留。两趟都会实际
 执行程序，且不会在中间恢复可写参数，这与现有 one-shot L3 replay 语义一致。
 
 L2 子进程用两种方式重建编排实参：被 pytest harness 驱动时从 `golden.py` 重新生成

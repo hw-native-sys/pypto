@@ -44,6 +44,7 @@ import math
 import os
 import statistics
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,6 +129,8 @@ JSON_REQUIRED_KEYS = (
     "warmup",
     "rounds",
     "metric",
+    "aiv_capture_requested",
+    "aiv_capture_missing",
     "per_rank_kernel_us",
     "per_rank_send_bytes",
     "per_rank_recv_bytes",
@@ -591,6 +594,7 @@ def result_json(  # noqa: PLR0913
     recv_bytes: list[int],
     row_width: int,
     aiv_task_times: bool = False,
+    aiv_capture_requested: bool = False,
 ) -> dict[str, Any]:
     means = {int(r): sum(v) / len(v) for r, v in per_rank_kernel_us.items() if v}
     if means:
@@ -632,6 +636,8 @@ def result_json(  # noqa: PLR0913
         "warmup": warmup,
         "rounds": rounds,
         "metric": metric,
+        "aiv_capture_requested": aiv_capture_requested,
+        "aiv_capture_missing": aiv_capture_requested and not aiv_task_times,
         "per_rank_kernel_us": per_rank_kernel_us,
         "per_rank_send_bytes": {str(i): b for i, b in enumerate(send_bytes)},
         "per_rank_recv_bytes": {str(i): b for i, b in enumerate(recv_bytes)},
@@ -1168,10 +1174,23 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
             slot_includes_tax = True
 
     aiv_found = any(aiv_rank.values())
+    aiv_requested = profile in ("swimlane", "both")
     if aiv_found:
         metric = "per_rank_receive_bandwidth"
         per_rank = aiv_rank
     else:
+        # A run that asked for AIV capture and got none still produces a
+        # plausible end-to-end number, so the degradation has to be stated --
+        # both on stderr and in the JSON -- or it reads as a successful
+        # measurement of something it never measured.
+        if aiv_requested:
+            print(
+                f"[a2av-bench] WARNING: --profile {profile} requested AIV capture but no swimlane "
+                "span was collected for any rank; falling back to metric=end_to_end_latency. "
+                "per_rank_receive_bandwidth_gbps and per_rank_task_time_us will be empty.",
+                file=sys.stderr,
+                flush=True,
+            )
         metric = "end_to_end_latency"
         per_rank = (
             slot_rank if any(slot_rank.values()) else {str(i): list(host_slots) for i in range(shape.p)}
@@ -1196,6 +1215,7 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
         recv_bytes=recv_b,
         row_width=shape.row_width,
         aiv_task_times=aiv_found,
+        aiv_capture_requested=aiv_requested,
     )
     if host_slots:
         # End-to-end latency: the whole runtime.run() (stage + fill_counts +

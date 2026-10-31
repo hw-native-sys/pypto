@@ -79,8 +79,11 @@ namespaces the prefix per dispatch:
 └── rank1/d0/
 ```
 
-`d{k}` counts that card's dispatches within the run, restarting at `d0`
-each run. Every dispatch is filed under the chip that ran it: a `device=`
+`d{k}` counts that card's dispatches, mirroring the capture counter in the
+worker's child process. A one-shot worker forks a fresh child per run, so its
+numbering restarts at `d0`; a prepared or persistent worker reuses one child
+across runs, so its numbering **continues** and a later run's directories
+start above zero. Every dispatch is filed under the chip that ran it: a `device=`
 pinned dispatch under its own rank, and a comm-less one (no `device=`)
 under the chip it was placed on — those are handed out round-robin over
 the program's chips in submit order. Each leaf holds the flat artefacts
@@ -131,8 +134,12 @@ Distributed L3 uses the same graph/timing split without the L2 capture
 subprocess. The one-shot path creates a fresh Worker lifecycle for each pass.
 A prepared `DistributedWorker` keeps its resident handles and forked hierarchy,
 but enters two separate `Worker.run()` fences: dep-gen-only first, then
-swimlane with dep_gen forced off. Per-card dispatch counters restart for both
-passes, so graph and timing artefacts join in the same `rank{r}/d{k}` directory.
+swimlane with dep_gen forced off. The per-card dispatch counter spans the
+child process, so the two passes land in *different* `rank{r}/d{k}` directories;
+a post-pass pairs them through the child's identity sidecars and folds the
+timing artefacts forward into the graph capture, which restores one directory
+per dispatch. The timing pass's own program marker is kept alongside as
+`dispatch_program.timing.json`.
 Both passes execute the program; mutable arguments are not restored between
 them, matching the existing one-shot L3 replay semantics.
 
