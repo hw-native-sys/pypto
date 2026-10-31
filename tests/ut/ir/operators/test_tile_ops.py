@@ -9728,7 +9728,7 @@ def test_store_rejects_invalid_cache_policy(policy):
         tile.store(src, [0, 0], dst, cache=policy)
 
 
-@pytest.mark.parametrize("policy", [pl.A5CachePolicy.NOT_ALLOC_KEEP, pl.A5CachePolicy.NOT_ALLOC_DROP])
+@pytest.mark.parametrize("policy", [pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP])
 def test_store_rejects_load_only_cache_policy(policy):
     src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
     dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
@@ -9736,7 +9736,7 @@ def test_store_rejects_load_only_cache_policy(policy):
         pl.store(src, [0, 0], dst, cache=policy)
 
 
-@pytest.mark.parametrize("policy", [*pl.A2A3CachePolicy, *pl.A5CachePolicy])
+@pytest.mark.parametrize("policy", list(pl.CachePolicy))
 def test_dsl_load_preserves_semantic_cache_policy(policy):
     src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
     call = pl.load(src, [0, 0], [32, 32], cache=policy).unwrap()
@@ -9749,8 +9749,8 @@ def test_dsl_load_preserves_semantic_cache_policy(policy):
     "policy",
     [
         p
-        for p in [*pl.A2A3CachePolicy, *pl.A5CachePolicy]
-        if p not in (pl.A5CachePolicy.NOT_ALLOC_KEEP, pl.A5CachePolicy.NOT_ALLOC_DROP)
+        for p in list(pl.CachePolicy)
+        if p not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
     ],
 )
 def test_dsl_store_preserves_semantic_cache_policy(policy):
@@ -9766,19 +9766,25 @@ def test_dsl_cache_rejects_raw_isa_enums():
     src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
     value = pl.load(src, [0, 0], [32, 32])
     for hint in (LoadL2Hint.NotAllocClean, StoreL2Hint.NotAllocClean):
-        with pytest.raises(TypeError, match="cache must be A2A3CachePolicy or A5CachePolicy"):
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
             pl.load(src, [0, 0], [32, 32], cache=cast(Any, hint))
-        with pytest.raises(TypeError, match="cache must be A2A3CachePolicy or A5CachePolicy"):
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
             pl.store(value, [0, 0], src, cache=cast(Any, hint))
 
 
-def test_cache_policy_keeps_legacy_values_and_distinct_architecture_enums():
-    assert int(pl.CachePolicy.DEFAULT) == 0
-    assert int(pl.CachePolicy.BYPASS) == 1
-    assert pl.CachePolicy is pl.A2A3CachePolicy
-    assert len(list(pl.A2A3CachePolicy)) == 2
-    assert len(list(pl.A5CachePolicy)) == 6
-    assert not hasattr(pl.A5CachePolicy, "BYPASS")
+def test_cache_policy_unifies_all_modes_and_keeps_legacy_values():
+    assert {policy.name: int(policy) for policy in pl.CachePolicy} == {
+        "DEFAULT": 0,
+        "BYPASS": 1,
+        "NORMAL_FIRST_VICTIM": 2,
+        "NORMAL_LAST_VICTIM": 3,
+        "NORMAL_PERSISTENT": 4,
+        "NOT_ALLOC_KEEP": 5,
+        "NOT_ALLOC_CLEAN": 6,
+        "NOT_ALLOC_DROP": 7,
+    }
+    assert not hasattr(pl, "A2A3CachePolicy")
+    assert not hasattr(pl, "A5CachePolicy")
     assert not hasattr(pl, "LoadL2Hint")
     assert not hasattr(pl, "StoreL2Hint")
 

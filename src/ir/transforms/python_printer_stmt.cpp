@@ -394,7 +394,7 @@ bool IRPythonPrinter::PrintScopeCachePolicyStmts(const ScopeStmtPtr& op) {
     for (const auto& [var, policy] : *entries) {
       if (!var) continue;
       stream_ << GetIndent() << prefix_ << ".set_cache_policy(" << GetVarName(var.get()) << ", " << prefix_
-              << (policy > 1 ? ".A5CachePolicy." : ".CachePolicy.")
+              << ".CachePolicy."
               << AttrValueToEnumMember(CachePolicyToString(static_cast<CachePolicy>(policy))) << ")\n";
       printed = true;
     }

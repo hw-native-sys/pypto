@@ -57,10 +57,7 @@ SCOPE_MODE_MAP: dict[str, bool] = {
 
 # Maps pl.CachePolicy names to the enum, for the ``pl.set_cache_policy(t, policy)``
 # marker statement. Backend lowering determines each policy's implementation.
-CACHE_POLICY_MAP: dict[str, ir.A2A3CachePolicy | ir.A5CachePolicy] = {
-    **ir.A2A3CachePolicy.__members__,
-    **ir.A5CachePolicy.__members__,
-}
+CACHE_POLICY_MAP: dict[str, ir.CachePolicy] = dict(ir.CachePolicy.__members__)
 
 # Reverse of CACHE_POLICY_MAP, keyed by the underlying int the IR carries, for
 # naming a policy back to the user in a diagnostic. Derived rather than written

@@ -86,7 +86,7 @@ def _cache_policy_case(cache, planner, scope):
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
-            pl.set_cache_policy(w, pl.A2A3CachePolicy.BYPASS)
+            pl.set_cache_policy(w, pl.CachePolicy.BYPASS)
             c: pl.Tensor[[M, N], pl.FP32] = pl.matmul(x, w, out_dtype=pl.FP32)
             out = pl.assemble(out, c, [0, 0])
         return out
@@ -98,12 +98,12 @@ def _cache_policy_case(cache, planner, scope):
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
-            pl.set_cache_policy(w, pl.A2A3CachePolicy.DEFAULT)
+            pl.set_cache_policy(w, pl.CachePolicy.DEFAULT)
             c: pl.Tensor[[M, N], pl.FP32] = pl.matmul(x, w, out_dtype=pl.FP32)
             out = pl.assemble(out, c, [0, 0])
         return out
 
-    scope_kernel = scope_bypass if cache == pl.A2A3CachePolicy.BYPASS else scope_default
+    scope_kernel = scope_bypass if cache == pl.CachePolicy.BYPASS else scope_default
     surface = "scope" if scope else "per_load"
     return st.case(
         scope_kernel if scope else per_load,
@@ -120,7 +120,7 @@ def _cache_policy_case(cache, planner, scope):
 @st.cases(
     *[
         _cache_policy_case(cache, planner, scope)
-        for cache in (pl.A2A3CachePolicy.DEFAULT, pl.A2A3CachePolicy.BYPASS)
+        for cache in (pl.CachePolicy.DEFAULT, pl.CachePolicy.BYPASS)
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for scope in (False, True)
     ]

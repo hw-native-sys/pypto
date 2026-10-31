@@ -8091,9 +8091,9 @@ class TestCachePolicyConversion:
         "policy",
         [
             pl.CachePolicy.DEFAULT,
-            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
-            pl.A5CachePolicy.NORMAL_PERSISTENT,
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
         ],
     )
     @pytest.mark.parametrize("explicit_default", [False, True])
@@ -8148,8 +8148,8 @@ class Expected:
         [
             None,
             pl.CachePolicy.DEFAULT,
-            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
         ],
     )
     @pytest.mark.parametrize("swap_branches", [False, True])
@@ -8157,7 +8157,7 @@ class Expected:
         """Distinct GM roots may merge only when their declared policies agree."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
-        policy = pl.A5CachePolicy.NORMAL_FIRST_VICTIM
+        policy = pl.CachePolicy.NORMAL_FIRST_VICTIM
         declarations = [(1, int(policy))]
         if other_policy is not None:
             declarations.append((2, int(other_policy)))
@@ -8236,7 +8236,7 @@ class Expected:
                 value = pl.load(x, [0], [64])
                 if cond > 0:
                     pl.store(value, [0], out)
-                second = pl.load(out, [0], [64], cache=pl.A5CachePolicy.NORMAL_PERSISTENT)
+                second = pl.load(out, [0], [64], cache=pl.CachePolicy.NORMAL_PERSISTENT)
                 result = pl.store(second, [0], out)
                 return result
 

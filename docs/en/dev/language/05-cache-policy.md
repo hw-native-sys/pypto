@@ -17,20 +17,20 @@ unchanged from the DSL to codegen.
 
 ## Architecture-specific cache policies
 
-`A2A3CachePolicy` has two modes: `DEFAULT=0` and `BYPASS=1`.
-`CachePolicy` remains an alias for compatibility. On A2/A3, BYPASS adds the
-runtime-provided nocache offset to the load address; no A5 hint parameter is
-used. Stores support DEFAULT only.
+`pl.CachePolicy` is the shared enum for both targets. Its eight members use
+semantic IDs rather than raw ISA encodings.
 
-`A5CachePolicy` has six modes, listed below. These semantic IDs are disjoint
-from the A2/A3 policies and are translated to the direction-specific PTO-ISA
-encoding. A2/A3 rejects all A5 modes. Legacy `CachePolicy.BYPASS` reads
-(and the `A2A3CachePolicy` alias) still select A5 NotAllocKeep for compatibility;
-new A5 code should use `A5CachePolicy.NOT_ALLOC_KEEP`. Omitting `cache`
-uses the ordinary transfer on either architecture. An explicit DEFAULT can
-also reset an inherited scope policy.
+On A2/A3, only `DEFAULT=0` and `BYPASS=1` are supported. BYPASS adds the
+runtime-provided nocache offset to the load address; no A5 instruction mode is
+selected. Stores support DEFAULT only.
 
-| A5CachePolicy | A5 load ISA mode | A5 store ISA mode |
+On A5, the six modes below are translated to direction-specific PTO-ISA
+encodings. A2/A3 rejects these modes. Legacy `CachePolicy.BYPASS` reads still
+select A5 NotAllocKeep for compatibility; new A5 code should use
+`CachePolicy.NOT_ALLOC_KEEP`. Omitting `cache` uses the ordinary transfer on
+either architecture. An explicit DEFAULT can reset an inherited scope policy.
+
+| CachePolicy   | A5 load ISA mode | A5 store ISA mode |
 | ------------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
@@ -64,11 +64,11 @@ on A2/A3 instead of silently approximating A5 semantics.
 
 ```python
 # A2/A3 uses the runtime nocache address offset.
-streamed = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
+streamed = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
 
 # A5 selects a direction-specific ISA mode.
-retained = pl.load(x, [0, 0], [32, 32], cache=pl.A5CachePolicy.NORMAL_PERSISTENT)
-out = pl.store(retained, [0, 0], out, cache=pl.A5CachePolicy.NOT_ALLOC_CLEAN)
+retained = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_PERSISTENT)
+out = pl.store(retained, [0, 0], out, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
 ```
 
 `cache=None` omits the policy. An explicit per-load policy overrides
@@ -88,12 +88,11 @@ debug rebuild share finalization; PTOAS-only output from `skip_ptoas=True`
 still needs this finalization. Non-default policies stay on the Tile path;
 forced Buffer lowering rejects unsupported transfer policies.
 
-Compilation units containing `pl.reg_scope` select the binary VPTO backend.
-Explicit `A5CachePolicy` modes and legacy BYPASS reads are rejected before
-assembly in those units:
-the current C++ finalizer cannot apply hints to a VPTO object. This applies to
-all transfers in the compilation unit, including loads/stores outside the
-register scope. Omit explicit A5 policies or use a unit without `pl.reg_scope`.
+Binary VPTO compilation units (`pto.backend = "vpto"`) reject explicit A5
+`CachePolicy` modes and legacy BYPASS reads before assembly: the current C++
+finalizer cannot apply hints to a VPTO object. The restriction applies to every
+transfer in that binary unit. Use the EmitC compilation path for hinted
+transfers.
 
 No PTOAS, simpler or workflow changes are required.
 
@@ -127,7 +126,7 @@ class Demo:
 ### Per-access kwarg
 
 ```python
-tile = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
+tile = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
 ```
 
 ## The contract
@@ -141,7 +140,7 @@ On a read, `CachePolicy.BYPASS` asserts **two** things about the tensor:
 
 BYPASS is load-only: it uses a runtime offset on A2/A3 and preserves the
 legacy NotAllocKeep lowering on A5. A5 stores
-select one of the four supported A5CachePolicy store modes.
+select one of the four supported CachePolicy store modes.
 
 Mixing a cached write and a bypassing read of the same bytes is a **coherency
 bug**: the two paths can see different data. The compiler cannot prove absence
@@ -372,9 +371,9 @@ The double mapping is an a2a3 property, and so is everything built on it:
 | ------ | -------------------------------------- |
 | a2a3 device | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)`. This is the case the feature exists for |
 | a2a3 device with no alias | The driver reports `0`, `addr + 0` is the ordinary address, and the read is cached — correct, one optimisation short. The simulator is this case by construction |
-| a5 | Legacy BYPASS reads select ISA NotAllocKeep; new code uses A5CachePolicy |
+| a5 | Legacy BYPASS reads select ISA NotAllocKeep; new code uses CachePolicy.NOT_ALLOC_KEEP |
 
-A5 uses A5CachePolicy and lowers it to ISA cache-control modes.
+A5 uses CachePolicy and lowers it to ISA cache-control modes.
 
 ### Older assemblers
 

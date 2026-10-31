@@ -1561,7 +1561,7 @@ def _compile_pto_module(
         r'^\s*emitc\.verbatim\s+"// __pypto_l2_hint_begin (?:load|store) ', pto_code, re.MULTILINE
     ):
         raise ValueError(
-            f"A5CachePolicy load/store modes are not supported in VPTO compilation unit '{unit_name}' "
+            f"A5 CachePolicy load/store modes are not supported in VPTO compilation unit '{unit_name}' "
             "containing pl.reg_scope: the binary path cannot apply ISA cache hints. "
             "Omit explicit A5 cache policies or use a compilation unit without pl.reg_scope."
         )

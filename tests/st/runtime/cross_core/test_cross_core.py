@@ -61,11 +61,11 @@ SLOTNUM_LOCAL_SLOT_NUM = 4
 SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
 
 
-_LOAD_POLICIES = list(pl.A5CachePolicy)
+_LOAD_POLICIES = [policy for policy in pl.CachePolicy if int(policy) >= 2]
 _STORE_POLICIES = [
     policy
-    for policy in pl.A5CachePolicy
-    if policy not in (pl.A5CachePolicy.NOT_ALLOC_KEEP, pl.A5CachePolicy.NOT_ALLOC_DROP)
+    for policy in _LOAD_POLICIES
+    if policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
 ]
 
 
@@ -1028,9 +1028,9 @@ def _cache_case_run(_st_case, test_runner, tmp_path, monkeypatch):
     [
         _scope_rebind_case(policy, planner, explicit_default)
         for policy in (
-            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
-            pl.A5CachePolicy.NORMAL_PERSISTENT,
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
         )
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for explicit_default in (False, True)
@@ -1048,9 +1048,9 @@ def _assert_scope_rebind_hints(scope_rebind_run, policy, explicit_default):
     assert sources, "the compiled case must retain its kernel sources"
     cpp = "\n".join(path.read_text() for path in sources)
     hint = {
-        pl.A5CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
-        pl.A5CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
-        pl.A5CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+        pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+        pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+        pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
     }[policy]
     assert cpp.count(f"TLOAD<pto::TLoadL2Hint::{hint}>") == (1 if explicit_default else 2)
     assert "TSTORE<pto::TStoreL2Hint" not in cpp, "scope policies govern reads only"
@@ -1099,9 +1099,9 @@ def _scope_conditional_rebind_case(policy, planner, take_then):
     [
         _scope_conditional_rebind_case(policy, planner, take_then)
         for policy in (
-            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
-            pl.A5CachePolicy.NORMAL_PERSISTENT,
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
         )
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for take_then in (False, True)
@@ -1178,9 +1178,9 @@ def _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps)
     [
         _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps)
         for policy in (
-            pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-            pl.A5CachePolicy.NORMAL_LAST_VICTIM,
-            pl.A5CachePolicy.NORMAL_PERSISTENT,
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
         )
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
         for explicit_default in (False, True)

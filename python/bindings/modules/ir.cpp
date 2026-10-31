@@ -145,8 +145,6 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<AccPhase>(item.second)) {
       // Cast enum to int for storage — tile.gemv-family ops read as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<AccPhase>(item.second)));
-    } else if (nb::isinstance<A5CachePolicy>(item.second)) {
-      kwargs.emplace_back(key, static_cast<int>(nb::cast<A5CachePolicy>(item.second)));
     } else if (nb::isinstance<LoadL2Hint>(item.second)) {
       kwargs.emplace_back(key, static_cast<int>(nb::cast<LoadL2Hint>(item.second)));
     } else if (nb::isinstance<StoreL2Hint>(item.second)) {
@@ -539,20 +537,17 @@ void BindIR(nb::module_& m) {
   // CachePolicy enum - semantic GM cache-access policy for reads and writes.
   // nb::is_arithmetic like AtomicType: the policy rides the transfer's "cache"
   // kwarg as a plain `int`, so the DSL needs `int(policy)` to work.
-  nb::enum_<CachePolicy>(ir, "A2A3CachePolicy", nb::is_arithmetic(),
-                         "A2/A3 runtime address-alias policy; not an ISA hint")
+  nb::enum_<CachePolicy>(ir, "CachePolicy", nb::is_arithmetic(),
+                         "GM cache policy; supported modes depend on target and transfer direction")
       .value("DEFAULT", CachePolicy::kDefault)
       .value("BYPASS", CachePolicy::kBypass)
+      .value("NORMAL_FIRST_VICTIM", CachePolicy::kNormalFirstVictim)
+      .value("NORMAL_LAST_VICTIM", CachePolicy::kNormalLastVictim)
+      .value("NORMAL_PERSISTENT", CachePolicy::kNormalPersistent)
+      .value("NOT_ALLOC_KEEP", CachePolicy::kNotAllocKeep)
+      .value("NOT_ALLOC_CLEAN", CachePolicy::kNotAllocClean)
+      .value("NOT_ALLOC_DROP", CachePolicy::kNotAllocDrop)
       .export_values();
-  ir.attr("CachePolicy") = ir.attr("A2A3CachePolicy");
-  nb::enum_<A5CachePolicy>(ir, "A5CachePolicy", nb::is_arithmetic(),
-                           "A5 DMA cache modes; KEEP and DROP are load-only")
-      .value("NORMAL_FIRST_VICTIM", A5CachePolicy::kNormalFirstVictim)
-      .value("NORMAL_LAST_VICTIM", A5CachePolicy::kNormalLastVictim)
-      .value("NORMAL_PERSISTENT", A5CachePolicy::kNormalPersistent)
-      .value("NOT_ALLOC_KEEP", A5CachePolicy::kNotAllocKeep)
-      .value("NOT_ALLOC_CLEAN", A5CachePolicy::kNotAllocClean)
-      .value("NOT_ALLOC_DROP", A5CachePolicy::kNotAllocDrop);
 
   // TensorView - struct for tensor view information - must be before TensorType
   nb::class_<TensorView>(ir, "TensorView",

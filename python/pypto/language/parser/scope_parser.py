@@ -28,6 +28,7 @@ from .diagnostics import (
 )
 from .dispatch_semantics import DispatchSemantics
 from .enum_utils import (
+    CACHE_POLICY_MAP,
     CACHE_POLICY_NAMES,
     LEVEL_MAP,
     ROLE_MAP,
@@ -298,15 +299,9 @@ class ScopeParser:
         policy_node = call.args[1]
         enum_node = policy_node.value if isinstance(policy_node, ast.Attribute) else None
         enum_name = enum_node.attr if isinstance(enum_node, ast.Attribute) else getattr(enum_node, "id", "")
-        enum_types = {
-            "CachePolicy": ir.CachePolicy,
-            "A2A3CachePolicy": ir.A2A3CachePolicy,
-            "A5CachePolicy": ir.A5CachePolicy,
-        }
-        enum_type = enum_types.get(enum_name)
-        if enum_type is None:
-            raise ParserSyntaxError("Expected A2A3CachePolicy or A5CachePolicy")
-        policy = extract_enum_value(policy_node, dict(enum_type.__members__), enum_name, f"pl.{enum_name}")
+        if enum_name != "CachePolicy":
+            raise ParserSyntaxError("Expected CachePolicy")
+        policy = extract_enum_value(policy_node, CACHE_POLICY_MAP, "CachePolicy", "pl.CachePolicy")
 
         # Resolved against the bindings live *at the scope*, not inside it: the
         # declaration names a tensor the scope body captures from outside, which

@@ -598,10 +598,10 @@ class TypedTransfers:
 @pytest.mark.parametrize(
     "load_hint,store_hint",
     [
-        (pl.A5CachePolicy.NORMAL_FIRST_VICTIM, None),
-        (pl.A5CachePolicy.NORMAL_PERSISTENT, None),
-        (None, pl.A5CachePolicy.NORMAL_FIRST_VICTIM),
-        (None, pl.A5CachePolicy.NORMAL_PERSISTENT),
+        (pl.CachePolicy.NORMAL_FIRST_VICTIM, None),
+        (pl.CachePolicy.NORMAL_PERSISTENT, None),
+        (None, pl.CachePolicy.NORMAL_FIRST_VICTIM),
+        (None, pl.CachePolicy.NORMAL_PERSISTENT),
     ],
 )
 @pytest.mark.parametrize("force_buffer", [False, True])

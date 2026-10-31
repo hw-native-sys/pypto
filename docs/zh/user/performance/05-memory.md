@@ -228,17 +228,17 @@ load 上显式的 `cache=` 永远优先于作用域声明，两个方向都成�
 
 ### A5 缓存模式
 
-A5 的 load/store 使用 `cache=pl.A5CachePolicy...`。六种 load 模式为
+A5 的 load/store 使用 `cache=pl.CachePolicy...`。六种 load 模式为
 NORMAL_FIRST_VICTIM、NORMAL_LAST_VICTIM、NORMAL_PERSISTENT、NOT_ALLOC_KEEP、
 NOT_ALLOC_CLEAN、NOT_ALLOC_DROP。Vec → GM store 支持三个 NORMAL 模式和
 NOT_ALLOC_CLEAN；KEEP/DROP 仅支持 load。当前固定版本的 PTO-ISA 在 ACC → GM store
 上也支持这四种模式，包括 ReLU 和量化写回。
 NOT_ALLOC_CLEAN 对应 load 编码 5、store 编码 4，前端语义 ID 不能作为 ISA 编码。
 
-A2/A3 改用 `A2A3CachePolicy.DEFAULT` 或 `A2A3CachePolicy.BYPASS`。
+同一枚举在 A2/A3 上使用 `CachePolicy.DEFAULT` 或 `CachePolicy.BYPASS`。
 BYPASS 将运行时取得的 nocache offset 加到 load 地址上，不选择 A5 ISA 模式。
-A2/A3 store 只支持 DEFAULT。`CachePolicy` 是 `A2A3CachePolicy` 的兼容别名。
-旧 BYPASS 读取在 A5 上仍映射到 NotAllocKeep，新 A5 代码应使用 A5CachePolicy；
+A2/A3 store 只支持 DEFAULT。
+旧 BYPASS 读取在 A5 上仍映射到 NotAllocKeep，新 A5 代码应使用 `CachePolicy.NOT_ALLOC_KEEP`；
 A2/A3 拒绝全部 A5 模式。作用域声明控制读取，显式 load
 策略优先，完整模式表见 [GM 缓存策略](../../dev/language/05-cache-policy.md)。
 

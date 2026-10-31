@@ -41,8 +41,6 @@ from pypto.ir import TensorView, TileView
 from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
-    A2A3CachePolicy,
-    A5CachePolicy,
     AccPhase,
     AtomicType,
     CachePolicy,
@@ -530,8 +528,6 @@ __all__ = [
     "ForKind",
     "AccPhase",
     "AtomicType",
-    "A2A3CachePolicy",
-    "A5CachePolicy",
     "CachePolicy",
     "KernelType",
     "SyncAllMode",

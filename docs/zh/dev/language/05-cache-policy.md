@@ -14,17 +14,17 @@
 
 ## 按架构区分缓存策略
 
-`A2A3CachePolicy` 只有 `DEFAULT=0` 和 `BYPASS=1` 两种模式。
-保留 `CachePolicy` 作为兼容别名。A2/A3 的 BYPASS 将运行时取得的 nocache offset
-加到 load 地址上，不使用 A5 hint 参数；store 只支持 DEFAULT。
+两种架构统一使用 `pl.CachePolicy`。枚举包含八个成员，其值为语义 ID，不能直接用作 ISA 编码。
 
-`A5CachePolicy` 提供以下六种模式。其语义 ID 与 A2/A3 策略互不重叠，后端按
-load/store 方向转换成 PTO-ISA 编码。A2/A3 拒绝全部 A5 模式。为兼容已有调用，
-`CachePolicy.BYPASS` 读取（以及 `A2A3CachePolicy` 别名）在 A5 上仍映射到
-NotAllocKeep；新 A5 代码应使用 `A5CachePolicy.NOT_ALLOC_KEEP`。
+A2/A3 只支持 `DEFAULT=0` 和 `BYPASS=1`。BYPASS 将运行时取得的 nocache offset
+加到 load 地址上，不选择 A5 指令模式；store 只支持 DEFAULT。
+
+A5 支持以下六种模式，由后端按 load/store 方向转换成 PTO-ISA 编码。
+A2/A3 拒绝这六种模式。为兼容已有调用，`CachePolicy.BYPASS` 读取在 A5 上仍映射到
+NotAllocKeep；新 A5 代码应使用 `CachePolicy.NOT_ALLOC_KEEP`。
 不指定 `cache` 时，两种架构都使用普通搬运；显式 DEFAULT 也可覆盖继承的作用域策略。
 
-| A5CachePolicy | A5 load ISA 模式 | A5 store ISA 模式 |
+| CachePolicy   | A5 load ISA 模式 | A5 store ISA 模式 |
 | ------------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
@@ -55,11 +55,11 @@ A2/A3 的 load DEFAULT/BYPASS 保留原实现：BYPASS 将运行时 nocache offs
 
 ```python
 # A2/A3 uses the runtime nocache address offset.
-streamed = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
+streamed = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
 
 # A5 selects a direction-specific ISA mode.
-retained = pl.load(x, [0, 0], [32, 32], cache=pl.A5CachePolicy.NORMAL_PERSISTENT)
-out = pl.store(retained, [0, 0], out, cache=pl.A5CachePolicy.NOT_ALLOC_CLEAN)
+retained = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_PERSISTENT)
+out = pl.store(retained, [0, 0], out, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
 ```
 
 `cache=None` 不记录策略；显式 load 策略优先于 `pl.set_cache_policy`。
@@ -77,10 +77,9 @@ bypass 属性和显式 offset 操作数。A5 保留真实的 `pto.tload` / `pto.
 
 不需要修改 PTOAS、simpler 或 workflow。
 
-包含 `pl.reg_scope` 的编译单元使用二进制 VPTO 后端。此类单元中的显式
-`A5CachePolicy` 模式和旧接口 BYPASS 读取会在汇编前报错，因为当前 C++ 后处理无法给 VPTO 对象应用
-hint。限制作用于整个编译单元，包括寄存器作用域之外的 load/store。请省略显式
-A5 策略，或使用不含 `pl.reg_scope` 的编译单元。
+二进制 VPTO 编译单元（`pto.backend = "vpto"`）中的显式 A5 `CachePolicy`
+模式和旧接口 BYPASS 读取会在汇编前报错，因为当前 C++ 后处理无法给 VPTO 对象应用
+hint。限制作用于该二进制单元中的所有搬运；需要显式策略的搬运应使用 EmitC 编译路径。
 
 ## CachePolicy 的书写面
 
@@ -111,7 +110,7 @@ class Demo:
 ### 单次访问的 kwarg
 
 ```python
-tile = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
+tile = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
 ```
 
 ## 契约
@@ -125,7 +124,7 @@ tile = pl.load(x, [0, 0], [32, 32], cache=pl.A2A3CachePolicy.BYPASS)
 
 BYPASS 仅用于 load：A2/A3 使用运行时 offset，A5 保留旧接口的 NotAllocKeep
 映射。A5 store 应从支持的四种
-A5CachePolicy store 模式中显式选择。
+CachePolicy store 模式中显式选择。
 
 对同一批字节混用带缓存的写与 bypass 的读，是一个**一致性（coherency）缺陷**：两条通路
 可能看到不同的数据。编译器无法跨任务、跨 rank 或跨 host 证明"不存在并发写者"，因此
@@ -332,9 +331,9 @@ PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —
 | ---- | -------------------------------- |
 | a2a3 设备 | load 对 uncached 别名发起，即 `addr + get_l2_cache_offset(args)`。这正是该特性存在的场景 |
 | 无别名的 a2a3 设备 | 驱动返回 `0`，`addr + 0` 即原地址，读取照常带缓存 —— 结果正确，只是少了一项优化。模拟器天然如此 |
-| a5 | 旧 BYPASS 读取映射到 ISA NotAllocKeep；新代码使用 A5CachePolicy |
+| a5 | 旧 BYPASS 读取映射到 ISA NotAllocKeep；新代码使用 CachePolicy.NOT_ALLOC_KEEP |
 
-A5 使用 A5CachePolicy 接口，由后端转换为 ISA 缓存控制模式。
+A5 使用 CachePolicy 接口，由后端转换为 ISA 缓存控制模式。
 
 ### 更旧的汇编器
 

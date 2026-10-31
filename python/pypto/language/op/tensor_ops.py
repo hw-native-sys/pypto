@@ -131,9 +131,8 @@ from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_parti
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
-    A2A3CachePolicy,
-    A5CachePolicy,
     AtomicType,
+    CachePolicy,
     Expr,
     MemorySpace,
     PadValue,
@@ -363,7 +362,7 @@ def dump_tag(tensor: Tensor) -> Tensor:
     return tensor
 
 
-def set_cache_policy(tensor: Tensor, policy: A2A3CachePolicy | A5CachePolicy) -> None:
+def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
     """Declare the GM cache-access policy for every read of ``tensor`` in this scope.
 
     The scope-level surface of the cache policy, for tensor programming — where
@@ -410,22 +409,22 @@ def set_cache_policy(tensor: Tensor, policy: A2A3CachePolicy | A5CachePolicy) ->
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
     reports no alias reports zero, leaving the read ordinary and correct.
-    For new A5 code, use ``A5CachePolicy.NORMAL_*`` or
-    ``A5CachePolicy.NOT_ALLOC_*`` to select an ISA mode, for example
-    ``A5CachePolicy.NOT_ALLOC_KEEP`` for a non-allocating read. Existing
+    For new A5 code, use ``CachePolicy.NORMAL_*`` or
+    ``CachePolicy.NOT_ALLOC_*`` to select an ISA mode, for example
+    ``CachePolicy.NOT_ALLOC_KEEP`` for a non-allocating read. Existing
     ``CachePolicy.BYPASS`` reads retain their A5 NotAllocKeep lowering for
-    compatibility; the A2A3CachePolicy alias has the same behavior on A5.
-    BYPASS remains load-only. Explicit A5 policies are unsupported in VPTO compilation units
-    containing ``pl.reg_scope`` and are rejected before assembly.
+    compatibility.
+    BYPASS remains load-only. Explicit A5 policies are unsupported in binary
+    VPTO compilation units and are rejected before assembly.
     ``CachePolicy.DEFAULT`` emits nothing, so a read that declares no policy
     generates exactly the code it did before.
 
     Args:
         tensor: The tensor whose reads the policy applies to. Must be a
             ``Tensor`` value bound outside the scope and read inside it.
-        policy: ``A2A3CachePolicy.DEFAULT/BYPASS`` on A2/A3, or one of the six
-            ``A5CachePolicy`` modes on A5. ``CachePolicy`` is a compatibility
-            alias for ``A2A3CachePolicy``. Scope policies configure reads only.
+        policy: ``CachePolicy.DEFAULT/BYPASS`` on A2/A3, or one of the six
+            A5-specific ``CachePolicy`` modes on A5. The same enum is used
+            on both targets. Scope policies configure reads only.
 
     Returns:
         Nothing. The marker is consumed at parse time and produces no value.

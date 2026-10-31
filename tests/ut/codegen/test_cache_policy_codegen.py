@@ -65,19 +65,19 @@ ROWS, COLS = 32, 128
 
 _LOAD_HINTS = {
     pl.CachePolicy.DEFAULT: None,
-    pl.A5CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
-    pl.A5CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
-    pl.A5CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
-    pl.A5CachePolicy.NOT_ALLOC_KEEP: "NotAllocKeep",
-    pl.A5CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
-    pl.A5CachePolicy.NOT_ALLOC_DROP: "NotAllocDrop",
+    pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+    pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+    pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+    pl.CachePolicy.NOT_ALLOC_KEEP: "NotAllocKeep",
+    pl.CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
+    pl.CachePolicy.NOT_ALLOC_DROP: "NotAllocDrop",
 }
 _STORE_HINTS = {
     pl.CachePolicy.DEFAULT: None,
-    pl.A5CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
-    pl.A5CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
-    pl.A5CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
-    pl.A5CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
+    pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+    pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+    pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+    pl.CachePolicy.NOT_ALLOC_CLEAN: "NotAllocClean",
 }
 _LOAD_POLICIES = list(_LOAD_HINTS)
 _STORE_POLICIES = list(_STORE_HINTS)
@@ -471,7 +471,7 @@ def test_explicit_hint_overrides_scope_cache_declaration():
             self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
         ) -> pl.Tensor[[32, 32], pl.FP32]:
             pl.func_attr({"cache_policy": [(0, 1)]})
-            t = pl.load(x, [0, 0], [32, 32], cache=pl.A5CachePolicy.NORMAL_FIRST_VICTIM)
+            t = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_FIRST_VICTIM)
             return pl.store(t, [0, 0], out)
 
     backend.reset_for_testing()
@@ -498,8 +498,7 @@ class ScopedPolicy:
 """)
     restored = ir.deserialize(ir.serialize(program))
     assert ir.python_print(restored) == ir.python_print(program)
-    enum_name = "A5CachePolicy" if type(policy) is pl.A5CachePolicy else "CachePolicy"
-    assert f"pl.set_cache_policy(x, pl.{enum_name}.{policy.name})" in ir.python_print(restored)
+    assert f"pl.set_cache_policy(x, pl.CachePolicy.{policy.name})" in ir.python_print(restored)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
     mlir = _incore_mlir(restored)
@@ -529,9 +528,9 @@ class ReadWritePolicy:
     backend.set_backend_type(BackendType.Ascend950)
     nonallocating = (
         pl.CachePolicy.BYPASS,
-        pl.A5CachePolicy.NOT_ALLOC_KEEP,
-        pl.A5CachePolicy.NOT_ALLOC_CLEAN,
-        pl.A5CachePolicy.NOT_ALLOC_DROP,
+        pl.CachePolicy.NOT_ALLOC_KEEP,
+        pl.CachePolicy.NOT_ALLOC_CLEAN,
+        pl.CachePolicy.NOT_ALLOC_DROP,
     )
     if policy in nonallocating:
         with pytest.raises(ValueError, match="is not allowed on a tensor this scope writes"):
@@ -543,9 +542,9 @@ class ReadWritePolicy:
 @pytest.mark.parametrize(
     "policy",
     [
-        pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-        pl.A5CachePolicy.NORMAL_LAST_VICTIM,
-        pl.A5CachePolicy.NORMAL_PERSISTENT,
+        pl.CachePolicy.NORMAL_FIRST_VICTIM,
+        pl.CachePolicy.NORMAL_LAST_VICTIM,
+        pl.CachePolicy.NORMAL_PERSISTENT,
     ],
 )
 @pytest.mark.parametrize("explicit_default", [False, True])
@@ -578,9 +577,9 @@ class ScopedRebind:
 @pytest.mark.parametrize(
     "policy",
     [
-        pl.A5CachePolicy.NORMAL_FIRST_VICTIM,
-        pl.A5CachePolicy.NORMAL_LAST_VICTIM,
-        pl.A5CachePolicy.NORMAL_PERSISTENT,
+        pl.CachePolicy.NORMAL_FIRST_VICTIM,
+        pl.CachePolicy.NORMAL_LAST_VICTIM,
+        pl.CachePolicy.NORMAL_PERSISTENT,
     ],
 )
 @pytest.mark.parametrize("loop_kind", ["for", "while"])
@@ -624,7 +623,7 @@ class ScopedLoopRebind:
     assert "__pypto_l2_hint_begin store" not in mlir
 
 
-@pytest.mark.parametrize("hint", [p for p in _LOAD_POLICIES if type(p) is pl.A5CachePolicy])
+@pytest.mark.parametrize("hint", [p for p in _LOAD_POLICIES if int(p) >= 2])
 def test_a2a3_rejects_all_explicit_load_hints(hint):
     @pl.program
     class HintedLoad:
@@ -640,7 +639,7 @@ def test_a2a3_rejects_all_explicit_load_hints(hint):
         _incore_mlir(HintedLoad)
 
 
-@pytest.mark.parametrize("hint", [p for p in _STORE_POLICIES if type(p) is pl.A5CachePolicy])
+@pytest.mark.parametrize("hint", [p for p in _STORE_POLICIES if int(p) >= 2])
 def test_a2a3_rejects_all_explicit_store_hints(hint):
     @pl.program
     class HintedStore:
@@ -693,9 +692,7 @@ def test_l2_hints_reach_isa_with_stock_ptoas(tmp_path, planner, load_hint, store
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
-@pytest.mark.parametrize(
-    "load_hint", [pl.A5CachePolicy.NORMAL_FIRST_VICTIM, pl.A5CachePolicy.NORMAL_LAST_VICTIM]
-)
+@pytest.mark.parametrize("load_hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NORMAL_LAST_VICTIM])
 def test_l2_hints_stay_with_transfers_in_control_flow(tmp_path, planner, load_hint):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
@@ -715,7 +712,7 @@ def test_l2_hints_stay_with_transfers_in_control_flow(tmp_path, planner, load_hi
                     tile = pl.load(x, [offset, 0], [32, 32], cache=load_hint)
                 else:
                     tile = pl.load(x, [offset, 0], [32, 32])
-                updated = pl.store(tile, [offset, 0], out_iter, cache=pl.A5CachePolicy.NOT_ALLOC_CLEAN)
+                updated = pl.store(tile, [offset, 0], out_iter, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
                 result = pl.yield_(updated)
             return result
 
@@ -770,7 +767,7 @@ def test_store_l2_hint_preserves_epilogue_with_stock_ptoas(tmp_path, planner, wi
     mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
     cpp = pto_backend._compile_pto_module(mlir, "hinted_writeback", str(tmp_path), planner)
     store = next(line for line in cpp.splitlines() if "TSTORE<" in line)
-    if type(policy) is pl.A5CachePolicy:
+    if int(policy) >= 2:
         assert f"TSTORE<pto::TStoreL2Hint::{_STORE_HINTS[policy]}," in store
     else:
         assert "TStoreL2Hint" not in store
@@ -802,7 +799,7 @@ def test_store_l2_hint_preserves_phase_in_pto_ir(planner):
             rhs = pl.load(y, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
             acc = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
             return pl.store(
-                acc, [0, 0], out, st_phase=pl.STPhase.Final, cache=pl.A5CachePolicy.NORMAL_FIRST_VICTIM
+                acc, [0, 0], out, st_phase=pl.STPhase.Final, cache=pl.CachePolicy.NORMAL_FIRST_VICTIM
             )
 
     backend.reset_for_testing()

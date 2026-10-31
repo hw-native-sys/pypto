@@ -1004,19 +1004,19 @@ def test_gather_rejects_unsupported_lanes_or_index_width(lanes, dtype):
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 @pytest.mark.parametrize(
     "direction,policy",
-    [("load", policy) for policy in pl.A5CachePolicy]
+    [("load", policy) for policy in pl.CachePolicy if int(policy) >= 2]
     + [("load", pl.CachePolicy.BYPASS)]
     + [
         ("store", policy)
-        for policy in pl.A5CachePolicy
-        if policy not in (pl.A5CachePolicy.NOT_ALLOC_KEEP, pl.A5CachePolicy.NOT_ALLOC_DROP)
+        for policy in pl.CachePolicy
+        if int(policy) >= 2 and policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
     ],
 )
 def test_register_unit_rejects_a5_cache_modes_before_assembly(
     tmp_path, monkeypatch, planner, direction, policy
 ):
     load_cache = f", cache=pl.{type(policy).__name__}.{policy.name}" if direction == "load" else ""
-    store_cache = f", cache=pl.A5CachePolicy.{policy.name}" if direction == "store" else ""
+    store_cache = f", cache=pl.CachePolicy.{policy.name}" if direction == "store" else ""
     program = pl.parse_program(f"""
 @pl.program
 class RegisterCache:
@@ -1049,7 +1049,7 @@ class RegisterCache:
         pytest.fail("unsupported cache modes must be rejected before invoking PTOAS")
 
     monkeypatch.setattr(pto_backend, "_run_ptoas", unexpected_assembly)
-    with pytest.raises(ValueError, match="A5CachePolicy.*not supported in VPTO"):
+    with pytest.raises(ValueError, match="CachePolicy.*not supported in VPTO"):
         pto_backend._compile_pto_module(source, "register_cache", str(tmp_path), planner)
 
 

@@ -104,18 +104,18 @@ static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PT
                    : ir::LoadL2HintToString(ir::LoadL2Hint::NormalPersistent);
     case ir::CachePolicy::kBypass:
       CHECK_SPAN(!store, op->span_)
-          << "CachePolicy.BYPASS is load-only; use A5CachePolicy.NOT_ALLOC_CLEAN for an A5 store";
+          << "CachePolicy.BYPASS is load-only; use CachePolicy.NOT_ALLOC_CLEAN for an A5 store";
       // Preserve legacy CachePolicy.BYPASS callers (including pypto-lib) while
       // new A5 callers select one of the six architecture-specific modes.
       return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
     case ir::CachePolicy::kNotAllocKeep:
-      CHECK_SPAN(!store, op->span_) << "store does not support A5CachePolicy.NOT_ALLOC_KEEP";
+      CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_KEEP";
       return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
     case ir::CachePolicy::kNotAllocClean:
       return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NotAllocClean)
                    : ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocClean);
     case ir::CachePolicy::kNotAllocDrop:
-      CHECK_SPAN(!store, op->span_) << "store does not support A5CachePolicy.NOT_ALLOC_DROP";
+      CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_DROP";
       return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocDrop);
     case ir::CachePolicy::kDefault:
       break;

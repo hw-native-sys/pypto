@@ -442,17 +442,15 @@ class StoreL2Hint(enum.IntEnum):
     NormalPersistent = 2
     NotAllocClean = 4
 
-class A2A3CachePolicy(enum.IntEnum):
-    """A2/A3 runtime address-alias policy. BYPASS adds the device's nocache offset."""
+class CachePolicy(enum.IntEnum):
+    """GM cache policy. Supported modes depend on target and transfer direction.
+
+    DEFAULT/BYPASS retain IDs 0/1. The six A5 modes use semantic IDs,
+    not raw ISA encodings. KEEP and DROP are load-only.
+    """
 
     DEFAULT = 0
     BYPASS = 1
-
-CachePolicy = A2A3CachePolicy
-
-class A5CachePolicy(enum.IntEnum):
-    """A5 DMA modes. Values are semantic IDs, not ISA encodings."""
-
     NORMAL_FIRST_VICTIM = 2
     NORMAL_LAST_VICTIM = 3
     NORMAL_PERSISTENT = 4
