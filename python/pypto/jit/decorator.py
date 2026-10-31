@@ -405,6 +405,7 @@ class JITFunction:
         external_aiv_source: str | None = None,
         external_dual_aiv_dispatch: bool = False,
         external_include_dirs: tuple[str, ...] = (),
+        external_builder: Callable[[SpecializeContext], Any] | None = None,
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
@@ -413,6 +414,7 @@ class JITFunction:
         # External C++ kernel backing (func_type == "extern"): resolved absolute
         # paths the specializer emits as @pl.function(external_source=...).
         self._external_core_type = external_core_type
+        self._external_builder = external_builder
         self._external_aic_source = external_aic_source
         self._external_aiv_source = external_aiv_source
         self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
@@ -488,6 +490,7 @@ class JITFunction:
             sorted(
                 (gen_names[id(dep._func)], param, str(layout))
                 for dep in state.graph.deps
+                if dep._external_builder is None
                 # ``dep.__name__`` here is the diagnostic name only — a layout
                 # error should name the user's own function.
                 for param, layout in _arguments.param_layouts(dep._func, dep.__name__).items()
@@ -590,7 +593,9 @@ class JITFunction:
             else self._compute_static_source_hash(deps_topo)
         )
         layout_dependencies = tuple(
-            (dep._func, names) for dep in deps_topo if (names := _layout_dependency_names(dep._func))
+            (dep._func, names)
+            for dep in deps_topo
+            if dep._external_builder is None and (names := _layout_dependency_names(dep._func))
         )
         state = _CachedDepGraph(graph, bindings, source_hash, layout_dependencies)
         self._dep_graph_state = state
@@ -1083,6 +1088,22 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        prepared_contexts = None
+        foreign_digest = ""
+        if any(dep._external_builder is not None for dep in self._get_deps()):
+            from .foreign import external_context_digest  # noqa: PLC0415
+
+            prepared_contexts = self._build_contexts(
+                specialization.tensor_meta,
+                specialization.scalar_dtypes,
+                specialization.constexpr_values,
+                specialization.per_func_dyn,
+            )
+            foreign_digest = external_context_digest(
+                prepared_contexts,
+                compile_kwargs["backend_type"].name,
+                runtime_kind_to_name(_resolve_runtime()),
+            )
         target_platform = _platform_string(compile_kwargs["backend_type"], compile_kwargs["execution_mode"])
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
@@ -1101,6 +1122,7 @@ class JITFunction:
                     specialization.constexpr_values,
                     specialization.per_func_dyn,
                     pl,
+                    prepared_contexts=prepared_contexts,
                     **(compile_kwargs | overrides),
                 )
 
@@ -1114,7 +1136,10 @@ class JITFunction:
         constexpr_bindings = self._resolve_constexpr_bindings(specialization.constexpr_values)
         key = make_cache_key(
             source_hash=_request_source_hash(
-                self._get_source_hash(), self._constexpr_identity_records(constexpr_bindings)
+                compute_source_hash([self._get_source_hash(), foreign_digest])
+                if prepared_contexts is not None
+                else self._get_source_hash(),
+                self._constexpr_identity_records(constexpr_bindings),
             ),
             param_names=specialization.param_names,
             tensor_shapes={n: m.static_shape() for n, m in specialization.tensor_meta.items()},
@@ -1144,7 +1169,9 @@ class JITFunction:
                     key,
                     cache_config,
                     build,
-                    self._persistent_source_digest,
+                    (lambda: compute_source_hash([self._persistent_source_digest(), foreign_digest]))
+                    if prepared_contexts is not None
+                    else self._persistent_source_digest,
                     platform=target_platform,
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
                     distributed=self._func_type == "host",
@@ -1518,6 +1545,7 @@ class JITFunction:
         constexpr_values: dict[str, str],
         per_func_dyn: dict[int, dict[str, dict[int, DynDim]]],
         pl: Any,
+        prepared_contexts: list[SpecializeContext] | None = None,
         **ir_compile_kwargs: Any,
     ) -> Any:
         """Specialize entry + deps into @pl.program source, parse, and compile.
@@ -1540,7 +1568,11 @@ class JITFunction:
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
-        contexts = self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
+        contexts = (
+            prepared_contexts
+            if prepared_contexts is not None
+            else self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
+        )
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts)
         source = specializer.specialize()
@@ -1762,6 +1794,37 @@ class JITFunction:
                     external_include_dirs=dep._external_include_dirs,
                 )
             )
+            if dep._external_builder is not None:
+                from .foreign import apply_external_spec  # noqa: PLC0415
+
+                apply_external_spec(contexts[-1], dep._external_builder(contexts[-1]))
+        # One dependency has one tensor specialization in a program. Check
+        # every foreign call before exporting a mismatched ABI at another site.
+        for caller_key, targets in plan.call_targets.items():
+            caller = plan.jit_func[caller_key]
+            c_meta, c_sd = resolved[caller_key]
+            for (call_name, ordinal), dep_key in targets.items():
+                dep = plan.jit_func[dep_key]
+                if dep._external_builder is None:
+                    continue
+                call = _call_binding._dep_call_nodes(caller._func, call_name)[ordinal]
+                actual = _tensor_meta.resolve_dep_call_metadata(
+                    dep,
+                    caller._func,
+                    c_meta,
+                    c_sd,
+                    {},
+                    caller_func_type=caller._func_type,
+                    dep_call_name=call_name,
+                    call_node=call,
+                    caller_constexpr=plan.binding[caller_key],
+                    discover_deps=_discover_dep_bindings,
+                )
+                if actual != resolved[dep_key]:
+                    raise ValueError(
+                        f"External kernel {call_name!r} requires the same shapes, dtypes and layouts "
+                        "at every call in one program; use distinct kernels for different signatures"
+                    )
         contexts.reverse()
         return contexts
 
@@ -1797,6 +1860,8 @@ def _discover_dep_bindings(
     Only top-level (non-method) calls are considered. The returned list
     preserves the order in which deps first appear in the source.
     """
+    if caller_func_type == "extern":
+        return []
     func_def = _ast_analysis.get_func_def(func)
 
     called_names = _ast_analysis.collect_all_called_names(func_def)
@@ -1811,6 +1876,13 @@ def _discover_dep_bindings(
     seen: set[str] = set()
     for name in called_names:
         obj = all_vars.get(name)
+        hook = getattr(obj, "__pypto_jit__", None)
+        if hook is not None and not isinstance(obj, JITFunction):
+            obj = hook()
+            if not isinstance(obj, JITFunction):
+                raise TypeError(f"{name}.__pypto_jit__() must return a JITFunction")
+            if caller_func_type not in ("orchestration", "inline"):
+                raise TypeError(f"External DSL kernel {name!r} must be called from chip orchestration")
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_call_binding.DepBinding(call_name=name, dep=obj))
             seen.add(name)
@@ -1838,7 +1910,9 @@ def _generated_names_for(jit_func: JITFunction, base: str) -> tuple[str, ...]:
     which the specializer renders as an AIC member, an AIV member, and a Group
     wrapper — three names derived from the same base.
     """
-    if jit_func._func_type == "extern" and jit_func._external_core_type == "mixed":
+    if jit_func._func_type == "extern" and (
+        jit_func._external_core_type == "mixed" or jit_func._external_builder is not None
+    ):
         return (base, f"{base}_aic", f"{base}_aiv")
     return (base,)
 
