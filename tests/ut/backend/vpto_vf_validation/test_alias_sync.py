@@ -92,7 +92,7 @@ def compile_helper(directory: Path, source: str, *, enabled: bool = True) -> dic
     assert ptoas, "PTOAS must be on PATH"
     (directory / "helper.pto").write_text(source)
     run(directory, "version", [ptoas, "--version"])
-    flags = [*_vpto.PTOAS_FLAGS, f"--enable-vecscope-mem-bar={'true' if enabled else 'false'}"]
+    flags = [*_vpto.LLVM_FLAGS, f"--enable-vecscope-mem-bar={'true' if enabled else 'false'}"]
     run(
         directory,
         "lower",
