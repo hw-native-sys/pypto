@@ -583,7 +583,8 @@ Last-axis gather shares this packing and full-tile flat-index lowering on A2/A3 
 The converter receives a read-only `ConversionContext` containing packed-storage
 facts collected from earlier lowered producers in one SSA traversal. Registered
 functional tile results with fresh storage are proven packed; plain aliases and
-`tile.set_validshape` preserve that proof. Other views, parameters, and control-flow
+`tile.set_validshape`, full-shape zero-offset slices, and reshapes with 32-byte-aligned
+source and destination rows preserve that proof. Other views, parameters, and control-flow
 results remain unknown and keep the copy. An empty `TileView.stride` alone is not
 proof: `tile.slice` can retain its parent's physical pitch without storing it there.
 

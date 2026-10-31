@@ -120,5 +120,29 @@ def test_rank3_gather_uses_one_full_tile(ascend_backend):
     assert "rows=16, cols=32" in mlir
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_gather_reuses_packed_full_slice_reshape(ascend_backend):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            inp: pl.Tensor[[32, 512], pl.FP32],
+            idx: pl.Tensor[[1, 2048], pl.INT32],
+            output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+        ) -> pl.Tensor[[1, 2048], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                local = pl.add(inp, 1.0)
+                full = local[:, :]
+                flat = pl.reshape(full, [1, 16384])
+                out = pl.tensor.gather(flat, dim=-1, index=idx)
+                output = pl.assemble(output, out, [0, 0])
+            return output
+
+    mlir = _codegen(Program)
+    assert "pto.textract" not in mlir
+    assert mlir.count("pto.tgather ins(") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

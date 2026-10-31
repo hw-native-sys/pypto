@@ -5532,15 +5532,34 @@ class TestConvertFlatGatherOp:
 
     @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
     @pytest.mark.parametrize(
-        "source_mode", ["computed", "alias", "valid", "strided", "strided_alias", "strided_valid"]
+        "source_mode",
+        [
+            "computed",
+            "alias",
+            "valid",
+            "full_slice",
+            "reshape",
+            "full_slice_reshape",
+            "strided",
+            "strided_alias",
+            "strided_valid",
+            "strided_reshape",
+        ],
     )
     def test_computed_source_uses_tile_gather(self, dtype, source_mode):
         specs = [("src", [4, 32], dtype), ("idx", [1, 16], DataType.INT32)]
 
         def before_body(ib, ins):
             local = ib.let("local", tensor_ops.add(ins[0], 1))
+            if source_mode.startswith("full_slice"):
+                local = ib.let("window", tensor_ops.slice(local, [4, 32], [0, 0]))
             if source_mode.startswith("strided"):
                 local = ib.let("window", tensor_ops.slice(local, [4, 16], [0, 16]))
+            if source_mode.endswith("reshape"):
+                local = ib.let(
+                    "reshaped",
+                    tensor_ops.reshape(local, [1, 64 if source_mode.startswith("strided") else 128]),
+                )
             if source_mode.endswith("alias"):
                 local = ib.let("alias", local)
             if source_mode.endswith("valid"):
@@ -5556,8 +5575,13 @@ class TestConvertFlatGatherOp:
             src = ib.let("src_tile", tile_ops.load(ins[0], [0, 0], [4, 32]))
             local = ib.let("local_tile", tile_ops.add(src, 1))
             shape = [4, 16] if source_mode.startswith("strided") else [4, 32]
+            if source_mode.startswith("full_slice"):
+                local = ib.let("window_tile", tile_ops.slice(local, [4, 32], [0, 0]))
             if source_mode.startswith("strided"):
                 local = ib.let("window_tile", tile_ops.slice(local, shape, [0, 16]))
+            if source_mode.endswith("reshape"):
+                shape = [1, 64 if source_mode.startswith("strided") else 128]
+                local = ib.let("reshaped_tile", tile_ops.reshape(local, shape))
             if source_mode.endswith("alias"):
                 local = ib.let("alias", local)
             if source_mode.endswith("valid"):

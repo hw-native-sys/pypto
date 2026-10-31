@@ -7360,6 +7360,40 @@ class TestForbidOutputAlias:
             f"preceding cmps still reads, but both landed on {bases['tmp0']}"
         )
 
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_sequential_gathers_reuse_vector_scratch_in_loop(self, ascend_backend):
+        """TGATHER scratch uses the visible vector pipe, so ordinary reuse is safe."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                inp: pl.Tensor[[8, 64], pl.INT16],
+                indices: pl.Tensor[[8, 816], pl.INT32],
+                output: pl.Out[pl.Tensor[[8, 816], pl.INT16]],
+            ) -> pl.Tensor[[8, 816], pl.INT16]:
+                source = pl.load(inp, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                idx = pl.load(indices, [0, 0], [8, 816], target_memory=pl.Mem.Vec)
+                acc0 = pl.tile.full([8, 816], dtype=pl.INT16, value=0)
+                for _i, (acc,) in pl.range(4, init_values=(acc0,)):
+                    tmp0 = pl.tile.create([8, 816], dtype=pl.INT32, target_memory=pl.Mem.Vec)
+                    first = pl.tile.gather(source, idx, tmp0)
+                    used = pl.add(first, acc)
+                    tmp1 = pl.tile.create([8, 816], dtype=pl.INT32, target_memory=pl.Mem.Vec)
+                    second = pl.tile.gather(source, idx, tmp1)
+                    total = pl.add(used, second)
+                    nxt = pl.yield_(total)
+                result = pl.store(nxt, [0, 0], output)
+                return result
+
+        after = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["tmp0"] == bases["tmp1"]
+        for tmp, result in (("tmp0", "first"), ("tmp1", "second")):
+            for other in ("source", "idx", result):
+                assert bases[tmp] != bases[other]
+
     def test_written_workspace_in_a_loop_takes_an_exclusive_buffer(self):
         """Across a back edge the directional argument collapses.
 
