@@ -227,7 +227,7 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 | barrier | — | `collectives/test_l3_tensor_barrier_intrinsic.py` | `test_l3_host_tensor_barrier.py` |
 | broadcast | `collectives/test_l3_broadcast.py` | `collectives/test_l3_tensor_broadcast_intrinsic.py` | `test_l3_host_tensor_broadcast.py` |
 | allgather | `collectives/test_l3_allgather.py` | `collectives/test_l3_tensor_allgather_intrinsic.py` | `test_l3_host_tensor_allgather.py` |
-| reduce_scatter | `collectives/test_l3_reduce_scatter.py` | `collectives/test_l3_tensor_reduce_scatter_intrinsic.py` | `test_l3_host_tensor_reduce_scatter.py` |
+| reduce_scatter | `collectives/test_l3_reduce_scatter.py` | `collectives/test_l3_tensor_reduce_scatter_intrinsic.py`、`collectives/test_l3_tensor_reduce_scatter_chunked.py` | `test_l3_host_tensor_reduce_scatter.py` |
 | all_to_all | `collectives/test_l3_all_to_all.py` | `collectives/test_l3_tensor_all_to_all_intrinsic.py` | `test_l3_host_tensor_all_to_all.py` |
 
 ## 相关链接

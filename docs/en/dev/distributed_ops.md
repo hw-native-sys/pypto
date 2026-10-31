@@ -789,6 +789,35 @@ while a rank-one `[NR]` signal is HOST-only. A signal shaped for ring
 `allreduce` (`[2*(NR-1), NR]`) cannot be shared with this collective on either
 path; give it its own window.
 
+### `pld.tensor.reduce_scatter`
+
+```text
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+```
+
+`target` is `[NR, SIZE]`. Each rank stages all `NR` chunks before the call; after
+it, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r`
+across every rank (Sum/Max/Min/Prod by `ReduceOp`). Signal shape `[NR, 1]`.
+
+The row is walked in UB-sized chunks of at most 16 KiB. A static, 32-byte-aligned
+`SIZE` that fits one chunk keeps the single-tile path (ready barrier, peer loop,
+post-reduce barrier, store, epilogue); anything larger, not 32-byte aligned, or
+symbolic uses the chunked path: one ready barrier, then a read-complete barrier per chunk on
+generation `1 + chunk_index`, with a ragged final chunk carried as
+`valid_shape = min(chunk_cols, SIZE - offset)`. Either way a self-clearing
+epilogue restores the signal (see
+[Barrier-signal protocol](#barrier-signal-protocol)), so one signal serves
+back-to-back calls.
+
+Chunking is what makes a large, unaligned, or symbolic `SIZE` expressible at all:
+the single-tile form allocates the whole row as one VEC tile, which overflows the
+VEC budget for a real payload and is rejected by PTOAS whenever the row's byte
+width is not 32-byte aligned. A static `SIZE` below one chunk but not 32-byte
+aligned therefore also takes the chunked path, which rounds the physical chunk
+width up to the next aligned extent and keeps the logical width in `valid_shape`.
+A symbolic `SIZE` must be runtime-bound by a kernel scalar, loop variable, or
+physical tensor-shape parameter.
+
 ### `pld.system.notify` (TNOTIFY)
 
 ```text
@@ -909,6 +938,7 @@ dispatches before the final `Simplify`.
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
   `test_l3_tensor_allgather_runtime_width.py` (composite allgather at a runtime
   extent: one compile exercised at three different extents),
+  `test_l3_tensor_reduce_scatter_intrinsic.py`, `test_l3_tensor_reduce_scatter_chunked.py`,
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
   `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,

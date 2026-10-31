@@ -341,17 +341,18 @@ mesh 和 ring 降级均支持 FP16、FP32，以及任意正元素数量下的
 
 ### `pld.tensor.reduce_scatter`
 
-展开为与 `allreduce` 相同的 5 阶段序列：
+`target` 形状为 `[NR, SIZE]`；每个 rank 在调用前暂存全部 `NR` 个 chunk。调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素归约结果（按 `ReduceOp` 取 Sum/Max/Min/Prod）。
 
-- Phase 2a：notify-all（`AtomicAdd 1`）
-- Phase 2b：wait-all（`Ge 1`）
-- 尾调用：`EmitEpilogueReset`（自清理信用屏障）
-- Phase 3：对每个 peer `p`，`remote_load` 该 peer 的 chunk `r` 并用与 `ReduceOp` 匹配的 tile 算子（`tile.add` / `tile.maximum` / `tile.minimum` / `tile.mul`）累加到本地 scratch
-- Phase 3.5a：re-notify（`AtomicAdd 1`）
-- Phase 3.5b：re-wait（`Ge 2`）
-- Phase 4：`tile.store` 把归约后的 chunk `r` 写回 `target[r, 0:SIZE]`
+该规则按 extent 选择两种调度之一：
 
-`target` 形状为 `[NR, SIZE]`；每个 rank 在调用前暂存全部 `NR` 个 chunk。调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素归约结果（按 `ReduceOp` 取 Sum/Max/Min/Prod）。post-reduce 屏障与 `allreduce` 出于同样的 WAR 原因而必需。
+- **单 tile** —— 静态且按 32 字节对齐的 `SIZE` 不超过一个 16-KiB chunk 时沿用原有的矩形路径配方：ready 屏障（generation 1），对每个 peer `remote_load` chunk `r` 并用与 `ReduceOp` 匹配的 tile 算子（`tile.add` / `tile.maximum` / `tile.minimum` / `tile.mul`）累加，post-reduce 屏障（generation 2），`tile.store` 把归约后的 chunk 写回 `target[r, 0:SIZE]`，尾声从每个非 self cell 减去 2。post-reduce 屏障与 `allreduce` 出于同样的 WAR 原因而必需。
+- **分块** —— 更大的 `SIZE`、未按 32 字节对齐的 `SIZE`，或符号化 `SIZE`，把同一行按 UB 大小的 chunk 遍历。整个调用只用一个 ready 屏障（generation 1）；随后每个 chunk 在 generation `1 + chunk_index` 上做一次自己的读完成屏障，因此任何 rank 都不会在全部 peer 读完之前覆写自己行的第 `k` 个 chunk。chunk 的物理宽度取所选静态宽度，`valid_shape` 为 `min(chunk_cols, SIZE - offset)`：末尾不整齐的 chunk 在归约前先补零（`tile.fillpad_inplace`），store 前再收窄（`tile.set_validshape`），因此既不越界读也不越界写。尾声从每个非 self cell 减去 `1 + ceil(SIZE / chunk_cols)`；由于 `SIZE` 可能是运行时标量，该值以 IR 表达式构造。
+
+分块是让大 `SIZE`、未对齐 `SIZE` 或符号化 `SIZE` 得以表达的前提。单 tile 形式会把整行分配成一个 VEC tile：真实负载下会超出 VEC 预算（planner 的 VEC 上限为 188,416 字节，25,600 个 FP32 元素的行就已失败），且只要行字节宽度不是 32 字节对齐就会被 PTOAS 拒绝。因此，小于一个 chunk 但未按 32 字节对齐的静态 `SIZE` 也走分块路径：它把物理 chunk 宽度向上取整到对齐范围，并用 `valid_shape` 保留逻辑宽度。
+
+**FP16 peer 读。** FP16 行的最后一个 chunk 可能窄于 32 字节的 MTE 对齐单元。A2/A3 上 peer `pld.tile.remote_load` 因此会按对齐后的元素数加宽（`allow_physical_tail_padding`），并在归约前立即用 `tile.set_validshape` 收窄；comm domain 为这段加宽范围额外保留一个 32 字节块。FP32 不需要该处理——32 字节可被其元素宽度整除。
+
+符号化 `SIZE` 必须由 kernel 标量、循环变量或物理 tensor 形状参数在运行时绑定；仅存在于类型元数据中的符号会在 PTO codegen 阶段被拒绝，与 mesh allreduce 的要求一致。
 
 四种 `ReduceOp` 均受支持 —— `kSum`、`kMax`、`kMin`、`kProd` —— 通过共享的 `Reduce()` helper 路由，与 allreduce 规则使用的分发一致。
 

@@ -663,6 +663,18 @@ InCore 下降在一点上比推导器更严格：其屏障按 rank 索引一格�
 而一维 `[NR]` 仅适用于 HOST。为 ring `allreduce` 设计的信号（`[2*(NR-1), NR]`）
 在两条路径上都不能与本集合通信算子共用，应给它独立的窗口。
 
+### `pld.tensor.reduce_scatter`
+
+```text
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+```
+
+`target` 形状为 `[NR, SIZE]`，每个 rank 在调用前暂存全部 `NR` 个 chunk；调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素归约结果（按 `ReduceOp` 取 Sum/Max/Min/Prod）。signal 形状为 `[NR, 1]`。
+
+该行按不超过 16 KiB 的 UB chunk 遍历。静态且按 32 字节对齐的 `SIZE` 能放进一个 chunk 时沿用单 tile 路径（ready 屏障、peer 循环、post-reduce 屏障、store、尾声）；更大的 `SIZE`、未按 32 字节对齐的 `SIZE` 或符号化 `SIZE` 走分块路径：一个 ready 屏障，随后每个 chunk 在 generation `1 + chunk_index` 上做一次自己的读完成屏障，末尾不整齐的 chunk 以 `valid_shape = min(chunk_cols, SIZE - offset)` 承载。两种路径都用自清理尾声恢复 signal（见[屏障-信号协议](#屏障-信号协议)），因此同一个 signal 可用于连续调用。
+
+分块是让大 `SIZE`、未对齐 `SIZE` 或符号化 `SIZE` 得以表达的前提：单 tile 形式会把整行分配成一个 VEC tile，真实负载下会超出 VEC 预算，且行字节宽度不是 32 字节对齐时会被 PTOAS 拒绝。因此，小于一个 chunk 但未按 32 字节对齐的静态 `SIZE` 也走分块路径：它把物理 chunk 宽度向上取整到对齐范围，并用 `valid_shape` 保留逻辑宽度。符号化 `SIZE` 必须由 kernel 标量、循环变量或物理 tensor 形状参数在运行时绑定。
+
 ### `pld.system.notify`（TNOTIFY）
 
 ```text
@@ -772,6 +784,8 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_l3_tensor_allreduce_ring_intrinsic.py`、
   `test_l3_tensor_allgather_runtime_width.py`（运行时范围的 composite allgather：
   一次编译在三种不同范围上执行）、
+  `test_l3_tensor_reduce_scatter_intrinsic.py`、
+  `test_l3_tensor_reduce_scatter_chunked.py`、
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
   `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
