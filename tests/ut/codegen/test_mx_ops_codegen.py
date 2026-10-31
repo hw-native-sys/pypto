@@ -158,9 +158,9 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         tloads = [line for line in mlir.splitlines() if "pto.tload" in line]
         assert len(tloads) == 1, f"expected one MX scale load:\n{mlir}"
-        assert "{layout = #pto.layout<mx_a_zz>}" in tloads[0]
+        assert "layout = #pto.layout<mx_a_zz>" in tloads[0]
         assert "cache_policy" not in mlir
-        assert "__pypto_l2_hint_begin load NotAllocKeep" in mlir
+        assert "l2_hint = #pto.load_l2_hint<not_alloc_keep>" in tloads[0]
 
     def test_mx_scale_load_rejects_unprovable_dynamic_offset(self):
         """Unaligned / unprovable dynamic MX offsets fail at BlockMxScaleTensorViews."""

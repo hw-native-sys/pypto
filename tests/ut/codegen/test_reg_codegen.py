@@ -1012,9 +1012,7 @@ def test_gather_rejects_unsupported_lanes_or_index_width(lanes, dtype):
         if int(policy) >= 2 and policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
     ],
 )
-def test_register_unit_rejects_a5_cache_modes_before_assembly(
-    tmp_path, monkeypatch, planner, direction, policy
-):
+def test_register_unit_native_verifier_rejects_a5_cache_modes(tmp_path, planner, direction, policy):
     load_cache = f", cache=pl.{type(policy).__name__}.{policy.name}" if direction == "load" else ""
     store_cache = f", cache=pl.CachePolicy.{policy.name}" if direction == "store" else ""
     program = pl.parse_program(f"""
@@ -1043,13 +1041,9 @@ class RegisterCache:
         optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
     )
     assert 'pto.backend = "vpto"' in source.partition("\n")[0]
-    assert f"__pypto_l2_hint_begin {direction}" in source
-
-    def unexpected_assembly(*args, **kwargs):
-        pytest.fail("unsupported cache modes must be rejected before invoking PTOAS")
-
-    monkeypatch.setattr(pto_backend, "_run_ptoas", unexpected_assembly)
-    with pytest.raises(ValueError, match="CachePolicy.*not supported in VPTO"):
+    assert f"l2_hint = #pto.{direction}_l2_hint<" in source
+    # Validation belongs to PTOAS, including standalone binary compilation.
+    with pytest.raises(RuntimeError, match="l2_hint.*not supported in binary VPTO"):
         pto_backend._compile_pto_module(source, "register_cache", str(tmp_path), planner)
 
 

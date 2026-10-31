@@ -80,10 +80,9 @@ static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const C
   return "";
 }
 
-// CachePolicy is semantic: preserve its public encodings and translate only
-// here, where both the architecture and transfer direction are known.
-static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PTOCodegen& codegen,
-                                                  bool store) {
+// Select native PTO enum spellings from the semantic frontend policy after
+// choosing the target. PTOAS owns encodings, target/path checks and ISA emission.
+static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCodegen& codegen, bool store) {
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
   if (policy == ir::CachePolicy::kDefault) return std::nullopt;
   if (codegen.GetBackendHandler()->GetPtoTargetArch() != "a5") {
@@ -92,31 +91,28 @@ static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PT
         << " is only supported on A5; A2/A3 supports load DEFAULT/BYPASS and store DEFAULT";
     return std::nullopt;
   }
+  // PTOAS owns the direction-specific encodings and checks the target/path.
+  // Symbolic attributes keep an explicit NormalFirstVictim distinct from omission.
   switch (policy) {
     case ir::CachePolicy::kNormalFirstVictim:
-      return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalFirstVictim)
-                   : ir::LoadL2HintToString(ir::LoadL2Hint::NormalFirstVictim);
+      return "normal_first_victim";
     case ir::CachePolicy::kNormalLastVictim:
-      return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalLastVictim)
-                   : ir::LoadL2HintToString(ir::LoadL2Hint::NormalLastVictim);
+      return "normal_last_victim";
     case ir::CachePolicy::kNormalPersistent:
-      return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalPersistent)
-                   : ir::LoadL2HintToString(ir::LoadL2Hint::NormalPersistent);
+      return "normal_persistent";
     case ir::CachePolicy::kBypass:
       CHECK_SPAN(!store, op->span_)
           << "CachePolicy.BYPASS is load-only; use CachePolicy.NOT_ALLOC_CLEAN for an A5 store";
-      // Preserve legacy CachePolicy.BYPASS callers (including pypto-lib) while
-      // new A5 callers select one of the six architecture-specific modes.
-      return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
+      // Preserve existing A5 BYPASS reads without using the A2/A3 offset path.
+      return "not_alloc_keep";
     case ir::CachePolicy::kNotAllocKeep:
       CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_KEEP";
-      return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
+      return "not_alloc_keep";
     case ir::CachePolicy::kNotAllocClean:
-      return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NotAllocClean)
-                   : ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocClean);
+      return "not_alloc_clean";
     case ir::CachePolicy::kNotAllocDrop:
       CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_DROP";
-      return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocDrop);
+      return "not_alloc_drop";
     case ir::CachePolicy::kDefault:
       break;
   }
@@ -163,7 +159,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // attribute alone declares the policy but moves no address. Both are attached
   // below, alongside the MX layout attribute when it applies.
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
-  const auto isa_hint = GetIsaCacheHint(op, codegen, false);
+  const auto isa_hint = GetPtoL2Hint(op, codegen, false);
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
@@ -212,10 +208,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   std::vector<std::string> attrs;
   if (isa_hint) {
-    // Stock PTOAS preserves these comments. PyPTO finalization uses them to
-    // select this transfer's ISA overload; PTOAS still sees the real load's
-    // memory effects and pipe for planning and synchronization.
-    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_begin load " + *isa_hint + "\"");
+    attrs.emplace_back("l2_hint = #pto.load_l2_hint<" + *isa_hint + ">");
   }
   if (is_mx_load) {
     attrs.push_back("layout = #pto.layout<" + pto_layout + ">");
@@ -246,9 +239,6 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     }
   }
   codegen.Emit(tload_line.str());
-  if (isa_hint) {
-    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_end\"");
-  }
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
   // already carries the desired `valid_row` / `valid_col` operands, and the
@@ -483,6 +473,11 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     attrs.emplace_back("atomicType = #pto<atomic_type atomic_add>");
   }
 
+  const auto isa_hint = GetPtoL2Hint(op, codegen, true);
+  if (isa_hint) {
+    attrs.emplace_back("l2_hint = #pto.store_l2_hint<" + *isa_hint + ">");
+  }
+
   // Default-valued attributes are omitted so ordinary stores keep their
   // byte-identical PTO form. PTOAS expects all present attributes in one dict.
   if (!attrs.empty()) {
@@ -493,14 +488,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     }
     tstore_line << "}";
   }
-  const auto isa_hint = GetIsaCacheHint(op, codegen, true);
-  if (isa_hint) {
-    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_begin store " + *isa_hint + "\"");
-  }
   codegen.Emit(tstore_line.str());
-  if (isa_hint) {
-    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_end\"");
-  }
 
   auto result_var = codegen.GetCurrentResultVar();
   if (result_var != nullptr) {

@@ -53,9 +53,7 @@ using namespace pto;
 extern "C" __global__ AICORE void main_kernel(__gm__ int64_t* args) {
     AICORE void helper();
     helper();
-    // __pypto_l2_hint_begin load NormalPersistent
-    TLOAD(tile, gm);
-    // __pypto_l2_hint_end
+    TLOAD<pto::TLoadL2Hint::NormalPersistent>(tile, gm);
 }
 
 AICORE void helper() {}
