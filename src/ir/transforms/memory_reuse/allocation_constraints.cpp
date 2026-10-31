@@ -35,6 +35,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -403,9 +404,12 @@ class WrittenWorkspaceCollector : public IRVisitor {
   // lowered to a loop by LowerPipelineToSlots / LowerPipelineLoops (passes
   // 30-31), well before this pass.
   void VisitStmt_(const ForStmtPtr& op) override {
+    const bool software_pipeline = op->HasAttr(kSoftwarePipelineSlotsAttr);
+    if (software_pipeline) ++software_pipeline_depth_;
     ++loop_depth_;
     IRVisitor::VisitStmt_(op);
     --loop_depth_;
+    if (software_pipeline) --software_pipeline_depth_;
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -427,8 +431,14 @@ class WrittenWorkspaceCollector : public IRVisitor {
     // workspace contract.
     const auto* entry = LookupOpEntry(op);
     if (entry == nullptr) return;
-    for (const size_t index : entry->GetWorkspaceArgs()) {
-      if (index >= args.size() || !entry->MayWriteArg(index)) continue;
+    for (size_t index = 0; index < args.size(); ++index) {
+      // Legacy reductions expose hidden writes through the scratch-role
+      // contract. Recognize them only in an actually transformed pipeline;
+      // ordinary loops retain their existing allocation policy.
+      const bool pipeline_scratch =
+          software_pipeline_depth_ > 0 && entry->GetLaneInvariantArgKind(index) == LaneInvariantArg::Scratch;
+      const bool explicit_workspace = entry->IsWorkspaceArg(index) && entry->MayWriteArg(index);
+      if (!explicit_workspace && !pipeline_scratch) continue;
       // AsVarLike, not As<Var>: a workspace can reach the op as a loop IterArg
       // when the call sits inside a loop body.
       auto workspace = AsVarLike(args[index]);
@@ -445,6 +455,7 @@ class WrittenWorkspaceCollector : public IRVisitor {
   }
 
   int loop_depth_ = 0;
+  int software_pipeline_depth_ = 0;
   std::unordered_set<const Var*> workspaces_;
   std::unordered_set<const Var*> bases_;
   std::unordered_set<const Var*> looping_workspaces_;

@@ -499,7 +499,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 15. [`StampTfreeSplit`](28-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
 16. `NormalizeReturnOrder`
 17. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
-18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md)（把合格的 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制；自门控于 `memory_planner=PTOAS`，未处理的循环原样留给 `LowerPipelineLoops`）
+18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md)（PyPTO 下 opt-in 固定地址单层 Vec 软流水，或 PTOAS 下同轮 slot 轮转；不支持的循环保留 unroll）
 19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
 20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
 21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline

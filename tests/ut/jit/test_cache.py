@@ -30,6 +30,7 @@ from pypto.jit.cache import (
 from pypto.jit.decorator import (
     _resolve_enable_buffer_ir,
     _resolve_enable_pypto_l0c_double_buffer,
+    _resolve_enable_software_pipeline,
     _resolve_memory_planner,
     _resolve_runtime,
 )
@@ -84,6 +85,7 @@ class TestMakeCacheKey:
         dep_layouts=(),
         runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir=False,
+        enable_software_pipeline=False,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -101,6 +103,7 @@ class TestMakeCacheKey:
             dep_layouts=dep_layouts,
             runtime=runtime,
             enable_buffer_ir=enable_buffer_ir,
+            enable_software_pipeline=enable_software_pipeline,
         )
 
     def test_basic_key_structure(self):
@@ -127,6 +130,7 @@ class TestMakeCacheKey:
             ("runtime", "tensormap_and_ringbuffer"),
             ("enable_buffer_ir", False),
             ("buffer_ir_version", 0),
+            ("enable_software_pipeline", False),
         )
 
     def test_tensor_shape_in_key(self):
@@ -452,6 +456,9 @@ class TestMakeCacheKey:
         assert ("buffer_ir_version", 0) in off.compile_opts
         assert ("buffer_ir_version", 7) in on.compile_opts
 
+    def test_software_pipeline_splits_key(self):
+        assert self._make_key() != self._make_key(enable_software_pipeline=True)
+
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
         which worker can bind it, so a ``host_build_graph`` call must not reuse a
@@ -503,6 +510,27 @@ def test_buffer_ir_cache_option_follows_active_context():
             assert _resolve_enable_buffer_ir() is True
         assert _resolve_enable_buffer_ir() is False
     assert _resolve_enable_buffer_ir() is True
+
+
+def test_software_pipeline_cache_option_follows_active_context():
+    assert _resolve_enable_software_pipeline() is False
+    with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=True):
+        assert _resolve_enable_software_pipeline() is True
+        with passes.PassContext([]):
+            assert _resolve_enable_software_pipeline() is False
+        assert _resolve_enable_software_pipeline() is True
+    assert _resolve_enable_software_pipeline() is False
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_cache_option_uses_explicit_value(enabled):
+    assert _resolve_enable_software_pipeline(enabled) == enabled
+
+
+@pytest.mark.parametrize("software", [None, False, True])
+def test_explicit_software_pipeline_selects_tile_ir_in_cache_key(software):
+    """Caching must mirror compile's effective default storage representation."""
+    assert _resolve_enable_buffer_ir(software) is (not software)
 
 
 class TestResolveEnablePyptoL0cDoubleBuffer:

@@ -15,9 +15,9 @@ takes slot k" — which is exactly ptoas's ``pto.alloc_multi_tile`` /
 as one region and derive per-slot (dynamic event id) synchronization from the
 slot expression, instead of seeing N unrelated buffers.
 
-Only under the **PTOAS** planner. Under the PyPTO planner ptoas runs at
-``--pto-level=level3``, where a region needs an explicit ``addr`` base that codegen
-does not emit — so the baked-address ``pto.alloc_tile`` path stays.
+The default PyPTO path keeps ordinary addressed allocations. Software pipelines
+use fixed-address parent subviews for co-live loop slots at ``--pto-level=level3``;
+single-live-slot schedules can retain multi-buffer regions.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
@@ -28,7 +28,7 @@ import re
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir
+from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
@@ -46,6 +46,55 @@ RUNTIME_VALID = pl.MemRef(slots=2)
 CO_LIVE = pl.MemRef(slots=2)
 PREFETCH = pl.MemRef(slots=2)
 SIBLING_LOOPS = pl.MemRef(slots=2)
+PREFETCHED = pl.MemRef(slots=3)
+REVERSE_SLOTS = pl.MemRef(slots=2)
+
+
+@pl.program
+class PrefetchedSlots:
+    """Two preloads followed by load-next / compute-current and two drain steps."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 1024], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 1024], pl.FP32]],
+    ) -> pl.Tensor[[64, 1024], pl.FP32]:
+        _first: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[0], pl.Mem.Vec] = pl.load(a, [0, 0], [1, 1024])
+        _second: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[1], pl.Mem.Vec] = pl.load(a, [1, 0], [1, 1024])
+        for i in pl.range(62):
+            _future: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[(i + 2) % 3], pl.Mem.Vec] = pl.load(
+                a, [i + 2, 0], [1, 1024]
+            )
+            current: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[i % 3], pl.Mem.Vec] = pl.tile.create(
+                [1, 1024], pl.FP32, target_memory=pl.Mem.Vec
+            )
+            y: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[i % 3], pl.Mem.Vec] = pl.add(current, 1.0)
+            output = pl.store(y, [i, 0], output)
+        penultimate: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[2], pl.Mem.Vec] = pl.tile.create(
+            [1, 1024], pl.FP32, target_memory=pl.Mem.Vec
+        )
+        output = pl.store(pl.add(penultimate, 1.0), [62, 0], output)
+        last: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[0], pl.Mem.Vec] = pl.tile.create(
+            [1, 1024], pl.FP32, target_memory=pl.Mem.Vec
+        )
+        output = pl.store(pl.add(last, 1.0), [63, 0], output)
+        return output
+
+
+@pl.program
+class ReverseConstantSlots:
+    """The first tile names slot 1; its address is not the allocation base."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        first: pl.Tile[[64, 64], pl.FP32, REVERSE_SLOTS[1], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        second: pl.Tile[[64, 64], pl.FP32, REVERSE_SLOTS[0], pl.Mem.Vec] = pl.exp(first)
+        return pl.store(second, [0, 0], output)
 
 
 @pl.program
@@ -297,13 +346,44 @@ class SingleSlotDeclaration:
         return pl.store(t0, [0, 0], output)
 
 
-def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
+def _mark_lowered_slot_producers(program: ir.Program) -> ir.Program:
+    """Give hand-written scheduling fixtures the provenance emitted by real lowering."""
+    producers = {ir.get_op("tile.load").name, ir.get_op("tile.create").name}
+
+    class MarkProducers(ir.IRMutator):
+        def visit_call(self, op: ir.Call) -> ir.Expr:
+            call = super().visit_call(op)
+            if not isinstance(call, ir.Call) or call.op.name not in producers:
+                return call
+            return ir.Call(
+                call.op,
+                call.args,
+                call.kwargs,
+                {**call.attrs, "software_pipeline_slots": True},
+                call.type,
+                call.span,
+            )
+
+    return MarkProducers().visit_program(program)
+
+
+def _codegen(
+    program: ir.Program,
+    planner: passes.MemoryPlanner,
+    *,
+    enable_software_pipeline: bool = False,
+    simulate_lowered_slots: bool = False,
+) -> str:
     """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
-    with passes.PassContext([], memory_planner=planner):
+    with passes.PassContext(
+        [], memory_planner=planner, enable_buffer_ir=False, enable_software_pipeline=enable_software_pipeline
+    ):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
+    if simulate_lowered_slots:
+        optimized = _mark_lowered_slot_producers(optimized)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     single = ir.Program([func], "kernel", optimized.span)
     # The planner also decides the address mode: PTOAS plans (no addr, level2),
@@ -468,6 +548,19 @@ def _pipelined_kernel(start: int, stop: int, step: int, stage: int) -> ir.Progra
     return Program
 
 
+def _slot_parents(mlir: str) -> dict[str, str]:
+    """Follow selected slot handles and their reshape aliases to the allocation."""
+    parents = {}
+    for line in mlir.splitlines():
+        selected = re.search(r"(%\w+) = pto\.(?:subview|multi_tile_get) (%\w+)\[", line)
+        if selected:
+            parents[selected[1]] = selected[2]
+        reshaped = re.search(r"(%\w+) = pto\.treshape (%\w+) :", line)
+        if reshaped and reshaped[2] in parents:
+            parents[reshaped[1]] = parents[reshaped[2]]
+    return parents
+
+
 def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
     """Map every TileType assignment's var name to its MemRef."""
     found: dict[str, ir.MemRef] = {}
@@ -550,12 +643,7 @@ class TestFallbacks:
     """Everything the ptoas multi-buffer form does not cover keeps alloc_tile."""
 
     def test_pypto_planner_keeps_baked_addresses(self):
-        """level3 gets no region: codegen emits no `addr` base for one.
-
-        ptoas is not the limit — given a constant `addr` it has derived per-slot sync
-        at level3 since 0.55 (hw-native-sys/PTOAS#1106, closed). Emitting the region's
-        base is the missing PyPTO side, so the baked-address path stays.
-        """
+        """Without the opt-in flag, level3 retains its original allocation path."""
         mlir = _codegen(RotatingSlot, passes.MemoryPlanner.PYPTO)
         assert not _lines(mlir, "pto.alloc_multi_tile"), f"level3 must not use a region:\n{mlir}"
         assert not _lines(mlir, "pto.multi_tile_get"), f"level3 must not use a region:\n{mlir}"
@@ -577,6 +665,281 @@ class TestFallbacks:
         mlir = _codegen(SingleSlotDeclaration, passes.MemoryPlanner.PYPTO)
         assert not _lines(mlir, "pto.alloc_multi_tile"), f"a single slot is not a region:\n{mlir}"
         assert _lines(mlir, "pto.alloc_tile"), f"expected the ordinary alloc path:\n{mlir}"
+
+
+class TestFixedAddressMultiBuffer:
+    @pytest.mark.parametrize("stage", [2, 3, 4])
+    def test_compute_chain_reuses_one_input_region_through_the_store(self, stage):
+        """Last-use compute chains share an input region without extra UB storage."""
+
+        @pl.program
+        class BinaryChain:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[65, 1024], pl.FP32],
+                b: pl.Tensor[[65, 1024], pl.FP32],
+                output: pl.Out[pl.Tensor[[65, 1024], pl.FP32]],
+            ) -> pl.Tensor[[65, 1024], pl.FP32]:
+                for i in pl.pipeline(65, stage=stage):
+                    lhs = pl.load(a, [i, 0], [1, 1024])
+                    rhs = pl.load(b, [i, 0], [1, 1024])
+                    intermediate = pl.add(lhs, rhs)
+                    result = pl.add(intermediate, 1.0)
+                    output = pl.store(result, [i, 0], output)
+                return output
+
+        mlir = _codegen(BinaryChain, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), "Co-live slots require parent subviews"
+        regions = _lines(mlir, "pto.alloc_tile addr =")
+        assert len(regions) == 2, mlir
+        assert all(f"rows={stage}" in line and "cols=1024" in line for line in regions), mlir
+        # Two input streams retain exactly stage-1 preloads plus one steady load.
+        assert len(_lines(mlir, "pto.tload")) == 2 * stage, mlir
+        assert len(_lines(mlir, "pto.tstore")) == stage, mlir
+        handle_regions = _slot_parents(mlir)
+        input_regions = {
+            handle_regions[line.split("outs(")[1].split(" :")[0].strip()]
+            for line in _lines(mlir, "pto.tload")
+        }
+        stored_handles = [line.split("ins(")[1].split(" :")[0].strip() for line in _lines(mlir, "pto.tstore")]
+        output_regions = {handle_regions[handle] for handle in stored_handles}
+        assert len(input_regions) == 2 and len(output_regions) == 1, mlir
+        assert output_regions <= input_regions, mlir
+        additions = _lines(mlir, "pto.tadds ")
+        assert len(additions) == len(stored_handles), mlir
+        for addition, stored in zip(additions, stored_handles, strict=True):
+            intermediate = addition.split("ins(")[1].split(",")[0].strip()
+            result = addition.split("outs(")[1].split(" :")[0].strip()
+            assert intermediate == result, "Last-use compute must retain the same slot handle"
+            assert result == stored, "The store must consume the exact current output-slot handle"
+
+        constants = {
+            name: int(value) for name, value in re.findall(r"(%\w+) = arith.constant (\d+) : i64", mlir)
+        }
+        region_ranges = []
+        for region in regions:
+            address = constants[region.split("addr = ")[1].split()[0]]
+            region_ranges.append((address, address + stage * 4096))
+        region_ranges.sort()
+        assert all(first[1] <= second[0] for first, second in zip(region_ranges, region_ranges[1:]))
+        assert len(_lines(mlir, "pto.alloc_tile")) == 2, "The chain needs no independent temporary"
+        assert max(end for _, end in region_ranges) == 2 * stage * 4096
+
+    def test_two_inputs_have_distinct_fixed_regions_and_inplace_compute(self):
+        """Exercise compiler slots at a nonzero base and keep ordinary modulo signed."""
+
+        @pl.program
+        class TwoInputs:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 1024], pl.FP32],
+                b: pl.Tensor[[64, 1024], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 1024], pl.FP32]],
+            ) -> pl.Tensor[[64, 1024], pl.FP32]:
+                for i in pl.pipeline(64, stage=3):
+                    row = (i + 1) % 64
+                    lhs = pl.load(a, [i, 0], [1, 1024])
+                    rhs = pl.load(b, [row, 0], [1, 1024])
+                    result = pl.add(lhs, rhs)
+                    output = pl.store(result, [i, 0], output)
+                return output
+
+        mlir = _codegen(TwoInputs, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), "Co-live slots require parent subviews"
+        regions = _lines(mlir, "pto.alloc_tile addr =")
+        assert len(regions) == 2, mlir
+        assert all("rows=3" in line and "cols=1024" in line for line in regions), mlir
+        addresses = {line.split("addr = ")[1].split()[0] for line in regions}
+        assert addresses == {"%c0_i64", "%c12288_i64"}, mlir
+        assert len(_lines(mlir, "pto.tload")) == 6, mlir
+        assert len(_lines(mlir, "pto.tadd ")) == 3, mlir
+        assert _lines(mlir, "arith.remui"), mlir
+        assert _lines(mlir, "arith.remsi"), mlir
+        handle_regions = _slot_parents(mlir)
+        for line in _lines(mlir, "pto.tadd "):
+            first_input = line.split("ins(")[1].split(",")[0].strip()
+            output = line.split("outs(")[1].split(" :")[0].strip()
+            assert handle_regions[first_input] == handle_regions[output], line
+            assert first_input == output, "In-place slot compute must preserve PTOAS slot SSA identity"
+
+    def test_static_prefetch_uses_parent_subviews_and_unsigned_slot_indices(self):
+        mlir = _codegen(
+            PrefetchedSlots,
+            passes.MemoryPlanner.PYPTO,
+            enable_software_pipeline=True,
+            simulate_lowered_slots=True,
+        )
+        assert not _lines(mlir, "pto.alloc_multi_tile"), "PTOAS #1519 also affects static prefetch"
+        assert not _lines(mlir, "pto.multi_tile_get")
+        parents = set(_slot_parents(mlir).values())
+        regions = [line for line in _lines(mlir, "pto.alloc_tile addr =") if line.split(" = ")[0] in parents]
+        assert len(regions) == 1, mlir
+        assert "addr = %c0_i64" in regions[0], mlir
+        assert "rows=3, cols=1024" in regions[0], mlir
+        assert "valid_row =" not in regions[0], mlir
+        assert len(_lines(mlir, "scf.for")) == 1, mlir
+        assert len(_lines(mlir, "pto.tload")) == 3, mlir
+        assert len(_lines(mlir, "pto.tstore")) == 3, mlir
+        assert len(_lines(mlir, "arith.remui")) >= 2, mlir
+        assert not _lines(mlir, "arith.remsi"), mlir
+        gets = _lines(mlir, "pto.subview")
+        handles = {line.split("=")[0].strip() for line in gets}
+        assert len(gets) >= 6, mlir
+        assert not (handles & {line.split("=")[0].strip() for line in _lines(mlir, "pto.alloc_tile")})
+        steady_add = _lines(mlir, "pto.tadds ")[0]
+        first_input = steady_add.split("ins(")[1].split(",")[0].strip()
+        output = steady_add.split("outs(")[1].split(" :")[0].strip()
+        assert first_input == output, "Duplicate same-slot gets prevent PTOAS from deriving overlap"
+
+    def test_first_selected_slot_is_not_used_as_the_region_base(self):
+        mlir = _codegen(
+            ReverseConstantSlots,
+            passes.MemoryPlanner.PYPTO,
+            enable_software_pipeline=True,
+            simulate_lowered_slots=True,
+        )
+        region = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(region) == 1, mlir
+        assert "addr = %c0_i64" in region[0], mlir
+        assert "count=2" in region[0], mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2, "A different output slot must retain its own handle"
+        assert "[%c1_index]" in gets[0], mlir
+
+    @pytest.mark.parametrize("program", [MixedSlotShapes, MixedSlotValidShapes, RuntimeValidShapeSlots])
+    def test_unsupported_region_keeps_the_existing_addressed_path(self, program):
+        # Isolate codegen's region rejection; this does not claim the scheduler
+        # accepts these deliberately unsupported hand-written shapes.
+        mlir = _codegen(
+            program,
+            passes.MemoryPlanner.PYPTO,
+            enable_software_pipeline=True,
+            simulate_lowered_slots=True,
+        )
+        assert not _lines(mlir, "pto.alloc_multi_tile"), mlir
+        assert _lines(mlir, "pto.alloc_tile"), mlir
+
+    @pytest.mark.parametrize("software", [False, True], ids=["default", "software"])
+    def test_fallback_slot_allocation_keeps_mutable_valid_shape(self, software, tmp_path):
+        """A rejected region retains the mutable descriptor of an ordinary allocation."""
+
+        @pl.program
+        class NarrowedSlot:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                rows: pl.Scalar[pl.INDEX],
+                cols: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile: pl.Tile[[32, 32], pl.FP32, TOO_MANY[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+                narrowed = pl.tile.set_validshape(tile, rows, cols)
+                return pl.store(narrowed, [0, 0], out)
+
+        # Seventeen slots force the ordinary addressed fallback even with the
+        # optimization enabled; that handle must remain valid for set_validshape.
+        mlir = _codegen(
+            NarrowedSlot,
+            passes.MemoryPlanner.PYPTO,
+            enable_software_pipeline=software,
+            simulate_lowered_slots=software,
+        )
+        assert not _lines(mlir, "pto.alloc_multi_tile"), mlir
+        allocations = _lines(mlir, "pto.alloc_tile")
+        updates = _lines(mlir, "pto.set_validshape")
+        assert len(allocations) == len(updates) == 1, mlir
+        assert all("v_row=?" in line and "v_col=?" in line for line in allocations + updates), mlir
+
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source = tmp_path / "mutable_slot.pto"
+        output = tmp_path / "mutable_slot.cpp"
+        source.write_text(mlir)
+        _run_ptoas(str(source), str(output), ["--pto-level=level3", "--pto-arch=a2", "--enable-insert-sync"])
+        assert output.is_file()
+
+    def test_default_prefetch_codegen_still_uses_individual_allocations(self):
+        mlir = _codegen(PrefetchedSlots, passes.MemoryPlanner.PYPTO)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), mlir
+        assert _lines(mlir, "arith.remsi"), mlir
+
+    def test_slot_proofs_do_not_leak_into_the_next_buffer_function(self):
+        """A shared IR expression has different bounds in each function."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=True):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PrefetchedSlots)
+        optimized = _mark_lowered_slot_producers(optimized)
+        shared_mod = next(
+            ref.slot_index_
+            for ref in _tile_memrefs(optimized).values()
+            if isinstance(ref.slot_index_, ir.FloorMod) and isinstance(ref.slot_index_.left, ir.Var)
+        )
+        assert isinstance(shared_mod.left, ir.Var)
+        span = ir.Span.unknown()
+        value = ir.Var("value", ir.ScalarType(DataType.INDEX), span)
+        scalar = ir.Function(
+            "buffer_scalar",
+            [shared_mod.left],
+            [],
+            ir.AssignStmt(value, shared_mod, span),
+            span,
+            type=ir.FunctionType.InCore,
+            ir_stage=ir.FunctionIRStage.Buffer,
+        )
+        buffer_program = ir.Program([scalar], "BufferScalar", span)
+        tile = next(func for func in optimized.functions.values() if func.name == "kernel")
+        generator = codegen.PTOCodegen()
+        assert "arith.remui" in generator.generate(ir.Program([tile], "TilePipeline", span))
+        reused = generator.generate(buffer_program)
+        fresh = codegen.PTOCodegen().generate(buffer_program)
+        assert reused == fresh
+        assert "arith.remui" not in reused
+        assert "arith.select" in reused
+
+    @pytest.mark.parametrize("narrowed", ["numerator", "divisor"])
+    def test_non_index_slot_arithmetic_keeps_the_ordinary_addressed_path(self, narrowed, tmp_path):
+        """An INDEX result does not prove that its operand arithmetic cannot narrow."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=True):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PrefetchedSlots)
+
+        class NarrowSlotArithmetic(ir.IRMutator):
+            def visit_floor_mod(self, op: ir.FloorMod) -> ir.Expr:
+                mod = super().visit_floor_mod(op)
+                if not isinstance(mod, ir.FloorMod):
+                    return mod
+                if narrowed == "numerator" and isinstance(mod.left, ir.Add):
+                    left = ir.Add(mod.left.left, mod.left.right, DataType.INT32, mod.left.span)
+                    return ir.FloorMod(left, mod.right, DataType.INDEX, mod.span)
+                if narrowed == "divisor" and isinstance(mod.right, ir.ConstInt):
+                    right = ir.ConstInt(mod.right.value, DataType.INT32, mod.right.span)
+                    return ir.FloorMod(mod.left, right, DataType.INDEX, mod.span)
+                return mod
+
+        # Simulate a lowered schedule, but retain its mixed-width arithmetic.
+        # It must decline the region rather than emit an i32 SSA as INDEX remui.
+        transformed = _mark_lowered_slot_producers(NarrowSlotArithmetic().visit_program(optimized))
+        func = next(func for func in transformed.functions.values() if func.name == "kernel")
+        single = ir.Program([func], "kernel", transformed.span)
+        mlir = codegen.PTOCodegen().generate(single)
+        assert not _lines(mlir, "pto.subview"), mlir
+        assert not _lines(mlir, "pto.alloc_multi_tile"), mlir
+        assert _lines(mlir, "pto.alloc_tile"), mlir
+        assert _lines(mlir, "arith.remsi"), mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source = tmp_path / "mixed_slot.pto"
+        source.write_text(mlir)
+        _run_ptoas(
+            str(source),
+            str(source.with_suffix(".cpp")),
+            ["--pto-level=level3", "--pto-arch=a2", "--enable-insert-sync"],
+        )
 
 
 class TestUnsupportedShapesAreLoud:

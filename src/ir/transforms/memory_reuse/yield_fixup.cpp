@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>

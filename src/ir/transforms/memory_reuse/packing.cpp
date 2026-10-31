@@ -10,8 +10,6 @@
  */
 
 #include <algorithm>
-#include <cctype>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -38,9 +36,11 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
@@ -50,6 +50,8 @@
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 #include "src/ir/transforms/memory_reuse/storage.h"
@@ -867,6 +869,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
         auto rebase_memref = [&](const TileTypePtr& tile) -> std::optional<MemRefPtr> {
           if (!tile->memref_.has_value() || !curr_memref) return source_memref;
           const auto& old = tile->memref_.value();
+          const auto& slot = placement.forward_slot ? source_memref : old;
           auto old_off = As<ConstInt>(old->byte_offset_);
           auto curr_off = As<ConstInt>(curr_memref->byte_offset_);
           if (!old_off || !curr_off) {
@@ -883,7 +886,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
             auto target_offset = AddByteOffsets(source_memref->byte_offset_, placement_expr);
             auto rebased_offset = AddByteOffsets(target_offset, relative);
             return std::make_shared<MemRef>(source_memref->base_, rebased_offset, old->size_, old->span_,
-                                            old->is_pinned_, old->slot_count_, old->slot_index_);
+                                            slot->is_pinned_, slot->slot_count_, slot->slot_index_);
           }
           const __int128 wide_rel = static_cast<__int128>(old_off->value_) - curr_off->value_;
           const __int128 wide_placement = placement.byte_offset;
@@ -902,7 +905,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
           auto rel_expr = std::make_shared<ConstInt>(placed_rel, DataType::INDEX, Span::unknown());
           return std::make_shared<MemRef>(source_memref->base_,
                                           AddByteOffsets(source_memref->byte_offset_, rel_expr), old->size_,
-                                          old->span_, old->is_pinned_, old->slot_count_, old->slot_index_);
+                                          old->span_, slot->is_pinned_, slot->slot_count_, slot->slot_index_);
         };
 
         // Rebase the representative through the same path as every member of
@@ -976,6 +979,116 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
 
   MemRefSharingMutator mutator(reuse_map, var_sharing_groups, allocation_sizes);
   return mutator.VisitStmt(stmt);
+}
+
+/// Forward a last-used logical input version through an in-place-safe op.
+/// Scheduling only declares input versions. This placement decision runs after
+/// InitMemRef and uses the shared lifetime facts and operator alias contracts.
+/// A fixed number of indexed walks keeps the additional work O(N log N).
+StmtPtr ReuseSoftwarePipelineInputs(const StmtPtr& body, const LifetimeAnalysisResult& lifetimes,
+                                    const HazardInputs& hazard, const std::set<const Var*>& declared_bases) {
+  class Facts : public IRVisitor {
+   public:
+    std::vector<AssignStmtPtr> assigns;
+    std::map<const Var*, const Var*> aliases;
+    std::set<const Var*> version_bases;
+    std::set<const Var*> partial_view_bases;
+    const Var* Root(const Var* var) const {
+      auto it = aliases.find(var);
+      return it == aliases.end() ? var : it->second;
+    }
+    void VisitStmt_(const AssignStmtPtr& stmt) override {
+      if (auto tile = As<TileType>(stmt->var_->GetType()); tile && tile->memref_) {
+        assigns.push_back(stmt);
+        auto call = As<Call>(stmt->value_);
+        auto source = AsVarLike(stmt->value_);
+        if (call && op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
+          source = AsVarLike(call->args_[0]);
+        }
+        if (source) {
+          const auto* root = Root(source.get());
+          aliases.emplace(stmt->var_.get(), root);
+          const auto source_type = As<TileType>(root->GetType());
+          const auto& ref = *tile->memref_;
+          // Moving an ordinary result into a uniform slot must preserve every
+          // view in its allocation family, not just the defining result type.
+          if (ref->slot_count_ == 1 && source_type && source_type->memref_ &&
+              (!TileBufSignature::FromTileType(*tile).IsFullSlotAlias(
+                   TileBufSignature::FromTileType(*source_type)) ||
+               !structural_equal(ref->byte_offset_, (*source_type->memref_)->byte_offset_))) {
+            partial_view_bases.insert(ref->base_.get());
+          }
+        }
+        if (call && call->GetAttr<bool>(kSoftwarePipelineSlotsAttr, false)) {
+          version_bases.insert((*tile->memref_)->base_.get());
+        }
+      }
+      IRVisitor::VisitStmt_(stmt);
+    }
+  } facts;
+  facts.VisitStmt(body);
+  if (facts.version_bases.empty()) return body;
+  std::map<const Var*, int> last_use;
+  for (const auto& [var, interval] : lifetimes.var_liveness) {
+    last_use[facts.Root(var)] = std::max(last_use[facts.Root(var)], interval.second);
+  }
+  ReuseMap reuse;
+  std::map<const Var*, VarPtr> storage;
+  for (const auto& stmt : facts.assigns) {
+    auto call = As<Call>(stmt->value_);
+    if (!call || !OpRegistry::GetInstance().IsRegistered(call->op_->name_) ||
+        facts.aliases.count(stmt->var_.get())) {
+      continue;
+    }
+    auto output = As<TileType>(stmt->var_->GetType());
+    INTERNAL_CHECK_SPAN(output, stmt->span_) << "Internal error: software pipeline reuse requires a tile";
+    INTERNAL_CHECK_SPAN(output->memref_.has_value(), stmt->span_)
+        << "Internal error: software pipeline reuse requires an allocated tile";
+    const auto* output_base = (*output->memref_)->base_.get();
+    if (declared_bases.count(output_base) || facts.partial_view_bases.count(output_base)) continue;
+    const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+    if (!entry.IsInplaceSafe() || entry.GetCrossCoreRole()) continue;
+    auto def = lifetimes.var_liveness.find(stmt->var_.get());
+    if (def == lifetimes.var_liveness.end()) continue;
+    auto resolved = [&](const VarPtr& var) {
+      auto it = storage.find(facts.Root(var.get()));
+      return it == storage.end() ? var : it->second;
+    };
+    std::set<const Var*> forbidden;
+    for (const auto arg : entry.ForbidOutputAliasArgs()) {
+      if (arg >= call->args_.size()) continue;
+      auto var = AsVarLike(call->args_[arg]);
+      if (!var) continue;
+      auto ref = GetTypeMemRef(resolved(var)->GetType());
+      if (ref && *ref) forbidden.insert((*ref)->base_.get());
+    }
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      if (entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read || entry.IsWorkspaceArg(i)) continue;
+      auto input = AsVarLike(call->args_[i]);
+      if (!input || !last_use.count(facts.Root(input.get())) ||
+          last_use.at(facts.Root(input.get())) != def->second.first) {
+        continue;
+      }
+      auto source = resolved(input);
+      auto tile = As<TileType>(source->GetType());
+      if (!tile || !tile->memref_) continue;
+      const auto& ref = *tile->memref_;
+      if (ref->slot_count_ <= 1 || !facts.version_bases.count(ref->base_.get()) ||
+          forbidden.count(ref->base_.get()) || output->memory_space_ != tile->memory_space_ ||
+          output->dtype_.GetBit() != tile->dtype_.GetBit() ||
+          !TileBufSignature::FromTileType(*output).IsFullSlotAlias(TileBufSignature::FromTileType(*tile))) {
+        continue;
+      }
+      // Marked slot regions originate only from pipeline loads, including their
+      // tile.create consumer views and forwarded chains. Preserve the target
+      // load/TPOP constraint even though those views are not tile.load defs.
+      if (hazard.reads_tpop.count(stmt->var_.get())) continue;
+      reuse.emplace(stmt->var_, ReusePlacement{source, 0, true});
+      storage.emplace(stmt->var_.get(), source);
+      break;
+    }
+  }
+  return reuse.empty() ? body : ApplyMemRefSharing(body, reuse, lifetimes.var_sharing_groups);
 }
 
 }  // namespace memory_reuse

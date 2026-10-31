@@ -297,6 +297,13 @@ void PTOCodegen::VisitExpr_(const ir::FloorDivPtr& op) {
                        "arith.divf");
 }
 void PTOCodegen::VisitExpr_(const ir::FloorModPtr& op) {
+  // CanonicalSlotCollector proves these INDEX operands nonnegative. Preserve
+  // the unsigned remainder PTOAS uses for slot synchronization, while ordinary
+  // FloorMod expressions keep the signed floor correction below.
+  if (fs_.unsigned_slot_remainders.count(op.get())) {
+    VisitBinaryArithExpr(op, "arith.remui", "arith.remf");
+    return;
+  }
   const auto dtype = ir::GetScalarDtype(op);
   if (dtype != DataType::INDEX && !dtype.IsSignedInt()) {
     VisitBinaryArithExpr(op, "arith.remsi", "arith.remf");

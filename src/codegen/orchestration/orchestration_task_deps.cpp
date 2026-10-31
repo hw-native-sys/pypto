@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <any>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <map>

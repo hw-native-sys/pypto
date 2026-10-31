@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -780,7 +781,6 @@ class PTOCodegen : public CodegenBase {
    * disjoint byte ranges within that parameter.
    */
   [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
-
   /**
    * @brief Whether physical addresses are baked into the emitted PTO.
    *
@@ -977,14 +977,18 @@ class PTOCodegen : public CodegenBase {
 
   /// One author-declared multi-slot allocation (`pl.MemRef(slots=N)`), lowered to
   /// a ptoas `pto.alloc_multi_tile` region whose slots are selected per use by
-  /// `pto.multi_tile_get`. PTOAS-planner mode only — see PlanMultiBufferRegions.
+  /// `pto.multi_tile_get`. Also used with fixed addresses by software pipelines.
   struct MultiBufferRegion {
-    std::string region_ssa;     ///< The `%mb` handle the slots are taken from
-    std::string mtb_type_str;   ///< `!pto.multi_tile_buf<<slot>, count=N>`
-    std::string slot_type_str;  ///< The single-slot `!pto.tile_buf<...>` type
+    std::string region_ssa;       ///< The `%mb` handle the slots are taken from
+    std::string mtb_type_str;     ///< `!pto.multi_tile_buf<<slot>, count=N>`
+    std::string slot_type_str;    ///< The single-slot `!pto.tile_buf<...>` type
+    std::string parent_type_str;  ///< Optional flat parent for ordinary slot subviews
+    std::string flat_slot_type_str;
+    int64_t slot_elements = 0;
+    std::string addr_ssa;       ///< Constant base address under the PyPTO planner
     std::string valid_row_ssa;  ///< valid_row operand (shared by every slot)
     std::string valid_col_ssa;  ///< valid_col operand (shared by every slot)
-    uint64_t count = 1;         ///< Slot count, in [2, 16] (the ptoas bound)
+    uint64_t count = 1;         ///< Slots per backend region, in [2, 16]
   };
 
   /**
@@ -1046,27 +1050,21 @@ class PTOCodegen : public CodegenBase {
    * region and derive per-slot (dynamic event id) synchronization from the slot
    * expression. Emitting N unrelated `alloc_tile`s instead throws that away.
    *
-   * Runs only under the PTOAS memory planner (`emit_tile_addr_ == false`). Under
-   * the PyPTO planner, ptoas runs at `--pto-level=level3`, where a region needs an
-   * explicit `addr` base that codegen does not emit, so the baked-address
-   * `alloc_tile` path stays. ptoas itself handles such a region: given a constant
-   * `addr`, it has derived the same per-slot sync at level3 as at level2 since 0.55
-   * (hw-native-sys/PTOAS#1106, closed).
+   * Runs under the PTOAS planner or, when software pipelining is enabled, with
+   * a constant region base assigned by the PyPTO planner.
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
    * the slots share one tile_buf type and one static valid extent, at most one of
    * them is live per loop iteration, the memory space is a local one ptoas supports
-   * for multi_tile_buf (vec / mat / acc), and the count is within ptoas's `[2, 16]`.
+   * for multi_tile_buf (vec / mat / acc), and each backend region has 2..16 slots.
    *
-   * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
-   * typing one (hw-native-sys/PTOAS#1519 in the pinned ptoas) — see
-   * CoLiveSlotCollector.
+   * The opt-in fixed-address path additionally supports canonical co-live slots
+   * through addressed parent buffers and subviews, avoiding multi-tile startup
+   * and drain synchronization regressions in the assembler.
    *
-   * Anything else is a `ValueError` naming the shape, *not* a fallback: under this
-   * planner per-slot `alloc_tile`s would leave ptoas free to plan the slots on top
-   * of each other, which is the one thing the declaration exists to prevent. The
-   * ordinary `alloc_tile` path is reached only when no region is planned at all —
-   * under the PyPTO planner, or for an allocation that declares no slots.
+   * Unsupported declarations keep their addressed alloc_tile form under PyPTO.
+   * Under PTOAS they raise a ValueError: separate unaddressed alloc_tile ops
+   * would not preserve the declared separation between slots.
    *
    * @param func The function being generated (scanned for tile phis, which take a
    *             head-declared handle a per-use slot cannot provide)
@@ -1084,12 +1082,14 @@ class PTOCodegen : public CodegenBase {
    * Emitted where the ordinary `alloc_tile` would be — at the tile's definition —
    * so a runtime slot index (`l0c[i % 2]`) is read inside the loop that names it.
    *
-   * @return false when no region was planned for `memref`'s allocation — it
-   *         declares no slots, or the PyPTO planner is in use. An allocation that
-   *         declares slots this planner cannot describe never reaches here:
-   *         PlanMultiBufferRegions has already raised.
+   * @return false when no region was planned, including addressed declarations
+   *         that keep ordinary alloc_tile lowering. Unsupported declarations
+   *         under the PTOAS planner have already raised in PlanMultiBufferRegions.
    */
-  bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf, const ir::Span& span);
+  bool TryEmitMultiTileGet(const ir::TileTypePtr& type, const std::string& tile_buf, const ir::Span& span);
+
+  /// Existing operand whose region slot is also the in-place compute result.
+  [[nodiscard]] ir::VarPtr FindMultiTileInputAlias(const ir::AssignStmtPtr& stmt) const;
 
   /**
    * @brief Emit the `pto.alloc_multi_tile` declarations in the function head.
@@ -1109,6 +1109,8 @@ class PTOCodegen : public CodegenBase {
   /// Per-function mutable state that is reset at the start of each GenerateFunction call.
   struct FunctionState {
     bool buffer_ir = false;
+    /// Lowered slot producers require shared alias identity even through split APIs.
+    bool has_software_pipeline_slots = false;
     std::ostringstream constants_section;
     std::ostringstream body_section;
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
@@ -1173,6 +1175,10 @@ class PTOCodegen : public CodegenBase {
     /// The same regions in discovery order — the map is keyed by pointer, which
     /// is not a stable order to emit declarations in.
     std::vector<const ir::Var*> multi_buffer_region_order;
+    /// Slot remainders proven to have nonnegative operands in canonical loops.
+    std::set<const ir::Expr*> unsigned_slot_remainders;
+    /// Canonical (induction, offset, count) remainders in one statement region.
+    std::map<std::tuple<const ir::Expr*, int64_t, int64_t>, std::string> slot_index_ssa;
 
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
@@ -1260,6 +1266,7 @@ class PTOCodegen : public CodegenBase {
 
     void Reset() {
       buffer_ir = false;
+      has_software_pipeline_slots = false;
       constants_section.str("");
       constants_section.clear();
       body_section.str("");
@@ -1301,6 +1308,8 @@ class PTOCodegen : public CodegenBase {
       next_tile_alloc_scope = 0;
       multi_buffer_regions.clear();
       multi_buffer_region_order.clear();
+      unsigned_slot_remainders.clear();
+      slot_index_ssa.clear();
 
       tuple_element_index.clear();
       current_function.reset();

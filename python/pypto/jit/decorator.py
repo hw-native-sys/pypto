@@ -199,6 +199,8 @@ def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
     }
     if run_config.memory_planner is not None:
         kwargs["memory_planner"] = run_config.memory_planner
+    if run_config.enable_software_pipeline is not None:
+        kwargs["enable_software_pipeline"] = run_config.enable_software_pipeline
     return kwargs
 
 
@@ -220,10 +222,22 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     return _passes.MemoryPlanner.PYPTO
 
 
-def _resolve_enable_buffer_ir() -> bool:
-    """Resolve the staged Buffer IR option inherited by ``ir.compile()``."""
+def _resolve_enable_buffer_ir(software_pipeline: bool | None = None) -> bool:
+    """Mirror compile's Tile IR selection for an explicit software pipeline."""
     ctx = _passes.PassContext.current()
-    return ctx.get_enable_buffer_ir() if ctx is not None else True
+    return (
+        ctx.get_enable_buffer_ir()
+        if ctx is not None
+        else not _resolve_enable_software_pipeline(software_pipeline)
+    )
+
+
+def _resolve_enable_software_pipeline(explicit: bool | None = None) -> bool:
+    """Resolve the explicit option, active context, then the default for caching."""
+    if explicit is not None:
+        return explicit
+    ctx = _passes.PassContext.current()
+    return ctx.get_enable_software_pipeline() if ctx is not None else False
 
 
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:
@@ -277,6 +291,7 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         diagnostic_phase=kwargs.get("diagnostic_phase"),
         memory_planner=kwargs.get("memory_planner"),
         runtime=kwargs.get("runtime"),
+        enable_software_pipeline=kwargs.get("enable_software_pipeline"),
     )
     bypass = (
         kwargs["dump_passes"] is not PassDumpLevel.NONE
@@ -1131,7 +1146,10 @@ class JITFunction:
             emit_source_loc=compile_kwargs["emit_source_loc"],
             memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
-            enable_buffer_ir=_resolve_enable_buffer_ir(),
+            enable_buffer_ir=_resolve_enable_buffer_ir(compile_kwargs.get("enable_software_pipeline")),
+            enable_software_pipeline=_resolve_enable_software_pipeline(
+                compile_kwargs.get("enable_software_pipeline")
+            ),
             runtime=_resolve_runtime(),
         )
 

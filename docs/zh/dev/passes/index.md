@@ -59,7 +59,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 28 | [StampTfreeSplit](28-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
 | 29 | [NormalizeReturnOrder](29-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |
 | 30 | [SkewCrossCorePipeline](30-skew_cross_core_pipeline.md) | 对混合 cube/vector 循环做软流水，使两个核重叠执行 |
-| 31 | [LowerPipelineToSlots](31-lower_pipeline_to_slots.md) | 把 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制（`memory_planner=PTOAS`） |
+| 31 | [LowerPipelineToSlots](31-lower_pipeline_to_slots.md) | PyPTO 下 opt-in 单层 Vec 预取和槽位轮转，或 PTOAS 下同轮槽位轮转；不支持的循环保留 unroll |
 | 32 | [LowerPipelineLoops](32-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
 | 33 | [CanonicalizeIOOrder](33-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |
 | 34 | [MaterializeTensorStrides](34-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |

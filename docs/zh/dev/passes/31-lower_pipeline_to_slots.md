@@ -1,8 +1,8 @@
 # LowerPipelineToSlots Pass
 
-把 `pl.pipeline(N, stage=F)` 循环改为让**一份**循环体轮转同一个分配的 `F` 个 slot，而不是把循环体复制 `F` 份。
+把合格的 `pl.pipeline(N, stage=F)` 循环下降为现有 slot MemRef。默认 PyPTO 路径保留 unroll + reorder；`enable_software_pipeline=True` 开启固定地址的显式预取。原有 PTOAS planner 轮转路径单独保留。
 
-## 概述
+## 原有轮转方案概述
 
 `pl.pipeline(N, stage=F)` 表达的是乒乓缓冲的诉求。[`LowerPipelineLoops`](32-lower_pipeline_loops.md) 用**复制**来兑现：把循环体复制 `F` 份，每份都有全新的定义变量，于是各份的 tile 是彼此独立的 MemRef，`MemoryReuse` 不允许把它们合并。这条路可行，但代价是 `F` 倍的代码量、一套静态/动态余数派发，以及为了隔开各份副本而存在的 `pipeline_membership` 机制。
 
@@ -21,7 +21,7 @@ for i in pl.range(64):
     pl.tile.store(x, [i * 128], out)
 ```
 
-**不引入新的 IR op，也不新增用户可见开关。** 合成出来的 MemRef 与作者手写的声明形状完全一致，因此 [`InitMemRef`](35-init_memref.md) 走同一条路径解析它，codegen 也分辨不出这个轮转是作者写的还是编译器推导的。
+**原有轮转方案不需要新的 IR op 或额外开关。** 合成出来的 MemRef 与作者手写的声明形状完全一致，因此 [`InitMemRef`](35-init_memref.md) 走同一条路径解析它，codegen 也分辨不出这个轮转是作者写的还是编译器推导的。
 
 由于边界、步长和 `iter_args` 都没有改动，不存在需要派发的余数——动态 trip count 完全不需要特殊处理。
 
@@ -35,16 +35,99 @@ for i in pl.range(64):
 
 这与 [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md) 的做法同构：它处理跨核 pipeline 循环，其余原样留下。
 
-## 自门控于 `memory_planner=PTOAS`
+## 可选的 PyPTO 软件流水
 
-在默认的 PyPTO planner 下，本 pass 对每个函数都原样返回，因此那条路径保持**字节一致**。
+按编译开启新调度，DSL 保持不变：
 
-这个门控划的是"region 在哪里被**发出**"，而不是"ptoas 在哪里**能用** region"。PTO codegen 的 `PlanMultiBufferRegions` 在 PyPTO planner 下直接返回，所以在那条路上合成的轮转只会落成一条运行时地址的普通 `alloc_tile`——正确，但拿不到本变换赖以生效的 slot 分析。
+```python
+import pypto.language as pl
+from pypto.runtime import RunConfig
 
-**限制不在 ptoas。** 给定 `pto.alloc_multi_tile addr = <常量 base>`，ptoas 0.55 在 `--pto-level=level3` 下推导出的 per-slot 动态 event 同步与 level2 一致——在一个预取循环上实测，归一化 event id 后同步算子序列逐条相同（prime 两个 event、按 slot 键控的 `wait_flag`/`set_flag`、两个 drain）。ptoas 0.54 则不会，这正是较早的
-[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106) 所描述的情形。
+@pl.jit
+def vec_add(x: pl.Tensor[[64, 1024], pl.FP32],
+            y: pl.Out[pl.Tensor[[64, 1024], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.pipeline(64, stage=3):
+            y[i:i + 1, :] = pl.add(x[i:i + 1, :], 1.0)
+    return y
 
-因此放宽门控要做的是 PyPTO 侧而非上游的工作：地址分配器需要为 region base 预留 `slot_count * slot_size`，codegen 需要把该地址发到 region 上。这属于后续工作；在它落地之前，本 pass 只覆盖 codegen 路径已经存在的那个 planner。
+vec_add.compile(config=RunConfig(enable_software_pipeline=True, codegen_only=True))
+```
+
+`PassContext([], enable_buffer_ir=False, enable_software_pipeline=True)` 和
+`ir.compile(..., enable_software_pipeline=True)` 使用同一配置。context 默认值为 `False`；
+compile/RunConfig 未指定时继承当前 context。已有 context 时显式传入编译选项会报错。
+生效的开关参与 JIT 缓存键，并通过 profiling 和 pass dump 的嵌套 context 传递。
+首版要求 PyPTO 内存规划器和 Tile IR 流水线。显式 context 必须关闭 Buffer IR；
+没有当前 context 时，compile/RunConfig 的软件流水选项自动选择 Tile IR。
+其他编译保持默认开启的 Buffer IR 选择。
+
+该 pass 使用已有的 `software_pipeline_slots` Call 属性标记变换后的槽位分配。
+内存复用保留该标记，codegen 直接读取 lower 后的 IR，无需再次传入开关。
+只有预取和尾部计算、没有稳态循环的短流水也使用同一机制。
+
+`tests/ut/codegen/test_software_pipeline_codegen.py` 中的 PTOAS 契约测试复用已有的
+CPU 编译回归步骤：`pytest tests/ut/codegen/ --require-ptoas -m ptoas_compile`。
+该步骤使用固定版本的汇编器，无需设备运行时、CANN 或 NPU。普通单测在缺少 PTOAS 时
+可以跳过这些测试；`--require-ptoas` 会让缺失或不兼容的汇编器直接导致 CI 失败。
+
+单条局部数据流有 `S` 个槽位时，预取距离为 `P = S - 1`：
+
+1. 预加载逻辑迭代 `0 .. P-1`。
+2. 对 `t = 0 .. N-P-1`，先把 `t+P` 加载到 `(t+P) % S`，再使用 `t % S` 计算、写回 `t`。
+3. 计算、写回剩下的 `P` 次迭代。
+
+变换复用普通语句、循环和 `MemRef` 槽位元数据，通过 `tile.create` 获取已填充存储的句柄，
+不增加 IR 节点或算子。主循环降为顺序循环，后续 unroll 和 IO reorder 不再改动其调度。
+槽位下标局部生成 `arith.remui`，不改变一般标量取模的语义。计算结果复用输入槽位时，
+codegen 也复用已定义的 tile 句柄；分别发射等价的槽位取模 SSA 可能妨碍 PTOAS 推导动态 event 调度。
+
+PyPTO 预留完整 region 并分配基地址。在 PTOAS level3 下，循环中不存在共活槽位的调度可以生成
+`pto.alloc_multi_tile addr = ...` 和 `pto.multi_tile_get`。共活预取槽位（包括静态循环），
+以及运行时或带条件的调度，使用 `pto.alloc_tile addr = <base>` 和 `pto.subview`，
+保留完整槽分配及已证明的静态有效维度，避免 PTOAS multi-tile 预取同步回退（#1519）。
+两者都不使用 PTOAS 内存规划；最终容量检查在 AllocateMemoryAddr 完成。
+单层流水在 InitMemRef 之后，由 MemoryReuse 使用既有算子契约和共享生命周期分析：
+
+- GM load 拥有 `S` 槽输入区域。
+- 原地安全的计算可以继续使用最后一次读取的输入槽。INT32 到 FP32 等同元素位宽转换、
+  完整的一维 reshape 别名复用 `TileBufSignature` 的物理布局证明。仍存活的别名、禁止别名
+  的参数或不兼容布局会阻止复用。结果的整个别名族必须适合完整槽；较窄的 view 保留普通存储。
+- MemoryReuse 决定末端 store 源是否复用输入版本；否则使用普通分配，不由调度 pass 创建 output ring。
+  同时存在 store 和 compute 消费者的值仍不支持。
+- 独立中间量及 reduction scratch 保持普通分配。常驻的完整 Vec tile 可以留在循环外。
+  可写参数必须在 registry 声明为 workspace，且由未绑定的 `tile.create` 独立分配；
+  同时作为循环数据读取的 workspace 会被拒绝。已有 reduction 复用原有的
+  `LaneInvariantArg::Scratch` 契约。
+  这些分配均计入容量检查。
+
+对既有归约临时工作区（scratch）的额外隔离，只作用于变换后带有
+`software_pipeline_slots` 标记的循环。仅开启选项，不会改变回退或其他未变换循环的
+scratch 复用策略。该隔离作用于带标记的稳态循环中使用的 scratch；
+普通循环以及位于该循环外的预取和尾部计算沿用既有分配约束。
+
+例如，accumulator load 可经 cast、ReLU、列广播乘法原地复用同一槽；row-sum 的输出和
+scratch 独立；最后的乘法可复用已最后使用的 KV-scale 槽。三槽 128x64 score epilogue
+只需 accumulator 与 scale 两个 ring，无需复制所有中间量。
+
+强制别名 view 由 `InitMemRef` 继承源分配。Codegen 只在已证明时使用静态有效维度，
+用现有 `pto.treshape` 表达槽位 view，并在每个直线语句区域共享规范槽位下标 SSA。
+不会把动态或部分有效维度替换成完整形状。
+
+局部路径支持有效范围完整的二维平坦 Vec tile、2–4 个 stage、非负常量起点和正常量步长。
+动态边界使用受保护的预载与归一化循环；有溢出风险的路径保留原调度。
+嵌套流水、跨核 FIFO 操作、不支持的副作用、真正的数据递推和无法证明的
+别名关系会使整条循环回退。单层静态循环的次数小于预载距离时也保留既有路径。
+
+**性能限制：** 原版 PTOAS 可能对槽位互不重叠的动态 subview 仍插入保守同步。
+它不会移除必要同步，但可能阻止 MTE2 与向量计算重叠，见
+[PTOAS #1587](https://github.com/hw-native-sys/PTOAS/issues/1587)。
+因此，开启该变换不保证性能提升。
+
+## 原有 PTOAS planner 轮转
+
+新开关关闭时，`memory_planner=PTOAS` 保留本文原有的单循环体 `iv % F` 轮转。
+默认 PyPTO planner 且新开关关闭时，本 pass 保持所有循环不变。
 
 ## API
 
@@ -58,7 +141,7 @@ with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
     result = passes.lower_pipeline_to_slots()(program)
 ```
 
-## 行为
+## 原有轮转方案的行为
 
 对于 `F > 1` 且通过下列全部门槛的 `ForStmt(kind == ForKind::Pipeline, attrs["pipeline_stages"] == F)`：
 
@@ -203,3 +286,11 @@ ptoas 会把 `floordivsi` 展开为截断除法加上同样的条件修正。
 - [`InitMemRef`](35-init_memref.md) —— 解析合成出来的声明
 - [PTO codegen](../codegen/00-pto_codegen.md) —— 把 slot 下降为 ptoas region
 - [Python 语法：槽位](../language/00-python_syntax.md#槽位) —— 同一声明的手写形式
+
+### 动态边界调度
+
+符合条件的动态循环保留 guarded preload 和一条归一化循环体。
+PyPTO 内部调度属性不会作为 assembler 契约输出。
+运行时或带条件的循环使用固定地址父 buffer 与显式 slot subview，保留槽数、固定分配基址及已证明的静态有效维度。
+PTOAS 为这些标准操作插入同步，不需要私有能力开关；A5 保留既有 fallback。
+保守同步可能使传输串行，因此 overlap 和数值正确性需要分别验证。

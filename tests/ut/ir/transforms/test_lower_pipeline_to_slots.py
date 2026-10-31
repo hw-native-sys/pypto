@@ -7,39 +7,37 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for LowerPipelineToSlots — ``pl.pipeline`` via MemRef slots, not body copies.
+"""Test both LowerPipelineToSlots paths and their conservative whole-loop fallback.
 
-The pass keeps ONE loop body and rebinds its top-level loads onto
-``pl.MemRef(name, slots=F)[iv % F]``, then demotes the loop to Sequential. It is
-self-gated on ``memory_planner=PTOAS`` and falls back to leaving a loop untouched
-(for ``LowerPipelineLoops`` to replicate) whenever it cannot guarantee codegen
-will accept the region.
-
-Groups:
-  * ``TestGating``   — the planner gate, and that a declined loop is left intact
-  * ``TestBinding``  — the slot geometry actually written onto the tile
-  * ``TestFallback`` — one case per expressible eligibility gate, each asserting NO
-    slot binding
-  * ``TestChaining`` — LowerPipelineLoops still replicates what this pass declined
+The existing PTOAS path rotates one body through declared slots. The opt-in
+PyPTO path builds preload / steady / drain using ordinary loops and the same
+slot MemRefs, with prefetch distance equal to stage count minus one.
 """
 
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 from pypto.arith import Analyzer
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.text_parser import parse
+from pypto.pypto_core import ir as _ir_core
 
 _PASS_NAME = "LowerPipelineToSlots"
 
 
-def _run_to_slots(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
+def _run_to_slots(
+    program: ir.Program, planner: passes.MemoryPlanner, *, software: bool = False
+) -> ir.Program:
     """Run the Default strategy up to and including LowerPipelineToSlots.
 
     The pass needs tile-level IR (memory spaces inferred, structure normalized),
     so it cannot run standalone on a freshly parsed program. The PassManager is
     built inside the context because its construction reads the planner.
     """
-    with passes.PassContext([], memory_planner=planner):
+    with passes.PassContext(
+        [], memory_planner=planner, enable_buffer_ir=False, enable_software_pipeline=software
+    ):
         manager = PassManager(OptimizationStrategy.Default)
         names = manager.pass_names
         stop = names.index(_PASS_NAME)
@@ -795,6 +793,703 @@ class TestChaining:
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             replicated = passes.lower_pipeline_loops()(after_slots)
         assert _load_count(replicated) == 2 * before_loads
+
+
+def _plan_memory(program, *, allocate=False):
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False, enable_software_pipeline=True
+    ):
+        after = passes.init_mem_ref()(program)
+        after = passes.materialize_semantic_aliases()(after)
+        after = passes.memory_reuse()(after)
+        return passes.allocate_memory_addr()(after) if allocate else after
+
+
+@pytest.mark.usefixtures("ascend_backend")
+class TestSoftwarePipeline:
+    """The opt-in PyPTO path splits prefetch from consumption without new IR kinds."""
+
+    @staticmethod
+    def _program(stage: int, trips: int, start: int = 0, step: int = 1) -> ir.Program:
+        stop = start + trips * step
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[1024, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[1024, 64], pl.FP32]],
+            ) -> pl.Tensor[[1024, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(start, stop, step, stage=stage, init_values=(out,)):
+                    t: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    e: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(t, 1.0)
+                    nxt: pl.Tensor[[1024, 64], pl.FP32] = pl.store(e, [i, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        return Before
+
+    @pytest.mark.parametrize("stage", [2, 3, 4])
+    @pytest.mark.parametrize("trips", [4, 5, 64, 65])
+    def test_preload_steady_and_drain(self, stage, trips):
+        after = _run_to_slots(self._program(stage, trips), passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        loops = [stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.ForStmt)]
+        assert len(loops) == 1
+        steady = loops[0]
+        assert steady.kind == ir.ForKind.Sequential
+        assert isinstance(steady.start, ir.ConstInt)
+        assert isinstance(steady.stop, ir.ConstInt)
+        assert isinstance(steady.step, ir.ConstInt)
+        assert steady.start.value == 0
+        assert steady.stop.value == trips - (stage - 1)
+        assert steady.step.value == 1
+        assert _load_count(after) == stage, "P prologue loads plus one steady load"
+        calls = [
+            stmt.value
+            for stmt in _walk_stmts(after)
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
+        create_name = _ir_core.get_op("tile.create").name
+        assert sum(call.op.name == create_name for call in calls) == stage
+        memrefs = list(_slotted_memrefs(after).values())
+        assert memrefs and all(memref.slot_count_ == stage for memref in memrefs)
+        ir.assert_structural_equal(pl.parse_program(after.as_python()), after)
+
+    @pytest.mark.parametrize("stage", [2, 3, 4])
+    def test_exact_prefetch_count_has_no_empty_steady_loop(self, stage):
+        after = _run_to_slots(self._program(stage, stage - 1), passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        assert not [stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.ForStmt)]
+        assert _load_count(after) == stage - 1
+        assert _slotted_memrefs(after)
+
+    @pytest.mark.parametrize("stage,trips", [(2, 0), (3, 0), (3, 1), (4, 1), (4, 2)])
+    def test_short_loop_keeps_existing_lowering(self, stage, trips):
+        before = self._program(stage, trips)
+        legacy = _run_to_slots(before, passes.MemoryPlanner.PYPTO)
+        enabled = _run_to_slots(before, passes.MemoryPlanner.PYPTO, software=True)
+        ir.assert_structural_equal(enabled, legacy)
+        assert not _slotted_memrefs(enabled)
+
+    def test_normalizes_source_start_and_step(self):
+        after = _run_to_slots(self._program(3, 5, start=7, step=3), passes.MemoryPlanner.PYPTO, software=True)
+        loops = [stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.ForStmt)]
+        assert len(loops) == 1
+        steady = loops[0]
+        assert isinstance(steady.start, ir.ConstInt)
+        assert isinstance(steady.step, ir.ConstInt)
+        assert steady.start.value == 0 and steady.step.value == 1
+        refs = [
+            stmt.var.type.memref
+            for stmt in _walk_stmts(after)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.memref is not None
+        ]
+        dynamic = [ref.slot_index_ for ref in refs if isinstance(ref.slot_index_, ir.FloorMod)]
+        assert dynamic
+        assert all(isinstance(index.left, (ir.Var, ir.Add)) for index in dynamic)
+        assert "7" in after.as_python()
+        ir.assert_structural_equal(pl.parse_program(after.as_python()), after)
+
+    def test_result_reuses_last_used_input_slot(self):
+        after = _run_to_slots(self._program(3, 8), passes.MemoryPlanner.PYPTO, software=True)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        assert set(refs) == {"t", "e"}
+        assert refs["t"].base_.same_as(refs["e"].base_), (
+            "terminal in-place reuse must not add an output region"
+        )
+
+    @pytest.mark.parametrize(
+        "ascend_backend,split,stage",
+        [
+            (BackendType.Ascend910, True, 2),
+            (BackendType.Ascend910, True, 3),
+            (BackendType.Ascend910, False, 3),
+            (BackendType.Ascend950, True, 3),
+        ],
+        indirect=["ascend_backend"],
+    )
+    def test_input_slot_forwarding_respects_load_tpop_hazard(self, ascend_backend, split, stage):
+        """Slot forwarding must preserve the split-AIV load/TPOP target constraint."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def main(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)
+                for i, (acc,) in pl.pipeline(8, stage=stage, init_values=(out,)):
+                    loaded: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                        a, [i * 8, 0], [8, 128], target_memory=pl.Mem.Vec
+                    )
+                    # This view still reads pipe-owned storage, not a pool allocation.
+                    pipe_view: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tile.reshape(pipe_chunk, [8, 128])
+                    result: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(loaded, pipe_view)
+                    stored = pl.tile.store(result, [i * 8, 0], acc)
+                    y = pl.yield_(stored)
+                return y
+
+        if not split:
+            Before = parse(Before.as_python().replace("SplitMode.UP_DOWN", "SplitMode.NONE"))
+        # Start from typed SSA AIV IR: cross-core pipe setup is orthogonal to
+        # the scheduling and memory-reuse passes under test.
+        with passes.PassContext(
+            [],
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            enable_buffer_ir=False,
+            enable_software_pipeline=True,
+        ):
+            lowered = passes.lower_pipeline_to_slots()(Before)
+        assert not _pipeline_loops(lowered), "Exercise actual scheduled slots, not fallback replication"
+        assert _load_count(lowered) == stage
+        after = _plan_memory(lowered)
+        outputs = [
+            stmt
+            for stmt in _walk_stmts(after)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.add").name
+        ]
+        assert outputs
+        hazardous = ascend_backend == BackendType.Ascend910 and split
+        for stmt in outputs:
+            assert isinstance(stmt.value, ir.Call)
+            source_type = stmt.value.args[0].type
+            destination_type = stmt.var.type
+            assert isinstance(source_type, ir.TileType) and isinstance(destination_type, ir.TileType)
+            source = source_type.memref
+            destination = destination_type.memref
+            assert source is not None and destination is not None
+            assert source.slot_count_ == stage
+            assert source.base_.same_as(destination.base_) is not hazardous, (
+                "Only Ascend910 split-AIV must separate the output from its load slot"
+            )
+
+    def test_multiple_inputs_share_no_regions(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 64], pl.FP32],
+                b: pl.Tensor[[8, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(8, stage=3, init_values=(out,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(b, [i, 0], [1, 64])
+                    z: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, y)
+                    nxt = pl.store(z, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        refs = _slotted_memrefs(after)
+        assert not refs["x"].base_.same_as(refs["y"].base_)
+        assert _load_count(after) == 6
+
+    def test_compute_chain_reuses_last_used_input_slots(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 64], pl.FP32],
+                b: pl.Tensor[[8, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(8, stage=3, init_values=(out,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    z: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(b, [i, 0], [1, 64])
+                    first: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, z)
+                    final: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(first, 1.0)
+                    nxt = pl.store(final, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        assert set(refs) == {"x", "z", "first", "final"}
+        assert refs["first"].base_.same_as(refs["x"].base_)
+        assert refs["final"].slot_count_ == 3
+        assert refs["final"].base_.same_as(refs["x"].base_)
+        assert not refs["final"].base_.same_as(refs["z"].base_)
+        assert _load_count(after) == 6, "output slots must not introduce any preloads"
+        ir.assert_structural_equal(pl.parse_program(after.as_python()), after)
+
+    @pytest.mark.parametrize("trips", [2, 3, 64, 65])
+    def test_score_reuses_cast_chain_and_last_use_scale_with_private_scratch(self, trips):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                acc: pl.Tensor[[trips * 128, 64], pl.INT32],
+                scale: pl.Tensor[[trips * 128, 1], pl.FP32],
+                coef: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[trips * 128, 1], pl.FP32]],
+            ) -> pl.Tensor[[trips * 128, 1], pl.FP32]:
+                resident = pl.load(coef, [0, 0], [1, 64], target_memory=pl.Mem.Vec)
+                scratch = pl.create_tile([128, 64], dtype=pl.FP32)
+                for i in pl.pipeline(trips, stage=3):
+                    a = pl.load(acc, [i * 128, 0], [128, 64], target_memory=pl.Mem.Vec)
+                    s = pl.load(scale, [i * 128, 0], [128, 1], target_memory=pl.Mem.Vec)
+                    fp = pl.cast(a, target_type=pl.FP32, mode="none")
+                    positive = pl.maximum(fp, 0.0)
+                    weighted = pl.col_expand_mul(positive, resident)
+                    reduced = pl.row_sum(weighted, scratch)
+                    value = pl.mul(reduced, s)
+                    out = pl.store(value, [i * 128, 0], out)
+                return out
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        for name in ("fp", "positive", "weighted"):
+            assert refs[name].base_.same_as(refs["a"].base_)
+        assert "resident" not in refs and "scratch" not in refs and "reduced" not in refs
+        roots = {ref.base_.name_hint for ref in refs.values()}
+        assert len(roots) == 2, "The score uses only accumulator and scale rings"
+        assert _load_count(after) == (3 if trips == 2 else 4) + (2 if trips == 2 else 3)
+        ir.assert_structural_equal(pl.parse_program(after.as_python()), after)
+
+    def test_workspace_read_as_data_keeps_original_schedule(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[8 * 32, 64], pl.FP32], out: pl.Out[pl.Tensor[[8 * 32, 1], pl.FP32]]
+            ) -> pl.Tensor[[8 * 32, 1], pl.FP32]:
+                scratch = pl.create_tile([32, 64], dtype=pl.FP32)
+                for i in pl.pipeline(8, stage=3):
+                    x = pl.load(src, [i * 32, 0], [32, 64])
+                    reduced = pl.row_sum(x, scratch)
+                    reread = pl.row_sum(scratch, x)
+                    out = pl.store(pl.add(reduced, reread), [i * 32, 0], out)
+                return out
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert _pipeline_loops(after)
+        assert not _slotted_memrefs(after)
+
+    def test_repeated_operand_in_one_compute_is_one_consumer(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(8, stage=3, init_values=(out,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, x)
+                    nxt = pl.store(y, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        assert refs["x"].base_.same_as(refs["y"].base_)
+
+    def test_shared_prefetched_input_falls_back(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(8, stage=3, init_values=(out,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                    z: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, y)
+                    nxt = pl.store(z, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert len(_pipeline_loops(after)) == 1
+        assert not _slotted_memrefs(after), "multiple consumers of a rotating input can exhaust PTOAS events"
+
+    def test_before_after_exact_prefetch(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def main(
+                self, a: pl.Tensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(1, stage=2, init_values=(out,)):
+                    t: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(a, [i, 0], [1, 64])
+                    e: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(t, 1.0)
+                    nxt = pl.tile.store(e, [i, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def main(
+                self, a: pl.Tensor[[1, 64], pl.FP32], out: pl.Out[pl.Tensor[[1, 64], pl.FP32]]
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                _preload: pl.Tile[[1, 64], pl.FP32, pl.MemRef("pipe_t_0", slots=2)[0], pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [1, 64], attrs={"software_pipeline_slots": True})
+                )
+                current: pl.Tile[[1, 64], pl.FP32, pl.MemRef("pipe_t_0", slots=2)[0], pl.Mem.Vec] = (
+                    pl.tile.create(
+                        [1, 64], pl.FP32, target_memory=pl.Mem.Vec, attrs={"software_pipeline_slots": True}
+                    )
+                )
+                value: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(current, 1.0)
+                nxt = pl.tile.store(value, [0, 0], out)
+                y = nxt
+                return y
+
+        with passes.PassContext(
+            [],
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            enable_buffer_ir=False,
+            enable_software_pipeline=True,
+        ):
+            after = passes.lower_pipeline_to_slots()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_forbidden_alias_operand_is_checked_by_value(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(8, stage=3, init_values=(out,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.addsc(x, 1.0, x)
+                    nxt = pl.store(y, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        assert set(refs) == {"x"}  # The forbidden result keeps ordinary storage.
+
+    def test_scalar_recurrence_falls_back(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc, off) in pl.pipeline(8, stage=3, init_values=(out, 0)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [off, 0], [1, 64])
+                    nxt = pl.store(x, [i, 0], acc)
+                    result, next_off = pl.yield_(nxt, off + 1)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert len(_pipeline_loops(after)) == 1
+        assert not _slotted_memrefs(after)
+
+    def test_same_input_output_tensor_falls_back(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, a: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(8, stage=3, init_values=(a,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                    nxt = pl.store(y, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert len(_pipeline_loops(after)) == 1
+        assert not _slotted_memrefs(after)
+
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+    def test_dynamic_bound_has_guarded_preload_and_one_rotating_body(self, ascend_backend):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(n, stage=3, init_values=(out,)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    nxt = pl.store(x, [i, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        if ascend_backend == BackendType.Ascend950:
+            assert len(_pipeline_loops(after)) == 1
+            assert not _slotted_memrefs(after)
+            return
+        assert not _pipeline_loops(after)
+        assert _slotted_memrefs(after)
+        loops = [stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.ForStmt)]
+        assert len(loops) == 2, "One scheduled body and one overflow fallback"
+        assert all(loop.kind == ir.ForKind.Sequential for loop in loops)
+        guards = [stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.IfStmt)]
+        assert len(guards) == 5, "Nonempty/overflow guards, two preloads and a future load"
+        legacy = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=False)
+        assert len(_pipeline_loops(legacy)) == 1
+        assert not _slotted_memrefs(legacy)
+
+    def test_declined_parent_keeps_nested_pipeline_replicable(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                for outer, (acc,) in pl.pipeline(2, stage=2, init_values=(out,)):
+                    for inner, (inner_acc,) in pl.pipeline(4, stage=3, init_values=(acc,)):
+                        x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [outer * 4 + inner, 0], [1, 64])
+                        y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                        nxt = pl.store(y, [outer * 4 + inner, 0], inner_acc)
+                        inner_result = pl.yield_(nxt)
+                    result = pl.yield_(inner_result)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert len(_pipeline_loops(after)) == 2
+        assert not _slotted_memrefs(after)
+        with passes.PassContext(
+            [],
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            enable_buffer_ir=False,
+            enable_software_pipeline=True,
+        ):
+            replicated = passes.lower_pipeline_loops()(after)
+        assert not _slotted_memrefs(replicated)
+
+    def test_unsupported_stage_falls_back(self):
+        before = self._program(5, 8)
+        legacy = _run_to_slots(before, passes.MemoryPlanner.PYPTO)
+        enabled = _run_to_slots(before, passes.MemoryPlanner.PYPTO, software=True)
+        ir.assert_structural_equal(enabled, legacy)
+        assert not _slotted_memrefs(enabled)
+
+    def test_stored_intermediate_with_compute_consumer_falls_back(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 64], pl.FP32],
+                out1: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[8, 64], pl.FP32], pl.Tensor[[8, 64], pl.FP32]]:
+                for i, (acc1, acc2) in pl.pipeline(8, stage=3, init_values=(out1, out2)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    first: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                    nxt1 = pl.store(first, [i, 0], acc1)
+                    final: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(first, 2.0)
+                    nxt2 = pl.store(final, [i, 0], acc2)
+                    result1, result2 = pl.yield_(nxt1, nxt2)
+                return result1, result2
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert len(_pipeline_loops(after)) == 1
+        assert not _slotted_memrefs(after), "a stored intermediate must not become a rotating compute input"
+
+    def test_multiple_stores_share_one_output_region(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[8, 64], pl.FP32],
+                out1: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[8, 64], pl.FP32], pl.Tensor[[8, 64], pl.FP32]]:
+                for i, (acc1, acc2) in pl.pipeline(8, stage=3, init_values=(out1, out2)):
+                    x: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                    nxt1 = pl.store(y, [i, 0], acc1)
+                    nxt2 = pl.store(y, [i, 0], acc2)
+                    result1, result2 = pl.yield_(nxt1, nxt2)
+                return result1, result2
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        assert set(refs) == {"x", "y"}
+        assert refs["x"].base_.same_as(refs["y"].base_)
+        store_name = _ir_core.get_op("tile.store").name
+        stores = [
+            stmt.value
+            for stmt in _walk_stmts(after)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == store_name
+        ]
+        assert len(stores) == 6, "one steady and two drain iterations each contain two stores"
+        for store in stores:
+            source_type = store.args[0].type
+            assert isinstance(source_type, ir.TileType)
+            assert source_type.memref is not None
+            assert source_type.memref.base_.same_as(refs["y"].base_)
+        ir.assert_structural_equal(pl.parse_program(after.as_python()), after)
+
+    def test_non_inplace_capacity_is_checked_after_memory_planning(self):
+        """A 144 KiB input ring plus an ordinary 48 KiB result exceeds UB."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tensor[[768, 64], pl.FP32], out: pl.Out[pl.Tensor[[768, 64], pl.FP32]]
+            ) -> pl.Tensor[[768, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(4, stage=3, init_values=(out,)):
+                    x: pl.Tile[[192, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i * 192, 0], [192, 64])
+                    y: pl.Tile[[192, 64], pl.FP32, pl.Mem.Vec] = pl.tile.addsc(x, 1.0, x)
+                    nxt = pl.store(y, [i * 192, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(after, allocate=True)
+
+    def test_inplace_output_does_not_duplicate_region_budget(self):
+        """The same 48 KiB geometry fits when load and output share one 144 KiB ring."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[768, 64], pl.FP32], out: pl.Out[pl.Tensor[[768, 64], pl.FP32]]
+            ) -> pl.Tensor[[768, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(4, stage=3, init_values=(out,)):
+                    x: pl.Tile[[192, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i * 192, 0], [192, 64])
+                    y: pl.Tile[[192, 64], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                    nxt = pl.store(y, [i * 192, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(after)
+        after = _plan_memory(after)
+        refs = _slotted_memrefs(after)
+        assert set(refs) == {"x", "y"}
+        assert refs["x"].base_.same_as(refs["y"].base_)
+
+    def test_memory_capacity_reports_error(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, a: pl.Tensor[[512, 256], pl.FP32], out: pl.Out[pl.Tensor[[512, 256], pl.FP32]]
+            ) -> pl.Tensor[[512, 256], pl.FP32]:
+                for i, (acc,) in pl.pipeline(4, stage=3, init_values=(out,)):
+                    x: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec] = pl.load(a, [i * 128, 0], [128, 256])
+                    y: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec] = pl.add(x, 1.0)
+                    nxt = pl.store(y, [i * 128, 0], acc)
+                    result = pl.yield_(nxt)
+                return result
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(after, allocate=True)
+
+
+def _allocation_bases(program: ir.Program, names: set[str]) -> dict[str, ir.Var]:
+    """Read allocation identities rather than relying on generated base names."""
+    refs: dict[str, ir.Var] = {}
+
+    class Storage(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            name = _source_name(op.var.name_hint)
+            if name in names:
+                assert isinstance(op.var.type, ir.TileType) and op.var.type.memref is not None
+                assert name not in refs, "Each source allocation must have exactly one definition"
+                refs[name] = op.var.type.memref.base_
+            super().visit_assign_stmt(op)
+
+    Storage().visit_program(program)
+    assert set(refs) == names
+    return refs
+
+
+@pytest.mark.parametrize("software", [False, True])
+@pytest.mark.parametrize("reduction", ["row_max", "row_sum"])
+def test_legacy_scratch_isolation_is_scoped_to_lowered_pipelines(software, reduction):
+    @pl.program
+    class ScratchLifetime:
+        @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+        def kernel(self, x: pl.Tensor[[64, 16], pl.FP32], y: pl.Tensor[[64, 16], pl.FP32]):
+            dead: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(x, [0, 0], [16, 16])
+            _prior_store = pl.tile.store(dead, [0, 0], y)
+            scratch: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            for i in pl.range(4, attrs={"software_pipeline_slots": 3}):
+                value: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(x, [i * 16, 0], [16, 16])
+                reduced: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.row_max(value, scratch)
+                _stored = pl.tile.store(reduced, [i * 16, 0], y)
+
+    refs = {}
+
+    class Allocations(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if op.var.name_hint in {"dead", "scratch"}:
+                assert isinstance(op.var.type, ir.TileType) and op.var.type.memref is not None
+                refs[op.var.name_hint] = op.var.type.memref.base_
+            super().visit_assign_stmt(op)
+
+    source = ir.python_print(ScratchLifetime).replace("tile.row_max", f"tile.{reduction}")
+    if not software:
+        source = source.replace(', attrs={"software_pipeline_slots": 3}', "")
+    Allocations().visit_program(_plan_memory(parse(source)))
+    assert set(refs) == {"dead", "scratch"}
+    # Legacy reduction scratch is recognized only in transformed loops.
+    # A previous MTE3 reader must not share the loop's hidden scratch writes.
+    # Ordinary loops retain their existing allocation policy.
+    assert refs["dead"].same_as(refs["scratch"]) is not software
+
+
+def test_static_pipeline_marks_steady_loop_and_isolates_scratch():
+    """The static builder must retain the same workspace isolation as dynamic loops."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+        def kernel(self, x: pl.Tensor[[128, 16], pl.FP32], y: pl.Tensor[[128, 16], pl.FP32]):
+            dead: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(x, [0, 0], [16, 16])
+            _prior_store = pl.tile.store(dead, [0, 0], y)
+            scratch: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            for i in pl.pipeline(8, stage=3):
+                value: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(x, [i * 16, 0], [16, 16])
+                reduced: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.row_sum(value, scratch)
+                _stored = pl.tile.store(reduced, [i * 16, 0], y)
+
+    after = _plan_memory(_run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True))
+    loops = [stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.ForStmt)]
+    refs = _allocation_bases(after, {"dead", "scratch"})
+    assert len(loops) == 1 and loops[0].kind == ir.ForKind.Sequential
+    assert loops[0].attrs["software_pipeline_slots"] == 3
+    assert set(refs) == {"dead", "scratch"}
+    assert not refs["dead"].same_as(refs["scratch"])
 
 
 if __name__ == "__main__":

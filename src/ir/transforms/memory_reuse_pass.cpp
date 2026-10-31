@@ -9,8 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cctype>
-#include <climits>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -72,13 +70,26 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     return func;
   }
 
+  auto planned_func = func;
+  auto constraint_analysis = AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+  if (auto* context = PassContext::Current(); context && context->GetEnableSoftwarePipeline()) {
+    new_body = memory_reuse::ReuseSoftwarePipelineInputs(new_body, analysis_result,
+                                                         constraint_analysis.target_hazard_inputs,
+                                                         constraint_analysis.declared_allocation_bases);
+    if (new_body != func->body_) {
+      auto updated = MutableCopy(func);
+      updated->body_ = new_body;
+      planned_func = updated;
+      analysis_result = AnalyzeAllocationLifetimes(new_body);
+      constraint_analysis = AnalyzeAllocationConstraints(planned_func, analysis_result, "MemoryReuse");
+    }
+  }
+
   // Step 2: Identify reuse opportunities.  On Ascend910 split-AIV functions,
   // collect the load + tpop_from_aic hazard inputs so the reuse decision never
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
-  const AllocationConstraintAnalysis constraint_analysis =
-      AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
   const memory_reuse::HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
   const memory_reuse::ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
 
@@ -107,7 +118,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
       analysis_result.pipeline_load_tiles, analysis_result.subrange_unsafe_groups, reserved_end_by_space,
-      pinned_bases, func, &hints);
+      pinned_bases, planned_func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");

@@ -43,7 +43,8 @@ class BufferIRFunctionScope {
                  outer_ && outer_->GetEnablePyptoL0cDoubleBuffer(),
                  outer_ ? outer_->GetRuntime() : kDefaultRuntimeKind,
                  (outer_ ? outer_->GetEnableBufferIR() : function->HasAttr(kAttrBufferIrSelected)) &&
-                     IsInCoreType(function->func_type_) && IsBufferIRSelected(function)) {
+                     IsInCoreType(function->func_type_) && IsBufferIRSelected(function),
+                 outer_ && outer_->GetEnableSoftwarePipeline()) {
     context_.EnterContext();
   }
   ~BufferIRFunctionScope() { context_.ExitContext(); }

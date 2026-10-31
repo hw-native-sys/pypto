@@ -307,7 +307,7 @@ RuntimeKind RuntimeKindFromName(const std::string& name) {
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
                          MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
-                         RuntimeKind runtime, bool enable_buffer_ir)
+                         RuntimeKind runtime, bool enable_buffer_ir, bool enable_software_pipeline)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
@@ -316,7 +316,13 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
       enable_pypto_l0c_double_buffer_(enable_pypto_l0c_double_buffer),
       runtime_(runtime),
       enable_buffer_ir_(enable_buffer_ir),
-      previous_(nullptr) {}
+      enable_software_pipeline_(enable_software_pipeline),
+      previous_(nullptr) {
+  CHECK(!enable_software_pipeline_ || memory_planner_ == MemoryPlanner::PyPTO)
+      << "enable_software_pipeline requires memory_planner=PYPTO";
+  CHECK(!enable_software_pipeline_ || !enable_buffer_ir_)
+      << "enable_software_pipeline does not support enable_buffer_ir=True";
+}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
 
@@ -325,6 +331,8 @@ MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
 RuntimeKind PassContext::GetRuntime() const { return runtime_; }
 
 bool PassContext::GetEnableBufferIR() const { return enable_buffer_ir_; }
+
+bool PassContext::GetEnableSoftwarePipeline() const { return enable_software_pipeline_; }
 
 bool PassContext::GetEnablePyptoL0cDoubleBuffer() const { return enable_pypto_l0c_double_buffer_; }
 

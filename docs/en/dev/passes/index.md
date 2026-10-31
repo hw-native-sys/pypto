@@ -64,7 +64,7 @@ Keep the English and Chinese documentation synchronized.
 | 28 | [StampTfreeSplit](28-stamp_tfree_split.md) | Copies each cross-core tpop's split and pipe id onto its matching tfree op |
 | 29 | [NormalizeReturnOrder](29-normalize_return_order.md) | Reorders every InCore function's return tuple into the canonical order |
 | 30 | [SkewCrossCorePipeline](30-skew_cross_core_pipeline.md) | Software-pipelines mixed cube/vector loops so the two cores overlap |
-| 31 | [LowerPipelineToSlots](31-lower_pipeline_to_slots.md) | Rotates a `pl.pipeline` body through the slots of one allocation instead of replicating it (`memory_planner=PTOAS`) |
+| 31 | [LowerPipelineToSlots](31-lower_pipeline_to_slots.md) | Opt-in single-level Vec prefetch and rotating slots under PyPTO, or same-iteration slot rotation under PTOAS; declined loops retain unroll |
 | 32 | [LowerPipelineLoops](32-lower_pipeline_loops.md) | Replicates `pl.pipeline(N, stage=F)` bodies `F` times to enable ping-pong buffering |
 | 33 | [CanonicalizeIOOrder](33-canonicalize_io_order.md) | Reorders pipeline-body statements along the scalar → load → compute → store ladder |
 | 34 | [MaterializeTensorStrides](34-materialize_tensor_strides.md) | Fills in the packed canonical stride for every tensor view that carries none |

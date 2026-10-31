@@ -229,6 +229,15 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
 
+  /**
+   * @brief Whether this backend enables local Vec software-pipeline lowering
+   *        for loops with runtime trip counts.
+   *
+   * False preserves the existing loop fallback; it does not describe hardware
+   * event capabilities or cross-core transport.
+   */
+  [[nodiscard]] virtual bool SupportsRuntimeBoundLocalSoftwarePipeline() const { return false; }
+
   /// Whether frontend pipes can size local consumer storage independently of
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.
   [[nodiscard]] virtual bool SupportsLocalPipeDepth() const { return false; }

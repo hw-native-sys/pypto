@@ -1020,6 +1020,43 @@ def test_pass_context_conflict_is_rejected_before_cache_lookup(kernel, compile_c
     assert len(compile_calls) == 1
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_conflict_is_rejected_before_cache_lookup(kernel, compile_calls, enabled):
+    config = RunConfig(enable_software_pipeline=enabled)
+    kernel.compile(config=config)
+    with passes.PassContext([]), pytest.raises(RuntimeError, match="enable_software_pipeline.*PassContext"):
+        kernel.compile(config=config)
+    assert len(compile_calls) == 1
+
+
+def test_software_pipeline_cache_separates_effective_modes(kernel, compile_calls):
+    ordinary = kernel.compile()
+    enabled = kernel.compile(config=RunConfig(enable_software_pipeline=True))
+    assert enabled is not ordinary
+    assert kernel.compile(config=RunConfig(enable_software_pipeline=False)) is ordinary
+    with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=True):
+        assert kernel.compile() is enabled
+    assert kernel.compile() is ordinary
+    assert len(compile_calls) == 2
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("entrypoint", ["lower", "compile"])
+def test_run_config_selects_software_pipeline_during_lowering(kernel, monkeypatch, enabled, entrypoint):
+    """Both JIT entrypoints apply RunConfig to the shared lowering pipeline."""
+    compile_module = importlib.import_module("pypto.ir.compile")
+    seen = []
+    run_pipeline = compile_module._run_pass_pipeline
+
+    def observe_pipeline(*args, **kwargs):
+        seen.append(kwargs["enable_software_pipeline"])
+        return run_pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "_run_pass_pipeline", observe_pipeline)
+    getattr(kernel, entrypoint)(config=RunConfig(enable_software_pipeline=enabled))
+    assert seen == [enabled]
+
+
 def test_failed_diagnostic_compile_preserves_ordinary_entry(kernel, compile_calls, monkeypatch):
     cached = kernel.compile()
 

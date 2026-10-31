@@ -158,6 +158,7 @@ def _validate_pass_context_conflicts(
     diagnostic_phase: _passes.DiagnosticPhase | None,
     memory_planner: _passes.MemoryPlanner | None,
     runtime: _passes.RuntimeKind | None = None,
+    enable_software_pipeline: bool | None = None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -181,6 +182,11 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with runtime while a PassContext is already active. "
             "Set the runtime on the existing PassContext instead."
         )
+    if enable_software_pipeline is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with enable_software_pipeline while a PassContext is already active. "
+            "Set enable_software_pipeline on the existing PassContext instead."
+        )
     return outer
 
 
@@ -196,6 +202,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
@@ -211,6 +218,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -237,6 +245,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         )
         rt = runtime if runtime is not None else outer.get_runtime()
         buffer_ir = outer.get_enable_buffer_ir()
+        software_pipeline = outer.get_enable_software_pipeline()
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -247,8 +256,13 @@ def _run_pass_pipeline(  # noqa: PLR0913
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-        buffer_ir = True
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir)
+        software_pipeline = enable_software_pipeline if enable_software_pipeline is not None else False
+        # Software pipelining currently lowers Tile IR; leave the default Buffer
+        # IR selection enabled for compilations that do not request this opt-in.
+        buffer_ir = not software_pipeline
+    ctx = _passes.PassContext(
+        instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir, software_pipeline
+    )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -316,6 +330,7 @@ def compile(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
@@ -391,6 +406,11 @@ def compile(  # noqa: PLR0913
             ``False``). Automatic dbC is disabled for PYPTO and DSA_RP;
             PTOAS retains its existing selection independently of this flag.
             Explicit buffering is preserved.
+        enable_software_pipeline: Lower eligible pipeline loops with explicit
+            prefetch and rotating slots instead of unrolling. ``None`` inherits
+            the active ``PassContext`` setting, or defaults to ``False``. Requires
+            ``MemoryPlanner.PYPTO`` and cannot be combined with Buffer IR. Set
+            this on the context when a ``PassContext`` is already active.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Deprecated; use backend_type and execution_mode.
@@ -455,6 +475,7 @@ def compile(  # noqa: PLR0913
         disabled_diagnostics=disabled_diagnostics,
         memory_planner=memory_planner,
         enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        enable_software_pipeline=enable_software_pipeline,
         profiling=profiling,
         platform=platform,
         execution_mode=execution_mode,
@@ -567,6 +588,7 @@ def _compile_to_files(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
@@ -601,6 +623,7 @@ def _compile_to_files(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
     # --- Compile profiling ---------------------------------------------------
@@ -632,6 +655,7 @@ def _compile_to_files(  # noqa: PLR0913
             disabled_diagnostics=disabled_diagnostics,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            enable_software_pipeline=enable_software_pipeline,
             runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),

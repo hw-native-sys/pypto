@@ -57,7 +57,12 @@ class PTOCodegen:
     ) -> PTOCodegenBundle:
         """Generate an EmitC caller and separate typed-VMI helpers for A5/AIV."""
 
-    def generate(self, program: Program, emit_tile_addr: bool = True, emit_source_loc: bool = True) -> str:
+    def generate(
+        self,
+        program: Program,
+        emit_tile_addr: bool = True,
+        emit_source_loc: bool = True,
+    ) -> str:
         """Generate PTO assembly from PyPTO IR Program.
 
         Args:

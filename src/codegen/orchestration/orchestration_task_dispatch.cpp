@@ -10,7 +10,6 @@
  */
 
 #include <any>
-#include <cctype>
 #include <cstddef>
 #include <map>
 #include <memory>

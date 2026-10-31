@@ -120,8 +120,9 @@ def test_compile_pto_module_enables_per_unit_pass_dump(tmp_path, monkeypatch) ->
     handler = SimpleNamespace(get_extra_ptoas_flags=lambda: ["--pto-arch", "a3"])
     monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
 
+    code = "module {}"
     result = pto_backend._compile_pto_module(
-        "module {}",
+        code,
         "vector_kernel",
         str(tmp_path),
         dump_ptoas_passes=True,
@@ -161,6 +162,16 @@ def test_compile_vpto_module_preserves_binary_output(tmp_path, monkeypatch) -> N
     )
     assert result == ""
     assert (tmp_path / "ptoas/register_kernel.o").read_bytes() == binary
+
+
+def test_rebuild_preserves_fixed_multi_buffer_addresses() -> None:
+    code = """module {
+      %ring = pto.alloc_multi_tile addr = %base : !pto.multi_tile_buf<vec, 16x16xf32, count=3>
+    }"""
+    assert pto_rebuild._ptoas_flags(code) == [
+        "--enable-insert-sync",
+        "--pto-level=level3",
+    ]
 
 
 if __name__ == "__main__":
