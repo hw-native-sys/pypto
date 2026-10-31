@@ -168,8 +168,13 @@ only their operator expressions. With the companion CANNBotDSL device-export
 integration installed, the A5 example is:
 
 ```python
+import os
+
 import cannbotdsl as cb
 import pypto.language as pl
+import torch
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
 
 
 @cb.kernel
@@ -182,12 +187,37 @@ def add_one(x: cb.Tensor, out: cb.Tensor):
 def program(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     add_one(x, out)
     return out
+
+
+def main():
+    # Torch is used only for CPU buffers and result validation.
+    x = torch.arange(32, dtype=torch.float32, device="cpu").reshape(1, 32)
+    out = torch.empty_like(x)
+    config = RunConfig(
+        backend_type=BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        device_id=int(os.environ.get("TASK_DEVICE", "0")),
+    )
+
+    program(x, out, config=config)
+
+    torch.testing.assert_close(out, x + 1.0, rtol=0, atol=0)
+    print("PASS: program -> CANNBotDSL add_one")
+    print(out)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-This uses **program mode**. No user-written `TensorSpec`, export call, wrapper,
-`jit.extern` declaration, or Torch execution layer is required. Use the usual
-A5 `RunConfig` when executing the program. This does not add Torch kernel mode
-or allow a device kernel to submit another kernel from an InCore scope.
+This is a complete **program mode** example: the call to
+`program(x, out, config=config)` compiles and executes on A5, and the assertion
+checks the copied-back CPU output. Torch is used only for CPU buffers and result
+validation. No user-written `TensorSpec`, export call, ABI wrapper or `jit.extern`
+declaration is required. Install both companion changes and activate the A5
+environment before running the script. It defaults to device 0 and uses
+`TASK_DEVICE` when launched through the device queue. This does not add Torch
+kernel mode or allow a device kernel to submit another kernel from an InCore scope.
 
 The producer hook returns a stable `JITFunction(func, func_type="extern",
 external_builder=...)`. The builder receives a request-local `SpecializeContext`

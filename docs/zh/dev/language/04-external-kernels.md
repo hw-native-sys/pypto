@@ -152,8 +152,13 @@ Python DSL 可以实现惰性的 `__pypto_jit__()` 协议，使用户只保留�
 安装配套 CANNBotDSL 设备导出接入后，A5 示例为：
 
 ```python
+import os
+
 import cannbotdsl as cb
 import pypto.language as pl
+import torch
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
 
 
 @cb.kernel
@@ -166,11 +171,35 @@ def add_one(x: cb.Tensor, out: cb.Tensor):
 def program(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     add_one(x, out)
     return out
+
+
+def main():
+    # Torch is used only for CPU buffers and result validation.
+    x = torch.arange(32, dtype=torch.float32, device="cpu").reshape(1, 32)
+    out = torch.empty_like(x)
+    config = RunConfig(
+        backend_type=BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        device_id=int(os.environ.get("TASK_DEVICE", "0")),
+    )
+
+    program(x, out, config=config)
+
+    torch.testing.assert_close(out, x + 1.0, rtol=0, atol=0)
+    print("PASS: program -> CANNBotDSL add_one")
+    print(out)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-这里使用 **program 模式**。用户不需要写 `TensorSpec`、导出调用、wrapper、
-`jit.extern` 声明或 Torch 调用层；执行时沿用 A5 `RunConfig`。
-本功能不增加 Torch kernel 模式，也不允许在 InCore 核内派发其他 kernel。
+这是完整的 **program 模式**示例：`program(x, out, config=config)` 在 A5 上编译并执行，
+断言检查复制回 CPU 的输出。Torch 仅用于 CPU 数据准备和结果校验。
+用户不需要写 `TensorSpec`、导出调用、ABI wrapper 或 `jit.extern` 声明。
+运行脚本前需要安装两个配套改动并激活 A5 环境。默认使用设备 0，
+通过设备队列运行时读取 `TASK_DEVICE`。本功能不增加 Torch kernel 模式，
+也不允许在 InCore 核内派发其他 kernel。
 
 生产者钩子返回稳定的 `JITFunction(func, func_type="extern", external_builder=...)`。
 构建器接收本次请求的 `SpecializeContext`，其中包含推导的 Tensor/Scalar 元数据，
