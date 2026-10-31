@@ -24,8 +24,8 @@ A2/A3 拒绝这六种模式。为兼容已有调用，`CachePolicy.BYPASS` 读�
 NotAllocKeep；新 A5 代码应使用 `CachePolicy.NOT_ALLOC_KEEP`。
 不指定 `cache` 时，两种架构都使用普通搬运；显式 DEFAULT 也可覆盖继承的作用域策略。
 
-| CachePolicy   | A5 load ISA 模式 | A5 store ISA 模式 |
-| ------------- | ---------------- | ----------------- |
+| CachePolicy | A5 load ISA 模式 | A5 store ISA 模式 |
+| ----------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
 | NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |

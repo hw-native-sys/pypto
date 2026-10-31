@@ -30,8 +30,8 @@ select A5 NotAllocKeep for compatibility; new A5 code should use
 `CachePolicy.NOT_ALLOC_KEEP`. Omitting `cache` uses the ordinary transfer on
 either architecture. An explicit DEFAULT can reset an inherited scope policy.
 
-| CachePolicy   | A5 load ISA mode | A5 store ISA mode |
-| ------------- | ---------------- | ----------------- |
+| CachePolicy | A5 load ISA mode | A5 store ISA mode |
+| ----------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
 | NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
