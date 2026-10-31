@@ -92,9 +92,6 @@ static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PT
         << " is only supported on A5; A2/A3 supports load DEFAULT/BYPASS and store DEFAULT";
     return std::nullopt;
   }
-  CHECK_SPAN(policy != ir::CachePolicy::kBypass, op->span_)
-      << "A2A3CachePolicy.BYPASS requires the A2/A3 runtime offset path; "
-         "use A5CachePolicy on A5";
   switch (policy) {
     case ir::CachePolicy::kNormalFirstVictim:
       return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalFirstVictim)
@@ -106,7 +103,11 @@ static std::optional<std::string> GetIsaCacheHint(const CallPtr& op, codegen::PT
       return store ? ir::StoreL2HintToString(ir::StoreL2Hint::NormalPersistent)
                    : ir::LoadL2HintToString(ir::LoadL2Hint::NormalPersistent);
     case ir::CachePolicy::kBypass:
-      break;  // Rejected above: the runtime address-alias policy is A2/A3-only.
+      CHECK_SPAN(!store, op->span_)
+          << "CachePolicy.BYPASS is load-only; use A5CachePolicy.NOT_ALLOC_CLEAN for an A5 store";
+      // Preserve legacy CachePolicy.BYPASS callers (including pypto-lib) while
+      // new A5 callers select one of the six architecture-specific modes.
+      return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);
     case ir::CachePolicy::kNotAllocKeep:
       CHECK_SPAN(!store, op->span_) << "store does not support A5CachePolicy.NOT_ALLOC_KEEP";
       return ir::LoadL2HintToString(ir::LoadL2Hint::NotAllocKeep);

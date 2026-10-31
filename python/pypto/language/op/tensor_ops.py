@@ -410,17 +410,22 @@ def set_cache_policy(tensor: Tensor, policy: A2A3CachePolicy | A5CachePolicy) ->
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
     reports no alias reports zero, leaving the read ordinary and correct.
-    On A5 the backend selects ISA NotAllocKeep for BYPASS and maps the six
-    additional NORMAL_* / NOT_ALLOC_* policies to their corresponding ISA modes.
+    For new A5 code, use ``A5CachePolicy.NORMAL_*`` or
+    ``A5CachePolicy.NOT_ALLOC_*`` to select an ISA mode, for example
+    ``A5CachePolicy.NOT_ALLOC_KEEP`` for a non-allocating read. Existing
+    ``CachePolicy.BYPASS`` reads retain their A5 NotAllocKeep lowering for
+    compatibility; the A2A3CachePolicy alias has the same behavior on A5.
+    BYPASS remains load-only. Explicit A5 policies are unsupported in VPTO compilation units
+    containing ``pl.reg_scope`` and are rejected before assembly.
     ``CachePolicy.DEFAULT`` emits nothing, so a read that declares no policy
     generates exactly the code it did before.
 
     Args:
         tensor: The tensor whose reads the policy applies to. Must be a
             ``Tensor`` value bound outside the scope and read inside it.
-        policy: ``CachePolicy.BYPASS`` to declare a streaming, non-cached read;
-            ``CachePolicy.DEFAULT`` for an ordinary cached read, or an A5CachePolicy
-            NORMAL_* / NOT_ALLOC_* policy on A5.
+        policy: ``A2A3CachePolicy.DEFAULT/BYPASS`` on A2/A3, or one of the six
+            ``A5CachePolicy`` modes on A5. ``CachePolicy`` is a compatibility
+            alias for ``A2A3CachePolicy``. Scope policies configure reads only.
 
     Returns:
         Nothing. The marker is consumed at parse time and produces no value.

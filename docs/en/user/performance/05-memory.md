@@ -288,8 +288,8 @@ including ReLU and quantized writeback. NOT_ALLOC_CLEAN maps to load encoding 5 
 A2/A3 uses `A2A3CachePolicy.DEFAULT` or `A2A3CachePolicy.BYPASS` instead.
 BYPASS adds the runtime-provided nocache offset to the load address and does
 not select an A5 ISA mode. A2/A3 stores support DEFAULT only. `CachePolicy`
-is a compatibility alias for `A2A3CachePolicy`. A5 rejects A2/A3 BYPASS and
-A2/A3 rejects all A5 modes. Scope declarations control reads; explicit
+is a compatibility alias for `A2A3CachePolicy`. Legacy BYPASS reads still map
+to A5 NotAllocKeep; new A5 code uses A5CachePolicy. A2/A3 rejects all A5 modes. Scope declarations control reads; explicit
 per-load policies take precedence. See
 [GM cache policy](../../dev/language/05-cache-policy.md) for the full mode table.
 

@@ -966,11 +966,13 @@ def _l2_hint_case(load_hint, store_hint, planner):
         for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
     ]
 )
-def test_l2_hints_preserve_results(case_run):
+def test_l2_hints_preserve_results(_cache_case_run):
     """Check numerical results and the selected ISA modes on A5 CI."""
+    case_run, work_dir = _cache_case_run
     case_run.assert_passed()
-    assert case_run.work_dir is not None
-    cpp = "\n".join(path.read_text() for path in case_run.work_dir.rglob("*.cpp"))
+    sources = list((work_dir / "kernels").rglob("*.cpp"))
+    assert sources, "the compiled case must retain its kernel sources"
+    cpp = "\n".join(path.read_text() for path in sources)
     load_policy = next(p for p in _LOAD_POLICIES if case_run.case.name.startswith(f"l2_{p.name}_"))
     suffix = case_run.case.name.removeprefix(f"l2_{load_policy.name}_")
     store_policy = next(p for p in _STORE_POLICIES if suffix.startswith(f"{p.name}_"))
@@ -1012,7 +1014,7 @@ def _scope_rebind_case(policy, planner, explicit_default):
 
 
 @pytest.fixture
-def _scope_rebind_run(_st_case, test_runner, tmp_path, monkeypatch):
+def _cache_case_run(_st_case, test_runner, tmp_path, monkeypatch):
     # CI runs inline under --forked; keep its sources as well as batch artifacts.
     monkeypatch.setattr(test_runner.config, "save_kernels", True)
     monkeypatch.setattr(test_runner.config, "save_kernels_dir", str(tmp_path))
@@ -1034,9 +1036,9 @@ def _scope_rebind_run(_st_case, test_runner, tmp_path, monkeypatch):
         for explicit_default in (False, True)
     ],
 )
-def test_scope_cache_policy_survives_gm_rebinding(_scope_rebind_run, policy, explicit_default):
+def test_scope_cache_policy_survives_gm_rebinding(_cache_case_run, policy, explicit_default):
     """Check inherited ISA modes as well as values after assemble/store rebindings."""
-    _assert_scope_rebind_hints(_scope_rebind_run, policy, explicit_default)
+    _assert_scope_rebind_hints(_cache_case_run, policy, explicit_default)
 
 
 def _assert_scope_rebind_hints(scope_rebind_run, policy, explicit_default):
@@ -1105,9 +1107,9 @@ def _scope_conditional_rebind_case(policy, planner, take_then):
         for take_then in (False, True)
     ],
 )
-def test_scope_cache_policy_survives_conditional_gm_rebinding(_scope_rebind_run, policy):
+def test_scope_cache_policy_survives_conditional_gm_rebinding(_cache_case_run, policy):
     """Both runtime branches retain the selected read mode after their GM merge."""
-    _assert_scope_rebind_hints(_scope_rebind_run, policy, False)
+    _assert_scope_rebind_hints(_cache_case_run, policy, False)
 
 
 def _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps):
@@ -1186,9 +1188,9 @@ def _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps)
         for steps in (0, 2)
     ],
 )
-def test_scope_cache_policy_survives_loop_results(_scope_rebind_run, policy, explicit_default):
+def test_scope_cache_policy_survives_loop_results(_cache_case_run, policy, explicit_default):
     """Check zero/multiple iterations and ISA hints after for/while GM results."""
-    _assert_scope_rebind_hints(_scope_rebind_run, policy, explicit_default)
+    _assert_scope_rebind_hints(_cache_case_run, policy, explicit_default)
 
 
 def _acc_store_cache_case(policy, planner, quantized, with_relu):

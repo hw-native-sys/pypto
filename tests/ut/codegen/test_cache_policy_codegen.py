@@ -357,12 +357,24 @@ def test_one_parameter_serves_every_declared_load():
     assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, _signature_line(mlir)
 
 
-def test_a5_rejects_a2a3_runtime_bypass():
-    """A2/A3 address aliases cannot request an A5 instruction mode."""
+def test_legacy_bypass_on_a5_uses_isa_without_a_runtime_offset():
+    """Existing CachePolicy.BYPASS callers retain A5 NotAllocKeep lowering."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
-    with pytest.raises(ValueError, match="use A5CachePolicy on A5"):
-        _incore_mlir(TwoBypassingLoadsOfOneTensor)
+    mlir = _incore_mlir(TwoBypassingLoadsOfOneTensor)
+    assert mlir.count("__pypto_l2_hint_begin load NotAllocKeep") == 2
+    assert BYPASS_ATTR not in mlir
+    assert OFFSET_PARAM not in mlir
+
+
+def test_legacy_scope_bypass_on_a5_keeps_its_cache_mode():
+    """Existing set_cache_policy(..., CachePolicy.BYPASS) callers still compile."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    mlir = _incore_mlir(DeclaredBypass)
+    assert mlir.count("__pypto_l2_hint_begin load NotAllocKeep") == 1
+    assert BYPASS_ATTR not in mlir
+    assert OFFSET_PARAM not in mlir
 
 
 # ---------------------------------------------------------------------------

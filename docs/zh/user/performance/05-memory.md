@@ -238,7 +238,8 @@ NOT_ALLOC_CLEAN 对应 load 编码 5、store 编码 4，前端语义 ID 不能�
 A2/A3 改用 `A2A3CachePolicy.DEFAULT` 或 `A2A3CachePolicy.BYPASS`。
 BYPASS 将运行时取得的 nocache offset 加到 load 地址上，不选择 A5 ISA 模式。
 A2/A3 store 只支持 DEFAULT。`CachePolicy` 是 `A2A3CachePolicy` 的兼容别名。
-A5 拒绝 A2/A3 BYPASS，A2/A3 拒绝全部 A5 模式。作用域声明控制读取，显式 load
+旧 BYPASS 读取在 A5 上仍映射到 NotAllocKeep，新 A5 代码应使用 A5CachePolicy；
+A2/A3 拒绝全部 A5 模式。作用域声明控制读取，显式 load
 策略优先，完整模式表见 [GM 缓存策略](../../dev/language/05-cache-policy.md)。
 
 ## 参见

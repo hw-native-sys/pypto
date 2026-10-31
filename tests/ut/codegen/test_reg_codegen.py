@@ -1001,5 +1001,57 @@ def test_gather_rejects_unsupported_lanes_or_index_width(lanes, dtype):
         pl.reg.gather_lanes(vector(lanes=lanes), vector(dtype, lanes))
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize(
+    "direction,policy",
+    [("load", policy) for policy in pl.A5CachePolicy]
+    + [("load", pl.CachePolicy.BYPASS)]
+    + [
+        ("store", policy)
+        for policy in pl.A5CachePolicy
+        if policy not in (pl.A5CachePolicy.NOT_ALLOC_KEEP, pl.A5CachePolicy.NOT_ALLOC_DROP)
+    ],
+)
+def test_register_unit_rejects_a5_cache_modes_before_assembly(
+    tmp_path, monkeypatch, planner, direction, policy
+):
+    load_cache = f", cache=pl.{type(policy).__name__}.{policy.name}" if direction == "load" else ""
+    store_cache = f", cache=pl.A5CachePolicy.{policy.name}" if direction == "store" else ""
+    program = pl.parse_program(f"""
+@pl.program
+class RegisterCache:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, src: pl.Tensor[[1, 128], pl.FP32],
+               dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]]):
+        tile_src: pl.Tile[
+            [1, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 128], stride=[128, 1])
+        ] = pl.load(
+            src, [0, 0], [1, 128], target_memory=pl.Mem.Vec{load_cache})
+        tile_dst: pl.Tile[
+            [1, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 128], stride=[128, 1])
+        ] = pl.load(
+            dst, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+        with pl.reg_scope():
+            value = pl.reg.load(tile_src, lanes=64)
+            doubled = pl.reg.add(value, value)
+            out = pl.reg.store(tile_dst, value=doubled)
+        stored = pl.store(out, [0, 0], dst{store_cache})
+""")
+    with passes.PassContext([], memory_planner=planner):
+        optimized = ir.PassManager(ir.OptimizationStrategy.Default).run_passes(program)
+    source = codegen.PTOCodegen().generate(
+        optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    assert 'pto.backend = "vpto"' in source.partition("\n")[0]
+    assert f"__pypto_l2_hint_begin {direction}" in source
+
+    def unexpected_assembly(*args, **kwargs):
+        pytest.fail("unsupported cache modes must be rejected before invoking PTOAS")
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", unexpected_assembly)
+    with pytest.raises(ValueError, match="A5CachePolicy.*not supported in VPTO"):
+        pto_backend._compile_pto_module(source, "register_cache", str(tmp_path), planner)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

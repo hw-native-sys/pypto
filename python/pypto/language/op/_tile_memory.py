@@ -201,9 +201,10 @@ def load(
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
             back into the cache inside a bypassing scope. Requires PTOAS >= v0.72,
             where a BYPASS read compiles to a load issued against the page's
-            uncached alias on A2/A3. A5 uses the six modes in A5CachePolicy
-            instead; A2/A3 BYPASS is rejected on A5. Their ISA encodings are
-            selected by backend code generation. DEFAULT resets an inherited
+            uncached alias on A2/A3. New A5 code uses the six modes in
+            A5CachePolicy; legacy CachePolicy.BYPASS reads retain their A5
+            NotAllocKeep lowering for compatibility. ISA encodings are selected
+            by backend code generation. DEFAULT resets an inherited
             scope policy to an ordinary load on either architecture.
 
     Returns:

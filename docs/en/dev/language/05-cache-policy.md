@@ -24,7 +24,9 @@ used. Stores support DEFAULT only.
 
 `A5CachePolicy` has six modes, listed below. These semantic IDs are disjoint
 from the A2/A3 policies and are translated to the direction-specific PTO-ISA
-encoding. A5 rejects A2/A3 BYPASS; A2/A3 rejects all A5 modes. Omitting `cache`
+encoding. A2/A3 rejects all A5 modes. Legacy `CachePolicy.BYPASS` reads
+(and the `A2A3CachePolicy` alias) still select A5 NotAllocKeep for compatibility;
+new A5 code should use `A5CachePolicy.NOT_ALLOC_KEEP`. Omitting `cache`
 uses the ordinary transfer on either architecture. An explicit DEFAULT can
 also reset an inherited scope policy.
 
@@ -86,6 +88,13 @@ debug rebuild share finalization; PTOAS-only output from `skip_ptoas=True`
 still needs this finalization. Non-default policies stay on the Tile path;
 forced Buffer lowering rejects unsupported transfer policies.
 
+Compilation units containing `pl.reg_scope` select the binary VPTO backend.
+Explicit `A5CachePolicy` modes and legacy BYPASS reads are rejected before
+assembly in those units:
+the current C++ finalizer cannot apply hints to a VPTO object. This applies to
+all transfers in the compilation unit, including loads/stores outside the
+register scope. Omit explicit A5 policies or use a unit without `pl.reg_scope`.
+
 No PTOAS, simpler or workflow changes are required.
 
 ## CachePolicy surfaces
@@ -130,8 +139,9 @@ On a read, `CachePolicy.BYPASS` asserts **two** things about the tensor:
 | The kernel streams these bytes — no reuse worth caching | Author | No (a performance claim) |
 | Nothing writes these bytes while the kernel runs | Author | Partially — see below |
 
-A per-store BYPASS policy controls that write; the no-writer promise applies
-only to bypassing reads.
+BYPASS is load-only: it uses a runtime offset on A2/A3 and preserves the
+legacy NotAllocKeep lowering on A5. A5 stores
+select one of the four supported A5CachePolicy store modes.
 
 Mixing a cached write and a bypassing read of the same bytes is a **coherency
 bug**: the two paths can see different data. The compiler cannot prove absence
@@ -362,7 +372,7 @@ The double mapping is an a2a3 property, and so is everything built on it:
 | ------ | -------------------------------------- |
 | a2a3 device | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)`. This is the case the feature exists for |
 | a2a3 device with no alias | The driver reports `0`, `addr + 0` is the ordinary address, and the read is cached — correct, one optimisation short. The simulator is this case by construction |
-| a5 | Rejects A2/A3 BYPASS; use A5CachePolicy for DMA modes |
+| a5 | Legacy BYPASS reads select ISA NotAllocKeep; new code uses A5CachePolicy |
 
 A5 uses A5CachePolicy and lowers it to ISA cache-control modes.
 
