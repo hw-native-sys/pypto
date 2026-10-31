@@ -145,3 +145,47 @@ Python stub 未变，kernel 变更也会触发重新编译。
 - 函数体必须是裸的 `...`（仅签名）。
 - 一个 `Group` 必须全为外部 kernel 或全为 DSL kernel —— 不允许在同一 group 中混用外部
   与 DSL 成员。
+
+## 直接调用 Python DSL kernel
+
+Python DSL 可以实现惰性的 `__pypto_jit__()` 协议，使用户只保留原始算子表达。
+安装配套 CANNBotDSL 设备导出接入后，A5 示例为：
+
+```python
+import cannbotdsl as cb
+import pypto.language as pl
+
+
+@cb.kernel
+def add_one(x: cb.Tensor, out: cb.Tensor):
+    for i in cb.range(x.shape[1]):
+        out[0, i] = x[0, i] + 1.0
+
+
+@pl.jit
+def program(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    add_one(x, out)
+    return out
+```
+
+这里使用 **program 模式**。用户不需要写 `TensorSpec`、导出调用、wrapper、
+`jit.extern` 声明或 Torch 调用层；执行时沿用 A5 `RunConfig`。
+本功能不增加 Torch kernel 模式，也不允许在 InCore 核内派发其他 kernel。
+
+生产者钩子返回稳定的 `JITFunction(func, func_type="extern", external_builder=...)`。
+构建器接收本次请求的 `SpecializeContext`，其中包含推导的 Tensor/Scalar 元数据，
+并返回 `pypto.jit.foreign.ExternalKernelSpec`，提供源码路径、include 目录、core type、
+Tensor 读写方向和可选的 backend/runtime 要求。生成的完整源码文件必须在编译和缓存期间
+保持可用。PyPTO 不强制依赖生产者包。
+
+框架将独立调用语句改写为隐式接收每个写入 Tensor，保留 SSA 和循环携带依赖。
+支持多输出与关键字参数；输出实参必须是不同的 Tensor 变量。Python callable 仍为 void，
+不能将调用用作值。一个 program 内，同一生产者各调用点必须具有相同的 Tensor 签名。
+支持从芯片 orchestration 及其 inline helper 调用。
+
+构建器在查缓存前运行；源码、局部 include 和读写/core 元数据参与两层缓存身份，
+本次请求内复用生成结果。生产者可以采用按内容寻址的存储；JIT 依赖对象不保存调用者的
+Tensor、地址或本次请求的可变源码路径。CANNBotDSL 接入目前支持 A5/TMR、最内层连续的
+ND Tensor、显式 runtime Scalar、AIV/AIC/MIX 和基本动态形状。
+CANN 9.3.0 缺少 CPU-debug 条件头文件，可能使可选的持久缓存保守跳过；
+默认的进程内缓存仍可使用。

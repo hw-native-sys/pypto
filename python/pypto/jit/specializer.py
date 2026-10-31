@@ -212,6 +212,9 @@ class SpecializeContext:
     # remain expressions so call bindings and local dimensions take precedence.
     eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    external_parameter_access: dict[str, str] | None = None
+    external_backend: str | None = None
+    external_runtime: str | None = None
 
     @property
     def source_def_name(self) -> str:
@@ -1762,6 +1765,15 @@ class Specializer:
         self._dep_constexpr_params: dict[str, set[str]] = {
             ctx.func_name: set(ctx.constexpr_values) for ctx in contexts
         }
+        self._dep_mutated_params = {
+            ctx.func_name: tuple(
+                name
+                for name in ctx.param_names
+                if ctx.external_parameter_access.get(name) in ("write", "read_write")
+            )
+            for ctx in contexts
+            if ctx.external_parameter_access is not None
+        }
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
@@ -1898,6 +1910,12 @@ class Specializer:
         return out
 
     def _specialize_function(self, ctx: SpecializeContext) -> list[str]:
+        """Dispatch native Python bodies or a foreign producer's declaration."""
+        if ctx.external_parameter_access is not None:
+            return self._render_foreign(ctx)
+        return self._specialize_python_function(ctx)
+
+    def _specialize_python_function(self, ctx: SpecializeContext) -> list[str]:
         """Generate lines for a single @pl.function method."""
         # Parse the source to AST
         src = textwrap.dedent(ctx.source)
@@ -1909,7 +1927,6 @@ class Specializer:
         out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(
             func_def
         )
-
         # Inline helpers share the caller's tensor storage, so writes do not
         # need Out/InOut annotations at this eliminated call boundary. Local
         # name rebindings remain local; InlineFunctions separates their handles.
@@ -2023,7 +2040,6 @@ class Specializer:
             func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
-
         # External C++ kernel: emit header-only declaration(s) backed by the
         # hand-written source instead of a transformed DSL body. A "mixed"
         # kernel expands to an AIC member + AIV member + Group wrapper so the
@@ -2055,6 +2071,7 @@ class Specializer:
                 else {}
             ),
         )
+        transformer._dep_mutated_params = self._dep_mutated_params
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
         # Don't overwrite entries from earlier functions — in multi-function JIT,
@@ -2126,6 +2143,26 @@ class Specializer:
         result_lines.extend(body_lines[1:])
 
         return result_lines
+
+    def _render_foreign(self, ctx: SpecializeContext) -> list[str]:
+        """Render the producer's ABI without interpreting its DSL annotations."""
+        assert ctx.external_parameter_access is not None
+        params: list[str] = []
+        for name in ctx.param_names:
+            if name in ctx.tensor_meta:
+                access = ctx.external_parameter_access[name]
+                annotation = _build_tensor_annotation(
+                    ctx.tensor_meta[name], is_out=access == "write", is_inout=access == "read_write"
+                )
+            else:
+                annotation = f"pl.Scalar[{values.dtype_str(ctx.scalar_dtypes[name])}]"
+            params.append(f"{name}: {annotation}")
+        types = [
+            _build_tensor_annotation(ctx.tensor_meta[name], is_out=False)
+            for name in self._dep_mutated_params[ctx.func_name]
+        ]
+        result = types[0] if len(types) == 1 else f"tuple[{', '.join(types)}]" if types else None
+        return self._render_external(ctx, params, f" -> {result}" if result else "", ctx.param_names)
 
     def _render_external(
         self,

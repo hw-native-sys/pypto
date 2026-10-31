@@ -23,11 +23,16 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 import torch
+from pypto import CacheConfig
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR
+from pypto.backend import BackendType
 from pypto.backend.pto_backend import generate
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.jit import JITFunction
+from pypto.jit.foreign import ExternalKernelSpec
 from pypto.jit.specializer import Specializer
 from pypto.pypto_core import codegen, ir
+from pypto.runtime import ExecutionMode, RunConfig
 
 _KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 
@@ -384,6 +389,186 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
 
         @pl.jit.extern(core_type="aiv", source=cpp, include_dirs=[missing])
         def k(a: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+
+
+class _ForeignKernel:
+    """A producer with no PyPTO annotations or mandatory third-party package."""
+
+    def __init__(self, func, source, access, *, core="aiv"):
+        self.jit = JITFunction(
+            func,
+            func_type="extern",
+            external_builder=lambda ctx: ExternalKernelSpec(
+                source=str(source),
+                core_type=core,
+                parameter_access=access,
+                dual_aiv_dispatch=core == "mixed",
+            ),
+        )
+
+    def __pypto_jit__(self):
+        return self.jit
+
+
+@pytest.mark.parametrize("core", ["aiv", "aic", "mixed"])
+def test_foreign_call_infers_outputs_and_emits_task(tmp_path, core):
+    def foreign_body(x, out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"x": "read", "out": "write"}, core=core)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+        leaf(x, out=out)
+        return out
+
+    args = (torch.zeros(1, 32), torch.empty(1, 32))
+    src = _specialize(entry, *args)
+    assert "out_v1 = self.foreign_body(x, out)" in src
+    assert "return out_v1" in src
+    config, after = _generate_external_config(entry, args, tmp_path)
+    assert "foreign_body" in config
+    orch = after.get_function("entry")
+    assert orch is not None
+    generated = codegen.generate_orchestration(after, orch).code
+    assert "add_output(" in generated
+    if core == "mixed":
+        assert "MixedKernels mixed_0 = {0, 1, 1}" in generated
+
+
+def test_foreign_inout_call_is_loop_carried(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]) -> pl.Tensor:
+        for _ in pl.range(0, 3):
+            leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32),)
+    src = _specialize(entry, *args)
+    assert "out = self.foreign_body(out)" in src
+    _, after = _generate_external_config(entry, args, tmp_path)
+    orch = after.get_function("entry")
+    assert orch is not None
+    generated = codegen.generate_orchestration(after, orch).code
+    assert "add_inout(" in generated
+
+
+def test_foreign_multiple_outputs_are_rebound(tmp_path):
+    def foreign_body(x, y):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"x": "write", "y": "write"})
+
+    @pl.jit
+    def entry(x: pl.Out[pl.Tensor], y: pl.Out[pl.Tensor]) -> tuple[pl.Tensor, pl.Tensor]:
+        leaf(x, y)
+        leaf(x, y)
+        return x, y
+
+    args = (torch.empty(1, 32), torch.empty(1, 32))
+    src = _specialize(entry, *args)
+    assert "x_v1, y_v1 = self.foreign_body(x, y)" in src
+    assert "x_v2, y_v2 = self.foreign_body(x_v1, y_v1)" in src
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_cache_tracks_generated_cpp(tmp_path, monkeypatch):
+    def foreign_body(out):
+        pass
+
+    cpp = _write_kernel(tmp_path)
+    leaf = _ForeignKernel(foreign_body, cpp, {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]) -> pl.Tensor:
+        leaf(out)
+        return out
+
+    builds = []
+
+    def compile_stub(*args, **kwargs):
+        artifact = object()
+        builds.append(artifact)
+        return artifact
+
+    monkeypatch.setattr(entry, "_compile", compile_stub)
+    config = RunConfig(
+        backend_type=BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        cache_config=CacheConfig(enabled=False),
+    )
+    out = torch.empty(1, 32)
+    first = entry.compile(out, config=config)
+    assert entry.compile(out, config=config) is first
+    cpp.write_text(_KERNEL_SRC + "\n// changed producer implementation\n")
+    assert entry.compile(out, config=config) is not first
+    assert len(builds) == 2
+
+
+def test_foreign_scalar_argument_inherits_caller_dtype(tmp_path):
+    def foreign_body(out, scale):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor], scale: pl.Scalar[pl.FP32]) -> pl.Tensor:
+        leaf(scale=scale, out=out)
+        return out
+
+    source = _specialize(entry, torch.empty(1, 32), 2.5)
+    assert "scale: pl.Scalar[pl.FP32]" in source
+    _generate_external_config(entry, (torch.empty(1, 32), 2.5), tmp_path)
+
+
+def test_foreign_different_call_shapes_are_rejected(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(x: pl.Out[pl.Tensor], y: pl.Out[pl.Tensor]):
+        leaf(x)
+        leaf(y)
+
+    with pytest.raises(ValueError, match="same shapes, dtypes and layouts"):
+        entry.specialize(torch.empty(1, 32), torch.empty(1, 64))
+
+
+def test_foreign_void_call_cannot_be_used_as_value(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]):
+        out = leaf(out)
+        return out
+
+    with pytest.raises(TypeError, match="standalone call statement"):
+        entry.specialize(torch.empty(1, 32))
+
+
+def test_foreign_hook_rejects_invalid_result():
+    class BadHook:
+        def __pypto_jit__(self):
+            return None
+
+    leaf = BadHook()
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        leaf(x)
+
+    with pytest.raises(TypeError, match="must return a JITFunction"):
+        entry.specialize(torch.zeros(1, 32))
 
 
 if __name__ == "__main__":
