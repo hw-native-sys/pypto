@@ -3673,6 +3673,8 @@ class IRBuilder:
             span: Source location for loop definition
             kind: Loop kind (default: Sequential)
             attrs: Loop-level attributes (default: empty)
+            hardware_loop_policy: Auto (default) or Require. Require needs a Sequential
+                loop inside RegScope, INDEX start=0 and step=1, and empty attrs.
         """
 
     def add_iter_arg(self, iter_arg: IterArg) -> None:

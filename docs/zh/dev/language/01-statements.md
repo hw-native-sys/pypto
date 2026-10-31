@@ -241,8 +241,10 @@ sum_final: pl.INT64 = sum  # captures final value
 
 ## 强制硬件循环
 
-`pl.range` 对应 `HardwareLoopPolicy.Auto`；`pl.hardware_loop` 使用相同的边界参数与
-`init_values`，对应 `Require`，仅允许 Sequential 循环。
+`pl.range` 对应 `HardwareLoopPolicy.Auto`。
+`pl.hardware_loop(stop, *, init_values=None)` 对应 `Require`，创建 `[0, stop)` 的
+Sequential 循环，固定 `start=0`、`step=1`。仅接受 `stop` 和可选的循环携带初始值
+`init_values`；拒绝 start、step 和 attrs 参数。`init_values` 重载保留携带值的类型推导。
 `Require` 只能位于外层 `pl.reg_scope()` 内，包括空循环。循环体内部的作用域不能满足
 这一要求。普通 `pl.range` 循环仍可在寄存器作用域外使用。
 
@@ -261,8 +263,9 @@ Eligible 仍不等于最终产物的硬件证据，计数器窄化与 `scf.for` 
 动态边界、动态步长或未知效应保持 Unknown；Auto 在三态下均保持普通循环语义。
 
 静态零次 Sequential 循环豁免资格和证据要求，由 Simplify 消除并返回初始 iter_args；
-可能为空的动态循环不豁免。非空 Require 要求正步长，单次循环也不能丢失意图。
-例如 `(32760, 32767, 4)` 执行两次，post-IV 为 32768，超出 signed-i16 范围。
+可能为空的动态循环不豁免。Require 在单次循环中也不能丢失意图。
+Builder 和手工构造的 IR 同样必须使用常量 `start=0`、`step=1`，零次循环也不例外。
+对于有符号 16 位计数器，`stop=32767` 合法，`stop=32768` 超出范围。
 
 目标 profile 定义计数器、次数、嵌套和资源限制、允许的循环携带类型以及 profile/toolchain
 版本标识。未显式认证的操作按未知处理。分析在当前 IR 上重新计算，结果不进入序列化

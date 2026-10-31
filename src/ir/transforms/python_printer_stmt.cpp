@@ -214,7 +214,13 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   bool start_is_zero = is_const_int(op->start_, 0);
   bool step_is_one = is_const_int(op->step_, 1);
 
-  if (start_is_zero && step_is_one) {
+  if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
+    // Required loops have a stop-only surface. Never print removed overloads.
+    CHECK_SPAN(start_is_zero && step_is_one, op->span_)
+        << "HardwareLoopPolicy.Require requires constant start=0 and step=1 with INDEX dtype";
+    CHECK_SPAN(op->attrs_.empty(), op->span_) << "HardwareLoopPolicy.Require does not support loop attrs";
+    VisitExpr(op->stop_);
+  } else if (start_is_zero && step_is_one) {
     // range(stop)
     VisitExpr(op->stop_);
   } else if (step_is_one) {

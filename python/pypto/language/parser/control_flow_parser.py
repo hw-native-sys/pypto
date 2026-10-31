@@ -46,7 +46,7 @@ ITERATOR_HINT = (
 )
 
 ITERATOR_KEYWORDS = {
-    "hardware_loop": ("init_values", "attrs"),
+    "hardware_loop": ("init_values",),
     "range": ("init_values", "attrs"),
     "parallel": ("init_values", "attrs"),
     "unroll": ("init_values", "attrs"),
@@ -465,6 +465,35 @@ class ControlFlowParser:
         Returns:
             Dictionary with start, stop, step, init_values
         """
+        if iterator_type == "hardware_loop":
+            stop_keywords = [keyword for keyword in call.keywords if keyword.arg == "stop"]
+            if not (
+                (len(call.args) == 1 and not stop_keywords) or (not call.args and len(stop_keywords) == 1)
+            ):
+                raise ParserSyntaxError(
+                    "pl.hardware_loop() requires exactly one stop argument; start=0 and step=1",
+                    span=self.services.span_tracker.get_span(call),
+                )
+            stop_node = call.args[0] if call.args else stop_keywords[0].value
+            hardware_args: dict[str, Any] = {
+                "start": 0,
+                "stop": self.callbacks.expression(stop_node),
+                "step": 1,
+                "init_values": [],
+                "unroll": None,
+                "attrs": {},
+            }
+            for keyword in call.keywords:
+                if keyword.arg == "stop":
+                    continue
+                if keyword.arg != "init_values":
+                    raise ParserSyntaxError(
+                        "pl.hardware_loop() supports only stop and init_values",
+                        span=self.services.span_tracker.get_span(keyword),
+                    )
+                self.parse_range_keyword(keyword, hardware_args, iterator_type)
+            return hardware_args
+
         if len(call.args) < 1:
             raise ParserSyntaxError(
                 f"pl.{iterator_type}() requires at least 1 argument (stop)",

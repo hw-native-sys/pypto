@@ -12,7 +12,11 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto::ir {
@@ -27,6 +31,15 @@ class ContractChecker : public IRVisitor {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
                                 "HardwareLoopPolicy.Require requires Sequential ForKind and a valid policy",
                                 op->span_);
+    }
+    if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !HasCanonicalHardwareLoopBounds(op)) {
+      diagnostics_.emplace_back(
+          DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+          "HardwareLoopPolicy.Require requires constant start=0 and step=1 with INDEX dtype", op->span_);
+    }
+    if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+                                "HardwareLoopPolicy.Require does not support loop attrs", op->span_);
     }
     IRVisitor::VisitStmt_(op);
   }

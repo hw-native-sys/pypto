@@ -109,7 +109,7 @@ set(PYPTO_SOURCES
     src/core/error.cpp
 
     # IR - Core
-    src/ir/analysis/hardware_loop_analysis.cpp
+    src/ir/transforms/utils/hardware_loop_analysis.cpp
     src/ir/builder.cpp
     src/ir/core.cpp
     src/ir/expr.cpp

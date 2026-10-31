@@ -487,7 +487,9 @@ static bool RegisterComputeFamilies() {
         .add_argument("mask", "Optional MaskReg")
         .set_attr<std::string>("pmode")
         .no_arg_writes()
-        .f_deduce_type([name](const Args& args, const Kwargs& kwargs) { return Unary(args, kwargs, name); });
+        .f_deduce_type([op_name = name](const Args& args, const Kwargs& kwargs) {
+          return Unary(args, kwargs, op_name);
+        });
   }
   for (const auto& [name, opcode] :
        std::vector<std::pair<std::string, std::string>>{{"bitwise_and", "vand"},
@@ -523,12 +525,14 @@ static bool RegisterComputeFamilies() {
         .add_argument("scalar", "Scalar")
         .add_argument("mask", "MaskReg")
         .no_arg_writes()
-        .f_deduce_type(
-            [name](const Args& args, const Kwargs& kwargs) { return ScalarOperation(args, kwargs, name); });
-    if (name == "compares")
+        .f_deduce_type([op_name = name](const Args& args, const Kwargs& kwargs) {
+          return ScalarOperation(args, kwargs, op_name);
+        });
+    if (name == "compares") {
       entry.set_attr<std::string>("predicate");
-    else
+    } else {
       entry.set_attr<std::string>("pmode");
+    }
   }
   for (const auto& [name, opcode] : std::vector<std::pair<std::string, std::string>>{
            {"reduce_sum", "vcadd"}, {"reduce_max", "vcmax"}, {"reduce_min", "vcmin"}}) {
@@ -539,9 +543,12 @@ static bool RegisterComputeFamilies() {
         .add_argument("value", "VecReg")
         .add_argument("mask", "MaskReg")
         .no_arg_writes()
-        .f_deduce_type(
-            [name](const Args& args, const Kwargs& kwargs) { return Reduction(args, kwargs, name); });
-    if (name == "reduce_sum") entry.set_attr<bool>("reassoc");
+        .f_deduce_type([op_name = name](const Args& args, const Kwargs& kwargs) {
+          return Reduction(args, kwargs, op_name);
+        });
+    if (name == "reduce_sum") {
+      entry.set_attr<bool>("reassoc");
+    }
   }
   return true;
 }

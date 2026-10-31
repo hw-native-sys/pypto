@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include "pypto/ir/analysis/hardware_loop_analysis.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -20,9 +20,13 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
@@ -56,9 +60,18 @@ HardwareLoopQualification Qualify(const ForStmtPtr& loop, const HardwareLoopProf
     result.reason = reason;
     return result;
   };
+  // These are IR/API requirements, so empty loops cannot bypass them.
+  if (loop->hardware_loop_policy_ == HardwareLoopPolicy::Require && !HasCanonicalHardwareLoopBounds(loop)) {
+    return finish(HardwareLoopState::Ineligible, "HWL_CANONICAL_BOUNDS");
+  }
   if (!result.step) return finish(HardwareLoopState::Unknown, "HWL_DYNAMIC_STEP");
   if (*result.step == 0) return finish(HardwareLoopState::Ineligible, "HWL_ZERO_STEP");
   if (!result.lower || !result.upper) return finish(HardwareLoopState::Unknown, "HWL_DYNAMIC_BOUND");
+  // Auto loops are still ordinary loops, but can qualify as nested hardware
+  // loops only under the same zero-start, unit-step hardware restriction.
+  if (!HasCanonicalHardwareLoopBounds(loop)) {
+    return finish(HardwareLoopState::Ineligible, "HWL_CANONICAL_BOUNDS");
+  }
 
   // Subtraction, ceil division and the terminating induction update can exceed
   // int64 even when every input fits. Never divide before validating the step.
@@ -218,6 +231,14 @@ void Enforce(const ForStmtPtr& loop, const HardwareLoopQualification& result) {
                                  << "]: qualification is not hardware evidence";
 }
 }  // namespace
+
+bool HasCanonicalHardwareLoopBounds(const ForStmtPtr& loop) {
+  auto start = As<ConstInt>(loop->start_);
+  auto step = As<ConstInt>(loop->step_);
+  // The omitted bounds reparse as INDEX literals in the stop-only DSL.
+  return start && start->value_ == 0 && start->dtype() == DataType::INDEX && step && step->value_ == 1 &&
+         step->dtype() == DataType::INDEX;
+}
 
 HardwareLoopQualification AnalyzeHardwareLoop(const ForStmtPtr& loop, const HardwareLoopProfile& profile) {
   CHECK(loop != nullptr) << "AnalyzeHardwareLoop requires a loop";

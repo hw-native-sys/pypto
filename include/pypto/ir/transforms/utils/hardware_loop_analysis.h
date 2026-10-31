@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#ifndef PYPTO_IR_ANALYSIS_HARDWARE_LOOP_ANALYSIS_H_
-#define PYPTO_IR_ANALYSIS_HARDWARE_LOOP_ANALYSIS_H_
+#ifndef PYPTO_IR_TRANSFORMS_UTILS_HARDWARE_LOOP_ANALYSIS_H_
+#define PYPTO_IR_TRANSFORMS_UTILS_HARDWARE_LOOP_ANALYSIS_H_
 
 #include <cstdint>
 #include <optional>
@@ -54,6 +54,8 @@ struct HardwareLoopQualification {
   std::optional<int64_t> step;
 };
 
+/// Require's fixed bounds are mandatory even for statically empty loops.
+bool HasCanonicalHardwareLoopBounds(const ForStmtPtr& loop);
 /// Recomputed from current IR/profile on every call; summaries never enter hashes.
 HardwareLoopQualification AnalyzeHardwareLoop(const ForStmtPtr& loop, const HardwareLoopProfile& profile);
 std::vector<HardwareLoopQualification> AnalyzeHardwareLoops(const ProgramPtr& program,
@@ -65,4 +67,4 @@ void VerifyHardwareLoopRequirement(const ForStmtPtr& loop, const HardwareLoopPro
 void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile);
 
 }  // namespace pypto::ir
-#endif  // PYPTO_IR_ANALYSIS_HARDWARE_LOOP_ANALYSIS_H_
+#endif  // PYPTO_IR_TRANSFORMS_UTILS_HARDWARE_LOOP_ANALYSIS_H_

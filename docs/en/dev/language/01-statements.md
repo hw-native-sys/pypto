@@ -75,8 +75,11 @@ for i in pl.parallel(start, stop, step):
 
 ### Required hardware loops
 
-`pl.range` persists `HardwareLoopPolicy.Auto`. `pl.hardware_loop` uses the same
-bounds and `init_values` syntax but persists `Require`; only Sequential is legal.
+`pl.range` persists `HardwareLoopPolicy.Auto`.
+`pl.hardware_loop(stop, *, init_values=None)` persists `Require` and creates a
+Sequential loop over `[0, stop)` with fixed `start=0` and `step=1`. Only `stop`
+and optional loop-carried `init_values` are accepted; start, step and attrs
+arguments are rejected. The `init_values` overloads retain carried-value types.
 `Require` is valid only inside an enclosing `pl.reg_scope()`, including for empty
 loops. A scope inside the loop body does not satisfy this requirement. Ordinary
 `pl.range` loops remain valid outside register scopes.
@@ -100,9 +103,9 @@ regardless of qualification.
 
 Static zero-trip Sequential loops are exempt: Simplify removes them and replaces
 results with initial iter_args. A dynamic loop that might be empty is not exempt.
-Nonempty Require needs positive step and retains intent even for a single trip.
-For example, `(32760, 32767, 4)` has two trips and post-IV 32768, outside signed
-16-bit range despite the upper bound fitting.
+Require retains intent even for a single trip. Builder and manually constructed
+IR must also use constant `start=0` and `step=1`, even for zero-trip loops.
+For a signed 16-bit counter, `stop=32767` fits while `stop=32768` does not.
 
 Target profiles carry counter/trip limits, nesting/resource bounds, carry types,
 and profile/toolchain IDs. Unknown operations are conservative unless explicitly

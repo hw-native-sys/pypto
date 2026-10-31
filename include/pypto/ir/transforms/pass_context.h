@@ -20,9 +20,9 @@
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/ir/analysis/hardware_loop_analysis.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 
 namespace pypto {

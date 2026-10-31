@@ -165,6 +165,8 @@ class IRBuilder:
             span: Optional explicit span. If None, automatically captured.
             kind: Loop kind (default: Sequential)
             attrs: Loop-level attributes (key-value metadata, default: empty)
+            hardware_loop_policy: Auto (default) or Require. Require needs a Sequential
+                loop inside RegScope, INDEX start=0 and step=1, and empty attrs.
 
         Yields:
             ForLoopBuilder: Helper object for building the loop

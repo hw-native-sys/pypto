@@ -17,7 +17,6 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/analysis/hardware_loop_analysis.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -27,6 +26,7 @@
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/spmd_launch_utils.h"
 #include "pypto/ir/type.h"

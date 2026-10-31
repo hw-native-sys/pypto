@@ -26,6 +26,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -178,6 +179,13 @@ class RegionChecker : public IRVisitor {
     // before visiting the body: a RegScope inside a loop cannot authorize it.
     if (collecting_ && !region_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
       Error("HardwareLoopPolicy.Require requires RegScope", op->span_);
+    }
+    if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require &&
+        !HasCanonicalHardwareLoopBounds(op)) {
+      Error("HardwareLoopPolicy.Require requires constant start=0 and step=1 with INDEX dtype", op->span_);
+    }
+    if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
+      Error("HardwareLoopPolicy.Require does not support loop attrs", op->span_);
     }
     const auto previous = yield_region_;
     yield_region_ = region_;

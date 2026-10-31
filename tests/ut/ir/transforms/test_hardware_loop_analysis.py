@@ -55,12 +55,12 @@ def profile(**kwargs):
     [
         ((0, 8, 1), "Eligible", 8, 8),
         ((0, 4, 0), "Ineligible", None, None),
-        ((8, 0, -1), "Ineligible", 8, 0),
-        ((32760, 32767, 4), "Ineligible", 2, 32768),
+        ((8, 0, -1), "Ineligible", None, None),
+        ((32760, 32767, 4), "Ineligible", None, None),
         ((0, 32767, 1), "Eligible", 32767, 32767),
         ((0, 32768, 1), "Ineligible", 32768, 32768),
-        ((8, 0, 1), "Eligible", 0, 8),
-        ((0, 8, -1), "Eligible", 0, 0),
+        ((8, 0, 1), "Ineligible", None, None),
+        ((0, 8, -1), "Ineligible", None, None),
         ((-(2**63), 2**63 - 1, 1), "Ineligible", None, None),
     ],
 )
@@ -75,12 +75,13 @@ def test_bounds(bounds, state, count, post):
 
 
 @pytest.mark.parametrize("dynamic_arg", ["upper", "step"])
-def test_dynamic_is_unknown_and_require_fails(dynamic_arg):
+def test_dynamic_require_bounds_fail(dynamic_arg):
     n = ir.Var("n", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
     op = loop(**{dynamic_arg: n}, policy=ir.HardwareLoopPolicy.Require)
     result = ir.analyze_hardware_loop(op, profile())
-    assert result.state == ir.HardwareLoopState.Unknown
-    with pytest.raises(ValueError, match=r"Unknown.*root/loop0.*synthetic-v1.*test-compiler-v1"):
+    state = "Unknown" if dynamic_arg == "upper" else "Ineligible"
+    assert result.state.name == state
+    with pytest.raises(ValueError, match=rf"{state}.*root/loop0.*synthetic-v1.*test-compiler-v1"):
         ir.verify_hardware_loop_requirement(op, profile())
 
 
@@ -91,7 +92,7 @@ def test_eligible_is_not_evidence():
     # Auto never requests evidence. Static empty Require is exempt as well.
     ir.verify_hardware_loop_requirement(loop(), profile(supported=False))
     ir.verify_hardware_loop_requirement(
-        loop(8, 0, policy=ir.HardwareLoopPolicy.Require), profile(supported=False)
+        loop(0, 0, policy=ir.HardwareLoopPolicy.Require), profile(supported=False)
     )
 
 
@@ -131,6 +132,15 @@ def test_required_hardware_loop_requires_nested_qualification():
     assert result.state == ir.HardwareLoopState.Unknown
 
 
+@pytest.mark.parametrize("start,step", [(1, 1), (0, 2)])
+def test_nested_auto_loop_must_have_hardware_bounds(start, step):
+    inner = loop(start, 8, step)
+    outer = loop(body=inner, policy=ir.HardwareLoopPolicy.Require)
+    assert ir.analyze_hardware_loop(inner, profile()).state == ir.HardwareLoopState.Ineligible
+    # The parent conservatively reports an unqualified nested body as Unknown.
+    assert ir.analyze_hardware_loop(outer, profile()).state != ir.HardwareLoopState.Eligible
+
+
 def test_illegal_control_flow():
     op = loop(body=ir.ReturnStmt([], ir.Span.unknown()))
     assert ir.analyze_hardware_loop(op, profile()).state == ir.HardwareLoopState.Ineligible
@@ -148,7 +158,7 @@ def test_contract_property_is_registered():
 
 def test_empty_outer_does_not_require_inner_evidence():
     inner = loop(policy=ir.HardwareLoopPolicy.Require)
-    outer = loop(4, 0, body=inner, policy=ir.HardwareLoopPolicy.Require)
+    outer = loop(0, 0, body=inner, policy=ir.HardwareLoopPolicy.Require)
     ir.verify_hardware_loop_requirement(outer, profile())
 
 
@@ -204,6 +214,16 @@ def test_context_manager_returns_active_context():
     with original as context:
         assert context is original
         assert passes.PassContext.current() is context
+
+
+@pytest.mark.parametrize("start,step", [(1, 1), (0, 2), (0, -1)])
+def test_required_bounds_cannot_be_bypassed_by_empty_loop(start, step):
+    op = loop(start, 0, step, policy=ir.HardwareLoopPolicy.Require)
+    result = ir.analyze_hardware_loop(op, profile())
+    assert result.state == ir.HardwareLoopState.Ineligible
+    assert result.reason == "HWL_CANONICAL_BOUNDS"
+    with pytest.raises(ValueError, match="HWL_CANONICAL_BOUNDS"):
+        ir.verify_hardware_loop_requirement(op, profile())
 
 
 if __name__ == "__main__":

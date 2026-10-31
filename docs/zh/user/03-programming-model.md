@@ -159,6 +159,13 @@ Pass 快照。Pass 本身在 [Passes](../dev/passes/index.md) 中逐个有文档
   `acc = pl.add(acc, ...)` 能work，尽管 IR 里并不存在就地修改。
 - **它是不可变的。** pass 构建新 IR 而不是就地修改，这也是逐 pass 快照对调试有意义的原因。
 
+### 硬件循环
+
+若循环必须使用目标支持的硬件循环，请在 `pl.reg_scope()` 内使用
+`pl.hardware_loop(stop, *, init_values=None)`。其起点固定为 0，步长固定为 1，
+通过 `init_values` 支持循环携带值。代码生成期间会检查目标资格及最终产物中的硬件循环证据。
+完整约束见[控制流](../dev/language/01-statements.md)。
+
 ### 内存层次
 
 Tile 级代码之所以对内存如此显式，是因为硬件本身如此。`pl.load` 与 `pl.move` 接受
@@ -261,6 +268,7 @@ def mm(
 
 ## See Also
 
+- [控制流](../dev/language/01-statements.md) —— 循环形式及硬件循环要求。
 - [快速上手](02-quickstart.md) —— 本页所解释的那些例子。
 - [语言指南](language/index.md) —— 完整表面：类型、函数、控制流、内存、作用域与任务、编译期指令。
 - [Passes](../dev/passes/index.md) —— 流水线中的每个 pass，按执行顺序编号。

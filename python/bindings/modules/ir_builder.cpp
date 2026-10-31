@@ -158,7 +158,9 @@ void BindIRBuilder(nb::module_& m) {
           "    step: Step value expression\n"
           "    span: Source location for loop definition\n"
           "    kind: Loop kind (Sequential or Parallel, default: Sequential)\n"
-          "    attrs: Loop-level attributes (default: empty)\n\n"
+          "    attrs: Loop-level attributes (default: empty)\n"
+          "    hardware_loop_policy: Auto (default) or Require. Require needs a Sequential\n"
+          "        loop inside RegScope, INDEX start=0 and step=1, and empty attrs.\n\n"
           "Raises:\n"
           "    RuntimeError: If not inside a valid context")
 

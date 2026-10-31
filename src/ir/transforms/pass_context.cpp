@@ -30,6 +30,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 

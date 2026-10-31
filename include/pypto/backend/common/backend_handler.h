@@ -18,8 +18,8 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/ir/analysis/hardware_loop_analysis.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
