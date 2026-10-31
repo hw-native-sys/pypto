@@ -218,12 +218,10 @@ after their last use, ordinary memory reuse applies to each allocation. The
 candidates are not unconditional aliases and must not be merged just because
 one of them represents the result's MemRef metadata.
 
-A conditional update can reuse the unchanged sibling's fixed storage when
-the fresh producer is in-place safe and no independent old value remains
-observable. Per-operand output-alias restrictions also apply: an in-place-safe
-operation may still forbid reuse of a carry or workspace operand. This requires
-a proof of the actual source family, including earlier coalesced choices; a
-representative phi MemRef alone is insufficient.
+For ordinary native If results, this pass does not opportunistically coalesce
+a fresh Vec branch producer with an unchanged sibling. Later memory planning
+may reuse storage when lifetimes and allocation constraints permit it.
+
 Post-fixup alias normalization also refreshes enclosing native If hints when
 their yielded writeback aliases move, so abandoned hint allocations can be freed.
 
@@ -346,9 +344,8 @@ physical address for ptoas `PlanMemory`. See
   window.
 - In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
   behavior of the former single `MemoryReuse` pass.
-- `DSA_RP` and `PTOAS` both skip general lifetime-based MemRef reuse. Guarded
-  conditional updates described above still run on the native Tile path;
-  neither planner may undo a must-alias relation established by this pass.
+- `DSA_RP` and `PTOAS` both skip the legacy `MemoryReuse` pass. Neither planner
+  may undo a must-alias relation established by this pass.
 - Accumulator-phi normalization runs for every memory planner before lifetime
   planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
   reuse can introduce a fresh carry/phi mismatch.

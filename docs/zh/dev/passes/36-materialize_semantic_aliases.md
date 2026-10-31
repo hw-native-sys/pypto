@@ -166,10 +166,9 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 内存复用。候选之间不是必须别名，不能因为结果的 MemRef 元数据代表其中一支
 就合并它们的存储。
 
-如果新 producer 支持原地更新，且旧值不再被独立观测，条件更新可以复用另一支
-原样转发的固定存储。还必须满足逐操作数的输出别名限制：允许原地执行的算子
-仍可能禁止复用 carry 或 workspace 操作数。这需要证明实际来源族，包括先前
-已安全合并的选择；仅有代表性的 phi MemRef 不足以作为依据。
+对于普通 native If 结果，本 pass 不会为了复用而将新生成的 Vec 分支结果与
+另一支原样转发的存储合并。后续内存规划可在生命周期和分配约束允许时复用存储。
+
 写回别名在后置归一化中移动时，还会同步刷新外层 native If 的提示，释放不再
 使用的提示分配。
 
@@ -266,8 +265,8 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
   canonical window。
 - 在默认（`PYPTO`）流水线里,本 pass 加上 `MemoryReuse` 组合起来等于原来单个
   `MemoryReuse` pass 的行为。
-- `DSA_RP` 与 `PTOAS` 都跳过一般的生命周期 MemRef 复用。上文带保护条件的
-  条件更新仍在 native Tile 路径运行；二者都不能撤销本 pass 建立的强制别名关系。
+- `DSA_RP` 与 `PTOAS` 都跳过旧的 `MemoryReuse` pass；二者都不能撤销本 pass
+  建立的强制别名关系。
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
   legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的
   carry/phi mismatch。

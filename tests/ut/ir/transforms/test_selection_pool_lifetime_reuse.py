@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Conditional Vec updates reuse a proven dead sibling without merge copies."""
+"""Native If selections preserve independent storage and operand alias constraints."""
 
 import pypto.language as pl
 import pytest
@@ -31,71 +31,6 @@ def _materialize(program):
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         before = passes.init_mem_ref()(program)
         return passes.materialize_semantic_aliases()(before)
-
-
-def test_conditional_update_chain_reuses_one_proven_storage(ascend_backend):
-    """Online-softmax style chains must not retain a new historical tile per If."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            x: pl.Tensor[[4, 8], pl.FP32],
-            flag: pl.Scalar[pl.INT32],
-            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
-        ) -> pl.Tensor[[4, 8], pl.FP32]:
-            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
-            if flag > 0:
-                update_a = pl.tile.adds(a, 1.0)
-                first = pl.yield_(update_a)
-            else:
-                first = pl.yield_(a)
-            if flag > 1:
-                update_b = pl.tile.adds(first, 2.0)
-                second = pl.yield_(update_b)
-            else:
-                second = pl.yield_(first)
-            if flag > 2:
-                update_c = pl.tile.adds(second, 3.0)
-                selected = pl.yield_(update_c)
-            else:
-                selected = pl.yield_(second)
-            return pl.store(selected, [0, 0], out)
-
-    after = _materialize(Before)
-    storage = _storage(after)
-    assert all(
-        storage[name] is storage["a"]
-        for name in ("update_a", "first", "update_b", "second", "update_c", "selected")
-    )
-    assert "tile.move" not in ir.python_print(after)
-
-
-def test_sibling_only_observation_does_not_block_update(ascend_backend):
-    """The opposite arm reads the original value only when the update does not run."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            x: pl.Tensor[[4, 8], pl.FP32],
-            flag: pl.Scalar[pl.INT32],
-            out: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
-        ) -> pl.Tensor[[8, 8], pl.FP32]:
-            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
-            if flag > 0:
-                update = pl.tile.adds(a, 1.0)
-                selected = pl.yield_(update)
-            else:
-                if flag < 0:
-                    pl.store(a, [4, 0], out)
-                selected = pl.yield_(a)
-            return pl.store(selected, [0, 0], out)
-
-    storage = _storage(_materialize(Before))
-    assert storage["update"] is storage["a"]
 
 
 def test_independently_live_old_input_is_not_coalesced(ascend_backend):
@@ -219,8 +154,8 @@ def test_inplace_unsafe_branch_producer_is_not_retargeted(ascend_backend):
     assert storage["update"] is not storage["a"]
 
 
-def test_inplace_unsafe_update_after_coalesced_phi_keeps_separate_storage(ascend_backend):
-    """The first phi's original hint must not hide the sort's actual input allocation."""
+def test_inplace_unsafe_update_after_selected_phi_keeps_separate_storage(ascend_backend):
+    """The sort output must remain separate from both selected input candidates."""
 
     @pl.program
     class Before:
@@ -245,9 +180,9 @@ def test_inplace_unsafe_update_after_coalesced_phi_keeps_separate_storage(ascend
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"] is storage["a"]
-    # RetargetAssign used the original first.type when checking the sort's
-    # nonaliasing contract. Its current allocation has already changed to a.
+    assert storage["update_a"] is storage["first"]
+    assert storage["first"] is not storage["a"]
+    assert storage["sorted_value"] is not storage["first"]
     assert storage["sorted_value"] is not storage["a"]
 
 
@@ -276,8 +211,8 @@ def test_conditional_addc_update_keeps_carry_storage_separate(ascend_backend):
     assert storage["update"] is not storage["carry"]
 
 
-def test_addc_update_after_coalesced_phi_checks_actual_carry_storage(ascend_backend):
-    """A rewritten phi's abandoned hint must not hide its forbidden carry input."""
+def test_addc_update_after_selected_phi_keeps_carry_candidates_separate(ascend_backend):
+    """Neither possible carry input may share the addc output storage."""
 
     @pl.program
     class Before:
@@ -303,7 +238,9 @@ def test_addc_update_after_coalesced_phi_checks_actual_carry_storage(ascend_back
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"] is storage["a"]
+    assert storage["update_a"] is storage["first"]
+    assert storage["first"] is not storage["a"]
+    assert storage["update"] is not storage["first"]
     assert storage["update"] is not storage["a"]
 
 
@@ -361,33 +298,7 @@ def test_selected_addc_carry_hint_does_not_prove_loop_destination_disjoint(ascen
     assert storage["update"] is not storage["result"]
 
 
-def test_conditional_addc_may_reuse_source_with_disjoint_carry(ascend_backend):
-    """The carry restriction still permits overwriting a dead ordinary source."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel(
-            self,
-            x: pl.Tensor[[8, 8], pl.FP32],
-            flag: pl.Scalar[pl.INT32],
-            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
-        ) -> pl.Tensor[[4, 8], pl.FP32]:
-            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
-            carry = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
-            if flag > 0:
-                update = pl.tile.addc(a, a, carry)
-                selected = pl.yield_(update)
-            else:
-                selected = pl.yield_(a)
-            return pl.store(selected, [0, 0], out)
-
-    storage = _storage(_materialize(Before))
-    assert storage["update"] is storage["selected"] is storage["a"]
-    assert storage["update"] is not storage["carry"]
-
-
-def test_coalesced_value_escaping_through_another_selection_keeps_old_storage(ascend_backend):
+def test_value_escaping_through_another_selection_keeps_old_storage(ascend_backend):
     """A saved native choice observes the first update's value before a later update."""
 
     @pl.program
@@ -419,9 +330,11 @@ def test_coalesced_value_escaping_through_another_selection_keeps_old_storage(as
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"] is storage["a"]
-    # saved's original MemRef hint names update_a's abandoned allocation. The
-    # later update must still preserve the actual first/a bytes saved may read.
+    assert storage["update_a"] is storage["first"]
+    assert storage["first"] is not storage["a"]
+    # saved may retain either update_a or the original a through first.
+    # A later update must preserve both possible saved payloads.
+    assert storage["update_b"] is not storage["first"]
     assert storage["update_b"] is not storage["a"]
 
 
