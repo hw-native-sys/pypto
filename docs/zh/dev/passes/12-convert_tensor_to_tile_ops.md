@@ -482,18 +482,6 @@ flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列�
 
 用 `tile.sel`（而非 `input * mask`）重建保留混合，使下沉不产生 `pto.tmul`（A2/A3 对 bf16/i8 拒绝 `tmul`）。index 的 `reshape [b, s] → [n, 1]` 是 buffer 视图重命名，不是单独的 PTO 算子。
 
-## A5 按轴 Gather 的源数据
-
-A5 的末轴 `tensor.gather(..., dim=-1, index=idx)` 使用扁平索引，要求源数据紧密排列。
-当原始父 tile 的行跨度和紧密目标的行跨度均可证明为 32 字节对齐时，片上 FP16/FP32 源通过
-`tile.extract` 复制到独立的 Vec tile。转换过程沿保留行跨度的视图记录跨度来源，不能仅根据切片列数判断对齐。
-未对齐或来源未知时保留 assemble 拷贝，并将源窗口限定到 index 的前导维度范围。
-这一选择不会放宽 PTOAS 对物理 tile 尺寸的对齐要求。
-`CanonicalizeTileSlice` 将前置列切片的
-偏移合并进 extract，因此 `full[:, 64:128]` 由 `pto.textract` 直接读取较宽的父 tile，
-无需嵌套的 `pto.subview` 操作数。GM 源已由 `tile.load` 紧密加载，无需额外 extract。
-INT16/INT32 源保留基于 assemble 的拷贝路径，因为 A5 `textract` 不支持这两种类型。
-
 ## 扁平 Gather 下沉
 
 `pl.gather(src, index=idx)` 和 `pl.gather(src, idx)` 生成已有的
@@ -513,7 +501,8 @@ Vec 索引直接复用；生产者下降后，重新检查其内存空间及无�
 索引边界要求见[算子契约](../ir/05-tensor-tile-ops.md)。
 
 带 stride 的源通过 `tile.extract`（浮点）或保持数值不变的整数 `tile.adds(..., 0)`
-（INT16/INT32）物化为紧凑 tile；A2/A3 TEXTRACT 无法复制这两种整数类型。
+（INT16/INT32）物化为紧凑 tile；TEXTRACT 无法复制这两种整数类型。
+末轴 gather 在 A2/A3 和 A5 上共用这一物化方式和整块扁平索引下沉。
 转换器通过只读 `ConversionContext` 获取前序生产者的紧凑存储证明，信息在一次
 SSA 遍历中收集。已注册的 functional tile 算子若生成独立存储，可证明结果紧凑；
 普通别名和 `tile.set_validshape` 保留该证明。其他视图、参数及控制流结果仍视为

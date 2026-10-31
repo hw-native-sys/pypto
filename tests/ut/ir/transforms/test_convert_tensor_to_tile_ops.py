@@ -5638,15 +5638,11 @@ class TestConvertFlatGatherOp:
 
 
 class TestConvertGatherOp:
-    """Test conversion of tensor.gather (MVP: 2D + dim=-1).
+    """Test full-tile axis gather lowering shared by A2/A3 and A5."""
 
-    UT transforms conftest pins Ascend950 (A5), so the default path is the
-    full-tile flat-index lowering. A separate test switches to Ascend910 to
-    lock the legacy per-row loop.
-    """
-
-    def test_gather_conversion(self):
-        """A5: tensor.gather -> full-tile load + flat index + one tile.gather."""
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion(self, ascend_backend):
+        """tensor.gather -> full-tile load + flat index + one tile.gather."""
 
         @pl.program
         class Before:
@@ -5738,8 +5734,9 @@ class TestConvertGatherOp:
         for cast in casts:
             assert dict(cast.kwargs)["mode"] == 0
 
-    def test_gather_conversion_expand(self):
-        """A5 expand gather (K > S1): flat uses src cols, not output cols."""
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion_expand(self, ascend_backend):
+        """Expand gather (K > S1): flat uses src cols, not output cols."""
 
         @pl.program
         class Before:
@@ -5797,80 +5794,14 @@ class TestConvertGatherOp:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_gather_conversion_a2a3_per_row(self):
-        """Non-A5 keeps the legacy per-row single-row gather loop."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-        try:
-
-            @pl.program
-            class Before:
-                @pl.function(type=pl.FunctionType.InCore)
-                def main_incore_0(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    out: pl.Tensor[[4, 3], pl.FP32] = pl.tensor.gather(inp, dim=-1, index=idx)
-                    return out
-
-                @pl.function
-                def main(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(inp, idx)
-                    return out
-
-            @pl.program
-            class Expected:
-                @pl.function(type=pl.FunctionType.InCore)
-                def main_incore_0(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                    ret0__out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    gather_acc_init = pl.tile.create([4, 3], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-                    for gather_lv, (gather_ia,) in pl.range(4, init_values=(gather_acc_init,)):
-                        gather_inp_row = pl.tile.load(
-                            inp, [gather_lv, 0], [1, 16], [1, 16], target_memory=pl.Mem.Vec
-                        )
-                        gather_idx_row = pl.tile.load(
-                            idx, [gather_lv, 0], [1, 3], [1, 3], target_memory=pl.Mem.Vec
-                        )
-                        gather_row_tmp = pl.tile.create([1, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                        gather_row = pl.tile.gather(gather_inp_row, gather_idx_row, gather_row_tmp)
-                        gather_asmbl = pl.tile.assemble(gather_ia, gather_row, [gather_lv, 0])
-                        gather_rv = pl.yield_(gather_asmbl)
-                    out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather_rv
-                    ret0__store = pl.tile.store(out__tile, [0, 0], ret0__out)
-                    return ret0__store
-
-                @pl.function
-                def main(
-                    self,
-                    inp: pl.Tensor[[4, 16], pl.FP32],
-                    idx: pl.Tensor[[4, 3], pl.INT32],
-                ) -> pl.Tensor[[4, 3], pl.FP32]:
-                    ret0__out = pl.tensor.create([4, 3], dtype=pl.FP32, layout=pl.TensorLayout.ND)
-                    out = self.main_incore_0(inp, idx, ret0__out)
-                    return out
-
-            After = passes.convert_tensor_to_tile_ops()(Before)
-            ir.assert_structural_equal(After, Expected)
-        finally:
-            backend.reset_for_testing()
-            backend.set_backend_type(BackendType.Ascend950)
-
-    def test_gather_conversion_with_tile_input(self):
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion_with_tile_input(self, ascend_backend):
         """tensor.gather whose input was already demoted to a tile by an upstream conversion.
 
         Regression test for the case the converter previously crashed with
         CHECK(input_tensor_type): a local tensor.create + tensor.assemble feeds
         tensor.gather, so by the time gather is visited its `input` arg is a
-        TileType. On A5 the converter extracts a packed source for flat gather.
+        TileType. The converter extracts a packed source for flat gather.
         """
 
         @pl.program
@@ -5932,8 +5863,9 @@ class TestConvertGatherOp:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_gather_conversion_strided_tile_source_materializes(self):
-        """A5 flat-index gather materializes a strided tile.slice source.
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_gather_conversion_strided_tile_source_materializes(self, ascend_backend):
+        """Flat-index gather materializes a strided tile.slice source.
 
         Regression for the strided-source corruption (DeepSeek sparse_attn
         inverse-RoPE): flat[i,j] = i*src_cols + idx assumes the source is stored

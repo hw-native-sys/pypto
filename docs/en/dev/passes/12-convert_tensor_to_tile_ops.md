@@ -557,21 +557,6 @@ Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src
 
 `tile.sel` (not `input * mask`) reconstructs the preserve blend so the lowering emits no `pto.tmul`, which A2/A3 reject for bf16/i8. The index `reshape [b, s] → [n, 1]` is a buffer-view realias, not a separate PTO op.
 
-## A5 Axis Gather Sources
-
-For last-axis `tensor.gather(..., dim=-1, index=idx)` on A5, flat indices assume
-a packed source. On-chip FP16/FP32 sources are materialized with `tile.extract` into a
-fresh Vec tile when both the original parent's row pitch and the dense destination
-row pitch are provably 32-byte aligned. Conversion tracks the pitch origin through
-row-preserving views; the slice's column count alone cannot establish alignment.
-Unaligned or unknown pitches retain the assemble-based copy, with the source
-window bounded to the index's leading extent. This does not relax PTOAS's physical
-tile-extent alignment requirements. `CanonicalizeTileSlice` folds preceding column-slice offsets
-into that extract, so `full[:, 64:128]` is read by `pto.textract` directly from
-the wider parent rather than through nested `pto.subview` operands. GM sources
-are already packed by `tile.load` and need no extra extract. INT16/INT32 sources
-keep their assemble-based copy because A5 `textract` does not support these types.
-
 ## Flat Gather Lowering
 
 `pl.gather(src, index=idx)` and `pl.gather(src, idx)` emit the existing
@@ -593,7 +578,8 @@ explicitly for `tile.gather`. See the [operator contract](../ir/05-tensor-tile-o
 for dtype, shape, alignment, and bounds requirements.
 
 Strided sources are packed using `tile.extract` for floating point or exact integer
-`tile.adds(..., 0)` for INT16/INT32, which A2/A3 TEXTRACT cannot copy.
+`tile.adds(..., 0)` for INT16/INT32, which TEXTRACT cannot copy.
+Last-axis gather shares this packing and full-tile flat-index lowering on A2/A3 and A5.
 The converter receives a read-only `ConversionContext` containing packed-storage
 facts collected from earlier lowered producers in one SSA traversal. Registered
 functional tile results with fresh storage are proven packed; plain aliases and

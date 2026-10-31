@@ -66,17 +66,6 @@ constexpr int kCastModeRound = 2;
 
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
 
-const backend::BackendHandler* GetActiveBackendHandler() {
-  return tile_conversion_utils::ActiveBackendHandler();
-}
-
-// A5 index-form gather needs full-tile flat indices; A2A3 keeps the legacy
-// per-row path (see RegisterGatherOps Case 1/2).
-bool IsA5TargetArch() {
-  const auto* handler = GetActiveBackendHandler();
-  return handler != nullptr && handler->GetPtoTargetArch() == "a5";
-}
-
 // Detect row-broadcast pattern: [M, N] op [M, 1] or [M, 1] op [M, N]
 // Returns {wider_arg_idx, narrower_arg_idx} if broadcast detected, empty otherwise
 std::pair<int, int> DetectRowBroadcast(const std::vector<ExprPtr>& args) {
@@ -109,6 +98,42 @@ VarPtr AppendScratchTile(std::vector<StmtPtr>* prologue, const std::shared_ptr<c
   auto tmp_var = std::make_shared<Var>(name, create_call->GetType(), span);
   prologue->push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
   return tmp_var;
+}
+
+// Share packing between axis and flat gather. Slice types do not retain
+// their parent's pitch; only a proven packed producer can be reused directly.
+ExprPtr MaterializeGatherSource(const ExprPtr& source, const std::vector<ExprPtr>& shape,
+                                const ConversionContext& context, std::vector<StmtPtr>& prologue,
+                                const Span& span, const std::string& name) {
+  auto type = As<TileType>(source->GetType());
+  INTERNAL_CHECK_SPAN(type, span) << "gather source materialization requires a TileType";
+  const bool full_shape = tile_view_semantics::ShapeExprListsEquivalent(type->shape_, shape);
+  if (full_shape && context.packed_tiles.count(source)) return source;
+
+  auto& reg = OpRegistry::GetInstance();
+  auto emit = [&](const CallPtr& call, const std::string& hint) -> VarPtr {
+    auto var = std::make_shared<Var>(hint, call->GetType(), span);
+    prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+    return var;
+  };
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto window = MakeShapeTuple(shape, span);
+  if (type->dtype_.IsInt()) {
+    // TEXTRACT cannot copy INT16/INT32. Exact integer addition packs the
+    // window without converting through float. Bound fewer index rows first.
+    ExprPtr bounded = source;
+    if (!full_shape) {
+      bounded = emit(reg.Create("tile.slice", {source, window, MakeZeroOffsets(shape.size(), span)}, span),
+                     name + "_slice");
+    }
+    return emit(reg.Create("tile.adds", {bounded, std::make_shared<ConstInt>(0, type->dtype_, span)}, span),
+                name);
+  }
+  // Extract directly from the source so slice canonicalization can fold
+  // column offsets into the original parent, preserving the actual pitch.
+  return emit(
+      reg.Create("tile.extract", {source, zero, zero, window}, {{"target_memory", MemorySpace::Vec}}, span),
+      name);
 }
 
 ConversionResult ConvertFlatGather(const std::vector<ExprPtr>& args, const Span& span,
@@ -157,22 +182,7 @@ ConversionResult ConvertFlatGather(const std::vector<ExprPtr>& args, const Span&
       << "flat gather on-chip source rows must be 32-byte aligned; gather directly from the GM tensor "
          "for unaligned rows";
 
-  // Type metadata alone cannot prove packing: tile.slice retains the parent's
-  // pitch without encoding it in TileView. Only reuse a proven packed producer.
-  ExprPtr packed = args[0];
-  if (context.packed_tiles.count(packed) == 0) {
-    auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
-    // A2/A3 TEXTRACT cannot copy INT16/INT32. Integer addition of zero is an
-    // exact identity and packs the result without a lossy float conversion.
-    packed =
-        source->dtype_.IsInt()
-            ? emit(reg.Create("tile.adds", {args[0], std::make_shared<ConstInt>(0, source->dtype_, span)},
-                              span),
-                   "gather_src")
-            : emit(reg.Create("tile.extract", {args[0], zero, zero, MakeShapeTuple(source->shape_, span)},
-                              {{"target_memory", MemorySpace::Vec}}, span),
-                   "gather_src");
-  }
+  ExprPtr packed = MaterializeGatherSource(args[0], source->shape_, context, prologue, span, "gather_src");
   auto tmp = AppendScratchTile(&prologue, index_type, "gather_tmp", span);
   auto valid_tmp = emit(
       reg.Create("tile.set_validshape", {tmp, index_view.valid_shape[0], index_view.valid_shape[1]}, span),
@@ -1582,10 +1592,8 @@ void OpConversionRegistry::RegisterSortOps() {
 // (dst[i,j] = src_flat[indices[i,j]]). Torch-style last-dim gather exposes
 // column indices, so they must be expanded to flat offsets for multi-row src.
 //
-// A5 (GetPtoTargetArch()=="a5"): Case 1/2 emit one full-tile gather after
+// Case 1/2 emit one full-tile gather on all backends after
 //   flat_idx[i,j] = i * src_cols + index[i,j]  (mirrors tensor.scatter).
-// A2A3 / other: keep the legacy per-row (rows=1) loop where column indices
-//   equal flat indices within each 1-row src slice.
 //
 // FlattenTileNdTo2D constraint: tile.load, tile.store, tile.reshape may
 // produce/consume >2D tiles; all other tile ops must be 2D.
@@ -1604,12 +1612,10 @@ void OpConversionRegistry::RegisterSortOps() {
 // Four cases (by rank and norm_dim):
 //
 // Case 1  rank==2, dim==1 (last):
-//   A5: load [I0,S1]/[I0,K], expand flat indices, one tile.gather → [I0,K].
-//   A2A3: loop over I0 rows: load [1,S1] and [1,K], single-row gather.
+//   Load [I0,S1]/[I0,K], expand flat indices, one tile.gather → [I0,K].
 //
 // Case 2  rank==3, dim==2 (last):
-//   A5: reshape to [I0*I1,S2]/[I0*I1,K], then same flat full-tile gather.
-//   A2A3: nested loop: outer I0 × inner I1, single-row gathers + reshape.
+//   Reshape to [I0*I1,S2]/[I0*I1,K], then same flat full-tile gather.
 //
 // Case 3  rank==3, dim==0 (first):
 //   Flat-index gather: for each output row r = i0*I1+i1:
@@ -1765,13 +1771,12 @@ void OpConversionRegistry::RegisterGatherOps() {
 
         const DataType idx_dtype = index_info.second;
 
-        // A5 helper: flat_idx[i,j] = i * src_cols + index[i,j].
+        // flat_idx[i,j] = i * src_cols + index[i,j].
         // Prefer a linear arange reshaped to [rows, idx_cols] so every allocated
         // tile has a 32-byte-aligned row (avoids tile.ci([1, rows]) when rows is
         // small). Falls back to row_expand_add for odd idx_cols (UT-only shapes).
-        auto emit_a5_flat_idx = [&](std::vector<StmtPtr>& stmts, const VarPtr& idx_2d, int64_t rows,
-                                    int64_t src_cols, int64_t idx_cols,
-                                    const std::string& prefix) -> ExprPtr {
+        auto emit_flat_idx = [&](std::vector<StmtPtr>& stmts, const VarPtr& idx_2d, int64_t rows,
+                                 int64_t src_cols, int64_t idx_cols, const std::string& prefix) -> ExprPtr {
           const DataType compute_dtype(DataType::INT32);
           auto make_cd = [&](int64_t v) -> ExprPtr {
             return std::make_shared<ConstInt>(v, compute_dtype, span);
@@ -1816,176 +1821,80 @@ void OpConversionRegistry::RegisterGatherOps() {
           return flat;
         };
 
-        // A5 flat-index gather addresses the source as a flat 1D array
-        // (flat[i,j] = i * src_cols + index[i,j]), which assumes the source is
-        // stored row-major with stride == src_cols. A tile.slice *view* of a
-        // wider tile keeps the parent's stride (e.g. rope = full[:, nope:head]
-        // has stride HEAD_DIM, not ROPE_DIM), so the flat offset misaddresses
-        // every row past the first — only row 0 survives. tile.load already
-        // materializes TensorType sources to a fresh contiguous tile; only
-        // TileType sources may retain a parent's wider pitch, so they need
-        // this copy into a fresh contiguous tile.
-        // A5 Vec TEXTRACT requires both row pitches to be 32-byte aligned.
-        // Look up the original pitch: a column slice's own shape/TileView no
-        // longer describes its parent's stride. An unknown origin is not proof
-        // of alignment, so keep the existing assemble copy in that case.
-        auto can_extract_src = [&](int64_t cols) {
-          if (input_dtype.IsInt() || (cols % 32) * input_dtype.GetByte() % 32 != 0) return false;
-          auto source = context.tile_row_pitch_sources.find(input);
-          if (source == context.tile_row_pitch_sources.end()) return false;
-          auto type = As<TileType>(source->second->GetType());
-          auto source_cols = As<ConstInt>(type->shape_.back());
-          return source_cols && (source_cols->value_ % 32) * type->dtype_.GetByte() % 32 == 0;
-        };
-        // When legal, extract lets CanonicalizeTileSlice fold column offsets
-        // into the read of the parent rather than retaining source subviews.
-        auto materialize_src_contig = [&](const ExprPtr& src, int64_t rows, int64_t cols,
-                                          const std::string& name) -> VarPtr {
-          auto sh = MakeShapeTuple({make_idx(rows), make_idx(cols)}, span);
-          auto dtype = As<TileType>(src->GetType())->dtype_;
-          if (!can_extract_src(cols)) {
-            // Also preserves INT16/INT32, which A5 TEXTRACT cannot read.
-            auto contig = emit("tile.create", {sh}, {{"dtype", dtype}, {"target_memory", MemorySpace::Vec}},
-                               name + "_alloc");
-            auto ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
-            return emit("tile.assemble", {contig, src, ofs}, {}, name + "_copy");
-          }
-          return emit("tile.extract", {src, zero, zero, sh}, {{"target_memory", MemorySpace::Vec}}, name);
-        };
-
         // ================================================================
         // Case 1  rank==2, dim==1 (last dim)
-        // A5: full-tile gather with flat indices (mirrors tensor.scatter).
-        // A2A3: legacy per-row loop (column index == flat within rows=1 src).
+        // Full-tile gather with flat indices on all backends.
         // ================================================================
         if (rank == 2 && norm_dim == 1) {
           int64_t I0 = get_const(index_shape[0], "index.shape[0]");
           int64_t S1 = get_const(input_shape[1], "input.shape[1]");
           int64_t K = get_const(index_shape[1], "index.shape[1]");
 
-          if (IsA5TargetArch()) {
-            // INT16 flat-index range guard (same bound as tensor.scatter).
-            if (idx_dtype == DataType::INT16) {
-              const int64_t kMaxFlat = 32768;
-              const int64_t max_rows = S1 == 0 ? kMaxFlat : kMaxFlat / S1;
-              CHECK_SPAN(I0 <= max_rows, span)
-                  << "tensor.gather (A5) with INT16 indices: rows(" << I0 << ") * src_cols(" << S1
-                  << ") exceeds the INT16 index range (max flat index 32767, rows <= " << max_rows << ").";
-            }
-
-            auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
-            auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(S1)}, span);
-            // Materialize a possibly-strided TileType source (see comment on
-            // materialize_src_contig) so the flat-index gather addresses it
-            // correctly. TensorType sources are already contiguous (tile.load).
-            // Extract directly from input: an intermediate slice carrying an
-            // explicit valid_shape cannot be folded by CanonicalizeTileSlice.
-            VarPtr gather_src;
-            if (auto input_tile = As<TileType>(input->GetType())) {
-              ExprPtr source = input;
-              if (!can_extract_src(S1)) {
-                // Gather permits fewer index rows than input rows. Bound the
-                // assemble source so it fits the smaller dense destination.
-                source = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
-              }
-              gather_src = materialize_src_contig(source, I0, S1, "gather_src");
-            } else {
-              gather_src = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
-            }
-            auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
-            auto idx_full = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx");
-
-            auto flat_idx = emit_a5_flat_idx(prologue, idx_full, I0, S1, K, "gather");
-            auto tmp_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
-            auto tmp = emit("tile.create", {tmp_sh}, tmp_create_kwargs, "gather_tmp");
-            auto result = emit("tile.gather", {gather_src, flat_idx, tmp}, {}, "gather");
-            return ConversionResult{std::move(prologue), result};
+          // INT16 flat-index range guard (same bound as tensor.scatter).
+          if (idx_dtype == DataType::INT16) {
+            const int64_t kMaxFlat = 32768;
+            const int64_t max_rows = S1 == 0 ? kMaxFlat : kMaxFlat / S1;
+            CHECK_SPAN(I0 <= max_rows, span)
+                << "tensor.gather with INT16 indices: rows(" << I0 << ") * src_cols(" << S1
+                << ") exceeds the INT16 index range (max flat index 32767, rows <= " << max_rows << ").";
           }
 
-          auto result =
-              make_loop(prologue, "gather", index_shape[0], I0, K, input_dtype,
-                        [&](const VarPtr& lv, const IterArgPtr& /*ia*/, std::vector<StmtPtr>& bs) -> VarPtr {
-                          auto row_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{lv, zero}, span);
-                          auto inp_sh = MakeShapeTuple({one, make_idx(S1)}, span);
-                          auto inp_row = emit_load_or_slice(bs, input, row_ofs, inp_sh, "gather_inp_row");
-                          auto idx_sh = MakeShapeTuple({one, make_idx(K)}, span);
-                          auto idx_row = emit_load_or_slice(bs, index, row_ofs, idx_sh, "gather_idx_row");
-                          return single_row_gather(bs, inp_row, idx_row, K, "gather_row");
-                        });
+          auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
+          auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(S1)}, span);
+          // GM loads are packed; local windows use the same packing as flat gather.
+          ExprPtr gather_src = As<TileType>(input->GetType())
+                                   ? MaterializeGatherSource(input, {make_idx(I0), make_idx(S1)}, context,
+                                                             prologue, span, "gather_src")
+                                   : emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
+          auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
+          auto idx_full = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx");
+
+          auto flat_idx = emit_flat_idx(prologue, idx_full, I0, S1, K, "gather");
+          auto tmp_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
+          auto tmp = emit("tile.create", {tmp_sh}, tmp_create_kwargs, "gather_tmp");
+          auto result = emit("tile.gather", {gather_src, flat_idx, tmp}, {}, "gather");
           return ConversionResult{std::move(prologue), result};
         }
 
         // ================================================================
         // Case 2  rank==3, dim==2 (last dim)
         // Result tile: [I0*I1, K] where tile[i0*I1+i1, k] = output[i0, i1, k].
-        // A5: reshape to 2D then full-tile flat gather. A2A3: nested row loops.
+        // Reshape to 2D then full-tile flat gather on all backends.
         // ================================================================
         if (rank == 3 && norm_dim == 2) {
           int64_t I0 = get_const(index_shape[0], "index.shape[0]");
           int64_t I1 = get_const(index_shape[1], "index.shape[1]");
           int64_t S2 = get_const(input_shape[2], "input.shape[2]");
           int64_t K = get_const(index_shape[2], "index.shape[2]");
-          int64_t I1K = I1 * K;
           int64_t I0I1 = I0 * I1;
 
-          if (IsA5TargetArch()) {
-            if (idx_dtype == DataType::INT16) {
-              const int64_t kMaxFlat = 32768;
-              const int64_t max_rows = S2 == 0 ? kMaxFlat : kMaxFlat / S2;
-              CHECK_SPAN(I0I1 <= max_rows, span)
-                  << "tensor.gather (A5) with INT16 indices: rows(" << I0I1 << ") * src_cols(" << S2
-                  << ") exceeds the INT16 index range (max flat index 32767, rows <= " << max_rows << ").";
-            }
-
-            auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero, zero}, span);
-            auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(S2)}, span);
-            auto inp_raw = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp_raw");
-            auto inp_2d = reshape_to(prologue, inp_raw, {make_idx(I0I1), make_idx(S2)}, "gather_inp");
-            // Materialize a possibly-strided TileType source (see comment on
-            // materialize_src_contig); the reshape above preserves a strided
-            // 3D slice's wider stride, which would break the flat-index gather.
-            VarPtr gather_src = inp_2d;
-            if (As<TileType>(input->GetType())) {
-              gather_src = materialize_src_contig(inp_2d, I0I1, S2, "gather_src");
-            }
-            auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(K)}, span);
-            auto idx_raw = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx_raw");
-            auto idx_2d = reshape_to(prologue, idx_raw, {make_idx(I0I1), make_idx(K)}, "gather_idx");
-
-            auto flat_idx = emit_a5_flat_idx(prologue, idx_2d, I0I1, S2, K, "gather");
-            auto tmp_sh = MakeShapeTuple({make_idx(I0I1), make_idx(K)}, span);
-            auto tmp = emit("tile.create", {tmp_sh}, tmp_create_kwargs, "gather_tmp");
-            auto result = emit("tile.gather", {gather_src, flat_idx, tmp}, {}, "gather");
-            // Trailing reshape keeps Phase 3 off (same as the legacy path).
-            auto out_2d = reshape_to(prologue, result, {make_idx(I0I1), make_idx(K)}, "gather_out");
-            return ConversionResult{std::move(prologue), out_2d};
+          if (idx_dtype == DataType::INT16) {
+            const int64_t kMaxFlat = 32768;
+            const int64_t max_rows = S2 == 0 ? kMaxFlat : kMaxFlat / S2;
+            CHECK_SPAN(I0I1 <= max_rows, span)
+                << "tensor.gather with INT16 indices: rows(" << I0I1 << ") * src_cols(" << S2
+                << ") exceeds the INT16 index range (max flat index 32767, rows <= " << max_rows << ").";
           }
 
-          // Outer loop: i0=0..I0-1, accumulates [I0, I1*K].
-          auto outer_result = make_loop(
-              prologue, "gather_outer", index_shape[0], I0, I1K, input_dtype,
-              [&](const VarPtr& outer_lv, const IterArgPtr& /*oia*/, std::vector<StmtPtr>& ob) -> VarPtr {
-                // Inner loop: i1=0..I1-1, accumulates [I1, K].
-                auto inner_result =
-                    make_loop(ob, "gather_inner", index_shape[1], I1, K, input_dtype,
-                              [&](const VarPtr& inner_lv, const IterArgPtr& /*iia*/,
-                                  std::vector<StmtPtr>& bs) -> VarPtr {
-                                auto ofs = std::make_shared<MakeTuple>(
-                                    std::vector<ExprPtr>{outer_lv, inner_lv, zero}, span);
-                                // Load with 3D shape → 3D tile type; immediately reshape to 2D.
-                                auto inp_sh = MakeShapeTuple({one, one, make_idx(S2)}, span);
-                                auto inp_raw = emit_load_or_slice(bs, input, ofs, inp_sh, "gather_inp_raw");
-                                auto inp_row = reshape_to(bs, inp_raw, {one, make_idx(S2)}, "gather_inp_row");
-                                auto idx_sh = MakeShapeTuple({one, one, make_idx(K)}, span);
-                                auto idx_raw = emit_load_or_slice(bs, index, ofs, idx_sh, "gather_idx_raw");
-                                auto idx_row = reshape_to(bs, idx_raw, {one, make_idx(K)}, "gather_idx_row");
-                                return single_row_gather(bs, inp_row, idx_row, K, "gather_row");
-                              });
-                // Reshape [I1, K] → [1, I1*K] for outer assemble.
-                return reshape_to(ob, inner_result, {one, make_idx(I1K)}, "gather_inner_flat");
-              });
-          // Reshape [I0, I1*K] → [I0*I1, K].  Prevents Phase 3 and gives correct 2D layout.
-          auto out_2d = reshape_to(prologue, outer_result, {make_idx(I0I1), make_idx(K)}, "gather_out");
+          auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero, zero}, span);
+          auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(S2)}, span);
+          auto inp_raw = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp_raw");
+          auto inp_2d = reshape_to(prologue, inp_raw, {make_idx(I0I1), make_idx(S2)}, "gather_inp");
+          ExprPtr gather_src = inp_2d;
+          if (As<TileType>(input->GetType())) {
+            gather_src = MaterializeGatherSource(inp_2d, {make_idx(I0I1), make_idx(S2)}, context, prologue,
+                                                 span, "gather_src");
+          }
+          auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(K)}, span);
+          auto idx_raw = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx_raw");
+          auto idx_2d = reshape_to(prologue, idx_raw, {make_idx(I0I1), make_idx(K)}, "gather_idx");
+
+          auto flat_idx = emit_flat_idx(prologue, idx_2d, I0I1, S2, K, "gather");
+          auto tmp_sh = MakeShapeTuple({make_idx(I0I1), make_idx(K)}, span);
+          auto tmp = emit("tile.create", {tmp_sh}, tmp_create_kwargs, "gather_tmp");
+          auto result = emit("tile.gather", {gather_src, flat_idx, tmp}, {}, "gather");
+          // Trailing reshape keeps Phase 3 off (same as the legacy path).
+          auto out_2d = reshape_to(prologue, result, {make_idx(I0I1), make_idx(K)}, "gather_out");
           return ConversionResult{std::move(prologue), out_2d};
         }
 

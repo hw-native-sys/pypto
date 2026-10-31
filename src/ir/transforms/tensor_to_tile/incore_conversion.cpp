@@ -1123,44 +1123,6 @@ class TensorToTileMutator : public TypePropagatingMutator {
       }
     }
     if (packed) conversion_context_.packed_tiles.insert(var);
-
-    // Resolve the pitch origin once per definition, rather than walking a
-    // slice/alias chain again at every gather. A reshape can change the pitch
-    // only when its input is known packed; otherwise preserve it only when
-    // the last dimension is unchanged. Unknown/boxed layouts stay unknown.
-    ExprPtr pitch_source;
-    ExprPtr alias = value;
-    if (auto call = As<Call>(value)) {
-      if (packed || IsOp(call, "tile.create")) {
-        pitch_source = var;
-      } else if (!call->args_.empty() && (IsOp(call, "tile.slice") || IsOp(call, "tile.set_validshape") ||
-                                          IsOp(call, "tile.assemble") || IsOp(call, "tile.reshape"))) {
-        // Other aliases (for example a dtype/shape reinterpretation) may
-        // repartition rows; buffer inheritance alone does not prove the pitch.
-        alias = call->args_[0];
-        if (IsOp(call, "tile.slice") && call->args_.size() >= 5) {
-          auto dropped = As<MakeTuple>(call->args_[4]);
-          if (!dropped || !dropped->elements_.empty()) return;
-        }
-        if (IsOp(call, "tile.reshape")) {
-          if (conversion_context_.packed_tiles.count(alias)) {
-            pitch_source = var;
-          } else {
-            auto source_type = As<TileType>(alias->GetType());
-            auto source_cols = source_type && !source_type->shape_.empty()
-                                   ? As<ConstInt>(source_type->shape_.back())
-                                   : nullptr;
-            auto result_cols = As<ConstInt>(type->shape_.back());
-            if (!source_cols || !result_cols || source_cols->value_ != result_cols->value_) return;
-          }
-        }
-      }
-    }
-    if (!pitch_source) {
-      auto source = conversion_context_.tile_row_pitch_sources.find(alias);
-      if (source != conversion_context_.tile_row_pitch_sources.end()) pitch_source = source->second;
-    }
-    if (pitch_source) conversion_context_.tile_row_pitch_sources.emplace(var, pitch_source);
   }
 
   StmtPtr HandlePassThroughAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {

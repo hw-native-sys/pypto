@@ -68,10 +68,6 @@ using ConversionFunc = std::function<ConversionResult(
 /// Keep owning references so replaced SSA values cannot leave recycled pointer keys.
 struct ConversionContext {
   std::unordered_set<ExprPtr> packed_tiles;
-  // A row-preserving view keeps its original allocation's row pitch even
-  // when tile.slice drops the stride from its result type. Unknown origins
-  // are absent; keep owning references just as for packed_tiles.
-  std::unordered_map<ExprPtr, ExprPtr> tile_row_pitch_sources;
 };
 
 using ContextualConversionFunc = std::function<ConversionResult(

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 axis gather must repack column slices before using flat indices."""
+"""Axis gather shares full-tile source packing across Ascend backends."""
 
 import pypto.language as pl
 import pytest
@@ -16,7 +16,7 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
-def _codegen_a5(program):
+def _codegen(program):
     # The tensor.gather printer currently emits (source, idx, dim=-1),
     # which cannot roundtrip through the DSL's positional dim argument.
     # Keep property verification while testing the full codegen pipeline.
@@ -27,10 +27,11 @@ def _codegen_a5(program):
     return codegen.PTOCodegen().generate(ir.Program([kernel], kernel.name, optimized.span))
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("dtype", [pl.FP32, pl.FP16, pl.INT32, pl.INT16])
 @pytest.mark.parametrize("strided", [False, True])
-def test_a5_gather_column_slice_uses_extract(dtype, strided, ascend_backend):
+@pytest.mark.parametrize("index_rows", [8, 16])
+def test_gather_column_slice_uses_extract(dtype, strided, index_rows, ascend_backend):
     # Sixteen rows cross the A5 FP32 vector box boundary. For a column slice,
     # the parent pitch is 128 but tgather's flat indices assume a pitch of 64.
     if strided:
@@ -41,9 +42,9 @@ def test_a5_gather_column_slice_uses_extract(dtype, strided, ascend_backend):
             def main(
                 self,
                 inp: pl.Tensor[[16, 128], dtype],
-                idx: pl.Tensor[[16, 64], pl.INT32],
-                output: pl.Out[pl.Tensor[[16, 64], dtype]],
-            ) -> pl.Tensor[[16, 64], dtype]:
+                idx: pl.Tensor[[index_rows, 64], pl.INT32],
+                output: pl.Out[pl.Tensor[[index_rows, 64], dtype]],
+            ) -> pl.Tensor[[index_rows, 64], dtype]:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     local = pl.create_tensor([16, 128], dtype=dtype)
                     local = pl.assemble(local, inp, [0, 0])
@@ -60,17 +61,16 @@ def test_a5_gather_column_slice_uses_extract(dtype, strided, ascend_backend):
             def main(
                 self,
                 inp: pl.Tensor[[16, 64], dtype],
-                idx: pl.Tensor[[16, 64], pl.INT32],
-                output: pl.Out[pl.Tensor[[16, 64], dtype]],
-            ) -> pl.Tensor[[16, 64], dtype]:
+                idx: pl.Tensor[[index_rows, 64], pl.INT32],
+                output: pl.Out[pl.Tensor[[index_rows, 64], dtype]],
+            ) -> pl.Tensor[[index_rows, 64], dtype]:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     out = pl.tensor.gather(inp, dim=-1, index=idx)
                     output = pl.assemble(output, out, [0, 0])
                 return output
 
-    mlir = _codegen_a5(Program)
-    # A5 TEXTRACT cannot read INT16/INT32. Those sources keep their
-    # existing assembly path; float gather must eliminate source subviews.
+    mlir = _codegen(Program)
+    # TEXTRACT cannot read INT16/INT32; integer sources use exact adds(0).
     subviews = [line for line in mlir.splitlines() if "pto.subview" in line]
     floating = dtype in (pl.FP32, pl.FP16)
     if floating:
@@ -82,59 +82,42 @@ def test_a5_gather_column_slice_uses_extract(dtype, strided, ascend_backend):
         # The nested slice offsets must fold into a read of the wider
         # parent. The output must be dense and feed tgather directly.
         assert "rows=16, cols=128" in extracts[0]
-        assert "rows=16, cols=64" in extracts[0]
+        assert f"rows={index_rows}, cols=64" in extracts[0]
         assert ", %c0_index, %c64_index :" in extracts[0]
         packed = extracts[0].split("outs(")[1].split(" :")[0]
         assert f"pto.tgather ins({packed}," in mlir
     else:
         # GM input is already packed by tload. Integer local input must
-        # not acquire a TEXTRACT unsupported by the A5 verifier.
+        # not acquire a TEXTRACT unsupported by the backend verifier.
         assert not extracts
+        if strided:
+            adds = [line for line in mlir.splitlines() if "pto.tadds ins(" in line]
+            assert len(adds) == 1
+            packed = adds[0].split("outs(")[1].split(" :")[0]
+            assert f"pto.tgather ins({packed}," in mlir
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
-@pytest.mark.parametrize("dtype, aligned_cols", [(pl.FP32, 8), (pl.FP16, 16)])
-@pytest.mark.parametrize("case", ["source", "destination", "both", "aligned"])
-@pytest.mark.parametrize("index_rows", [8, 16])
-def test_a5_gather_checks_parent_and_destination_pitch(dtype, aligned_cols, case, index_rows, ascend_backend):
-    parent_cols = 2 * aligned_cols + (case in ("source", "both"))
-    source_cols = aligned_cols + (case in ("destination", "both"))
-
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_rank3_gather_uses_one_full_tile(ascend_backend):
     @pl.program
     class Program:
         @pl.function(type=pl.FunctionType.Opaque)
         def main(
             self,
-            inp: pl.Tensor[[16, parent_cols], dtype],
-            idx: pl.Tensor[[index_rows, 64], pl.INT32],
-            output: pl.Out[pl.Tensor[[index_rows, 64], dtype]],
-        ) -> pl.Tensor[[index_rows, 64], dtype]:
+            inp: pl.Tensor[[2, 8, 64], pl.FP32],
+            idx: pl.Tensor[[2, 8, 32], pl.INT32],
+            output: pl.Out[pl.Tensor[[2, 8, 32], pl.FP32]],
+        ) -> pl.Tensor[[2, 8, 32], pl.FP32]:
             with pl.at(level=pl.Level.CORE_GROUP):
-                local = pl.create_tensor([16, parent_cols], dtype=dtype)
-                local = pl.assemble(local, inp, [0, 0])
-                source = local[:, :source_cols]
-                alias = source
-                window = alias[:, :source_cols]
-                shaped = pl.reshape(window, [16, source_cols])
-                valid = pl.tensor.set_validshape(shaped, 16, source_cols)
-                out = pl.tensor.gather(valid, dim=-1, index=idx)
-                output = pl.assemble(output, out, [0, 0])
+                out = pl.tensor.gather(inp, dim=-1, index=idx)
+                output = pl.assemble(output, out, [0, 0, 0])
             return output
 
-    # A slice/alias/reshape/validity chain must retain the parent's pitch.
-    # In the source-only case the slice itself has an aligned column count,
-    # so checking just its TileType would incorrectly choose TEXTRACT.
-    # These unaligned IR cases check fallback selection; PTOAS separately
-    # rejects their unaligned physical allocations even without TEXTRACT.
-    mlir = _codegen_a5(Program)
-    extracts = [line for line in mlir.splitlines() if "pto.textract ins(" in line]
-    assert len(extracts) == (case == "aligned")
+    mlir = _codegen(Program)
     assert mlir.count("pto.tgather ins(") == 1
-    if case != "aligned":
-        # A smaller index leading dimension must bound the fallback source;
-        # an unbounded 16-row view cannot be assembled into an 8-row tile.
-        copies = [line for line in mlir.splitlines() if "pto.tinsert ins(" in line]
-        assert any(f"rows={index_rows}, cols={source_cols}" in line for line in copies)
+    assert "scf.for" not in mlir
+    assert "rows=16, cols=64" in mlir
+    assert "rows=16, cols=32" in mlir
 
 
 if __name__ == "__main__":
