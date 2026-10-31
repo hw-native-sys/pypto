@@ -160,3 +160,55 @@ though the Python stub is unchanged.
 - The body must be a bare `...` (signature only).
 - A `Group` must be all-external or all-DSL — mixing external and DSL members in
   one group is rejected.
+
+## Calling a Python DSL kernel directly
+
+A Python DSL can implement the lazy `__pypto_jit__()` protocol so callers keep
+only their operator expressions. With the companion CANNBotDSL device-export
+integration installed, the A5 example is:
+
+```python
+import cannbotdsl as cb
+import pypto.language as pl
+
+
+@cb.kernel
+def add_one(x: cb.Tensor, out: cb.Tensor):
+    for i in cb.range(x.shape[1]):
+        out[0, i] = x[0, i] + 1.0
+
+
+@pl.jit
+def program(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    add_one(x, out)
+    return out
+```
+
+This uses **program mode**. No user-written `TensorSpec`, export call, wrapper,
+`jit.extern` declaration, or Torch execution layer is required. Use the usual
+A5 `RunConfig` when executing the program. This does not add Torch kernel mode
+or allow a device kernel to submit another kernel from an InCore scope.
+
+The producer hook returns a stable `JITFunction(func, func_type="extern",
+external_builder=...)`. The builder receives a request-local `SpecializeContext`
+with inferred tensor/scalar metadata and returns an `ExternalKernelSpec` from
+`pypto.jit.foreign`. It supplies the source path, include directories, core type,
+tensor access directions and optional backend/runtime requirements. It must
+publish complete source files that remain available for compilation and caching.
+PyPTO has no mandatory dependency on the producer's package.
+
+A bare call is rewritten internally to capture each written tensor, preserving
+SSA and loop-carried dependencies. Multiple outputs and keyword arguments work;
+output arguments must be distinct tensor variables. The Python callable remains
+void: using its call as a value is rejected. All call sites of one producer in
+one program must have the same inferred tensor signature. Foreign calls are
+supported from chip orchestration and inline orchestration helpers.
+
+Builders run before cache lookup; source content, local includes and access/core
+metadata participate in both cache identities. Generated source is reused within
+the request. Producers may use content-addressed storage; no captured tensors,
+addresses or mutable per-request source paths are stored on the JIT dependency.
+The CANNBotDSL integration currently supports A5/TMR, ND tensors with a contiguous
+innermost axis, explicit runtime scalars, AIV/AIC/MIX and basic dynamic shapes.
+The CANN 9.3.0 SDK has a missing CPU-debug-only include which can make the optional
+persistent cache bypass conservatively; the default in-process cache still works.

@@ -16,6 +16,7 @@ decorator at runtime; recursive walks preserve that resolver and request snapsho
 import ast
 import copy
 import functools
+import inspect
 import math
 import types
 from collections.abc import Callable, Mapping, Sequence
@@ -1666,6 +1667,17 @@ def resolve_dep_call_metadata(
     dep with that static extent.
     """
     dep_param_names = dep._param_names()
+    if dep._external_builder is not None:
+        from pypto.language.typing.scalar import Scalar  # noqa: PLC0415
+
+        caller_scalar_dtypes = dict(caller_scalar_dtypes)
+        sig = inspect.signature(caller_func)
+        namespace = _arguments._annotation_namespace(caller_func, sig)
+        for name, param in sig.parameters.items():
+            ann = _arguments.resolve_annotation(param.annotation, namespace)
+            dtype = ann.dtype if isinstance(ann, Scalar) else ann
+            if isinstance(dtype, DataType):
+                caller_scalar_dtypes.setdefault(name, dtype)
     call_name = dep_call_name or dep.__name__
     call_args = (
         _call_binding.call_arg_refs(call_node)
@@ -1718,9 +1730,10 @@ def resolve_dep_call_metadata(
         dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}
         dep_scalar_dtypes = {n: caller_scalar_dtypes[n] for n in dep_param_names if n in caller_scalar_dtypes}
 
-    _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta)
-    _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
-    _overlay_dep_declared_layouts(dep, dep_tensor_meta)
+    if dep._external_builder is None:
+        _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta)
+        _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
+        _overlay_dep_declared_layouts(dep, dep_tensor_meta)
 
     return dep_tensor_meta, dep_scalar_dtypes
 
