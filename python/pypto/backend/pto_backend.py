@@ -1913,6 +1913,19 @@ def _generate_with_distributed(
           kernel_config.py
       sub_workers/{name}.py             — each SubWorker callable
     """
+    if any(
+        f.level is not None and _ir_core.level_to_linqu_level(f.level) >= 4
+        for f in transformed_program.functions.values()
+    ):
+        return _generate_cluster(
+            transformed_program,
+            output_dir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            emit_source_loc=emit_source_loc,
+            dump_ptoas_passes=dump_ptoas_passes,
+            runtime=runtime,
+        )
     result_files: dict[str, str] = {}
 
     # 1. L3 HOST orchestrator → orchestration/host_orch.py
@@ -1962,6 +1975,65 @@ def _generate_with_distributed(
         result_files["sub_workers/__required__.json"] = json.dumps(sorted(required_callbacks), indent=2)
 
     return result_files
+
+
+def _generate_cluster(
+    program: _ir_core.Program,
+    output_dir: str,
+    skip_ptoas: bool,
+    **options: Any,
+) -> dict[str, str]:
+    """Emit reachable HOST packages, retaining full IR for native WB ownership checks."""
+    from pypto.ir._cluster_artifacts import host_entries, reachable_functions  # noqa: PLC0415
+
+    entries = host_entries(program)
+    result = {
+        "__init__.py": "",
+        "orchestration/__init__.py": "",
+        "next_levels/__init__.py": "",
+        "orchestration/cluster_orch.py": _codegen_core.DistributedCodegen().generate(program),
+        "orchestration/_distributed_support.py": resources.files("pypto.runtime")
+        .joinpath("_distributed_support.py")
+        .read_text(encoding="utf-8"),
+    }
+    for entry in entries:
+        prefix = f"next_levels/{entry.name}"
+        generator = _codegen_core.DistributedCodegen()
+        result[f"{prefix}/orchestration/host_orch.py"] = generator._generate_embedded(
+            program, entry_name=entry.name
+        )
+        result[f"{prefix}/__init__.py"] = ""
+        result[f"{prefix}/next_levels/__init__.py"] = ""
+        # The native source's unchanged `from . import _distributed_support`
+        # resolves through this shim to one root module under any digest name.
+        result[f"{prefix}/orchestration/__init__.py"] = "from ....orchestration import _distributed_support\n"
+        builtin = _materialize_builtin_next_levels(
+            generator.get_builtin_next_level_specs(), options["runtime"]
+        )
+        result.update({f"{prefix}/{path}": source for path, source in builtin.items()})
+        required_callbacks = []
+        for function in reachable_functions(program, entry):
+            if function.level == _ir_core.Level.CHIP and function.role == _ir_core.Role.Orchestrator:
+                if function.func_type != _ir_core.FunctionType.Orchestration:
+                    raise ValueError(f"Cluster CHIP dependency {function.name!r} requires Orchestration IR")
+                chip_program = _ir_core.Program(
+                    _collect_chip_task_functions(function, program), function.name, program.span
+                )
+                chip_prefix = f"{prefix}/next_levels/{function.name}"
+                chip_files = _generate_single_chip(
+                    chip_program, os.path.join(output_dir, chip_prefix), skip_ptoas, **options
+                )
+                result.update({f"{chip_prefix}/{path}": source for path, source in chip_files.items()})
+            elif function.level == _ir_core.Level.HOST and function.role == _ir_core.Role.SubWorker:
+                result[f"{prefix}/sub_workers/__init__.py"] = ""
+                result[f"{prefix}/sub_workers/{function.name}.py"] = _emit_sub_worker_module(
+                    function, support_import="....orchestration._distributed_support"
+                )
+                if function.requires_runtime_binding:
+                    required_callbacks.append(function.name)
+        if required_callbacks:
+            result[f"{prefix}/sub_workers/__required__.json"] = json.dumps(sorted(required_callbacks))
+    return result
 
 
 def _resolve_builtin_template_dir(template_dir: str) -> Traversable:
@@ -2035,7 +2107,9 @@ def _materialize_builtin_next_levels(
     return result_files
 
 
-def _emit_sub_worker_module(func: _ir_core.Function) -> str:
+def _emit_sub_worker_module(
+    func: _ir_core.Function, *, support_import: str = "pypto.runtime.distributed_runner"
+) -> str:
     """Emit a self-contained SubWorker module callable as ``fn(args: MappedArgs)``.
 
     The user's function body lives on ``func.body`` as an :class:`InlineStmt`
@@ -2079,7 +2153,7 @@ def _emit_sub_worker_module(func: _ir_core.Function) -> str:
         f"\n"
         f"import torch\n"
         f"\n"
-        f"from pypto.runtime.distributed_runner import _tensor_from_continuous\n"
+        f"from {support_import} import _tensor_from_continuous\n"
         f"\n"
         f"\n"
         f"def _user_{func.name}({params_str}):\n"

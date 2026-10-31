@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -149,16 +150,20 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       << "Internal error: builtin tensor collective dispatch arg_directions length mismatch";
 
   std::optional<std::string> handle_var;
+  std::vector<std::string> domain_handles;
   for (const auto& arg : call->args_) {
     auto dist_type = ir::As<ir::DistributedTensorType>(arg->GetType());
     if (!dist_type || !dist_type->window_buffer_.has_value()) continue;
     const auto& window_buffer = dist_type->window_buffer_.value();
     const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
+    if (std::find(domain_handles.begin(), domain_handles.end(), arg_handle) == domain_handles.end()) {
+      domain_handles.push_back(arg_handle);
+    }
     if (!handle_var.has_value()) {
       handle_var = arg_handle;
       continue;
     }
-    INTERNAL_CHECK_SPAN(*handle_var == arg_handle, call->span_)
+    INTERNAL_CHECK_SPAN(codegen.IsEmbedded() || *handle_var == arg_handle, call->span_)
         << "Internal error: builtin tensor collective window args must share the same comm-domain scope";
   }
   INTERNAL_CHECK_SPAN(handle_var.has_value(), call->span_)
@@ -186,14 +191,17 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
           << "Internal error: builtin tensor collective window arg must have a WindowBuffer";
       const auto& window_buffer = dist_type->window_buffer_.value();
       const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
-      INTERNAL_CHECK_SPAN(arg_handle == *handle_var, call->span_)
+      INTERNAL_CHECK_SPAN(codegen.IsEmbedded() || arg_handle == *handle_var, call->span_)
           << "Internal error: builtin tensor collective window args must share the same comm-domain scope";
       const std::string name = codegen.SanitizeName(window_buffer->name_hint_);
       const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
       const std::string dtype_enum =
           "DataType." + DistributedCodegen::DataTypeToSimplerEnum(dist_type->dtype_);
+      const std::string view_args = codegen.IsEmbedded()
+                                        ? codegen.EmbeddedWindowViewArgs(dist_type, call->span_)
+                                        : "shapes=" + shape + ", dtype=" + dtype_enum;
       codegen.Emit(ta_var + ".add_tensor(" + arg_handle + "[" + rank_expr + "].buffers[\"" + name +
-                   "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
+                   "\"].tensor(" + view_args + "), " + tag + ")");
       continue;
     }
     if (ir::As<ir::TileType>(call->args_[i]->GetType())) {
@@ -219,8 +227,8 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   // across separate dispatches — would still let a waiting dispatch be routed ahead of its
   // producer, which is the deadlock this token exists to prevent. All window args here are
   // checked above to share one comm domain, so a single token is enough.
-  codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + *handle_var + "_ord\"][" +
-               rank_expr + "]), TensorArgType.INOUT)");
+  codegen.EmitDomainOrderingTokens(
+      codegen.IsEmbedded() ? domain_handles : std::vector<std::string>{*handle_var}, rank_expr, ta_var, true);
 
   if (emit_rank_count) {
     codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
@@ -468,6 +476,9 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
   auto& dist_codegen = dynamic_cast<DistributedCodegen&>(codegen);
+  CHECK_SPAN(!dist_codegen.IsEmbedded() || !As<ir::DistributedTensorType>(op->args_[0]->GetType()), op->span_)
+      << "Embedded distributed window slice geometry is not supported in this path; pass an "
+         "already-lowered slot-relative view instead of a function-local slice";
 
   INTERNAL_CHECK_SPAN(op->args_.size() == 3 || op->args_.size() == 4 || op->args_.size() == 5, op->span_)
       << "tensor.slice host_orch codegen expects 3-5 args (input, shape, offset[, valid_shape[, "
@@ -499,6 +510,26 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
     }
   }
 
+  if (dist_codegen.IsEmbedded()) {
+    const auto input_type = ir::AsTensorTypeLike(op->args_[0]->GetType());
+    CHECK_SPAN(
+        input_type && (!input_type->tensor_view_ || (input_type->tensor_view_->valid_shape.empty() &&
+                                                     input_type->tensor_view_->pad == ir::PadValue::null)),
+        op->span_)
+        << "Embedded descriptor slices with partial validity or padding are not supported";
+    std::string drops = "(";
+    for (const auto axis : drop_dims) drops += std::to_string(axis) + ", ";
+    drops += ")";
+    const auto valid = op->args_.size() >= 4 ? As<MakeTuple>(op->args_[3]) : nullptr;
+    codegen.Emit("tensors[\"" + lhs + "\"] = " + dist_codegen.EmbeddedSupportAlias() +
+                 "._slice_tensor(tensors[\"" + input_name + "\"], " +
+                 dist_codegen.FormatShapeTuple(shape_tuple->elements_) + ", " +
+                 dist_codegen.FormatShapeTuple(offset_tuple->elements_) + ", " + drops + ", " +
+                 (valid ? dist_codegen.FormatShapeTuple(valid->elements_) : "None") + ")");
+    dist_codegen.MarkDeclared(lhs);
+    return "";
+  }
+
   std::ostringstream indices;
   for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
     if (i > 0) indices << ", ";
@@ -525,6 +556,42 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
   return "";
 }
 
+namespace {
+std::string EmitEmbeddedShapeView(const ir::CallPtr& op, DistributedCodegen& codegen) {
+  INTERNAL_CHECK_SPAN(codegen.IsEmbedded(), op->span_)
+      << "Private descriptor shape handler requires embedded code generation";
+  CHECK_SPAN(!As<ir::DistributedTensorType>(op->args_[0]->GetType()), op->span_)
+      << "Embedded distributed window shape views require already-lowered slot-relative geometry";
+  const auto input = ir::AsTensorTypeLike(op->args_[0]->GetType());
+  const auto result = ir::AsTensorTypeLike(op->GetType());
+  CHECK_SPAN(input && result, op->span_) << "Embedded shape view requires tensor types";
+  for (const auto& type : {input, result}) {
+    CHECK_SPAN(!type->tensor_view_ ||
+                   (type->tensor_view_->layout == ir::TensorLayout::ND &&
+                    type->tensor_view_->valid_shape.empty() && type->tensor_view_->pad == ir::PadValue::null),
+               op->span_)
+        << "Embedded descriptor shape views require full-valid ND layout without padding";
+  }
+  CHECK_SPAN(input->dtype_ == result->dtype_, op->span_)
+      << "Embedded descriptor shape views cannot change element dtype";
+  const std::string lhs = codegen.GetCurrentResultTarget();
+  CHECK_SPAN(!lhs.empty(), op->span_) << "Embedded shape view requires an assignment target";
+  codegen.Emit("tensors[\"" + lhs + "\"] = " + codegen.EmbeddedSupportAlias() +
+               "._reshape_tensor(tensors[\"" + codegen.GetExprAsCode(op->args_[0]) + "\"], " +
+               codegen.FormatShapeTuple(result->shape_) + ")");
+  codegen.MarkDeclared(lhs);
+  return "";
+}
+}  // namespace
+
+REGISTER_DISTRIBUTED_OP(tensor_view, "tensor.view") {
+  return EmitEmbeddedShapeView(op, dynamic_cast<DistributedCodegen&>(codegen));
+}
+
+REGISTER_DISTRIBUTED_OP(tensor_reshape, "tensor.reshape") {
+  return EmitEmbeddedShapeView(op, dynamic_cast<DistributedCodegen&>(codegen));
+}
+
 // ============================================================================
 // tensor.assemble — write a source tensor into a target tensor slice.
 //
@@ -538,6 +605,8 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(tensor_assemble, "tensor.assemble") {
   auto& dist_codegen = dynamic_cast<DistributedCodegen&>(codegen);
+  CHECK_SPAN(!dist_codegen.IsEmbedded(), op->span_)
+      << "Embedded descriptor tensor.assemble writes are not supported";
 
   INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
       << "Internal error: tensor.assemble expects 3 arguments";

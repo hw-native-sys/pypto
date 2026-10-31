@@ -17,6 +17,7 @@ owner Buffer/provenance cannot belong to a temporary one-shot Worker.
 
 import json
 import warnings
+from dataclasses import asdict
 from unittest.mock import patch
 
 import pypto.language as pl
@@ -499,6 +500,123 @@ def test_reload_platform_warns_but_explicit_mode_and_metadata_are_silent(compile
         assert explicit.platform == legacy.platform == "a2a3"
         assert persisted.execution_mode is ExecutionMode.SIM
     assert (tmp_path / _DISTRIBUTED_META_FILENAME).read_bytes() == metadata
+
+
+def _c1d1_cluster(**overrides):
+    # Lazy imports keep unrelated distributed tests collectible before the API exists.
+    from pypto.ir.distributed_compiled_program import (  # noqa: PLC0415
+        ClusterConfig,
+        ClusterNodeSpec,
+    )
+
+    values = {
+        "nodes": [ClusterNodeSpec("node-a", [5, 2]), ClusterNodeSpec("node-b", [3, 1])],
+        "python_executable": "/opt/runtime/bin/python",
+    }
+    return ClusterConfig(**(values | overrides))
+
+
+def test_c1d1_cluster_rank_order_and_defaults_do_not_probe_network(monkeypatch):
+    import socket  # noqa: PLC0415
+
+    def no_network(*args, **kwargs):
+        pytest.fail("ClusterConfig must not resolve hosts or establish connections")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    config = _c1d1_cluster()
+    assert config.node_device_counts() == [2, 2]
+    assert config.global_device_ranks() == [(0, 1), (2, 3)]
+    assert config.world_size() == 4  # Devices, not the two MPI node entries.
+    assert [n.devices for n in config.nodes] == [[5, 2], [3, 1]]
+    assert config.comm_profile == "a3-fabric-v1"
+    assert config.runtime == "tensormap_and_ringbuffer"
+    assert config.num_sub_workers == 0
+    assert config.startup_timeout_s == 120.0
+    assert config.mpirun_path == "mpirun"
+    assert config.mpirun_args == ()
+    assert config.aicpu_thread_num == 0
+
+
+def _c1d2_cluster_config():
+    return ir.ClusterConfig(
+        [ir.ClusterNodeSpec("node-a", [2, 3]), ir.ClusterNodeSpec("node-b", [4, 5])],
+        "/env/bin/python",
+        mpirun_args=["--bind-to", "none"],
+    )
+
+
+def _c1d2_entry_program(*, cluster=True, ambiguous=False):
+    """Post-pass order deliberately places a differently shaped HOST dependency first."""
+    span = ir.Span.unknown()
+
+    def function(name, level, role, extent, returns):
+        tensor = ir.TensorType([extent], DataType.FP32)
+        return ir.Function(
+            name,
+            [
+                (ir.Var(f"{name}_input", tensor, span), ParamDirection.In),
+                (ir.Var(f"{name}_output", tensor, span), ParamDirection.Out),
+            ],
+            [tensor] if returns else [],
+            ir.SeqStmts([], span),
+            span,
+            level=level,
+            role=role,
+        )
+
+    functions = [function("a_host_dependency", ir.Level.HOST, ir.Role.Orchestrator, 8, False)]
+    if cluster:
+        functions.extend(
+            [
+                function("cluster_sub_worker", ir.Level.CLUSTER_0, ir.Role.SubWorker, 16, False),
+                function("cluster_root", ir.Level.CLUSTER_0, ir.Role.Orchestrator, 64, True),
+            ]
+        )
+    if ambiguous:
+        functions.append(function("other_root", ir.Level.CLUSTER_0, ir.Role.Orchestrator, 128, False))
+    return ir.Program(functions, "c1d2_actual_entry", span)
+
+
+def _c1d2_cluster_record():
+    # A hand-authored cold artifact must be readable without current codegen.
+    return {
+        "schema": 4,
+        "entry_kind": "cluster",
+        "entry_name": "cluster_root",
+        "supported_execution_modes": ["program"],
+        "params": [
+            {"name": "cluster_root_input", "direction": "In", "shape": [64], "dtype": "fp32"},
+            {"name": "cluster_root_output", "direction": "Out", "shape": [64], "dtype": "fp32"},
+        ],
+        "num_return_types": 1,
+        "platform": "a2a3sim",
+        "backend_type": "Ascend910",
+        "cluster_config": json.loads(json.dumps(asdict(_c1d2_cluster_config()))),
+    }
+
+
+def test_c1d2_actual_cluster_entry_owns_signature_and_metadata(tmp_path):
+    program = _c1d2_entry_program()
+    assert next(iter(program.functions.values())).level == ir.Level.HOST
+    compiled = DistributedCompiledProgram(program, str(tmp_path), cluster_config=_c1d2_cluster_config())
+    infos, outputs, returns = compiled._get_metadata()
+    assert [p.name for p in infos] == ["cluster_root_input", "cluster_root_output"]
+    assert [p.shape for p in infos] == [[64], [64]]
+    assert outputs == [1] and len(returns) == 1
+    assert compiled.entry_kind == "cluster" and compiled.entry_name == "cluster_root"
+    record = json.loads((tmp_path / _DISTRIBUTED_META_FILENAME).read_text())
+    assert record == _c1d2_cluster_record() | {"params": record["params"]}
+    assert record["params"][1]["direction"] == "Out"
+
+
+def test_c1d2_host_metadata_remains_schema_three(tmp_path):
+    compiled = DistributedCompiledProgram(_c1d2_entry_program(cluster=False), str(tmp_path))
+    assert compiled.entry_kind == "host"
+    record = json.loads((tmp_path / _DISTRIBUTED_META_FILENAME).read_text())
+    assert record["schema"] == 3 and "cluster_config" not in record
+    restored = DistributedCompiledProgram.from_dir(tmp_path, distributed_config=DistributedConfig([7]))
+    assert restored.entry_kind == "host" and restored._distributed_config.device_ids == [7]
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
 
 if TYPE_CHECKING:
+    from pypto.ir.distributed_compiled_program import ClusterConfig
     from pypto.ir.pass_manager import OptimizationStrategy
     from pypto.pypto_core.ir import TensorLayout
 
@@ -86,6 +87,7 @@ class CacheKey(NamedTuple):
     tensor_infos: tuple[TensorCacheInfo, ...]
     dist_config: tuple[Any, ...] | None
     compile_opts: tuple[Any, ...] | None
+    cluster_config: tuple[Any, ...] | None = None
 
 
 def _freeze(value: Any) -> Any:
@@ -141,6 +143,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     enable_buffer_ir: bool = True,
+    cluster_config: "ClusterConfig | None" = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -181,6 +184,10 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             would silently reuse the first-compiled artifact. ``None`` (the
             single-chip default) leaves the key unchanged for non-distributed
             callers.
+        cluster_config: Optional POD/CLUSTER_0 launch configuration. Frozen
+            recursively, including node/device order and all launcher options,
+            so different placements cannot reuse one compiled object. Cannot
+            be combined with ``distributed_config``.
         analyze_auto_scopes_for_deps: Compile-side switch for deriving explicit
             task dependencies from AUTO runtime scopes. Included in the key
             because it changes generated orchestration dependencies.
@@ -228,7 +235,10 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             )
         )
 
+    if cluster_config is not None and distributed_config is not None:
+        raise ValueError("cluster_config and distributed_config cannot both be supplied")
     dist_key = _freeze(distributed_config) if distributed_config is not None else None
+    cluster_key = _freeze(cluster_config) if cluster_config is not None else None
     effective_pypto_dbc = enable_pypto_l0c_double_buffer and memory_planner in (
         None,
         MemoryPlanner.PYPTO,
@@ -251,6 +261,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         tuple(tensor_infos),
         dist_key,
         compile_opts,
+        cluster_key,
     )
 
 

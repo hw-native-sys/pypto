@@ -16,9 +16,10 @@ through simpler's distributed runtime (Worker level=3)::
     compiled(a, b, c)   # executes via simpler Worker(level=3)
 """
 
+import math
 import os
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, fields
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
 
@@ -33,7 +34,7 @@ from pypto._target import (
     _warn_deprecated_platform,
 )
 from pypto.backend import BackendType
-from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_level
+from pypto.pypto_core.ir import FunctionType, ParamDirection, Program, Role, level_to_linqu_level
 from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 
 from .compiled_program import (
@@ -61,11 +62,134 @@ from .param_info import bind_complete_args
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
 _META_SCHEMA = 3
+_CLUSTER_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
+    from pypto.runtime.cluster_runner import ClusterWorker
     from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
     from pypto.runtime.runner import RunConfig
+
+
+def _validate_cluster_text(value: str, name: str) -> None:
+    """Validate launcher text without resolving hosts or normalizing user order."""
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "\0\r\n"):
+        raise ValueError(f"{name} must be a non-empty string without NUL or newlines, got {value!r}")
+
+
+@dataclass
+class ClusterNodeSpec:
+    """One MPI node entry and its ordered physical device indices.
+
+    Separate entries may name the same host when their devices are disjoint.
+    Construction copies the device list and performs no network operations.
+    """
+
+    host: str
+    devices: list[int] = field(default_factory=lambda: [0])
+
+    def __post_init__(self) -> None:
+        _validate_cluster_text(self.host, "ClusterNodeSpec.host")
+        if not isinstance(self.devices, list) or not self.devices:
+            raise ValueError(f"ClusterNodeSpec.devices must be a non-empty list, got {self.devices!r}")
+        if any(type(device) is not int or device < 0 for device in self.devices):
+            raise ValueError(
+                f"ClusterNodeSpec.devices must contain non-negative ints (not bools), got {self.devices!r}"
+            )
+        if len(set(self.devices)) != len(self.devices):
+            raise ValueError(f"ClusterNodeSpec.devices must be distinct, got {self.devices!r}")
+        self.devices = list(self.devices)
+
+
+@dataclass
+class ClusterConfig:
+    """Validated launch settings for POD/CLUSTER_0 execution.
+
+    Each node entry owns an ordered group of devices. Global device ranks are
+    contiguous in node declaration order, then device-list order. MPI entry
+    count and device world size are separate quantities. Only equal device
+    counts per entry are supported by the initial shape/layout contract.
+
+    The launcher and Python executable are explicit strings; this configuration
+    performs no discovery or network operations. CLUSTER_0 compilation captures
+    recursive artifacts; preparation launches its dedicated cluster runner.
+    """
+
+    nodes: list[ClusterNodeSpec]
+    python_executable: str
+    comm_profile: str = "a3-fabric-v1"
+    runtime: str = "tensormap_and_ringbuffer"
+    num_sub_workers: int = 0
+    startup_timeout_s: float = 120.0
+    mpirun_path: str = "mpirun"
+    mpirun_args: tuple[str, ...] | list[str] = ()
+    aicpu_thread_num: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.nodes, list) or not self.nodes:
+            raise ValueError(
+                f"ClusterConfig.nodes must be a non-empty list of ClusterNodeSpec, got {self.nodes!r}"
+            )
+        if any(not isinstance(node, ClusterNodeSpec) for node in self.nodes):
+            raise ValueError(f"ClusterConfig.nodes must contain ClusterNodeSpec entries, got {self.nodes!r}")
+        # Reconstruct nested entries to both revalidate mutations and take
+        # ownership. dataclasses.replace(config) is therefore a validated snapshot.
+        self.nodes = [ClusterNodeSpec(node.host, node.devices) for node in self.nodes]
+        owned: dict[str, set[int]] = {}
+        for node in self.nodes:
+            previous = owned.setdefault(node.host, set())
+            overlap = previous.intersection(node.devices)
+            if overlap:
+                raise ValueError(
+                    f"ClusterConfig.nodes have overlapping device ownership on {node.host!r}: {overlap}"
+                )
+            previous.update(node.devices)
+        if len(set(self.node_device_counts())) != 1:
+            raise ValueError(
+                "ClusterConfig requires equal device counts per node; unequal shape/layout is unsupported"
+            )
+        for name in ("python_executable", "comm_profile", "runtime", "mpirun_path"):
+            _validate_cluster_text(getattr(self, name), f"ClusterConfig.{name}")
+        for name in ("num_sub_workers", "aicpu_thread_num"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"ClusterConfig.{name} must be a non-negative int (not bool), got {value!r}")
+        if self.aicpu_thread_num == 1:
+            raise ValueError(
+                "ClusterConfig.aicpu_thread_num must be 0 (architecture default) or at least 2, got 1"
+            )
+        if (
+            type(self.startup_timeout_s) not in (int, float)
+            or not math.isfinite(self.startup_timeout_s)
+            or self.startup_timeout_s <= 0
+        ):
+            raise ValueError(
+                f"ClusterConfig.startup_timeout_s must be finite and positive, got {self.startup_timeout_s!r}"
+            )
+        if not isinstance(self.mpirun_args, (tuple, list)):
+            raise ValueError(
+                f"ClusterConfig.mpirun_args must be a tuple or list of strings, got {self.mpirun_args!r}"
+            )
+        for arg in self.mpirun_args:
+            _validate_cluster_text(arg, "ClusterConfig.mpirun_args item")
+        self.mpirun_args = tuple(self.mpirun_args)
+
+    def node_device_counts(self) -> list[int]:
+        """Return the number of devices owned by each MPI node entry."""
+        return [len(node.devices) for node in self.nodes]
+
+    def global_device_ranks(self) -> list[tuple[int, ...]]:
+        """Return each node's prefix-contiguous global device ranks."""
+        ranks = []
+        offset = 0
+        for count in self.node_device_counts():
+            ranks.append(tuple(range(offset, offset + count)))
+            offset += count
+        return ranks
+
+    def world_size(self) -> int:
+        """Return total device count, independently of MPI node-entry count."""
+        return sum(self.node_device_counts())
 
 
 @dataclass
@@ -175,6 +299,89 @@ def _distributed_config_from_dict(meta: dict[str, Any], meta_path: Path) -> Dist
         raise _bad(f"'distributed_config' is invalid ({exc})") from exc
 
 
+def _cluster_config_from_dict(meta: dict[str, Any], meta_path: Path) -> ClusterConfig:
+    """Validate the schema-4 launcher record before constructing any executable."""
+
+    def bad(detail: str) -> ValueError:
+        return _meta_error(_DISTRIBUTED_META_FILENAME, meta_path, f"'cluster_config' {detail}")
+
+    raw = meta.get("cluster_config")
+    if not isinstance(raw, dict):
+        raise bad("must be an object")
+    unknown = set(raw) - {f.name for f in fields(ClusterConfig)}
+    if unknown:
+        raise bad(f"has unknown fields {sorted(unknown)}")
+    if "nodes" not in raw or "python_executable" not in raw:
+        raise bad("requires nodes and python_executable")
+    nodes = raw["nodes"]
+    if not isinstance(nodes, list) or any(
+        not isinstance(node, dict) or set(node) != {"host", "devices"} for node in nodes
+    ):
+        raise bad("nodes must be objects containing exactly host and devices")
+    try:
+        return ClusterConfig(**(raw | {"nodes": [ClusterNodeSpec(**node) for node in nodes]}))
+    except (TypeError, ValueError) as exc:
+        raise bad(f"is invalid ({exc})") from exc
+
+
+def _actual_orchestration_entry(program: Program) -> Any:
+    """Select the highest post-pass root, independently of dependency order.
+
+    Older HOST-only fixtures can lack a root and retain best-effort signature
+    extraction. L4 requires one unambiguous Orchestrator, never a SubWorker.
+    """
+    from .compile import _highest_orchestration_level  # noqa: PLC0415
+
+    highest = _highest_orchestration_level(program)
+    if highest is not None and level_to_linqu_level(highest) > 4:
+        raise NotImplementedError(
+            f"Higher cluster entry {highest.name} metadata is unsupported; only CLUSTER_0 (L4) is defined"
+        )
+    candidates = [
+        func
+        for func in program.functions.values()
+        if func.level is not None
+        and func.role == Role.Orchestrator
+        and func.func_type != FunctionType.Graph
+        and (highest is None or level_to_linqu_level(func.level) == level_to_linqu_level(highest))
+    ]
+    if highest is not None and level_to_linqu_level(highest) >= 4 and len(candidates) != 1:
+        raise ValueError(
+            f"Cluster entry requires one highest Orchestrator; found {len(candidates)} "
+            f"ambiguous/missing entries: {[f.name for f in candidates]}"
+        )
+    return candidates[0] if candidates else None
+
+
+def _validate_compiled_entry(compiled: Any, cluster_config: ClusterConfig | None = None) -> None:
+    """Check request identity on fresh, cold and in-memory object routes.
+
+    Ordinary JIT can outline a HOST root and use default DistributedConfig;
+    its default spelling does not imply that the artifact must be single CHIP.
+    """
+    if cluster_config is not None:
+        if not isinstance(compiled, DistributedCompiledProgram) or compiled.entry_kind != "cluster":
+            raise ValueError("ClusterConfig request requires a cluster entry artifact")
+        if compiled.cluster_config != replace(cluster_config):
+            raise ValueError("Cluster artifact config does not match the captured ClusterConfig request")
+    elif isinstance(compiled, DistributedCompiledProgram) and compiled.entry_kind == "cluster":
+        raise ValueError("Cluster artifact requires ClusterConfig; missing cluster_config request")
+
+
+@dataclass(frozen=True)
+class SharedDomainBinding:
+    """Bind a compiled program's domain/slot ordinals to a session sharing key.
+
+    Inspect ``program.comm_domains`` for ordinals. ``prepare`` snapshots the
+    slot map; equal layouts alone never opt a domain into sharing.
+    """
+
+    program: "DistributedCompiledProgram"
+    domain: int
+    key: str
+    slots: Mapping[int, str]
+
+
 class DistributedCompiledProgram:
     """A compiled L3+ distributed program that executes via simpler Worker(level=3).
 
@@ -218,10 +425,15 @@ class DistributedCompiledProgram:
         platform: str | None = None,
         execution_mode: ExecutionMode | None = None,
         distributed_config: DistributedConfig | None = None,
+        cluster_config: ClusterConfig | None = None,
+        entry_kind: str | None = None,
+        _entry_name: str | None = None,
         _param_infos: list[_ParamInfo] | None = None,
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
         _execution_capabilities: ExecutionCapabilities = ExecutionCapabilities(),
+        _l3_entries: dict[str, Any] | None = None,
+        _cluster_domains: dict[str, Any] | None = None,
     ) -> None:
         # ``program`` is the post-pass IR. The runtime needs post-pass IR for
         # orchestrator metadata (post-SSA names that match the generated
@@ -236,6 +448,31 @@ class DistributedCompiledProgram:
         _execution_capabilities.require(ArtifactExecutionMode.PROGRAM)
         self._execution_capabilities = _execution_capabilities
         self._program = program
+        self._entry = _actual_orchestration_entry(program) if program is not None else None
+        actual_kind = (
+            (
+                "cluster"
+                if self._entry is not None and level_to_linqu_level(self._entry.level) >= 4
+                else "host"
+            )
+            if program is not None
+            else (entry_kind or "host")
+        )
+        if entry_kind is not None and entry_kind != actual_kind:
+            raise ValueError(
+                f"Explicit entry_kind {entry_kind!r} does not match actual {actual_kind!r} entry"
+            )
+        if actual_kind not in {"host", "cluster"}:
+            raise ValueError(f"Expected host or cluster entry_kind, got {actual_kind!r}")
+        if cluster_config is not None and distributed_config is not None:
+            raise ValueError("cluster_config and distributed_config cannot both be supplied")
+        if actual_kind == "cluster" and not isinstance(cluster_config, ClusterConfig):
+            raise ValueError("Cluster entry requires a valid ClusterConfig in cluster_config")
+        if actual_kind == "host" and cluster_config is not None:
+            raise ValueError("cluster_config requires a cluster entry, got HOST")
+        self._entry_kind = actual_kind
+        self._entry_name = self._entry.name if self._entry is not None else _entry_name
+        self._cluster_config = replace(cluster_config) if cluster_config is not None else None
         self._output_dir = Path(output_dir).resolve()
         self._backend_type = backend_type
         self._platform = (
@@ -247,6 +484,8 @@ class DistributedCompiledProgram:
         self._param_infos = _param_infos
         self._output_indices = _output_indices
         self._return_types = _return_types
+        self._l3_entries = _l3_entries
+        self._cluster_domains = _cluster_domains
 
         # Only the fresh-compile path (live IR) writes artifacts. The reload
         # path must not clobber a user's hand-edited debug/run.py or the
@@ -257,7 +496,8 @@ class DistributedCompiledProgram:
             # leftover -- and ``replay()`` keys off exactly that file, which
             # would make this build replay as the previous single-chip one.
             _drop_foreign_build_markers(
-                self._output_dir, keep=(_DISTRIBUTED_META_FILENAME, "orchestration/host_orch.py")
+                self._output_dir,
+                keep=(_DISTRIBUTED_META_FILENAME, f"orchestration/{self._entry_kind}_orch.py"),
             )
             self._persist_metadata()
             _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
@@ -284,6 +524,8 @@ class DistributedCompiledProgram:
         try:
             param_infos, _, return_types = self._get_metadata()
         except (ValueError, TypeError):
+            if self._entry_kind == "cluster":
+                raise
             _remove_meta(self._output_dir, _DISTRIBUTED_META_FILENAME)
             return
         dc = self._distributed_config
@@ -301,6 +543,33 @@ class DistributedCompiledProgram:
                 "aicpu_thread_num": dc.aicpu_thread_num,
             },
         }
+        if self._entry_kind == "cluster":
+            from ._cluster_artifacts import (  # noqa: PLC0415
+                host_entries,
+                make_domain_records,
+                make_entry_records,
+            )
+
+            assert self._cluster_config is not None
+            del meta["distributed_config"]
+            meta.update(
+                schema=_CLUSTER_META_SCHEMA,
+                entry_kind="cluster",
+                entry_name=self._entry_name,
+                cluster_config=asdict(self._cluster_config),
+            )
+            # Identity-only schema-4 records remain useful for inspection. A
+            # generated recursive artifact additionally owns its complete cold
+            # entry ABI; readiness checks require that closure explicitly.
+            if self._program is not None and host_entries(self._program):
+                self._l3_entries = make_entry_records(
+                    self._program, self._cluster_config.node_device_counts()[0]
+                )
+                meta["l3_entries"] = self._l3_entries
+                self._cluster_domains = make_domain_records(
+                    self._program, self._l3_entries, len(self._cluster_config.nodes)
+                )
+                meta["cluster_domains"] = self._cluster_domains
         _write_meta_atomically(self._output_dir / _DISTRIBUTED_META_FILENAME, meta)
 
     @classmethod
@@ -312,6 +581,7 @@ class DistributedCompiledProgram:
         backend_type: BackendType | None = None,
         execution_mode: ExecutionMode | None = None,
         distributed_config: DistributedConfig | None = None,
+        cluster_config: ClusterConfig | None = None,
     ) -> "DistributedCompiledProgram":
         """Reconstruct a distributed program from an existing ``build_output/`` dir.
 
@@ -361,7 +631,88 @@ class DistributedCompiledProgram:
         # JSON, bad params, a ``backend_type`` naming a class attribute instead
         # of an enum member -- surfaces as one ValueError naming the file and
         # the recompile fix, rather than whichever internal exception it raised.
-        meta = _load_meta(meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=_META_SCHEMA)
+        # Dispatch schema from the already parsed record; reopening here would
+        # create a gap between the validated ABI and selected launcher contract.
+        meta = _load_meta(
+            meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=(_META_SCHEMA, _CLUSTER_META_SCHEMA)
+        )
+        raw = meta["raw"]
+        entry_kind = "host"
+        entry_name = None
+        l3_entries = None
+        cluster_domains = None
+        if raw["schema"] == _CLUSTER_META_SCHEMA:
+            known = {
+                "schema",
+                "entry_kind",
+                "entry_name",
+                "supported_execution_modes",
+                "params",
+                "num_return_types",
+                "platform",
+                "backend_type",
+                "cluster_config",
+            }
+            if known - set(raw):
+                raise _meta_error(
+                    _DISTRIBUTED_META_FILENAME,
+                    meta_path,
+                    f"schema 4 missing cluster metadata fields {sorted(known - set(raw))}",
+                )
+            if set(raw) - known - {"l3_entries", "cluster_domains"}:
+                raise _meta_error(
+                    _DISTRIBUTED_META_FILENAME,
+                    meta_path,
+                    "unknown cluster metadata fields "
+                    f"{sorted(set(raw) - known - {'l3_entries', 'cluster_domains'})}",
+                )
+            if raw.get("entry_kind") != "cluster":
+                raise _meta_error(
+                    _DISTRIBUTED_META_FILENAME, meta_path, "schema 4 requires entry_kind='cluster'"
+                )
+            entry_name = raw.get("entry_name")
+            if not isinstance(entry_name, str) or not entry_name.strip():
+                raise _meta_error(_DISTRIBUTED_META_FILENAME, meta_path, "invalid cluster entry_name")
+            saved_cluster = _cluster_config_from_dict(raw, meta_path)
+            if "l3_entries" in raw:
+                from ._cluster_artifacts import validate_entry_records  # noqa: PLC0415
+
+                try:
+                    l3_entries = validate_entry_records(
+                        raw["l3_entries"], saved_cluster.node_device_counts()[0]
+                    )
+                except (ValueError, TypeError, KeyError, IndexError) as error:
+                    raise _meta_error(
+                        _DISTRIBUTED_META_FILENAME, meta_path, f"invalid l3_entries: {error}"
+                    ) from error
+            from ._cluster_artifacts import restore_domain_records  # noqa: PLC0415
+
+            try:
+                cluster_domains = restore_domain_records(raw, l3_entries, len(saved_cluster.nodes))
+            except (ValueError, TypeError, KeyError, IndexError) as error:
+                raise _meta_error(
+                    _DISTRIBUTED_META_FILENAME, meta_path, f"invalid cluster_domains: {error}"
+                ) from error
+            if distributed_config is not None:
+                raise ValueError("Cluster metadata cannot use distributed_config")
+            if cluster_config is not None:
+                if not isinstance(cluster_config, ClusterConfig) or replace(cluster_config) != saved_cluster:
+                    raise ValueError("cluster_config override must match the stored cluster topology/config")
+            cluster_config = saved_cluster
+            entry_kind = "cluster"
+        elif (
+            "cluster_config" in raw
+            or "l3_entries" in raw
+            or "cluster_domains" in raw
+            or raw.get("entry_kind", "host") != "host"
+        ):
+            raise _meta_error(
+                _DISTRIBUTED_META_FILENAME,
+                meta_path,
+                "schema 3 requires HOST metadata without cluster_config",
+            )
+        elif cluster_config is not None:
+            raise ValueError("cluster_config cannot override HOST metadata")
         platform = _reload_platform(
             meta["backend_type"],
             meta["platform"],
@@ -374,18 +725,71 @@ class DistributedCompiledProgram:
         # ``return_types`` contents are never inspected at runtime — only the
         # count matters (has_return = len(...) > 0), so placeholders suffice.
         return_types: list[Any] = [None] * meta["num_return_types"]
-        dc = distributed_config or _distributed_config_from_dict(meta["raw"], meta_path)
+        dc = (
+            (distributed_config or _distributed_config_from_dict(raw, meta_path))
+            if entry_kind == "host"
+            else None
+        )
         return cls(
             None,
             str(output_dir),
             backend_type=backend_type or meta["backend_type"],
             platform=platform or meta["platform"],
             distributed_config=dc,
+            cluster_config=cluster_config,
+            entry_kind=entry_kind,
+            _entry_name=entry_name,
             _param_infos=param_infos,
             _output_indices=output_indices,
             _return_types=return_types,
             _execution_capabilities=meta["execution_capabilities"],
+            _l3_entries=l3_entries,
+            _cluster_domains=cluster_domains,
         )
+
+    @property
+    def entry_kind(self) -> str:
+        """Actual highest dispatch kind, retained by metadata-only restoration."""
+        return self._entry_kind
+
+    @property
+    def entry_name(self) -> str | None:
+        """Post-pass root name; old HOST sidecars need not record it."""
+        return self._entry_name
+
+    @property
+    def cluster_config(self) -> ClusterConfig | None:
+        """Return an owned copy of the captured launcher snapshot."""
+        return replace(self._cluster_config) if self._cluster_config is not None else None
+
+    @property
+    def l3_entries(self) -> dict[str, Any] | None:
+        """Return an owned cold entry closure, or None for identity-only records."""
+        import copy  # noqa: PLC0415
+
+        return copy.deepcopy(self._l3_entries)
+
+    @property
+    def comm_domains(self) -> tuple[Mapping[str, Any], ...]:
+        """Immutable root-domain descriptors; empty for legacy/ordinary HOST artifacts."""
+        from ._cluster_artifacts import freeze_domains  # noqa: PLC0415
+
+        return freeze_domains(self._cluster_domains["domains"]) if self._cluster_domains is not None else ()
+
+    def _require_artifact_ready(self) -> None:
+        """Allow parent-side generation/loading only for complete L4 contracts."""
+        if self._entry_kind == "cluster" and self._l3_entries is None:
+            raise NotImplementedError(
+                "Cluster artifact loading is unsupported without a complete versioned l3_entries closure; "
+                "recompile for recursive artifacts"
+            )
+
+    def _require_supported_execution(self) -> None:
+        if self._entry_kind == "cluster":
+            raise NotImplementedError(
+                "Cluster/POD (L4) execution is unsupported by this HOST executor; "
+                "use compiled.prepare() to construct its ClusterWorker"
+            )
 
     @property
     def execution_capabilities(self) -> ExecutionCapabilities:
@@ -435,16 +839,7 @@ class DistributedCompiledProgram:
                 )
             # Find the HOST orchestrator function (post-SSA names match the
             # generated Python code).
-            host_orch = None
-            for func in self._program.functions.values():
-                if (
-                    func.level is not None
-                    and level_to_linqu_level(func.level) >= 3
-                    and func.role is not None
-                    and func.role == Role.Orchestrator
-                ):
-                    host_orch = func
-                    break
+            host_orch = self._entry
 
             if host_orch is not None:
                 self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(
@@ -464,6 +859,9 @@ class DistributedCompiledProgram:
     ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
         """Execute the distributed program via simpler Worker(level=3).
 
+        CLUSTER_0 entries instead use a one-shot :class:`ClusterWorker` session,
+        with ordinary contiguous CPU Tensor and Scalar arguments.
+
         ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
         ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
         ``ring_dep_pool``) size this dispatch's runtime ring buffers, and its
@@ -482,6 +880,10 @@ class DistributedCompiledProgram:
         live Worker; use :meth:`prepare`, allocate it through the returned
         ``DistributedWorker``, then call ``worker.run(...)``.
         """
+        if self._entry_kind == "cluster":
+            with self.prepare() as worker:
+                return worker(*args, config=config)
+        self._require_supported_execution()
         from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
         param_infos, output_indices, return_types = self._get_metadata()
@@ -536,12 +938,18 @@ class DistributedCompiledProgram:
         extra_compiled: Sequence["DistributedCompiledProgram"] = (),
         persistent: bool = False,
         reset_persistent_windows: bool | None = None,
+        shared_domains: Sequence[SharedDomainBinding] = (),
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
-    ) -> "DistributedWorker":
+    ) -> "DistributedWorker | ClusterWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
+
+        CLUSTER_0 entries return :class:`ClusterWorker`, whose synchronous
+        ``run`` accepts ordinary contiguous CPU tensors allocated after this
+        call. Explicit ``shared_domains`` bind program-local domain/slot
+        ordinals to session keys when ``persistent=True``.
 
         Runs the expensive setup (``_compile_and_assemble``, generated-module
         loading, simpler ``Worker(level=3)`` construction + registration +
@@ -586,6 +994,10 @@ class DistributedCompiledProgram:
                 enables reset in persistent mode. Set to ``False`` only when
                 the caller manually clears or otherwise manages all reused
                 communication-buffer state.
+            shared_domains: Explicit CLUSTER domain/slot mappings to session
+                keys. Requires persistent mode; omitted domains stay isolated
+                by program. This configuration is snapshotted at preparation
+                and does not affect compilation or JIT identity.
             callbacks: Bind a callable to a SubWorker by name — e.g. a real
                 sampling closure. Abstract SubWorkers (declared with a ``...``
                 body) are runtime-bound callback points and MUST be supplied
@@ -617,6 +1029,28 @@ class DistributedCompiledProgram:
             A :class:`DistributedWorker`; use it as a context manager or call
             ``close()`` when done.
         """
+        if self._entry_kind == "cluster":
+            self._require_artifact_ready()
+            if callbacks or sub_worker_overrides or inherited_host_tensors:
+                raise NotImplementedError(
+                    "ClusterWorker currently supports synchronous ordinary Tensor/Scalar execution; "
+                    "callback overrides and inherited host buffers are unsupported"
+                )
+            from pypto.runtime.cluster_runner import ClusterWorker  # noqa: PLC0415
+
+            return ClusterWorker(
+                [self, *extra_compiled],
+                config,
+                startup_timeout_s=startup_timeout_s,
+                persistent=persistent,
+                reset_persistent_windows=reset_persistent_windows,
+                shared_domains=shared_domains,
+            )
+        if shared_domains:
+            raise ValueError("shared_domains requires CLUSTER_0 compiled programs")
+        self._require_supported_execution()
+        for compiled in extra_compiled:
+            compiled._require_supported_execution()
         from pypto.runtime.distributed_runner import DistributedWorker  # noqa: PLC0415
 
         return DistributedWorker(

@@ -105,9 +105,9 @@ def test_builtin_op_carries_machine_only_attrs():
     ]
     assert len(barriers) == 1
     call = barriers[0]
-    assert set(call.attrs.keys()) == {"device", "arg_directions"}
-    assert isinstance(call.attrs["device"], ir.Var)
-    assert call.attrs["device"].name_hint == "r"
+    assert set(call.attrs.keys()) == {"worker", "arg_directions"}
+    assert isinstance(call.attrs["worker"], ir.Var)
+    assert call.attrs["worker"].name_hint == "r"
     assert list(call.attrs["arg_directions"]) == [ir.ArgDirection.InOut]
 
 
@@ -148,7 +148,7 @@ def test_builtin_op_reports_deduction_failures_against_its_own_name():
 def test_hand_written_builtin_call_without_device_is_a_user_error():
     """A bare `pl.builtin.tensor.barrier(signal)` is rejected at parse time.
 
-    Orchestration codegen resolves the dispatching rank from the `device` attr
+    Orchestration codegen resolves the dispatching rank from the `worker` attr
     behind an `INTERNAL_CHECK`, so accepting a hand-written call without it
     would turn bad user input into a compiler-bug diagnostic much later. The
     printer always stamps the attr, so requiring it costs the round-trip
@@ -156,7 +156,7 @@ def test_hand_written_builtin_call_without_device_is_a_user_error():
     """
     with pytest.raises(InvalidOperationError) as excinfo:
         pl.parse_program(_barrier_program("pl.builtin.tensor.barrier(signal)"))
-    assert "device" in str(excinfo.value)
+    assert "worker" in str(excinfo.value)
     assert excinfo.value.hint is not None
     assert "pld.tensor.barrier" in excinfo.value.hint
 

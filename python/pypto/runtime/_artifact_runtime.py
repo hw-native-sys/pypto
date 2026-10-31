@@ -63,6 +63,8 @@ class ArtifactRuntime:
                 return self._chips
             handle = self.handle
             manifest = self._validate()
+            if handle.spec.entry_kind == "cluster":
+                _restore_program_metadata(handle)._require_artifact_ready()
             if handle.spec.state is ArtifactState.GENERATED:
                 spec = ready_spec(handle.directory, handle.spec)
 
@@ -91,7 +93,11 @@ class ArtifactRuntime:
                 else None
             )
             chips = load_prebuilt(
-                self.directory, self.platform, handle.spec.build_kind, _validated_files=files
+                self.directory,
+                self.platform,
+                handle.spec.build_kind,
+                _validated_files=files,
+                _validated_entry_kind=handle.spec.effective_entry_kind,
             )
             self._chips = chips
             return chips
@@ -106,6 +112,9 @@ def _restore_program_metadata(handle: ArtifactHandle) -> Any:
     compiled = cls.from_dir(handle.directory)
     if compiled.execution_capabilities != handle.spec.execution_capabilities:
         raise ValueError("Artifact manifest capabilities do not match compiled metadata")
+    entry = compiled.entry_kind if isinstance(compiled, DistributedCompiledProgram) else "chip"
+    if entry != handle.spec.effective_entry_kind:
+        raise ValueError("Artifact manifest entry kind does not match compiled metadata")
     return compiled
 
 
@@ -126,6 +135,21 @@ def bind_artifact(compiled: Any, store: ArtifactStore, handle: ArtifactHandle, r
     restored = _restore_program_metadata(handle)
     if compiled.execution_capabilities != restored.execution_capabilities:
         raise ValueError("Artifact capabilities do not match the compiled program")
+    if isinstance(compiled, DistributedCompiledProgram):
+        if not isinstance(restored, DistributedCompiledProgram) or compiled.entry_kind != restored.entry_kind:
+            raise ValueError("Artifact entry kind does not match compiled metadata")
+        if compiled.entry_kind == "cluster":
+            # Return-type objects are not persisted, only their count. Compare
+            # ABI fields independently below rather than requiring live IR types.
+            live = compiled._get_metadata()
+            saved = restored._get_metadata()
+            if (
+                compiled.entry_name != restored.entry_name
+                or compiled.cluster_config != restored.cluster_config
+                or live[:2] != saved[:2]
+                or len(live[2]) != len(saved[2])
+            ):
+                raise ValueError("Artifact cluster entry/config metadata does not match compiled program")
     _attach(compiled, runtime, restored.platform)
     runtime._manifest = manifest
 

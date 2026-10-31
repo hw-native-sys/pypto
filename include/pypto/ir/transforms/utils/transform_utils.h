@@ -202,13 +202,20 @@ inline CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
 /// its caller-supplied prefix still maps positionally. Orchestration codegen
 /// splits the same three regions in ``GenerateSubmitReturnAliases``.
 [[nodiscard]] inline ExprPtr CallerSuppliedArg(const CallPtr& call, const FunctionPtr& callee,
-                                               size_t param_index) {
+                                               size_t param_index, size_t trailing_ctx_count) {
   if (!call || !callee) return nullptr;
-  const size_t ctx = TrailingCommCtxParamCount(callee);
+  const size_t ctx = trailing_ctx_count;
   if (call->args_.size() < ctx || call->args_.size() > callee->params_.size()) return nullptr;
   const size_t caller_supplied = call->args_.size() - ctx;
   if (param_index >= caller_supplied) return nullptr;
   return call->args_[param_index];
+}
+
+/// Use a cached suffix count in program-wide binding analyses. The ordinary
+/// overload retains the existing API for callers without per-callee facts.
+[[nodiscard]] inline ExprPtr CallerSuppliedArg(const CallPtr& call, const FunctionPtr& callee,
+                                               size_t param_index) {
+  return callee ? CallerSuppliedArg(call, callee, param_index, TrailingCommCtxParamCount(callee)) : nullptr;
 }
 
 /// Constant-evaluate @p expr if it is a ``ConstInt``, or a ``Neg`` of one;

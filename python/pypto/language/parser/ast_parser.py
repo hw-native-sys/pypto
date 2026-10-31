@@ -64,6 +64,7 @@ from .type_resolver import (
     _const_int_value,  # noqa: PLC2701
     _implicit_tile_view_defaults,  # noqa: PLC2701
     _is_dump_call,  # noqa: PLC2701
+    _ProgramWindowBuffers,  # noqa: PLC2701
 )
 
 if TYPE_CHECKING:
@@ -74,6 +75,20 @@ if TYPE_CHECKING:
 # submodules exposed by pypto.language.distributed.op (system_ops / tensor_ops
 # / tile_ops); also surfaced as the hint in _parse_pld_category_op.
 _PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
+
+# Resolve callable aliases once, then validate the operation produced by the
+# wrapper. Looking up a callable here does not decide its IR operator identity.
+_DISTRIBUTED_DSL_CALLABLES = {
+    getattr(module, name): (module, prefix, name)
+    for module, prefix in (
+        (_dsl_pld, "pld"),
+        (_dsl_pld.system, "pld.system"),
+        (_dsl_pld.tensor, "pld.tensor"),
+        (_dsl_pld.tile, "pld.tile"),
+    )
+    for name in module.__all__
+    if callable(getattr(module, name))
+}
 
 # ``pl.func_attr({...})`` — the body-prologue directive carrying function-level
 # attributes. Body position is what lets an attribute reference a parameter: a
@@ -741,6 +756,7 @@ class ASTParser:
         dyn_var_cache: dict[str, ir.Var] | None = None,
         pending_comments: dict[int, list[tuple[int, str]]] | None = None,
         alloc_window_buffer_names: set[str] | None = None,
+        program_window_buffers: _ProgramWindowBuffers | None = None,
     ):
         """Initialize AST parser.
 
@@ -765,6 +781,8 @@ class ASTParser:
             alloc_window_buffer_names: Optional shared set of declared buffer names
                 (``pld.tensor.alloc_window_buffer`` LHS). Shared across all functions in
                 a ``@pl.program`` to enforce program-wide name uniqueness.
+            program_window_buffers: Private descriptor registry belonging only
+                to this program parse; storage caches stay function-local.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
@@ -778,6 +796,7 @@ class ASTParser:
             span_tracker=self.span_tracker,
             dyn_var_cache=dyn_var_cache,
             parse_expression=self.parse_expression,
+            program_window_buffers=program_window_buffers,
         )
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
@@ -800,6 +819,9 @@ class ASTParser:
         # Track loop kinds for break/continue validation
         self._loop_kind_stack: list[str] = []
         self._scope_kind_stack: list[ir.ScopeKind] = []
+        # Membership queries run at every parsed call. Index active kinds so
+        # generic nesting does not multiply that work by the scope depth.
+        self._scope_kind_depths: dict[ir.ScopeKind, int] = {}
         # Set while parsing the body of an InCore scope the user declared with an
         # explicit ``optimizations=[pl.split(MODE)]`` — MODE included when it is
         # ``NONE``. ``InCoreScopeStmt.split_`` cannot answer this: it has a single
@@ -868,6 +890,8 @@ class ASTParser:
         # Current function level (set during parse_function). Drives
         # context-scoped op constraints (e.g. pld.system.world_size is host-only).
         self._func_level: ir.Level | None = None
+        self._distributed_level: ir.Level | None = None
+        self._distributed_role: ir.Role | None = None
         # Current function type (set during parse_function). Used by markers
         # whose validity is scoped to a specific function type — e.g.
         # ``pl.dump_tag`` only makes sense in Orchestration functions.
@@ -942,14 +966,45 @@ class ASTParser:
     def _scope_kind_context(self, scope_kind: ir.ScopeKind) -> Iterator[None]:
         """Track scope nesting during parsing for context-sensitive validation."""
         self._scope_kind_stack.append(scope_kind)
+        self._scope_kind_depths[scope_kind] = self._scope_kind_depths.get(scope_kind, 0) + 1
         try:
             yield
         finally:
             self._scope_kind_stack.pop()
+            # Repeated kinds remain active until their outermost occurrence
+            # exits, including when parsing unwinds because of a diagnostic.
+            remaining = self._scope_kind_depths[scope_kind] - 1
+            if remaining:
+                self._scope_kind_depths[scope_kind] = remaining
+            else:
+                del self._scope_kind_depths[scope_kind]
 
     def _is_inside_scope(self, scope_kind: ir.ScopeKind) -> bool:
         """Return whether parsing is currently nested inside the given scope kind."""
-        return scope_kind in self._scope_kind_stack
+        return self._scope_kind_depths.get(scope_kind, 0) > 0
+
+    @contextmanager
+    def _distributed_hierarchy_context(
+        self, scope_kind: ir.ScopeKind, level: ir.Level | None, role: ir.Role | None
+    ) -> Iterator[None]:
+        """Only hierarchy regions replace the effective distributed context."""
+        saved = self._distributed_level, self._distributed_role
+        if scope_kind == ir.ScopeKind.Hierarchy:
+            self._distributed_level, self._distributed_role = level, role
+        try:
+            yield
+        finally:
+            self._distributed_level, self._distributed_role = saved
+
+    def _validate_distributed_op_context(self, op: ir.Op, span: ir.Span) -> None:
+        in_device_scope = self._func_type in self._GRAPH_FORBIDDEN_FUNC_TYPES or any(
+            self._is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        )
+        message = ir._distributed_op_context_error(
+            op, self._distributed_level, self._distributed_role, in_device_scope
+        )
+        if message:
+            raise ParserSyntaxError(message, span=span)
 
     @contextmanager
     def _incore_user_split_context(
@@ -1120,9 +1175,12 @@ class ASTParser:
         func_name = func_def.name
         # Window definitions may follow a signature that references them. Their
         # allocation Vars are interned and adopted at the actual definition site.
-        self.type_resolver.register_window_definitions(func_def)
+        self.type_resolver.window_owner = func_name
+        self.type_resolver.register_window_definitions(func_def, opaque_body=inline_body is not None)
         self._func_name = func_name
         self._func_level = func_level
+        self._distributed_level = func_level
+        self._distributed_role = func_role
         # auto_scope rides in func_attrs; absent ⇒ default True.
         self._func_auto_scope = bool((func_attrs or {}).get(AUTO_SCOPE_ATTR, True))
         self._func_type = func_type
@@ -1248,6 +1306,9 @@ class ASTParser:
                 self._parse_body_siblings(body_stmts)
                 self._discard_tail_block_comments(func_def.body, upper_line=None)
 
+            # Manual full descriptors outside comm_domain scopes must bind
+            # while both the owner's builder and lexical scope remain live.
+            self.type_resolver.finalize_window_definitions()
         # Exit function scope
         self.scope_manager.exit_scope()
 
@@ -2426,7 +2487,7 @@ class ASTParser:
         Parser-only concerns (everything else delegates to the DSL wrapper /
         IR builder / C++ deducer via :func:`invoke_dsl`):
 
-        - HOST-only, like ``world_size`` (see ``_validate_pld_op_call``): the
+        - Orchestration-only (HOST or CLUSTER_0): the
           window buffer is a host-orchestration resource, not lowerable inside
           InCore / SPMD scopes.
         - LHS must be a single ``ast.Name``.
@@ -2436,18 +2497,9 @@ class ASTParser:
         span = self.span_tracker.get_span(value)
         is_printed = _is_dump_call(value, "alloc_window_buffer")
 
-        in_device_scope = any(
-            self._is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
-        )
-        if not is_printed and (self._func_level != ir.Level.HOST or in_device_scope):
-            raise ParserSyntaxError(
-                "pld.tensor.alloc_window_buffer() can only be called in HOST orchestration "
-                "context (not inside InCore / SPMD scopes); "
-                f"current function level: {self._func_level}",
-                span=span,
-                hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                "on the enclosing function and call outside any nested device-side scope",
-            )
+        # Printed assignments bypass parse_call, but their recorded ABI fields
+        # do not exempt the operation from the same execution-context rule.
+        self._validate_distributed_op_context(ir.get_op("pld.tensor.alloc_window_buffer"), span)
 
         if not isinstance(target, ast.Name):
             raise ParserSyntaxError(
@@ -4604,7 +4656,7 @@ class ASTParser:
                         hint=usage_hint,
                     )
                 sync_start = kw.value.value
-            # 'deps' / 'attrs' / 'device' are validated and consumed elsewhere
+            # 'deps' / 'attrs' / 'worker' / 'device' are consumed elsewhere
             # in _parse_kernel_call; ignore them here.
         if core_num is None:
             raise ParserSyntaxError(
@@ -5787,6 +5839,7 @@ class ASTParser:
             with (
                 self._scope_kind_context(scope_kind),
                 self._incore_user_split_context(scope_kind, split),
+                self._distributed_hierarchy_context(scope_kind, level, role),
             ):
                 self.scope_manager.enter_scope("scope")
                 self._parse_body_siblings(stmt.body)
@@ -6405,7 +6458,10 @@ class ASTParser:
                                 "comm_domain attr names must be string literals", span=span
                             )
                         attrs.append((key.value, self._parse_attr_value("comm_domain", key.value, value)))
-                slots.extend(self.type_resolver.resolve_window_buffer(node) for node in slots_node.elts)
+                slots.extend(
+                    self.type_resolver.resolve_window_buffer(node, bind_owner=True)
+                    for node in slots_node.elts
+                )
                 self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                 self.scope_manager.exit_scope(leak_vars=True)
 
@@ -6962,6 +7018,15 @@ class ASTParser:
         )
 
     def parse_call(self, call: ast.Call) -> ir.Expr:
+        # Each parsed call validates only its newly built root. Its argument
+        # calls were checked while parsing them; rescanning their IR subtrees
+        # here would make deeply nested source expressions quadratic.
+        result = self._parse_call_impl(call)
+        if isinstance(result, (ir.Call, ir.Submit)):
+            self._validate_distributed_op_context(result.op, self.span_tracker.get_span(call))
+        return result
+
+    def _parse_call_impl(self, call: ast.Call) -> ir.Expr:
         """Parse function call.
 
         Args:
@@ -6971,6 +7036,14 @@ class ASTParser:
             IR expression from call
         """
         func = call.func
+
+        # Imported functions, callable aliases, and module aliases all dispatch
+        # through the same wrapper. Restrict resolution to known DSL callables.
+        resolved = self._resolve_distributed_callable(func)
+        if resolved is not None:
+            module, prefix, name = resolved
+            self._validate_pld_op_call(name, call)
+            return self._dispatch_op(module, prefix, name, call)
 
         if _is_dump_call(call):
             return self._parse_dump_call(call)
@@ -7027,6 +7100,20 @@ class ASTParser:
             hint="Use pl.* operations, pl.yield_(), self.method() for cross-function calls, "
             "or call an external @pl.function / @pl.inline by name",
         )
+
+    def _resolve_distributed_callable(self, node: ast.expr) -> tuple[Any, str, str] | None:
+        segments = []
+        while isinstance(node, ast.Attribute):
+            segments.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        value = self.expr_evaluator.closure_vars.get(node.id)
+        for segment in reversed(segments):
+            value = getattr(value, segment, None)
+        if not callable(value):
+            return None
+        return _DISTRIBUTED_DSL_CALLABLES.get(value)
 
     def _parse_recorded_call(self, call: ast.Call) -> ir.Call:
         """Restore a Call snapshot without repeating type inference."""
@@ -7440,7 +7527,7 @@ class ASTParser:
         ``deps=`` / ``dumps=`` / ``timing_slot=`` are accepted only on
         ``pl.submit(...)``;
         ``core_num=`` / ``sync_start=`` only on ``pl.spmd_submit(...)``;
-        ``device=`` only when the callee is an Orchestrator. Raises
+        ``worker=`` (or deprecated ``device=``) only for an Orchestrator callee. Raises
         ``ParserTypeError`` with a targeted hint for the common
         deps/dumps-on-a-plain-call mistakes.
         """
@@ -7454,7 +7541,7 @@ class ASTParser:
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
         if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
-            allowed_kwargs.add("device")
+            allowed_kwargs.update({"worker", "device"})
         for kw in keywords:
             if kw.arg in allowed_kwargs:
                 continue
@@ -7619,7 +7706,7 @@ class ASTParser:
         func_obj = self.gvar_to_func.get(gvar)
 
         # Reject unknown kwargs (``attrs`` always; ``deps`` / ``dumps`` only on
-        # submit; ``core_num`` / ``sync_start`` only on spmd_submit; ``device``
+        # submit; ``core_num`` / ``sync_start`` only on spmd_submit; ``worker`` / ``device``
         # only for an Orchestrator callee).
         self._validate_kernel_call_kwargs(method_name, func_obj, keywords, as_submit, as_spmd, span)
 
@@ -7667,9 +7754,9 @@ class ASTParser:
             in_dumps = any(arg is d for d in explicit_dump_vars)
             if (tagged or in_dumps) and isinstance(arg, ir.Var):
                 dump_vars.append(arg)
-        # Orchestration dispatch ``device=`` kwarg: resolves to a ConstInt or
-        # an enclosing-loop induction Var.
-        device_expr = self._parse_dispatch_device_kwarg(keywords)
+        # Reserve placement only on hierarchical dispatch, independently of
+        # ordinary operator kwargs and callee positional parameter names.
+        worker_expr = self._parse_dispatch_worker_kwarg(keywords, extra_attrs, func_obj)
         # ``pl.spmd_submit`` parses the SPMD launch spec (``core_num=`` /
         # ``sync_start=``) into a (positive int Expr, bool) pair recorded on
         # the resulting Submit.
@@ -7729,7 +7816,7 @@ class ASTParser:
             no_dep_indices=no_dep_indices,
             dump_vars=dump_vars,
             user_dep_vars=user_dep_vars,
-            device_expr=device_expr,
+            worker_expr=worker_expr,
             augment_task_id=as_submit,
             core_num=core_num_expr,
             sync_start=sync_start,
@@ -8364,38 +8451,47 @@ class ASTParser:
             hint=hint,
         )
 
-    def _parse_dispatch_device_kwarg(
+    def _parse_dispatch_worker_kwarg(
         self,
         keywords: list[ast.keyword],
+        extra_attrs: dict[str, Any],
+        func_obj: ir.Function | None,
     ) -> ir.Expr | None:
-        """Extract the optional ``device=`` kwarg on a ``self.<orch>(...)`` call.
+        """Extract the logical immediate-child selector for a Call or Submit.
 
-        ``device=`` selects the physical device for an orchestrator dispatch
-        and is legal only when the callee has :class:`ir.Role.Orchestrator`
-        (i.e. either chip-level ``FunctionType.Orchestration`` or a function
-        declared with ``level=..., role=Role.Orchestrator``; both forms set
-        the same ``role`` field on the IR Function). Callee-role validation
-        happens in :meth:`parse_call` via the ``allowed_kwargs`` filter
-        before this method runs, so by the time we reach this point the
-        kwarg is known to be legal. The parser is intentionally permissive
-        about the value form: any IR expression works. Downstream passes
-        (the comm-collection pass, simplify) inspect the resolved expression
-        and decide:
-
-        * ``ConstInt`` (literal or after simplify-time constant folding) →
-          fixed-device dispatch.
-        * IR Var that is a ``for``-loop induction variable with a known
-          range → device subset / kAll.
-        * Anything else → rejected by the comm-collection pass, with the
-          full def-use chain available for a good error message.
-
-        Returns:
-            The parsed IR expression, or ``None`` when ``device=`` is absent.
+        Top-level kwarg role validation happens before this method; placement
+        recovered from attrs is checked here. Keep expression parsing
+        permissive so downstream scope analysis can resolve loop variables and
+        folded constants with full def-use context. Reject competing sources
+        before merging attrs: choosing one silently can dispatch to a wrong child.
         """
-        device_kw = next((kw for kw in keywords if kw.arg == "device"), None)
-        if device_kw is None:
-            return None
-        return self.parse_expression(device_kw.value)
+        placement_kwargs = [kw for kw in keywords if kw.arg in {"worker", "device"}]
+        placement_attrs = [key for key in ("worker", "device") if key in extra_attrs]
+        if placement_attrs and (func_obj is None or func_obj.role != ir.Role.Orchestrator):
+            # Printed attrs must obey the same role restriction as worker=/device=.
+            # Otherwise a plain kernel call could acquire the dispatch-only layout
+            # exemption simply by hiding its placement metadata in attrs.
+            raise ParserTypeError(
+                f"Placement attrs {placement_attrs} require an Orchestrator callee",
+                span=func_obj.span if func_obj is not None else None,
+            )
+        if len(placement_kwargs) + len(placement_attrs) > 1:
+            raise ParserTypeError(
+                "Dispatch placement must use only one worker or device spelling, including attrs",
+                span=self.span_tracker.get_span(placement_kwargs[0].value) if placement_kwargs else None,
+            )
+        if placement_kwargs:
+            keyword = placement_kwargs[0]
+            if keyword.arg == "device":
+                warnings.warn(
+                    "device= is deprecated for dispatch; use worker= for the logical child selector",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+            return self.parse_expression(keyword.value)
+        if placement_attrs:
+            return cast(ir.Expr, extra_attrs.pop(placement_attrs[0]))
+        return None
 
     def _effective_return_types(self, func: ir.Function | None) -> list[ir.Type]:
         """Effective callee return types for cross-function call type inference.
@@ -8429,7 +8525,7 @@ class ASTParser:
         no_dep_indices: list[int] | None = None,
         dump_vars: list[ir.Var] | None = None,
         user_dep_vars: list[ir.Var] | None = None,
-        device_expr: ir.Expr | None = None,
+        worker_expr: ir.Expr | None = None,
         augment_task_id: bool = False,
         core_num: ir.Expr | None = None,
         sync_start: bool = False,
@@ -8469,10 +8565,9 @@ class ASTParser:
                 ``augment_task_id=True`` — ManualDepsOnSubmitOnly invariant);
                 codegen emits a ``set_dependencies(arr, count)`` call built
                 from the entries (array entries expand to one slot each).
-            device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
-                on an Orchestration dispatch call. Stored under
-                ``attrs['device']`` so the comm-collection pass can recover
-                per-dispatch device subsets without re-parsing the AST.
+            worker_expr: Logical immediate-child selector from ``worker=``
+                (or legacy ``device=``). Stored as a typed Expr under
+                ``attrs['worker']`` for scope analysis, SSA and codegen.
             augment_task_id: When True (``pl.submit(...)`` path), the call's
                 return type is wrapped as the flat
                 ``TupleType([*<callee returns>, Scalar[TASK_ID]])`` — elements
@@ -8513,9 +8608,9 @@ class ASTParser:
         if no_dep_indices:
             attrs = attrs or {}
             attrs["arg_direction_overrides"] = list(no_dep_indices)
-        if device_expr is not None:
+        if worker_expr is not None:
             attrs = attrs or {}
-            attrs["device"] = device_expr
+            attrs["worker"] = worker_expr
         # Generic round-trip attrs (e.g. arg_direction_overrides from a printed
         # attrs dict, dummy_task, future keys). setdefault so a value already
         # supplied by a dedicated param above wins — the two sources are
@@ -8829,6 +8924,15 @@ class ASTParser:
             span=self.span_tracker.get_span(first_node),
         )
 
+    def _parse_dispatch_attr_value(self, method_name: str, key: str, value_node: ast.expr) -> Any:
+        """Read placement as an Expr only in a dispatch-specific attrs context."""
+        if key in {"worker", "device"}:
+            # A dispatch selector is an SSA edge even when written as a literal.
+            # Function, loop and communication-scope metadata use the generic
+            # syntax-inferred reader and must not inherit this reserved meaning.
+            return self.parse_expression(value_node)
+        return self._parse_attr_value(method_name, key, value_node)
+
     def _extract_generic_call_attrs(
         self,
         method_name: str,
@@ -8853,7 +8957,7 @@ class ASTParser:
             key = key_node.value
             if key in bespoke:
                 continue
-            result[key] = self._parse_attr_value(method_name, key, value_node)
+            result[key] = self._parse_dispatch_attr_value(method_name, key, value_node)
         return result
 
     def _extract_arg_directions_from_attrs(
@@ -9247,7 +9351,9 @@ class ASTParser:
                 kwargs[key] = self.parse_expression(value)
         return kwargs
 
-    def _parse_op_attrs(self, call: ast.Call) -> dict[str, object] | None:
+    def _parse_op_attrs(
+        self, call: ast.Call, *, dispatch_placement: bool = False
+    ) -> dict[str, object] | None:
         """Extract a generic ``attrs={...}`` kwarg from an op call, if present.
 
         The python printer surfaces compiler-internal op-call attrs (e.g.
@@ -9270,10 +9376,14 @@ class ASTParser:
                     "op attrs must be a dict literal",
                     span=self.span_tracker.get_span(keyword.value),
                 )
-            return self._parse_generic_attrs_dict(ast.unparse(call.func), keyword.value)
+            return self._parse_generic_attrs_dict(
+                ast.unparse(call.func), keyword.value, dispatch_placement=dispatch_placement
+            )
         return None
 
-    def _parse_generic_attrs_dict(self, method_name: str, node: ast.Dict) -> dict[str, object]:
+    def _parse_generic_attrs_dict(
+        self, method_name: str, node: ast.Dict, *, dispatch_placement: bool = False
+    ) -> dict[str, object]:
         """Read an open-world ``attrs={...}`` dict literal via ``_parse_attr_value``.
 
         Only the string-literal-key invariant is enforced; each value's type is
@@ -9300,7 +9410,11 @@ class ASTParser:
                     "pl.system.task_dummy or pl.submit",
                     span=self.span_tracker.get_span(value_node),
                 )
-            result[key] = self._parse_attr_value(method_name, key, value_node)
+            result[key] = (
+                self._parse_dispatch_attr_value(method_name, key, value_node)
+                if dispatch_placement
+                else self._parse_attr_value(method_name, key, value_node)
+            )
         return result
 
     @staticmethod
@@ -9724,7 +9838,8 @@ class ASTParser:
 
         - ``alloc_window_buffer``: must be intercepted at assignment-LHS.
           Reaching here means it was used outside that context.
-        - ``world_size``: host-only.
+        Resolved operation context is checked by ``parse_call`` instead of the
+        user's spelling, so aliases and private printer paths share the rule.
         """
         span = self.span_tracker.get_span(call)
 
@@ -9736,20 +9851,6 @@ class ASTParser:
                 hint="Write 'buf = pld.tensor.alloc_window_buffer(N)' "
                 "(or the short form 'buf = pld.alloc_window_buffer(N)')",
             )
-
-        if op_name == "world_size":
-            in_device_scope = any(
-                self._is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
-            )
-            if self._func_level != ir.Level.HOST or in_device_scope:
-                raise ParserSyntaxError(
-                    "pld.system.world_size() can only be called in HOST orchestration context "
-                    "(not inside InCore / SPMD scopes); "
-                    f"current function level: {self._func_level}",
-                    span=span,
-                    hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                    "on the enclosing function and call outside any nested device-side scope",
-                )
 
     def _parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse ``pld.<op>(...)`` — 2-segment unified short form.
@@ -9821,7 +9922,7 @@ class ASTParser:
         printer can write. Every ``builtin.*`` dispatch is built by one
         function (``MakeBuiltinCallWithAttrs`` in
         ``lower_host_tensor_collectives_pass.cpp``), which unconditionally
-        stamps a ``device`` attr and an ``arg_directions`` attr covering every
+        stamps a ``worker`` attr and an ``arg_directions`` attr covering every
         positional arg; orchestration codegen then reads both back behind
         internal checks. Hand-written source that omits them would be accepted
         here and blow up much later as an "internal error" — a compiler-bug
@@ -9850,7 +9951,7 @@ class ASTParser:
 
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
-        attrs = self._parse_op_attrs(call) or {}
+        attrs = self._parse_op_attrs(call, dispatch_placement=True) or {}
         self._check_builtin_op_printer_invariants(full_name, args, attrs, span)
         try:
             built = ir._create_internal_op_call(full_name, args, kwargs, span)
@@ -9873,7 +9974,7 @@ class ASTParser:
         Keeps the accepted grammar equal to the printer's output, so this
         machine-only surface cannot be used to hand-build a dispatch that
         orchestration codegen would reject with an ``INTERNAL_CHECK`` (see
-        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``device`` attr
+        ``EmitBuiltinWindowCollectiveDispatch``: it requires a ``worker`` attr
         to resolve the rank expression, and one ``arg_directions`` entry per
         positional arg).
         """
@@ -9882,10 +9983,20 @@ class ASTParser:
             f"{full_name} is reached by writing the public pld.{full_name.split('.', 1)[1]} "
             f"collective and letting LowerHostTensorCollectives lower it"
         )
-        if "device" not in attrs:
+        if "worker" in attrs and "device" in attrs:
             raise InvalidOperationError(
-                f"'pl.{full_name}' requires a device attr naming the dispatching rank "
-                f'(attrs={{"device": <rank>}})',
+                f"'pl.{full_name}' must use only one worker or device placement attr",
+                span=span,
+                hint=hint,
+            )
+        if "device" in attrs:
+            # Read older printer dumps; constructors perform the same wire/direct
+            # IR normalization while preserving the referenced expression object.
+            attrs["worker"] = attrs.pop("device")
+        if "worker" not in attrs:
+            raise InvalidOperationError(
+                f"'pl.{full_name}' requires a worker attr naming the dispatching child "
+                f'(attrs={{"worker": <rank>}})',
                 span=span,
                 hint=hint,
             )

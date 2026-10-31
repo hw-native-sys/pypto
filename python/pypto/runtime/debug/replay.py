@@ -102,6 +102,18 @@ def invalidate_binary_cache(work_dir: Path | str) -> None:
         print("[cpp->.so] no cached binaries to invalidate")
 
 
+def _require_supported_replay(work_dir: Path) -> None:
+    """Validate L4 metadata before legacy marker routing or replay mutations.
+
+    A restored cluster directory can contain stale HOST/CHIP markers. Neither
+    those files nor golden.py may select an executor for its cluster contract.
+    """
+    if (work_dir / "distributed_meta.json").is_file():
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        DistributedCompiledProgram.from_dir(work_dir)._require_supported_execution()
+
+
 def replay(
     work_dir: Path | str,
     *tensors: torch.Tensor | DeviceTensor | _SimpleCData[Any],
@@ -158,6 +170,7 @@ def replay(
     """
     config = config or RunConfig()
     work_dir = Path(work_dir)
+    _require_supported_replay(work_dir)
     # L3 distributed builds have no top-level ``kernel_config.py`` (per-rank
     # configs live under ``next_levels/{rank}/``); they are identified by the
     # generated HOST orchestrator and dispatched through DistributedCompiledProgram.
@@ -400,6 +413,9 @@ def _main(
         ),
     )
     args = parser.parse_args(argv)
+    # The CLI normally imports golden.py to obtain inputs before calling replay.
+    # Reject unsupported entry contracts before that trusted-code boundary too.
+    _require_supported_replay(args.work_dir)
 
     if args.log_level is not None:
         from pypto.runtime.log_config import configure_log  # noqa: PLC0415 — keep import lazy

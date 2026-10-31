@@ -11,13 +11,24 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 #include <nanobind/trampoline.h>
 
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 #include "../module.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/type.h"
 
 namespace nb = nanobind;
 
@@ -25,6 +36,79 @@ namespace pypto {
 namespace python {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
+
+namespace {
+
+/// Finalize one parser program's explicit window references. The normal
+/// IRMutator remains responsible for rebuilding params, Vars, Call/Submit
+/// results, tuples, returns and attrs; only the ownership back-reference is
+/// opt-in here. Keeping this native also avoids recursive Python visitor calls.
+class WindowBufferRebinder final : public IRMutator {
+ public:
+  explicit WindowBufferRebinder(
+      const std::vector<std::pair<WindowBufferPtr, WindowBufferPtr>>& replacements) {
+    for (const auto& [old_window, new_window] : replacements) {
+      CHECK(old_window && new_window) << "WindowBuffer replacements must not contain null windows";
+      auto [it, inserted] = replacements_.emplace(old_window, new_window);
+      CHECK_SPAN(inserted || it->second.get() == new_window.get(), old_window->span_)
+          << "Conflicting WindowBuffer replacement for one source window";
+    }
+  }
+
+ protected:
+  TypePtr RemapTypeViaVisitor(const TypePtr& type) override {
+    // Always run the ordinary walk first: var_remap_ may have advanced since
+    // this type was seen in an earlier function, so caching the whole input
+    // type here would retain stale shape/view/storage expression bindings.
+    auto remapped = IRMutator::RemapTypeViaVisitor(type);
+    auto distributed = As<DistributedTensorType>(remapped);
+    if (!distributed || !distributed->window_buffer_.has_value()) return remapped;
+    auto window = ResolveWindow(*distributed->window_buffer_);
+    if (window.get() == distributed->window_buffer_->get()) return remapped;
+    return std::make_shared<const DistributedTensorType>(distributed->shape_, distributed->dtype_,
+                                                         distributed->memref_, distributed->tensor_view_,
+                                                         std::move(window));
+  }
+
+  ExprPtr VisitExpr_(const WindowBufferPtr& op) override { return ResolveWindow(op); }
+
+ private:
+  WindowBufferPtr ResolveWindow(const WindowBufferPtr& window) {
+    CHECK(window) << "WindowBuffer rebinding requires a non-null window";
+    auto cached = canonical_windows_.find(window);
+    if (cached != canonical_windows_.end()) return cached->second;
+    CHECK_SPAN(active_windows_.insert(window).second, window->span_)
+        << "Cyclic WindowBuffer replacement or size dependency";
+    WindowBufferPtr canonical;
+    auto replacement = replacements_.find(window);
+    if (replacement != replacements_.end() && replacement->second != window) {
+      // Follow explicit aliases through the same cycle guard and canonical
+      // cache as real owner metadata. A target may itself be a replacement key.
+      canonical = ResolveWindow(replacement->second);
+    } else {
+      // Real metadata already names its owner's exact Var objects. The native
+      // base walk retypes them through this mutator's var_remap_, even if an
+      // inheriting function sorts before the owner. Later owner parameters and
+      // body uses reuse those same fresh Vars. Visit unmapped actual windows
+      // too: eager full annotations may have no placeholder of their own.
+      canonical = As<WindowBuffer>(IRMutator::VisitExpr_(window));
+      INTERNAL_CHECK_SPAN(canonical, window->span_) << "WindowBuffer rebinding changed the resource kind";
+    }
+    active_windows_.erase(window);
+    canonical_windows_.emplace(window, canonical);
+    // A freshly rebuilt window is already canonical; later direct slots and
+    // type back-references must return it without re-entering owner metadata.
+    canonical_windows_.emplace(canonical, canonical);
+    return canonical;
+  }
+
+  // Strong keys and values retain both identities for this single traversal.
+  std::unordered_map<WindowBufferPtr, WindowBufferPtr> replacements_;
+  std::unordered_map<WindowBufferPtr, WindowBufferPtr> canonical_windows_;
+  std::unordered_set<WindowBufferPtr> active_windows_;
+};
+
+}  // namespace
 
 // Trampoline macros: generate NB_OVERRIDE_NAME + non-virtual base forwarder.
 // The forwarder calls the base class method non-virtually, so that
@@ -269,6 +353,17 @@ struct PyIRMutator : IRMutator {
 
 void BindFunctor(nb::module_& m) {
   nb::module_ ir_mod = nb::cast<nb::module_>(m.attr("ir"));
+
+  ir_mod.def(
+      "_rebind_window_buffers",
+      [](const ProgramPtr& program,
+         const std::vector<std::pair<WindowBufferPtr, WindowBufferPtr>>& replacements) {
+        CHECK(program) << "WindowBuffer rebinding requires a non-null Program";
+        if (replacements.empty()) return program;
+        return WindowBufferRebinder(replacements).VisitProgram(program);
+      },
+      nb::arg("program"), nb::arg("replacements"),
+      "Finalize explicit window identities for one parser program (private).");
 
   // ---- IRVisitor ----
   auto visitor_cls =

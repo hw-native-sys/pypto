@@ -428,6 +428,10 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
 
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_other(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             buf_a = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
@@ -436,8 +440,8 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
             data_b = pld.window(buf_b, [256], dtype=pl.FP32)
             self.chip_orch(data_a, device=0)
             self.chip_orch(data_a, device=1)
-            self.chip_orch(data_b, device=2)
-            self.chip_orch(data_b, device=3)
+            self.chip_orch_other(data_b, device=2)
+            self.chip_orch_other(data_b, device=3)
             data_a = pld.tensor.allreduce(data_a, op=pld.ReduceOp.Sum)
             data_b = pld.tensor.allreduce(data_b, op=pld.ReduceOp.Sum)
             return data_a
@@ -754,6 +758,10 @@ def test_implicit_allreduce_signal_names_are_program_unique():
                 def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
                     return data
 
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip_orch_other(self, data: pld.DistributedTensor[[256], pl.FP32]):
+                    return data
+
                 @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
                 def host_orch_a(self):
                     data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
@@ -777,7 +785,7 @@ def test_implicit_allreduce_signal_names_are_program_unique():
                     data_buf_b = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
                     data = pld.window(data_buf_b, [256], dtype=pl.FP32)
                     for r in pl.range(pld.world_size()):
-                        self.chip_orch(data, device=r)
+                        self.chip_orch_other(data, device=r)
                     data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
                     return data
             """
@@ -1684,33 +1692,8 @@ def test_multi_view_per_alloc_shares_wb_instance():
 
 
 # ---------------------------------------------------------------------------
-# chip_orch param types remain nullopt (host_orch only is rewritten)
+# Dispatch formals inherit the owner's exact window identity.
 # ---------------------------------------------------------------------------
-
-
-def test_chip_orch_param_types_keep_window_buffer_nullopt():
-    @pl.program
-    class P:
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
-            data = pld.window(buf, [256], dtype=pl.FP32)
-            for r in pl.range(pld.world_size()):
-                self.chip_orch(data, device=r)
-            return 0
-
-    result = _apply(P)
-    chip = _get_func(result, "chip_orch")
-    # The param annotation came from the user; its DistributedTensorType
-    # should carry no window_buffer back-reference even after the pass runs.
-    assert len(chip.params) == 1
-    pt = chip.params[0].type
-    assert isinstance(pt, ir.DistributedTensorType)
-    assert pt.window_buffer is None
 
 
 # ---------------------------------------------------------------------------
@@ -1921,6 +1904,10 @@ def _build_pass_output_with_two_groups() -> ir.Program:
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
 
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_other(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             buf_a = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
@@ -1929,7 +1916,7 @@ def _build_pass_output_with_two_groups() -> ir.Program:
             data_b = pld.window(buf_b, [256], dtype=pl.FP32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(data_a, device=r)
-            self.chip_orch(data_b, device=0)
+            self.chip_orch_other(data_b, device=0)
             return 0
 
     return _apply(P)
@@ -2002,6 +1989,10 @@ def test_materialized_program_text_roundtrip(explicit_layout):
         def chip(self, x: pld.DistributedTensor[[4], pl.FP32]):
             return x
 
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_other(self, x: pld.DistributedTensor[[4], pl.FP32]):
+            return x
+
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host(self, n: pl.Scalar[pl.INDEX]):
             size = n * 4
@@ -2013,7 +2004,7 @@ def test_materialized_program_text_roundtrip(explicit_layout):
             for r in pl.range(2):
                 self.chip(x, device=r)
                 self.chip(alias, device=r)
-            self.chip(other, device=2)
+            self.chip_other(other, device=2)
             return 0
 
     ir.assert_structural_equal(P, pl.parse(ir.python_print(P, format=False)))
@@ -2239,6 +2230,194 @@ def test_signed_scope_attribute_roundtrip(value):
     assert scope.attrs["saved"] == value
     assert isinstance(scope.attrs["index_expr"], ir.ConstInt)
     assert scope.attrs["index_expr"].value == -1
+
+
+def _c1b_dynamic_dispatch_program(query, *, hoisted=False, start="0", step="1"):
+    bound = "n_alias" if hoisted else f"pld.{query}()"
+    hoist = f"        n = pld.{query}()\n        n_alias = n\n" if hoisted else ""
+    return pl.parse_program(
+        "import pypto.language as pl\n"
+        "import pypto.language.distributed as pld\n"
+        "@pl.program\nclass P:\n"
+        "    @pl.function(type=pl.FunctionType.Orchestration)\n"
+        "    def chip(self, data: pld.DistributedTensor[[256], pl.FP32]):\n"
+        "        return data\n"
+        "    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)\n"
+        "    def host(self, begin: pl.Scalar[pl.INT64], stride: pl.Scalar[pl.INT64]):\n"
+        "        buf = pld.alloc_window_buffer(1024)\n"
+        "        data = pld.window(buf, [256], dtype=pl.FP32)\n"
+        f"{hoist}"
+        f"        for r in pl.range({start}, {bound}, {step}):\n"
+        "            self.chip(data, worker=r)\n"
+        "        return 0\n"
+    )
+
+
+@pytest.mark.parametrize("hoisted", [False, True])
+def test_c1b_num_workers_full_coverage_loop(hoisted):
+    # ConvertToSSA runs inside _apply; both direct and aliased bounds must resolve.
+    program = _apply(_c1b_dynamic_dispatch_program("num_workers", hoisted=hoisted))
+    scopes = _get_comm_domain_scopes(_get_func(program, "host"))
+    assert len(scopes) == 1
+    assert list(scopes[0].devices) == []
+    assert len(scopes[0].slots) == 1
+    assert _view_var_types(_get_func(program, "host"))[0].window_buffer is scopes[0].slots[0]
+
+
+def _c2a_stmts(stmt):
+    yield stmt
+    if isinstance(stmt, ir.SeqStmts):
+        for child in stmt.stmts:
+            yield from _c2a_stmts(child)
+    elif isinstance(stmt, (ir.ScopeStmt, ir.ForStmt, ir.WhileStmt)):
+        yield from _c2a_stmts(stmt.body)
+    elif isinstance(stmt, ir.IfStmt):
+        yield from _c2a_stmts(stmt.then_body)
+        if stmt.else_body is not None:
+            yield from _c2a_stmts(stmt.else_body)
+
+
+def _c2a_exprs(expr):
+    yield expr
+    if isinstance(expr, (ir.Call, ir.Submit)):
+        for arg in expr.args:
+            yield from _c2a_exprs(arg)
+        if isinstance(expr, ir.Submit):
+            for dep in expr.deps:
+                yield from _c2a_exprs(dep)
+    elif isinstance(expr, ir.MakeTuple):
+        for element in expr.elements:
+            yield from _c2a_exprs(element)
+    elif isinstance(expr, ir.TupleGetItemExpr):
+        yield from _c2a_exprs(expr.tuple)
+
+
+def _c2a_dist_types(ty):
+    if isinstance(ty, ir.DistributedTensorType):
+        yield ty
+    elif isinstance(ty, ir.TupleType):
+        for element in ty.types:
+            yield from _c2a_dist_types(element)
+
+
+def _c2a_assert_function_identity(func, slot):
+    """Check signatures, defining expressions, projections, and SSA carries."""
+    types = [param.type for param in func.params] + list(func.return_types)
+    for stmt in _c2a_stmts(func.body):
+        exprs = []
+        if isinstance(stmt, ir.AssignStmt):
+            exprs = [stmt.var, stmt.value]
+        elif isinstance(stmt, ir.EvalStmt):
+            exprs = [stmt.expr]
+        elif isinstance(stmt, (ir.ReturnStmt, ir.YieldStmt)):
+            exprs = list(stmt.value)
+        elif isinstance(stmt, (ir.ForStmt, ir.WhileStmt)):
+            exprs = list(stmt.iter_args) + list(stmt.return_vars)
+            exprs += [arg.initValue for arg in stmt.iter_args]
+        elif isinstance(stmt, ir.IfStmt):
+            exprs = list(stmt.return_vars)
+        for expr in exprs:
+            types.extend(value.type for value in _c2a_exprs(expr))
+    distributed = [dt for ty in types for dt in _c2a_dist_types(ty)]
+    assert distributed, f"{func.name} must contain distributed values"
+    assert all(dt.window_buffer is slot for dt in distributed)
+
+
+def _c2a_three_level_program(names=("z_root", "a_host", "m_chip"), *, hoisted=False, start="0", step="1"):
+    root, host, chip = names
+    bound = "count_alias" if hoisted else "pld.num_workers()"
+    hoist = "        count = pld.num_workers()\n        count_alias = count\n" if hoisted else ""
+    return pl.parse_program(
+        f"""
+@pl.program
+class ThreeLevels:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def {chip}(self, data: pld.DistributedTensor[[4], pl.FP32]) -> pld.DistributedTensor[[4], pl.FP32]:
+        return data
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def {host}(self, data: pld.DistributedTensor[[4], pl.FP32]) -> pld.DistributedTensor[[4], pl.FP32]:
+        forwarded = self.{chip}(data, worker=0)
+        return forwarded
+
+    @pl.function(level=pl.Level.CLUSTER_0, role=pl.Role.Orchestrator)
+    def {root}(self, begin: pl.Scalar[pl.INDEX], stride: pl.Scalar[pl.INDEX]):
+        buf = pld.alloc_window_buffer(16)
+        data = pld.window(buf, [4], dtype=pl.FP32)
+{hoist}        for worker in pl.range({start}, {bound}, {step}):
+            self.{host}(data, worker=worker)
+        return 0
+"""
+    )
+
+
+@pytest.mark.parametrize("names", [("z_root", "a_host", "m_chip"), ("a_root", "z_host", "b_chip")])
+@pytest.mark.parametrize("hoisted", [False, True])
+def test_c2a_three_levels_share_identity_independent_of_function_order(names, hoisted):
+    before = _c2a_three_level_program(names, hoisted=hoisted)
+    after = _apply(before)
+    root, host, chip = [_get_func(after, name) for name in names]
+    scopes = _get_comm_domain_scopes(root)
+    assert len(scopes) == 1
+    assert list(scopes[0].devices) == []
+    assert len(scopes[0].slots) == 1
+    slot = scopes[0].slots[0]
+    for func in (root, host, chip):
+        _c2a_assert_function_identity(func, slot)
+    assert _get_comm_domain_scopes(host) == []
+    assert _get_comm_domain_scopes(chip) == []
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.AssignTypeSymmetry)
+    props.insert(passes.IRProperty.TypeChecked)
+    assert passes.PropertyVerifierRegistry.verify(props, after) == []
+
+
+@pytest.mark.parametrize("roundtrip", ["idempotence", "text", "serde"])
+def test_c2a_cross_function_identity_survives_roundtrip(roundtrip):
+    before = _apply(_c2a_three_level_program())
+    if roundtrip == "idempotence":
+        after = passes.materialize_comm_domain_scopes()(before)
+    elif roundtrip == "text":
+        after = pl.parse_program(ir.python_print(before, format=False))
+    else:
+        after = ir.deserialize(ir.serialize(before))
+    ir.assert_structural_equal(before, after)
+    slot = _get_comm_domain_scopes(_get_func(after, "z_root"))[0].slots[0]
+    for name in ("z_root", "a_host", "m_chip"):
+        _c2a_assert_function_identity(_get_func(after, name), slot)
+
+
+def test_c2a_local_and_inherited_windows_have_separate_owners():
+    before = pl.parse_program("""
+@pl.program
+class LocalAndInherited:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(
+        self, inherited: pld.DistributedTensor[[4], pl.FP32], local: pld.DistributedTensor[[4], pl.FP32]
+    ):
+        return inherited, local
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self, inherited: pld.DistributedTensor[[4], pl.FP32]):
+        local_buf = pld.alloc_window_buffer(16)
+        local = pld.window(local_buf, [4], dtype=pl.FP32)
+        self.chip(inherited, local, worker=0)
+        return inherited
+    @pl.function(level=pl.Level.CLUSTER_0, role=pl.Role.Orchestrator)
+    def root(self):
+        buf = pld.alloc_window_buffer(16)
+        inherited = pld.window(buf, [4], dtype=pl.FP32)
+        self.host(inherited, worker=0)
+        return 0
+""")
+    after = _apply(before)
+    root, host, chip = [_get_func(after, name) for name in ("root", "host", "chip")]
+    root_scope, host_scope = _get_comm_domain_scopes(root)[0], _get_comm_domain_scopes(host)[0]
+    assert len(root_scope.slots) == len(host_scope.slots) == 1
+    global_slot, local_slot = root_scope.slots[0], host_scope.slots[0]
+    assert global_slot is not local_slot
+    assert host.params[0].type.window_buffer is chip.params[0].type.window_buffer is global_slot
+    assert _view_var_types(host)[0].window_buffer is chip.params[1].type.window_buffer is local_slot
+    assert _get_comm_domain_scopes(chip) == []
 
 
 if __name__ == "__main__":

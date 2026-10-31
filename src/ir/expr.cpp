@@ -29,6 +29,27 @@
 namespace pypto {
 namespace ir {
 
+void NormalizeWorkerPlacementAttrs(std::vector<std::pair<std::string, std::any>>& attrs, const Span& span) {
+  bool seen = false;
+  for (auto& [key, value] : attrs) {
+    if (key != kAttrWorker && key != "device") continue;
+    CHECK_SPAN(!seen, span) << "Dispatch placement must use only one worker or device attr";
+    seen = true;
+    key = kAttrWorker;
+    // Older direct IR producers serialized integer placement as scalar attrs.
+    // Match the Python binding's INDEX literal conversion, restricted to the
+    // reserved placement keys above; ordinary attrs and kwargs stay unchanged.
+    if (const auto* integer = std::any_cast<int>(&value)) {
+      value = ExprPtr(std::make_shared<ConstInt>(*integer, DataType::INDEX, span));
+    } else if (const auto* var = std::any_cast<VarPtr>(&value)) {
+      // Upcast the same shared pointer so placement keeps its argument/definition identity.
+      value = ExprPtr(*var);
+    }
+    const auto* expr = std::any_cast<ExprPtr>(&value);
+    CHECK_SPAN(expr && *expr, span) << "Dispatch worker attr must hold a non-null ExprPtr";
+  }
+}
+
 void detail::CheckValueOperand(const ExprPtr& expr, const Span& span, const char* context) {
   if (expr) CheckValueType(expr->GetType(), span.is_valid() ? span : expr->span_, context);
 }

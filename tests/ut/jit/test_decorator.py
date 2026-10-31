@@ -4488,5 +4488,53 @@ class TestRuntimeSizedLocalExtents:
         assert not dim.synthesized
 
 
+def _c1c_four_level_graph():
+    @jit.incore
+    def kernel(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        pl.store(pl.load(x, [0], [32]), [0], out)
+        return out, n
+
+    kernel_alias = kernel
+
+    @jit
+    def chip(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        out, n = kernel_alias(x, out, n)
+        return out, n
+
+    chip_alias = chip
+
+    @jit.host
+    def host(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        out, n = chip_alias(x, out, n, worker=1)
+        return out, n
+
+    host_alias = host
+
+    @jit.pod
+    def pod(x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        out, n = host_alias(x, out, n, worker=0)
+        return out, n
+
+    return pod, host, chip, kernel
+
+
+def test_c1c_four_level_specialize_parse_serialize_roundtrip():
+    pod, _, _, _ = _c1c_four_level_graph()
+    program = pod.specialize()
+    source = program.as_python()
+    assert "pl.Level.CLUSTER_0" in source
+    assert "pl.Level.HOST" in source
+    assert "worker=0" in source or '"worker": 0' in source
+    assert "worker=1" in source or '"worker": 1' in source
+    assert "device=" not in source
+    assert "self.host(" in source and "self.chip(" in source and "self.kernel(" in source
+    assert program.get_function("pod").level == pl.Level.CLUSTER_0
+    assert program.get_function("pod").role == pl.Role.Orchestrator
+    assert program.get_function("host").level == pl.Level.HOST
+    assert program.get_function("chip").level == pl.Level.CHIP
+    ir.assert_structural_equal(pl.parse_program(source), program)
+    ir.assert_structural_equal(ir.deserialize(ir.serialize(program)), program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

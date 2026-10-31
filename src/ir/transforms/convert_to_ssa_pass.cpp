@@ -319,18 +319,10 @@ class SSAConverter {
 
   ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(*this).VisitExpr(e) : e; }
 
-  /// Substitute Var references stored in Call attrs. Currently covers:
-  ///   * ``kAttrManualDepEdges`` — ``std::vector<VarPtr>`` (dep edges)
-  ///   * ``kAttrDumpVars`` — ``std::vector<VarPtr>`` (selective dump
-  ///     targets from ``pl.dump_tag`` / ``dumps=``)
-  ///   * every ``IsExprValuedCallAttr`` key — ``ExprPtr`` (the host-orch
-  ///     dispatch ``device=`` selector, typically a loop induction Var that SSA
-  ///     must version; the SPMD ``core_num`` launch width). Routed through the
-  ///     shared predicate so a new Expr-valued attr cannot be added to some
-  ///     walkers and silently missed here.
-  ///
-  /// ``kAttrArgDirOverrideVars`` is scope-only and handled by the separate
-  /// ``SubstScopeAttrs`` path below.
+  /// Substitute reference-typed attrs on Call and Submit using MapAttrExprs.
+  /// ExprPtr placement/launch attrs (worker, core_num), VarPtr and Var lists
+  /// all retain the current SSA definitions. Dispatching by stored type keeps
+  /// newly introduced expression attrs visible without adding a key allowlist.
   /// Returns a rebuilt attrs vector when any Var was rewritten, otherwise
   /// std::nullopt so the caller can keep the existing attrs vector verbatim.
   std::optional<std::vector<std::pair<std::string, std::any>>> SubstCallAttrs(

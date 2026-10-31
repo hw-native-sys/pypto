@@ -396,7 +396,7 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
         }
         kwargs.emplace_back(key, std::move(entries));
       } else if (type_name == "Expr") {
-        // Reserved Expr-valued attr (kAttrDevice). Resolved through the node table.
+        // Reserved Expr-valued attr (kAttrWorker). Resolved through the node table.
         // A missing 'value' field is a malformed envelope (fail fast); an
         // explicit nil value is the null placeholder.
         if (!has_value_obj) {
@@ -558,6 +558,9 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
+  // Normalize the legacy literal "device" key only after resolving Expr refs.
+  // Reuse the node-table pointers so arguments and placement share Var identity.
+  NormalizeWorkerPlacementAttrs(attrs, span);
   return std::make_shared<Call>(op, args, std::move(kwargs), std::move(attrs), type, span);
 }
 
@@ -638,6 +641,9 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
+  // Normalize the legacy literal "device" key only after resolving Expr refs.
+  // Reuse the node-table pointers so arguments and placement share Var identity.
+  NormalizeWorkerPlacementAttrs(attrs, span);
   return std::make_shared<Submit>(op, args, deps, std::move(kwargs), std::move(attrs), type, span,
                                   std::move(core_num), sync_start, allow_early_resolve, std::move(predicate));
 }
@@ -1049,6 +1055,19 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
     }
   }
 
+  // Reflection serializes the inherited ScopeStmt body and attrs before slots.
+  // A body-local DistributedTensor type can define a WindowBuffer (and shared
+  // shape/base nodes) that slots only references. Decode in that same order so
+  // valid references are already registered; unknown IDs still remain errors.
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
+  }
+
   std::vector<WindowBufferPtr> slots;
   auto slots_obj = GetOptionalFieldObj(fields_obj, "slots", ctx);
   if (slots_obj.has_value() && slots_obj->type == msgpack::type::ARRAY) {
@@ -1057,15 +1076,6 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
       slots.push_back(std::static_pointer_cast<const WindowBuffer>(
           ctx.DeserializeNode(slots_obj->via.array.ptr[i], zone)));
     }
-  }
-
-  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
-  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-
-  std::vector<std::pair<std::string, std::any>> attrs;
-  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
-  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
   }
 
   return std::make_shared<CommDomainScopeStmt>(std::move(devices), std::move(slots), std::move(name_hint),

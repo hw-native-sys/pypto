@@ -215,6 +215,68 @@ The marker governs the named-copy descriptor only. Dispatch arguments are named 
 runtime's own path, which this does not reach, so marking a dispatch IO buffer read-only
 does not stop the child from writing it.
 
+## Cluster launch configuration (POD/CLUSTER_0)
+
+`pypto.ir.ClusterNodeSpec` and `ClusterConfig` describe multi-node placement.
+They validate and copy the supplied lists without DNS lookups or connections.
+POD/CLUSTER_0 (L4) programs compile into cluster artifacts and execute through
+the cluster runner. Higher cluster orchestration levels remain unsupported. For
+prepared sessions, shared windows and cold loading, see
+[Persistent L3 sessions](../../dev/06-persistent-l3.md).
+
+```python
+import os
+from pypto.ir import ClusterConfig, ClusterNodeSpec
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+
+cluster = ClusterConfig(
+    nodes=[
+        ClusterNodeSpec(host, [int(d) for d in devices.split(",")])
+        for host, devices in node_device_assignments
+    ],
+    python_executable=os.environ["CLUSTER_PYTHON"],
+)
+config = RunConfig(
+    backend_type=BackendType.Ascend910,
+    execution_mode=ExecutionMode.ONBOARD,
+    cluster_config=cluster,
+)
+compile_kwargs = config.compile_kwargs()
+```
+
+`node_device_assignments` comes from your allocation: each pair contains a host
+and a comma-separated list of that host's assigned physical device indices.
+Do not infer placement from global ranks. `node_device_counts()` returns one
+count per MPI entry, `global_device_ranks()` assigns contiguous ranks in node
+declaration order and then device-list order, and `world_size()` counts devices,
+not MPI entries. For counts `[2, 2]`, the rank groups are `[(0, 1), (2, 3)]`.
+
+| Field | Default | Contract |
+| ----- | ------- | -------- |
+| `nodes` | Required | Nonempty list of `ClusterNodeSpec(host, devices)`; `devices` defaults to a fresh `[0]` |
+| `python_executable` | Required | Python executable available to the launcher |
+| `comm_profile` | `"a3-fabric-v1"` | Communication profile identifier |
+| `runtime` | `"tensormap_and_ringbuffer"` | Runtime flavour |
+| `num_sub_workers` | `0` | Nonnegative integer; `0` leaves worker-count selection to the runtime |
+| `startup_timeout_s` | `120.0` | Finite positive startup timeout in seconds |
+| `mpirun_path` | `"mpirun"` | Launcher executable |
+| `mpirun_args` | `()` | Ordered tuple/list of string arguments, copied to a tuple |
+| `aicpu_thread_num` | `0` | Architecture default (`0`), or an integer at least `2` |
+
+Device indices must be distinct nonnegative integers; booleans are rejected.
+Repeated exact host names are allowed with disjoint device ownership. All node
+entries must initially have equal device counts because unequal shape/layouts
+are unsupported. Host, executable, profile, runtime, and argument strings must
+be nonempty and contain no NUL or newline. Counts and timeouts reject booleans.
+Rank-zero placement is checked by the eventual runtime, not by this config API.
+
+`RunConfig.compile_options()` and `CompileOptions.as_compile_kwargs()` forward
+`cluster_config`; each compile request snapshots and revalidates its nested
+settings. Every placement and launcher field contributes to the JIT cache key.
+`cluster_config` and `distributed_config` are mutually exclusive; supplying a
+cluster config for a HOST/CHIP program fails before backend discovery.
+
 ## One-Shot vs Persistent Worker
 
 ### One-Shot

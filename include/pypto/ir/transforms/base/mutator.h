@@ -141,7 +141,11 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// (var_remap_ or subclass overrides) reaches Var refs that live inside types.
   /// Copy-on-write inside CloneTypeWithMemRefAndRemapExprs returns the original
   /// TypePtr when nothing inside changes.
-  TypePtr RemapTypeViaVisitor(const TypePtr& type);
+  /// A private program-window rebinder overrides this to replace explicit
+  /// DistributedTensorType back-references after the ordinary expression walk.
+  /// The default keeps window ownership opaque; it must not enter a different
+  /// function's owner metadata through an inherited tensor type.
+  virtual TypePtr RemapTypeViaVisitor(const TypePtr& type);
 
   /// Resolve a var_remap_ hit transitively — the seeded value may itself need
   /// further substitution (its type embeds a Var that's also in var_remap_).
@@ -164,6 +168,12 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// caller-supplied substitution maps (e.g. {A→B, B→A}) and stops recursion
   /// before a stack overflow.
   std::unordered_set<const Expr*> remap_resolving_;
+
+ private:
+  // Scalar-only type trees contain no Expr callbacks. Strong keys retain their
+  // immutable objects if this mutator is reused after an input is destroyed.
+  bool IsScalarTypeTree(const TypePtr& type);
+  std::unordered_map<TypePtr, bool> scalar_type_trees_;
 };
 
 }  // namespace ir

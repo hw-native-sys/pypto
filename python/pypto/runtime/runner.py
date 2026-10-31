@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     # imports from ``pypto.runtime`` (``device_tensor``), so importing it eagerly
     # here would risk a partially-initialised ``pypto.runtime`` package at import
     # time. The field is plumbed through to ``ir.compile()`` lazily anyway.
-    from pypto.ir.distributed_compiled_program import DistributedConfig
+    from pypto.ir.distributed_compiled_program import ClusterConfig, DistributedConfig
 
 
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
@@ -343,6 +343,11 @@ class RunConfig:
             :meth:`compile_kwargs` forwards it too, so a ``@pl.program``
             compiled via ``ir.compile(prog, **config.compile_kwargs())`` picks
             up the same distributed target.
+        cluster_config: Optional POD/CLUSTER_0 launch configuration, forwarded
+            through :meth:`compile_options` and :meth:`compile_kwargs` as a
+            validated snapshot of the nested node/device lists. Cannot be
+            combined with ``distributed_config``. Full POD compilation is
+            still unsupported pending cluster codegen and runner integration.
         analyze_auto_scopes_for_deps: If ``True``, enable compiler-derived task
             dependency analysis for AUTO runtime scopes during compilation.
             Defaults to ``False`` so existing runs keep using TensorMap fallback
@@ -394,6 +399,7 @@ class RunConfig:
     ring_dep_pool: int | list[int] | tuple[int, ...] | None = None
     cache_config: CacheConfig | None = None
     distributed_config: "DistributedConfig | None" = None
+    cluster_config: "ClusterConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
@@ -441,12 +447,15 @@ class RunConfig:
             ring_dep_pool: int | list[int] | tuple[int, ...] | None = ...,
             cache_config: CacheConfig | None = ...,
             distributed_config: "DistributedConfig | None" = ...,
+            cluster_config: "ClusterConfig | None" = ...,
             analyze_auto_scopes_for_deps: bool = ...,
             memory_planner: MemoryPlanner | None = ...,
             dump_ptoas_passes: bool = ...,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.cluster_config is not None and self.distributed_config is not None:
+            raise ValueError("RunConfig.cluster_config and distributed_config cannot both be supplied")
         # The two axes replace what used to be a membership test on the packed
         # platform string. They make a *disagreeing* platform unrepresentable,
         # but not a nonsensical one: ``execution_mode="sim"`` is not
@@ -599,6 +608,7 @@ class RunConfig:
             output_dir=self.save_kernels_dir,
             memory_planner=self.memory_planner,
             distributed_config=self.distributed_config,
+            cluster_config=self.cluster_config,
         )
 
     def run_options(self) -> "RunOptions":
@@ -915,8 +925,11 @@ class CompileOptions:
     output_dir: str | None = None
     memory_planner: MemoryPlanner | None = None
     distributed_config: "DistributedConfig | None" = None
+    cluster_config: "ClusterConfig | None" = None
 
     def __post_init__(self) -> None:
+        if self.cluster_config is not None and self.distributed_config is not None:
+            raise ValueError("CompileOptions.cluster_config and distributed_config cannot both be supplied")
         if type(self.execution_mode) is not ExecutionMode:
             raise TypeError(
                 f"CompileOptions.execution_mode must be an ExecutionMode, got {self.execution_mode!r}"
@@ -945,6 +958,14 @@ class CompileOptions:
             value = getattr(self, name)
             if value is not None:
                 kwargs[name] = value
+        if self.cluster_config is not None:
+            if self.distributed_config is not None:
+                raise ValueError(
+                    "CompileOptions.cluster_config and distributed_config cannot both be supplied"
+                )
+            # Revalidate and detach nested device lists once per request. The
+            # JIT uses this same snapshot for its key and subsequent compiler call.
+            kwargs["cluster_config"] = replace(self.cluster_config)
         return kwargs
 
 

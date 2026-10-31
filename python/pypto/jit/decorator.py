@@ -79,7 +79,11 @@ from pypto._target import _platform_string
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
-from pypto.ir.compile import _validate_pass_context_conflicts, make_default_output_dir
+from pypto.ir.compile import (
+    _check_supported_orchestration_level,
+    _validate_pass_context_conflicts,
+    make_default_output_dir,
+)
 from pypto.ir.pass_manager import PassDumpLevel, coerce_dump_level
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -986,8 +990,8 @@ def _scan_dep_io(
     declaration order so it stays aligned with the callee's return order (the
     positional target<->param zip in ``_dep_out_metas``).
 
-    ``caller_func_type`` mirrors ``_discover_deps``'s gating: a host
-    orchestrator also admits ``orchestration`` deps (its chip orchestrators).
+    ``caller_func_type`` mirrors ``_discover_deps``'s gating: host/pod
+    orchestrators also admit chip/host orchestrators, respectively.
     """
     out: dict[str, tuple[list[str], list[str]]] = {}
     for call_name, dep in _discover_dep_bindings(func, caller_func_type):
@@ -2851,7 +2855,7 @@ class JITFunction:
 
     Attributes:
         _func: Original Python function.
-        _func_type: 'orchestration' | 'host' | 'incore' | 'inline' | 'opaque'.
+        _func_type: 'orchestration' | 'host' | 'pod' | 'incore' | 'inline' | 'opaque'.
             ``'host'`` is the HOST-level orchestrator produced by
             ``@pl.jit.host`` — it owns ``pld.alloc_window_buffer`` /
             ``pld.window`` / ``pld.world_size()`` and the per-rank
@@ -3543,6 +3547,12 @@ class JITFunction:
         """
         import pypto.language as pl  # noqa: PLC0415
 
+        # A restored HOST artifact cannot execute a POD entry. Keep this check
+        # before every cache path, including object hits and diagnostic rebuilds;
+        # specialize()/parse/serialization remain available for frontend work.
+        if self._func_type == "pod":
+            _check_supported_orchestration_level(_ir.Level.CLUSTER_0)
+
         specialization, run_config = self._resolve_specialization(
             args,
             kwargs,
@@ -3550,6 +3560,18 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        cluster_config = compile_kwargs.get("cluster_config")
+        if cluster_config is not None:
+            _check_supported_orchestration_level(_ir.Level.CLUSTER_0)
+        if self._func_type == "pod" and cluster_config is None:
+            raise ValueError("POD entry requires ClusterConfig in cluster_config")
+
+        def validated(compiled: Any) -> Any:
+            from pypto.ir.distributed_compiled_program import _validate_compiled_entry  # noqa: PLC0415
+
+            _validate_compiled_entry(compiled, cluster_config)
+            return compiled
+
         target_platform = _platform_string(compile_kwargs["backend_type"], compile_kwargs["execution_mode"])
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
@@ -3562,13 +3584,15 @@ class JITFunction:
         def build(**overrides: Any) -> Any:
             record_stats(generation_builds=1)
             with time_stage("build_ns"):
-                return self._compile(
-                    specialization.tensor_meta,
-                    specialization.scalar_dtypes,
-                    specialization.constexpr_values,
-                    specialization.per_func_dyn,
-                    pl,
-                    **(compile_kwargs | overrides),
+                return validated(
+                    self._compile(
+                        specialization.tensor_meta,
+                        specialization.scalar_dtypes,
+                        specialization.constexpr_values,
+                        specialization.per_func_dyn,
+                        pl,
+                        **(compile_kwargs | overrides),
+                    )
                 )
 
         if bypass_cache:
@@ -3594,6 +3618,7 @@ class JITFunction:
             platform=target_platform,
             strategy=compile_kwargs["strategy"],
             distributed_config=compile_kwargs.get("distributed_config"),
+            cluster_config=compile_kwargs.get("cluster_config"),
             analyze_auto_scopes_for_deps=compile_kwargs["analyze_auto_scopes_for_deps"],
             emit_source_loc=compile_kwargs["emit_source_loc"],
             memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
@@ -3614,14 +3639,15 @@ class JITFunction:
                     self._persistent_source_digest,
                     platform=target_platform,
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
-                    distributed=self._func_type == "host",
+                    distributed=self._func_type in {"host", "pod"},
+                    cluster_config=cluster_config,
                 )
             elif key in self._cache:
                 record_stats(object_hits=1)
                 compiled = self._cache[key]
             else:
                 compiled = self._cache[key] = build()
-        return compiled, ordered_args, run_config
+        return validated(compiled), ordered_args, run_config
 
     def _persistent_source_digest(self) -> str:
         """Memoize immutable graph content; refresh folded constants and externs."""
@@ -4094,7 +4120,7 @@ class JITFunction:
 
         # Map each Python function id → its JIT ``_func_type`` so meta
         # resolution downstream can gate dep discovery on the caller's type
-        # (a host orchestrator additionally admits ``orchestration`` deps).
+        # (host/pod orchestrators additionally admit chip/host deps).
         # Expand the graph into one generated function per compile-time binding.
         # A dep called with two different ``pl.constexpr`` values is two
         # functions here, not an error. The same walk backs the cache key, so
@@ -4246,9 +4272,9 @@ def _discover_dep_bindings(func: Any, caller_func_type: str = "orchestration") -
     - A regular entry (``caller_func_type`` is ``'orchestration'`` or any
       ``incore`` / ``inline`` / ``opaque`` sub-function recursing into its
       own deps) admits ``incore``, ``inline``, ``opaque`` sub-functions.
-    - A host orchestrator (``caller_func_type == 'host'``) additionally
-      admits ``orchestration`` deps — the chip-level orchestrator a host
-      entry dispatches with ``self.chip_orch(..., device=r)``. Plain
+    - A host orchestrator additionally admits ``orchestration`` deps; a pod
+      orchestrator admits ``host`` deps. These dispatch exactly one level down.
+      Plain
       ``@pl.jit`` entries never discover other ``@pl.jit`` entries; that
       would conflate two top-level kernels into a single program.
 
@@ -4264,11 +4290,30 @@ def _discover_dep_bindings(func: Any, caller_func_type: str = "orchestration") -
     allowed_dep_types: set[str] = {"incore", "inline", "opaque", "extern", "graph"}
     if caller_func_type == "host":
         allowed_dep_types.add("orchestration")
+    elif caller_func_type == "pod":
+        allowed_dep_types.add("host")
+
+    orchestration_levels = {"pod": "CLUSTER_0", "host": "HOST", "orchestration": "CHIP"}
 
     deps: list[_DepBinding] = []
     seen: set[str] = set()
     for name in called_names:
         obj = all_vars.get(name)
+        if (
+            isinstance(obj, JITFunction)
+            and caller_func_type in orchestration_levels
+            and obj._func_type in orchestration_levels
+            and obj._func_type not in allowed_dep_types
+            # Preserve the independent plain-jit entry contract: two chip
+            # entries do not become one program merely because one calls another.
+            and (caller_func_type, obj._func_type) != ("orchestration", "orchestration")
+        ):
+            raise ValueError(
+                f"Invalid orchestrator dispatch from '{func.__name__}' "
+                f"({orchestration_levels[caller_func_type]}) to '{name}' "
+                f"({orchestration_levels[obj._func_type]}): orchestration dispatch "
+                "must target the next lower level (CLUSTER_0 -> HOST -> CHIP)."
+            )
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_DepBinding(call_name=name, dep=obj))
             seen.add(name)
@@ -4352,15 +4397,17 @@ _AUTO_SCOPE_UNSET: Any = object()
 
 
 class _SubFunctionDecorator:
-    """Sub-decorator factory for ``@jit.<kind>`` (host / incore / inline / opaque).
+    """Sub-decorator factory for ``@jit.<kind>`` (pod / host / incore / inline / opaque).
 
     Every kind supports both ``@jit.kind`` (bare) and ``@jit.kind()`` (parens).
     Only ``incore`` honors a ``level=`` kwarg; passing it to other kinds raises.
-    Only ``host`` and ``inline`` honor an ``auto_scope=`` kwarg — ``inline``
+    Only ``pod``, ``host`` and ``inline`` honor an ``auto_scope=`` kwarg — ``inline``
     because its body is spliced into the caller, so hand-placed scopes land
     there; ``incore``/``opaque`` outline into separate kernels and reject it.
 
     See `_JITDecorator` for the kind semantics:
+      - ``pod``     → CLUSTER_0 Orchestrator frontend entry; full compilation
+        waits for cluster codegen and runner integration.
       - ``host``    → HOST Orchestrator entry (specialized to
         ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)``).
       - ``incore``  → ``FunctionType.InCore`` (separate IR function, ``level`` selectable).
@@ -4387,7 +4434,7 @@ class _SubFunctionDecorator:
             raise TypeError(
                 f"@pl.jit.{self._func_type} does not accept an auto_scope= argument "
                 "(auto_scope is only meaningful for the Orchestration entry, the "
-                "HOST orchestrator, and inline sub-functions)"
+                "HOST/POD orchestrators, and inline sub-functions)"
             )
         resolved_auto_scope = True if auto_scope is _AUTO_SCOPE_UNSET else auto_scope
         if func is None:
@@ -4530,6 +4577,7 @@ class _JITDecorator:
 
         @pl.jit                               # entry-point (Orchestration)
         @pl.jit.host                          # entry-point (HOST Orchestrator)
+        @pl.jit.pod                           # frontend entry (CLUSTER_0 Orchestrator)
         @pl.jit.incore                        # InCore sub-function
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
@@ -4545,6 +4593,7 @@ class _JITDecorator:
 
     def __init__(self) -> None:
         self.host = _SubFunctionDecorator("host", allow_level=False, allow_auto_scope=True)
+        self.pod = _SubFunctionDecorator("pod", allow_level=False, allow_auto_scope=True)
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
         self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)

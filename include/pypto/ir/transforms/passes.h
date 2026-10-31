@@ -226,7 +226,7 @@ Pass SynthesizeAllReduceSignals();
  *  2. Follow def-use to the ``pld.tensor.window(ptr_var, shape, *, dtype)`` views
  *     materialised over each ``ptr_var`` and the dispatch calls that consume
  *     those views (recursing through chip_orch formal-param bindings).
- *  3. From each dispatch call's ``attrs["device"]`` expression, derive a
+ *  3. From each dispatch call's ``attrs["worker"]`` expression, derive a
  *     ``DeviceDescriptor`` (``kAll`` / explicit subset). Merge across all
  *     consuming dispatches for the same alloc.
  *  4. Construct a :class:`WindowBuffer` per alloc (``base = ptr_var``,

@@ -145,6 +145,7 @@ set(PYPTO_SOURCES
     src/ir/op/sync_ops/launch.cpp
     src/ir/op/distributed/memory.cpp
     src/ir/op/distributed/world_size.cpp
+    src/ir/op/distributed/num_workers.cpp
     src/ir/op/distributed/remote_load.cpp
     src/ir/op/distributed/remote_store.cpp
     src/ir/op/distributed/collective.cpp
@@ -354,6 +355,9 @@ set(PYPTO_SOURCES
     src/ir/serialization/serializer.cpp
     src/ir/serialization/type_deserializers.cpp
     src/ir/serialization/type_registry.cpp
+
+    # Hierarchy formatting policy
+    src/hierarchy/level_handler.cpp
 
     # Codegen
     src/codegen/code_emitter.cpp

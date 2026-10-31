@@ -169,7 +169,7 @@ class SpecializeContext:
         auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
             (SIMPLER_SCOPE). ``True`` by default; ``False`` emits
             ``@pl.function(..., auto_scope=False)`` so the body places scopes
-            by hand. Honored for the Orchestration entry, HOST orchestrator,
+            by hand. Honored for the Orchestration entry, HOST/POD orchestrators,
             and inline sub-function decorators (see
             :meth:`Specializer._build_decorator`).
     """
@@ -2354,13 +2354,16 @@ class Specializer:
         the explicit ``role=Orchestrator``.
         """
         # auto_scope=False is meaningful for orchestration-level entries (the
-        # Orchestration entry and the HOST orchestrator) and for inline
+        # Orchestration entry and HOST/POD orchestrators) and for inline
         # sub-functions, whose bodies are spliced into the caller so hand-placed
         # scopes land there. incore/opaque reject it at the decorator layer, so
         # ctx.auto_scope is always True for them and the suffix stays empty.
         auto_scope_suffix = "" if ctx.auto_scope else ", auto_scope=False"
-        if ctx.func_type == "host":
-            return f"@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator{auto_scope_suffix})"
+        if ctx.func_type in {"host", "pod"}:
+            # POD is the user-facing spelling; serialized/source IR always uses
+            # the canonical CLUSTER_0 level, sharing the existing Function node.
+            level = "CLUSTER_0" if ctx.func_type == "pod" else "HOST"
+            return f"@pl.function(level=pl.Level.{level}, role=pl.Role.Orchestrator{auto_scope_suffix})"
         if ctx.func_type is None or ctx.func_type == "orchestration":
             return f"@pl.function(type=pl.FunctionType.Orchestration{auto_scope_suffix})"
         if ctx.func_type == "inline":
@@ -2494,7 +2497,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
             (the alias, under an aliased import).
         auto_scope: Whether the compiler auto-inserts AUTO runtime scopes.
             Forwarded to the generated ``@pl.function`` decorator; the
-            Orchestration entry, HOST orchestrator, and inline sub-functions
+            Orchestration entry, HOST/POD orchestrators, and inline sub-functions
             honor ``False``.
         dep_func_names: ``call name -> generated function name`` for the deps
             this function reaches under a different name; names that agree may

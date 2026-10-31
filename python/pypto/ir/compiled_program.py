@@ -128,6 +128,7 @@ _BUILD_KIND_MARKERS = (
     _DISTRIBUTED_META_FILENAME,
     "kernel_config.py",
     "orchestration/host_orch.py",
+    "orchestration/cluster_orch.py",
 )
 
 
@@ -335,7 +336,7 @@ def _meta_error(filename: str, meta_path: Path, detail: str) -> ValueError:
     )
 
 
-def _load_meta(meta_path: Path, *, filename: str, schema: int) -> dict[str, Any]:
+def _load_meta(meta_path: Path, *, filename: str, schema: int | tuple[int, ...]) -> dict[str, Any]:
     """Read and fully validate the fields the L2 and L3 sidecars share.
 
     Every malformed-payload failure surfaces as a single :class:`ValueError`
@@ -371,7 +372,16 @@ def _load_meta(meta_path: Path, *, filename: str, schema: int) -> dict[str, Any]
     except UnicodeDecodeError as exc:  # binary or mis-encoded file
         raise _bad(f"is not valid UTF-8 text ({exc})") from exc
     try:
-        raw_meta: object = json.loads(raw_text)
+
+        def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for name, value in pairs:
+                if name in result:
+                    raise ValueError(f"duplicate metadata field {name!r}")
+                result[name] = value
+            return result
+
+        raw_meta: object = json.loads(raw_text, object_pairs_hook=unique_fields)
     except ValueError as exc:  # JSONDecodeError is a ValueError subclass
         raise _bad(f"not valid JSON ({exc})") from exc
     if not _is_str_dict(raw_meta):
@@ -379,7 +389,8 @@ def _load_meta(meta_path: Path, *, filename: str, schema: int) -> dict[str, Any]
     meta = raw_meta
 
     found_schema = meta.get("schema")
-    if type(found_schema) is not int or found_schema != schema:
+    accepted_schemas = (schema,) if type(schema) is int else schema
+    if type(found_schema) is not int or found_schema not in accepted_schemas:
         raise ValueError(
             f"Incompatible {filename} schema {found_schema!r} (expected "
             f"{schema}) in {meta_path}. The metadata was written by a "

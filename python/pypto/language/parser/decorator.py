@@ -29,7 +29,23 @@ from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
 from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
+from .expr_evaluator import ExprEvaluator
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
+from .span_tracker import SpanTracker
+from .type_resolver import TypeResolver, _ProgramWindowBuffers  # noqa: PLC2701
+
+
+def _prescan_window_buffers(func_defs: list[ast.FunctionDef], spans: SpanTracker) -> _ProgramWindowBuffers:
+    """Index explicit window owners without interpreting callback Python."""
+    windows = _ProgramWindowBuffers()
+    # This resolver validates AST fields only: no owner size/base expression
+    # may be evaluated outside the real owner's live parser scope.
+    metadata_resolver = TypeResolver(ExprEvaluator({}), span_tracker=spans)
+    for func_def in func_defs:
+        level, role = _extract_function_level_role_from_decorator(func_def)
+        opaque_body = level is not None and ir.level_to_linqu_level(level) >= 3 and role == ir.Role.SubWorker
+        windows.prescan(func_def, metadata_resolver, opaque_body=opaque_body)
+    return windows
 
 
 def _is_pl_func_attr_stmt(stmt: ast.stmt) -> bool:
@@ -1242,6 +1258,14 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # checks span every function in the program.
             alloc_window_buffer_names: set[str] = set()
 
+            # Only explicit window IDs cross function boundaries. Index their
+            # descriptor/owner metadata once without evaluating any size/base
+            # expressions in this metadata-only resolver. Opaque callback
+            # bodies are Python source and cannot contribute IR definitions.
+            program_window_buffers = _prescan_window_buffers(
+                func_defs, SpanTracker(source_file, source_lines, line_offset, col_offset)
+            )
+
             # Compute per-method line-range boundaries. Each method owns comments from
             # its first-line up to the line just before the next method (or end of
             # class for the last one). This captures tail-of-block comments inside
@@ -1325,6 +1349,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     dyn_var_cache=dyn_var_cache,
                     pending_comments=method_comments,
                     alloc_window_buffer_names=alloc_window_buffer_names,
+                    program_window_buffers=program_window_buffers,
                 )
 
                 try:
@@ -1381,7 +1406,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             program_span = ir.Span(source_file, starting_line, col_offset + 1)
             prog = ir.Program(all_functions, c.__name__, program_span)
 
-            return prog
+            return program_window_buffers.finish(prog)
 
         except ParserError as e:
             # Attach source lines if not already present

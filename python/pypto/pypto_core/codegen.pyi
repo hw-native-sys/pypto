@@ -121,6 +121,15 @@ class DistributedCodegen:
             Complete C++ source code as a string
         """
 
+    def _generate_embedded(self, program: Program, entry_name: str | None = None) -> str:
+        """Emit a selected HOST Orchestrator with the private direct Python ABI.
+
+        The full lowered program retains window ownership during verification.
+        Without an entry name, exactly one HOST Orchestrator must exist.
+        Bind runtime state before invoking the emitted ``(orch, args, config)`` entry.
+        """
+        ...
+
     def get_builtin_next_level_specs(self) -> list[BuiltinNextLevelSpec]:
         """Return builtin ``next_levels`` variants referenced by the generated host orchestration."""
         ...

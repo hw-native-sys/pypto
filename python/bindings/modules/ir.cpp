@@ -54,6 +54,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -954,6 +955,10 @@ void BindIR(nb::module_& m) {
       "get_op", [](const std::string& op_name) { return OpRegistry::GetInstance().GetOp(op_name); },
       nb::arg("op_name"), "Get an operator instance by name");
 
+  ir.def("_distributed_op_context_error", &op_predicates::DistributedOpContextError, nb::arg("op"),
+         nb::arg("level"), nb::arg("role"), nb::arg("in_device_scope"),
+         "Return the distributed operation's context error, or an empty string when legal");
+
   ir.def(
       "get_op_output_arity",
       [](const std::string& op_name) { return OpRegistry::GetInstance().GetEntry(op_name).GetOutputArity(); },
@@ -1300,7 +1305,8 @@ void BindIR(nb::module_& m) {
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("attrs").none(), nb::arg("type"),
       nb::arg("span"),
       "Create a function call expression with kwargs and explicit attrs map and type. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Call>(call_class);
 
@@ -1332,7 +1338,8 @@ void BindIR(nb::module_& m) {
       "allow_early_resolve opts this task in as a speculative early-dispatch producer. "
       "predicate is an optional comparison Expr (e.g. Gt(tensor.read(t, [i]), 0)) the scheduler "
       "evaluates at the dispatch point; omit it for an unconditional dispatch. "
-      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection], 'worker' -> Expr. Legacy 'device' "
+      "placement attrs normalize to 'worker'.");
 
   BindFields<Submit>(submit_class);
 
@@ -1413,7 +1420,7 @@ void BindIR(nb::module_& m) {
         // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
         result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
       } else if (value.type() == typeid(ExprPtr)) {
-        // IR expressions stored in attrs (e.g. attrs["device"] and
+        // IR expressions stored in attrs (e.g. attrs["worker"] and
         // attrs["core_num"] on Orchestration dispatch calls).
         result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
       }

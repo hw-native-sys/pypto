@@ -33,8 +33,10 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -43,10 +45,27 @@ namespace ir {
 
 namespace {
 
+// Context indexes/captures are bounded by callee signatures and supplied args;
+// literal-type classification visits each immutable type DAG once. Residual
+// base traversal can cost O(V * W) for V uses of an unsafe expression-bearing
+// type with W fields. Those walks remain separate because context queries and
+// Var/MemRef remapping depend on visitor state; caching rewritten unsafe types
+// would change semantics.
 struct FunctionCtxPlan {
+  // Retain the pre-extension ABI once per callee. In a Submit the existing
+  // CommCtx suffix follows the omitted Out gap, so argument count alone cannot
+  // tell an original call from one whose new ctx args have already been added.
+  FunctionPtr original_func;
+  size_t original_arity = 0;
+  size_t original_ctx_count = 0;
   std::vector<size_t> dist_param_indices;
   std::unordered_map<const Var*, VarPtr> param_to_ctx;
   std::vector<std::optional<size_t>> returned_param_indices;
+  // Result positions retain their original ABI indices, but repeated returns
+  // of one DT parameter share one compact context ordinal. These maps are
+  // built once per callee, never expanded into a return-width vector per call.
+  std::vector<size_t> returned_dist_param_indices;
+  std::vector<std::optional<size_t>> returned_ctx_indices;
 };
 
 [[nodiscard]] bool IsDistTensor(const ExprPtr& expr) {
@@ -116,12 +135,15 @@ class LocalNameCollector : public IRVisitor {
   return nullptr;
 }
 
-/// Host orchestration is the one place where get_comm_ctx is a real runtime
-/// query: host codegen resolves it from the window's per-rank device context.
-/// Chip orchestration and all lower/device functions must have the query
-/// eliminated here, after the matching explicit CommCtx parameter is known.
-[[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
-  if (!func || !func->level_.has_value() || *func->level_ != Level::HOST) return false;
+/// HOST and CLUSTER_0 orchestrators may retain runtime context queries for
+/// their owned windows. This is IR authorization, independent of LevelHandler
+/// registration or the later runtime interpretation of a CLUSTER_0 context.
+/// CHIP and lower/device functions must use an explicit CommCtx SSA value.
+[[nodiscard]] bool CanQueryRuntimeCtx(const FunctionPtr& func) {
+  if (!func || !func->level_.has_value() ||
+      (*func->level_ != Level::HOST && *func->level_ != Level::CLUSTER_0)) {
+    return false;
+  }
   return func->func_type_ == FunctionType::Orchestration ||
          (func->role_.has_value() && *func->role_ == Role::Orchestrator);
 }
@@ -129,6 +151,9 @@ class LocalNameCollector : public IRVisitor {
 [[nodiscard]] FunctionCtxPlan BuildFunctionCtxPlan(const FunctionPtr& func) {
   FunctionCtxPlan plan;
   if (!func) return plan;
+  plan.original_func = func;
+  plan.original_arity = func->params_.size();
+  plan.original_ctx_count = transform_utils::TrailingCommCtxParamCount(func);
   plan.returned_param_indices = return_lineage::ExplicitReturnedParamIndices(func);
   std::unordered_set<std::string> used_names;
   for (const auto& param : func->params_) {
@@ -144,6 +169,18 @@ class LocalNameCollector : public IRVisitor {
                                      GetCommCtxType(), param->span_);
     plan.dist_param_indices.push_back(i);
     plan.param_to_ctx[param.get()] = ctx;
+  }
+  std::unordered_map<size_t, size_t> returned_ordinals;
+  plan.returned_ctx_indices.reserve(plan.returned_param_indices.size());
+  for (const auto& param_idx : plan.returned_param_indices) {
+    if (!param_idx || *param_idx >= plan.original_arity ||
+        !As<DistributedTensorType>(func->params_[*param_idx]->GetType())) {
+      plan.returned_ctx_indices.push_back(std::nullopt);
+      continue;
+    }
+    auto [it, inserted] = returned_ordinals.emplace(*param_idx, plan.returned_dist_param_indices.size());
+    if (inserted) plan.returned_dist_param_indices.push_back(*param_idx);
+    plan.returned_ctx_indices.push_back(it->second);
   }
   return plan;
 }
@@ -188,49 +225,85 @@ class LocalNameCollector : public IRVisitor {
   return "a DistributedTensor value";
 }
 
-/// Map each result position of a `Call` / `Submit` to the caller-side CommCtx
-/// of the callee parameter that result writes back.
-///
-/// `Call` and `Submit` share one result-position map: a `Submit`'s type is
-/// `TupleType([*<callee returns>, Scalar[TASK_ID]])`, so the trailing TASK_ID
-/// simply falls off the end of the returned vector.  Positions that write back
-/// a *runtime-allocated* Out param — one the caller never passed, per the
-/// `Submit` args-prefix invariant (`pass-submit-awareness.md` rule 5) — have no
-/// caller-side argument and resolve to null.
-///
-/// @param lookup_arg_ctx resolves the ctx of one caller-side argument
-/// @return one entry per callee return position (null = unresolved)
-template <typename LookupArgCtx>
-[[nodiscard]] std::vector<VarPtr> ResolveResultCtxs(
+enum class CtxBindingStage { Original, Materialized };
+
+struct CallResultBinding {
+  const FunctionCtxPlan* plan;
+  CallPtr call;
+  FunctionPtr callee;
+  size_t ctx_count;
+};
+
+/// Bind a call-like source once; converting Submit to a Call view copies its
+/// args, so result positions must not repeat that conversion in a return loop.
+[[nodiscard]] std::optional<CallResultBinding> BindResultSource(
     const ExprPtr& expr, const ProgramPtr& program,
-    const std::unordered_map<std::string, FunctionCtxPlan>& plans, const LookupArgCtx& lookup_arg_ctx) {
+    const std::unordered_map<std::string, FunctionCtxPlan>& plans, CtxBindingStage stage) {
   OpPtr op;
-  const std::vector<ExprPtr>* args = nullptr;
   if (auto call = As<Call>(expr)) {
     op = call->op_;
-    args = &call->args_;
   } else if (auto submit = As<Submit>(expr)) {
     op = submit->op_;
-    args = &submit->args_;
-  } else {
-    return {};
   }
-
   auto gvar = As<GlobalVar>(op);
-  if (!gvar || !program) return {};
+  if (!gvar || !program) return std::nullopt;
   auto callee = program->GetFunction(gvar->name_);
-  if (!callee) return {};
+  if (!callee) return std::nullopt;
   auto plan_it = plans.find(callee->name_);
-  if (plan_it == plans.end()) return {};
+  if (plan_it == plans.end() || plan_it->second.returned_dist_param_indices.empty()) return std::nullopt;
+  const auto& plan = plan_it->second;
+  // Alias collection reads the untouched body, but mutator result lookup reads
+  // argument subtrees already rewritten by the base mutator. Use that known
+  // traversal stage, never an arity heuristic: an Out gap can make the original
+  // and materialized argument counts overlap.
+  const auto& binding_func = stage == CtxBindingStage::Original ? plan.original_func : callee;
+  const size_t ctx_count =
+      plan.original_ctx_count + (stage == CtxBindingStage::Materialized ? plan.dist_param_indices.size() : 0);
+  return CallResultBinding{&plan, transform_utils::AsCallOrSubmitView(expr), binding_func, ctx_count};
+}
 
-  std::vector<VarPtr> result(plan_it->second.returned_param_indices.size());
-  for (size_t result_idx = 0; result_idx < result.size(); ++result_idx) {
-    const auto& param_idx = plan_it->second.returned_param_indices[result_idx];
-    if (!param_idx || *param_idx >= args->size() || *param_idx >= callee->params_.size()) continue;
-    if (!As<DistributedTensorType>(callee->params_[*param_idx]->GetType())) continue;
-    result[result_idx] = lookup_arg_ctx((*args)[*param_idx]);
+/// Immutable tuple provenance captures ctx Vars at the assignment, preserving
+/// alias/rebinding semantics. Storage is bounded by distinct returned DT
+/// parameters (and thus supplied args), even for a wide repeated-DT return.
+/// Tuple aliases share this object instead of copying a result-width vector.
+struct ResultCtxSource {
+  const FunctionCtxPlan* plan;
+  std::vector<VarPtr> contexts;
+
+  [[nodiscard]] VarPtr At(size_t index) const {
+    // The trailing Submit TASK_ID and scalar/unknown results have no context.
+    if (index >= plan->returned_ctx_indices.size()) return nullptr;
+    const auto& ordinal = plan->returned_ctx_indices[index];
+    return ordinal ? contexts[*ordinal] : nullptr;
   }
-  return result;
+};
+using ResultCtxSourcePtr = std::shared_ptr<const ResultCtxSource>;
+
+template <typename LookupArgCtx>
+[[nodiscard]] ResultCtxSourcePtr CaptureResultCtxs(const CallResultBinding& binding,
+                                                   const LookupArgCtx& lookup_arg_ctx) {
+  std::vector<VarPtr> contexts;
+  contexts.reserve(binding.plan->returned_dist_param_indices.size());
+  for (auto param_idx : binding.plan->returned_dist_param_indices) {
+    auto arg = transform_utils::CallerSuppliedArg(binding.call, binding.callee, param_idx, binding.ctx_count);
+    // Runtime-allocated Out gaps have no caller provenance; never borrow a ctx
+    // suffix arg. AppendCtxArgs separately diagnoses unsupported DT Out gaps.
+    contexts.push_back(arg ? lookup_arg_ctx(arg) : nullptr);
+  }
+  return std::make_shared<const ResultCtxSource>(ResultCtxSource{binding.plan, std::move(contexts)});
+}
+
+/// Direct nested expressions need only the requested original result position.
+/// Do not allocate/capture contexts for all other results or DT parameters.
+template <typename LookupArgCtx>
+[[nodiscard]] VarPtr ResolveResultCtx(const CallResultBinding& binding, size_t index,
+                                      const LookupArgCtx& lookup_arg_ctx) {
+  if (index >= binding.plan->returned_ctx_indices.size() || !binding.plan->returned_ctx_indices[index]) {
+    return nullptr;
+  }
+  const auto& param_idx = binding.plan->returned_param_indices[index];
+  auto arg = transform_utils::CallerSuppliedArg(binding.call, binding.callee, *param_idx, binding.ctx_count);
+  return arg ? lookup_arg_ctx(arg) : nullptr;
 }
 
 class DistParamAliasCollector : public IRVisitor {
@@ -239,7 +312,7 @@ class DistParamAliasCollector : public IRVisitor {
                           const FunctionCtxPlan* plan)
       : program_(std::move(program)), plans_(plans), plan_(plan) {}
   std::unordered_map<const Var*, VarPtr> alias_to_ctx;
-  std::unordered_map<const Var*, std::vector<VarPtr>> tuple_to_ctx;
+  std::unordered_map<const Var*, ResultCtxSourcePtr> tuple_to_ctx;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -249,7 +322,7 @@ class DistParamAliasCollector : public IRVisitor {
       }
     } else if (op && op->var_ && As<TupleType>(op->var_->GetType())) {
       auto returned_ctxs = ReturnedCtxs(op->value_);
-      if (!returned_ctxs.empty()) tuple_to_ctx[op->var_.get()] = std::move(returned_ctxs);
+      if (returned_ctxs) tuple_to_ctx[op->var_.get()] = std::move(returned_ctxs);
     }
     IRVisitor::VisitStmt_(op);
   }
@@ -311,11 +384,9 @@ class DistParamAliasCollector : public IRVisitor {
       const auto index = static_cast<size_t>(get_item->index_);
       if (tuple_var) {
         auto tuple_it = tuple_to_ctx.find(tuple_var.get());
-        if (tuple_it == tuple_to_ctx.end() || index >= tuple_it->second.size()) return nullptr;
-        return tuple_it->second[index];
+        return tuple_it == tuple_to_ctx.end() ? nullptr : tuple_it->second->At(index);
       }
-      auto returned_ctxs = ReturnedCtxs(get_item->tuple_);
-      return index < returned_ctxs.size() ? returned_ctxs[index] : nullptr;
+      return LookupResultCtx(get_item->tuple_, index);
     }
 
     if (auto call = As<Call>(expr)) {
@@ -324,17 +395,29 @@ class DistParamAliasCollector : public IRVisitor {
       }
     }
 
-    auto returned_ctxs = ReturnedCtxs(expr);
-    return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
+    if (!plans_) return nullptr;
+    auto binding = BindResultSource(expr, program_, *plans_, CtxBindingStage::Original);
+    return binding && binding->plan->returned_param_indices.size() == 1
+               ? ResolveResultCtx(*binding, 0, [this](const ExprPtr& arg) { return LookupCtx(arg); })
+               : nullptr;
   }
 
-  std::vector<VarPtr> ReturnedCtxs(const ExprPtr& expr) const {
+  VarPtr LookupResultCtx(const ExprPtr& expr, size_t index) const {
+    if (!plans_) return nullptr;
+    auto binding = BindResultSource(expr, program_, *plans_, CtxBindingStage::Original);
+    return binding ? ResolveResultCtx(*binding, index, [this](const ExprPtr& arg) { return LookupCtx(arg); })
+                   : nullptr;
+  }
+
+  ResultCtxSourcePtr ReturnedCtxs(const ExprPtr& expr) const {
     if (auto tuple_var = AsVarLike(expr)) {
       auto it = tuple_to_ctx.find(tuple_var.get());
-      return it == tuple_to_ctx.end() ? std::vector<VarPtr>{} : it->second;
+      return it == tuple_to_ctx.end() ? nullptr : it->second;
     }
-    if (!plans_) return {};
-    return ResolveResultCtxs(expr, program_, *plans_, [this](const ExprPtr& arg) { return LookupCtx(arg); });
+    if (!plans_) return nullptr;
+    auto binding = BindResultSource(expr, program_, *plans_, CtxBindingStage::Original);
+    return binding ? CaptureResultCtxs(*binding, [this](const ExprPtr& arg) { return LookupCtx(arg); })
+                   : nullptr;
   }
 
   /// A loop carry is seeded from its init value *before* the body is visited so
@@ -413,15 +496,28 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
       current_alias_to_ctx_ = std::move(alias_collector.alias_to_ctx);
       current_tuple_to_ctx_ = std::move(alias_collector.tuple_to_ctx);
     }
+    // Function attrs share the call/query ABI, including Expr containers the
+    // base mutator recognizes by stored type. They have no statement insertion
+    // point, so resolve existing formal/view contexts while prefix synthesis is
+    // disabled; an unresolved attr call gets a user-facing limitation.
+    auto attrs = func->attrs_;
+    bool attrs_changed = false;
+    for (auto& [key, value] : attrs) {
+      auto remapped = MapAttrExprs(value, [this](const ExprPtr& expr) { return VisitExpr(expr); });
+      if (remapped.has_value()) {
+        value = std::move(*remapped);
+        attrs_changed = true;
+      }
+    }
     auto new_body = VisitStmt(func->body_);
     INTERNAL_CHECK_SPAN(pending_prefix_.empty(), func->span_)
         << "MaterializeDistTensorCtx: generated get_comm_ctx prefix was not attached to a statement";
     auto out = func;
-    if (new_body.get() != func->body_.get()) {
+    if (new_body.get() != func->body_.get() || attrs_changed) {
       out =
           std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                      new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                     func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+                                     std::move(attrs), func->requires_runtime_binding_, func->ir_stage_);
     }
     current_func_ = nullptr;
     current_plan_ = nullptr;
@@ -431,6 +527,13 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   }
 
  protected:
+  TypePtr RemapTypeViaVisitor(const TypePtr& type) override {
+    if (!type || IsLiteralTypeTree(type)) return type;
+    // Cache only an immutable classification, never a rewritten type: queries,
+    // Vars, IterArgs, and MemRefs can observe the current function/visitor state.
+    return IRMutator::RemapTypeViaVisitor(type);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     pending_prefix_.clear();
     auto value = VisitExprWithPrefixSynthesis(op->value_);
@@ -495,13 +598,14 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     if (IsOp(call, "pld.system.get_comm_ctx")) {
       INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
           << "MaterializeDistTensorCtx: pld.system.get_comm_ctx expects exactly one argument";
-      if (IsHostOrch(current_func_)) return call;
+      if (CanQueryRuntimeCtx(current_func_)) return call;
 
       auto ctx = LookupExistingCtx(call->args_[0]);
       CHECK_SPAN(ctx, call->span_)
           << "Cannot resolve pld.system.get_comm_ctx(" << DescribeDistValue(call->args_[0]) << ") in '"
           << (current_func_ ? current_func_->name_ : std::string("<unknown>"))
-          << "'. Outside host orchestration the query has no runtime representation, so the context must "
+          << "'. Outside HOST or CLUSTER_0 orchestration the query has no runtime representation, so the "
+             "context must "
              "be reachable from a parameter of this function. Take "
           << DescribeDistValue(call->args_[0])
           << " as a parameter (or return it from a callee that does) instead of producing it locally.";
@@ -517,7 +621,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     if (plan_it == plans_.end()) return call;
 
     std::vector<ExprPtr> new_args = call->args_;
-    AppendCtxArgs(plan_it->second, call->args_, call->span_, &new_args);
+    AppendCtxArgs(plan_it->second, call, call->span_, &new_args);
 
     auto attrs = call->attrs_;
     if (call->HasArgDirections()) {
@@ -539,7 +643,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     if (plan_it == plans_.end()) return submit;
 
     std::vector<ExprPtr> new_args = submit->args_;
-    AppendCtxArgs(plan_it->second, submit->args_, submit->span_, &new_args);
+    AppendCtxArgs(plan_it->second, transform_utils::AsCallOrSubmitView(submit), submit->span_, &new_args);
 
     auto attrs = submit->attrs_;
     if (submit->HasArgDirections()) {
@@ -553,6 +657,30 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   }
 
  private:
+  bool IsLiteralTypeTree(const TypePtr& type) {
+    auto found = literal_type_trees_.find(type);
+    if (found != literal_type_trees_.end()) return found->second;
+    bool literal = IsA<ScalarType>(type);
+    if (auto tuple = As<TupleType>(type)) {
+      literal = true;
+      for (const auto& field : tuple->types_) literal &= IsLiteralTypeTree(field);
+    } else if (auto tensor = AsTensorTypeLike(type); tensor && !tensor->memref_.has_value()) {
+      literal = true;
+      // Use the canonical metadata walk so shape and TensorView coverage stays
+      // aligned with the base mutator. Its callback is only a classification:
+      // ConstInt leaves cannot change in this pass, all other Exprs are unsafe.
+      // WindowBuffer ownership remains opaque, exactly as in the clone helper.
+      CloneTypeWithMemRefAndRemapExprs(type, std::nullopt, [&literal](const ExprPtr& expr) {
+        literal &= IsA<ConstInt>(expr);
+        return expr;
+      });
+    }
+    // Strong keys retain immutable DAG nodes; classification is independent of
+    // ctx bindings and can be reused across functions without freezing a rewrite.
+    literal_type_trees_.emplace(type, literal);
+    return literal;
+  }
+
   class PrefixSynthesisScope {
    public:
     explicit PrefixSynthesisScope(MaterializeDistTensorCtxMutator* owner)
@@ -580,9 +708,10 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     return program_->GetFunction(gvar->name_);
   }
 
-  std::vector<VarPtr> LookupReturnedCtxs(const ExprPtr& call_like) const {
-    return ResolveResultCtxs(call_like, program_, plans_,
-                             [this](const ExprPtr& arg) { return LookupExistingCtx(arg); });
+  VarPtr LookupResultCtx(const ExprPtr& call_like, size_t index, bool single_result = false) const {
+    auto binding = BindResultSource(call_like, program_, plans_, CtxBindingStage::Materialized);
+    if (!binding || (single_result && binding->plan->returned_param_indices.size() != 1)) return nullptr;
+    return ResolveResultCtx(*binding, index, [this](const ExprPtr& arg) { return LookupExistingCtx(arg); });
   }
 
   VarPtr LookupExistingCtx(const ExprPtr& arg) const {
@@ -599,11 +728,9 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
       const auto index = static_cast<size_t>(get_item->index_);
       if (auto tuple_var = AsVarLike(get_item->tuple_)) {
         auto tuple_it = current_tuple_to_ctx_.find(tuple_var.get());
-        if (tuple_it == current_tuple_to_ctx_.end()) return nullptr;
-        return index < tuple_it->second.size() ? tuple_it->second[index] : nullptr;
+        return tuple_it == current_tuple_to_ctx_.end() ? nullptr : tuple_it->second->At(index);
       }
-      auto returned_ctxs = LookupReturnedCtxs(get_item->tuple_);
-      return index < returned_ctxs.size() ? returned_ctxs[index] : nullptr;
+      return LookupResultCtx(get_item->tuple_, index);
     }
 
     if (auto call = As<Call>(arg)) {
@@ -612,27 +739,26 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
       }
     }
 
-    auto returned_ctxs = LookupReturnedCtxs(arg);
-    return returned_ctxs.size() == 1 ? returned_ctxs[0] : nullptr;
+    return LookupResultCtx(arg, 0, true);
   }
 
   ExprPtr GetCtxForArg(const ExprPtr& arg, const Span& span) {
     if (!IsDistTensor(arg)) return nullptr;
     if (auto ctx = LookupExistingCtx(arg)) return ctx;
-    // Only host orchestration can recover a context through the runtime query.
-    // Chip orchestration and device functions must carry an explicit context
-    // SSA value; leaving a synthesized get_comm_ctx in those functions would
-    // give device codegen an operation with no runtime representation.
-    CHECK_SPAN(IsHostOrch(current_func_), span)
+    // Runtime queries belong only to HOST/CLUSTER_0 orchestration. CHIP and
+    // device functions must carry an explicit context SSA value instead.
+    CHECK_SPAN(CanQueryRuntimeCtx(current_func_), span)
         << "Cannot determine the communication context of DistributedTensor " << DescribeDistValue(arg)
         << " passed from '" << (current_func_ ? current_func_->name_ : std::string("<unknown>"))
-        << "'. Only host orchestration can query a context at runtime; a chip-orchestration or device "
-           "function must reach its DistributedTensor from one of its own parameters. Take "
+        << "'. Only HOST or CLUSTER_0 orchestration can query a context at runtime; a chip-orchestration "
+           "or device function must reach its DistributedTensor from one of its own parameters. Take "
         << DescribeDistValue(arg)
         << " as a parameter of this function (or return it from a callee that does) instead of producing "
            "it locally.";
-    INTERNAL_CHECK_SPAN(can_emit_prefix_, span)
-        << "MaterializeDistTensorCtx: cannot synthesize get_comm_ctx prefix in this expression context";
+    CHECK_SPAN(can_emit_prefix_, span)
+        << "Cannot synthesize a get_comm_ctx prefix in a function attribute or other expression context "
+           "without a statement insertion point. Pass the DistributedTensor as a parameter so its "
+           "existing communication context can be forwarded.";
     std::string base_name = "dist";
     if (auto var = AsVarLike(arg)) {
       base_name = auto_name::GetBaseName(var->name_hint_);
@@ -644,13 +770,23 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     return ctx;
   }
 
-  void AppendCtxArgs(const FunctionCtxPlan& plan, const std::vector<ExprPtr>& old_args, const Span& span,
+  void AppendCtxArgs(const FunctionCtxPlan& plan, const CallPtr& original_call, const Span& span,
                      std::vector<ExprPtr>* new_args) {
+    // The current call has visited its argument subtrees but has not appended
+    // its own ctx suffix yet. Bind against its cached original signature, so an
+    // existing ctx arg can never be mistaken for an omitted Out argument.
     for (auto param_idx : plan.dist_param_indices) {
-      INTERNAL_CHECK_SPAN(param_idx < old_args.size(), span)
+      auto arg = transform_utils::CallerSuppliedArg(original_call, plan.original_func, param_idx,
+                                                    plan.original_ctx_count);
+      CHECK_SPAN(arg || plan.original_func->param_directions_[param_idx] != ParamDirection::Out, span)
+          << "An omitted runtime-allocated DistributedTensor Out parameter '"
+          << plan.original_func->params_[param_idx]->name_hint_ << "' in '" << plan.original_func->name_
+          << "' has no caller communication context. Pass this Out parameter explicitly; runtime "
+             "allocation of its communication context is not supported.";
+      INTERNAL_CHECK_SPAN(arg, span)
           << "MaterializeDistTensorCtx: call-like expression does not provide DistributedTensor arg at "
           << "callee param index " << param_idx;
-      auto ctx = GetCtxForArg(old_args[param_idx], span);
+      auto ctx = GetCtxForArg(arg, span);
       INTERNAL_CHECK_SPAN(ctx, span)
           << "MaterializeDistTensorCtx: expected DistributedTensor arg at callee param index " << param_idx;
       new_args->push_back(ctx);
@@ -662,10 +798,11 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   FunctionPtr current_func_;
   const FunctionCtxPlan* current_plan_ = nullptr;
   std::unordered_map<const Var*, VarPtr> current_alias_to_ctx_;
-  std::unordered_map<const Var*, std::vector<VarPtr>> current_tuple_to_ctx_;
+  std::unordered_map<const Var*, ResultCtxSourcePtr> current_tuple_to_ctx_;
   std::vector<StmtPtr> pending_prefix_;
   std::unordered_set<std::string> local_ctx_names_;
   bool can_emit_prefix_ = false;
+  std::unordered_map<TypePtr, bool> literal_type_trees_;
 };
 
 [[nodiscard]] FunctionPtr ExtendFunctionSignature(const FunctionPtr& func, const FunctionCtxPlan& plan) {
@@ -711,7 +848,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
 // DistTensorCtxMaterialized property verifier
 // ============================================================================
 
-/// Flags every `pld.system.get_comm_ctx` left outside host orchestration.
+/// Flags every `pld.system.get_comm_ctx` left outside HOST/CLUSTER_0 orchestration.
 ///
 /// The pass eliminates the query by construction, but only for functions it
 /// visits: a Program in which no function declares a DistributedTensor
@@ -732,9 +869,9 @@ class GetCommCtxCallChecker : public IRVisitor {
     diagnostics_.emplace_back(
         DiagnosticSeverity::Error, "DistTensorCtxMaterialized", 0,
         "Function '" + func_name_ +
-            "' still calls pld.system.get_comm_ctx. Only host orchestration may query a communication "
-            "context at runtime; everywhere else MaterializeDistTensorCtx must have replaced it with the "
-            "explicit CommCtx parameter, and device codegen cannot lower the query.",
+            "' still calls pld.system.get_comm_ctx. Only HOST or CLUSTER_0 orchestration may query a "
+            "communication context at runtime; everywhere else MaterializeDistTensorCtx must have "
+            "replaced it with the explicit CommCtx parameter, and device codegen cannot lower the query.",
         op->span_);
   }
 
@@ -750,9 +887,9 @@ class DistTensorCtxMaterializedPropertyVerifierImpl : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_ || IsHostOrch(func)) continue;
+      if (!func || CanQueryRuntimeCtx(func)) continue;
       GetCommCtxCallChecker checker(diagnostics, func->name_);
-      checker.VisitStmt(func->body_);
+      checker.VisitFunction(func);
     }
   }
 };

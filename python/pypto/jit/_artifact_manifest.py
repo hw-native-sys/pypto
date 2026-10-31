@@ -114,6 +114,7 @@ class ArtifactSpec:
     build_kind: BuildKind
     required_files: tuple[str, ...]
     execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
+    entry_kind: str | None = None
 
     def __post_init__(self) -> None:
         # Exact-type checks: the manifest deserializes untrusted records, and
@@ -122,22 +123,39 @@ class ArtifactSpec:
             raise ValueError("Artifact spec requires ArtifactState and BuildKind enum values")
         if type(self.execution_capabilities) is not ExecutionCapabilities:
             raise ValueError("Artifact spec requires ExecutionCapabilities")
+        entry = (
+            self.entry_kind
+            if self.entry_kind is not None
+            else ("chip" if self.build_kind is BuildKind.SINGLE_CHIP else "host")
+        )
+        allowed = {"chip"} if self.build_kind is BuildKind.SINGLE_CHIP else {"host", "cluster"}
+        if type(entry) is not str or entry not in allowed:
+            raise ValueError(f"Artifact entry_kind {entry!r} contradicts build kind {self.build_kind.value}")
+        # Keep None as an inference request. dataclasses.replace can then
+        # change an old caller's build_kind without inheriting a stale inferred
+        # CHIP/HOST entry; an explicitly supplied contradictory kind still fails.
         required = tuple(sorted(_relative_path(path) for path in self.required_files))
         if not required or len(set(required)) != len(required):
             raise ValueError(f"Artifact required files must be nonempty and unique, got {required!r}")
         object.__setattr__(self, "required_files", required)
 
     @property
+    def effective_entry_kind(self) -> str:
+        """Resolve legacy/default specs without turning inference into input."""
+        return self.entry_kind or ("chip" if self.build_kind is BuildKind.SINGLE_CHIP else "host")
+
+    @property
     def digest(self) -> str:
         """Address distinct stage contracts independently of the caller's key."""
-        return digest_record(
-            (
-                self.state.value,
-                self.build_kind.value,
-                self.required_files,
-                self.execution_capabilities.record(),
-            )
+        record = (
+            self.state.value,
+            self.build_kind.value,
+            self.required_files,
+            self.execution_capabilities.record(),
         )
+        # Preserve the established CHIP/HOST namespace. Only the new cluster
+        # contract extends the record, so existing persistent artifacts survive.
+        return digest_record((*record, self.entry_kind) if self.entry_kind == "cluster" else record)
 
 
 def check_directory(path: Path) -> None:
@@ -188,7 +206,7 @@ def make_manifest(directory: Path, key: ArtifactKey, spec: ArtifactSpec) -> dict
     missing = set(spec.required_files) - {entry["path"] for entry in files}
     if missing:
         raise ValueError(f"Artifact build is missing required files: {sorted(missing)}")
-    return {
+    record = {
         "schema": ARTIFACT_SCHEMA,
         "key": key.digest,
         "components": key.record(),
@@ -198,6 +216,9 @@ def make_manifest(directory: Path, key: ArtifactKey, spec: ArtifactSpec) -> dict
         "required_files": list(spec.required_files),
         "files": files,
     }
+    if spec.entry_kind == "cluster":
+        record["entry_kind"] = "cluster"
+    return record
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

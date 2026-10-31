@@ -88,3 +88,59 @@ retained CommDomain 脱离 Simpler 的 per-run release set，并在 prepared wor
 registry 和当前 run-resource journal（`_live_domains` 和
 `_building_run_resources.live_domains`）；后续应由公开的 retention API 封装该
 lifecycle。
+
+## CLUSTER 程序：显式共享全局窗口
+
+CLUSTER_0 支持同步的多程序会话。启动前用 `extra_compiled` 准备全部程序，
+通过 `run(compiled, ...)` 选择程序；每次调用都有独立的完成栅栏（completion
+fence）。全局域默认按程序隔离，只有显式映射到同一个会话共享键才复用：
+
+```python
+from pypto.ir import SharedDomainBinding
+
+with compute.prepare(
+    extra_compiled=[communication],
+    persistent=True,
+    reset_persistent_windows=False,
+    shared_domains=[
+        SharedDomainBinding(compute, domain=0, key="activations", slots={0: "values"}),
+        SharedDomainBinding(communication, domain=0, key="activations", slots={0: "values"}),
+    ],
+) as worker:
+    worker.run(compute, lhs, rhs, echo)
+    worker.run(communication, peer_values)
+```
+
+第一个程序向各 rank 的全局窗口写入计算结果，返回时所有写入已排空，第二个
+程序随后通过 TLOAD 读取。通信程序没有接收已保存数据的 host 副本。一个编译
+程序对应一次 run；会话不会在程序内部切分相位，也不增加前端窗口拷贝接口。
+
+通过不可变的 `compiled.comm_domains` 描述查看域和槽的序号。生成的名字仅供
+内部使用，不同程序的名字可以不同。`slots` 将程序内槽序号映射到规范物理槽名，
+必须完整且一一对应；规范槽名允许重排槽次序。复用前校验有序成员、拓扑、
+runtime/profile、窗口和对齐后的槽大小，以及 dtype、shape、strides、字节偏移。
+相同大小不会自动共享，不同 key 和未配置的域继续隔离。共享布局要求槽大小
+静态可知。prepare 会保存配置快照，之后修改原映射不会改变会话；共享配置不
+进入 JIT 编译身份。
+
+会话安装一个有界的聚合源码包，每节点使用一份规范 runtime helper 和一个
+fork 前 token pool。各程序共享真实的 R1 retained domain，以及以
+`(domain_id, generation)` 为键的 ordering 状态。槽翻译只选择实际 runtime
+Buffer，不包装或重命名导入的全局域 view。helper/bootstrap 合同不匹配会在启动
+前失败。冷 schema-4 产物保存域描述；缺少这些描述的旧产物须重新生成后才能
+显式共享。
+
+默认在本 run 的首个任务提交前清零复用的整个全局映射，包括 signals 和 padding；
+runtime 控制拷贝每块最多 8 MiB。新分配不重复清零。
+`reset_persistent_windows=False` 保留 DATA、signals 和用户 epoch 的原内容。
+使用 signal/credit 的 kernel 协议须自行管理重置或 epoch 推进；上述先计算再
+TLOAD 的用例仅依赖 run fence。ordering token 的存储身份跨程序保持稳定。
+
+正常关闭在最后一次 fence 后显式释放 retained domain。失败关闭先排空 Worker
+树，再释放域、I/O 和 fork 前状态的引用。无法确认关闭完成时保留 journals，拒绝
+新的 run，并允许重试 close。CLUSTER 仅支持同步 run；保留机制使用 R1 公开的
+`retain_after_run` 合同，不从私有 runtime journal 中摘除域。
+
+验证时，SIM 全局域的 ranks 必须位于同一个 host/POSIX 共享内存命名空间。
+SIM 后端通过 `shm_open` 导入 peer 窗口，不提供跨 host 的 SIM 全局窗口。
+真实跨机验证使用 A3 fabric profile 和物理设备；普通远端张量 I/O 是另一项能力。

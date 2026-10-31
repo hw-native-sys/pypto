@@ -222,7 +222,7 @@ def _match_builtin_dispatch(
     call = _as_call(body.expr)
 
     # device attr is bound to the loop induction var
-    assert call.attrs["device"] is loop.loop_var
+    assert call.attrs["worker"] is loop.loop_var
 
     # every leading argument is the expected window-bound DistributedTensor, in
     # order; an optional trailing scalar (e.g. all_to_all_v's core_num) is
@@ -253,7 +253,7 @@ def _match_builtin_dispatch(
     assert dict(call.kwargs) == kwargs, f"kwargs mismatch: {dict(call.kwargs)} != {kwargs}"
 
     # exact attr key set plus op-specific values (device / arg_directions above)
-    expected_attr_keys = {"device", "arg_directions", *(attrs or {})}
+    expected_attr_keys = {"worker", "arg_directions", *(attrs or {})}
     assert set(call.attrs.keys()) == expected_attr_keys, (
         f"attr key mismatch: {set(call.attrs.keys())} != {expected_attr_keys}"
     )

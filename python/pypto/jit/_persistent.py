@@ -224,12 +224,21 @@ def resolve_persistent(
     platform: str,
     runtime_name: str,
     distributed: bool,
+    cluster_config: Any = None,
 ) -> Any:
     """Capture identity before object lookup; keep policy out of content keys."""
+    from pypto.ir.distributed_compiled_program import _validate_compiled_entry  # noqa: PLC0415
     from pypto.runtime._artifact_runtime import bind_artifact, restore_artifact  # noqa: PLC0415
     from pypto.runtime._artifact_sources import package_generated_sources  # noqa: PLC0415
     from pypto.runtime._extern_includes import UnsupportedArtifactInput  # noqa: PLC0415
     from pypto.runtime._prebuilt import ready_spec  # noqa: PLC0415
+
+    entry_kind = "cluster" if cluster_config is not None else ("host" if distributed else "chip")
+    distributed = distributed or entry_kind == "cluster"
+
+    def validated(compiled: Any) -> Any:
+        _validate_compiled_entry(compiled, cluster_config)
+        return compiled
 
     with time_stage("lookup_ns"):
         identity = capture_toolchain(platform, runtime_name)
@@ -269,7 +278,7 @@ def resolve_persistent(
         cached = owner._artifact_objects.get(compatible)
         if cached is not None:
             record_stats(object_hits=1)
-            return cached
+            return validated(cached)
         key = ArtifactKey(
             identity,
             digest_record((source_before, extra.digest)),
@@ -286,11 +295,16 @@ def resolve_persistent(
         spec = ArtifactSpec(
             ArtifactState.GENERATED,
             kind,
-            ("distributed_meta.json", "orchestration/host_orch.py")
+            ("distributed_meta.json", f"orchestration/{entry_kind}_orch.py")
             if distributed
             else ("compiled_meta.json", "kernel_config.py"),
+            entry_kind=entry_kind,
         )
-        ready = store.lookup_ready(key, spec)
+        # Cluster metadata is restorable, but has no READY wire ABI yet. Do not
+        # scan/import the flat HOST children while merely looking up metadata.
+        ready = (
+            store.lookup_ready(key, spec) if entry_kind != "cluster" else ArtifactLookup(LookupStatus.MISS)
+        )
         _event(ready.status)
         if ready.handle is not None:
             record_stats(ready_hits=1)
@@ -301,12 +315,16 @@ def resolve_persistent(
                 _validated_manifest=ready.manifest,
             )
             owner._artifact_objects[compatible] = compiled
-            return compiled
+            return validated(compiled)
         initial = store.lookup(key, spec)
         _event(initial.status)
         handle = initial.handle
         if handle is not None:
-            ready = store.lookup(key, ready_spec(handle.directory, spec))
+            ready = (
+                store.lookup(key, ready_spec(handle.directory, spec))
+                if entry_kind != "cluster"
+                else ArtifactLookup(LookupStatus.MISS)
+            )
             _event(ready.status)
             record_stats(**{"ready_hits" if ready.handle is not None else "generated_hits": 1})
             handle = ready.handle or handle
@@ -317,11 +335,21 @@ def resolve_persistent(
                 _validated_manifest=ready.manifest if ready.handle is not None else initial.manifest,
             )
             owner._artifact_objects[compatible] = compiled
-            return compiled
+            return validated(compiled)
         record_stats(misses=1)
 
     def generate(directory: Path) -> Any:
-        compiled = build(output_dir=str(directory))
+        compiled = validated(build(output_dir=str(directory)))
+        if entry_kind == "cluster":
+            raise _PrivateBuild(
+                compiled, "Cluster source packaging is unsupported until cluster codegen integration"
+            )
+        if entry_kind == "chip" and getattr(compiled, "entry_kind", None) == "host":
+            # Plain JIT can discover HOST only after outlining actual IR. Keep
+            # that usable object rather than forcing it into a CHIP manifest.
+            raise _PrivateBuild(
+                compiled, "Actual post-pass HOST entry requires a distributed artifact contract"
+            )
         with time_stage("build_ns"):
             try:
                 package_generated_sources(directory, kind)
@@ -338,7 +366,10 @@ def resolve_persistent(
         result = store.get_or_build(key, spec, generate)
     except _PrivateBuild as exc:
         _bypass(exc.reason)
-        return exc.compiled
+        # Packaging limitations and inputs changing during compilation both
+        # invalidate reuse under the pre-build identity. Keep the usable private
+        # result, but never seed the compatible-object map from a bypass.
+        return validated(exc.compiled)
     with time_stage("lookup_ns"):
         if result.handle is None:
             if result.failure in (BuildFailure.LOCK, BuildFailure.PUBLICATION) or (
@@ -353,4 +384,4 @@ def resolve_persistent(
         else:
             compiled = restore_artifact(store, result.handle, private_root / f"run-{uuid.uuid4().hex}")
         owner._artifact_objects[compatible] = compiled
-        return compiled
+        return validated(compiled)

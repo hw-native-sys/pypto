@@ -745,10 +745,10 @@ class TileMemorySpaceMutator : public IRMutator {
             continue;
           }
         }
-      } else if (key == kAttrDevice) {
+      } else if (key == kAttrWorker) {
         if (const auto* device = std::any_cast<ExprPtr>(&value); device && *device) {
           auto remapped = IRMutator::VisitExpr(*device);
-          INTERNAL_CHECK_SPAN(remapped, op->span_) << "Call device attribute mutated to null";
+          INTERNAL_CHECK_SPAN(remapped, op->span_) << "Call worker attribute mutated to null";
           if (remapped.get() != device->get()) {
             changed = true;
             new_attrs.emplace_back(key, std::any(std::move(remapped)));

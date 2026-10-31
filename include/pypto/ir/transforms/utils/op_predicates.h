@@ -15,12 +15,26 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 
 namespace pypto {
 namespace ir {
 namespace op_predicates {
+
+/// Return an empty string when the resolved op is legal in this context.
+/// Shared by the parser and native verification: aliases and deserialized Ops
+/// have the same identity, and generic scopes never replace hierarchy context.
+[[nodiscard]] std::string DistributedOpContextError(const OpPtr& op, std::optional<Level> level,
+                                                    std::optional<Role> role, bool in_device_scope);
+
+/// Check a function in one traversal, restoring hierarchy context at scope exit.
+/// The returned diagnostics also protect standalone composite lowering of IR
+/// constructed without the parser or pass verification instruments.
+[[nodiscard]] std::vector<std::pair<std::string, Span>> DistributedOpContextErrors(const FunctionPtr& func);
 
 /// Whether tile.cast must keep its result disjoint from its source. Widening
 /// casts are unsafe in place on every target. A2/A3 narrowing casts process all

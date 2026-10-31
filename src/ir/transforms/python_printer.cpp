@@ -604,7 +604,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // Render one ``attrs={...}`` value as a parseable Python DSL expression. This
   // is the generic round-trip "safety net": every Call/Submit attr that has no
-  // bespoke kwarg surface (deps=/device=/dumps=) and is not emitted by a
+  // bespoke kwarg surface (deps=/worker=/dumps=) and is not emitted by a
   // dedicated emitter (dump_vars/arg_directions) is rendered here, so print ->
   // parse never silently drops an attr. Dispatches on the ``std::any`` value
   // type and FAILS LOUD (INTERNAL_CHECK_SPAN) on a type it cannot represent in
@@ -1173,17 +1173,17 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
           << "' carries attrs[\"manual_dep_edges\"]; manual deps must be on Submit::deps_";
       // Zero-arg self.fn() needs no leading comma before the first kwarg, so
       // gate every kwarg separator on a shared flag rather than hard-coding
-      // ", " — otherwise self.fn(, device=...) breaks the round-trip.
+      // ", " — otherwise self.fn(, worker=...) breaks the round-trip.
       bool need_kwarg_comma = !op->args_.empty();
 
-      // Surface ``attrs["device"]`` (set by N3 parser on host_orch → chip_orch
-      // dispatches) as a ``device=<expr>`` kwarg so it round-trips through
+      // Surface ``attrs["worker"]`` (set by N3 parser on host_orch → chip_orch
+      // dispatches) as a ``worker=<expr>`` kwarg so it round-trips through
       // reparse and remains observable by the MaterializeCommDomainScopes pass.
       for (const auto& [k, v] : op->attrs_) {
-        if (k != kAttrDevice) continue;
+        if (k != kAttrWorker) continue;
         if (const auto* p = std::any_cast<ExprPtr>(&v)) {
           if (*p) {
-            stream_ << (need_kwarg_comma ? ", " : "") << "device=";
+            stream_ << (need_kwarg_comma ? ", " : "") << "worker=";
             VisitExpr(*p);
             need_kwarg_comma = true;
           }
@@ -1198,7 +1198,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       // other attr — ``arg_direction_overrides``, ``dummy_task``, any future
       // key — is rendered generically by ``PrintAttrValue`` into the same dict
       // (the round-trip safety net), so nothing is silently dropped. The sugar
-      // key already surfaced above (``device`` -> ``device=``) is skipped
+      // key already surfaced above (``worker`` -> ``worker=``) is skipped
       // here. The parser recovers the bespoke keys via dedicated extractors
       // and the rest via ``_parse_attr_value``.
       auto call_arg_directions = op->GetArgDirections();
@@ -1207,7 +1207,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       std::vector<const std::pair<std::string, std::any>*> generic_attrs;
       for (const auto& kv : op->attrs_) {
         const std::string& k = kv.first;
-        if (k == kAttrDevice) continue;                               // emitted as device=
+        if (k == kAttrWorker) continue;                               // emitted as worker=
         if (k == kAttrDumpVars || k == kAttrArgDirections) continue;  // bespoke emitters below
         generic_attrs.push_back(&kv);
       }

@@ -12,6 +12,7 @@
 import ast
 import warnings
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
@@ -183,6 +184,123 @@ def _dtypes_compatible(ann: DataType, inf: DataType) -> bool:
     return False
 
 
+@dataclass
+class _ProgramWindowDefinition:
+    node: ast.Call
+    signature: str
+    owner: str
+    scope_owned: bool
+    span: ir.Span
+    placeholder: ir.WindowBuffer | None = None
+    actual: ir.WindowBuffer | None = None
+
+
+class _ProgramWindowBuffers:
+    """Restore explicit window identities within exactly one program parse.
+
+    Only descriptor IDs are shared: a deferred reference never interns storage
+    names or evaluates another function's size expression. Owner lookup and
+    finalization use indexes built in one AST pre-scan, followed by one native
+    mutator traversal to replace private placeholders before publishing IR.
+    """
+
+    def __init__(self) -> None:
+        self._definitions: dict[str | int, _ProgramWindowDefinition] = {}
+        self._owners: dict[str, dict[str | int, None]] = {}
+
+    def prescan(self, func_def: ast.FunctionDef, resolver: "TypeResolver", *, opaque_body: bool) -> None:
+        """Index signatures and DSL bodies; callback Python bodies stay opaque."""
+        roots: list[ast.AST] = [func_def.args]
+        if func_def.returns is not None:
+            roots.append(func_def.returns)
+        if not opaque_body:
+            roots.extend(func_def.body)
+        # ast.walk visits parents before children, so slot ownership is known
+        # before visiting the descriptor nested in that comm_domain call.
+        slot_nodes: set[int] = set()
+        for root in roots:
+            for node in ast.walk(root):
+                if _is_dump_call(node, "comm_domain"):
+                    for keyword in node.keywords:
+                        if keyword.arg == "slots" and isinstance(keyword.value, ast.List):
+                            slot_nodes.update(id(slot) for slot in keyword.value.elts)
+                if (
+                    isinstance(node, ast.Call)
+                    and resolver.is_window_buffer_annotation(node)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "window_buffer"
+                ):
+                    self.register(func_def.name, node, resolver, scope_owned=id(node) in slot_nodes)
+
+    def register(
+        self, owner: str, node: ast.expr, resolver: "TypeResolver", *, scope_owned: bool = False
+    ) -> _ProgramWindowDefinition:
+        fields = resolver._window_buffer_fields(node)
+        identifier = resolver._window_buffer_key(fields["key"])
+        assert isinstance(node, ast.Call)
+        signature = ast.dump(node, include_attributes=False)
+        previous = self._definitions.get(identifier)
+        if previous is not None:
+            if previous.signature != signature or (
+                scope_owned and previous.scope_owned and previous.owner != owner
+            ):
+                raise ParserTypeError(
+                    f"Conflicting window_buffer descriptors for ID {identifier!r}",
+                    span=resolver._get_span(node),
+                )
+            # A full annotation is also accepted for compatibility. An actual
+            # owning slot, if present, determines whose lexical context binds it.
+            if scope_owned and not previous.scope_owned:
+                del self._owners[previous.owner][identifier]
+                self._owners.setdefault(owner, {})[identifier] = None
+                previous.owner = owner
+                previous.scope_owned = True
+                previous.node = node
+                previous.span = resolver._get_span(node)
+            return previous
+        definition = _ProgramWindowDefinition(node, signature, owner, scope_owned, resolver._get_span(node))
+        self._definitions[identifier] = definition
+        self._owners.setdefault(owner, {})[identifier] = None
+        return definition
+
+    def reference(self, identifier: str | int, span: ir.Span) -> ir.WindowBuffer:
+        definition = self._definitions.get(identifier)
+        if definition is None:
+            raise ParserTypeError(f"Undefined window_buffer ID {identifier!r}", span=span)
+        if definition.actual is not None:
+            return definition.actual
+        if definition.placeholder is None:
+            # This unbound token carries no storage identity. Its fields are
+            # never inspected as owner metadata and it cannot escape finish().
+            definition.placeholder = ir.WindowBuffer(
+                ir.Var("__unresolved_window", ir.PtrType(), span), ir.ConstInt(0, DataType.INDEX, span)
+            )
+        return definition.placeholder
+
+    def finalize_owner(self, owner: str, resolver: "TypeResolver") -> None:
+        """Bind remaining manual descriptors before leaving the owner's scope."""
+        for identifier in self._owners.get(owner, {}):
+            definition = self._definitions[identifier]
+            if definition.actual is None:
+                definition.actual = resolver._resolve_local_window_buffer(definition.node)
+
+    def finish(self, program: ir.Program) -> ir.Program:
+        """Replace deferred references once, keeping ordinary storage local."""
+        replacements: list[tuple[ir.WindowBuffer, ir.WindowBuffer]] = []
+        for identifier, definition in self._definitions.items():
+            if definition.actual is None:
+                raise ParserTypeError(f"Unresolved window_buffer ID {identifier!r}", span=definition.span)
+            if definition.placeholder is not None:
+                replacements.append((definition.placeholder, definition.actual))
+        if not replacements:
+            return program
+
+        # The private native helper uses IRMutator's ordinary rebuilding, with
+        # an opt-in type back-reference substitution. Ordinary mutators do not
+        # visit owner metadata through every inherited distributed tensor type.
+        return ir._rebind_window_buffers(program, replacements)
+
+
 class TypeResolver:
     """Resolves Python type annotations to IR types."""
 
@@ -247,6 +365,7 @@ class TypeResolver:
         span_tracker: "SpanTracker | None" = None,
         dyn_var_cache: dict[str, ir.Var] | None = None,
         parse_expression: Callable[[ast.expr], "ir.Expr"] | None = None,
+        program_window_buffers: _ProgramWindowBuffers | None = None,
     ):
         """Initialize type resolver.
 
@@ -265,6 +384,8 @@ class TypeResolver:
                 index expression the DSL itself can parse (matching what the C++
                 ``ir.TileView`` constructor accepts), not just integer constants
                 and bare names.
+            program_window_buffers: Private explicit-window registry for one
+                program parse. Ordinary storage caches remain resolver-local.
         """
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
@@ -273,6 +394,8 @@ class TypeResolver:
         self._parse_expression = parse_expression
         self._window_buffers: dict[str | int, tuple[str, ir.WindowBuffer]] = {}
         self._window_buffer_nodes: dict[str | int, ast.Call] = {}
+        self._program_window_buffers = program_window_buffers
+        self.window_owner = ""
 
     @staticmethod
     def is_window_buffer_annotation(node: ast.expr) -> bool:
@@ -287,9 +410,16 @@ class TypeResolver:
             and node.func.value.value.id == "pl"
         )
 
-    def register_window_definitions(self, root: ast.AST) -> None:
+    def register_window_definitions(self, root: ast.FunctionDef, *, opaque_body: bool = False) -> None:
         """Collect definitions before resolving references in a function signature."""
-        for node in ast.walk(root):
+        if self._program_window_buffers is not None:
+            return  # Already indexed once by the program decorator.
+        roots: list[ast.AST] = [root.args]
+        if root.returns is not None:
+            roots.append(root.returns)
+        if not opaque_body:
+            roots.extend(root.body)
+        for node in (node for subtree in roots for node in ast.walk(subtree)):
             if (
                 isinstance(node, ast.Call)
                 and self.is_window_buffer_annotation(node)
@@ -339,6 +469,9 @@ class TypeResolver:
 
     def register_window_buffer(self, node: ast.expr) -> None:
         """Record a descriptor before its body-local allocation has been parsed."""
+        if self._program_window_buffers is not None:
+            self._program_window_buffers.register(self.window_owner, node, self)
+            return
         fields = self._window_buffer_fields(node)
         identifier = self._window_buffer_key(fields["key"])
         assert isinstance(node, ast.Call)
@@ -349,7 +482,7 @@ class TypeResolver:
             )
         self._window_buffer_nodes[identifier] = node
 
-    def resolve_window_buffer(self, node: ast.expr) -> ir.WindowBuffer:
+    def resolve_window_buffer(self, node: ast.expr, *, bind_owner: bool = False) -> ir.WindowBuffer:
         """Intern a printed window descriptor, preserving shared object identity."""
         span = self._get_span(node)
         if not self.is_window_buffer_annotation(node) or not isinstance(node, ast.Call):
@@ -358,6 +491,8 @@ class TypeResolver:
             if len(node.args) != 1 or node.keywords:
                 raise ParserTypeError("window_ref requires one window key", span=span)
             identifier = self._window_buffer_key(node.args[0])
+            if self._program_window_buffers is not None:
+                return self._program_window_buffers.reference(identifier, span)
             cached = self._window_buffers.get(identifier)
             if cached is not None:
                 return cached[1]
@@ -365,6 +500,27 @@ class TypeResolver:
             if descriptor is None:
                 raise ParserTypeError(f"Undefined window_buffer ID {identifier!r}", span=span)
             return self.resolve_window_buffer(descriptor)
+        if self._program_window_buffers is not None:
+            definition = self._program_window_buffers.register(self.window_owner, node, self)
+            # Owning scopes bind only after their body, when local size/base
+            # Vars exist. Full manual annotations without a scope retain their
+            # existing eager binding in the defining function's own resolver.
+            if definition.owner == self.window_owner and (bind_owner or not definition.scope_owned):
+                if definition.actual is None:
+                    definition.actual = self._resolve_local_window_buffer(node)
+                return definition.actual
+            fields = self._window_buffer_fields(node)
+            return self._program_window_buffers.reference(self._window_buffer_key(fields["key"]), span)
+        return self._resolve_local_window_buffer(node)
+
+    def finalize_window_definitions(self) -> None:
+        """Resolve this function's pending descriptors while its scope is live."""
+        if self._program_window_buffers is not None:
+            self._program_window_buffers.finalize_owner(self.window_owner, self)
+
+    def _resolve_local_window_buffer(self, node: ast.expr) -> ir.WindowBuffer:
+        """Evaluate a full descriptor exclusively in its owner's lexical scope."""
+        span = self._get_span(node)
         fields = self._window_buffer_fields(node)
         identifier = self._window_buffer_key(fields["key"])
         base_node, size_node = fields["base"], fields["size"]

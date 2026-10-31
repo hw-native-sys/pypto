@@ -191,6 +191,66 @@ with compiled.prepare(
 该标记只作用于命名拷贝的 descriptor。dispatch 参数由 runtime 自己的路径命名，不经过这里，
 因此把一个 dispatch IO buffer 标记为只读并不能阻止子进程写它。
 
+## 集群启动配置（POD/CLUSTER_0）
+
+`pypto.ir.ClusterNodeSpec` 和 `ClusterConfig` 用于描述多节点设备分配。
+构造时会校验并复制输入列表，不进行 DNS 查询或网络连接。
+POD/CLUSTER_0（L4）程序可编译为集群产物，并通过集群运行器执行。
+更高的集群编排层级尚不支持。预备会话、共享窗口和冷加载的使用方式见
+[持久化 L3 会话](../../dev/06-persistent-l3.md)。
+
+```python
+import os
+from pypto.ir import ClusterConfig, ClusterNodeSpec
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+
+cluster = ClusterConfig(
+    nodes=[
+        ClusterNodeSpec(host, [int(d) for d in devices.split(",")])
+        for host, devices in node_device_assignments
+    ],
+    python_executable=os.environ["CLUSTER_PYTHON"],
+)
+config = RunConfig(
+    backend_type=BackendType.Ascend910,
+    execution_mode=ExecutionMode.ONBOARD,
+    cluster_config=cluster,
+)
+compile_kwargs = config.compile_kwargs()
+```
+
+`node_device_assignments` 来自实际资源分配，每一对包含主机名和以逗号分隔的
+该主机获配物理设备索引。不要通过全局 rank 推断物理设备。
+`node_device_counts()` 返回各 MPI 节点条目的设备数；`global_device_ranks()`
+按节点声明顺序、再按节点内设备列表顺序分配连续 rank；`world_size()`
+统计设备总数，而非 MPI 条目数。例如设备数 `[2, 2]` 对应 rank 分组
+`[(0, 1), (2, 3)]`。
+
+| 字段 | 默认值 | 约束 |
+| ---- | ------ | ---- |
+| `nodes` | 必填 | 非空 `ClusterNodeSpec(host, devices)` 列表；`devices` 默认使用独立的 `[0]` |
+| `python_executable` | 必填 | 启动器可访问的 Python 可执行文件 |
+| `comm_profile` | `"a3-fabric-v1"` | 通信配置标识 |
+| `runtime` | `"tensormap_and_ringbuffer"` | 运行时类型 |
+| `num_sub_workers` | `0` | 非负整数；`0` 由运行时选择 worker 数量 |
+| `startup_timeout_s` | `120.0` | 有限正数，单位为秒 |
+| `mpirun_path` | `"mpirun"` | 启动器可执行文件 |
+| `mpirun_args` | `()` | 有序字符串 tuple/list，构造时复制为 tuple |
+| `aicpu_thread_num` | `0` | `0` 选择架构默认值；显式整数必须至少为 `2` |
+
+设备索引必须是互不重复的非负整数，不接受布尔值。同一确切主机名可对应多个
+条目，但设备所有权不能重叠。初期要求各节点条目的设备数相等，暂不支持不等长
+形状/布局。主机名、可执行文件、通信配置、运行时及启动参数字符串必须非空，
+且不能包含 NUL 或换行符。计数和超时参数均拒绝布尔值。
+rank 0 的部署位置由后续运行时校验，配置 API 不作该检查。
+
+`RunConfig.compile_options()` 和 `CompileOptions.as_compile_kwargs()` 会转发
+`cluster_config`；每次编译请求会重新校验并快照嵌套配置。
+所有设备分配及启动器字段均参与 JIT 缓存键。
+`cluster_config` 与 `distributed_config` 互斥；为 HOST/CHIP 程序提供集群配置
+会在发现后端之前报错。
+
 ## One-Shot vs 持久 Worker
 
 ### One-Shot

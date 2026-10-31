@@ -9,6 +9,7 @@
 
 """Unit tests for distributed Python code generation."""
 
+import ast
 import re
 
 import pypto.language as pl
@@ -159,11 +160,11 @@ class TestDistributedCodegen:
 
         @pl.program
         class Input:
-            @pl.function(level=pl.Level.POD, role=pl.Role.SubWorker)
+            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
             def worker(x: pl.Tensor[[64], pl.FP32]):
                 pass
 
-            @pl.function(level=pl.Level.POD, role=pl.Role.Orchestrator)
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
             def orch_with_loop(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(0, 4):
                     self.worker(x)
@@ -750,10 +751,6 @@ class TestChipTaskCollection:
         assert "down_seed" in names, names
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     @pl.program
     class Program:
@@ -781,3 +778,71 @@ def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1\)', code)
     assert code.count(".add_scalar(") == 1
     compile(code, "host_orch.py", "exec")
+
+
+def test_c3a_cluster_entry_selects_cluster_imports_and_signature():
+    @pl.program
+    class Program:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def node(self, x: pl.Tensor[[8], pl.FP32]):
+            return x
+
+        @pl.function(level=pl.Level.CLUSTER_0, role=pl.Role.Orchestrator)
+        def cluster(self, x: pl.Tensor[[8], pl.FP32]):
+            self.node(x, worker=0)
+            return x
+
+    code = codegen.DistributedCodegen().generate(passes.convert_to_ssa()(Program))
+    module = ast.parse(code)
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
+    entry = next(node for node in functions if node.name == "cluster")
+    keywords = {arg.arg for arg in entry.args.kwonlyargs}
+    assert {"tensors", "callables", "nodes", "node_sizes", "node_bindings", "_keep", "_retain"} <= keywords
+    assert "world_size" not in keywords
+    imports = [node for node in module.body if isinstance(node, ast.ImportFrom)]
+    runtime_import = next(node for node in imports if node.module == "simpler.task_interface")
+    assert {"TaskArgs", "TensorArgType"} <= {alias.name for alias in runtime_import.names}
+    imported = {alias.name for node in imports for alias in node.names}
+    # The selected highest entry determines module imports. Reusing HOST's
+    # helper imports would silently retain the wrong argument-routing policy.
+    assert not {"make_tensor_arg", "add_chip_tensor_arg", "_submit_chip"} & imported
+    assert "cluster._pypto_distributed_entry = True" in code
+    assert "def node(" not in code
+    compile(code, "cluster_orch.py", "exec")
+
+
+def test_c3a_cluster_generation_does_not_change_reused_host_codegen():
+    @pl.program
+    class Host:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip(self, x: pl.Tensor[[8], pl.FP32]):
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, x: pl.Tensor[[8], pl.FP32]):
+            self.chip(x, worker=0)
+            return x
+
+    @pl.program
+    class Cluster:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def node(self, x: pl.Tensor[[8], pl.FP32]):
+            return x
+
+        @pl.function(level=pl.Level.CLUSTER_0, role=pl.Role.Orchestrator)
+        def cluster(self, x: pl.Tensor[[8], pl.FP32]):
+            self.node(x, worker=0)
+            return x
+
+    generator = codegen.DistributedCodegen()
+    host = passes.convert_to_ssa()(Host)
+    before = generator.generate(host)
+    generator.generate(passes.convert_to_ssa()(Cluster))
+    after = generator.generate(host)
+    assert after == before
+    assert 'callables["chip"]' in after and "_submit_chip(" in after
+    assert "nodes[" not in after and "_io_arg(" not in after
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

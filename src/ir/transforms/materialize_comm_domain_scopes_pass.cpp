@@ -9,9 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -37,9 +40,9 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/structural_comparison.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -49,60 +52,584 @@ namespace ir {
 
 namespace {
 
-[[nodiscard]] bool IsTensorAllReduce(const CallPtr& call) {
-  return call && call->op_ && IsOp(call, "pld.tensor.allreduce");
+// Complexity: the identity graph and IR walks are O(N + E). Coverage uses shared
+// canonical interval snapshots, not copied dispatch histories. Shared type DAGs
+// are indexed once; graph tuple fields omit ordinary scalar-only positions and
+// unchanged functions bypass mutation. Each distinct
+// snapshot union costs O(I_left + I_right), plus ordered canonical-key comparison
+// costs; direct dispatch intervals accumulate in O(D log D), and worker IDs are
+// enumerated only in the emitted domain lists. Identical snapshot pairs are
+// cached. Distinct overlapping collective unions can still take quadratic work
+// in IR size even when final output is small; canonical comparisons also inspect
+// interval keys. This residual coverage exception needs explicit approval before
+// merge; it is not a universal O(N log N) bound.
+using ValueId = size_t;
+
+// Window identity follows storage, never an arbitrary tensor computation.
+// Registry-backed helpers are shared with the other alias/return analyses.
+std::optional<size_t> WindowSourceArg(const CallPtr& call) {
+  if (auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) return index;
+  if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) return 0;
+  if ((IsOp(call, "pld.tensor.allreduce") || IsOp(call, "pld.tensor.broadcast") ||
+       IsOp(call, "pld.tensor.reduce_scatter")) &&
+      !call->args_.empty())
+    return 0;
+  if ((IsOp(call, "pld.tensor.all_to_all") || IsOp(call, "pld.tensor.allgather") ||
+       IsOp(call, "pld.tensor.all_to_all_v")) &&
+      call->args_.size() > 1)
+    return 1;
+  return std::nullopt;
 }
 
-// pld.tensor.all_to_all(input, target, signal) and
-// pld.tensor.allgather(input, target, signal) return `target` in-place
-// (args_[1]) — unlike allreduce, which aliases args_[0]. A window view
-// bound to such a call's result must resolve back through this arg
-// index so the target allocation's device coverage is inferred correctly
-// even when no dispatch site references the pre-call view directly (e.g.
-// when input and target are two distinct buffers, as they must be — see
-// kernel.cpp.in for why aliasing them is unsafe).
-[[nodiscard]] bool IsTensorAllToAll(const CallPtr& call) {
-  return call && call->op_ && IsOp(call, "pld.tensor.all_to_all");
-}
+/// One bounded graph for the entire program, including tuple positions and
+/// declared returns. Each identity changes from unknown to one object once;
+/// every edge/consensus input is processed once. No function-order dependency,
+/// recursive callee searches, per-value lineage walks, or body fixed points.
+class WindowIdentityGraph : public IRVisitor {
+ public:
+  explicit WindowIdentityGraph(const ProgramPtr& program) {
+    for (const auto& [gvar, func] : program->functions_) {
+      current_function_ = func.get();
+      Facts facts{func,
+                  transform_utils::TrailingCommCtxParamCount(func),
+                  {},
+                  return_lineage::ExplicitReturnedParamIndices(func)};
+      for (const auto& type : func->return_types_) facts.returns.push_back(NewValue(type, func->span_));
+      // Annotation-free DSL functions retain an empty declared signature even
+      // when their calls have body-derived result types. Match that ABI: one
+      // position per ReturnStmt value, including a packed Tuple as one value.
+      // These analysis-only positions must not populate return_types_ later.
+      if (func->return_types_.empty()) {
+        if (auto returned = return_lineage::FindFirstReturn(func->body_)) {
+          for (const auto& value : returned->value_) {
+            facts.returns.push_back(NewValue(value->GetType(), value->span_));
+          }
+        }
+      }
+      for (ValueId result : facts.returns) function_roots_[func.get()].insert(result);
+      functions_.emplace(func->name_, std::move(facts));
+      for (const auto& param : func->params_) Value(param);
+    }
+    for (const auto& [gvar, func] : program->functions_) {
+      current_ = &functions_.at(func->name_);
+      current_function_ = func.get();
+      // Function attributes are live references at parameter binding, including
+      // expression trees whose aliases and tuple results exist only in attrs.
+      for (const auto& [key, value] : func->attrs_) {
+        ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitExpr(expr); });
+      }
+      VisitStmt(func->body_);
+    }
+    current_ = nullptr;
+    current_function_ = nullptr;
+  }
 
-[[nodiscard]] bool IsTensorAllGather(const CallPtr& call) {
-  return call && call->op_ && IsOp(call, "pld.tensor.allgather");
-}
+  bool FunctionNeedsRewrite(const FunctionPtr& func) const { return changed_functions_.count(func.get()); }
 
-// pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)
-// also returns `target` in-place (args_[1]) — same aliasing discipline as
-// IsTensorAllToAll above.
-[[nodiscard]] bool IsTensorAllToAllV(const CallPtr& call) {
-  return call && call->op_ && IsOp(call, "pld.tensor.all_to_all_v");
-}
+  void SeedLocal(const ExprPtr& expr, const WindowBufferPtr& window) {
+    local_windows_.insert(window.get());
+    Set(Value(expr), window);
+  }
 
-/// Device coverage descriptor inferred from a dispatch ``device=`` expression.
+  void Propagate() {
+    // Queue entries are indices rather than references: constructing the graph
+    // may grow values_, whereas propagation never adds graph vertices/edges.
+    for (size_t next = 0; next < ready_.size(); ++next) {
+      ValueId source = ready_[next];
+      auto window = values_[source].window;
+      for (ValueId target : values_[source].users) Set(target, window);
+      for (size_t join_id : values_[source].joins) {
+        auto& join = joins_[join_id];
+        CHECK_SPAN(!join.window || join.window.get() == window.get(), values_[join.target].span)
+            << "MaterializeCommDomainScopes: conflicting WindowBuffer identities at a branch/loop merge";
+        join.window = window;
+        if (--join.remaining == 0) Set(join.target, window);
+      }
+    }
+    std::vector<bool> changed(values_.size(), false);
+    for (ValueId id = 0; id < values_.size(); ++id) {
+      const auto& value = values_[id];
+      if (!value.window) continue;
+      CHECK_SPAN(local_windows_.count(value.window.get()) || owners_.count(value.window.get()), value.span)
+          << "MaterializeCommDomainScopes: orphan WindowBuffer identity has no owning communication scope";
+      auto original = As<DistributedTensorType>(value.type);
+      changed[id] =
+          !original->window_buffer_.has_value() || original->window_buffer_->get() != value.window.get();
+    }
+    // Containment children are allocated after their parent. Compute each root
+    // flag once, then follow real function/root uses; never expand a tuple's
+    // descendants once per function sharing that same native expression DAG.
+    for (size_t id = values_.size(); id-- > 0;) {
+      for (const auto& [position, child] : values_[id].fields) {
+        changed[id] = changed[id] || changed[child];
+      }
+    }
+    // A scalar/CommCtx expression may contain a Call whose DT result changed.
+    // Propagate that mutation requirement through the shared expression DAG,
+    // separately from tuple type containment, before consulting function users.
+    std::vector<ValueId> changed_roots;
+    for (ValueId id = 0; id < changed.size(); ++id) {
+      if (changed[id]) changed_roots.push_back(id);
+    }
+    for (size_t next = 0; next < changed_roots.size(); ++next) {
+      auto parents = expression_parents_.find(changed_roots[next]);
+      if (parents == expression_parents_.end()) continue;
+      for (ValueId parent : parents->second) {
+        if (changed[parent]) continue;
+        changed[parent] = true;
+        changed_roots.push_back(parent);
+      }
+    }
+    for (const auto& [function, roots] : function_roots_) {
+      for (ValueId root : roots) {
+        if (changed[root]) {
+          changed_functions_.insert(function);
+          break;
+        }
+      }
+    }
+  }
+
+  WindowBufferPtr Identity(const ExprPtr& expr) const {
+    auto found = expr_values_.find(expr.get());
+    return found == expr_values_.end() ? nullptr : values_[found->second].window;
+  }
+
+  TypePtr RewriteType(const ExprPtr& expr, const TypePtr& type) const {
+    auto found = expr_values_.find(expr.get());
+    return found == expr_values_.end() ? type : RewriteValueType(found->second, type);
+  }
+
+  std::vector<TypePtr> RewriteReturns(const FunctionPtr& func) const {
+    const auto& returns = functions_.at(func->name_).returns;
+    std::vector<TypePtr> types;
+    for (size_t i = 0; i < func->return_types_.size(); ++i) {
+      types.push_back(RewriteValueType(returns[i], func->return_types_[i]));
+    }
+    return types;
+  }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!expr) return;
+    ValueId id = Value(expr);  // Record this function's use before the global memo.
+    if (active_parent_) expression_parents_[id].push_back(*active_parent_);
+    if (!visited_.insert(expr.get()).second) return;
+    auto saved = active_parent_;
+    active_parent_ = id;
+    IRVisitor::VisitExpr(expr);
+    active_parent_ = saved;
+  }
+
+ private:
+  struct ValueInfo {
+    TypePtr type;
+    Span span;
+    WindowBufferPtr window;
+    std::unordered_map<size_t, ValueId> fields;  // Original tuple positions; scalar fields are absent.
+    std::vector<ValueId> users;
+    std::vector<size_t> joins;
+  };
+  struct Join {
+    ValueId target;
+    size_t remaining;
+    WindowBufferPtr window;
+  };
+  struct Facts {
+    FunctionPtr func;
+    size_t ctx;
+    std::vector<ValueId> returns;
+    std::vector<std::optional<size_t>> explicit_params;
+  };
+
+  bool ContainsDistributedTensor(const TypePtr& type) {
+    auto found = type_relevance_.find(type.get());
+    if (found != type_relevance_.end()) return found->second;
+    bool relevant = IsA<DistributedTensorType>(type);
+    if (auto tuple = As<TupleType>(type)) {
+      std::vector<size_t> positions;
+      for (size_t i = 0; i < tuple->types_.size(); ++i) {
+        if (ContainsDistributedTensor(tuple->types_[i])) positions.push_back(i);
+      }
+      relevant = !positions.empty();
+      tuple_positions_.emplace(type.get(), std::move(positions));
+    }
+    type_relevance_.emplace(type.get(), relevant);
+    return relevant;
+  }
+
+  ValueId NewValue(const TypePtr& type, const Span& span) {
+    ValueId id = values_.size();
+    values_.push_back({type, span, nullptr, {}, {}, {}});
+    if (!ContainsDistributedTensor(type)) return id;
+    if (auto dt = As<DistributedTensorType>(type)) {
+      if (dt->window_buffer_.has_value()) Set(id, *dt->window_buffer_);
+    } else if (auto tuple = As<TupleType>(type)) {
+      for (size_t position : tuple_positions_.at(type.get())) {
+        ValueId child = NewValue(tuple->types_[position], span);
+        values_[id].fields.emplace(position, child);
+      }
+    }
+    return id;
+  }
+
+  ValueId Value(const ExprPtr& expr) {
+    auto found = expr_values_.find(expr.get());
+    ValueId id;
+    if (found != expr_values_.end()) {
+      id = found->second;
+    } else {
+      id = NewValue(expr->GetType(), expr->span_);
+      expr_values_.emplace(expr.get(), id);
+    }
+    if (current_function_) function_roots_[current_function_].insert(id);
+    return id;
+  }
+
+  void Set(ValueId id, const WindowBufferPtr& window) {
+    if (!window || !As<DistributedTensorType>(values_[id].type)) return;
+    auto& value = values_[id];
+    CHECK_SPAN(!value.window || value.window.get() == window.get(), value.span)
+        << "MaterializeCommDomainScopes: conflicting WindowBuffer identities for one value/formal";
+    if (!value.window) {
+      value.window = window;
+      ready_.push_back(id);
+    }
+  }
+
+  void Connect(ValueId source, ValueId target) {
+    if (As<DistributedTensorType>(values_[source].type) && As<DistributedTensorType>(values_[target].type)) {
+      values_[source].users.push_back(target);
+    } else {
+      for (const auto& [position, child] : values_[source].fields) {
+        auto found = values_[target].fields.find(position);
+        if (found != values_[target].fields.end()) Connect(child, found->second);
+      }
+    }
+  }
+
+  void Consensus(ValueId left, ValueId right, ValueId target) {
+    if (As<DistributedTensorType>(values_[target].type) && As<DistributedTensorType>(values_[left].type) &&
+        As<DistributedTensorType>(values_[right].type)) {
+      size_t id = joins_.size();
+      joins_.push_back({target, 2, nullptr});
+      values_[left].joins.push_back(id);
+      values_[right].joins.push_back(id);
+    } else {
+      for (const auto& [position, child] : values_[target].fields) {
+        auto l = values_[left].fields.find(position);
+        auto r = values_[right].fields.find(position);
+        if (l != values_[left].fields.end() && r != values_[right].fields.end()) {
+          Consensus(l->second, r->second, child);
+        }
+      }
+    }
+  }
+
+  TypePtr RewriteValueType(ValueId id, const TypePtr& type) const {
+    const auto& value = values_[id];
+    if (auto dt = As<DistributedTensorType>(type); dt && value.window) {
+      if (dt->window_buffer_.has_value() && dt->window_buffer_->get() == value.window.get()) return type;
+      // Only identity changes. In particular, retain the callee's own MemRef,
+      // view, dtype and shape so actual type disagreements remain observable.
+      return std::make_shared<const DistributedTensorType>(dt->shape_, dt->dtype_, dt->memref_,
+                                                           dt->tensor_view_, value.window);
+    }
+    auto tuple = As<TupleType>(type);
+    if (!tuple || value.fields.empty()) return type;
+    std::vector<TypePtr> types;
+    for (const auto& [position, child] : value.fields) {
+      if (position >= tuple->types_.size()) continue;
+      auto field = RewriteValueType(child, tuple->types_[position]);
+      if (field.get() == tuple->types_[position].get()) continue;
+      if (types.empty()) types = tuple->types_;
+      types[position] = std::move(field);
+    }
+    return types.empty() ? type : std::make_shared<const TupleType>(std::move(types));
+  }
+
+  std::vector<std::pair<size_t, ValueId>> Results(const ExprPtr& expr, size_t count) {
+    ValueId id = Value(expr);
+    if (!As<Submit>(expr) && count == 1) return {{0, id}};
+    auto tuple = As<TupleType>(expr->GetType());
+    if (!tuple || tuple->types_.size() < count) return {};
+    std::vector<std::pair<size_t, ValueId>> results;
+    results.reserve(values_[id].fields.size());
+    for (const auto& [position, child] : values_[id].fields) {
+      if (position < count) results.emplace_back(position, child);
+    }
+    return results;
+  }
+
+  void BindCall(const ExprPtr& expr) {
+    auto call = transform_utils::AsCallOrSubmitView(expr);
+    auto gvar = As<GlobalVar>(call->op_);
+    if (!gvar) {
+      if (auto source = WindowSourceArg(call)) Connect(Value(call->args_[*source]), Value(expr));
+      return;
+    }
+    auto found = functions_.find(gvar->name_);
+    if (found == functions_.end()) return;
+    const auto& facts = found->second;
+    const auto& callee = facts.func;
+    if (call->args_.size() < facts.ctx || call->args_.size() > callee->params_.size()) return;
+    if (!As<Submit>(expr) && call->args_.size() != callee->params_.size()) return;
+    const size_t supplied = call->args_.size() - facts.ctx;
+    // Traverse actual args, never all formal params for each call. The shared
+    // binding helper receives the once-per-callee ctx count; omitted Out params
+    // have no caller provenance and cannot consume an argument from the suffix.
+    for (size_t i = 0; i < supplied; ++i) {
+      auto actual = transform_utils::CallerSuppliedArg(call, callee, i, facts.ctx);
+      Connect(Value(actual), Value(callee->params_[i]));
+    }
+    auto outputs = Results(expr, facts.returns.size());
+    for (const auto& [i, output] : outputs) {
+      Connect(facts.returns[i], output);
+      if (i < facts.explicit_params.size() && facts.explicit_params[i].has_value()) {
+        auto actual = transform_utils::CallerSuppliedArg(call, callee, *facts.explicit_params[i], facts.ctx);
+        if (actual) Connect(Value(actual), output);
+      }
+    }
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    BindCall(op);
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const SubmitPtr& op) override {
+    BindCall(op);
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const IterArgPtr& op) override {
+    Connect(Value(op->initValue_), Value(op));
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const MakeTuplePtr& op) override {
+    ValueId tuple = Value(op);
+    // Value() can append to values_; do not retain a field-map reference across it.
+    for (size_t i = 0; i < op->elements_.size(); ++i) {
+      auto found = values_[tuple].fields.find(i);
+      if (found == values_[tuple].fields.end()) continue;
+      ValueId child = found->second;
+      Connect(Value(op->elements_[i]), child);
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const TupleGetItemExprPtr& op) override {
+    ValueId tuple = Value(op->tuple_);
+    auto found = values_[tuple].fields.find(static_cast<size_t>(op->index_));
+    if (op->index_ >= 0 && found != values_[tuple].fields.end()) {
+      ValueId child = found->second;
+      Connect(child, Value(op));
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    Connect(Value(op->value_), Value(op->var_));
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    if (current_) {
+      if (op->value_.size() == current_->returns.size()) {
+        for (size_t i = 0; i < op->value_.size(); ++i) Connect(Value(op->value_[i]), current_->returns[i]);
+      } else if (op->value_.size() == 1) {
+        ValueId packed = Value(op->value_[0]);
+        auto tuple = As<TupleType>(op->value_[0]->GetType());
+        if (tuple && tuple->types_.size() == current_->returns.size()) {
+          for (const auto& [position, child] : values_[packed].fields) {
+            Connect(child, current_->returns[position]);
+          }
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+  template <typename LoopPtr>
+  void BindLoop(const LoopPtr& loop) {
+    auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      ValueId init = Value(loop->iter_args_[i]->initValue_);
+      ValueId carry = Value(loop->iter_args_[i]);
+      Connect(init, carry);
+      if (yield && i < yield->value_.size()) {
+        ValueId yielded = Value(yield->value_[i]);
+        Connect(yielded, carry);
+        if (i < loop->return_vars_.size()) Consensus(init, yielded, Value(loop->return_vars_[i]));
+      }
+    }
+  }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    BindLoop(op);
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    BindLoop(op);
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const IfStmtPtr& op) override {
+    auto left = transform_utils::GetLastYieldStmt(op->then_body_);
+    auto right = op->else_body_ ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
+    if (left && right) {
+      size_t count = std::min({left->value_.size(), right->value_.size(), op->return_vars_.size()});
+      for (size_t i = 0; i < count; ++i) {
+        Consensus(Value(left->value_[i]), Value(right->value_[i]), Value(op->return_vars_[i]));
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+    for (const auto& slot : op->slots_) {
+      auto [found, inserted] = owners_.emplace(slot.get(), op.get());
+      CHECK_SPAN(inserted || found->second == op.get(), op->span_)
+          << "MaterializeCommDomainScopes: WindowBuffer has multiple owning scopes";
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  std::vector<ValueInfo> values_;
+  std::vector<Join> joins_;
+  std::vector<ValueId> ready_;
+  std::unordered_map<const Expr*, ValueId> expr_values_;
+  std::unordered_set<const Expr*> visited_;
+  std::unordered_map<std::string, Facts> functions_;
+  std::unordered_map<const WindowBuffer*, const CommDomainScopeStmt*> owners_;
+  std::unordered_set<const WindowBuffer*> local_windows_;
+  std::unordered_map<const Type*, bool> type_relevance_;
+  std::unordered_map<const Type*, std::vector<size_t>> tuple_positions_;
+  std::unordered_map<const Function*, std::unordered_set<ValueId>> function_roots_;
+  std::unordered_map<ValueId, std::vector<ValueId>> expression_parents_;
+  std::optional<ValueId> active_parent_;
+  std::unordered_set<const Function*> changed_functions_;
+  const Function* current_function_ = nullptr;
+  Facts* current_ = nullptr;
+};
+
+/// Device coverage descriptor inferred from a dispatch ``worker=`` expression.
 struct DeviceDescriptor {
   bool is_all = false;
-  std::set<int64_t> subset;
+  // Sorted, disjoint inclusive intervals. Numeric loop bounds do not enumerate
+  // workers until one final device list is emitted for each distinct domain.
+  std::vector<std::pair<int64_t, int64_t>> intervals;
 
-  bool operator==(const DeviceDescriptor& o) const {
-    return is_all == o.is_all && (is_all || subset == o.subset);
-  }
-  bool operator<(const DeviceDescriptor& o) const {
-    if (is_all != o.is_all) return is_all < o.is_all;
-    if (is_all) return false;  // all-device: subset is meaningless, matches operator==
-    return subset < o.subset;
+  bool operator<(const DeviceDescriptor& other) const {
+    if (is_all != other.is_all) return is_all < other.is_all;
+    return !is_all && intervals < other.intervals;
   }
 
   void Merge(const DeviceDescriptor& other) {
     if (is_all || other.is_all) {
       is_all = true;
-      subset.clear();
+      intervals.clear();
       return;
     }
-    subset.insert(other.subset.begin(), other.subset.end());
+    std::vector<std::pair<int64_t, int64_t>> merged;
+    merged.reserve(intervals.size() + other.intervals.size());
+    size_t left = 0;
+    size_t right = 0;
+    while (left < intervals.size() || right < other.intervals.size()) {
+      auto next = right == other.intervals.size() ||
+                          (left < intervals.size() && intervals[left] < other.intervals[right])
+                      ? intervals[left++]
+                      : other.intervals[right++];
+      if (!merged.empty() && (merged.back().second == std::numeric_limits<int64_t>::max() ||
+                              next.first <= merged.back().second + 1)) {
+        merged.back().second = std::max(merged.back().second, next.second);
+      } else {
+        merged.push_back(next);
+      }
+    }
+    intervals = std::move(merged);
   }
 
   [[nodiscard]] std::vector<int64_t> ToDevices() const {
-    if (is_all) return {};
-    return {subset.begin(), subset.end()};
+    std::vector<int64_t> devices;
+    if (is_all) return devices;
+    for (const auto& [first, last] : intervals) {
+      for (int64_t worker = first;; ++worker) {
+        devices.push_back(worker);
+        if (worker == last) break;  // Also avoids incrementing INT64_MAX.
+      }
+    }
+    return devices;
   }
+};
+
+/// Direct dispatches accumulate mutably: sparse worker annotations must not copy
+/// a growing immutable prefix at every dispatch. Erased intervals are visited
+/// only once, giving O(D log D) accumulation for D direct interval insertions.
+struct DispatchCoverage {
+  bool observed = false;
+  bool is_all = false;
+  std::map<int64_t, int64_t> intervals;
+
+  void Add(const DeviceDescriptor& descriptor) {
+    observed = true;
+    if (is_all) return;
+    if (descriptor.is_all) {
+      is_all = true;
+      intervals.clear();
+      return;
+    }
+    for (auto [first, last] : descriptor.intervals) {
+      auto next = intervals.lower_bound(first);
+      if (next != intervals.begin()) {
+        auto previous = std::prev(next);
+        if (previous->second >= first - 1) {
+          first = previous->first;
+          last = std::max(last, previous->second);
+          next = intervals.erase(previous);
+        }
+      }
+      while (next != intervals.end() &&
+             (last == std::numeric_limits<int64_t>::max() || next->first <= last + 1)) {
+        last = std::max(last, next->second);
+        next = intervals.erase(next);
+      }
+      intervals.emplace_hint(next, first, last);
+    }
+  }
+
+  DeviceDescriptor Freeze() const {
+    DeviceDescriptor descriptor;
+    descriptor.is_all = is_all;
+    descriptor.intervals.assign(intervals.begin(), intervals.end());
+    return descriptor;
+  }
+};
+
+/// Immutable canonical snapshots share large identical coverage sets. A cached
+/// union is keyed by snapshots, not allocation pairs: a later A -> S consumer
+/// must observe a new A snapshot after an intervening B -> A consumer.
+class CoverageSnapshots {
+ public:
+  CoverageSnapshots() { Intern({}); }  // ID zero is the empty set.
+
+  size_t Intern(DeviceDescriptor descriptor) {
+    auto [entry, inserted] = canonical_.try_emplace(std::move(descriptor), snapshots_.size());
+    if (inserted) snapshots_.push_back(&entry->first);
+    return entry->second;
+  }
+
+  size_t Merge(size_t left, size_t right) {
+    if (left == right || right == 0) return left;
+    if (left == 0) return right;
+    if (Get(left).is_all) return left;
+    if (Get(right).is_all) return right;
+    auto key = std::make_pair(std::min(left, right), std::max(left, right));
+    auto cached = unions_.find(key);
+    if (cached != unions_.end()) return cached->second;
+    DeviceDescriptor merged = Get(left);
+    merged.Merge(Get(right));
+    size_t result = Intern(std::move(merged));
+    unions_.emplace(key, result);
+    return result;
+  }
+
+  const DeviceDescriptor& Get(size_t id) const { return *snapshots_[id]; }
+
+ private:
+  std::map<DeviceDescriptor, size_t> canonical_;
+  std::vector<const DeviceDescriptor*> snapshots_;
+  std::map<std::pair<size_t, size_t>, size_t> unions_;
 };
 
 /// Per-alloc bookkeeping populated during the host_orch scan.
@@ -112,7 +639,8 @@ struct AllocRecord {
   ExprPtr size_expr;                   ///< alloc_call->args_[0]
   std::string name;                    ///< from alloc_call attr "name"
   Span span;                           ///< alloc_call->span_ (const fields → emplaced)
-  std::vector<DeviceDescriptor> seen;  ///< one per consuming dispatch
+  DispatchCoverage dispatch_coverage;  ///< mutable direct-dispatch evidence
+  std::optional<size_t> coverage;      ///< immutable snapshot ID; nullopt means no consumer
   WindowBufferPtr wb;                  ///< filled after construction
 
   AllocRecord(CallPtr ac, VarPtr pv, ExprPtr sz, std::string nm, Span sp)
@@ -140,6 +668,10 @@ struct CollectiveConsumer {
 /// ``pld.tensor.alloc_window_buffer`` and ``pld.tensor.window`` assignment.
 class AllocAndWindowCollector : public IRVisitor {
  public:
+  // Existing scopes already own their slots. Inherited formals and allocations
+  // under an existing scope must never be materialized as fresh local slots.
+  void VisitStmt_(const CommDomainScopeStmtPtr&) override {}
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     auto var = AsVarLike(op->var_);
     auto call = As<Call>(op->value_);
@@ -157,21 +689,15 @@ class AllocAndWindowCollector : public IRVisitor {
         allocs.push_back(std::move(rec));
       } else if (IsOp(call, "pld.tensor.window") && !call->args_.empty()) {
         // AsVarLike (not As<Var>): the windowed buffer may be an SSA loop carry
-        // (IterArg) — record it so ResolveWindowRecord can follow it.
+        // (IterArg); identity propagation uses the same Var-like distinction.
         auto ptr_arg_var = AsVarLike(call->args_[0]);
         if (ptr_arg_var) {
           auto it = ptr_to_alloc.find(ptr_arg_var.get());
           if (it != ptr_to_alloc.end()) {
             WindowRecord wr{call, var, it->second};
-            view_to_window[var.get()] = wr;
             windows.push_back(wr);
           }
         }
-      } else if (IsTensorAllReduce(call) && !call->args_.empty()) {
-        // An allreduce result aliases its data window: record (result, data)
-        // so the substitution below can re-type the result with the same
-        // WindowBuffer (loop-carried results must keep window identity).
-        collective_results.emplace_back(var, AsVarLike(call->args_[0]));
       }
     }
     // Record the AssignStmt def for every Var so ResolveDeviceDescriptor can
@@ -184,110 +710,115 @@ class AllocAndWindowCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const ForStmtPtr& op) override {
-    if (!op->iter_args_.empty()) loops.push_back(op);
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    if (!op->iter_args_.empty()) whiles.push_back(op);
-    IRVisitor::VisitStmt_(op);
-  }
-
   std::vector<std::unique_ptr<AllocRecord>> allocs;
   std::unordered_map<const Var*, AllocRecord*> ptr_to_alloc;
-  std::unordered_map<const Var*, WindowRecord> view_to_window;
   std::vector<WindowRecord> windows;
-  std::vector<std::pair<VarPtr, VarPtr>> collective_results;  ///< {allreduce result, data arg}
-  std::vector<ForStmtPtr> loops;                              ///< loops carrying values (iter_args non-empty)
-  std::vector<WhileStmtPtr> whiles;
   std::unordered_map<const Var*, ExprPtr> var_defs;
 };
 
 /// Detects whether a Call resolves to a chip-level Orchestration function (i.e.
 /// the host_orch is dispatching down one level). Such calls carry the
-/// ``device=`` attr written by the N3 parser pass.
-[[nodiscard]] bool IsChipOrchDispatch(const CallPtr& op,
-                                      const std::map<std::string, FunctionPtr>& chip_orchs) {
+/// ``worker=`` attr written by the N3 parser pass.
+[[nodiscard]] bool IsAdjacentOrchDispatch(const CallPtr& op,
+                                          const std::map<std::string, FunctionPtr>& chip_orchs) {
   if (!op || !op->op_) return false;
   auto gvar = As<GlobalVar>(op->op_);
   if (!gvar) return false;
   return chip_orchs.find(gvar->name_) != chip_orchs.end();
 }
 
-/// Unwrap a ``stop_`` expression through one level of SSA assignment indirection
-/// so the dispatch device resolver can see through CSE-hoisted bounds like
-/// ``t__tmp_v0 = pld.system.world_size(); for r in pl.range(t__tmp_v0):``.
-/// Returns ``stop`` unchanged when it is already a literal/call or when the
-/// chain dead-ends in a Var without a known def.
+/// Resolve SSA aliases once per function. Path compression prevents repeated
+/// dispatches sharing long alias chains from rescanning them quadratically.
+/// Definitions are immutable during DispatchAnalyzer's traversal; unknown or
+/// cyclic chains remain unresolved rather than being treated as full coverage.
 [[nodiscard]] ExprPtr UnwrapStopExpr(const ExprPtr& stop,
-                                     const std::unordered_map<const Var*, ExprPtr>& var_defs) {
+                                     const std::unordered_map<const Var*, ExprPtr>& var_defs,
+                                     std::unordered_map<const Var*, ExprPtr>& cache) {
   ExprPtr cur = stop;
+  std::vector<const Var*> path;
   std::unordered_set<const Var*> visited;
   while (auto v = As<Var>(cur)) {
-    if (!visited.insert(v.get()).second) return cur;
+    if (auto hit = cache.find(v.get()); hit != cache.end()) {
+      cur = hit->second;
+      break;
+    }
+    if (!visited.insert(v.get()).second) break;
+    path.push_back(v.get());
     auto it = var_defs.find(v.get());
-    if (it == var_defs.end() || !it->second) return cur;
+    if (it == var_defs.end() || !it->second) break;
     cur = it->second;
   }
+  for (const auto* var : path) cache[var] = cur;
   return cur;
 }
 
-/// Resolves the device descriptor for a ``device=`` Expr in the context of a
+/// Resolves the device descriptor for a ``worker=`` Expr in the context of a
 /// stack of enclosing ForStmt scopes. Throws pypto::ValueError on unsupported
-/// forms (the user's parser is meant to restrict ``device=`` to ConstInt or
+/// forms (the user's parser is meant to restrict ``worker=`` to ConstInt or
 /// the induction var of an enclosing pl.range loop).
-DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vector<ForStmtPtr>& for_stack,
+DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device,
+                                         const std::unordered_map<const Var*, ForStmtPtr>& active_loops,
                                          const std::unordered_map<const Var*, ExprPtr>& var_defs,
-                                         const Span& dispatch_span) {
+                                         std::unordered_map<const Var*, ExprPtr>& bound_cache,
+                                         const Span& dispatch_span, bool host_owner) {
   DeviceDescriptor desc;
   if (auto ci = As<ConstInt>(device)) {
     INTERNAL_CHECK_SPAN(ci->value_ >= 0, dispatch_span)
-        << "MaterializeCommDomainScopes: device= ConstInt must be non-negative, got " << ci->value_;
-    desc.subset.insert(ci->value_);
+        << "MaterializeCommDomainScopes: worker= ConstInt must be non-negative, got " << ci->value_;
+    desc.intervals.emplace_back(ci->value_, ci->value_);
     return desc;
   }
   if (auto v = As<Var>(device)) {
-    for (auto it = for_stack.rbegin(); it != for_stack.rend(); ++it) {
-      const auto& fs = *it;
-      if (fs->loop_var_.get() == v.get()) {
-        // Loop bound determines coverage. Unwrap one level of SSA-assigned temp
-        // so a hoisted ``t = pld.system.world_size()`` is recognised the same
-        // as the direct ``pl.range(pld.system.world_size())`` form.
-        ExprPtr stop = UnwrapStopExpr(fs->stop_, var_defs);
-        if (auto stop_call = As<Call>(stop)) {
-          if (stop_call->op_ && IsOp(stop_call, "pld.system.world_size")) {
-            desc.is_all = true;
-            return desc;
-          }
-        }
-        if (auto stop_ci = As<ConstInt>(stop)) {
-          auto start_ci = As<ConstInt>(UnwrapStopExpr(fs->start_, var_defs));
-          INTERNAL_CHECK_SPAN(start_ci, dispatch_span)
-              << "MaterializeCommDomainScopes: device=r loop start must unwrap to ConstInt";
-          int64_t start = start_ci->value_;
-          auto step_ci = As<ConstInt>(UnwrapStopExpr(fs->step_, var_defs));
-          INTERNAL_CHECK_SPAN(step_ci, dispatch_span)
-              << "MaterializeCommDomainScopes: device=r loop step must unwrap to ConstInt";
-          int64_t step = step_ci->value_;
-          INTERNAL_CHECK_SPAN(step == 1, dispatch_span)
-              << "MaterializeCommDomainScopes: device=r over a non-unit-step loop is not supported (step="
-              << step << ")";
-          INTERNAL_CHECK_SPAN(start >= 0 && stop_ci->value_ >= start, dispatch_span)
-              << "MaterializeCommDomainScopes: device=r loop range must be [0, N) with N>=0";
-          for (int64_t i = start; i < stop_ci->value_; ++i) desc.subset.insert(i);
+    auto loop = active_loops.find(v.get());
+    if (loop != active_loops.end()) {
+      const auto& fs = loop->second;
+      ExprPtr stop = UnwrapStopExpr(fs->stop_, var_defs, bound_cache);
+      if (auto stop_call = As<Call>(stop)) {
+        if (IsOp(stop_call, "pld.system.world_size") || IsOp(stop_call, "pld.system.num_workers")) {
+          CHECK_SPAN(host_owner || !IsOp(stop_call, "pld.system.world_size"), dispatch_span)
+              << "MaterializeCommDomainScopes: world_size is HOST-only; use num_workers at CLUSTER_0";
+          // A dynamic child-count stop covers all children only for [0, N)
+          // with unit step. In particular, an unproven start/step cannot be
+          // accepted merely because the stop is a topology query.
+          auto start = As<ConstInt>(UnwrapStopExpr(fs->start_, var_defs, bound_cache));
+          auto step = As<ConstInt>(UnwrapStopExpr(fs->step_, var_defs, bound_cache));
+          CHECK_SPAN(start && start->value_ == 0, dispatch_span)
+              << "MaterializeCommDomainScopes: dynamic full coverage requires loop start=0";
+          CHECK_SPAN(step && step->value_ == 1, dispatch_span)
+              << "MaterializeCommDomainScopes: dynamic full coverage requires loop step=1";
+          desc.is_all = true;
           return desc;
         }
-        throw pypto::ValueError(
-            "MaterializeCommDomainScopes: device=r loop bound must be ConstInt or pld.system.world_size()");
       }
+      if (auto stop_ci = As<ConstInt>(stop)) {
+        auto start_ci = As<ConstInt>(UnwrapStopExpr(fs->start_, var_defs, bound_cache));
+        INTERNAL_CHECK_SPAN(start_ci, dispatch_span)
+            << "MaterializeCommDomainScopes: worker=r loop start must unwrap to ConstInt";
+        int64_t start = start_ci->value_;
+        auto step_ci = As<ConstInt>(UnwrapStopExpr(fs->step_, var_defs, bound_cache));
+        INTERNAL_CHECK_SPAN(step_ci, dispatch_span)
+            << "MaterializeCommDomainScopes: worker=r loop step must unwrap to ConstInt";
+        int64_t step = step_ci->value_;
+        INTERNAL_CHECK_SPAN(step == 1, dispatch_span)
+            << "MaterializeCommDomainScopes: worker=r over a non-unit-step loop is not supported (step="
+            << step << ")";
+        INTERNAL_CHECK_SPAN(start >= 0 && stop_ci->value_ >= start, dispatch_span)
+            << "MaterializeCommDomainScopes: worker=r loop range must be [0, N) with N>=0";
+        if (start < stop_ci->value_) desc.intervals.emplace_back(start, stop_ci->value_ - 1);
+        return desc;
+      }
+      throw pypto::ValueError(
+          "MaterializeCommDomainScopes: worker=r loop bound must be ConstInt, pld.system.world_size() "
+          "or pld.system.num_workers()");
     }
     throw pypto::ValueError(
-        "MaterializeCommDomainScopes: device= Var is not the induction variable of any enclosing pl.range "
+        "MaterializeCommDomainScopes: worker= Var is not the induction variable of any enclosing "
+        "pl.range "
         "loop");
   }
   throw pypto::ValueError(
-      "MaterializeCommDomainScopes: device= expression must be ConstInt or the induction var of pl.range; "
+      "MaterializeCommDomainScopes: worker= expression must be ConstInt or the induction var of "
+      "pl.range; "
       "got "
       "an unsupported expression at " +
       dispatch_span.to_string());
@@ -298,21 +829,34 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
 /// each view Var passed positionally.
 class DispatchAnalyzer : public IRVisitor {
  public:
-  DispatchAnalyzer(const std::unordered_map<const Var*, WindowRecord>& view_to_window,
+  DispatchAnalyzer(const WindowIdentityGraph& identities,
+                   const std::unordered_map<const WindowBuffer*, AllocRecord*>& local_allocs,
                    const std::map<std::string, FunctionPtr>& chip_orchs,
-                   const std::unordered_map<const Var*, ExprPtr>& var_defs)
-      : view_to_window_(view_to_window), chip_orchs_(chip_orchs), var_defs_(var_defs) {}
+                   const std::unordered_map<const Var*, ExprPtr>& var_defs, bool host_owner)
+      : identities_(identities),
+        local_allocs_(local_allocs),
+        chip_orchs_(chip_orchs),
+        var_defs_(var_defs),
+        host_owner_(host_owner) {}
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    for_stack_.push_back(op);
+    // Index active induction variables so deeply nested dispatches do not scan
+    // the entire enclosing loop stack at every call. Restore shadowed entries.
+    auto previous = active_loops_.find(op->loop_var_.get());
+    ForStmtPtr saved = previous == active_loops_.end() ? nullptr : previous->second;
+    active_loops_[op->loop_var_.get()] = op;
     ++repeating_scope_depth_;
     IRVisitor::VisitStmt_(op);
     --repeating_scope_depth_;
-    for_stack_.pop_back();
+    if (saved) {
+      active_loops_[op->loop_var_.get()] = std::move(saved);
+    } else {
+      active_loops_.erase(op->loop_var_.get());
+    }
   }
 
   // WhileStmt carries no device-descriptor role (unlike ForStmt, which
-  // for_stack_ tracks for ResolveDeviceDescriptor), but it must still count
+  // active_loops_ tracks for ResolveDeviceDescriptor), but it must still count
   // toward repeating_scope_depth_ so the all_to_all_v loop-use guard in
   // AnalyzeCollective rejects a call nested in a while loop too.
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -322,50 +866,36 @@ class DispatchAnalyzer : public IRVisitor {
   }
 
   void AnalyzeDispatch(const CallPtr& op) {
-    if (!IsChipOrchDispatch(op, chip_orchs_)) return;
+    if (!IsAdjacentOrchDispatch(op, chip_orchs_)) return;
     ExprPtr device;
     for (const auto& [k, v] : op->attrs_) {
-      if (k == kAttrDevice) {
-        // attrs["device"] is stored as ExprPtr by N3 parser.
+      if (k == kAttrWorker) {
+        // attrs["worker"] is stored as ExprPtr by N3 parser.
         if (const auto* p = std::any_cast<ExprPtr>(&v)) device = *p;
         break;
       }
     }
     if (!device) return;
-    DeviceDescriptor desc = ResolveDeviceDescriptor(device, for_stack_, var_defs_, op->span_);
+    DeviceDescriptor desc =
+        ResolveDeviceDescriptor(device, active_loops_, var_defs_, bound_cache_, op->span_, host_owner_);
     for (const auto& arg : op->args_) {
-      auto arg_var = AsVarLike(arg);
-      if (!arg_var) continue;
-      auto window = ResolveWindowRecord(arg_var);
-      if (window) {
-        window->alloc->seen.push_back(desc);
-      }
+      if (auto* alloc = LocalAllocation(arg)) alloc->dispatch_coverage.Add(desc);
     }
   }
 
   [[nodiscard]] AllocRecord* ResolveWindowAlloc(const ExprPtr& expr, const std::string& op_name,
                                                 const char* role) {
-    // AsVarLike (not As<Var>): a loop-carried data/signal arg is an IterArg
-    // (ConvertToSSA runs first); ResolveWindowRecord follows its init value.
-    auto view_var = AsVarLike(expr);
-    INTERNAL_CHECK_SPAN(view_var, expr->span_)
-        << "MaterializeCommDomainScopes: " << op_name << " " << role << " must be a window view Var";
-    auto window = ResolveWindowRecord(view_var);
-    INTERNAL_CHECK_SPAN(window, expr->span_) << "MaterializeCommDomainScopes: " << op_name << " " << role
-                                             << " must be produced by pld.tensor.window";
-    return window->alloc;
+    auto* alloc = LocalAllocation(expr);
+    INTERNAL_CHECK_SPAN(alloc, expr->span_) << "MaterializeCommDomainScopes: " << op_name << " " << role
+                                            << " must be produced by pld.tensor.window";
+    return alloc;
   }
 
   // Nullable variant of ResolveWindowAlloc for operands that are window-bound
   // on the builtin rails but may legally stay plain Tensors on the InCore
   // composite rail (send_counts today): returns nullptr instead of failing
   // when the expression is not a pld.tensor.window view.
-  [[nodiscard]] AllocRecord* TryResolveWindowAlloc(const ExprPtr& expr) {
-    auto view_var = AsVarLike(expr);
-    if (!view_var) return nullptr;
-    auto window = ResolveWindowRecord(view_var);
-    return window ? window->alloc : nullptr;
-  }
+  [[nodiscard]] AllocRecord* TryResolveWindowAlloc(const ExprPtr& expr) { return LocalAllocation(expr); }
 
   void AnalyzeCollective(const CallPtr& op) {
     if (!op || !op->op_) return;
@@ -463,11 +993,11 @@ class DispatchAnalyzer : public IRVisitor {
 
   void VisitExpr_(const CallPtr& op) override {
     AnalyzeDispatch(op);
-    AnalyzeCollective(op);
+    if (host_owner_) AnalyzeCollective(op);
     IRVisitor::VisitExpr_(op);
   }
 
-  // A captured (`as tid`) chip-orch dispatch is a Submit; the ``device=`` attr
+  // A captured (`as tid`) chip-orch dispatch is a Submit; the ``worker=`` attr
   // it carries is analysed identically through the Call-shaped view.
   void VisitExpr_(const SubmitPtr& op) override {
     AnalyzeDispatch(SubmitToCallView(op));
@@ -477,51 +1007,20 @@ class DispatchAnalyzer : public IRVisitor {
   std::vector<CollectiveConsumer> collective_consumers;
 
  private:
-  [[nodiscard]] const WindowRecord* ResolveWindowRecord(const VarPtr& var) const {
-    std::unordered_set<const Var*> visited;
-    return ResolveWindowRecord(var, &visited);
+  AllocRecord* LocalAllocation(const ExprPtr& expr) const {
+    auto identity = identities_.Identity(expr);
+    auto found = local_allocs_.find(identity.get());
+    return found == local_allocs_.end() ? nullptr : found->second;
   }
 
-  [[nodiscard]] const WindowRecord* ResolveWindowRecord(const VarPtr& var,
-                                                        std::unordered_set<const Var*>* visited) const {
-    if (!var || !visited->insert(var.get()).second) return nullptr;
-    auto direct = view_to_window_.find(var.get());
-    if (direct != view_to_window_.end()) return &direct->second;
-
-    // An SSA loop carry is an IterArg with no AssignStmt RHS: resolve through
-    // its init value (AsVarLike + initValue_, mirroring InferTileMemorySpace
-    // #2547 — see .claude/rules/ir-kind-traits.md).
-    if (var->GetKind() == ObjectKind::IterArg) {
-      auto init = static_cast<const IterArg*>(var.get())->initValue_;
-      return init ? ResolveWindowRecord(AsVarLike(init), visited) : nullptr;
-    }
-
-    auto def_it = var_defs_.find(var.get());
-    if (def_it == var_defs_.end() || !def_it->second) return nullptr;
-    if (auto alias = AsVarLike(def_it->second)) {
-      return ResolveWindowRecord(alias, visited);
-    }
-    auto call = As<Call>(def_it->second);
-    if (call && IsTensorAllReduce(call) && !call->args_.empty()) {
-      return ResolveWindowRecord(AsVarLike(call->args_[0]), visited);
-    }
-    if (call && IsTensorAllToAll(call) && call->args_.size() > 1) {
-      return ResolveWindowRecord(AsVarLike(call->args_[1]), visited);
-    }
-    if (call && IsTensorAllGather(call) && call->args_.size() > 1) {
-      return ResolveWindowRecord(AsVarLike(call->args_[1]), visited);
-    }
-    if (call && IsTensorAllToAllV(call) && call->args_.size() > 1) {
-      return ResolveWindowRecord(AsVarLike(call->args_[1]), visited);
-    }
-    return nullptr;
-  }
-
-  const std::unordered_map<const Var*, WindowRecord>& view_to_window_;
+  const WindowIdentityGraph& identities_;
+  const std::unordered_map<const WindowBuffer*, AllocRecord*>& local_allocs_;
   const std::map<std::string, FunctionPtr>& chip_orchs_;
   const std::unordered_map<const Var*, ExprPtr>& var_defs_;
-  std::vector<ForStmtPtr> for_stack_;
+  std::unordered_map<const Var*, ForStmtPtr> active_loops_;
+  std::unordered_map<const Var*, ExprPtr> bound_cache_;
   int repeating_scope_depth_ = 0;
+  bool host_owner_;
 };
 
 /// A host-orchestration function in PyPTO is declared as either
@@ -547,337 +1046,230 @@ class DispatchAnalyzer : public IRVisitor {
          (func->role_.has_value() && *func->role_ == Role::Orchestrator);
 }
 
-/// Build a fresh Var with an updated DistributedTensorType whose
-/// ``window_buffer_`` now points to the constructed ``wb``.
-[[nodiscard]] VarPtr MintViewVar(const VarPtr& old_var, const WindowBufferPtr& wb) {
-  auto dt = As<DistributedTensorType>(old_var->GetType());
-  INTERNAL_CHECK_SPAN(dt, old_var->span_)
-      << "MaterializeCommDomainScopes: pld.tensor.window result Var should have DistributedTensorType";
-  // Preserve every field (shape / dtype / memref / tensor_view) and set
-  // window_buffer to the freshly-built ``wb``. ``pld.tensor.window`` outputs never
-  // carry memref / tensor_view today (parser-fresh views), but the full-fields
-  // ctor is the safe form.
-  auto new_type = std::make_shared<const DistributedTensorType>(dt->shape_, dt->dtype_, dt->memref_,
-                                                                dt->tensor_view_, std::make_optional(wb));
-  return std::make_shared<Var>(old_var->name_hint_, new_type, old_var->span_);
+[[nodiscard]] bool IsLocalDomainOwner(const FunctionPtr& func) {
+  if (!func || !func->level_.has_value()) return false;
+  if (*func->level_ != Level::HOST && *func->level_ != Level::CLUSTER_0) return false;
+  return func->func_type_ == FunctionType::Orchestration ||
+         (func->role_.has_value() && *func->role_ == Role::Orchestrator);
 }
 
-/// Build a fresh IterArg with an updated DistributedTensorType whose
-/// ``window_buffer_`` points to ``wb`` — a loop carry that views a window must
-/// share the window-buffer object with its init value / yield / return var
-/// (the typecheck verifier compares those by pointer identity).
-[[nodiscard]] IterArgPtr MintIterArgWithWb(const IterArgPtr& iter_arg, const WindowBufferPtr& wb) {
-  auto dt = As<DistributedTensorType>(iter_arg->GetType());
-  INTERNAL_CHECK_SPAN(dt, iter_arg->span_)
-      << "MaterializeCommDomainScopes: loop iter_arg should have DistributedTensorType";
-  auto new_type = std::make_shared<const DistributedTensorType>(dt->shape_, dt->dtype_, dt->memref_,
-                                                                dt->tensor_view_, std::make_optional(wb));
-  return std::make_shared<IterArg>(iter_arg->name_hint_, new_type, iter_arg->initValue_, iter_arg->span_);
-}
-
-/// Re-mint the Call that *defines* a re-typed view Var so its own result type
-/// carries the same ``window_buffer_`` back-reference.
-///
-/// ``transform_utils::Substitute`` rewrites Var *references* — including an
-/// AssignStmt's LHS — but never the result type of the expression on the RHS.
-/// Without this rewrite, every ``data = pld.tensor.window(...)`` ends the pass
-/// with ``var.type.window_buffer_`` set and ``value.type.window_buffer_`` still
-/// ``nullopt``, which violates the ``AssignTypeSymmetry`` contract (#1285) that
-/// an AssignStmt's two sides carry structurally equal types.
-///
-/// The rewrite only ever *adds* the back-reference: it rebuilds the Call type
-/// from the Call's own fields plus the Var's window buffer and keeps it only
-/// when that reconstruction is structurally equal to the Var's type, so a
-/// genuine shape / dtype / view disagreement is left alone to be reported
-/// rather than papered over.
-///
-/// Call-only is exhaustive here, not an oversight of ``Submit`` (see
-/// `pass-submit-awareness.md`): a Var enters ``view_subst`` only as a
-/// ``pld.tensor.window`` result, a collective result, or a loop carry over one
-/// of those, and the collector records all three from a ``Call`` RHS. A Submit
-/// returns a TASK_ID-augmented TupleType, which is not a window view type.
-class DefiningCallRetyper : public IRMutator {
- protected:
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    auto base = IRMutator::VisitStmt_(op);
-    auto assign = As<AssignStmt>(base);
-    if (!assign || !assign->var_ || !assign->value_) return base;
-
-    auto var_dt = As<DistributedTensorType>(assign->var_->GetType());
-    if (!var_dt || !var_dt->window_buffer_.has_value()) return base;
-
-    auto call = As<Call>(assign->value_);
-    if (!call) return base;
-    auto call_dt = As<DistributedTensorType>(call->GetType());
-    if (!call_dt || structural_equal(call_dt, var_dt)) return base;
-
-    auto retyped = std::make_shared<const DistributedTensorType>(
-        call_dt->shape_, call_dt->dtype_, call_dt->memref_, call_dt->tensor_view_, var_dt->window_buffer_);
-    if (!structural_equal(CloneTypeWithoutMemRef(retyped), CloneTypeWithoutMemRef(var_dt))) return base;
-
-    auto new_call =
-        std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, retyped, call->span_);
-    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
-  }
+struct PendingDomain {
+  DeviceDescriptor desc;
+  std::vector<WindowBufferPtr> slots;
+  std::set<std::string> names;
+  Span span;
 };
 
-/// Follow a Var's def chain (through window / allreduce / all_to_all / allgather /
-/// all_to_all_v aliases and loop-carry init values) to the alloc-window-buffer it
-/// views, returning that alloc's ``WindowBuffer`` (the SAME object the scope slot
-/// holds). Mirrors DispatchAnalyzer::ResolveWindowRecord; used to extend the view
-/// substitution to collective results and loop carries so every DistributedTensorType
-/// denoting the same window shares one WindowBuffer object.
-[[nodiscard]] const WindowBufferPtr* ResolveWindowBufferPtr(const VarPtr& var,
-                                                            const AllocAndWindowCollector& c) {
-  std::unordered_set<const Var*> visited;
-  VarPtr cur = var;
-  while (cur && visited.insert(cur.get()).second) {
-    auto it = c.view_to_window.find(cur.get());
-    if (it != c.view_to_window.end()) return &it->second.alloc->wb;
-    if (cur->GetKind() == ObjectKind::IterArg) {
-      auto init = static_cast<const IterArg*>(cur.get())->initValue_;
-      cur = init ? AsVarLike(init) : nullptr;
-      continue;
-    }
-    auto def_it = c.var_defs.find(cur.get());
-    if (def_it == c.var_defs.end() || !def_it->second) return nullptr;
-    const ExprPtr& def = def_it->second;
-    if (auto alias = AsVarLike(def)) {
-      cur = alias;
-      continue;
-    }
-    auto call = As<Call>(def);
-    if (call && IsOp(call, "pld.tensor.window") && !call->args_.empty()) {
-      cur = AsVarLike(call->args_[0]);
-      continue;
-    }
-    if (call && IsTensorAllReduce(call) && !call->args_.empty()) {
-      cur = AsVarLike(call->args_[0]);
-      continue;
-    }
-    if (call && (IsOp(call, "pld.tensor.all_to_all") || IsOp(call, "pld.tensor.allgather")) &&
-        call->args_.size() > 1) {
-      cur = AsVarLike(call->args_[1]);
-      continue;
-    }
-    if (call && IsOp(call, "pld.tensor.all_to_all_v") && call->args_.size() > 1) {
-      cur = AsVarLike(call->args_[1]);
-      continue;
-    }
-    return nullptr;
+struct LocalWindowPlan {
+  AllocAndWindowCollector collector;
+  std::vector<PendingDomain> domains;
+};
+
+// Local allocation collection and scope planning are separate from rewriting.
+// Graph propagation can therefore see all owners before any child signature is
+// rebuilt; lexical Program order cannot select a first caller or clone a scope.
+void PrepareLocalWindows(const FunctionPtr& func, LocalWindowPlan& plan) {
+  plan.collector.VisitStmt(func->body_);
+  std::unordered_set<const AllocRecord*> viewed;
+  for (const auto& window : plan.collector.windows) viewed.insert(window.alloc);
+  for (const auto& rec : plan.collector.allocs) {
+    INTERNAL_CHECK_SPAN(viewed.count(rec.get()), rec->span)
+        << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer '" << rec->name
+        << "' has no pld.tensor.window materialisation (dead allocation)";
+    rec->wb = std::make_shared<const WindowBuffer>(rec->ptr_var, rec->size_expr, false, false, rec->span);
   }
-  return nullptr;
 }
 
-/// Process one host_orch function: identify allocs/windows/dispatches,
-/// construct WindowBuffer instances, rewrite the body to substitute view Vars
-/// with type-updated copies, and wrap the body in a chain of
-/// ``CommDomainScopeStmt`` (one per inferred comm domain, outer = first
-/// declared, inner = last declared).
-FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string, FunctionPtr>& chip_orchs) {
-  // Idempotence: if this function's body is already wrapped in a
-  // CommDomainScopeStmt, the pass has run on it before — skip to avoid
-  // double-wrapping the body and minting a fresh set of WindowBuffer
-  // instances that would shadow the existing ones on every view.
-  if (func->body_ && As<CommDomainScopeStmt>(func->body_)) {
-    return func;
+void InferLocalDomains(const FunctionPtr& func, LocalWindowPlan& plan,
+                       const std::map<std::string, FunctionPtr>& children,
+                       const WindowIdentityGraph& identities) {
+  auto& collector = plan.collector;
+  if (collector.allocs.empty()) return;
+  std::unordered_map<const WindowBuffer*, AllocRecord*> local_allocs;
+  for (const auto& rec : collector.allocs) local_allocs.emplace(rec->wb.get(), rec.get());
+  CoverageSnapshots coverage;
+  DispatchAnalyzer analyzer(identities, local_allocs, children, collector.var_defs,
+                            *func->level_ == Level::HOST);
+  analyzer.VisitStmt(func->body_);
+  for (const auto& rec : collector.allocs) {
+    if (rec->dispatch_coverage.observed) rec->coverage = coverage.Intern(rec->dispatch_coverage.Freeze());
   }
 
-  StmtPtr materialization_body = func->body_;
-
-  AllocAndWindowCollector collector;
-  collector.VisitStmt(materialization_body);
-
-  if (collector.allocs.empty()) {
-    // No window-buffer allocations in this host_orch — nothing to do.
-    return func;
-  }
-
-  // Phase 2: record device-descriptor evidence from dispatch sites.
-  DispatchAnalyzer analyzer(collector.view_to_window, chip_orchs, collector.var_defs);
-  analyzer.VisitStmt(materialization_body);
-
-  // Host-level collectives do not carry their own device= selector. Their
-  // signal buffer is a user-visible window slot, so inherit paired data/target
-  // coverage when present. Barrier-only consumers keep signal coverage from
-  // dispatch sites, or fall back to the full comm-domain device set.
+  // Signal synthesis and collective-domain alignment remain HOST-only. Each
+  // entry is a real local slot; inherited formals never enter this index.
   for (const auto& consumer : analyzer.collective_consumers) {
     INTERNAL_CHECK_SPAN(consumer.signal_alloc, consumer.span)
         << "MaterializeCommDomainScopes: invalid collective consumer bookkeeping";
     if (consumer.data_alloc) {
-      INTERNAL_CHECK_SPAN(!consumer.data_alloc->seen.empty(), consumer.span)
+      INTERNAL_CHECK_SPAN(consumer.data_alloc->coverage.has_value(), consumer.span)
           << "MaterializeCommDomainScopes: collective data/target buffer has no inferred comm-domain "
              "coverage to share with its signal buffer";
-      consumer.signal_alloc->seen.insert(consumer.signal_alloc->seen.end(), consumer.data_alloc->seen.begin(),
-                                         consumer.data_alloc->seen.end());
-      continue;
-    }
-    // Barrier-only consumer: if no dispatch sites registered coverage for the
-    // signal window, surface the missing coverage as a user-facing diagnostic
-    // rather than silently widening to the full comm domain (which would cause
-    // a cross-rank hang for device-subset barriers).
-    CHECK_SPAN(!consumer.signal_alloc->seen.empty(), consumer.span)
-        << "MaterializeCommDomainScopes: pld.tensor.barrier signal buffer has no inferred "
-           "comm-domain coverage — add a device= annotation or ensure the signal window "
-           "is consumed by a device-tagged chip dispatch";
-  }
-
-  // Phase 4: each alloc must have at least one window AND at least one
-  // consuming dispatch — otherwise it is dead and downstream codegen has
-  // nothing to point a CommDomain buffer slot at.
-  std::unordered_map<const Var*, std::vector<const WindowRecord*>> allocs_with_windows;
-  for (const auto& w : collector.windows) {
-    allocs_with_windows[w.alloc->ptr_var.get()].push_back(&w);
-  }
-  for (const auto& rec : collector.allocs) {
-    INTERNAL_CHECK_SPAN(!allocs_with_windows[rec->ptr_var.get()].empty(), rec->span)
-        << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer '" << rec->name
-        << "' has no pld.tensor.window materialisation (dead allocation)";
-    INTERNAL_CHECK_SPAN(!rec->seen.empty(), rec->span)
-        << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer '" << rec->name
-        << "' is not consumed by any chip_orch dispatch";
-  }
-
-  // Phase 4: construct WindowBuffer for each alloc. Final descriptor merging
-  // happens in Phase 6 below (per-group), so we don't precompute it here.
-  for (auto& rec : collector.allocs) {
-    rec->wb = std::make_shared<const WindowBuffer>(rec->ptr_var, rec->size_expr,
-                                                   /*load_from_host=*/false,
-                                                   /*store_to_host=*/false, rec->span);
-  }
-
-  // Phase 5: build var substitution map for every pld.tensor.window result Var,
-  // every allreduce result Var (aliases its data window), and every loop carry
-  // (iter_arg / return_var) whose lineage is a window. The typecheck verifier
-  // compares loop-carry types (initValue / iter_arg / yield / return_var) by
-  // WindowBuffer pointer identity, so all DistributedTensorTypes denoting the
-  // same window must share one WindowBuffer object after substitution.
-  std::unordered_map<const Var*, VarPtr> view_subst;
-  for (const auto& w : collector.windows) {
-    view_subst[w.old_view_var.get()] = MintViewVar(w.old_view_var, w.alloc->wb);
-  }
-  for (const auto& [result_var, data_var] : collector.collective_results) {
-    if (!result_var || !data_var) continue;
-    if (const auto* wb = ResolveWindowBufferPtr(data_var, collector)) {
-      if (view_subst.find(result_var.get()) == view_subst.end()) {
-        view_subst[result_var.get()] = MintViewVar(result_var, *wb);
-      }
-    }
-  }
-  auto sync_loop_carries = [&collector, &view_subst](const std::vector<IterArgPtr>& iter_args,
-                                                     const std::vector<VarPtr>& return_vars) {
-    for (size_t i = 0; i < iter_args.size(); ++i) {
-      const auto& ia = iter_args[i];
-      if (!ia || !ia->initValue_) continue;
-      const auto* wb = ResolveWindowBufferPtr(AsVarLike(ia->initValue_), collector);
-      if (!wb) continue;
-      if (view_subst.find(ia.get()) == view_subst.end()) {
-        view_subst[ia.get()] = MintIterArgWithWb(ia, *wb);
-      }
-      if (i < return_vars.size() && return_vars[i] &&
-          view_subst.find(return_vars[i].get()) == view_subst.end()) {
-        view_subst[return_vars[i].get()] = MintViewVar(return_vars[i], *wb);
-      }
-    }
-  };
-  for (const auto& fs : collector.loops) sync_loop_carries(fs->iter_args_, fs->return_vars_);
-  for (const auto& ws : collector.whiles) sync_loop_carries(ws->iter_args_, ws->return_vars_);
-
-  // Phase 6: cluster allocs into pending domain entries by merged descriptor
-  // (alloc-order within a domain). Use a vector for deterministic order: scan
-  // collector.allocs in source order and append to the first matching entry
-  // or create a new one. `desc_to_index` maps a merged descriptor to its
-  // `pending` slot (O(log domains) via DeviceDescriptor::operator<, per
-  // pass-complexity.md — a per-alloc linear scan of `pending` would make this
-  // Phase O(allocs^2) for programs with many distinct comm domains). Store
-  // indices, not pointers, into the map: `pending.push_back` may reallocate
-  // and invalidate any previously-taken `PendingDomain*`.
-  struct PendingDomain {
-    DeviceDescriptor desc;
-    std::vector<WindowBufferPtr> slots;
-    std::set<std::string> names;  // sanity check
-    Span span;
-  };
-  std::vector<PendingDomain> pending;
-  std::map<DeviceDescriptor, size_t> desc_to_index;
-  for (const auto& rec : collector.allocs) {
-    DeviceDescriptor merged;
-    for (const auto& d : rec->seen) merged.Merge(d);
-    auto it = desc_to_index.find(merged);
-    size_t index;
-    if (it == desc_to_index.end()) {
-      index = pending.size();
-      desc_to_index.emplace(merged, index);
-      pending.push_back({merged, {}, {}, rec->span});
+      consumer.signal_alloc->coverage =
+          coverage.Merge(consumer.signal_alloc->coverage.value_or(0), *consumer.data_alloc->coverage);
     } else {
-      index = it->second;
+      CHECK_SPAN(consumer.signal_alloc->coverage.has_value(), consumer.span)
+          << "MaterializeCommDomainScopes: pld.tensor.barrier signal buffer has no inferred "
+             "comm-domain coverage — add a worker= annotation or ensure the signal window "
+             "is consumed by a device-tagged chip dispatch";
     }
-    PendingDomain& tgt = pending[index];
-    INTERNAL_CHECK_SPAN(tgt.names.insert(rec->name).second, rec->span)
+  }
+
+  // Canonical IDs group identical descriptors without comparing large sets for
+  // every allocation. Declaration order within each group remains unchanged.
+  std::unordered_map<size_t, size_t> desc_to_index;
+  for (const auto& rec : collector.allocs) {
+    INTERNAL_CHECK_SPAN(rec->coverage.has_value(), rec->span)
+        << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer '" << rec->name
+        << "' is not consumed by any chip_orch dispatch or adjacent HOST dispatch";
+    auto [found, inserted] = desc_to_index.emplace(*rec->coverage, plan.domains.size());
+    if (inserted) plan.domains.push_back({coverage.Get(*rec->coverage), {}, {}, rec->span});
+    auto& domain = plan.domains[found->second];
+    INTERNAL_CHECK_SPAN(domain.names.insert(rec->name).second, rec->span)
         << "MaterializeCommDomainScopes: duplicate allocation name '" << rec->name
         << "' within the same comm domain";
-    tgt.slots.push_back(rec->wb);
+    domain.slots.push_back(rec->wb);
   }
-
-  // Phase 7: rewrite host_orch body so every reference to a pld.tensor.window result
-  // Var picks up the type-updated copy. The base IRMutator handles all uses;
-  // Substitute is the wrapper that does exactly this transformation.
-  StmtPtr new_body = materialization_body;
-  if (!view_subst.empty()) {
-    new_body = transform_utils::Substitute(new_body, view_subst);
-    // Substitute rewrites references only; bring each re-typed Var's defining
-    // Call along so both sides of the assignment agree (#1285).
-    DefiningCallRetyper retyper;
-    new_body = retyper.VisitStmt(new_body);
-  }
-
-  // Phase 8: wrap new_body in nested CommDomainScopeStmts. Outer = first
-  // declared domain, inner = last. ``name_hint_`` is ``"comm_d<n>"`` so
-  // DistributedCodegen emits the matching ``__comm_d<n>`` handle var.
-  //
-  // Build inner-out: start from the substituted body, wrap once per group
-  // in reverse iteration order.
-  for (size_t i = pending.size(); i-- > 0;) {
-    auto& g = pending[i];
-    std::string name_hint = "comm_d" + std::to_string(i);
-    new_body = std::make_shared<const CommDomainScopeStmt>(g.desc.ToDevices(), std::move(g.slots),
-                                                           std::move(name_hint), new_body, g.span);
-  }
-
-  if (new_body.get() == func->body_.get()) return func;
-  auto new_func = MutableCopy(func);
-  new_func->body_ = new_body;
-  return new_func;
 }
 
+/// One final mutation uses the shared IRMutator's substitution/type plumbing.
+/// Call/Submit attrs, deps, launch operands and predicates are rewritten by the
+/// base mutator. Only the result type is changed here; no Submit becomes a Call.
+/// As in the previous DefiningCallRetyper, result shape/dtype/view come from the
+/// defining expression itself, so identity propagation cannot hide a mismatch.
+class WindowIdentityRewriter : public IRMutator {
+ public:
+  WindowIdentityRewriter(const WindowIdentityGraph& identities,
+                         const std::unordered_map<const Function*, std::unique_ptr<LocalWindowPlan>>& plans)
+      : identities_(identities), plans_(plans) {}
+
+  FunctionPtr VisitFunction(const FunctionPtr& func) override {
+    auto plan = plans_.find(func.get());
+    if (!identities_.FunctionNeedsRewrite(func) && (plan == plans_.end() || plan->second->domains.empty()))
+      return func;
+    auto params = func->params_;
+    bool changed = false;
+    for (auto& param : params) {
+      auto fresh = AsVarLike(VisitExpr(param));
+      changed |= fresh.get() != param.get();
+      param = std::move(fresh);
+    }
+    auto body = VisitStmt(func->body_);
+    auto types = identities_.RewriteReturns(func);
+    for (size_t i = 0; i < types.size(); ++i) {
+      types[i] = RemapTypeViaVisitor(types[i]);
+      changed |= types[i].get() != func->return_types_[i].get();
+    }
+    auto found = plans_.find(func.get());
+    if (found != plans_.end()) {
+      const auto& domains = found->second->domains;
+      for (size_t i = domains.size(); i-- > 0;) {
+        const auto& domain = domains[i];
+        body = std::make_shared<const CommDomainScopeStmt>(domain.desc.ToDevices(), domain.slots,
+                                                           "comm_d" + std::to_string(i), body, domain.span);
+      }
+    }
+    changed |= body.get() != func->body_.get();
+    // Match the base mutator's type-based attribute handling after parameter
+    // substitutions are known. Preserve every ordinary attribute unchanged.
+    auto attrs = func->attrs_;
+    for (auto& [key, value] : attrs) {
+      auto remapped = MapAttrExprs(value, [this](const ExprPtr& expr) { return VisitExpr(expr); });
+      if (remapped.has_value()) {
+        value = std::move(*remapped);
+        changed = true;
+      }
+    }
+    if (!changed) return func;
+    auto result = MutableCopy(func);
+    result->params_ = std::move(params);
+    result->return_types_ = std::move(types);
+    result->body_ = std::move(body);
+    result->attrs_ = std::move(attrs);
+    return result;
+  }
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto found = var_remap_.find(op.get());
+    if (found != var_remap_.end()) return found->second;
+    auto type = identities_.RewriteType(op, RemapTypeViaVisitor(op->GetType()));
+    if (type.get() == op->GetType().get()) return op;
+    auto fresh = std::make_shared<const Var>(op->name_hint_, type, op->span_);
+    var_remap_[op.get()] = fresh;
+    return fresh;
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto found = var_remap_.find(op.get());
+    if (found != var_remap_.end()) return found->second;
+    auto init = VisitExpr(op->initValue_);
+    auto type = identities_.RewriteType(op, RemapTypeViaVisitor(op->GetType()));
+    if (init.get() == op->initValue_.get() && type.get() == op->GetType().get()) return op;
+    auto fresh = std::make_shared<const IterArg>(op->name_hint_, type, init, op->span_);
+    var_remap_[op.get()] = fresh;
+    return fresh;
+  }
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto result = As<Call>(IRMutator::VisitExpr_(op));
+    auto type = identities_.RewriteType(op, result->GetType());
+    if (type.get() == result->GetType().get()) return result;
+    return std::make_shared<const Call>(result->op_, result->args_, result->kwargs_, result->attrs_,
+                                        std::move(type), result->span_);
+  }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    auto result = As<Submit>(IRMutator::VisitExpr_(op));
+    auto type = identities_.RewriteType(op, result->GetType());
+    if (type.get() == result->GetType().get()) return result;
+    return std::make_shared<const Submit>(result->op_, result->args_, result->deps_, result->kwargs_,
+                                          result->attrs_, std::move(type), result->span_, result->core_num_,
+                                          result->sync_start_, result->allow_early_resolve_,
+                                          result->predicate_);
+  }
+
+ private:
+  const WindowIdentityGraph& identities_;
+  const std::unordered_map<const Function*, std::unique_ptr<LocalWindowPlan>>& plans_;
+};
 }  // namespace
 
 namespace pass {
 
 Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Index chip-level Orchestration functions by name so the dispatch
-    // analyzer can recognise host → chip Calls.
+    // Index adjacent child dispatches once. A CHIP Graph remains a task of a
+    // CHIP entry, not a HOST dispatch target.
     std::map<std::string, FunctionPtr> chip_orchs;
+    std::map<std::string, FunctionPtr> host_orchs;
+    std::unordered_map<const Function*, std::unique_ptr<LocalWindowPlan>> plans;
     for (const auto& [gv, func] : program->functions_) {
       if (IsChipOrch(func)) chip_orchs[func->name_] = func;
-    }
-
-    std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
-    bool modified = false;
-
-    for (const auto& [gvar, func] : program->functions_) {
-      if (!IsHostOrch(func)) {
-        new_functions[gvar] = func;
-        continue;
+      if (IsHostOrch(func)) host_orchs[func->name_] = func;
+      if (IsLocalDomainOwner(func)) {
+        auto plan = std::make_unique<LocalWindowPlan>();
+        PrepareLocalWindows(func, *plan);
+        plans.emplace(func.get(), std::move(plan));
       }
-      auto new_func = ProcessHostOrch(func, chip_orchs);
-      new_functions[gvar] = new_func;
-      if (new_func.get() != func.get()) modified = true;
     }
-
-    if (!modified) return program;
-    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+    WindowIdentityGraph identities(program);
+    for (const auto& [gvar, func] : program->functions_) {
+      auto found = plans.find(func.get());
+      if (found == plans.end()) continue;
+      for (const auto& window : found->second->collector.windows) {
+        identities.SeedLocal(window.old_view_var, window.alloc->wb);
+        identities.SeedLocal(window.window_call, window.alloc->wb);
+      }
+    }
+    identities.Propagate();
+    for (const auto& [gvar, func] : program->functions_) {
+      auto found = plans.find(func.get());
+      if (found == plans.end()) continue;
+      InferLocalDomains(func, *found->second, *func->level_ == Level::HOST ? chip_orchs : host_orchs,
+                        identities);
+    }
+    WindowIdentityRewriter rewriter(identities, plans);
+    return rewriter.VisitProgram(program);
   };
 
   return CreateProgramPass(pass_func, "MaterializeCommDomainScopes", kMaterializeCommDomainScopesProperties);
@@ -888,20 +1280,52 @@ Pass MaterializeCommDomainScopes() {
 // ============================================================================
 // CommDomainScopesMaterialized property verifier
 //
-// Walks each host_orch function body looking for ``CommDomainScopeStmt``s and
+// Walks every function signature/body looking for window uses and owner scopes;
 // asserts: (a) ``slots_`` is non-empty (an empty domain would emit
 // ``window_size=0`` and the runtime would reject it); (b) every slot is
 // non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
-// scope program-wide (cross-scope identity uniqueness).
+// scope program-wide (cross-scope identity uniqueness); (d) every non-null
+// DistributedTensorType window reference has a scope owner, including formals.
 // ============================================================================
 
 class CommDomainScopeCollector : public IRVisitor {
  public:
   std::vector<CommDomainScopeStmtPtr> scopes;
+  std::vector<std::pair<WindowBufferPtr, Span>> referenced_windows;
+
+  void VisitFunction(const FunctionPtr& func) override {
+    IRVisitor::VisitFunction(func);
+    for (const auto& type : func->return_types_) CollectType(type, func->span_);
+  }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!expr || !visited_exprs_.insert(expr.get()).second) return;
+    CollectType(expr->GetType(), expr->span_);
+    IRVisitor::VisitExpr(expr);
+  }
+
   void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
     scopes.push_back(op);
+    VisitScopeAttrs(op);
     if (op->body_) VisitStmt(op->body_);
   }
+
+ private:
+  void CollectType(const TypePtr& type, const Span& span) {
+    if (!type || !visited_types_.insert(type.get()).second) return;
+    if (auto dt = As<DistributedTensorType>(type)) {
+      if (dt->window_buffer_.has_value() && *dt->window_buffer_) {
+        referenced_windows.emplace_back(*dt->window_buffer_, span);
+      }
+    } else if (auto tuple = As<TupleType>(type)) {
+      for (const auto& field : tuple->types_) CollectType(field, span);
+    }
+  }
+
+  // Types and SSA values are shared DAG nodes. Memoize both so signatures,
+  // tuple projections and repeated uses do not repeatedly traverse metadata.
+  std::unordered_set<const Expr*> visited_exprs_;
+  std::unordered_set<const Type*> visited_types_;
 };
 
 class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier {
@@ -912,7 +1336,7 @@ class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier
     if (!program) return;
     CommDomainScopeCollector collector;
     for (const auto& [gvar, func] : program->functions_) {
-      if (func && func->body_) collector.VisitStmt(func->body_);
+      if (func) collector.VisitFunction(func);
     }
     std::unordered_map<const WindowBuffer*, const CommDomainScopeStmt*> first_seen;
     for (const auto& scope : collector.scopes) {
@@ -946,12 +1370,21 @@ class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier
         }
       }
     }
+    // Resolve references only after indexing every scope in the program: a
+    // child's typed formal may precede its owner's function in lexical order.
+    // Unbound nullable formals deliberately contribute no reference here.
+    for (const auto& [window, span] : collector.referenced_windows) {
+      if (first_seen.count(window.get())) continue;
+      diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
+                               "DistributedTensorType references orphan WindowBuffer '" + window->name_hint_ +
+                                   "' with no owning CommDomainScopeStmt",
+                               span);
+    }
   }
 };
 
 PropertyVerifierPtr CreateCommDomainScopesMaterializedPropertyVerifier() {
   return std::make_shared<CommDomainScopesMaterializedPropertyVerifierImpl>();
 }
-
 }  // namespace ir
 }  // namespace pypto

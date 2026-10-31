@@ -30,13 +30,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import numpy as np
 import torch
 
+from . import _distributed_support
+from ._distributed_support import (
+    _DISPATCH_PROGRAM_FILE,
+    _ChipCallables,
+    _reset_dfx_dispatch_state,
+)
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
 
 logger = logging.getLogger(__name__)
+
+# Keep schema-3 generated imports and external helper callers compatible while
+# the canonical dispatch logic remains portable under an artifact namespace.
+_dfx_rank_label = _distributed_support._dfx_rank_label
+_record_dispatch_program = _distributed_support._record_dispatch_program
+_resolve_chip_worker = _distributed_support._resolve_chip_worker
+_submit_chip = _distributed_support._submit_chip
 
 if TYPE_CHECKING:
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
@@ -49,16 +61,15 @@ if TYPE_CHECKING:
 # simpler Tensor → torch.Tensor conversion
 # ---------------------------------------------------------------------------
 
-_DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
-    "FLOAT32": (ctypes.c_float, torch.float32),
-    "FLOAT16": (ctypes.c_uint8, torch.float16),
-    "BFLOAT16": (ctypes.c_uint8, torch.bfloat16),
-    "INT8": (ctypes.c_int8, torch.int8),
-    "INT16": (ctypes.c_int16, torch.int16),
-    "INT32": (ctypes.c_int32, torch.int32),
-    "INT64": (ctypes.c_int64, torch.int64),
-    "UINT8": (ctypes.c_uint8, torch.uint8),
-}
+_tensor_from_continuous = _distributed_support._tensor_from_continuous
+
+
+def _require_supported_program(compiled: Any) -> None:
+    """Reject actual L4 artifacts while retaining internal HOST duck typing."""
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+    if isinstance(compiled, DistributedCompiledProgram):
+        compiled._require_supported_execution()
 
 
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
@@ -258,67 +269,6 @@ class _RetainedDomainLease:
         return False
 
 
-# Reached only through function-scope lazy imports (pyright's unused analysis
-# discounts cross-module references to private symbols).
-def _tensor_from_continuous(ct: Any) -> torch.Tensor:  # pyright: ignore[reportUnusedFunction]
-    """Convert a mapped wire arg (or legacy chip tensor) to torch, zero-copy.
-
-    Current simpler Python SubWorkers receive ``MappedArg`` objects and expose
-    the view origin through ``arg.buffer``. The explicit ``data`` pointer path
-    is retained narrowly for older/direct chip-tensor callers.
-
-    For dtypes that ``torch.from_numpy`` cannot accept directly (FP16/BF16),
-    we view the buffer as raw bytes (uint8) and reinterpret with
-    ``torch.Tensor.view(dtype)`` — a zero-copy bit-cast that preserves the
-    shared-memory aliasing required for ``Out``/``InOut`` parameters.
-    """
-    # ``str(ct.dtype)`` yields ``"DataType.FLOAT32"``; strip the enum prefix
-    # to match the bare type names used as keys in ``_DTYPE_MAP``.
-    dtype_str = str(ct.dtype)
-    dtype_key = dtype_str.rsplit(".", 1)[-1]
-    if dtype_key.isdecimal():
-        from simpler.task_interface import DataType  # noqa: PLC0415
-
-        dtype_key = DataType(int(dtype_key)).name
-    try:
-        c_type, torch_dtype = _DTYPE_MAP[dtype_key]
-    except KeyError as exc:
-        raise TypeError(
-            f"Unsupported simpler Tensor dtype: {dtype_str!r}. "
-            f"Add an explicit mapping in _DTYPE_MAP. "
-            f"Known dtypes: {sorted(_DTYPE_MAP)}"
-        ) from exc
-
-    n_elements = 1
-    for s in ct.shapes:
-        n_elements *= s
-
-    # Compute the buffer length in units of c_type, then in elements of torch_dtype.
-    element_bytes = ctypes.sizeof(c_type)
-    torch_bytes = torch.tensor([], dtype=torch_dtype).element_size()
-    n_c_elements = n_elements * torch_bytes // element_bytes
-
-    if hasattr(ct, "buffer"):
-        strides = tuple(int(s) for s in ct.strides)
-        shapes = tuple(int(s) for s in ct.shapes)
-        span = 1 + sum((shape - 1) * stride for shape, stride in zip(shapes, strides, strict=True))
-        t = torch.frombuffer(ct.buffer, dtype=torch_dtype, count=span)
-        return torch.as_strided(t, size=shapes, stride=strides)
-    if not hasattr(ct, "data"):
-        raise TypeError(
-            "Expected a simpler MappedArg with .buffer or a legacy chip tensor with .data, "
-            f"got {type(ct).__name__}"
-        )
-
-    arr = np.ctypeslib.as_array(ctypes.cast(ct.data, ctypes.POINTER(c_type)), shape=(n_c_elements,))
-    # torch's stubs leave from_numpy's ndarray item-type parameter unresolved.
-    t = torch.from_numpy(arr)  # pyright: ignore[reportUnknownMemberType]
-    if t.dtype != torch_dtype:
-        # view(dtype) reinterprets the bytes without copying — preserves shared memory.
-        t = t.view(torch_dtype)
-    return t.reshape(ct.shapes)
-
-
 def _load_generated_module(path: Path) -> Any:
     """Dynamically load a generated Python module from *path*."""
     module_name = f"_pypto_generated.{path.stem}"
@@ -377,18 +327,6 @@ def _collect_program_swimlane(compiled: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _ChipCallables(dict[str, Any]):
-    """Chip callables (or registered handles) with their tensor transfer contracts."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.host_tensor_indices: dict[str, frozenset[int]] = {}
-
-    def add(self, name: str, value: Any, config: dict[str, Any]) -> None:
-        self[name] = value
-        self.host_tensor_indices[name] = frozenset(config.get("host_tensor_indices", ()))
-
-
 def add_chip_tensor_arg(
     args: Any,
     worker: Any,
@@ -398,18 +336,12 @@ def add_chip_tensor_arg(
     name: str,
     index: int,
 ) -> None:
-    """Pack a chip argument using the callee's emitted host-control contract."""
+    """Use canonical packing with the parent's DeviceTensor provenance boundary."""
     from .tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-    host_slots = callables.host_tensor_indices.get(name, ()) if isinstance(callables, _ChipCallables) else ()
-    if index in host_slots:
-        from simpler.buffer import TensorTransfer  # noqa: PLC0415
-
-        if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu":
-            raise ValueError(f"Chip {name!r} host control tensor slot {index} requires a CPU tensor")
-        args.add_tensor(make_tensor_arg(worker, tensor), tag, transfer=TensorTransfer.NONE)
-    else:
-        args.add_tensor(make_tensor_arg(worker, tensor), tag)
+    _distributed_support.add_chip_tensor_arg(
+        args, worker, tensor, tag, callables, name, index, tensor_converter=make_tensor_arg
+    )
 
 
 def _assemble_chip_callables(
@@ -423,6 +355,7 @@ def _assemble_chip_callables(
     it works identically for a freshly-compiled program and one reconstructed via
     :meth:`DistributedCompiledProgram.from_dir` (the ``runtime_dir`` replay path).
     """
+    _require_supported_program(compiled)
     artifact_runtime = vars(compiled).get("_artifact_runtime")
     if artifact_runtime is not None:
         chips = artifact_runtime.load()
@@ -886,7 +819,7 @@ _DISPATCH_DIR_GLOB = "d[0-9]*"
 # *what* it ran, and a kernel's ``func_id`` only means something within one
 # ``next_levels/<program>`` — so naming a dispatch's tasks needs this marker
 # (issue #2169).
-_DISPATCH_PROGRAM_FILE = "dispatch_program.json"
+# The marker constant is imported from the canonical support module above.
 
 # Written by the ChipWorker child into every capture directory it creates. The
 # child numbers captures per *process* (``local_capture_index``), not per run, so
@@ -899,139 +832,6 @@ _DISPATCH_IDENTITY_FILE = "dispatch_identity.json"
 # The dep_gen pass's task graph. The converter needs it for dependency edges and
 # defaults to the one beside the records — which the two-pass split apart.
 _DEPS_JSON_FILE = "deps.json"
-
-
-def _dfx_rank_label(worker: int) -> str:
-    """Directory name namespacing one card's DFX artifacts.
-
-    Every dispatch names a concrete chip by the time it reaches here (see
-    :func:`_resolve_chip_worker`), so the label is always the chip's own rank
-    and matches :data:`_RANK_DIR_GLOB`.
-    """
-    return f"rank{worker}"
-
-
-def _resolve_chip_worker(orch: Any, worker: int | None) -> int:
-    """Pick the chip a dispatch runs on.
-
-    A ``device=``-pinned dispatch arrives with its rank and is returned as is.
-    A comm-less dispatch arrives as ``None``: it expresses no affinity, but the
-    runtime requires an exact target — simpler #1436 made ``worker`` a required,
-    non-negative NEXT_LEVEL id and removed the "unconstrained" mode where the
-    scheduler picked an idle worker itself. Those dispatches are handed out
-    round-robin over the program's chips in submit order, so a host_orch with
-    one comm-less dispatch per chip still spreads across them (and does so
-    deterministically, unlike the old idle-pool pick).
-
-    The chip count is stamped on ``orch`` by ``_dispatch.orch_fn``; without it
-    (a caller that bypassed ``orch_fn``) every comm-less dispatch falls back to
-    chip 0, which always exists.
-    """
-    if worker is not None:
-        return worker
-    chip_count = max(1, int(getattr(orch, "_pypto_chip_count", 1)))
-    seq = getattr(orch, "_pypto_commless_seq", None)
-    if seq is None:
-        seq = 0
-    orch._pypto_commless_seq = seq + 1
-    return seq % chip_count
-
-
-def _reset_dfx_dispatch_state(orch: Any, chip_cids: dict[str, Any]) -> None:
-    """Reset the per-run dispatch state :func:`_submit_chip` reads off ``orch``.
-
-    ``_dfx_dispatch_idx`` numbers each card's dispatches ``d0, d1, ...`` fresh per
-    run, so the swimlane two-pass files one dispatch under one directory.
-
-    ``_dfx_chip_names`` reverses the registered ``callables`` mapping so
-    ``_submit_chip`` can name the L2 program behind an otherwise opaque
-    ``CallableHandle``. Keyed by ``id()``: the handle is not required to be
-    hashable, and ``chip_cids`` holds every one alive for the whole run, so the
-    ids are stable and unique.
-    """
-    orch._dfx_dispatch_idx = {}
-    orch._dfx_chip_names = {id(cid): name for name, cid in chip_cids.items()}
-
-
-def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> None:
-    """Record which L2 program a dispatch runs, for the swimlane post-pass.
-
-    A kernel's ``func_id`` is a per-L2-program namespace — every
-    ``next_levels/<program>/kernel_config.py`` numbers its kernels from 0 — so
-    labelling a dispatch's records requires knowing the program that produced
-    them. This wrapper is the only place that sees both the dispatch directory
-    and the callable being dispatched, so it stamps the pairing on disk
-    (:data:`_DISPATCH_PROGRAM_FILE`) for :func:`_collect_l3_swimlane` to read
-    back. Going through the filesystem keeps the two halves independent of where
-    the runtime places the L3 orchestrator, and the marker is rewritten
-    identically by both swimlane passes.
-
-    Best-effort: a marker that cannot be written costs kernel labels, never the
-    run. Silent when the caller bypassed :func:`_reset_dfx_dispatch_state` and
-    left no name table on ``orch``.
-    """
-    name = getattr(orch, "_dfx_chip_names", {}).get(id(callable_id))
-    if name is None:
-        return
-    try:
-        disp_dir.mkdir(parents=True, exist_ok=True)
-        (disp_dir / _DISPATCH_PROGRAM_FILE).write_text(json.dumps({"program": name}), encoding="utf-8")
-    except OSError as e:
-        print(
-            f"Could not record the dispatch program for {disp_dir} ({type(e).__name__}: {e}); "
-            "its swimlane falls back to anonymous task labels unless the build has a single "
-            "L2 program"
-        )
-
-
-# Called from generated host_orch.py code (pyright cannot see those references).
-def _submit_chip(  # pyright: ignore[reportUnusedFunction]
-    orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None
-) -> Any:
-    """``orch.submit_next_level`` that stamps each dispatch's DFX directory.
-
-    The runtime path helpers root every diagnostic artifact at a fixed filename
-    under ``output_prefix`` (``<prefix>/pmu.csv`` etc.), so any two dispatches
-    sharing one prefix clobber each other. Namespacing by card alone is not
-    enough: one card may receive several dispatches in a single host_orch run
-    (pipeline stages, expert kernels, or genuinely different chip programs all
-    pinned to the same ``device``), and each re-init+finalize of the runtime's
-    per-run collector rewrites the fixed-name file.
-
-    The ChipWorker child applies that ``rank{worker}/d{k}`` split itself, so
-    this wrapper only derives the same directory — for the marker below and the
-    offline post-pass — and forwards ``config`` untouched.
-
-    ``k`` comes from a per-card counter on ``orch`` reset at the top of every
-    run (see :func:`_reset_dfx_dispatch_state`), so it is this run's dispatch
-    ordinal. The child's own counter spans the whole process, so the two
-    numberings agree only on a worker's first run: the marker
-    :func:`_record_dispatch_program` stamps here therefore lands on the first
-    run's capture directory — the graph pass of a swimlane two-pass — and
-    :func:`_collect_l3_swimlane` reads it back through the capture pairing
-    rather than expecting it beside the records.
-
-    When DFX is off (``output_prefix`` unset) the call is forwarded unchanged.
-
-    The codegen routes every chip dispatch through this wrapper — a rank-pinned
-    dispatch passes its rank, a comm-less one passes ``None`` and is resolved by
-    :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
-    so the artifacts land under the chip that actually ran the dispatch.
-    """
-    worker = _resolve_chip_worker(orch, worker)
-    base = config.output_prefix
-    if not base:
-        return orch.submit_next_level(callable_id, task_args, config, worker=worker)
-    idx_map = getattr(orch, "_dfx_dispatch_idx", None)
-    if idx_map is None:
-        # Defensive: a caller that bypassed ``orch_fn`` (no reset) still gets
-        # per-card isolation, just without a guaranteed two-pass match.
-        idx_map = orch._dfx_dispatch_idx = cast("dict[str, int]", {})
-    rank_label = _dfx_rank_label(worker)
-    k = idx_map.get(rank_label, 0)
-    idx_map[rank_label] = k + 1
-    _record_dispatch_program(orch, callable_id, Path(f"{base}/{rank_label}/d{k}"))
-    return orch.submit_next_level(callable_id, task_args, config, worker=worker)
 
 
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
@@ -1600,6 +1400,7 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
         place; per-run timing is read from the runtime's ``[STRACE]`` log
         markers (simpler PR #1177), not returned here.
     """
+    _require_supported_program(compiled)
     host_args: list[torch.Tensor] = []
     for arg in coerced_args:
         if not isinstance(arg, torch.Tensor):
@@ -1894,6 +1695,9 @@ class DistributedWorker(Worker):
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
         startup_timeout_s: float | None = None,
     ) -> None:
+        programs = list(compiled) if isinstance(compiled, Sequence) else [compiled]
+        for program in programs:
+            _require_supported_program(program)
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         # Simpler owns allocations as Buffer objects. PyPTO continues exposing
         # raw pointers from its public memory API and resolves them through this
@@ -1940,7 +1744,6 @@ class DistributedWorker(Worker):
         self._accepting_dispatches = False
         self._closing = False
 
-        programs = list(compiled) if isinstance(compiled, Sequence) else [compiled]
         if not programs:
             raise ValueError("DistributedWorker requires at least one compiled program")
 
@@ -3370,6 +3173,7 @@ class DistributedWorker(Worker):
         Returns:
             A handle that owns the dispatch lifetime and cached outcome.
         """
+        _require_supported_program(compiled)
         with self._dispatch_submit_mu:
             return self._submit_compiled(compiled, *args, config=config)
 
@@ -3416,6 +3220,7 @@ class DistributedWorker(Worker):
             ValueError: *compiled* is not one of the programs this worker was
                 constructed from.
         """
+        _require_supported_program(compiled)
         self._require_open("register")
         if compiled not in self._states:
             raise ValueError(

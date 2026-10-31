@@ -923,7 +923,7 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       pol_map["value"] = msgpack::object(entry_vec, zone_);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(pol_map, zone_)));
     } else if (value.type() == typeid(ExprPtr)) {
-      // Reserved Expr-valued attr (e.g. kAttrDevice, the distributed
+      // Reserved Expr-valued attr (e.g. kAttrWorker, the distributed
       // device-placement expression). Serialize through the node-reference
       // machinery, like the Var-valued attrs above.
       const auto& expr = AnyCast<ExprPtr>(value, "serializing kwarg: " + key);

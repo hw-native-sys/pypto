@@ -23,6 +23,7 @@ instances during normal compilation) lands.
 
 import pytest
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import (
     ConstInt,
     IRMutator,
@@ -111,6 +112,128 @@ def test_mutator_preserves_host_staging_flags():
     assert isinstance(result, WindowBuffer)
     assert result.load_from_host is True
     assert result.store_to_host is True
+
+
+def _window_rebind_fixture(child_name, owner_name):
+    """Include all type-bearing result paths without invoking parser/lowering."""
+    span = Span.unknown()
+    old = WindowBuffer(_ptr("deferred"), _const(0))
+    n = _ir.Var("n", _ir.ScalarType(DataType.INDEX), span)
+    size = _ir.Var("size", _ir.ScalarType(DataType.INDEX), span)
+    base = _ptr("buf")
+    actual = WindowBuffer(base, size, True, True, span)
+    storage = _ir.MemRef("buf", 8, 12, span)
+    view = _ir.TensorView(stride=[1, 2], layout=_ir.TensorLayout.ND)
+    ty = _ir.DistributedTensorType([_const(2), _const(3)], DataType.FP16, storage, view, old)
+    x = _ir.Var("x", ty, span)
+    # A nested tuple parameter exercises recursive type rebuilding separately
+    # from the ordinary distributed parameter and scalar TaskId suffix.
+    nested_type = _ir.TupleType([ty, _ir.TupleType([ty, _ir.ScalarType(DataType.INDEX)])])
+    nested = _ir.Var("nested", nested_type, span)
+    child = _ir.Function(child_name, [x, nested], [ty], _ir.ReturnStmt([x], span), span)
+    seed = _ir.Var("seed", ty, span)
+    dep = _ir.Var("dep", _ir.ScalarType(DataType.TASK_ID), span)
+    owner_nested = _ir.Var("owner_nested", nested_type, span)
+    called = _ir.Call(_ir.GlobalVar(child_name), [seed, owner_nested], {}, {"saved": seed}, ty, span)
+    call_result = _ir.Var("called", ty, span)
+    submit_type = _ir.TupleType([ty, _ir.ScalarType(DataType.TASK_ID)])
+    submitted = _ir.Submit(
+        _ir.GlobalVar(child_name),
+        [seed, owner_nested],
+        [dep],
+        {},
+        {"saved": seed},
+        submit_type,
+        span,
+        core_num=_const(2),
+        sync_start=True,
+        allow_early_resolve=True,
+        predicate=_ir.ConstBool(True, span),
+    )
+    packed = _ir.Var("packed", submit_type, span)
+    first = _ir.Var("first", ty, span)
+    scope = _ir.CommDomainScopeStmt(
+        [],
+        [old],
+        "global",
+        body=_ir.SeqStmts(
+            [
+                _ir.AssignStmt(size, _ir.Mul(n, _const(4), DataType.INDEX, span), span),
+                _ir.AssignStmt(
+                    base,
+                    _ir.create_op_call("pld.tensor.alloc_window_buffer", [size], {"name": "buf"}, span),
+                    span,
+                ),
+                _ir.AssignStmt(call_result, called, span),
+                _ir.AssignStmt(packed, submitted, span),
+                _ir.AssignStmt(first, _ir.TupleGetItemExpr(packed, 0, span), span),
+                _ir.EvalStmt(old, span),
+                _ir.ReturnStmt([first, owner_nested], span),
+            ],
+            span,
+        ),
+        span=span,
+    )
+    owner = _ir.Function(
+        owner_name, [n, seed, dep, owner_nested], [ty, nested_type], scope, span, attrs={"saved": seed}
+    )
+    return _ir.Program([child, owner], "WindowRebind", span), old, actual, storage, view
+
+
+@pytest.mark.parametrize("names", [("a_child", "z_owner"), ("z_child", "a_owner")])
+def test_private_window_rebind_updates_all_types_without_rebinding_owner_storage(names):
+    """The opt-in final traversal changes only explicit WindowBuffer identities."""
+    child_name, owner_name = names
+    program, old, actual, storage, view = _window_rebind_fixture(*names)
+    changed = _ir._rebind_window_buffers(program, [(old, actual)])
+    child = changed.get_function(child_name)
+    owner = changed.get_function(owner_name)
+    expected_type = _ir.DistributedTensorType([_const(2), _const(3)], DataType.FP16, storage, view, actual)
+    for ty in (child.params[0].type, child.return_types[0], owner.params[1].type, owner.return_types[0]):
+        assert ty.window_buffer is actual
+        assert ty.memref is storage
+        # TensorView is stored by value; compare its complete metadata while
+        # retaining exact identity checks for MemRef and WindowBuffer.
+        _ir.assert_structural_equal(ty, expected_type)
+        assert ty.dtype == DataType.FP16
+        assert [dim.value for dim in ty.shape] == [2, 3]
+    for ty in (child.params[1].type, owner.params[3].type, owner.return_types[1]):
+        assert ty.types[0].window_buffer is actual
+        assert ty.types[1].types[0].window_buffer is actual
+    returned = child.body.value
+    assert returned[0] is child.params[0]
+    scope = owner.body
+    assert scope.slots[0] is actual
+    size, alloc, call, submit, projection, direct, returned = scope.body.stmts
+    assert actual.base is alloc.var
+    assert actual.size is size.var
+    assert size.value.left is owner.params[0]
+    assert alloc.value.args[0] is size.var
+    assert actual.load_from_host is True and actual.store_to_host is True
+    assert storage.base_ is not actual.base
+    assert owner.attrs["saved"] is owner.params[1]
+    for assignment in (call, submit):
+        launch = assignment.value
+        assert launch.args[0] is owner.params[1]
+        assert launch.args[1] is owner.params[3]
+        assert dict(launch.attrs)["saved"] is owner.params[1]
+    assert call.var.type.window_buffer is actual
+    assert call.value.type.window_buffer is actual
+    assert submit.var.type.types[0].window_buffer is actual
+    assert submit.value.type.types[0].window_buffer is actual
+    assert submit.value.type.types[1].dtype == DataType.TASK_ID
+    assert submit.value.deps[0] is owner.params[2]
+    assert submit.value.core_num.value == 2
+    assert submit.value.sync_start and submit.value.allow_early_resolve
+    assert submit.value.predicate.value is True
+    assert projection.var.type.window_buffer is actual
+    assert projection.value.type.window_buffer is actual
+    assert projection.value.tuple is submit.var
+    assert direct.expr is actual
+    assert returned.value[0] is projection.var
+    assert returned.value[1] is owner.params[3]
+    assert program.get_function(child_name).params[0].type.window_buffer is old
+    assert _ir._rebind_window_buffers(changed, []) is changed
 
 
 if __name__ == "__main__":

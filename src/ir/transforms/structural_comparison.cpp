@@ -86,19 +86,89 @@ struct Binding {
   uint64_t id;
 };
 
+struct ProgramWindowOwner {
+  FunctionPtr function;
+  uint64_t function_index;
+  uint64_t scope;
+  uint64_t slot;
+};
+
+using ProgramWindowOwners = std::unordered_map<const WindowBuffer*, ProgramWindowOwner>;
+
+/// Index only explicit owning scopes, once per Program. Inherited window
+/// metadata belongs to its owner, not to the referencing function's lexical
+/// environment. Tokens retain slot aliasing even for identical-looking slots.
+std::shared_ptr<const ProgramWindowOwners> IndexProgramWindowOwners(const ProgramPtr& program) {
+  auto owners = std::make_shared<ProgramWindowOwners>();
+  uint64_t next_function = 0;
+  for (const auto& [global, function] : program->functions_) {
+    const uint64_t function_index = next_function++;
+    if (!function || !function->body_) continue;
+    uint64_t next_scope = 0;
+    std::vector<StmtPtr> pending{function->body_};
+    std::unordered_set<const Stmt*> seen;
+    while (!pending.empty()) {
+      auto stmt = std::move(pending.back());
+      pending.pop_back();
+      // Projection still performs its own cycle/shared-statement checks. This
+      // index must terminate without recursively traversing malformed graphs.
+      if (!stmt || !seen.insert(stmt.get()).second) continue;
+      if (auto domain = As<CommDomainScopeStmt>(stmt)) {
+        const uint64_t scope = next_scope++;
+        for (size_t slot = 0; slot < domain->slots_.size(); ++slot) {
+          const auto& window = domain->slots_[slot];
+          if (!window) continue;
+          const bool inserted =
+              owners->emplace(window.get(), ProgramWindowOwner{function, function_index, scope, slot}).second;
+          if (!inserted) {
+            throw StructuralComparisonUnsupported(
+                "AmbiguousWindowOwner",
+                "root.functions." + global->name_ + ".body.slots." + std::to_string(slot));
+          }
+        }
+      }
+      // Reverse pushes preserve source preorder for deterministic scope IDs.
+      // Expressions, types and ordinary storage never participate in indexing.
+      if (auto sequence = As<SeqStmts>(stmt)) {
+        for (auto it = sequence->stmts_.rbegin(); it != sequence->stmts_.rend(); ++it) {
+          pending.push_back(*it);
+        }
+      } else if (auto branch = As<IfStmt>(stmt)) {
+        if (branch->else_body_.has_value()) pending.push_back(*branch->else_body_);
+        pending.push_back(branch->then_body_);
+      } else if (auto scope = As<ScopeStmt>(stmt)) {
+        pending.push_back(scope->body_);
+      } else if (auto loop = As<ForStmt>(stmt)) {
+        pending.push_back(loop->body_);
+      } else if (auto loop = As<WhileStmt>(stmt)) {
+        pending.push_back(loop->body_);
+      }
+    }
+  }
+  return owners;
+}
+
 // One reflection projection supplies equality, hashing and diagnostics.
 // Preparation reserves DefField identities; the independent verifier also
 // checks lexical use intervals.
 // Projection uses frozen bindings, with separate definition/reference caches.
-// Function contexts are independent even when the input shares node pointers.
+// Ordinary function contexts are independent even when node pointers are shared.
+// A Program additionally identifies explicit window references by their owner.
 class Projection {
  public:
   using result_type = Fields;
 
-  Projection(Arena& arena, bool map_free) : arena_(arena), map_free_(map_free) {}
+  Projection(Arena& arena, bool map_free,
+             std::shared_ptr<const ProgramWindowOwners> program_windows = nullptr)
+      : arena_(arena), map_free_(map_free), program_windows_(std::move(program_windows)) {}
 
   template <typename Root>
   Id Run(const Root& root) {
+    if constexpr (std::is_base_of_v<IRNode, typename Root::element_type>) {
+      if (auto program = As<Program>(std::static_pointer_cast<const IRNode>(root))) {
+        program_windows_ = IndexProgramWindowOwners(program);
+      }
+    }
     PrepareFunction(root);
     collecting_ = true;
     Value(root);
@@ -165,6 +235,13 @@ class Projection {
   }
 
  private:
+  const ProgramWindowOwner* InheritedWindowOwner(const VarPtr& var) const {
+    if (!program_windows_ || !function_ || var->GetKind() != ObjectKind::WindowBuffer) return nullptr;
+    auto found = program_windows_->find(static_cast<const WindowBuffer*>(var.get()));
+    if (found == program_windows_->end() || found->second.function == function_) return nullptr;
+    return &found->second;
+  }
+
   bool IsBodyContext() const {
     if (std::find(path_.begin(), path_.end(), "body") == path_.end()) return false;
     for (const auto& field : path_) {
@@ -389,6 +466,18 @@ class Projection {
   }
 
   Id Variable(const VarPtr& var, bool definition) {
+    if (auto owner = InheritedWindowOwner(var)) {
+      // The owning function still projects every storage field in its normal
+      // local binder context. An inheritor references that exact owning slot;
+      // it must neither reinterpret owner-local size Vars as free captures nor
+      // import the owner's ordinary variable/storage namespace.
+      // The ordered Program map separately compares its keys. Numeric ordinals
+      // avoid copying a possibly long function name into every window token.
+      return Intern("owned_window_ref", "",
+                    {{"function", Value(owner->function_index)},
+                     {"scope", Value(owner->scope)},
+                     {"slot", Value(owner->slot)}});
+    }
     if (collecting_ && !checking_visibility_ && definition) {
       if (!definitions_.insert(var.get()).second && verify_bindings_) Unsupported("RepeatedDefinition");
       Reserve(var, "bound");
@@ -429,7 +518,7 @@ class Projection {
     if (!node) return 0;
     if (auto func = As<Function>(node); func && func != function_) {
       if (collecting_) return 0;
-      Projection child(arena_, map_free_);
+      Projection child(arena_, map_free_, program_windows_);
       child.verify_bindings_ = verify_bindings_;
       return child.Run(func);
     }
@@ -443,7 +532,7 @@ class Projection {
       if (node->GetKind() == ObjectKind::WindowBuffer) {
         variable = std::static_pointer_cast<const Var>(node);
       }
-      if (collecting_ && function_) {
+      if (collecting_ && function_ && (!variable || !InheritedWindowOwner(variable))) {
         // Storage descriptors in a function declare implicit resource identities.
         // Preserve their alias pattern across serialization and renaming.
         const auto base = node->GetKind() == ObjectKind::MemRef
@@ -740,6 +829,7 @@ class Projection {
   bool defining_ = false;
   size_t depth_ = 0;
   FunctionPtr function_;
+  std::shared_ptr<const ProgramWindowOwners> program_windows_;
   uint64_t next_bound_ = 0;
   uint64_t next_symbol_ = 0;
   std::unordered_map<const Var*, Binding> bindings_;

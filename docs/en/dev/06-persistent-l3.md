@@ -104,3 +104,72 @@ closes. That retention currently depends on Simpler's private Worker-level
 live-domain registry and active run-resource journal (`_live_domains` and
 `_building_run_resources.live_domains`); a future public retention API should
 encapsulate this lifecycle.
+
+## CLUSTER programs: explicit shared global windows
+
+CLUSTER_0 programs support synchronous multi-program sessions. Prepare all
+programs before startup with `extra_compiled`, and select each program with
+`run(compiled, ...)`. Each call has its own completion fence. Global domains
+remain isolated by program unless explicitly bound to the same session key:
+
+```python
+from pypto.ir import SharedDomainBinding
+
+with compute.prepare(
+    extra_compiled=[communication],
+    persistent=True,
+    reset_persistent_windows=False,
+    shared_domains=[
+        SharedDomainBinding(compute, domain=0, key="activations", slots={0: "values"}),
+        SharedDomainBinding(communication, domain=0, key="activations", slots={0: "values"}),
+    ],
+) as worker:
+    worker.run(compute, lhs, rhs, echo)
+    worker.run(communication, peer_values)
+```
+
+The first program stores results into each rank's global window. Its return
+fence ensures all writes have drained before the second program performs
+TLOAD. The communication program receives no host copy of the saved data.
+One compiled program is one run; the session does not split programs into
+phases or add frontend window-copy operations.
+
+Inspect the immutable `compiled.comm_domains` descriptors for domain and slot
+ordinals. Generated names are internal and may differ between programs.
+`slots` maps each program-local slot ordinal to a canonical physical slot name
+and must cover every slot exactly once. Canonical names can reorder slots.
+The session validates ordered members, topology, runtime/profile, window and
+aligned slot sizes, dtype, shape, strides and byte offsets before reuse.
+Equal sizes do not imply sharing. Distinct keys and omitted bindings remain
+separate. Shared layouts require static slot sizes. Preparation snapshots the
+configuration; changing the original mapping later has no effect, and sharing
+does not enter JIT compilation identity.
+
+The session installs one bounded aggregate source package with a canonical
+runtime helper and one prefork token pool per node. All programs use the same
+actual retained R1 domain and its `(domain_id, generation)` ordering state.
+Slot translation selects the real runtime Buffer; it does not wrap or rename
+the imported global-domain view. Helper/bootstrap contract mismatches fail
+before startup. Cold schema-4 artifacts preserve the domain descriptors;
+older artifacts without them must be regenerated for explicit sharing.
+
+The default reset clears every reused global mapping, including signal state
+and padding, before the run's first task submission. Runtime control copies
+use chunks of at most 8 MiB. Fresh allocations need no additional reset.
+With `reset_persistent_windows=False`, data, signals and user epochs all retain
+their previous contents. Kernel protocols using credits or signals must manage
+their own reset/epoch progression. The compute-then-TLOAD example needs only
+the run fences. Ordering-token storage remains stable across both programs.
+
+Normal close explicitly releases retained domains after the last fence.
+Failure close drains the worker tree before dropping domain, I/O or prefork
+references. An uncertain close retains its journals, refuses new runs, and
+permits a close retry. CLUSTER sessions expose synchronous `run` only.
+Their retention uses R1's public `retain_after_run` contract and does not
+detach domains from private runtime journals.
+
+For validation, SIM global-domain ranks must share one host/POSIX shared-memory
+namespace. The SIM backend imports peer windows through `shm_open`; it does
+not provide cross-host SIM global windows. True multi-host validation uses the
+A3 fabric profile and physical devices. Ordinary remote tensor I/O is a
+separate capability.

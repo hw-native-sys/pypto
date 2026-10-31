@@ -607,6 +607,33 @@ def test_window_storage_is_supported(attached):
     equal(node, node)
 
 
+def test_program_owned_window_alias_pattern_is_preserved_across_children():
+    """Identical slot fields must not erase which owning slot a child inherits."""
+
+    def program(split):
+        base_a, base_b = ir.Var("a", ir.PtrType(), SPAN), ir.Var("b", ir.PtrType(), SPAN)
+        size = ir.ConstInt(16, D.INDEX, SPAN)
+        first, second = ir.WindowBuffer(base_a, size), ir.WindowBuffer(base_b, size)
+        shape = [ir.ConstInt(4, D.INDEX, SPAN)]
+        x = ir.Var("x", ir.DistributedTensorType(shape, D.FP32, first), SPAN)
+        y = ir.Var("y", ir.DistributedTensorType(shape, D.FP32, second if split else first), SPAN)
+        owner = ir.Function(
+            "z_owner",
+            [],
+            [],
+            ir.CommDomainScopeStmt([], [first, second], "domain", body=ir.ReturnStmt([], SPAN), span=SPAN),
+            SPAN,
+            level=ir.Level.HOST,
+            role=ir.Role.Orchestrator,
+        )
+        return ir.Program([function("a_child", [x]), function("b_child", [y]), owner], "SlotAliases", SPAN)
+
+    lhs, rhs = program(False), program(True)
+    equal(lhs, rhs, False)
+    equal(lhs, rhs, False, auto=True)
+    assert ir.structural_hash(lhs) != ir.structural_hash(rhs)
+
+
 def test_open_stride_symbol_is_not_implicitly_bound():
     def build(prefix):
         n = var(prefix, D.INDEX)

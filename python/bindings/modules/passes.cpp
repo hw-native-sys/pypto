@@ -662,7 +662,7 @@ void BindPass(nb::module_& m) {
              "Synthesize private signal windows for host-level pld.tensor.allreduce calls that omit "
              "the signal argument. Existing explicit-signal calls are preserved.");
   passes.def("materialize_comm_domain_scopes", &pass::MaterializeCommDomainScopes,
-             "Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r) "
+             "Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(worker=r) "
              "chains in each\n"
              "host_orch function, materialise WindowBuffer instances back-referenced from\n"
              "DistributedTensorType.window_buffer_ on view Vars, and wrap the host_orch\n"

@@ -96,6 +96,11 @@ void BindCodegen(nb::module_& m) {
            "    program: The IR Program (after OutlineHierarchyScopes)\n\n"
            "Returns:\n"
            "    Complete C++ source code as a string")
+      .def("_generate_embedded", &DistributedCodegen::GenerateEmbedded, nb::arg("program"),
+           nb::arg("entry_name") = nb::none(),
+           "Generate one HOST Orchestrator with the private direct (orch, args, config) ABI.\n\n"
+           "The full lowered Program is verified. Without entry_name, exactly one HOST "
+           "Orchestrator must exist. Runtime state must be bound before invoking the entry.")
       .def("get_builtin_next_level_specs", &DistributedCodegen::GetBuiltinNextLevelSpecs,
            "Return builtin chip-callable variants requested during the last generate() call.");
 

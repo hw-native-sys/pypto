@@ -270,7 +270,7 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
                                                std::vector<std::pair<std::string, std::any>> attrs,
                                                std::vector<ArgDirection> arg_directions) {
   auto builtin = OpRegistry::GetInstance().CreateInternal(builtin_name, args, kwargs, call->span_);
-  attrs.emplace_back(kAttrDevice, device);
+  attrs.emplace_back(kAttrWorker, device);
   attrs = WithArgDirectionsAttr(std::move(attrs), std::move(arg_directions));
   return std::make_shared<Call>(builtin->op_, builtin->args_, builtin->kwargs_, std::move(attrs),
                                 builtin->GetType(), builtin->span_);
