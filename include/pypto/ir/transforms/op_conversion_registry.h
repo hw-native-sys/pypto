@@ -68,6 +68,8 @@ using ConversionFunc = std::function<ConversionResult(
 /// Keep owning references so replaced SSA values cannot leave recycled pointer keys.
 struct ConversionContext {
   std::unordered_set<ExprPtr> packed_tiles;
+  // Views retain their allocation's full extent even when their shape shrinks.
+  std::unordered_map<ExprPtr, ExprPtr> storage_origins;
 };
 
 using ContextualConversionFunc = std::function<ConversionResult(

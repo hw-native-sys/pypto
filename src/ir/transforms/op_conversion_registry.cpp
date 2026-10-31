@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,7 @@
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -43,6 +45,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -1821,6 +1824,141 @@ void OpConversionRegistry::RegisterGatherOps() {
           return flat;
         };
 
+        // Keep large gathers row-bounded on every backend. This conservative
+        // estimate covers the source, output, and the flat-index working tiles;
+        // surrounding live values can still require a smaller user tile.
+        auto needs_row_gather = [&](int64_t rows, int64_t source_cols, int64_t index_cols) {
+          if (!backend::BackendConfig::IsConfigured()) return false;
+          // Collapsing local ND rows requires proof that no hidden pitch or
+          // offset will be lost. A 2D source can be sliced one row at a time.
+          if (rank == 3) {
+            for (const auto& operand : {input, index}) {
+              if (auto tile = As<TileType>(operand->GetType())) {
+                if (context.packed_tiles.count(operand) == 0) return false;
+                auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+                auto offset = As<ConstInt>(view.start_offset);
+                if (view.start_offset && (!offset || offset->value_ != 0)) return false;
+              }
+            }
+          }
+          // Flat indices use the logical row width; physical row padding
+          // would otherwise shift every row after the first.
+          if ((source_cols % 32) * input_dtype.GetByte() % 32 != 0) return true;
+          const auto* ctx = PassContext::Current();
+          const auto* target = ctx ? ctx->GetBackend() : backend::BackendConfig::GetBackend();
+          const uint64_t capacity = target->GetMemSize(MemorySpace::Vec);
+          if (capacity == 0) return false;
+          auto row_bytes = [&](int64_t cols, uint64_t element_bytes) {
+            if (static_cast<uint64_t>(cols) > capacity / element_bytes) return capacity + 1;
+            const uint64_t bytes = static_cast<uint64_t>(cols) * element_bytes;
+            return (bytes + 31) / 32 * 32;
+          };
+          uint64_t remaining = capacity;
+          auto policy = target->CreateMemoryAllocatorPolicy();
+          std::unordered_set<ExprPtr> charged;
+          for (const auto& operand : {input, index}) {
+            if (!As<TileType>(operand->GetType())) continue;
+            auto origin = context.storage_origins.find(operand);
+            // Unknown local storage cannot safely be sized by its view shape.
+            if (origin == context.storage_origins.end()) return true;
+            if (!charged.insert(origin->second).second) continue;
+            auto bytes = utils::StaticPhysicalAllocationBytes(As<TileType>(origin->second->GetType()),
+                                                              MemorySpace::Vec, target->GetHandler());
+            if (!bytes) return true;
+            const uint64_t aligned = policy->AlignAddress(*bytes, MemorySpace::Vec);
+            if (aligned < *bytes || aligned > remaining) return true;
+            remaining -= aligned;
+          }
+          auto requested = index_shape;
+          requested.back() = make_idx(source_cols);
+          const bool copy_source = !As<TileType>(input->GetType()) ||
+                                   context.packed_tiles.count(input) == 0 ||
+                                   !tile_view_semantics::ShapeExprListsEquivalent(input_shape, requested);
+          if (copy_source) {
+            const uint64_t source_row = row_bytes(source_cols, input_dtype.GetByte());
+            if (source_row == 0) return false;
+            if (static_cast<uint64_t>(rows) > remaining / source_row) return true;
+            remaining -= static_cast<uint64_t>(rows) * source_row;
+          }
+          const uint64_t other_row =
+              row_bytes(index_cols, input_dtype.GetByte()) + 4 * row_bytes(index_cols, sizeof(int32_t));
+          return other_row != 0 && static_cast<uint64_t>(rows) > remaining / other_row;
+        };
+
+        auto emit_row_gather = [&](int64_t rows, int64_t source_cols,
+                                   int64_t index_cols) -> ConversionResult {
+          if (idx_dtype == DataType::INT16) {
+            CHECK_SPAN(source_cols <= 32768, span)
+                << "tensor.gather with INT16 indices: source row exceeds the INT16 index range";
+          }
+          ExprPtr row_source = input;
+          const bool flatten_source = rank == 3 && As<TileType>(input->GetType());
+          if (flatten_source) {
+            const int64_t source_rows =
+                get_const(input_shape[0], "input.shape[0]") * get_const(input_shape[1], "input.shape[1]");
+            row_source = reshape_to(prologue, input, {make_idx(source_rows), make_idx(source_cols)},
+                                    "gather_src_flat");
+          }
+          ExprPtr row_index_source = index;
+          const bool flatten_index = rank == 3 && As<TileType>(index->GetType());
+          if (flatten_index) {
+            row_index_source =
+                reshape_to(prologue, index, {make_idx(rows), make_idx(index_cols)}, "gather_idx_flat");
+          }
+          auto result = make_loop(
+              prologue, "gather_rows", make_idx(rows), rows, index_cols, input_dtype,
+              [&](const VarPtr& row, const IterArgPtr& /*acc*/, std::vector<StmtPtr>& bs) -> VarPtr {
+                std::vector<ExprPtr> offsets{row, zero};
+                std::vector<ExprPtr> source_shape{one, make_idx(source_cols)};
+                std::vector<ExprPtr> index_row_shape{one, make_idx(index_cols)};
+                if (rank == 3) {
+                  offsets = {MakeFloorDiv(row, index_shape[1], span), MakeFloorMod(row, index_shape[1], span),
+                             zero};
+                  source_shape = {one, one, make_idx(source_cols)};
+                  index_row_shape = {one, one, make_idx(index_cols)};
+                }
+                auto source_offsets = offsets;
+                if (flatten_source) {
+                  source_offsets = {MakeAdd(MakeMul(offsets[0], input_shape[1], span), offsets[1], span),
+                                    zero};
+                  source_shape = {one, make_idx(source_cols)};
+                }
+                VarPtr src_raw;
+                int64_t physical_cols = source_cols;
+                if (As<TileType>(row_source->GetType())) {
+                  src_raw = emit_load_or_slice(bs, row_source, MakeShapeTuple(source_offsets, span),
+                                               MakeShapeTuple(source_shape, span), "gather_inp_row_raw");
+                } else {
+                  // A row load may pad its allocation without reading past the
+                  // logical GM window. Flat column indices remain unchanged.
+                  const int64_t alignment = 32 / static_cast<int64_t>(input_dtype.GetByte());
+                  physical_cols += (alignment - source_cols % alignment) % alignment;
+                  auto physical_shape = source_shape;
+                  physical_shape.back() = make_idx(physical_cols);
+                  src_raw =
+                      emit_to(bs, "tile.load",
+                              {row_source, MakeShapeTuple(source_offsets, span),
+                               MakeShapeTuple(physical_shape, span), MakeShapeTuple(source_shape, span)},
+                              load_kwargs, "gather_inp_row_raw");
+                }
+                auto src = rank == 2 || flatten_source
+                               ? src_raw
+                               : reshape_to(bs, src_raw, {one, make_idx(physical_cols)}, "gather_inp_row");
+                auto index_offsets = flatten_index ? std::vector<ExprPtr>{row, zero} : offsets;
+                if (flatten_index) index_row_shape = {one, make_idx(index_cols)};
+                auto idx_raw =
+                    emit_load_or_slice(bs, row_index_source, MakeShapeTuple(index_offsets, span),
+                                       MakeShapeTuple(index_row_shape, span), "gather_idx_row_raw");
+                auto idx = rank == 2 || flatten_index
+                               ? idx_raw
+                               : reshape_to(bs, idx_raw, {one, make_idx(index_cols)}, "gather_idx_row");
+                auto flat = emit_flat_idx(bs, idx, 1, source_cols, index_cols, "gather_row");
+                return single_row_gather(bs, src, As<Var>(flat), index_cols, "gather_row");
+              });
+          auto out = reshape_to(prologue, result, {make_idx(rows), make_idx(index_cols)}, "gather_out");
+          return ConversionResult{std::move(prologue), out};
+        };
+
         // ================================================================
         // Case 1  rank==2, dim==1 (last dim)
         // Full-tile gather with flat indices on all backends.
@@ -1829,6 +1967,8 @@ void OpConversionRegistry::RegisterGatherOps() {
           int64_t I0 = get_const(index_shape[0], "index.shape[0]");
           int64_t S1 = get_const(input_shape[1], "input.shape[1]");
           int64_t K = get_const(index_shape[1], "index.shape[1]");
+
+          if (needs_row_gather(I0, S1, K)) return emit_row_gather(I0, S1, K);
 
           // INT16 flat-index range guard (same bound as tensor.scatter).
           if (idx_dtype == DataType::INT16) {
@@ -1867,6 +2007,7 @@ void OpConversionRegistry::RegisterGatherOps() {
           int64_t S2 = get_const(input_shape[2], "input.shape[2]");
           int64_t K = get_const(index_shape[2], "index.shape[2]");
           int64_t I0I1 = I0 * I1;
+          if (needs_row_gather(I0I1, S2, K)) return emit_row_gather(I0I1, S2, K);
 
           if (idx_dtype == DataType::INT16) {
             const int64_t kMaxFlat = 32768;

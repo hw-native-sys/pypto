@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import codegen, ir, passes
+from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -142,6 +142,158 @@ def test_gather_reuses_packed_full_slice_reshape(ascend_backend):
     mlir = _codegen(Program)
     assert "pto.textract" not in mlir
     assert mlir.count("pto.tgather ins(") == 1
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("rank3", [False, True])
+def test_large_gm_gather_uses_bounded_source_rows(ascend_backend, rank3):
+    source_shape = [2, 32, 4096] if rank3 else [64, 4096]
+    index_shape = [2, 32, 8] if rank3 else [64, 8]
+    output_offsets = [0, 0, 0] if rank3 else [0, 0]
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            inp: pl.Tensor[source_shape, pl.FP32],
+            idx: pl.Tensor[index_shape, pl.INT32],
+            output: pl.Out[pl.Tensor[index_shape, pl.FP32]],
+        ) -> pl.Tensor[index_shape, pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.tensor.gather(inp, dim=-1, index=idx)
+                output = pl.assemble(output, out, output_offsets)
+            return output
+
+    mlir = _codegen(Program)
+    assert "scf.for" in mlir
+    assert mlir.count("pto.tgather ins(") == 1
+    assert "rows=1, cols=4096" in mlir
+    assert "rows=64, cols=4096" not in mlir
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize(
+    "source_shape,index_shape",
+    [([64, 512], [64, 128]), ([32, 512], [32, 768]), ([2, 16, 512], [2, 8, 1600])],
+)
+def test_large_local_gather_is_memory_bounded(ascend_backend, source_shape, index_shape):
+    output_offsets = [0] * len(index_shape)
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            idx: pl.Tensor[index_shape, pl.INT32],
+            output: pl.Out[pl.Tensor[index_shape, pl.FP32]],
+        ) -> pl.Tensor[index_shape, pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                local = pl.full(source_shape, dtype=pl.FP32, value=1.0)
+                out = pl.tensor.gather(local, dim=-1, index=idx)
+                output = pl.assemble(output, out, output_offsets)
+            return output
+
+    mlir = _codegen(Program)
+    assert "scf.for" in mlir
+    assert mlir.count("pto.tgather ins(") == 1
+    if len(source_shape) == 3:
+        # Source and index middle extents differ; preserve all 32 source rows
+        # and map each output row through its original ND coordinates.
+        assert "rows=32, cols=512" in mlir
+        assert "arith.muli" in mlir
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("case", ["prefix", "source_view", "index_view"])
+def test_gather_counts_backing_storage_and_window_copy(ascend_backend, case):
+    if case == "prefix":
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                idx: pl.Tensor[[32, 8], pl.INT32],
+                output: pl.Out[pl.Tensor[[32, 8], pl.FP32]],
+            ) -> pl.Tensor[[32, 8], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    local = pl.full([64, 512], dtype=pl.FP32, value=1.0)
+                    out = pl.tensor.gather(local, dim=-1, index=idx)
+                    output = pl.assemble(output, out, [0, 0])
+                return output
+
+    elif case == "source_view":
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                idx: pl.Tensor[[64, 8], pl.INT32],
+                output: pl.Out[pl.Tensor[[64, 8], pl.FP32]],
+            ) -> pl.Tensor[[64, 8], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    parent = pl.full([64, 640], dtype=pl.FP32, value=1.0)
+                    window = parent[:, :128]
+                    out = pl.tensor.gather(window, dim=-1, index=idx)
+                    output = pl.assemble(output, out, [0, 0])
+                return output
+
+    else:
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                inp: pl.Tensor[[64, 128], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 8], pl.FP32]],
+            ) -> pl.Tensor[[64, 8], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    parent = pl.full([64, 640], dtype=pl.INT32, value=0)
+                    window = parent[:, :8]
+                    out = pl.tensor.gather(inp, dim=-1, index=window)
+                    output = pl.assemble(output, out, [0, 0])
+                return output
+
+    mlir = _codegen(Program)
+    capacity = backend.get_backend_instance(ascend_backend).get_mem_size(ir.MemorySpace.Vec)
+    # In all three cases these coexisting buffers alone need 192 KiB.
+    assert ("scf.for" in mlir) == (capacity < 192 * 1024)
+    assert mlir.count("pto.tgather ins(") == 1
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize(
+    "source_shape,dtype", [([1, 3], pl.FP32), ([4, 3], pl.FP32), ([4, 3], pl.FP16), ([2, 2, 3], pl.FP32)]
+)
+def test_gather_unaligned_source_rows_use_row_fallback(ascend_backend, source_shape, dtype):
+    index_shape = [*source_shape[:-1], 16]
+    offsets = [0] * len(source_shape)
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            inp: pl.Tensor[source_shape, dtype],
+            idx: pl.Tensor[index_shape, pl.INT32],
+            output: pl.Out[pl.Tensor[index_shape, dtype]],
+        ) -> pl.Tensor[index_shape, dtype]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.tensor.gather(inp, dim=-1, index=idx)
+                output = pl.assemble(output, out, offsets)
+            return output
+
+    mlir = _codegen(Program)
+    if source_shape != [1, 3]:
+        assert "scf.for" in mlir
+    assert mlir.count("pto.tgather ins(") == 1
+    # Only the physical allocation is padded; GM reads retain three valid columns.
+    allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    padded_cols = 16 if dtype == pl.FP16 else 8
+    assert any(f"cols={padded_cols}" in line and "valid_col = %c3_index" in line for line in allocs)
 
 
 if __name__ == "__main__":

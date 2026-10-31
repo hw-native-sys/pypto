@@ -1107,6 +1107,27 @@ class TensorToTileMutator : public TypePropagatingMutator {
   void RecordPackedTile(const VarPtr& var, const ExprPtr& value) {
     auto type = As<TileType>(var->GetType());
     if (!type) return;
+    // Record backing storage independently of packing: a narrow/strided view
+    // still keeps its full parent allocation live beside a materialized copy.
+    ExprPtr origin;
+    auto known = conversion_context_.storage_origins.find(value);
+    if (known != conversion_context_.storage_origins.end()) origin = known->second;
+    if (auto call = As<Call>(value)) {
+      const auto* entry = LookupOpEntry(call->op_);
+      if (entry && entry->GetOpCategory() == "TileOp") {
+        auto source = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+        if (!source && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+          source = 0;
+        }
+        if (source) {
+          auto backing = conversion_context_.storage_origins.find(call->args_[*source]);
+          if (backing != conversion_context_.storage_origins.end()) origin = backing->second;
+        } else if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+          origin = var;
+        }
+      }
+    }
+    if (origin) conversion_context_.storage_origins.emplace(var, origin);
     const auto view = tile_view_semantics::GetEffectiveTileView(*type);
     if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
         !view.stride.empty()) {
