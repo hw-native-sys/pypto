@@ -268,6 +268,27 @@ PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发�
 `pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
 tile 调用 `set_validshape`。
 
+**空有效区域。** 任意有效维度为零都表示有效区域为空，与物理分配大小无关。
+以本地分配为根的普通 reshape 和 reinterpret 视图使用动态有效维度表示空区域，
+并在 `pto.treshape` 后立即通过 `pto.set_validshape` 初始化两个维度。
+静态正数有效维度仍保留静态编码。编译器初始化新描述符不代表用户可以在任意
+视图上调用 `pl.set_validshape`。
+
+普通 Tile 和 Buffer 内存传输省略静态空窗口。运行时尺寸窗口仅在非空条件分支内
+创建并访问。跳过 store 时保留输出 tensor 的身份和目标数据；这些条件保护
+不会删除跨核通信或同步操作。
+`st_phase=Final` 的 store 不参与该优化：它必须与 `acc_phase=Final` 的生产者
+保留在同一直线执行区域，才能清除生产者设置的单元标志（unit flag）。后端对
+空窗口的既有限制仍然适用；若要跳过空的 phased 操作，应在源码中同时对生产者
+和 store 添加条件保护。
+
+动态有效尺寸视图要求 SSA 源可追溯至本地分配。对于 TPOP、subview 或控制流结果，
+代码生成会明确报告尚不支持；应先将数据物化到本地 tile，再创建视图。
+静态正数有效尺寸的 TPOP 视图仍受支持。`SplitVectorKernel` 将 lane-1 重放中
+结果被丢弃的 reshape/reinterpret/transpose 视图替换为空的本地 tile，
+同时保留 TPOP/TPUSH/TFREE 握手。Subview 初始化仍受
+[PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706) 阻塞。
+
 ### 跨核操作到 PTO 指令
 
 | PyPTO 操作 | 生成的 PTO-ISA | 描述 |

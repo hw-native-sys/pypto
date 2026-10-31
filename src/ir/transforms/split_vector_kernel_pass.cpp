@@ -253,9 +253,14 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") || IsOp(call, "tile.rems") ||
-             IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") || IsOp(call, "tile.row_sum") ||
-             IsOp(call, "tile.row_prod")) {
+  } else if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") ||
+             IsOp(call, "tile.transpose_view") || IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") ||
+             IsOp(call, "tile.rems") || IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") ||
+             IsOp(call, "tile.row_sum") || IsOp(call, "tile.row_prod")) {
+    // Pure reshape/reinterpret/transpose views carry no cross-core handshake.
+    // Their replay values are discarded, so use an initialized empty local tile
+    // instead of attempting to set dynamic validity on a TPOP-backed view, which
+    // PTOAS rejects. The original TPOP/TPUSH/TFREE remain in the replay body.
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so
