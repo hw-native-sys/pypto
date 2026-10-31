@@ -37,7 +37,8 @@ def kernel(
 外部 Tile 和只读 Scalar 是隐式输入。寄存器与局部 Scalar 不能通过区域外使用、
 函数返回、循环结果、元组或向外部变量赋值逃逸。Tile 操作数必须源于区域外；
 `store` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
-包括 `store`；裸 store 会被拒绝。循环 API 和 hardware-loop policy 参见
+包括 `store`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
+只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
 ## 通用参数与 dtype 记法

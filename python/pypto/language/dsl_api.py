@@ -283,6 +283,7 @@ def hardware_loop(
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Require a Sequential hardware loop with range-compatible bounds and carries.
 
+    Only valid inside an enclosing ``pl.reg_scope()``, including empty loops.
     Static qualification is distinct from final artifact evidence. Unsupported
     targets fail compilation rather than silently falling back to ordinary loops.
     Static empty loops may be removed with their initial carry values preserved.

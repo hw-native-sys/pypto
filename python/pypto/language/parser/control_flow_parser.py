@@ -251,6 +251,12 @@ class ControlFlowParser:
         """
         iter_call, iterator_type = self.validate_for_loop_iterator(stmt)
 
+        if iterator_type == "hardware_loop" and not self.scopes.regions.is_inside_scope(ir.ScopeKind.Reg):
+            raise ParserSyntaxError(
+                "pl.hardware_loop() requires an enclosing pl.reg_scope()",
+                span=self.services.span_tracker.get_span(iter_call),
+            )
+
         # Handle pl.while_() case
         if iterator_type == "while_":
             self.parse_while_as_for(stmt, iter_call)
