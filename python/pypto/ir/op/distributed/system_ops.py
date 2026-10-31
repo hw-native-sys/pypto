@@ -142,4 +142,55 @@ def defer_wait(
     )
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def async_session(*, sync_id: int = 0, block_bytes: int = 0, span: Span | None = None) -> Call:
+    """Build a ``pld.system.async_session()`` Call returning ``AsyncSessionType``.
+
+    Builds the SDMA session that ``pld.tensor.put_async`` issues transfers on and
+    ``pld.system.wait_async_event`` drains. Takes no user operand: the runtime owns
+    and injects the workspace through a hidden codegen parameter, and
+    ``ConvertTensorToTileOps`` materializes the Vec(UB) scratch buffer, lowering
+    this to ``pld.tile.async_session(scratch)``.
+
+    ``sync_id`` must be in ``[0, 7]`` — pto-isa ``BuildSdmaSession`` returns false
+    above that and PTOAS's op discards the bool, so an out-of-range id would reach
+    the device as an invalid session. ``block_bytes`` is the SDMA chunking
+    granularity; ``0`` selects PyPTO's 1 MB default rather than PTOAS's implicit
+    32 KB. Both are packed as ``int`` attrs only when non-zero.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    attrs: dict[str, int] = {}
+    if sync_id:
+        attrs["sync_id"] = int(sync_id)
+    if block_bytes:
+        attrs["block_bytes"] = int(block_bytes)
+    return _ir_core.create_op_call("pld.system.async_session", [], attrs, actual_span)
+
+
+def wait_async_event(event: _ir_core.Expr, session: _ir_core.Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.system.wait_async_event(event, session)`` Call.
+
+    Blocks until the async transfer completes within its session and yields a
+    ``BOOL`` scalar done flag. This is the acquire half of ``put_async``: the GM
+    release fence and the peer-region cache invalidate are emitted *after* this
+    wait, not after the issue, so a cross-rank ``notify`` that publishes the
+    transferred data must follow it.
+
+    ``ConvertTensorToTileOps`` lowers this to ``pld.tile.wait_async_event(event,
+    session, scratch)``, threading in the session's scratch buffer so its live
+    range spans the whole async window.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.system.wait_async_event", [event, session], {}, actual_span)
+
+
+__all__ = [
+    "async_session",
+    "defer_wait",
+    "get_comm_ctx",
+    "notify",
+    "nranks",
+    "rank",
+    "wait",
+    "wait_async_event",
+    "world_size",
+]
