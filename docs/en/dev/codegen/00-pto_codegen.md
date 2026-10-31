@@ -288,7 +288,9 @@ per-backend tables continue to govern Acc-to-GM stores independently.
 
 **`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
 operand's `valid_row` / `valid_col` operands, so the operand must be a handle
-that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —
+that has them: an alloc or a supported cross-core pop slot. PTOAS 0.71 does
+not accept direct mutation of a native `scf.if` result; establish each arm's
+valid shape before yielding its descriptor.  A **view** —
 the `pto.subview` a `tile.slice` lowers to, or a `pto.treshape` — carries its
 valid extent in its own type instead, so ptoas rejects the op against one; PyPTO
 therefore rejects it first, with a message pointing at the slice.  View-ness is
@@ -297,6 +299,28 @@ slice given a runtime `valid_shape` renders `v_row=?, v_col=?` exactly as an
 alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
 (it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
 or call `set_validshape` on the source tile before taking the view.
+
+### Tile-valued branches
+
+Tile results use native PTOAS `scf.if` results, interleaved with scalar results
+in the same order as the PyPTO return values:
+
+```mlir
+%selected = scf.if %cond -> (!T) {
+  scf.yield %a : !T
+} else {
+  scf.yield %b : !T
+}
+```
+
+The yielded descriptor chooses the source storage. Codegen allocates no phi
+buffer, rebinds no branch producer, and inserts no `pto.tmov` for this choice.
+Aliases and views of the selected Tile follow its runtime SSA rather than
+reconstructing the then arm's address from representative MemRef metadata.
+Compatible descriptor type differences are normalized with views; the Tile
+contents remain in their original storage. See
+[MaterializeSemanticAliases](../passes/36-materialize_semantic_aliases.md#native-tile-results-from-ifstmt)
+for lifetime handling and default Buffer IR selection.
 
 ### Cross-Core Operations → PTO Instructions
 

@@ -82,7 +82,9 @@ def test_if_selection_does_not_copy_live_inputs(
     kernels = list(tmp_path.rglob("*.pto"))
     assert kernels
     for kernel in kernels:
-        for line in kernel.read_text().splitlines():
+        text = kernel.read_text()
+        assert re.search(r"scf\.if .* -> \(.*!pto\.tile_buf", text), text
+        for line in text.splitlines():
             if "pto.tmov" in line:
                 spaces = re.findall(r"\bloc\s*=\s*(\w+)", line)
                 assert len(spaces) == 2 and spaces[0] != spaces[1], line

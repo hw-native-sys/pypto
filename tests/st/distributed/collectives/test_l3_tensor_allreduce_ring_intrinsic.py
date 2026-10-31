@@ -191,6 +191,10 @@ def _build_ring_allreduce_program(
     return RingAllReduceIntrinsicNRank
 
 
+@pytest.mark.skip(
+    reason="Ring tail narrowing sets validity on an If-selected Tile; "
+    "https://github.com/hw-native-sys/PTOAS/issues/1708"
+)
 class TestL3TensorRingAllReduceIntrinsic:
     """L3 distributed runtime: ring allreduce via the composite intrinsic.
 

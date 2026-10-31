@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_MEMREF_COLLECTORS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_MEMREF_COLLECTORS_H_
 
-#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -24,8 +23,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
-#include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -76,27 +73,6 @@ class MemRefWithSpaceCollector : public IRVisitor {
 // ============================================================================
 // Free-function collectors
 // ============================================================================
-
-/// Static allocation capacities after InitMemRef, independent of pinned ownership.
-/// Allocation declarations are hoisted to the function-body head. A multi-slot
-/// allocation reserves more bytes than any one of its member Tile MemRefs.
-inline std::map<const Var*, uint64_t> CollectAllocSizes(const StmtPtr& body) {
-  std::map<const Var*, uint64_t> sizes;
-  auto collect = [&](const StmtPtr& statement) {
-    const auto assign = As<AssignStmt>(statement);
-    const auto call = assign ? As<Call>(assign->value_) : nullptr;
-    if (!call || (!IsOp(call, "tile.alloc") && !IsOp(call, "tensor.alloc"))) return;
-    if (call->args_.size() < 2) return;
-    const auto size = As<ConstInt>(call->args_[1]);
-    if (size && size->value_ > 0) sizes.emplace(assign->var_.get(), static_cast<uint64_t>(size->value_));
-  };
-  if (const auto sequence = As<SeqStmts>(body)) {
-    for (const auto& statement : sequence->stmts_) collect(statement);
-  } else {
-    collect(body);
-  }
-  return sizes;
-}
 
 /// Collect all unique (MemRef, MemorySpace) pairs from TileType variables
 /// in a statement subtree.

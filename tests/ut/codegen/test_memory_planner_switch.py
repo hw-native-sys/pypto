@@ -637,7 +637,7 @@ def test_ptoas_nested_mat_phi_does_not_reuse_sibling_branch_declaration(identity
         for line in lines
         if "pto.alloc_tile" in line and "loc=mat" in line and "rows=32, cols=64" in line
     ]
-    assert len(panel_allocations) == 2, mlir  # Sibling-local storage and one shared head phi.
+    assert len(panel_allocations) == 1, mlir  # One existing shared family, dominating every branch.
     assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in lines), mlir
     transposes = [line for line in lines if "pto.treshape" in line]
     assert transposes and f"pto.treshape {nested_handles[0]} :" in transposes[-1], mlir
@@ -688,6 +688,90 @@ def test_ptoas_nested_mat_phi_reuses_dominating_enclosing_branch_declaration():
     # Keep useful reuse inside an active ancestor scope. Requiring every shared
     # Mat to be head-declared would reintroduce the forbidden Mat-to-Mat copy.
     assert if_indices[0] < declarations[0] < if_indices[1], mlir
+
+
+def test_ptoas_sequential_shared_accumulators_keep_local_declarations():
+    """Hoisting already-dominating creates makes independent Acc families overlap."""
+
+    @pl.program
+    class SequentialAccumulators:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP16],
+            rhs: pl.Tensor[[16, 16], pl.FP16],
+            count: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            a = pl.tile.load(lhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            first = pl.tile.create([16, 16], pl.FP32, target_memory=pl.Mem.Acc)
+            for i, (carried,) in pl.range(count, init_values=(first,)):
+                if i == 0:
+                    updated = pl.tile.matmul(a, b)
+                else:
+                    updated = pl.tile.matmul_acc(carried, a, b)
+                first_result = pl.yield_(updated)
+            pl.tile.store(first_result, [0, 0], out)
+            second = pl.tile.create([16, 16], pl.FP32, target_memory=pl.Mem.Acc)
+            for j, (carried,) in pl.range(count, init_values=(second,)):
+                if j == 0:
+                    updated = pl.tile.matmul(a, b)
+                else:
+                    updated = pl.tile.matmul_acc(carried, a, b)
+                second_result = pl.yield_(updated)
+            return pl.tile.store(second_result, [16, 0], out)
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, SequentialAccumulators, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    allocations = [i for i, line in enumerate(lines) if "pto.alloc_tile" in line and "loc=acc" in line]
+    loops = [i for i, line in enumerate(lines) if "scf.for" in line]
+    stores = [i for i, line in enumerate(lines) if "pto.tstore" in line]
+    assert len(allocations) == len(loops) == len(stores) == 2, mlir
+    # Each initial create dominates its own loop already. The second family's
+    # declaration must remain after the first family's last use for PTOAS reuse.
+    assert allocations[0] < loops[0] < stores[0] < allocations[1] < loops[1] < stores[1], mlir
+
+
+def test_ptoas_loop_local_shared_accumulator_keeps_dynamic_validity_in_scope():
+    """An existing loop-local producer dominates its nested If and binds runtime extents."""
+
+    @pl.program
+    class LoopLocalAccumulator:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP16],
+            rhs: pl.Tensor[[16, 16], pl.FP16],
+            count: pl.Scalar[pl.INDEX],
+            valid_rows: pl.Scalar[pl.INDEX],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            b = pl.tile.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            for i in pl.range(count):
+                rows = pl.min(valid_rows + i, 16)
+                a = pl.tile.load(lhs, [0, 0], [16, 16], valid_shape=[rows, 16], target_memory=pl.Mem.Mat)
+                initial = pl.tile.matmul(a, b)
+                if flag != 0:
+                    result = pl.tile.matmul(a, b)
+                else:
+                    result = pl.tile.matmul_acc(initial, a, b)
+                pl.tile.store(result, [0, 0], out)
+            return out
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, LoopLocalAccumulator, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    allocations = [i for i, line in enumerate(lines) if "pto.alloc_tile" in line and "loc=acc" in line]
+    assert len(allocations) == 1, mlir
+    allocation = allocations[0]
+    loop = next(i for i, line in enumerate(lines) if "scf.for" in line)
+    branch = next(i for i, line in enumerate(lines) if "scf.if" in line)
+    assert loop < allocation < branch, mlir
+    valid_row = re.search(r"valid_row = (%[A-Za-z0-9_]+)", lines[allocation])
+    assert valid_row and not valid_row.group(1).startswith("%c"), mlir
 
 
 def test_ptoas_repaired_mat_phi_preserves_partial_view_and_gather_storage():
@@ -907,8 +991,8 @@ def test_ptoas_loop_mat_identity_phi_gather_writes_nonzero_row_subview():
         "all_unknown",
     ],
 )
-def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, difference):
-    """Reuse requires an exact window and a known, matching space on both yields and phi."""
+def test_ptoas_if_selection_preserves_each_source_window(memory_space, difference):
+    """A representative hint follows then without changing either selected source."""
     span = ir.Span.unknown()
     allocation = ir.Var("allocation", ir.PtrType(), span)
     other_allocation = ir.Var("other_allocation", ir.PtrType(), span)
@@ -985,9 +1069,9 @@ def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, diff
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(before)
 
-    if difference != "same_window":
-        # Sharing a pointer does not authorize cross-space or uncertain aliases,
-        # and the false switch continues to leave distinct windows to codegen.
+    if a_storage is None or phi_memref is None:
+        # Missing storage remains outside hint refresh; it is not invented by
+        # native selection. The selected source operands stay intact below.
         ir.assert_structural_equal(after, before)
         return
 
@@ -995,9 +1079,15 @@ def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, diff
     new_phi, arms = phis[0]
     _assert_same_tile_window(new_phi.type.memref, a_memref)
     assert new_phi.type.memory_space == memory_space
-    assert new_phi.type.tile_view == phi_type.tile_view
-    for arm in arms:
-        _assert_same_tile_window(arm, a_memref)
+    expected_phi = ir.TileType(phi_type.shape, dtype, a_memref, phi_type.tile_view, memory_space)
+    assert new_phi.type.tile_view == expected_phi.tile_view
+    _assert_same_tile_window(arms[0], a_memref)
+    if b_storage is None:
+        assert arms[1] is None
+    else:
+        _assert_same_tile_window(arms[1], b_storage)
+    # All geometry differences remain exercised. In particular, the else
+    # allocation/offset/slot must never be rebound to then's hint.
     for name in ("reshaped", "alias"):
         tile_type = tiles[name].type
         assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None

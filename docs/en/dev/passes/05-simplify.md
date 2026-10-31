@@ -29,7 +29,7 @@ Integer and INDEX rewrites preserve the expression's declared result dtype. If s
 
 Boolean bindings use value substitution without numeric ordering analysis; floating-point bindings also substitute known values while leaving floating-point algebraic rewrite rules disabled, preserving dtype and signed zero.
 
-Floating-point comparisons remain explicit until rounding to the declared format is modeled; raw `ConstFloat` doubles must not decide a branch. Scoped unbinding clears symbolic intervals as well as concrete bounds and substitutions. Single-trip cloning carries the original multi-assignment exclusions onto fresh variables, and scalar/yield-slot DCE preserves communication-domain scope fields when rebuilding their bodies.
+Comparisons between finite FP32 literals that are exactly representable in FP32 can fold, for example `10.0 > 0.0`. Other floating-point comparisons remain explicit until rounding to the declared format is modeled; raw `ConstFloat` doubles must not decide a branch that requires rounding. Scoped unbinding clears symbolic intervals as well as concrete bounds and substitutions. Single-trip cloning carries the original multi-assignment exclusions onto fresh variables, and scalar/yield-slot DCE preserves communication-domain scope fields when rebuilding their bodies.
 
 ## When to Use
 

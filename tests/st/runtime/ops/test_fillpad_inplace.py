@@ -121,7 +121,7 @@ def fillpad_then_narrow_same_mode(x: pl.Tensor, out: pl.Out[pl.Tensor]):
 def fillpad_branch_then_narrow(
     x: pl.Tensor, out: pl.Out[pl.Tensor], rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
 ):
-    """Exercise both branches of a head-declared allocation before padding."""
+    """Exercise both outcomes of native Tile selection before padding."""
     with pl.at(level=pl.Level.CORE_GROUP):
         if rows < 32:
             src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
@@ -157,7 +157,7 @@ def _fillpad_narrow_cases():
         else:
             kind = "branch" if kernel is fillpad_branch_then_narrow else "dynamic" if dynamic else "static"
         scalar_args = bounds if dynamic else ()
-        yield st.case(
+        case = st.case(
             kernel,
             x,
             torch.empty(64, 64, dtype=torch.float32),
@@ -167,6 +167,18 @@ def _fillpad_narrow_cases():
             memory_planner=MemoryPlanner.PTOAS,
             golden=lambda _tensors, expected=expected: expected,
         )
+        # Keep ordinary allocation-backed validity tests enabled. Only the
+        # native If descriptor composition awaits PTOAS backend support.
+        if kernel is fillpad_branch_then_narrow:
+            yield pytest.param(
+                case,
+                marks=pytest.mark.skip(
+                    reason="PTOAS set_validshape on native scf.if Tile results: "
+                    "https://github.com/hw-native-sys/PTOAS/issues/1708"
+                ),
+            )
+        else:
+            yield case
 
 
 @st.cases(*_fillpad_narrow_cases())

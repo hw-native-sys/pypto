@@ -35,16 +35,107 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/attrs.h"
-#include "pypto/ir/transforms/utils/memref_collectors.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace {
+
+// Build descriptor edges once, including loop backedges, then propagate one
+// boolean per value. Each node/edge is processed once (ordered lookups add log N).
+class SelectionCollector : public IRVisitor {
+ public:
+  explicit SelectionCollector(bool include_backedges) : include_backedges_(include_backedges) {}
+
+  TileSelectionInfo result;
+  std::map<const Var*, std::vector<const Var*>> users;
+  std::vector<IterArgPtr> arguments;
+
+  void Edge(const VarPtr& target, const ExprPtr& source) {
+    if (const auto value = AsVarLike(source); value && As<TileType>(target->GetType())) {
+      users[value.get()].push_back(target.get());
+    }
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (AsVarLike(op->value_)) Edge(op->var_, op->value_);
+    if (const auto call = As<Call>(op->value_); call && call->op_) {
+      auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+      if (!index && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        index = 0;
+      }
+      if (index) Edge(op->var_, call->args_[*index]);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    const auto lhs = transform_utils::GetLastYieldStmt(op->then_body_);
+    const auto rhs = op->else_body_ ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
+    if (!lhs || !rhs) return;
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& target = op->return_vars_[i];
+      if (!As<TileType>(target->GetType())) continue;
+      // Leave malformed boundary arity to the existing verifier/codegen
+      // diagnostics instead of indexing missing operands during this analysis.
+      if (i >= lhs->value_.size() || i >= rhs->value_.size()) continue;
+      Edge(target, lhs->value_[i]);
+      Edge(target, rhs->value_[i]);
+      const auto a = GetTileTypeWithMemRef(lhs->value_[i]->GetType());
+      const auto b = GetTileTypeWithMemRef(rhs->value_[i]->GetType());
+      if (lhs->value_[i] != rhs->value_[i] &&
+          (!a || !b || a->GetMemorySpace() != b->GetMemorySpace() ||
+           (CompareBaseAddress(GetDefinedMemRef(a), GetDefinedMemRef(b)) != AddressRelation::kSame ||
+            GetDefinedMemRef(a)->size_ != GetDefinedMemRef(b)->size_))) {
+        result.values.insert(target.get());
+      }
+    }
+  }
+
+  template <typename LoopPtr>
+  void Loop(const LoopPtr& op) {
+    for (const auto& argument : op->iter_args_) {
+      arguments.push_back(argument);
+      Edge(argument, argument->initValue_);
+    }
+    IRVisitor::VisitStmt_(op);
+    const auto yield = transform_utils::GetLastYieldStmt(op->body_);
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i < op->return_vars_.size()) Edge(op->return_vars_[i], op->iter_args_[i]);
+      if (include_backedges_ && yield && i < yield->value_.size()) Edge(op->iter_args_[i], yield->value_[i]);
+    }
+  }
+  void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { Loop(op); }
+
+  TileSelectionInfo Finish() {
+    std::vector<const Var*> pending(result.values.begin(), result.values.end());
+    while (!pending.empty()) {
+      const auto* source = pending.back();
+      pending.pop_back();
+      const auto found = users.find(source);
+      if (found == users.end()) continue;
+      for (const auto* target : found->second) {
+        if (result.values.insert(target).second) pending.push_back(target);
+      }
+    }
+    for (const auto& argument : arguments) {
+      if (result.values.count(argument.get())) result.carries.insert(argument.get());
+    }
+    return std::move(result);
+  }
+
+ private:
+  bool include_backedges_;
+};
 
 /**
  * @brief Collect all Var nodes referenced in an expression.
@@ -73,6 +164,8 @@ class VarUseCollector : public IRVisitor {
  */
 class LifetimeAnalyzer : public IRVisitor {
  public:
+  explicit LifetimeAnalyzer(bool native_if) : native_if_(native_if) {}
+
   struct Result {
     std::vector<VarPtr> ordered_defs;        // TileType vars in definition order
     std::map<VarPtr, int> var_def_order;     // var -> def order
@@ -84,6 +177,7 @@ class LifetimeAnalyzer : public IRVisitor {
     // var may belong to several families (e.g. a source yielded at >1 slot)
     // without those families merging, so we store a *set* of ids per var.
     std::map<const Var*, std::set<int>> phi_family_ids;
+    TileStorageSources storage_sources;
   };
 
   Result Analyze(const StmtPtr& func_body, const std::vector<VarPtr>& entry_vars = {}) {
@@ -102,11 +196,23 @@ class LifetimeAnalyzer : public IRVisitor {
       VisitStmt(func_body);
     }
 
+    // Definitions precede uses, including each If's region results. Propagate
+    // demands once backwards through direct bindings, not recursively per use.
+    // Map accesses cost O(log N); each binding edge is visited once.
+    for (auto it = binding_order_.rbegin(); it != binding_order_.rend(); ++it) {
+      const auto demand = var_raw_last_use_.find(*it);
+      if (demand == var_raw_last_use_.end()) continue;
+      for (const auto& source : storage_sources_.at(it->get())) {
+        auto& last = var_raw_last_use_[source];
+        last = std::max(last, demand->second);
+      }
+    }
+
     // Phase 2: Apply loop-aware lifetime extension
     auto effective_last_use = ComputeEffectiveLastUse();
 
-    return {std::move(ordered_defs_), std::move(var_def_order_), std::move(effective_last_use),
-            std::move(var_def_stmt_), std::move(var_family_ids_)};
+    return {std::move(ordered_defs_), std::move(var_def_order_),  std::move(effective_last_use),
+            std::move(var_def_stmt_), std::move(var_family_ids_), std::move(storage_sources_)};
   }
 
  protected:
@@ -129,9 +235,29 @@ class LifetimeAnalyzer : public IRVisitor {
     // Record TileType variable definitions
     auto tile_type = As<TileType>(op->var_->GetType());
     if (tile_type) {
-      ordered_defs_.push_back(op->var_);
-      var_def_order_[op->var_] = order;
-      var_def_stmt_[op->var_] = op;
+      if (native_if_) {
+        std::vector<VarPtr> sources;
+        if (auto source = AsVarLike(op->value_)) {
+          sources.push_back(source);
+        } else if (auto call = As<Call>(op->value_); call && call->op_) {
+          auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+          if (!index && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+            index = 0;
+          }
+          if (index) {
+            if (auto source = AsVarLike(call->args_[*index])) sources.push_back(source);
+          }
+        }
+        RegisterStorageBinding(op->var_, std::move(sources), order);
+      }
+      // A view/rename/writeback of an If descriptor owns no new allocation.
+      // Grouping its geometry-only MemRef with then's allocation would assert
+      // a false must-alias and lose the other runtime choice.
+      if (!selection_aliases_.count(op->var_.get())) {
+        ordered_defs_.push_back(op->var_);
+        var_def_order_[op->var_] = order;
+        var_def_stmt_[op->var_] = op;
+      }
     }
 
     // Collect variable uses from value expression (for ALL AssignStmt)
@@ -165,24 +291,11 @@ class LifetimeAnalyzer : public IRVisitor {
       else_end = current_order_ - 1;
     }
 
-    // An scf.if return_var (phi) is NOT itself a tracked def -- it is materialized
-    // by YieldFixup into a branch yield-source's buffer downstream, and tracking
-    // it here would perturb that lowering.  But reads of the phi *after* the if
-    // keep that buffer live; if we drop them (RecordRawUse early-returns on
-    // untracked vars), the buffer's live range collapses at the yield and a later
-    // temporary is packed onto the still-live phi value (merge_norm mi/li/oi,
-    // #1821).  So we redirect the phi's reads onto its *branch-local* yield-
-    // sources (the tiles actually holding the value), recorded in
-    // `phi_local_sources_`.  A source defined OUTSIDE the branch (loaded before
-    // the if and live elsewhere) is left alone -- it genuinely conflicts and
-    // YieldFixup moves it into the phi buffer.
-    //
-    // Extending both branch sources to the phi's last read makes the two
-    // mutually-exclusive sources overlap, so we also tag them with a fresh
-    // per-slot family id; the reuse packer exempts intra-family pairs from the
-    // interference check.  Ids are *per return slot* (not a transitive union): a
-    // source shared across slots joins several families without merging them, so
-    // two distinct phi results are never exempted.
+    // Native Tile phis forward descriptors, so every possible yielded storage
+    // stays live until the result's last use. The Buffer path keeps its existing
+    // canonical-destination treatment. Only genuinely branch-local producers
+    // receive the mutual-exclusion exemption: an alias created inside an arm
+    // can still denote an outer value that remains independently live.
     auto then_yield = transform_utils::GetLastYieldStmt(op->then_body_);
     auto else_yield =
         op->else_body_.has_value() ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
@@ -194,7 +307,17 @@ class LifetimeAnalyzer : public IRVisitor {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& rv = op->return_vars_[i];
       auto tile_type = As<TileType>(rv->GetType());
-      if (!tile_type || !tile_type->memref_.has_value()) continue;
+      if (!tile_type || (!native_if_ && !tile_type->memref_.has_value())) continue;
+      if (native_if_) {
+        std::vector<VarPtr> sources;
+        if (then_yield && i < then_yield->value_.size()) {
+          if (auto source = AsVarLike(then_yield->value_[i])) sources.push_back(source);
+        }
+        if (else_yield && i < else_yield->value_.size()) {
+          if (auto source = AsVarLike(else_yield->value_[i])) sources.push_back(source);
+        }
+        RegisterStorageBinding(rv, std::move(sources), current_order_, /*selection=*/true);
+      }
       int family_id = next_family_id_++;
       std::vector<VarPtr> local_sources;
       std::set<const Var*> seen_phi;
@@ -205,11 +328,32 @@ class LifetimeAnalyzer : public IRVisitor {
       // mutually-exclusive sharing.
       std::function<void(const VarPtr&, int, int)> add_source_var = [&](const VarPtr& src, int start,
                                                                         int end) {
+        if (native_if_) {
+          // Prune outer bindings before walking their ancestry. This also keeps
+          // deeply nested choices among outer values from rescanning one DAG
+          // per enclosing If merely to discover there are no local producers.
+          const auto order = binding_points_.find(src.get());
+          if (start < 0 || order == binding_points_.end() || order->second < start || order->second > end) {
+            return;
+          }
+        }
         auto pit = phi_local_sources_.find(src.get());
         if (pit != phi_local_sources_.end()) {
           if (!seen_phi.insert(src.get()).second) return;
           for (const auto& nested : pit->second) add_source_var(nested, start, end);
           return;
+        }
+        if (native_if_) {
+          // A may-alias DAG is not a mutual-exclusion proof. In particular,
+          // outer-then's live a/b can feed an inner choice without ever being
+          // mutually exclusive themselves. Only inherit proven phi families;
+          // otherwise follow a single non-choice alias to its owning producer.
+          if (selection_aliases_.count(src.get())) return;
+          if (!seen_phi.insert(src.get()).second) return;
+          if (auto sources = storage_sources_.find(src.get()); sources != storage_sources_.end()) {
+            for (const auto& source : sources->second) add_source_var(source, start, end);
+            return;
+          }
         }
         if (!branch_local(src, start, end)) return;
         local_sources.push_back(src);
@@ -243,6 +387,21 @@ class LifetimeAnalyzer : public IRVisitor {
 
  private:
   int current_order_ = 0;
+  bool native_if_;
+  TileStorageSources storage_sources_;
+  std::vector<VarPtr> binding_order_;
+  std::map<const Var*, int> binding_points_;
+  std::set<const Var*> selection_aliases_;
+
+  void RegisterStorageBinding(const VarPtr& value, std::vector<VarPtr> sources, int order,
+                              bool selection = false) {
+    binding_points_[value.get()] = order;
+    for (const auto& source : sources) selection |= selection_aliases_.count(source.get()) != 0;
+    if (selection) selection_aliases_.insert(value.get());
+    if (sources.empty()) return;
+    storage_sources_.emplace(value.get(), std::move(sources));
+    binding_order_.push_back(value);
+  }
 
   // Loop boundaries recorded during Phase 1
   struct LoopBoundary {
@@ -288,6 +447,11 @@ class LifetimeAnalyzer : public IRVisitor {
 
   void ProcessLoopBody(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
     for (const auto& iter_arg : iter_args) {
+      if (native_if_ && As<TileType>(iter_arg->GetType())) {
+        if (auto initial = AsVarLike(iter_arg->initValue_)) {
+          RegisterStorageBinding(iter_arg, {initial}, current_order_);
+        }
+      }
       if (iter_arg->initValue_) {
         CollectUsesFromExpr(iter_arg->initValue_, current_order_);
       }
@@ -329,6 +493,11 @@ class LifetimeAnalyzer : public IRVisitor {
     for (size_t i = 0; i < count; ++i) {
       const auto& rv = return_vars[i];
       if (!As<TileType>(rv->GetType())) continue;
+      if (native_if_) {
+        // Preserve the existing fixed-buffer loop boundary. Do not add a
+        // backedge to the native If provenance DAG or invent loop rotation.
+        RegisterStorageBinding(rv, {iter_args[i]}, current_order_);
+      }
 
       // Map return_var -> the init's buffer carrier so that post-loop uses of the
       // return_var extend that carrier's lifetime (not the return_var's).
@@ -343,6 +512,13 @@ class LifetimeAnalyzer : public IRVisitor {
   }
 
   void RecordRawUse(const VarPtr& var, int use_order) {
+    if (native_if_) {
+      if (As<TileType>(var->GetType())) {
+        auto& last = var_raw_last_use_[var];
+        last = std::max(last, use_order);
+      }
+      return;
+    }
     // If var is an scf.if phi return_var, redirect the use to its branch-local
     // yield-sources (the tiles holding the value), keeping their buffers live to
     // the phi's last read.  Sources may themselves be phis (chained scf.if), so
@@ -408,13 +584,13 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
   std::vector<LifetimeInterval> lifetimes;
 
   // Step 1: Walk full IR tree to collect variable defs, uses, and ordering
-  LifetimeAnalyzer analyzer;
+  const auto* context = PassContext::Current();
+  LifetimeAnalyzer analyzer(context == nullptr || !context->GetEnableBufferIR());
   auto result = analyzer.Analyze(func_body, entry_vars);
 
   if (result.ordered_defs.empty()) {
     return {lifetimes, {}};
   }
-  const auto allocation_sizes = memref_collectors::CollectAllocSizes(func_body);
 
   // Step 2: Build MemRef sharing groups (keyed by base_ Ptr identity)
   std::map<const Var*, std::vector<VarPtr>> memref_groups;
@@ -466,7 +642,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
     // Compute MERGED lifetime for all variables in the sharing group
     int min_def_point = INT_MAX;
     int max_last_use = INT_MIN;
-    bool has_slots = false;
 
     for (const auto& group_var : sharing_group) {
       int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
@@ -476,8 +651,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
-      const auto tile = GetTileTypeWithMemRef(group_var->GetType());
-      has_slots |= tile && GetDefinedMemRef(tile)->slot_count_ > 1;
     }
 
     LifetimeInterval interval;
@@ -492,12 +665,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
     interval.size = GetDefinedMemRef(representative_tile_type)->size_;
-    // Reuse moves the complete allocation. Keep its capacity separate from
-    // each slot's window size and from the author's pinned ownership contract.
-    if (has_slots) {
-      const auto capacity = allocation_sizes.find(GetDefinedMemRef(representative_tile_type)->base_.get());
-      if (capacity != allocation_sizes.end()) interval.size = std::max(interval.size, capacity->second);
-    }
 
     // A direct dynamic tile.slice is lowered through pto.subview, which rebuilds
     // its runtime address from the source tile and slice operands. Every other
@@ -569,10 +736,17 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
           std::move(var_liveness),
           std::move(pipeline_membership),
           std::move(pipeline_load_tiles),
-          std::move(subrange_unsafe_groups)};
+          std::move(subrange_unsafe_groups),
+          std::move(result.storage_sources)};
 }
 
 }  // namespace
+
+TileSelectionInfo AnalyzeTileSelections(const StmtPtr& body, bool include_backedges) {
+  SelectionCollector collector(include_backedges);
+  if (body) collector.VisitStmt(body);
+  return collector.Finish();
+}
 
 LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
   return AnalyzeAllocationLifetimesImpl(func_body);
@@ -580,6 +754,7 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
 
 LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func) {
   INTERNAL_CHECK(func != nullptr) << "Cannot analyze allocation lifetimes for a null function";
+  BufferIRFunctionScope buffer_scope(func);
   return AnalyzeAllocationLifetimesImpl(func->body_, func->params_);
 }
 

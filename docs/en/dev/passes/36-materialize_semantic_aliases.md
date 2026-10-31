@@ -28,19 +28,6 @@ MemRefs) and before the selected memory planner. It always runs. `PYPTO` follows
 it with [`MemoryReuse`](37-memory_reuse.md); `DSA_RP` consumes its allocation
 identities in [`AllocateMemoryAddr`](38-allocate_memory_addr.md).
 
-## Logical Tile selections
-
-On the Tile path, two compatible compiler-owned values selected by an If can use
-one allocation with disjoint slots. Both yields and the result carry a scalar
-slot index; `tile.create` reconstructs the selected descriptor without copying
-payloads. This also applies when a same-space move would be hardware-legal.
-An If exit barrier completes asynchronous producers before the selected view is used.
-The lowering retains full implicit descriptors in Vec/Mat/Acc and leaves explicit,
-borrowed, writeback, loop-touched and Buffer IR storage on their existing paths.
-All planners use the existing multi-buffer representation for the two slots.
-Compiler-created pools retain their full allocation capacity and slot identities,
-and participate in lifetime reuse as whole allocations.
-
 ## API
 
 | C++ | Python | Level |
@@ -112,9 +99,17 @@ its own fresh MemRef. This pass closes that gap:
    body structure, handled by tensor boundary normalization.
    Legacy Vec carries also use the shared isolation analysis for recurring
    independent seed reads: an entry copy lets the carry advance in private
-   storage while preserving the original seed. Incoming-parameter, post-loop
-   and overlapping-input policies remain specific to Buffer IR; unsupported
-   copy spaces retain the retarget guard and existing explicit copy diagnostic.
+   storage while preserving the original seed. General incoming-parameter,
+   post-loop and overlapping-input isolation remains specific to Buffer IR.
+   Legacy selected carries in destinations that accept Tile moves are rejected
+   when their initializers remain independently observable, unless recurrence
+   isolation already provides private storage: a writeback snapshot cannot
+   preserve another handle's old initializer value. Acc has no incoming move;
+   its provisional selections reach mandatory accumulator coalescing or the
+   existing divergent-Acc diagnostic instead.
+   A live native selection in the same memory space is conservatively treated
+   as a possible observer of that input, including its non-representative arm.
+   Unsupported copy spaces retain the retarget guard and existing diagnostic.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.
@@ -134,6 +129,12 @@ its own fresh MemRef. This pass closes that gap:
    considers loops entered after the read handle's definition; an accumulator
    recreated inside the loop can still be coalesced safely. These queries use
    precomputed alias and loop-interval indexes, retaining O(N log N) analysis.
+   Acc producer retargeting and coalescing also protect older native selections:
+   a later payload read may observe the input through a non-representative arm.
+   Observer provenance follows descriptor bindings and fixed loop initializers;
+   a carry marked selected only through its backedge is not an old descriptor.
+   Definition-order sweeps and branch/recurrence indexes distinguish these old
+   observers from current phi consumers without expanding candidate sets.
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
    after retargeting, rather than repairing one producer in isolation. Bare SSA
@@ -188,6 +189,87 @@ functions, alias normalization still runs when `Compute` returns no retargeting
 rewrites; it can repair existing type drift independently.
 
 ## Relationship to codegen
+
+### Native Tile results from `IfStmt`
+
+A Tile-valued `IfStmt` selects the Tile handle yielded by the executed arm.
+The arms retain their own storage; neither `MaterializeSemanticAliases` nor
+`MemoryReuse` inserts a `tile.move` to make their addresses equal. PTO codegen
+uses PTOAS's native region results:
+
+```mlir
+%selected = scf.if %cond -> (!T) {
+  scf.yield %a : !T
+} else {
+  scf.yield %b : !T
+}
+```
+
+This selects a descriptor, without copying Tile contents. There is no selection
+pool, slot index, fixed two-slot layout, or restriction to a particular memory
+space. Borrowed inputs, author-declared allocations, branch-local producers,
+and dynamic valid shapes use the same path. Yielded descriptors must have the
+same PTO type; descriptor-only views reconcile compatible valid-shape type
+representations without a data transfer.
+
+The lifetime analysis records both possible sources and follows aliases and
+views. A later use of `%selected` keeps both candidates alive through that use;
+after their last use, ordinary memory reuse applies to each allocation. The
+candidates are not unconditional aliases and must not be merged just because
+one of them represents the result's MemRef metadata.
+
+For ordinary native If results, this pass does not opportunistically coalesce
+a fresh Vec branch producer with an unchanged sibling. Later memory planning
+may reuse storage when lifetimes and allocation constraints permit it.
+
+Post-fixup alias normalization also refreshes enclosing native If hints when
+their yielded writeback aliases move, so abandoned hint allocations can be freed.
+
+Updating loop carries on the legacy Tile path still require one fixed buffer.
+If a carry's initializer or backedge retains an unresolved native If storage
+choice, compilation reports a diagnostic instead of treating the representative
+MemRef as the actual destination. This applies to both For and While; native
+Ifs used only within an iteration remain supported. An unchanged or statically
+zero-trip carry forwards its actual initializer. Descriptor-carry rotation is
+outside this pass's current lowering.
+
+Before inserting multiple carry writebacks, yield fixup checks the original
+selected sources. A bounded source summary permits choices that read only
+their own destination or storage untouched by every copy. Other conditional
+multi-copy boundaries are diagnosed; inserted moves must not hide an implicit
+swap from this check. A selected source that may name its own destination is
+snapshotted into independent storage before any writeback, including for a
+single carry. This prevents runtime self-moves. If every source path is proven
+to name exactly the same carry window, with unchanged shape, layout and validity,
+no transfer or scratch is needed. A fresh or unknown source prevents that proof,
+even when the representative hint matches the carry. Scratch storage is explicit
+before lifetime and address planning; explicit materializing copies retain their
+existing behavior.
+
+When producers already share one physical allocation, PTO codegen declares
+that storage before sibling regions and initializes logical validity at each
+producer site. If both arms yield the exact same SSA handle, the result binds
+directly to that handle, preserving its local allocation provenance for PTOAS.
+An existing producer that dominates the other sites keeps its local declaration
+so sequential accumulator families can reuse storage.
+
+In addressed PTO output, a slice of a selected flat Vec tile can derive a view
+from the actual selected handle's address. The view preserves the source's
+physical pitch without copying contents or using its representative MemRef.
+This fallback requires static inferred validity or explicit valid dimensions.
+Consumers requiring dense operands use a descriptor alias of the actual
+selected address for proven contiguous windows. Lazy materialization must not
+write into a representative branch allocation; uncertain selected windows are
+rejected unless an earlier pass has materialized independent storage.
+Unaddressed output, selections of views, and packed layouts retain the existing
+subview path and its PTOAS limitations.
+
+`SelectBufferIRFunctions` retains loop-free functions with Tile-valued If results
+on the Tile path, including when Buffer IR is enabled: Buffer lowering currently
+erases Tile region results and cannot represent this dynamic handle choice.
+This preserves native selection for branch-only kernels in the default pipeline.
+Kernels containing For/While retain their existing Buffer eligibility and carry
+lowering; changing their whole-kernel route would also change loop semantics.
 
 ### Staged Buffer IR pipeline
 
@@ -262,21 +344,8 @@ physical address for ptoas `PlanMemory`. See
   window.
 - In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
   behavior of the former single `MemoryReuse` pass.
-- `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
+- `DSA_RP` and `PTOAS` both skip the legacy `MemoryReuse` pass. Neither planner
   may undo a must-alias relation established by this pass.
-- On the legacy `PTOAS` path, if both branches yield the same tile byte window
-  (allocation, offset, size, slot count, and slot index), and both yields and the
-  result have the same known memory space, the merged result retains that window
-  without a copy. Semantic aliases follow the repaired result while preserving
-  their type/view metadata. Registered views rebase their relative byte offset
-  onto the repaired source, preserving their own extent and inheriting its
-  pipeline slot identity;
-  subsequent whole-window writeback results follow that view. Reusing an existing
-  mixed-type codegen handle additionally requires matching its declared SSA type,
-  both yields' window and current binding, and scope dominance. If an earlier
-  merge selected a new dominating handle, later merges use that common yielded
-  binding even when the identity map still names a rejected sibling handle.
-  Distinct branch windows keep their existing handling.
 - Accumulator-phi normalization runs for every memory planner before lifetime
   planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
   reuse can introduce a fresh carry/phi mismatch.

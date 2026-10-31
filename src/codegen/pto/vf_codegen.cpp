@@ -132,6 +132,12 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // offsets (including those of derived views) are not planned UB addresses.
     CHECK_SPAN(!IsParameterBackedTile(tile), call->span_)
         << "VF shared-base captures do not support parameter-backed Tiles or their views";
+    // The helper reconstructs every capture from one pointer and static MemRef
+    // differences. A selected descriptor can point at another candidate, so its
+    // representative offset cannot establish that shared coordinate system.
+    CHECK_SPAN(!IsSelectedTileName(GetExprAsCode(root)), call->span_)
+        << "VF shared-base captures do not support runtime-selected Tiles or their views; "
+           "materialize the selection into independent fixed storage before RegScope";
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.

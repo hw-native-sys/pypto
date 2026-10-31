@@ -282,8 +282,8 @@ class ForbidAliasCollector : public IRVisitor {
   // *values* need no such mapping: enforcement compares physical MemRef bases,
   // which every group member already shares.
   ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
-                       const BufferViewAnalysis* views)
-      : views_(views) {
+                       const BufferViewAnalysis* views, const TileStorageSources& storage_sources)
+      : views_(views), storage_sources_(storage_sources) {
     for (const auto& [var, group] : sharing_groups) {
       if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
     }
@@ -347,9 +347,63 @@ class ForbidAliasCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  ForbidAliasMap Take() { return std::move(forbidden_); }
+  ForbidAliasMap Take() {
+    for (auto& [output, inputs] : forbidden_) {
+      static_cast<void>(output);
+      std::sort(inputs.begin(), inputs.end());
+      inputs.erase(std::unique(inputs.begin(), inputs.end()), inputs.end());
+    }
+    return std::move(forbidden_);
+  }
 
  private:
+  VarPtr StorageSource(const VarPtr& value) {
+    auto current = value;
+    std::vector<const Var*> aliases;
+    while (true) {
+      if (auto known = storage_source_.find(current.get()); known != storage_source_.end()) {
+        current = known->second;
+        break;
+      }
+      const auto binding = storage_sources_.find(current.get());
+      if (binding == storage_sources_.end() || binding->second.size() != 1) break;
+      aliases.push_back(current.get());
+      current = binding->second.front();
+    }
+    for (const auto* alias : aliases) storage_source_[alias] = current;
+    return current;
+  }
+
+  const std::vector<VarPtr>& StorageRoots(const VarPtr& value) {
+    // Compress single-source aliases, then visit each reachable choice once per
+    // queried operand. Cache only actual queries, not every intermediate root
+    // set: growing nested choices otherwise materialize a quadratic closure
+    // even when the consumer asks for only the final set. Candidate expansion
+    // and emitted constraints remain output-sensitive, unlike scalar liveness.
+    const auto source = StorageSource(value);
+    if (auto known = storage_roots_.find(source.get()); known != storage_roots_.end()) {
+      return known->second;
+    }
+    std::vector<VarPtr> pending{source};
+    std::set<const Var*> visited;
+    std::set<VarPtr> roots;
+    while (!pending.empty()) {
+      const auto current = StorageSource(pending.back());
+      pending.pop_back();
+      if (!visited.insert(current.get()).second) continue;
+      const auto binding = storage_sources_.find(current.get());
+      if (auto known = storage_roots_.find(current.get()); known != storage_roots_.end()) {
+        roots.insert(known->second.begin(), known->second.end());
+      } else if (binding == storage_sources_.end()) {
+        roots.insert(current);
+      } else {
+        pending.insert(pending.end(), binding->second.begin(), binding->second.end());
+      }
+    }
+    return storage_roots_.emplace(source.get(), std::vector<VarPtr>(roots.begin(), roots.end()))
+        .first->second;
+  }
+
   void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& forbidden_inputs) {
     if (!output || forbidden_inputs.empty()) return;
     if (As<TupleType>(output->GetType())) {
@@ -357,14 +411,28 @@ class ForbidAliasCollector : public IRVisitor {
       return;
     }
     if (!As<TileType>(output->GetType())) return;
-    const auto rep_it = member_to_rep_.find(output.get());
-    const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
-    auto& recorded = forbidden_[out_key];
-    recorded.insert(recorded.end(), forbidden_inputs.begin(), forbidden_inputs.end());
+    // A descriptor phi's MemRef can name its then-arm geometry. Compare against
+    // every real input root instead of treating that hint as a unique buffer.
+    // Registered writeback results may themselves select several destinations,
+    // so apply the output constraint to every possible destination as well.
+    std::set<VarPtr> inputs;
+    for (const auto& input : forbidden_inputs) {
+      const auto& roots = StorageRoots(input);
+      inputs.insert(roots.begin(), roots.end());
+    }
+    for (const auto& root : StorageRoots(output)) {
+      const auto rep_it = member_to_rep_.find(root.get());
+      const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : root.get();
+      auto& recorded = forbidden_[out_key];
+      recorded.insert(recorded.end(), inputs.begin(), inputs.end());
+    }
   }
 
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
+  const TileStorageSources& storage_sources_;
+  std::map<const Var*, VarPtr> storage_source_;
+  std::map<const Var*, std::vector<VarPtr>> storage_roots_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
@@ -387,6 +455,9 @@ class ForbidAliasCollector : public IRVisitor {
 /// PyPTO has no way to know which pipe a given intrinsic writes from.
 class WrittenWorkspaceCollector : public IRVisitor {
  public:
+  explicit WrittenWorkspaceCollector(const TileStorageSources& storage_sources)
+      : storage_sources_(storage_sources) {}
+
   void VisitExpr_(const CallPtr& op) override {
     Record(op->op_, op->args_);
     IRVisitor::VisitExpr_(op);
@@ -420,6 +491,25 @@ class WrittenWorkspaceCollector : public IRVisitor {
   std::unordered_set<const Var*> TakeLoopingBases() { return std::move(looping_bases_); }
 
  private:
+  void Mark(const VarPtr& workspace, bool looping) {
+    auto& variables = looping ? looping_workspaces_ : workspaces_;
+    auto& bases = looping ? looping_bases_ : bases_;
+    std::vector<VarPtr> pending{workspace};
+    while (!pending.empty()) {
+      const auto value = pending.back();
+      pending.pop_back();
+      if (!variables.insert(value.get()).second) continue;
+      if (const auto* base = TileMemRefBase(value)) bases.insert(base);
+      // A native If workspace can write either candidate, while its MemRef
+      // carries only then's geometry hint. Propagate the hazard to all sources,
+      // including aliases/views. Each graph node is visited once per flag over
+      // the entire collection; no transitive root sets are materialized.
+      if (auto sources = storage_sources_.find(value.get()); sources != storage_sources_.end()) {
+        pending.insert(pending.end(), sources->second.begin(), sources->second.end());
+      }
+    }
+  }
+
   void Record(const OpPtr& op, const std::vector<ExprPtr>& args) {
     // LookupOpEntry, not a name lookup: a Submit's callee is a GlobalVar naming
     // a *function*, and resolving that against the operator registry would hand
@@ -433,18 +523,13 @@ class WrittenWorkspaceCollector : public IRVisitor {
       // when the call sits inside a loop body.
       auto workspace = AsVarLike(args[index]);
       if (!workspace) continue;
-      workspaces_.insert(workspace.get());
-      // Record the allocation base as well -- see `written_workspace_bases`.
-      const Var* base = TileMemRefBase(workspace);
-      if (base != nullptr) bases_.insert(base);
-      if (loop_depth_ > 0) {
-        looping_workspaces_.insert(workspace.get());
-        if (base != nullptr) looping_bases_.insert(base);
-      }
+      Mark(workspace, /*looping=*/false);
+      if (loop_depth_ > 0) Mark(workspace, /*looping=*/true);
     }
   }
 
   int loop_depth_ = 0;
+  const TileStorageSources& storage_sources_;
   std::unordered_set<const Var*> workspaces_;
   std::unordered_set<const Var*> bases_;
   std::unordered_set<const Var*> looping_workspaces_;
@@ -639,7 +724,7 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     result.target_hazard_inputs = collector.Take();
   }
 
-  WrittenWorkspaceCollector workspace_collector;
+  WrittenWorkspaceCollector workspace_collector(lifetimes.storage_sources);
   workspace_collector.VisitStmt(func->body_);
   result.target_hazard_inputs.written_workspaces = workspace_collector.TakeVars();
   result.target_hazard_inputs.written_workspace_bases = workspace_collector.TakeBases();
@@ -649,7 +734,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
-  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr);
+  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr,
+                                        lifetimes.storage_sources);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
   return result;

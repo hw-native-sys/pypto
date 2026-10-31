@@ -270,11 +270,12 @@ def test_public_buffer_control_flow(case_run, request):
         kernels = [
             function for function in program.functions.values() if ir.is_incore_type(function.func_type)
         ]
-        assert len(kernels) == 1 and kernels[0].ir_stage == ir.FunctionIRStage.Buffer
+        kind = case_run.case.get_name().split("_")[1]
+        expected_stage = ir.FunctionIRStage.Functional if kind == "branch" else ir.FunctionIRStage.Buffer
+        assert len(kernels) == 1 and kernels[0].ir_stage == expected_stage
         sources = list((case_run.work_dir / "ptoas").glob("*.pto"))
         assert len(sources) == 1, "Expected the exact source of the one executed device kernel"
         text = sources[0].read_text()
-        kind = case_run.case.get_name().split("_")[1]
         assert text.count("pto.tload ins(") == 2
         assert text.count("pto.tstore ins(") == (3 if kind in {"for", "while"} else 2)
         assert (" addr = " in text) == (case_run.case.memory_planner != passes.MemoryPlanner.PTOAS)

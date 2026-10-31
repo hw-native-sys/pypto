@@ -579,6 +579,67 @@ def test_helper_synthetic_names_do_not_collide(tmp_path, local_name):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("capture_role", ["source", "destination"])
+@pytest.mark.parametrize("view_kind", ["direct", "alias", "reshape"])
+@pytest.mark.parametrize("same_source", [False, True])
+def test_bundle_checks_runtime_selected_capture_storage(capture_role, view_kind, same_source):
+    """A representative offset cannot relate selected and fixed capture pointers."""
+    builder = IRBuilder()
+    with builder.function("selected_capture", span=SPAN, type=ir.FunctionType.AIV) as f:
+        condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
+        tile_type = ir.TileType(
+            [1, 128],
+            DataType.FP32,
+            tile_view=ir.TileView([1, 128], [128, 1], 0),
+            memory_space=ir.MemorySpace.Vec,
+        )
+        first = builder.let("first", tile.full([1, 128], dtype=DataType.FP32, value=1), type=tile_type)
+        second = builder.let("second", tile.full([1, 128], dtype=DataType.FP32, value=2), type=tile_type)
+        fixed = builder.let("fixed", tile.full([1, 128], dtype=DataType.FP32, value=0), type=tile_type)
+        with builder.if_stmt(condition, SPAN) as branch:
+            branch.return_var("selected", tile_type, SPAN)
+            builder.emit(ir.YieldStmt([first], SPAN))
+            branch.else_(SPAN)
+            builder.emit(ir.YieldStmt([first if same_source else second], SPAN))
+        selected = branch.output(0)
+        if view_kind == "alias":
+            selected = builder.let("selected_alias", selected, type=selected.type)
+        elif view_kind == "reshape":
+            # Register accesses require an explicit contiguous View for 2-D
+            # operands. Preserve the distinct reshape descriptor while making
+            # the fixture legal before executable-capture admission runs.
+            selected = builder.let(
+                "selected_view",
+                tile.reshape(selected, [2, 64]),
+                type=ir.TileType(
+                    [2, 64],
+                    DataType.FP32,
+                    tile_view=ir.TileView([2, 64], [64, 1], 0),
+                    memory_space=ir.MemorySpace.Vec,
+                ),
+            )
+        source = selected if capture_role == "source" else fixed
+        destination = selected if capture_role == "destination" else fixed
+        with builder.reg_scope(SPAN):
+            value = builder.emit_reg(
+                "value", "reg.load", [source, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            builder.emit_reg_store("updated", destination, value, span=SPAN)
+    with passes.PassContext([], enable_buffer_ir=False):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "SelectedCapture", SPAN))
+        program = passes.allocate_memory_addr()(program)
+    generator = codegen.PTOCodegen()
+    if same_source:
+        # Identical yielded SSAs retain their actual local allocation; an If
+        # alone must not exclude an otherwise supported fixed capture.
+        assert len(generator.generate_bundle(program).helpers) == 1
+    else:
+        with pytest.raises(ValueError, match="runtime-selected Tiles") as error:
+            generator.generate_bundle(program)
+        assert "register_kernel.py" in str(error.value)
+        assert len(generator.generate_bundle(build_kernel()).helpers) == 1
+
+
 @pytest.mark.parametrize("view_kind", ["direct", "slice", "reshape", "alias"])
 def test_bundle_rejects_parameter_backed_captures_and_views(view_kind):
     builder = IRBuilder()

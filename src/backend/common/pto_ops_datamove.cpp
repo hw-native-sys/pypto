@@ -1072,17 +1072,18 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
   codegen.Emit(oss.str());
 }
 
-// A fixed-address result declaration already carries the view over the inherited
-// storage. Without addresses, only the actual source handle can stand in for it:
-// a same-typed MemRef representative may have become stale after an if-phi rebind.
+// A fixed-address declaration can stand in for inherited storage only when the
+// source is fixed too. A selected tile and all views derived from it must retain
+// their runtime-selected address even when the result has a representative MemRef.
 static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
                                const std::string& target, const std::string& result_type,
                                bool result_has_memref, bool parameter_backed) {
   const auto existing_type = codegen.GetSSATileBufType(target);
   // Distinct handles alias only when compiler-owned addresses were emitted.
-  // PTOAS-planned and caller-backed views must follow the actual source SSA.
+  // PTOAS-planned, caller-backed and selected views must follow the actual source SSA.
   return result_has_memref && !existing_type.empty() && existing_type == result_type &&
-         ((codegen.EmitTileAddr() && !parameter_backed) || source == target);
+         ((codegen.EmitTileAddr() && !parameter_backed && !codegen.IsSelectedTileName(source)) ||
+          source == target);
 }
 
 // Same, resolving the source SSA and its type from the IR operand.
@@ -1334,7 +1335,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string result_type = codegen.GetCurrentResultTileBufTypeString();
     INTERNAL_CHECK_SPAN(!result_target.empty(), op->span_) << "tile.slice requires assignment target";
 
-    // tile.slice is always a pure pto.subview view of its source. The 4-arg
+    // tile.slice is always an aliasing view of its source. The 4-arg
     // form (explicit valid_shape) encodes the result valid into pto.subview's
     // `valid [...]` clause; no pto.tmov / pto.set_validshape is emitted. This
     // keeps tile.slice consistent with its set_output_memory_inherit_input
@@ -1371,23 +1372,159 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         view_type_info.v_col, view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
 
     std::string view_ssa = codegen.NewNamedTemp("slice_view");
-    std::ostringstream oss;
-    oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
-        << rows_const->value_ << ", " << cols_const->value_ << "]";
-    if (has_explicit_valid_shape) {
-      oss << " valid [" << valid_row << ", " << valid_col << "]";
+    std::string selected_dense_ssa;
+    std::string selected_dense_type;
+    auto registered_view_type = codegen.GetCurrentResultTileType();
+    auto actual_source_type = codegen.GetSSATileType(src);
+    if (!actual_source_type) actual_source_type = source_tile_type;
+    const auto source_components =
+        codegen::ExtractTileTypeInfo(*actual_source_type, codegen.GetTypeString(actual_source_type->dtype_));
+    const auto source_rows = actual_source_type->shape_.size() == 2
+                                 ? ir::As<ir::ConstInt>(actual_source_type->shape_[0])
+                                 : nullptr;
+    const auto source_cols = actual_source_type->shape_.size() == 2
+                                 ? ir::As<ir::ConstInt>(actual_source_type->shape_[1])
+                                 : nullptr;
+    const auto source_storage_bits = ir::storage_size::GetStorageBitWidth(actual_source_type->dtype_);
+    const bool addressed_alias =
+        codegen.EmitTileAddr() && codegen.IsSelectedTileName(src) && !codegen.IsTileViewName(src) &&
+        source_rows && source_cols && actual_source_type->GetMemorySpace() == ir::MemorySpace::Vec &&
+        source_components.slayout == ir::TileLayout::none_box &&
+        source_components.compact == ir::CompactMode::null &&
+        (source_components.blayout == ir::TileLayout::row_major ||
+         source_components.blayout == ir::TileLayout::col_major) &&
+        source_storage_bits > 0 && source_storage_bits % 8 == 0 &&
+        (has_explicit_valid_shape || (!view_type_info.v_row_dynamic && !view_type_info.v_col_dynamic));
+    if (addressed_alias) {
+      // PTOAS 0.70 cannot normalize subview(scf.if(...)): its address resolver
+      // only follows local allocation/declaration roots. In level3, extract the
+      // actual selected pointer and build the same addressed alias it would
+      // have produced for a local root. Never reconstruct the representative
+      // MemRef address, and never copy payload into overlapping view storage.
+      // Level2 rejects explicit alloc addresses, so its native subview path is
+      // deliberately unchanged until the backend supports selected roots.
+      // Inferred dynamic validity stays on that path as well: substituting the
+      // full slice extent could enlarge a partially valid selected descriptor.
+      // An If selecting views also stays native: its logical shape need not
+      // expose the branches' inherited physical pitch.
+      const bool col_major = source_components.blayout == ir::TileLayout::col_major;
+      const auto row_stride = col_major ? 1 : source_components.cols;
+      const auto col_stride = col_major ? source_components.rows : 1;
+      const bool compact_child = col_major ? rows_const->value_ == source_components.rows
+                                           : cols_const->value_ == source_components.cols;
+      auto physical_view = view_type_info;
+      if (!compact_child) {
+        physical_view.rows = source_components.rows;
+        physical_view.cols = source_components.cols;
+      }
+      view_type = codegen::FormatTileBufTypeString(
+          "vec", physical_view.dtype_str, physical_view.rows, physical_view.cols, physical_view.blayout,
+          physical_view.slayout, physical_view.fractal, physical_view.pad, physical_view.compact,
+          physical_view.v_row, physical_view.v_col, physical_view.v_row_dynamic, physical_view.v_col_dynamic);
+      auto offset_i64 = [&](const ir::ExprPtr& offset, const std::string& ssa) {
+        if (auto constant = ir::As<ir::ConstInt>(offset)) {
+          return codegen.GetOrEmitConstant(constant->value_, DataType::INT64);
+        }
+        const auto type = codegen.GetExprTypeAnnotation(offset);
+        if (type == "i64") return ssa;
+        std::string index = ssa;
+        if (type != "index") {
+          index = codegen.NewTemp();
+          codegen.Emit(index + " = arith.index_cast " + ssa + " : " + type + " to index");
+        }
+        const auto widened = codegen.NewTemp();
+        codegen.Emit(widened + " = arith.index_cast " + index + " : index to i64");
+        return widened;
+      };
+      const auto row = offset_i64(offset_tuple->elements_[0], row_off);
+      const auto col = offset_i64(offset_tuple->elements_[1], col_off);
+      const auto row_scale = codegen.GetOrEmitConstant(row_stride, DataType::INT64);
+      const auto col_scale = codegen.GetOrEmitConstant(col_stride, DataType::INT64);
+      const auto byte_scale =
+          codegen.GetOrEmitConstant(static_cast<int64_t>(source_storage_bits / 8), DataType::INT64);
+      const auto ptr = codegen.NewNamedTemp("selected_slice_ptr");
+      const auto base = codegen.NewTemp();
+      const auto row_elements = codegen.NewTemp();
+      const auto col_elements = codegen.NewTemp();
+      const auto elements = codegen.NewTemp();
+      const auto bytes = codegen.NewTemp();
+      const auto address = codegen.NewTemp();
+      const auto ptr_type = "!pto.ptr<" + source_components.dtype_str + ", ub>";
+      codegen.Emit(ptr + " = pto.tile_buf_addr " + src + " : " + src_type + " -> " + ptr_type);
+      codegen.Emit(base + " = pto.castptr " + ptr + " : " + ptr_type + " -> i64");
+      codegen.Emit(row_elements + " = arith.muli " + row + ", " + row_scale + " : i64");
+      codegen.Emit(col_elements + " = arith.muli " + col + ", " + col_scale + " : i64");
+      codegen.Emit(elements + " = arith.addi " + row_elements + ", " + col_elements + " : i64");
+      codegen.Emit(bytes + " = arith.muli " + elements + ", " + byte_scale + " : i64");
+      codegen.Emit(address + " = arith.addi " + base + ", " + bytes + " : i64");
+      auto emit_alias = [&](const std::string& name, const std::string& type) {
+        std::string allocation = name + " = pto.alloc_tile addr = " + address;
+        if (physical_view.v_row_dynamic) {
+          allocation += " valid_row = " + valid_row;
+        }
+        if (physical_view.v_col_dynamic) {
+          allocation += " valid_col = " + valid_col;
+        }
+        codegen.Emit(allocation + " {pto.view_semantics = \"subview\"} : " + type);
+      };
+      emit_alias(view_ssa, view_type);
+      const bool constant_offsets = ir::As<ir::ConstInt>(offset_tuple->elements_[0]) &&
+                                    ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
+      const bool dense_window =
+          col_major ? cols_const->value_ == 1 || compact_child : rows_const->value_ == 1 || compact_child;
+      if (constant_offsets && dense_window) {
+        // A selected slice's MemRef names only one candidate. Its dense
+        // consumer must retain this runtime address, including when the other
+        // candidate is selected and the representative remains independently
+        // live. These declarations alias existing bytes; they reserve no scratch.
+        selected_dense_ssa = view_ssa;
+        selected_dense_type = view_type;
+        if (!compact_child) {
+          // A single row/column is contiguous despite the parent's wider pitch.
+          // colexpand reads physical dimensions, so give it the logical dense
+          // box instead of the pitch-preserving descriptor used by other views.
+          selected_dense_ssa = codegen.NewNamedTemp("slice_dense");
+          selected_dense_type = codegen::FormatTileBufTypeString(
+              "vec", view_type_info.dtype_str, view_type_info.rows, view_type_info.cols,
+              view_type_info.blayout, view_type_info.slayout, view_type_info.fractal, view_type_info.pad,
+              view_type_info.compact, view_type_info.v_row, view_type_info.v_col,
+              view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
+          emit_alias(selected_dense_ssa, selected_dense_type);
+          codegen.RegisterTileBufType(selected_dense_ssa, selected_dense_type,
+                                      codegen.GetCurrentResultTileType());
+          codegen.RegisterTileViewName(selected_dense_ssa);
+          codegen.RegisterSelectedTileName(selected_dense_ssa);
+        }
+      }
+      INTERNAL_CHECK_SPAN(registered_view_type, op->span_) << "tile.slice result must have a TileType";
+      // The physical shape can retain the parent's pitch when logical columns
+      // shrink. Keep that actual geometry available to a subsequent slice.
+      registered_view_type = std::make_shared<ir::TileType>(
+          std::vector<int64_t>{physical_view.rows, physical_view.cols}, registered_view_type->dtype_,
+          registered_view_type->memref_, registered_view_type->tile_view_,
+          registered_view_type->GetMemorySpace());
+    } else {
+      std::ostringstream oss;
+      oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
+          << rows_const->value_ << ", " << cols_const->value_ << "]";
+      if (has_explicit_valid_shape) {
+        oss << " valid [" << valid_row << ", " << valid_col << "]";
+      }
+      if (!src_type.empty() && !view_type.empty()) {
+        oss << " : " << src_type << " -> " << view_type;
+      }
+      codegen.Emit(oss.str());
     }
-    if (!src_type.empty() && !view_type.empty()) {
-      oss << " : " << src_type << " -> " << view_type;
-    }
-    codegen.Emit(oss.str());
-    codegen.RegisterTileBufType(view_ssa, view_type, codegen.GetCurrentResultTileType());
+    codegen.RegisterTileBufType(view_ssa, view_type, registered_view_type);
     codegen.RegisterTileViewName(view_ssa);
+    if (codegen.IsSelectedTileName(src)) codegen.RegisterSelectedTileName(view_ssa);
 
     // Lazy materialization fallback: a few downstream ops (e.g. pto.tcolexpandmul)
     // cannot consume a subview SSA directly because their hardware lowering
     // reads physical tile dims from the operand type. MaterializeSubviewOperandIfNeeded
-    // will emit pto.textract on demand into result_target if such a consumer appears.
+    // will emit pto.textract on demand for fixed-address slices. A selected
+    // contiguous slice instead supplies a dense descriptor of its actual runtime
+    // address; an empty target rejects selected windows that lack this proof.
     codegen::PTOCodegen::SubviewMaterializationInfo mat_info;
     mat_info.source_ssa = src;
     mat_info.source_type = src_type;
@@ -1395,8 +1532,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     mat_info.col_off_ssa = col_off;
     mat_info.row_offset = offset_tuple->elements_[0];
     mat_info.col_offset = offset_tuple->elements_[1];
-    mat_info.materialize_target_ssa = result_target;
-    mat_info.materialize_target_type = result_type;
+    mat_info.materialize_target_ssa = codegen.IsSelectedTileName(src) ? selected_dense_ssa : result_target;
+    mat_info.materialize_target_type = codegen.IsSelectedTileName(src) ? selected_dense_type : result_type;
     mat_info.source_memory_space = source_tile_type->memory_space_;
     // Shapes and offset kind the materialization guard needs: the target buffer
     // aliases the source, so the lazy pto.textract may only run when its repack
@@ -1411,6 +1548,10 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         source_tile_type->shape_.size() == 2 ? ir::As<ir::ConstInt>(source_tile_type->shape_[1]) : nullptr;
     mat_info.source_rows = source_rows_const ? source_rows_const->value_ : 0;
     mat_info.source_cols = source_cols_const ? source_cols_const->value_ : 0;
+    if (addressed_alias) {
+      mat_info.source_rows = source_components.rows;
+      mat_info.source_cols = source_components.cols;
+    }
     mat_info.view_rows = rows_const->value_;
     mat_info.view_cols = cols_const->value_;
     auto row_offset_const = ir::As<ir::ConstInt>(offset_tuple->elements_[0]);
@@ -1628,8 +1769,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // With baked addresses, the result's own alloc_tile at the inherited
     // address is already the typed alias. PTOAS-planner mode shares one handle,
     // so it must materialize a typed SSA view below.
-    if (codegen.EmitTileAddr() && result_has_memref && !existing_type.empty() &&
-        existing_type == result_type) {
+    if (CanReuseViewTarget(codegen, codegen.GetExprAsCode(op->args_[0]), result_target, result_type,
+                           result_has_memref, codegen.IsParameterBackedTile(result_tile))) {
       return std::string("");
     }
 

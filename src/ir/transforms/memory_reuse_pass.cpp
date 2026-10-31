@@ -150,21 +150,20 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   //    the pre-normalization buffers every rename still sits on a buffer of its
   //    own, so no conflict is visible and a shift register silently collapses
   //    ([#2481]).
-  //  - after, because YieldFixup's own IfStmt fixup repoints a phi return_var
-  //    onto the canonical branch buffer, which strands that phi's downstream
-  //    `c = c_phi` rename in exactly the same way.
+  //  - after, because YieldFixup refreshes an If result's representative MemRef
+  //    after reuse. Its aliases must follow that hint as well; the descriptor
+  //    still selects its actual storage at runtime.
   //
   // The mutator is idempotent, so the second run is a no-op whenever the first
   // already settled everything.
   new_body = memory_reuse::NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
-  // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
+  // Step 4: Reconcile fixed carry storage and refresh native If result hints
   const auto* ctx = PassContext::Current();
   // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
   // like every other allocation, and Step 5 below keeps it because it is in use.
-  new_body =
-      memory_reuse::FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true,
-                                /*canonical_branch_storage=*/ctx != nullptr && ctx->GetEnableBufferIR());
+  new_body = memory_reuse::FixupYields(
+      new_body, func->params_, /*canonical_branch_storage=*/ctx != nullptr && ctx->GetEnableBufferIR());
 
   // Step 4.5: the second half of the bracket described at Step 3.9.
   new_body = memory_reuse::NormalizeIdentityCopyBuffers(new_body);

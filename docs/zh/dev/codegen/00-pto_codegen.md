@@ -259,14 +259,34 @@ PTOAS 0.65 通过为 scale 发出 `uint64_t`、为行列索引发出 `uint16_t`�
 store。
 
 **`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
-`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
-`scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
+`valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc
+或支持的跨核 pop slot。PTOAS 0.71 不接受直接修改原生 `scf.if` 结果；应在各
+分支 yield 描述符前确定该分支的 valid shape。而**视图**——`tile.slice` 下沉出的 `pto.subview`，
 或 `pto.treshape`——把有效范围存在自身类型里，ptoas 会拒绝对它执行这条指令，所以
 PyPTO 提前报错，并在信息里指向切片。视图身份在这两个发射点被记录，而不是从渲染出
 的维度推断：带运行时 `valid_shape` 的切片渲染成 `v_row=?, v_col=?`，与由 alloc
 承载的 handle 完全一样。要收窄视图，请给切片传 `valid_shape=`（它会落到
 `pto.subview` 的 `valid [...]` 子句，并且支持运行时范围），或在取视图之前对源
 tile 调用 `set_validshape`。
+
+### 返回 Tile 的分支
+
+Tile 返回值直接使用 PTOAS 原生 `scf.if` 结果，与 scalar 返回值按 PyPTO 返回
+位置的原始顺序排列：
+
+```mlir
+%selected = scf.if %cond -> (!T) {
+  scf.yield %a : !T
+} else {
+  scf.yield %b : !T
+}
+```
+
+yield 的描述符选择来源存储。代码生成不分配 phi buffer、不重绑分支生产者，
+也不为选择插入 `pto.tmov`。选中 Tile 的别名和 view 跟随运行时 SSA，不根据
+代表性 MemRef 元数据重建 then 分支地址。兼容的描述符类型差异通过 view 统一，
+Tile 数据留在原始存储。生命周期和默认 Buffer IR 选择见
+[MaterializeSemanticAliases](../passes/36-materialize_semantic_aliases.md#ifstmt-的原生-tile-返回值)。
 
 ### 跨核操作到 PTO 指令
 

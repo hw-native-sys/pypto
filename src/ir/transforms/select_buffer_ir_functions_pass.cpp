@@ -72,6 +72,8 @@ class BufferKernelSupport : public IRVisitor {
   bool supported = true;
   bool has_load = false;
   bool has_fill = false;
+  bool has_tile_if = false;
+  bool has_loop = false;
   bool has_store = false;
 
   static bool ConstantEquals(const ExprPtr& value, int64_t expected) {
@@ -257,6 +259,9 @@ class BufferKernelSupport : public IRVisitor {
   }
 
   void VisitStmt_(const IfStmtPtr& branch) override {
+    for (const auto& result : branch->return_vars_) {
+      has_tile_if |= As<TileType>(result->GetType()) != nullptr;
+    }
     VisitExpr(branch->condition_);
     Region then_region(branch->return_vars_);
     CheckRegion(branch->then_body_, then_region);
@@ -296,6 +301,7 @@ class BufferKernelSupport : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& loop) override {
+    has_loop = true;
     supported &= GetScalarDtype(loop->loop_var_) == DataType::INDEX;
     for (const auto& bound : {loop->start_, loop->stop_, loop->step_}) {
       VisitExpr(bound);
@@ -307,7 +313,10 @@ class BufferKernelSupport : public IRVisitor {
     CheckLoop(loop);
   }
 
-  void VisitStmt_(const WhileStmtPtr& loop) override { CheckLoop(loop); }
+  void VisitStmt_(const WhileStmtPtr& loop) override {
+    has_loop = true;
+    CheckLoop(loop);
+  }
 
   void VisitExpr_(const SubmitPtr&) override { supported = false; }
   void VisitExpr_(const CallPtr& call) override {
@@ -681,6 +690,11 @@ FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper
     support.CheckType(type);
   }
   support.VisitStmt(function->body_);
+  // Buffer lowering erases Tile region results and requires fixed destinations.
+  // Use native Tile SSA selection for branch-only kernels. Keep the existing
+  // whole-kernel route for loops: their Buffer carry legalization is separate
+  // from this change, and switching it to the legacy path can change semantics.
+  if (support.has_tile_if && !support.has_loop) support.supported = false;
   if (support.supported) support.supported = BufferValidAnalysis(function->body_).supported();
   auto selected = std::make_shared<Function>(*function);
   selected->attrs_.emplace_back(kAttrBufferIrSelected, support.supported &&
