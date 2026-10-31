@@ -4849,7 +4849,61 @@ def test_scalar_gm_access_rejects_nonpacked_nd_views(operation, strided):
     function = ir.Function("kernel", [source], [], body, span, ir.FunctionType.InCore)
     program = ir.Program([function], "scalar_view_access", span)
     if strided:
-        with pytest.raises(ValueError, match="nonpacked ND tensor views; use pl.load/pl.store"):
+        with pytest.raises(ValueError, match="requires packed row-major tensor views for scalar access"):
+            _generate_mlir(program)
+    else:
+        mlir = _generate_mlir(program)
+        assert ("pto.load" if operation == "read" else "pto.store") in mlir
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+@pytest.mark.parametrize("layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+@pytest.mark.parametrize("pitch", [8, 16])
+@pytest.mark.parametrize("operation", ["read", "write"])
+def test_scalar_gm_access_checks_layout_flipped_views(backend_type, layout, pitch, operation):
+    """A layout-only flip must not bypass the shape-only scalar offset guard."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([2, pitch], DataType.INT8), span)
+    alias_call = tensor_ops.view(source, [2, 8], strides=[pitch, 1])
+    alias = ir.Var("alias", alias_call.type, span)
+    viewed_call = tensor_ops.view(alias, layout=layout)
+    viewed = ir.Var("viewed", viewed_call.type, span)
+
+    # DN becomes shape [8, 2], strides [1, pitch]. Index [1, 0] needs
+    # offset 1, but shape-only scalar linearization would emit offset 2.
+    # Even a packed ND parent (pitch 8) must be rejected after this flip.
+    if layout == ir.TensorLayout.DN:
+        viewed_type = viewed.type
+        assert isinstance(viewed_type, ir.TensorType)
+        for dim, expected in zip(viewed_type.shape, [8, 2], strict=True):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == expected
+        assert viewed_type.tensor_view is not None
+        for stride, expected in zip(viewed_type.tensor_view.stride, [1, pitch], strict=True):
+            assert isinstance(stride, ir.ConstInt)
+            assert stride.value == expected
+
+    access = (
+        tensor_ops.read(viewed, [1, 0])
+        if operation == "read"
+        else tensor_ops.write(viewed, [1, 0], ir.ConstInt(7, DataType.INT8, span))
+    )
+    result = ir.Var("result", access.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(alias, alias_call, span),
+            ir.AssignStmt(viewed, viewed_call, span),
+            ir.AssignStmt(result, access, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    function = ir.Function("kernel", [source], [], body, span, ir.FunctionType.InCore)
+    program = ir.Program([function], "scalar_layout_view_access", span)
+    if pitch != 8 or layout == ir.TensorLayout.DN:
+        with pytest.raises(ValueError, match="requires packed row-major tensor views for scalar access"):
             _generate_mlir(program)
     else:
         mlir = _generate_mlir(program)

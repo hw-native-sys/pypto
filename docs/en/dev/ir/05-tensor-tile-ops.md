@@ -32,9 +32,10 @@ strides carry caller preconditions: positivity, non-overlap, representable
 address arithmetic, and the same span bound must hold at runtime. No automatic
 runtime bounds guard is generated. The capacity is relative to the source view,
 not any larger allocation it happens to share.
-Nonpacked ND aliases must use DMA `pl.load`/`pl.store` access; scalar
-`tensor.read`/`tensor.write` are rejected because their current addressing path
-assumes a packed tensor.
+Scalar `tensor.read`/`tensor.write` require packed row-major strides because
+their current addressing path linearizes indices from shape alone. Views with
+gapped or permuted strides must use DMA `pl.load`/`pl.store`, including DN views
+produced by a layout-only flip of an explicit-stride ND alias.
 
 For a contiguous INT8 native cache `[pages, page_bytes]`, the following fragment
 inside an InCore body skips each page's scale/padding tail without changing the

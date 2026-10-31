@@ -968,12 +968,12 @@ static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
-// Scalar GM access currently linearizes indices from shape alone. Reject a
-// gapped ND alias rather than addressing its padding as data; DMA load/store
-// uses the TensorView descriptor and preserves these explicit strides.
-static void CheckPackedNdScalarAccess(const CallPtr& op, const ir::TensorTypePtr& tensor) {
-  if (!tensor->tensor_view_ || tensor->tensor_view_->layout != ir::TensorLayout::ND ||
-      tensor->tensor_view_->stride.empty()) {
+// Scalar GM access currently linearizes indices from shape alone. Layout-only
+// views can retain gapped or permuted strides, so require packed row-major
+// strides regardless of the layout tag. DMA load/store uses the TensorView
+// descriptor and preserves these explicit strides.
+static void CheckPackedRowMajorScalarAccess(const CallPtr& op, const ir::TensorTypePtr& tensor) {
+  if (!tensor->tensor_view_ || tensor->tensor_view_->stride.empty()) {
     return;
   }
   CHECK_SPAN(ir::tile_view_semantics::ShapeExprListsEquivalent(
@@ -981,7 +981,7 @@ static void CheckPackedNdScalarAccess(const CallPtr& op, const ir::TensorTypePtr
                                                    tensor->shape_, ir::TensorLayout::ND)),
              op->span_)
       << op->op_->name_
-      << " does not support nonpacked ND tensor views; use pl.load/pl.store "
+      << " requires packed row-major tensor views for scalar access; use pl.load/pl.store "
          "so the TensorView strides are preserved.";
 }
 
@@ -992,7 +992,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
 
   auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.read first argument must be TensorType";
-  CheckPackedNdScalarAccess(op, tensor_type_ptr);
+  CheckPackedRowMajorScalarAccess(op, tensor_type_ptr);
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.read second argument must be MakeTuple (indices)";
@@ -1030,7 +1030,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
 
   auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.write first argument must be TensorType";
-  CheckPackedNdScalarAccess(op, tensor_type_ptr);
+  CheckPackedRowMajorScalarAccess(op, tensor_type_ptr);
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.write second argument must be MakeTuple (indices)";

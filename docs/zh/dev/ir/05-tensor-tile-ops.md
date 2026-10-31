@@ -27,8 +27,9 @@
 静态非法值和 int64 溢出会被拒绝。动态尺寸和 stride 由调用方保证运行时前置
 条件：正值、非重叠、地址运算可表示，以及相同的跨度约束。编译器不自动生成
 运行时边界检查。容量相对于当前源视图计算，不能借用其共享的更大分配越界访问。
-非紧密 ND 别名须通过 DMA `pl.load`/`pl.store` 访问；标量
-`tensor.read`/`tensor.write` 的现有寻址路径假定张量紧密排列，因此明确拒绝该别名。
+标量 `tensor.read`/`tensor.write` 要求紧密的行优先步长（packed row-major strides），
+因为现有寻址路径仅根据 shape 计算线性偏移。带间隙或维度置换步长的视图须通过 DMA `pl.load`/`pl.store`
+访问，包括显式 stride 的 ND 别名仅变更布局后得到的 DN 视图。
 
 对于连续的 INT8 Native cache `[pages, page_bytes]`，下面的 InCore 函数体片段
 在保留根输入合同的同时，跳过每页尾部的 scale/padding：
