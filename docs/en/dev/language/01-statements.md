@@ -77,13 +77,17 @@ for i in pl.parallel(start, stop, step):
 
 `pl.range` persists `HardwareLoopPolicy.Auto`. `pl.hardware_loop` uses the same
 bounds and `init_values` syntax but persists `Require`; only Sequential is legal.
+`Require` is valid only inside an enclosing `pl.reg_scope()`, including for empty
+loops. A scope inside the loop body does not satisfy this requirement. Ordinary
+`pl.range` loops remain valid outside register scopes.
 
 ```python
 @pl.jit.incore
 def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
-    for i, (acc,) in pl.hardware_loop(8, init_values=(x,)):
-        result = pl.yield_(acc + i)
-    return result
+    with pl.reg_scope():
+        for i, (acc,) in pl.hardware_loop(8, init_values=(x,)):
+            _result = pl.yield_(acc + i)
+    return x
 ```
 
 This expresses intent, not a guarantee that the installed backend implements it.

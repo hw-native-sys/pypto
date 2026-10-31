@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, ir
+from pypto.language.parser import ParserError
 
 
 def _loop(function):
@@ -29,12 +30,14 @@ def _loop(function):
     return finder.loops[0]
 
 
-def test_hardware_loop_frontend():
-    @pl.function
+@pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
+def test_hardware_loop_frontend(ascend_backend):
+    @pl.function(type=pl.FunctionType.AIV)
     def required(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
-        for i, (acc,) in pl.hardware_loop(0, 8, 2, init_values=(x,)):
-            result = pl.yield_(acc + i)
-        return result
+        with pl.reg_scope():
+            for i, (acc,) in pl.hardware_loop(0, 8, 2, init_values=(x,)):
+                _result = pl.yield_(acc + i)
+        return x
 
     loop = _loop(required)
     assert loop.hardware_loop_policy == ir.HardwareLoopPolicy.Require
@@ -43,6 +46,24 @@ def test_hardware_loop_frontend():
     assert "pl.hardware_loop(" in text
     restored = pl.parse(text)
     assert _loop(restored).hardware_loop_policy == ir.HardwareLoopPolicy.Require
+
+
+def test_hardware_loop_outside_reg_scope_is_rejected():
+    with pytest.raises(ParserError, match="hardware_loop.*reg_scope"):
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def invalid():
+            for i in pl.hardware_loop(0):
+                pass
+
+
+def test_builder_hardware_loop_outside_reg_scope_is_rejected():
+    builder = ir.IRBuilder()
+    with pytest.raises(ValueError, match="HardwareLoopPolicy.Require.*RegScope"):
+        with builder.function("invalid", type=ir.FunctionType.AIV):
+            index = builder.var("i", ir.ScalarType(DataType.INDEX))
+            with builder.for_loop(index, 0, 0, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require):
+                pass
 
 
 @pytest.mark.parametrize("kind", [ir.ForKind.Parallel, ir.ForKind.Unroll, ir.ForKind.Pipeline])

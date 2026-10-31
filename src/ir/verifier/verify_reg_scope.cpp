@@ -174,6 +174,11 @@ class RegionChecker : public IRVisitor {
     yield_region_ = previous;
   }
   void VisitStmt_(const ForStmtPtr& op) override {
+    // Require is VF-local intent, including for empty loops. Check containment
+    // before visiting the body: a RegScope inside a loop cannot authorize it.
+    if (collecting_ && !region_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
+      Error("HardwareLoopPolicy.Require requires RegScope", op->span_);
+    }
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {

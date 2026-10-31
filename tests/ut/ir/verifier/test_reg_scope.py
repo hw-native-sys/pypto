@@ -75,6 +75,38 @@ def test_while_outside_register_scope_is_allowed():
     assert verify(body) == []
 
 
+@pytest.mark.parametrize("placement", ["outside", "inside", "after_scope", "contains_scope"])
+@pytest.mark.parametrize("stop", [0, 8])
+def test_hardware_loop_policy_requires_lexical_reg_scope(placement, stop):
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    body = region(sequence()) if placement == "contains_scope" else sequence()
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        integer(stop),
+        integer(1),
+        [],
+        body,
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    stmt = region(loop) if placement == "inside" else loop
+    if placement == "after_scope":
+        stmt = sequence(region(sequence()), loop)
+    diagnostics = verify(stmt)
+    if placement == "inside":
+        assert diagnostics == []
+    else:
+        assert len(diagnostics) == 1
+        assert "HardwareLoopPolicy.Require requires RegScope" in diagnostics[0].message
+
+
+def test_auto_loop_outside_reg_scope_remains_legal():
+    loop = ir.ForStmt(scalar("i"), integer(0), integer(8), integer(1), [], sequence(), [], SPAN)
+    assert verify(loop) == []
+
+
 @pytest.mark.parametrize(
     "kind",
     [

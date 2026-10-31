@@ -42,6 +42,8 @@ loop results, tuples or assignments to outer variables. Tile operands must
 originate outside the region; `store` returns an alias usable after the region.
 Assign every operation result to a variable, including `store`; a bare store is
 rejected. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
+`pl.hardware_loop()` (`HardwareLoopPolicy.Require`) is restricted to this lexical
+scope, including when the loop has zero trips.
 
 ## Common parameters and dtype notation
 

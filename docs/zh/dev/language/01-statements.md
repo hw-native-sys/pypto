@@ -243,13 +243,16 @@ sum_final: pl.INT64 = sum  # captures final value
 
 `pl.range` 对应 `HardwareLoopPolicy.Auto`；`pl.hardware_loop` 使用相同的边界参数与
 `init_values`，对应 `Require`，仅允许 Sequential 循环。
+`Require` 只能位于外层 `pl.reg_scope()` 内，包括空循环。循环体内部的作用域不能满足
+这一要求。普通 `pl.range` 循环仍可在寄存器作用域外使用。
 
 ```python
 @pl.jit.incore
 def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
-    for i, (acc,) in pl.hardware_loop(8, init_values=(x,)):
-        result = pl.yield_(acc + i)
-    return result
+    with pl.reg_scope():
+        for i, (acc,) in pl.hardware_loop(8, init_values=(x,)):
+            _result = pl.yield_(acc + i)
+    return x
 ```
 
 该 API 表达意图。当前后端对保留的 Require 循环报告不支持的资格状态。
