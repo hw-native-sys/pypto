@@ -121,14 +121,16 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
 
 void IRBuilder::BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
                              const ExprPtr& step, const Span& span, ForKind kind,
-                             std::vector<std::pair<std::string, std::any>> attrs) {
+                             std::vector<std::pair<std::string, std::any>> attrs, HardwareLoopPolicy policy) {
+  CHECK_SPAN(policy == HardwareLoopPolicy::Auto || kind == ForKind::Sequential, span)
+      << "HardwareLoopPolicy.Require requires Sequential ForKind";
   if (context_stack_.empty()) {
     throw pypto::RuntimeError("Cannot begin for loop: not inside a function or another valid context at " +
                               span.to_string());
   }
 
   context_stack_.push_back(
-      std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind, std::move(attrs)));
+      std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind, std::move(attrs), policy));
 }
 
 void IRBuilder::AddIterArg(const IterArgPtr& iter_arg) {
@@ -167,10 +169,10 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create for statement
-  auto for_stmt =
-      std::make_shared<ForStmt>(loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(),
-                                loop_ctx->GetStep(), loop_ctx->GetIterArgs(), body, loop_ctx->GetReturnVars(),
-                                combined_span, loop_ctx->GetKind(), loop_ctx->GetAttrs());
+  auto for_stmt = std::make_shared<ForStmt>(
+      loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(), loop_ctx->GetStep(),
+      loop_ctx->GetIterArgs(), body, loop_ctx->GetReturnVars(), combined_span, loop_ctx->GetKind(),
+      loop_ctx->GetAttrs(), std::vector<std::string>{}, loop_ctx->GetPolicy());
 
   // Pop context
   context_stack_.pop_back();

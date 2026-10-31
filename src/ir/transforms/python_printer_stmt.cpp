@@ -156,8 +156,6 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
-  CHECK_SPAN(op->hardware_loop_policy_ == HardwareLoopPolicy::Auto, op->span_)
-      << "HardwareLoopPolicy.Require Python DSL printing is not supported yet; use serialization";
   // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
   stream_ << "for " << GetVarName(op->loop_var_.get());
 
@@ -179,7 +177,8 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // structural invariant `kind == Pipeline ⇔ pipeline_stages attr present`
   // (PipelineLoopValid, always-on) lets us read `stage=` from the attr below
   // without a dual-mode branch.
-  const char* range_func = ".range(";
+  const char* range_func =
+      op->hardware_loop_policy_ == HardwareLoopPolicy::Require ? ".hardware_loop(" : ".range(";
   switch (op->kind_) {
     case ForKind::Unroll:
       range_func = ".unroll(";

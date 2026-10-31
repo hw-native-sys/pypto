@@ -189,3 +189,190 @@ def mask_xor(lhs: Reg | ir.Expr, rhs: Reg | ir.Expr) -> Reg:
 def mask_not(value: Reg | ir.Expr) -> Reg:
     """Invert a boolean mask."""
     return Reg(_call("mask_not", [_expr(value)]))
+
+
+def _unary(name: str, value: Reg | ir.Expr, mask: Reg | ir.Expr | None, pmode: str) -> Reg:
+    args = [_expr(value)]
+    if mask is not None:
+        args.append(_expr(mask))
+    return Reg(_call(name, args, pmode=pmode))
+
+
+def abs(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply abs lane-wise; inactive masked lanes become zero."""
+    return _unary("abs", value, mask, pmode)
+
+
+def neg(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply neg lane-wise; inactive masked lanes become zero."""
+    return _unary("neg", value, mask, pmode)
+
+
+def relu(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply relu lane-wise; inactive masked lanes become zero."""
+    return _unary("relu", value, mask, pmode)
+
+
+def exp(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply exp lane-wise; inactive masked lanes become zero."""
+    return _unary("exp", value, mask, pmode)
+
+
+def log(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply log lane-wise; inactive masked lanes become zero."""
+    return _unary("log", value, mask, pmode)
+
+
+def sqrt(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply sqrt lane-wise; inactive masked lanes become zero."""
+    return _unary("sqrt", value, mask, pmode)
+
+
+def bitwise_not(value: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero") -> Reg:
+    """Apply bitwise_not lane-wise; inactive masked lanes become zero."""
+    return _unary("bitwise_not", value, mask, pmode)
+
+
+def bitwise_and(
+    lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero"
+) -> Reg:
+    """Apply bitwise_and to same-type integer registers with optional predication."""
+    return _binary("bitwise_and", lhs, rhs, mask, pmode)
+
+
+def bitwise_or(
+    lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero"
+) -> Reg:
+    """Apply bitwise_or to same-type integer registers with optional predication."""
+    return _binary("bitwise_or", lhs, rhs, mask, pmode)
+
+
+def bitwise_xor(
+    lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero"
+) -> Reg:
+    """Apply bitwise_xor to same-type integer registers with optional predication."""
+    return _binary("bitwise_xor", lhs, rhs, mask, pmode)
+
+
+def shift_left(
+    lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero"
+) -> Reg:
+    """Apply shift_left to same-type integer registers with optional predication."""
+    return _binary("shift_left", lhs, rhs, mask, pmode)
+
+
+def shift_right(
+    lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, mask: Reg | ir.Expr | None = None, *, pmode: str = "zero"
+) -> Reg:
+    """Apply shift_right to same-type integer registers with optional predication."""
+    return _binary("shift_right", lhs, rhs, mask, pmode)
+
+
+def _scalar(
+    name: str, value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, pmode: str
+) -> Reg:
+    expr = _expr(value)
+    if not isinstance(expr.type, ir.RegType):
+        raise TypeError("Vector-scalar operations require VecReg")
+    dtype = DataType.INT16 if name in ("shift_lefts", "shift_rights") else expr.type.dtype
+    return Reg(_call(name, [expr, _expr(scalar, dtype), _expr(mask)], pmode=pmode))
+
+
+def adds(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, *, pmode: str = "zero"
+) -> Reg:
+    """Apply adds with a governing mask and an exactly typed scalar.
+
+    Literal scalars are normalized; existing SSA scalars are never cast.
+    """
+    return _scalar("adds", value, scalar, mask, pmode)
+
+
+def muls(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, *, pmode: str = "zero"
+) -> Reg:
+    """Apply muls with a governing mask and an exactly typed scalar.
+
+    Literal scalars are normalized; existing SSA scalars are never cast.
+    """
+    return _scalar("muls", value, scalar, mask, pmode)
+
+
+def maximums(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, *, pmode: str = "zero"
+) -> Reg:
+    """Apply maximums with a governing mask and an exactly typed scalar.
+
+    Literal scalars are normalized; existing SSA scalars are never cast.
+    """
+    return _scalar("maximums", value, scalar, mask, pmode)
+
+
+def minimums(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, *, pmode: str = "zero"
+) -> Reg:
+    """Apply minimums with a governing mask and an exactly typed scalar.
+
+    Literal scalars are normalized; existing SSA scalars are never cast.
+    """
+    return _scalar("minimums", value, scalar, mask, pmode)
+
+
+def shift_lefts(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, *, pmode: str = "zero"
+) -> Reg:
+    """Apply shift_lefts with a governing mask and an exactly typed scalar.
+
+    Literal scalars are normalized; existing SSA scalars are never cast.
+    Scalar shifts require INT16 amounts, emitted as signless i16.
+    """
+    return _scalar("shift_lefts", value, scalar, mask, pmode)
+
+
+def shift_rights(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, mask: Reg | ir.Expr, *, pmode: str = "zero"
+) -> Reg:
+    """Apply shift_rights with a governing mask and an exactly typed scalar.
+
+    Literal scalars are normalized; existing SSA scalars are never cast.
+    Scalar shifts require INT16 amounts, emitted as signless i16.
+    """
+    return _scalar("shift_rights", value, scalar, mask, pmode)
+
+
+def compares(
+    value: Reg | ir.Expr, scalar: Scalar | ir.Expr | int | float, seed: Reg | ir.Expr, *, predicate: str
+) -> Reg:
+    """Compare each vector lane with a matching scalar under the seed mask."""
+    expr = _expr(value)
+    if not isinstance(expr.type, ir.RegType):
+        raise TypeError("reg.compares requires VecReg")
+    return Reg(_call("compares", [expr, _expr(scalar, expr.type.dtype), _expr(seed)], predicate=predicate))
+
+
+def gather_lanes(value: Reg | ir.Expr, indices: Reg | ir.Expr) -> Reg:
+    """Permute lanes as result[i] = value[indices[i]] using PTOAS vselr.
+
+    Index storage width and lane count must match the source. Runtime indices
+    must be within the source lane range. Only physical vselr lane counts apply.
+    """
+    return Reg(_call("gather_lanes", [_expr(value), _expr(indices)]))
+
+
+def reduce_sum(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool = False) -> Reg:
+    """Reduce active lanes to a one-lane VecReg of the same dtype.
+
+    Floating sums require reassoc=True to allow the hardware reduction tree.
+    Inactive input lanes contribute zero. No implicit widening is performed.
+    """
+    return Reg(_call("reduce_sum", [_expr(value), _expr(mask)], reassoc=reassoc))
+
+
+def reduce_max(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Reduce to one lane; inactive inputs contribute the dtype minimum or -inf."""
+    return Reg(_call("reduce_max", [_expr(value), _expr(mask)]))
+
+
+def reduce_min(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Reduce to one lane; inactive inputs contribute the dtype maximum or +inf."""
+    return Reg(_call("reduce_min", [_expr(value), _expr(mask)]))

@@ -557,6 +557,8 @@ class ForStmt : public Stmt {
                    hardware_loop_policy == HardwareLoopPolicy::Require,
                span_)
         << "Unknown hardware_loop_policy";
+    CHECK_SPAN(hardware_loop_policy == HardwareLoopPolicy::Auto || kind == ForKind::Sequential, span_)
+        << "HardwareLoopPolicy.Require requires Sequential ForKind";
     detail::CheckValueOperand(start_, span_, "ForStmt start");
     detail::CheckValueOperand(stop_, span_, "ForStmt stop");
     detail::CheckValueOperand(step_, span_, "ForStmt step");

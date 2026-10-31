@@ -173,7 +173,9 @@ void BindPass(nb::module_& m) {
              "Device region boundaries use canonical, nonoverlapping allocation windows")
       .value("TileStorageAllocated", IRProperty::TileStorageAllocated,
              "Device region storage and transfers also have nonoverlapping effective address windows")
-      .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas");
+      .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas")
+      .value("HardwareLoopContractValid", IRProperty::HardwareLoopContractValid,
+             "Required hardware loops retain Sequential intent");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -354,23 +356,25 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, RuntimeKind, bool>(),
+                    MemoryPlanner, bool, RuntimeKind, bool, bool>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
-           nb::arg("enable_buffer_ir") = true,
+           nb::arg("enable_buffer_ir") = true, nb::arg("report_hardware_loops") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the stored legacy "
            "L0C double-buffer compatibility flag, the target Simpler runtime ABI, and default-on "
            "whole-kernel Buffer IR selection. Automatic dbC remains disabled for PyPTO and DSA-RP; "
            "PTOAS retains its existing selection regardless of the flag")
-      .def("__enter__",
-           [](PassContext& self) -> PassContext& {
-             self.EnterContext();
-             return self;
-           })
+      .def(
+          "__enter__",
+          [](PassContext& self) -> PassContext& {
+            self.EnterContext();
+            return self;
+          },
+          nb::rv_policy::reference_internal)
       .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
       .def("get_verification_level", &PassContext::GetVerificationLevel,
            "Get the verification level for this context")
@@ -388,6 +392,12 @@ void BindPass(nb::module_& m) {
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
            "Return the stored legacy flag; it does not override the planner's automatic dbC policy")
       .def("get_runtime", &PassContext::GetRuntime, "Get the target Simpler runtime ABI for this context")
+      .def("get_report_hardware_loops", &PassContext::GetReportHardwareLoops,
+           "Whether optional hardware-loop reports are enabled")
+      .def("get_hardware_loop_profile", &PassContext::GetHardwareLoopProfile,
+           "Current backend profile, or unsupported for backend-independent host codegen")
+      .def("get_hardware_loop_reports", &PassContext::GetHardwareLoopReports,
+           "Latest transient codegen qualification reports; never final hardware evidence")
       .def("get_enable_buffer_ir", &PassContext::GetEnableBufferIR,
            "Whether supported whole kernels use Buffer IR")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,

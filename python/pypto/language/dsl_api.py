@@ -236,6 +236,65 @@ def range(
 
 
 @overload
+def hardware_loop(
+    *args: RangeArg,
+    init_values: None = None,
+) -> RangeIterator[Scalar]: ...
+
+
+@overload
+def hardware_loop(
+    *args: RangeArg,
+    init_values: tuple[T1],
+) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
+
+
+@overload
+def hardware_loop(
+    *args: RangeArg,
+    init_values: tuple[T1, T2],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
+
+
+@overload
+def hardware_loop(
+    *args: RangeArg,
+    init_values: tuple[T1, T2, T3],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
+
+
+@overload
+def hardware_loop(
+    *args: RangeArg,
+    init_values: tuple[T1, T2, T3, T4],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
+
+
+@overload
+def hardware_loop(
+    *args: RangeArg,
+    init_values: tuple[T1, T2, T3, T4, T5],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
+
+
+def hardware_loop(
+    *args: RangeArg,
+    init_values: tuple[Any, ...] | None = None,
+) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
+    """Require a Sequential hardware loop with range-compatible bounds and carries.
+
+    Static qualification is distinct from final artifact evidence. Unsupported
+    targets fail compilation rather than silently falling back to ordinary loops.
+    Static empty loops may be removed with their initial carry values preserved.
+    """
+    return _make_range_iterator(
+        *args,
+        init_values=init_values,
+        func_name="hardware_loop",
+    )
+
+
+@overload
 def parallel(*args: RangeArg, init_values: None = None) -> RangeIterator[Scalar]: ...
 
 

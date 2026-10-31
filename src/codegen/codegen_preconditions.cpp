@@ -17,6 +17,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/analysis/hardware_loop_analysis.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -24,6 +25,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/spmd_launch_utils.h"
@@ -99,6 +101,15 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
 
 void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
+  // Qualification is recomputed at the emission boundary. Installed backends
+  // default to unsupported; no cached report can authorize a Require loop.
+  auto* context = PassContext::Current();
+  const auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
+  if (context && context->GetReportHardwareLoops()) {
+    context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
+  }
+  VerifyHardwareLoopRequirements(program, profile);
+
   // Check lexical register ownership before emission. Hardware-loop Require
   // remains unsupported until its separate lowering and evidence contract.
   class VFInfrastructureChecker : public ir::IRVisitor {
@@ -123,11 +134,7 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
     }
 
     void VisitStmt_(const ir::RegScopeStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
-    void VisitStmt_(const ir::ForStmtPtr& op) override {
-      CHECK_SPAN(op->hardware_loop_policy_ == ir::HardwareLoopPolicy::Auto, op->span_)
-          << "HardwareLoopPolicy.Require code generation is not supported yet";
-      ir::IRVisitor::VisitStmt_(op);
-    }
+    void VisitStmt_(const ir::ForStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
   } checker;
   checker.VisitProgram(program);
 }

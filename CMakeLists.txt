@@ -109,6 +109,7 @@ set(PYPTO_SOURCES
     src/core/error.cpp
 
     # IR - Core
+    src/ir/analysis/hardware_loop_analysis.cpp
     src/ir/builder.cpp
     src/ir/core.cpp
     src/ir/expr.cpp
@@ -350,6 +351,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_array_not_escaped.cpp
     src/ir/verifier/verify_inout_use.cpp
     src/ir/verifier/verify_return_params_explicit.cpp
+    src/ir/verifier/verify_hardware_loop_contract.cpp
     src/ir/verifier/verify_pipeline_loop_valid.cpp
     src/ir/verifier/verify_manual_deps_on_submit_only.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp

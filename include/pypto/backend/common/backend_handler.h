@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/ir/analysis/hardware_loop_analysis.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
 
@@ -137,6 +138,16 @@ struct L0CostModel {
 class BackendHandler {
  public:
   virtual ~BackendHandler() = default;
+
+  /// Unsupported by default: narrowing or MLIR loop syntax is not final evidence.
+  [[nodiscard]] virtual ir::HardwareLoopProfile GetHardwareLoopProfile() const { return {}; }
+
+  /// Final-artifact hook for future target lowering. Empty artifacts and ordinary
+  /// IR loops are never evidence; no installed backend currently overrides this.
+  [[nodiscard]] virtual bool HasHardwareLoopEvidence(const ir::HardwareLoopQualification& /*qualification*/,
+                                                     const std::string& /*artifact*/) const {
+    return false;
+  }
 
   // ---------------------------------------------------------------------------
   // Codegen hooks

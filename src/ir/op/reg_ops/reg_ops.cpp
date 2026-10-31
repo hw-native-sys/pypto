@@ -209,6 +209,87 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
   CHECK(!(narrow_float || float_int) || rounding) << "convert requires normalized rounding";
   return std::make_shared<RegType>(x->shape_, dst, RegKind::VecReg);
 }
+bool Integer(DataType dtype) { return dtype.IsInt() && dtype.GetBit() <= 32 && dtype.GetBit() >= 8; }
+bool Float(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
+
+RegTypePtr Vec(const ExprPtr& expr) {
+  auto type = Register(expr, RegKind::VecReg);
+  CHECK_SPAN(Integer(type->dtype_) || Float(type->dtype_), expr->span_)
+      << "Unsupported VF dtype " << type->dtype_.ToString();
+  return type;
+}
+
+RegTypePtr Mask(const ExprPtr& expr, const RegTypePtr& vector) {
+  auto mask = Register(expr, RegKind::MaskReg);
+  CHECK_SPAN(mask->shape_ == vector->shape_, expr->span_) << "Mask lane mismatch";
+  return mask;
+}
+
+void Pmode(const Kwargs& kwargs) {
+  CHECK(GetStringKwarg(kwargs, "pmode", "zero") == "zero") << "VF pmode must be zero";
+}
+
+TypePtr Unary(const Args& args, const Kwargs& kwargs, const std::string& name) {
+  CHECK(args.size() == 1 || args.size() == 2) << "Unary VF expects value and optional mask";
+  auto x = Vec(args[0]);
+  auto dtype = x->dtype_;
+  if (name == "abs") {
+    CHECK(Float(dtype) || dtype.IsSignedInt()) << "reg.abs requires float or signed integer dtype";
+  } else if (name == "relu") {
+    CHECK(Float(dtype) || dtype == DataType::INT32) << "reg.relu requires FP16/FP32/INT32 dtype";
+  } else if (name == "bitwise_not") {
+    CHECK(Integer(dtype)) << "Bitwise operations require integer dtype";
+  } else if (name != "neg") {
+    CHECK(Float(dtype)) << "Transcendental VF requires FP16/FP32 dtype";
+  }
+  if (args.size() == 2) Mask(args[1], x);
+  Pmode(kwargs);
+  return x;
+}
+
+TypePtr IntegerBinary(const Args& args, const Kwargs& kwargs) {
+  CHECK(args.size() == 2 || args.size() == 3) << "Binary VF expects two vectors and optional mask";
+  auto x = Vec(args[0]);
+  auto y = Vec(args[1]);
+  CHECK(Integer(x->dtype_)) << "Bitwise and shift operations require integer dtype";
+  Match(x, y);
+  if (args.size() == 3) Mask(args[2], x);
+  Pmode(kwargs);
+  return x;
+}
+
+TypePtr ScalarOperation(const Args& args, const Kwargs& kwargs, const std::string& name) {
+  CHECK(args.size() == 3) << "Scalar VF expects vector, scalar and mask";
+  auto x = Vec(args[0]);
+  auto scalar = As<ScalarType>(args[1]->GetType());
+  bool shift = name == "shift_lefts" || name == "shift_rights";
+  auto dtype = shift ? DataType::INT16 : x->dtype_;
+  CHECK(scalar && scalar->dtype_ == dtype) << "Scalar dtype mismatch (shifts require i16)";
+  if (shift) CHECK(Integer(x->dtype_)) << "Scalar shift requires integer dtype";
+  if (name == "muls") CHECK(x->dtype_.GetBit() >= 16) << "reg.muls rejects 8-bit dtype";
+  auto mask = Mask(args[2], x);
+  Pmode(kwargs);
+  if (name != "compares") return x;
+  CHECK(Float(x->dtype_) || x->dtype_ == DataType::INT32 || x->dtype_ == DataType::UINT32)
+      << "Unsupported compares dtype";
+  auto predicate = GetRequiredKwarg<std::string>(kwargs, "predicate", "reg.compares");
+  CHECK(predicate == "eq" || predicate == "ne" || predicate == "lt" || predicate == "le" ||
+        predicate == "gt" || predicate == "ge")
+      << "Invalid compare predicate";
+  return mask;
+}
+
+TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& name) {
+  CHECK(args.size() == 2) << "Reduction requires source and mask";
+  auto x = Vec(args[0]);
+  CHECK(x->dtype_.GetBit() >= 16) << "Reduction rejects 8-bit dtype";
+  Mask(args[1], x);
+  if (name == "reduce_sum" && Float(x->dtype_)) {
+    CHECK(GetKwargOr<bool>(kwargs, "reassoc", false)) << "Floating reduce_sum requires reassoc=True";
+  }
+  return std::make_shared<RegType>(1, x->dtype_, RegKind::VecReg);
+}
+
 }  // namespace
 
 REGISTER_OP("reg.load")
@@ -314,6 +395,10 @@ static bool RegisterGenerators() {
         CHECK(active >= 0 && active <= n) << "active_lanes must be in [0, lanes]";
       }
       if (op == "index_gen") {
+        // A5 VCI has no BF16 form. Reject at the shared schema boundary so
+        // DSL, Builder and raw-IR verification fail before reaching codegen.
+        CHECK_SPAN(dtype != DataType::BF16, a[0]->span_)
+            << "reg.index_gen does not support BF16 VCI; use an integer index dtype";
         CHECK(GetStringKwarg(k, "order", "ascending") == "ascending") << "P0 order must be ascending";
       }
       return std::make_shared<RegType>(n, dtype, mask ? RegKind::MaskReg : RegKind::VecReg);
@@ -383,6 +468,103 @@ static bool RegisterMaskLogic() {
   return true;
 }
 static const bool masks_registered = RegisterMaskLogic();
+
+static bool RegisterComputeFamilies() {
+  for (const auto& [name, opcode] :
+       std::vector<std::pair<std::string, std::string>>{{"abs", "vabs"},
+                                                        {"neg", "vneg"},
+                                                        {"relu", "vrelu"},
+                                                        {"exp", "vexp"},
+                                                        {"log", "vln"},
+                                                        {"sqrt", "vsqrt"},
+                                                        {"bitwise_not", "vnot"}}) {
+    OpRegistry::GetInstance()
+        .Register("reg." + name)
+        .set_op_category("RegOp")
+        .set_description("Predicated lane-wise unary VF operation")
+        .set_reg_op("pto.vmi." + opcode)
+        .add_argument("value", "VecReg")
+        .add_argument("mask", "Optional MaskReg")
+        .set_attr<std::string>("pmode")
+        .no_arg_writes()
+        .f_deduce_type([name](const Args& args, const Kwargs& kwargs) { return Unary(args, kwargs, name); });
+  }
+  for (const auto& [name, opcode] :
+       std::vector<std::pair<std::string, std::string>>{{"bitwise_and", "vand"},
+                                                        {"bitwise_or", "vor"},
+                                                        {"bitwise_xor", "vxor"},
+                                                        {"shift_left", "vshl"},
+                                                        {"shift_right", "vshr"}}) {
+    OpRegistry::GetInstance()
+        .Register("reg." + name)
+        .set_op_category("RegOp")
+        .set_description("Predicated integer binary VF operation")
+        .set_reg_op("pto.vmi." + opcode)
+        .add_argument("lhs", "VecReg")
+        .add_argument("rhs", "VecReg")
+        .add_argument("mask", "Optional MaskReg")
+        .set_attr<std::string>("pmode")
+        .no_arg_writes()
+        .f_deduce_type(IntegerBinary);
+  }
+  for (const auto& [name, opcode] :
+       std::vector<std::pair<std::string, std::string>>{{"adds", "vadds"},
+                                                        {"muls", "vmuls"},
+                                                        {"maximums", "vmaxs"},
+                                                        {"minimums", "vmins"},
+                                                        {"shift_lefts", "vshls"},
+                                                        {"shift_rights", "vshrs"},
+                                                        {"compares", "vcmps"}}) {
+    auto& entry = OpRegistry::GetInstance().Register("reg." + name);
+    entry.set_op_category("RegOp")
+        .set_description("Seeded vector-scalar VF operation")
+        .set_reg_op("pto.vmi." + opcode)
+        .add_argument("value", "VecReg")
+        .add_argument("scalar", "Scalar")
+        .add_argument("mask", "MaskReg")
+        .no_arg_writes()
+        .f_deduce_type(
+            [name](const Args& args, const Kwargs& kwargs) { return ScalarOperation(args, kwargs, name); });
+    if (name == "compares")
+      entry.set_attr<std::string>("predicate");
+    else
+      entry.set_attr<std::string>("pmode");
+  }
+  for (const auto& [name, opcode] : std::vector<std::pair<std::string, std::string>>{
+           {"reduce_sum", "vcadd"}, {"reduce_max", "vcmax"}, {"reduce_min", "vcmin"}}) {
+    auto& entry = OpRegistry::GetInstance().Register("reg." + name);
+    entry.set_op_category("RegOp")
+        .set_description("Masked reduction to a one-lane vector")
+        .set_reg_op("pto.vmi." + opcode)
+        .add_argument("value", "VecReg")
+        .add_argument("mask", "MaskReg")
+        .no_arg_writes()
+        .f_deduce_type(
+            [name](const Args& args, const Kwargs& kwargs) { return Reduction(args, kwargs, name); });
+    if (name == "reduce_sum") entry.set_attr<bool>("reassoc");
+  }
+  return true;
+}
+static const bool compute_families_registered = RegisterComputeFamilies();
+
+REGISTER_OP("reg.gather_lanes")
+    .set_op_category("RegOp")
+    .set_description("Dynamic register lane permutation")
+    .set_reg_op("pto.vmi.vselr")
+    .add_argument("value", "VecReg")
+    .add_argument("indices", "VecReg")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& args, const Kwargs&) -> TypePtr {
+      CHECK(args.size() == 2) << "gather_lanes requires source and indices";
+      auto x = Vec(args[0]);
+      auto indices = Vec(args[1]);
+      auto width = x->dtype_.GetBit();
+      CHECK(Integer(indices->dtype_) && indices->dtype_.GetBit() == width) << "Index width mismatch";
+      CHECK(indices->shape_ == x->shape_) << "Index lane mismatch";
+      CHECK(x->shape_ == 64 || (width <= 16 && x->shape_ == 128) || (width == 8 && x->shape_ == 256))
+          << "Unsupported vselr lane count";
+      return x;
+    });
 
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   CHECK(call && call->op_ && (call->op_->name_ == "reg.load" || call->op_->name_ == "reg.store"))

@@ -901,3 +901,7 @@ Core definitions live in `include/pypto/core/common.h` and `include/pypto/ir/`; 
 The `reg.*` P0 schemas use category `RegOp`, explicit argument effects and
 register-region requirements. See [register operations](../language/06-register-operations.md)
 for dtype, memory, conversion and ownership contracts.
+
+Ordinary RegOp extensions include unary, integer bitwise/shifts, vector-scalar,
+scalar compare, dynamic lane selection and single-lane reductions; see the linked
+register operations contract for exact dtype and mask restrictions.
