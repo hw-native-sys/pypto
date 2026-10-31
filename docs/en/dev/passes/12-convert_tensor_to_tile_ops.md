@@ -194,8 +194,9 @@ stale the moment a later pass grows the param list.
 Precedence is per access: an explicit `pl.load(..., cache=...)` kwarg already on
 the load always wins over the scope declaration, in both directions, so
 `cache=pl.CachePolicy.DEFAULT` opts one read back into the cache inside a
-bypassing scope. From here the kwarg simply rides the op through the remaining
-passes to codegen, the way `target_memory` does. See
+bypassing scope. The same precedence applies to the new A5 CachePolicy modes.
+From here the kwarg simply rides the op through the remaining passes to codegen, the way
+`target_memory` does. See
 [GM Cache-Access Policy](../language/05-cache-policy.md).
 
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers

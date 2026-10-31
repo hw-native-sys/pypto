@@ -1564,8 +1564,10 @@ def _compile_pto_module(
     if is_vpto:
         # Binary output is persisted directly; the text-file API returns a marker.
         return ""
+    # PTOAS emits the complete ISA semantics, including native L2 attributes.
     with open(compiled_path) as f:
-        return f.read()
+        cpp = f.read()
+    return cpp
 
 
 def _emit_vpto_object(result_files: dict[str, str], object_rel: str, content: bytes, output_dir: str) -> None:

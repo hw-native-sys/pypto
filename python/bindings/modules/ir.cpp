@@ -144,6 +144,10 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<AccPhase>(item.second)) {
       // Cast enum to int for storage — tile.gemv-family ops read as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<AccPhase>(item.second)));
+    } else if (nb::isinstance<LoadL2Hint>(item.second)) {
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<LoadL2Hint>(item.second)));
+    } else if (nb::isinstance<StoreL2Hint>(item.second)) {
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<StoreL2Hint>(item.second)));
     } else if (nb::isinstance<STPhase>(item.second)) {
       // Cast enum to int for storage — tile.store reads as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<STPhase>(item.second)));
@@ -485,15 +489,33 @@ void BindIR(nb::module_& m) {
       .value("min", PadValue::min, "Min value padding")
       .export_values();
 
-  // CachePolicy enum - declared GM cache-access policy for a tensor read.
-  // nb::is_arithmetic like AtomicType: the policy rides the `tile.load` "cache"
+  nb::enum_<LoadL2Hint>(ir, "LoadL2Hint", nb::is_arithmetic(), "Per-transfer PTO-ISA L2 hint")
+      .value("NormalFirstVictim", LoadL2Hint::NormalFirstVictim)
+      .value("NormalLastVictim", LoadL2Hint::NormalLastVictim)
+      .value("NormalPersistent", LoadL2Hint::NormalPersistent)
+      .value("NotAllocKeep", LoadL2Hint::NotAllocKeep)
+      .value("NotAllocClean", LoadL2Hint::NotAllocClean)
+      .value("NotAllocDrop", LoadL2Hint::NotAllocDrop);
+
+  nb::enum_<StoreL2Hint>(ir, "StoreL2Hint", nb::is_arithmetic(), "Per-transfer PTO-ISA L2 hint")
+      .value("NormalFirstVictim", StoreL2Hint::NormalFirstVictim)
+      .value("NormalLastVictim", StoreL2Hint::NormalLastVictim)
+      .value("NormalPersistent", StoreL2Hint::NormalPersistent)
+      .value("NotAllocClean", StoreL2Hint::NotAllocClean);
+
+  // CachePolicy enum - semantic GM cache-access policy for reads and writes.
+  // nb::is_arithmetic like AtomicType: the policy rides the transfer's "cache"
   // kwarg as a plain `int`, so the DSL needs `int(policy)` to work.
   nb::enum_<CachePolicy>(ir, "CachePolicy", nb::is_arithmetic(),
-                         "GM cache-access policy declared for a tensor read")
-      .value("DEFAULT", CachePolicy::kDefault, "Ordinary cached GM access")
-      .value("BYPASS", CachePolicy::kBypass,
-             "Streaming access declared to bypass the cache: asserts this tensor has no reuse "
-             "worth caching and that nothing writes those bytes while the kernel runs")
+                         "GM cache policy; supported modes depend on target and transfer direction")
+      .value("DEFAULT", CachePolicy::kDefault)
+      .value("BYPASS", CachePolicy::kBypass)
+      .value("NORMAL_FIRST_VICTIM", CachePolicy::kNormalFirstVictim)
+      .value("NORMAL_LAST_VICTIM", CachePolicy::kNormalLastVictim)
+      .value("NORMAL_PERSISTENT", CachePolicy::kNormalPersistent)
+      .value("NOT_ALLOC_KEEP", CachePolicy::kNotAllocKeep)
+      .value("NOT_ALLOC_CLEAN", CachePolicy::kNotAllocClean)
+      .value("NOT_ALLOC_DROP", CachePolicy::kNotAllocDrop)
       .export_values();
 
   // TensorView - struct for tensor view information - must be before TensorType

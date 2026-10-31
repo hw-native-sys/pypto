@@ -791,5 +791,51 @@ def test_review_branch_returned_view_address(tmp_path, addressed, nested_loop):
     compile_review_pto(source, tmp_path, level="level3" if addressed else "level2")
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize(
+    "direction,policy",
+    [("load", policy) for policy in pl.CachePolicy if int(policy) >= 2]
+    + [("load", pl.CachePolicy.BYPASS)]
+    + [
+        ("store", policy)
+        for policy in pl.CachePolicy
+        if int(policy) >= 2 and policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
+    ],
+)
+def test_register_unit_native_verifier_rejects_a5_cache_modes(tmp_path, planner, direction, policy):
+    load_cache = f", cache=pl.{type(policy).__name__}.{policy.name}" if direction == "load" else ""
+    store_cache = f", cache=pl.CachePolicy.{policy.name}" if direction == "store" else ""
+    program = pl.parse_program(f"""
+@pl.program
+class RegisterCache:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, src: pl.Tensor[[1, 128], pl.FP32],
+               dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]]):
+        tile_src: pl.Tile[
+            [1, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 128], stride=[128, 1])
+        ] = pl.load(
+            src, [0, 0], [1, 128], target_memory=pl.Mem.Vec{load_cache})
+        tile_dst: pl.Tile[
+            [1, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 128], stride=[128, 1])
+        ] = pl.load(
+            dst, [0, 0], [1, 128], target_memory=pl.Mem.Vec)
+        with pl.reg_scope():
+            value = pl.reg.load(tile_src, lanes=64)
+            doubled = pl.reg.add(value, value)
+            out = pl.reg.store(tile_dst, value=doubled)
+        stored = pl.store(out, [0, 0], dst{store_cache})
+""")
+    with passes.PassContext([], memory_planner=planner):
+        optimized = ir.PassManager(ir.OptimizationStrategy.Default).run_passes(program)
+    source = codegen.PTOCodegen().generate(
+        optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    assert 'pto.backend = "vpto"' in source.partition("\n")[0]
+    assert f"l2_hint = #pto.{direction}_l2_hint<" in source
+    # Validation belongs to PTOAS, including standalone binary compilation.
+    with pytest.raises(RuntimeError, match="l2_hint.*not supported in binary VPTO"):
+        pto_backend._compile_pto_module(source, "register_cache", str(tmp_path), planner)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

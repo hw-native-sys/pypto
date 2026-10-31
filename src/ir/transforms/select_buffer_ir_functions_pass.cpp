@@ -329,10 +329,10 @@ class BufferKernelSupport : public IRVisitor {
       has_store = true;
       CheckTransferParameter(call, 2, false);
       CheckTransferTypes(call, false);
-      supported &= GetIntKwarg(call->kwargs_, "atomic", 0) == 0 &&
-                   GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
-                   !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
-                   !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+      supported &=
+          GetIntKwarg(call->kwargs_, "atomic", 0) == 0 && GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
+          !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
+          !GetKwargOr<bool>(call->kwargs_, "pre_relu", false) && GetIntKwarg(call->kwargs_, "cache", 0) == 0;
     } else if (IsOp(call, "tile.set_validshape")) {
       supported &= call->args_.size() == 3 && call->kwargs_.empty() && !views_.IsWindow(call->args_[0]) &&
                    As<TileType>(call->GetType())->GetMemorySpace() == MemorySpace::Vec;
@@ -460,7 +460,8 @@ class BufferKernelSupport : public IRVisitor {
     } else {
       supported &= call->args_.size() == 3 && !views_.IsWindow(call->args_[0]) &&
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
-                   !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+                   !GetKwargOr<bool>(call->kwargs_, "pre_relu", false) &&
+                   GetIntKwarg(call->kwargs_, "cache", 0) == 0;
       // Native Vec TMOV preserves row stride; copying a strided window into
       // a destination with a different pitch needs a separate transfer recipe.
       const auto source_view = views_.Get(call->args_[1]);

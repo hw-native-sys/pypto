@@ -595,6 +595,39 @@ class TypedTransfers:
     assert output.is_file()
 
 
+@pytest.mark.parametrize(
+    "load_hint,store_hint",
+    [
+        (pl.CachePolicy.NORMAL_FIRST_VICTIM, None),
+        (pl.CachePolicy.NORMAL_PERSISTENT, None),
+        (None, pl.CachePolicy.NORMAL_FIRST_VICTIM),
+        (None, pl.CachePolicy.NORMAL_PERSISTENT),
+    ],
+)
+@pytest.mark.parametrize("force_buffer", [False, True])
+def test_buffer_selection_preserves_nondefault_cache_policy(load_hint, store_hint, force_buffer):
+    @pl.program
+    class Hinted:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, source: pl.Tensor[[16, 32], pl.FP32], output: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            value = pl.load(source, [0, 0], [16, 32], cache=load_hint)
+            out = pl.store(value, [0, 0], output, cache=store_hint)
+            return out
+
+    if force_buffer:
+        with pytest.raises(ValueError, match="non-default cache requires a Buffer transfer recipe"):
+            _lower(passes.MemoryPlanner.PYPTO, program=Hinted)
+    else:
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            result = PassManager(OptimizationStrategy.Default).run_passes(Hinted)
+        kernel = result.get_function("kernel")
+        assert kernel is not None
+        assert kernel.attrs["buffer_ir_selected"] is False
+        assert kernel.ir_stage == ir.FunctionIRStage.Functional
+
+
 @pl.program
 class MixedRollout:
     @pl.function(type=pl.FunctionType.InCore)

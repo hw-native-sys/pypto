@@ -1154,12 +1154,14 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result && call->args_.size() >= 3, call->span_)
           << "Internal error: malformed tile.load";
       CHECK_SPAN(GetIntKwarg(call->kwargs_, "cache", 0) == 0, call->span_)
-          << "LowerTileToBuffer: cache-policy loads require a Buffer transfer recipe";
+          << "LowerTileToBuffer: non-default cache requires a Buffer transfer recipe";
       return Operation("buffer.load",
                        {VisitExpr(call->args_[0]), VisitExpr(call->args_[1]), Valid(result), Handle(result)},
                        call->span_);
     }
     if (IsOp(call, "tile.store")) {
+      CHECK_SPAN(GetIntKwarg(call->kwargs_, "cache", 0) == 0, call->span_)
+          << "LowerTileToBuffer: non-default cache requires a Buffer transfer recipe";
       INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
           << "Internal error: dense rank-2 tile.store requires three operands";
       CHECK_SPAN(

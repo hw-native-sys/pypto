@@ -296,7 +296,12 @@ class ScopeParser:
                     "no binding — are not supported."
                 ),
             )
-        policy = extract_enum_value(call.args[1], CACHE_POLICY_MAP, "CachePolicy", "pl.CachePolicy")
+        policy_node = call.args[1]
+        enum_node = policy_node.value if isinstance(policy_node, ast.Attribute) else None
+        enum_name = enum_node.attr if isinstance(enum_node, ast.Attribute) else getattr(enum_node, "id", "")
+        if enum_name != "CachePolicy":
+            raise ParserSyntaxError("Expected CachePolicy")
+        policy = extract_enum_value(policy_node, CACHE_POLICY_MAP, "CachePolicy", "pl.CachePolicy")
 
         # Resolved against the bindings live *at the scope*, not inside it: the
         # declaration names a tensor the scope body captures from outside, which

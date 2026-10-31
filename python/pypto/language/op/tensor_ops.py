@@ -130,7 +130,14 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, CachePolicy, Expr, MemorySpace, PadValue, TensorLayout
+from pypto.pypto_core.ir import (
+    AtomicType,
+    CachePolicy,
+    Expr,
+    MemorySpace,
+    PadValue,
+    TensorLayout,
+)
 
 from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, Tile, predicate_to_expr
 from ._utils import _normalize_intlike
@@ -378,11 +385,15 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       and that **nothing writes those bytes while the kernel runs**. Mixing a
       cached write and a bypassing read of the same bytes is a coherency bug
       the compiler cannot detect, so coherency is the author's contract. This
-      is why the policy is never a default and never inferred. Declaring
-      BYPASS on a tensor the scope itself writes is rejected at outlining.
+      is why the policy is never a default and never inferred. All non-allocating
+      scope policies (BYPASS and every NOT_ALLOC_* mode) require a read-only
+      tensor; declaring one on a tensor the scope writes is rejected at outlining.
     * **Tracked by Var identity, never by name.** The declaration names the
-      binding live at the scope, so rebinding the name afterwards
-      (``b = self.foo(b)``) yields a new value the declaration does not cover.
+      binding live at the scope and follows compiler-recognized aliases.
+      Rebinding the name to different GM storage loses the declaration; handles
+      returned by ``pl.store`` or ``pl.assemble`` retain the scope read policy
+      when they preserve the declared destination's storage. The declaration
+      does not configure stores.
     * **Consumed at parse time.** It emits no IR statement of its own: the
       parser records it on the enclosing scope, the scope outliner resolves it
       to the outlined kernel's parameters, and ``ConvertTensorToTileOps`` turns
@@ -397,18 +408,23 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
     ``cache_policy`` attribute on ``pto.tload`` plus the device's no-cache alias
     offset, which the assembler adds to that one load's source address; the
     offset comes from the driver through the dispatch payload, and a device that
-    reports no alias reports zero, leaving the read ordinary and correct. Other
-    architectures do not map GM twice — A5 expresses the policy on the load
-    instruction instead — and PTOAS lowers the bare attribute to an ordinary
-    load, so a declaration there is accepted and currently does nothing.
+    reports no alias reports zero, leaving the read ordinary and correct.
+    For new A5 code, use ``CachePolicy.NORMAL_*`` or
+    ``CachePolicy.NOT_ALLOC_*`` to select an ISA mode, for example
+    ``CachePolicy.NOT_ALLOC_KEEP`` for a non-allocating read. Existing
+    ``CachePolicy.BYPASS`` reads retain their A5 NotAllocKeep lowering for
+    compatibility.
+    BYPASS remains load-only. Explicit A5 policies are unsupported in binary
+    VPTO compilation units and are rejected before assembly.
     ``CachePolicy.DEFAULT`` emits nothing, so a read that declares no policy
     generates exactly the code it did before.
 
     Args:
         tensor: The tensor whose reads the policy applies to. Must be a
             ``Tensor`` value bound outside the scope and read inside it.
-        policy: ``CachePolicy.BYPASS`` to declare a streaming, non-cached read;
-            ``CachePolicy.DEFAULT`` for an ordinary cached read.
+        policy: ``CachePolicy.DEFAULT/BYPASS`` on A2/A3, or one of the six
+            A5-specific ``CachePolicy`` modes on A5. The same enum is used
+            on both targets. Scope policies configure reads only.
 
     Returns:
         Nothing. The marker is consumed at parse time and produces no value.

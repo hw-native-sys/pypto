@@ -2061,11 +2061,13 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       // write: the policy is a promise about the bytes, and the direction
       // inference above already knows whether the scope writes them.
       const ParamDirection dir = input_param_directions[static_cast<size_t>(it->second)];
-      CHECK_SPAN(static_cast<CachePolicy>(policy) != CachePolicy::kBypass || dir == ParamDirection::In,
+      CHECK_SPAN(!IsNonAllocatingCachePolicy(static_cast<CachePolicy>(policy)) || dir == ParamDirection::In,
                  op->span_)
-          << "pl.set_cache_policy(" << v->name_hint_
-          << ", CachePolicy.BYPASS) is not allowed on a tensor this scope writes ("
-          << ParamDirectionToString(dir)
+          << "pl.set_cache_policy(" << v->name_hint_ << ", "
+          << (static_cast<CachePolicy>(policy) == CachePolicy::kBypass
+                  ? "CachePolicy.BYPASS"
+                  : CachePolicyToString(static_cast<CachePolicy>(policy)))
+          << ") is not allowed on a tensor this scope writes (" << ParamDirectionToString(dir)
           << "). A bypassing read of bytes the same kernel writes is a coherency bug.";
       cache_policy_indices.emplace_back(it->second, policy);
     }

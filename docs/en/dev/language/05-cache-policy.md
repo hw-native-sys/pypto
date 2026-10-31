@@ -1,4 +1,4 @@
-# GM Cache-Access Policy
+# GM Cache-Access Policy and L2 Hints
 
 A **declared** policy for how a kernel reads a tensor out of global memory
 (GM). `CachePolicy.BYPASS` says "stream this tensor — do not spend cache on
@@ -8,19 +8,110 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Requires PTOAS >= v0.64** (`PTOAS_VERSION` in `toolchain/versions.env`), and
-> **has an effect on a2a3 only**. A `BYPASS` declaration becomes a
+> **Toolchain:** use the PTOAS version pinned in `toolchain/versions.env`.
+> A5 detailed modes require
+> native `l2_hint` support from [PTOAS #1722](https://github.com/hw-native-sys/PTOAS/pull/1722);
+> the current v0.70 toolchain pin does not include it. The A5 integration must
+> wait for that compiler change to be released and pinned.
+> **On A2/A3**, a `BYPASS` declaration becomes a
 > `cache_policy` attribute on `pto.tload` plus an `offset` operand carrying that
 > device's no-cache alias distance, which the assembler adds to that one load's
 > source address. See [What codegen emits](#what-codegen-emits) and
 > [Architectures](#architectures).
 
-## Two surfaces
+## Architecture-specific cache policies
+
+`pl.CachePolicy` is the shared enum for both targets. Its eight members use
+semantic IDs rather than raw ISA encodings.
+
+On A2/A3, only `DEFAULT=0` and `BYPASS=1` are supported. BYPASS adds the
+runtime-provided nocache offset to the load address; no A5 instruction mode is
+selected. Stores support DEFAULT only.
+
+On A5, the six modes below are translated to direction-specific PTO-ISA
+encodings. A2/A3 rejects these modes. Legacy `CachePolicy.BYPASS` reads still
+select A5 NotAllocKeep for compatibility; new A5 code should use
+`CachePolicy.NOT_ALLOC_KEEP`. Omitting `cache` uses the ordinary transfer on
+either architecture. An explicit DEFAULT can reset an inherited scope policy.
+
+| CachePolicy | A5 load ISA mode | A5 store ISA mode |
+| ----------- | ---------------- | ----------------- |
+| NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
+| NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
+| NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
+| NOT_ALLOC_KEEP | NotAllocKeep (4) | Rejected: load-only |
+| NOT_ALLOC_CLEAN | NotAllocClean (5) | NotAllocClean (4) |
+| NOT_ALLOC_DROP | NotAllocDrop (6) | Rejected: load-only |
+
+FirstVictim (0) | NormalFirstVictim (0) |
+| NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
+| NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
+| NOT_ALLOC_KEEP | NotAllocKeep (4) | Rejected: load-only |
+| NOT_ALLOC_CLEAN | NotAllocClean (5) | NotAllocClean (4) |
+| NOT_ALLOC_DROP | NotAllocDrop (6) | Rejected: load-only |
+
+FirstVictim favors earlier replacement, LastVictim favors later replacement,
+and Persistent uses resident cache lines, which other resident lines can still
+replace. The not-allocate read modes fetch from GM: Keep preserves existing
+cache-line state, Clean retains an existing line but marks it clean so eviction
+requires no writeback, and Drop discards an existing line at the same address.
+The store interface exposes only the Clean non-allocate mode.
+
+The pinned PTO-ISA forwards `l2Control` through A5 Vec-to-GM and ACC-to-GM
+stores, including ReLU and scalar/vector-quantized ACC writeback. Both paths
+support the four store modes in the table; KEEP/DROP remain load-only.
+
+On A2/A3, load DEFAULT/BYPASS keeps the existing implementation: BYPASS carries
+the runtime nocache offset to PTOAS, which adjusts that load's source address.
+Only DEFAULT is supported for stores. The six additional policies are rejected
+on A2/A3 instead of silently approximating A5 semantics.
+
+```python
+# A2/A3 uses the runtime nocache address offset.
+streamed = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
+
+# A5 selects a direction-specific ISA mode.
+retained = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_PERSISTENT)
+out = pl.store(retained, [0, 0], out, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
+```
+
+`cache=None` omits the policy. An explicit per-load policy overrides
+`pl.set_cache_policy`; the scope interface accepts the same enum and governs
+reads only. Non-allocating scope declarations require read-only tensors.
+Stores are controlled explicitly on `pl.store`, not by scope declarations.
+Scope read policies follow GM destination handles returned by `pl.assemble`
+and `pl.store`; an explicit policy on a later load still takes precedence.
+
+**Integration:** the IR carries semantic integer `cache` kwargs. A2/A3 retains
+PTOAS's `cache_policy` attribute and explicit runtime offset operand. A5 emits
+native, direction-specific optional attributes on the transfer itself:
+
+```mlir
+// Load: ISA encoding 5.
+pto.tload ins(%src : !pto.partition_tensor_view<32x32xf32>) outs(%tile : !pto.tile_buf<vec, 32x32xf32>) {l2_hint = #pto.load_l2_hint<not_alloc_clean>}
+// Store: ISA encoding 4.
+pto.tstore ins(%tile : !pto.tile_buf<vec, 32x32xf32>) outs(%dst : !pto.partition_tensor_view<32x32xf32>) {l2_hint = #pto.store_l2_hint<not_alloc_clean>}
+```
+
+PTOAS verifies the target, transfer path and attribute type, then EmitC lowering
+selects `TLOAD<TLoadL2Hint::...>` / `TSTORE<TStoreL2Hint::...>` directly.
+An omitted attribute remains absent; explicit NORMAL_FIRST_VICTIM retains the
+zero-valued attribute. Store phase, atomic, ReLU and quantization arguments
+remain intact. Standalone PTOAS compilation, PyPTO compilation and debug
+rebuilds therefore share the same semantics without a C++ text rewrite.
+
+This requires PTOAS with native `load_l2_hint` / `store_l2_hint` support; older
+releases reject the attributes. Binary VPTO compilation units currently reject
+explicit A5 modes in the PTOAS verifier. Non-default policies stay on the Tile
+path; forced Buffer lowering rejects unsupported transfer policies.
+
+## CachePolicy surfaces
 
 | Surface | Granularity | Written as | Use when |
 | ------- | ----------- | ---------- | -------- |
 | `pl.set_cache_policy(t, policy)` | every read of `t` in the enclosing scope | a standalone statement at the top level of a `pl.at(...)` / `pl.spmd(...)` body | Tensor programming — the GM reads are implicit (`pl.matmul`, `pl.assemble`, slicing) and there is no load call to annotate |
 | `pl.load(..., cache=policy)` | one read | a kwarg on the load | Tile programming — you already name the access |
+| `pl.store(..., cache=policy)` | one write | a kwarg on the store | Explicit A5 store cache control |
 
 `pl.slice` / `tensor.slice` deliberately take **no** `cache=` kwarg: a slice
 computes an address descriptor, it moves no data. The policy belongs to the op
@@ -49,12 +140,16 @@ tile = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
 
 ## The contract
 
-`CachePolicy.BYPASS` asserts **two** things about the tensor:
+On a read, `CachePolicy.BYPASS` asserts **two** things about the tensor:
 
 | Claim | Who guarantees it | Does the compiler check it? |
 | ----- | ----------------- | --------------------------- |
 | The kernel streams these bytes — no reuse worth caching | Author | No (a performance claim) |
 | Nothing writes these bytes while the kernel runs | Author | Partially — see below |
+
+BYPASS is load-only: it uses a runtime offset on A2/A3 and preserves the
+legacy NotAllocKeep lowering on A5. A5 stores
+select one of the four supported CachePolicy store modes.
 
 Mixing a cached write and a bypassing read of the same bytes is a **coherency
 bug**: the two paths can see different data. The compiler cannot prove absence
@@ -62,10 +157,11 @@ of a concurrent writer across tasks, ranks, or the host, so coherency is the
 author's contract. This is exactly why the policy is never a default and never
 inferred by an optimisation pass.
 
-The one part the compiler *can* check, it does: declaring `BYPASS` on a tensor
-**the same scope writes** is rejected at outlining (see
-[Errors](#errors)). The scope's own parameter direction already says whether it
-writes, so a self-inflicted coherency bug is caught rather than trusted.
+Every non-allocating scope declaration (`BYPASS`, `NOT_ALLOC_KEEP`,
+`NOT_ALLOC_CLEAN` or `NOT_ALLOC_DROP`) requires a read-only tensor
+(`ParamDirection::In`). Declaring one on a tensor **the same scope writes** is
+rejected at outlining (see [Errors](#errors)). The scope's parameter direction
+already records whether it writes the tensor.
 
 ## Precedence
 
@@ -85,8 +181,10 @@ with pl.at(level=pl.Level.CORE_GROUP):
     rest = pl.load(b, [32, 0], [32, 32])                              # BYPASS (declared)
 ```
 
-A load already present in the body (hand-written, or produced by an earlier
-pass) is stamped by the same rule as a load the compiler synthesises: the
+An explicit per-load cache policy overrides the scope policy on every backend.
+A load already present in the body
+(hand-written, or produced by an earlier pass) is stamped by the same rule as
+a load the compiler synthesises: the
 declaration applies unless that load states its own `cache=`.
 
 ## Where the declaration may be written
@@ -109,8 +207,10 @@ parsing the body.
 Two more rules the parser enforces:
 
 - **Tracked by Var identity, never by name.** The declaration names the binding
-  live *at the scope*. Rebinding the name afterwards (`b = self.foo(b)`) yields
-  a new value the declaration does not cover.
+  live *at the scope* and follows compiler-recognized aliases. Rebinding to
+  different GM storage loses the declaration. Storage-preserving destination
+  handles returned by `pl.store` or `pl.assemble` retain the scope read policy;
+  the declaration does not configure the stores themselves.
 - **Bare name, tensor-typed, already bound.** Attribute / subscript / call
   expressions name no binding; a non-tensor binding has no GM read to govern; a
   tensor created *inside* the body is not captured by the scope.
@@ -198,7 +298,7 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 
 ## What codegen emits
 
-A `BYPASS` read becomes one attribute on the emitted load and one operand — the
+On A2/A3, a `BYPASS` read becomes one attribute on the emitted load and one operand — the
 distance from the tensor's address to the uncached alias of the same bytes:
 
 ```mlir
@@ -270,7 +370,7 @@ Five properties of the emit are worth stating, because each one is asserted in
 | The attribute is emitted **per load**, not per tensor | It is a property of the instruction; a hint on only the first of two loads would leave the second one allocating in L2 (the superseded `[CacheBypassUnsupported]` diagnostic was deliberately once-per-tensor — the opposite granularity) |
 | The offset parameter is appended **once per kernel** | One runtime value serves every bypassing load, read once at entry |
 | It joins the MX `layout` in **one** attribute dict, after it, and the operand follows the dict | PTOAS takes all present attributes in a single dict; keeping `layout` first leaves an MX load that declares no policy byte-identical |
-| a5 emits the attribute and **no** offset | There is no second mapping to address (see [Architectures](#architectures)), and no accessor to read a distance from |
+| A5 uses ISA hints without an offset | The backend selects the instruction cache-control mode |
 
 ### Architectures
 
@@ -280,13 +380,9 @@ The double mapping is an a2a3 property, and so is everything built on it:
 | ------ | -------------------------------------- |
 | a2a3 device | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)`. This is the case the feature exists for |
 | a2a3 device with no alias | The driver reports `0`, `addr + 0` is the ordinary address, and the read is cached — correct, one optimisation short. The simulator is this case by construction |
-| a5 | Codegen emits the attribute and no offset, and PTOAS v0.64 lowers a bare attribute to an ordinary `TLOAD`. The declaration is accepted and **does nothing** |
+| a5 | Legacy BYPASS reads select ISA NotAllocKeep; new code uses CachePolicy.NOT_ALLOC_KEEP |
 
-A5 is not a missing offset waiting to be supplied: it has no second mapping to
-address. pto-isa carries an L2 hint on A5's `TLOAD` as an instruction operand
-instead, which is where a future A5 path would go — it is not wired to
-`cache_policy` in v0.64, so nothing in the emitted CCE distinguishes a declared
-load from an undeclared one there.
+A5 uses CachePolicy and lowers it to ISA cache-control modes.
 
 ### Older assemblers
 
@@ -302,8 +398,8 @@ an error that names both versions.
   `ConvertTensorToTileOps` is what turns GM reads into `tile.load`, and it
   transforms InCore functions. Declare the policy on the scope that becomes the
   device kernel (a `CORE_GROUP` `pl.at`, or a `pl.spmd` inline body).
-- The policy governs **reads**. There is no store-side counterpart; `BYPASS` on
-  a written tensor is rejected rather than reinterpreted.
+- Scope declarations govern **reads**; per-store policies are supported on A5.
+  Every non-allocating scope policy requires a read-only tensor.
 
 ## Implementation map
 

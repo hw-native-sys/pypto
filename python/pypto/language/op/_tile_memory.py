@@ -200,9 +200,11 @@ def load(
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
             back into the cache inside a bypassing scope. Requires PTOAS >= v0.64,
             where a BYPASS read compiles to a load issued against the page's
-            uncached alias on A2/A3 — the only architecture that maps GM twice,
-            and the only one where the declaration has an effect today; DEFAULT
-            emits nothing.
+            uncached alias on A2/A3. New A5 code uses the six modes in
+            CachePolicy; legacy CachePolicy.BYPASS reads retain their A5
+            NotAllocKeep lowering for compatibility. ISA encodings are selected
+            by backend code generation. DEFAULT resets an inherited
+            scope policy to an ordinary load on either architecture.
 
     Returns:
         Tile wrapping the load operation
@@ -213,6 +215,8 @@ def load(
         >>> # streaming read, no cache reuse expected
         >>> tile = load(tensor, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
     """
+    if cache is not None and type(cache) not in (CachePolicy, int):
+        raise TypeError("load cache must be CachePolicy")
     if valid_shape is None:
         valid_shape = shapes
     call_expr = _ir_ops.load(
@@ -237,6 +241,7 @@ def store(
     st_phase: STPhase = STPhase.Unspecified,
     pre_quant: float | None = None,
     pre_relu: bool = False,
+    cache: CachePolicy | None = None,
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -277,6 +282,9 @@ def store(
             ``maximum(tile, 0) * pre_quant`` and not
             ``maximum(tile * pre_quant, 0)``. The two agree for every positive
             scale and differ at every element for a negative one.
+        cache: CachePolicy.NORMAL_* or NOT_ALLOC_CLEAN for Vec/Acc-to-GM
+            stores, including ReLU and quantized writeback. NOT_ALLOC_KEEP
+            and NOT_ALLOC_DROP are load-only. On A2/A3 only DEFAULT is supported.
 
     Returns:
         Tensor wrapping the store operation
@@ -293,6 +301,8 @@ def store(
         >>> # INT32 accumulator dequantized and ReLU'd straight into FP16 GM
         >>> result = store(acc_i32, [0, 0], out_f16, pre_quant=1.0 / 1024, pre_relu=True)
     """
+    if cache is not None and type(cache) is not CachePolicy:
+        raise TypeError("store cache must be CachePolicy")
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
     call_expr = _ir_ops.store(
@@ -304,6 +314,7 @@ def store(
         st_phase=st_phase,
         pre_quant=pre_quant,
         pre_relu=pre_relu,
+        cache=None if cache is None else int(cache),
     )
     return output_tensor.__class__(expr=call_expr)
 

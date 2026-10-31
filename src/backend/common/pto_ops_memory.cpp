@@ -80,6 +80,45 @@ static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const C
   return "";
 }
 
+// Select native PTO enum spellings from the semantic frontend policy after
+// choosing the target. PTOAS owns encodings, target/path checks and ISA emission.
+static std::optional<std::string> GetPtoL2Hint(const CallPtr& op, codegen::PTOCodegen& codegen, bool store) {
+  const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
+  if (policy == ir::CachePolicy::kDefault) return std::nullopt;
+  if (codegen.GetBackendHandler()->GetPtoTargetArch() != "a5") {
+    CHECK_SPAN(!store && policy == ir::CachePolicy::kBypass, op->span_)
+        << (store ? "store" : "load") << " cache policy " << ir::CachePolicyToString(policy)
+        << " is only supported on A5; A2/A3 supports load DEFAULT/BYPASS and store DEFAULT";
+    return std::nullopt;
+  }
+  // PTOAS owns the direction-specific encodings and checks the target/path.
+  // Symbolic attributes keep an explicit NormalFirstVictim distinct from omission.
+  switch (policy) {
+    case ir::CachePolicy::kNormalFirstVictim:
+      return "normal_first_victim";
+    case ir::CachePolicy::kNormalLastVictim:
+      return "normal_last_victim";
+    case ir::CachePolicy::kNormalPersistent:
+      return "normal_persistent";
+    case ir::CachePolicy::kBypass:
+      CHECK_SPAN(!store, op->span_)
+          << "CachePolicy.BYPASS is load-only; use CachePolicy.NOT_ALLOC_CLEAN for an A5 store";
+      // Preserve existing A5 BYPASS reads without using the A2/A3 offset path.
+      return "not_alloc_keep";
+    case ir::CachePolicy::kNotAllocKeep:
+      CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_KEEP";
+      return "not_alloc_keep";
+    case ir::CachePolicy::kNotAllocClean:
+      return "not_alloc_clean";
+    case ir::CachePolicy::kNotAllocDrop:
+      CHECK_SPAN(!store, op->span_) << "store does not support CachePolicy.NOT_ALLOC_DROP";
+      return "not_alloc_drop";
+    case ir::CachePolicy::kDefault:
+      break;
+  }
+  INTERNAL_UNREACHABLE_SPAN(op->span_) << "Internal error: invalid cache policy";
+}
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -120,6 +159,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // attribute alone declares the policy but moves no address. Both are attached
   // below, alongside the MX layout attribute when it applies.
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
+  const auto isa_hint = GetPtoL2Hint(op, codegen, false);
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
@@ -167,10 +207,13 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   tload_line << tile_buf << " : " << tile_buf_type << ")";
 
   std::vector<std::string> attrs;
+  if (isa_hint) {
+    attrs.emplace_back("l2_hint = #pto.load_l2_hint<" + *isa_hint + ">");
+  }
   if (is_mx_load) {
     attrs.push_back("layout = #pto.layout<" + pto_layout + ">");
   }
-  if (policy == ir::CachePolicy::kBypass) {
+  if (policy == ir::CachePolicy::kBypass && !isa_hint) {
     attrs.emplace_back("cache_policy = #pto.load_cache_policy<l2_bypass>");
   }
 
@@ -186,12 +229,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     tload_line << "}";
   }
 
-  // The offset operand follows the attribute dict, and PTOAS applies it only to
-  // a load that also declared l2_bypass. It is empty on an architecture with no
-  // address alias to reach, which leaves the declaration carried by the
-  // attribute alone -- and PTOAS v0.64 lowers a bare attribute to an ordinary
-  // TLOAD, so that declaration costs nothing and does nothing.
-  if (policy == ir::CachePolicy::kBypass) {
+  // A2/A3 BYPASS uses an explicit byte offset after the attribute dict. PTOAS
+  // adds it to the source address of this l2_bypass load. A5 uses the ISA hint
+  // above and does not enter this address-offset path.
+  if (policy == ir::CachePolicy::kBypass && !isa_hint) {
     const std::string l2_cache_offset = codegen.GetL2CacheOffsetArgSSA();
     if (!l2_cache_offset.empty()) {
       tload_line << " offset = " << l2_cache_offset << " : i64";
@@ -430,6 +471,11 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     // combines) is checked by the AtomicAddDtypeValid property verifier at
     // pipeline input, where the error still carries the user's own span.
     attrs.emplace_back("atomicType = #pto<atomic_type atomic_add>");
+  }
+
+  const auto isa_hint = GetPtoL2Hint(op, codegen, true);
+  if (isa_hint) {
+    attrs.emplace_back("l2_hint = #pto.store_l2_hint<" + *isa_hint + ">");
   }
 
   // Default-valued attributes are omitted so ordinary stores keep their

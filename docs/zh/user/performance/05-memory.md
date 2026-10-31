@@ -221,10 +221,26 @@ load 上显式的 `cache=` 永远优先于作用域声明，两个方向都成�
 （coherency）缺陷 —— 这正是它绝不作为默认、也绝不由编译器推断的原因。编译器会拒绝它能看见的
 那种情况（在作用域会写入的张量上声明 `BYPASS` 是错误），但无法证明一般情形。
 
-**要求 PTOAS >= v0.64，且只在 a2a3 上真正生效。** 在 a2a3 上，`BYPASS` 读取会编译成
+**要求 PTOAS >= v0.64。** 在 a2a3 上，`BYPASS` 读取会编译成
 对该页 uncached 别名的访问，别名距离取自驱动为这块设备报告的值；若设备不提供该别名，
-驱动返回 0，读取退化为普通的带缓存访问，结果依然正确。a5 不做双重映射，声明在那里会被
-接受但当前不改变任何东西。未作声明的读取在所有目标上都逐字节不受影响。
+驱动返回 0，读取退化为普通的带缓存访问，结果依然正确。A5 使用 ISA 缓存控制模式，
+不使用地址别名偏移。未作声明的读取在所有目标上都逐字节不受影响。
+
+### A5 缓存模式
+
+A5 的 load/store 使用 `cache=pl.CachePolicy...`。六种 load 模式为
+NORMAL_FIRST_VICTIM、NORMAL_LAST_VICTIM、NORMAL_PERSISTENT、NOT_ALLOC_KEEP、
+NOT_ALLOC_CLEAN、NOT_ALLOC_DROP。Vec → GM store 支持三个 NORMAL 模式和
+NOT_ALLOC_CLEAN；KEEP/DROP 仅支持 load。当前固定版本的 PTO-ISA 在 ACC → GM store
+上也支持这四种模式，包括 ReLU 和量化写回。
+NOT_ALLOC_CLEAN 对应 load 编码 5、store 编码 4，前端语义 ID 不能作为 ISA 编码。
+
+同一枚举在 A2/A3 上使用 `CachePolicy.DEFAULT` 或 `CachePolicy.BYPASS`。
+BYPASS 将运行时取得的 nocache offset 加到 load 地址上，不选择 A5 ISA 模式。
+A2/A3 store 只支持 DEFAULT。
+旧 BYPASS 读取在 A5 上仍映射到 NotAllocKeep，新 A5 代码应使用 `CachePolicy.NOT_ALLOC_KEEP`；
+A2/A3 拒绝全部 A5 模式。作用域声明控制读取，显式 load
+策略优先，完整模式表见 [GM 缓存策略](../../dev/language/05-cache-policy.md)。
 
 ## 参见
 
