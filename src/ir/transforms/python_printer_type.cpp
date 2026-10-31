@@ -504,7 +504,9 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
   bool has_non_default_pad = (tensor_view.pad != PadValue::null);
 
   // If all fields are at defaults, skip TensorView entirely
-  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad) return "";
+  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad) {
+    return "";
+  }
 
   // When TensorView is non-trivial, always emit both stride and layout to satisfy
   // the C++ constructor signature TensorView(stride, layout, valid_shape=[], pad=null).

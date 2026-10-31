@@ -26,6 +26,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -74,6 +75,7 @@ Pass ConvertTensorToTileOps() {
       // metadata effects; functional tensor-to-tile conversion must leave
       // their bodies and signatures intact.
       if (ShouldConvertTensorToTileOps(func)) {
+        VerifyTensorSubviews(func);
         auto result = TransformIncoreFunction(func);
         all_added_outputs.emplace(func->name_, std::move(result.added_outputs));
         all_transformed_funcs.emplace(func->name_, result.func);
@@ -345,13 +347,15 @@ namespace {
  */
 class IncoreTileOpsVerifier : public IRVisitor {
  public:
-  explicit IncoreTileOpsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  IncoreTileOpsVerifier(std::vector<Diagnostic>& diagnostics, std::unordered_set<const Var*> required_aliases)
+      : diagnostics_(diagnostics), required_aliases_(std::move(required_aliases)) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
     if (auto call = As<Call>(op->value_)) {
       CheckTensorOp(call, op->span_);
     }
+    if (IsBorrowedTensorExpr(op->value_)) borrowed_tensor_vars_.insert(op->var_.get());
     IRVisitor::VisitStmt_(op);
   }
 
@@ -364,6 +368,18 @@ class IncoreTileOpsVerifier : public IRVisitor {
   }
 
  private:
+  [[nodiscard]] bool IsBorrowedTensorExpr(const ExprPtr& expr) const {
+    if (!expr) return false;
+    if (auto var = AsVarLike(expr)) {
+      return borrowed_tensor_vars_.count(var.get()) != 0 || required_aliases_.count(var.get()) != 0;
+    }
+    auto call = As<Call>(expr);
+    if (!call) return false;
+    return IsOp(call, "tensor.subview") ||
+           ((IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) && !call->args_.empty() &&
+            IsBorrowedTensorExpr(call->args_[0]));
+  }
+
   void CheckTensorOp(const std::shared_ptr<const Call>& call, const Span& span) {
     // Op calls use plain Op (not GlobalVar); GlobalVar is for function calls
     auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
@@ -384,6 +400,11 @@ class IncoreTileOpsVerifier : public IRVisitor {
           AsTensorTypeLike(call->args_[0]->GetType())) {
         return;
       }
+      // A borrowed GM descriptor keeps valid-shape metadata until a load
+      // materializes a Tile; tile.set_validshape is only valid for TileType.
+      if (IsOp(call, "tensor.set_validshape") && IsBorrowedTensorExpr(call)) {
+        return;
+      }
 
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "IncoreTileOps", 0,
@@ -392,6 +413,8 @@ class IncoreTileOpsVerifier : public IRVisitor {
   }
 
   std::vector<Diagnostic>& diagnostics_;
+  std::unordered_set<const Var*> borrowed_tensor_vars_;
+  std::unordered_set<const Var*> required_aliases_;
 };
 
 }  // namespace
@@ -404,7 +427,7 @@ class IncoreTileOpsPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!ShouldConvertTensorToTileOps(func)) continue;
-      IncoreTileOpsVerifier verifier(diagnostics);
+      IncoreTileOpsVerifier verifier(diagnostics, tensor_to_tile::CollectSubviewAliasVars(func->body_));
       verifier.VisitStmt(func->body_);
     }
   }

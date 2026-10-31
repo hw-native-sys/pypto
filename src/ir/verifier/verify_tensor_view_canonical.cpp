@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -67,12 +69,21 @@ class TensorViewCanonicalVisitor : public IRVisitor {
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
-    if (op) CheckType(op->GetType(), op->span_);
+    if (op && !borrowed_vars_.count(op.get())) CheckType(op->GetType(), op->span_);
     IRVisitor::VisitVarLike_(op);
   }
 
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    VisitExpr(op->value_);
+    if (IsBorrowedExpr(op->value_)) {
+      borrowed_vars_.insert(op->var_.get());
+    } else {
+      CheckType(op->var_->GetType(), op->var_->span_);
+    }
+  }
+
   void VisitExpr_(const CallPtr& op) override {
-    if (op) CheckType(op->GetType(), op->span_);
+    if (op && !IsBorrowedExpr(op)) CheckType(op->GetType(), op->span_);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -82,6 +93,16 @@ class TensorViewCanonicalVisitor : public IRVisitor {
   }
 
  private:
+  bool IsBorrowedExpr(const ExprPtr& expr) const {
+    if (!expr) return false;
+    if (auto var = AsVarLike(expr)) return borrowed_vars_.count(var.get()) != 0;
+    auto call = As<Call>(expr);
+    if (!call) return false;
+    return IsOp(call, "tensor.subview") ||
+           ((IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) && !call->args_.empty() &&
+            IsBorrowedExpr(call->args_[0]));
+  }
+
   void CheckTensorType(const TensorTypePtr& tensor_type, const Span& span) {
     if (!tensor_type) return;
     if (!tensor_type->tensor_view_.has_value()) {
@@ -133,6 +154,7 @@ class TensorViewCanonicalVisitor : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
   bool require_materialized_;
+  std::unordered_set<const Expr*> borrowed_vars_;
 };
 
 /// Concrete PropertyVerifier dispatched by the registry.

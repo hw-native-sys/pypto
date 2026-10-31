@@ -294,6 +294,16 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 `pl.TensorLayout` is the enum those layout constants come from — `pl.ND` is
 `pl.TensorLayout.ND`.
 
+`pl.tensor.subview(cache, [2, 512], [1, 0], steps=[3, 1])` borrows rows 1 and 4
+of an ordinary [8,512] Tensor without loading data or allocating a buffer. Its
+strides are [1536,1]; `pl.load` materializes only the requested consumer Tile.
+The origin and allocation identity are resolved through the borrowed MemRef
+alias. Geometry must be provably strictly smaller and contained in the parent
+valid window; unknown bounds reject. Native consumers retain their existing
+device restrictions; subview adds no hardware load limits. `tensor.view`
+retains packed reshape rules, and `tensor.slice` keeps its materializing InCore
+behavior.
+
 `pl.MX_A_ZZ` and `pl.MX_B_NN` are the two remaining layout constants. They tag the **GM
 scale tensor** of an MX (microscaling) operand on Ascend950 — `MX_A_ZZ` for the left/A
 scale pack, `MX_B_NN` for the right/B one — so that a Mat-to-scale `pl.move` can check the

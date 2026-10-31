@@ -59,6 +59,14 @@ program_with_memrefs = init_pass(program)
 7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
 8. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
 
+### Borrowed GM descriptors
+
+Borrowed affine GM descriptors share the root allocation through a MemRef alias
+that carries the cumulative byte offset and bounded view size. Nested subviews
+compose offsets against the same base; they do not create another allocation.
+Only the materialized consumer Tile receives local storage under the normal
+rules.
+
 ### Constant inputs before address construction
 
 A named scalar can denote a constant even when its assignment is inside a loop:

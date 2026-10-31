@@ -39,6 +39,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -696,6 +697,30 @@ inline ExprPtr ComputeSliceByteOffset(
 /// Dispatches: slice ops → stride-based offset, others → zero offset.
 inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
   const std::string& op_name = call->op_->name_;
+
+  if (IsOp(call, "tensor.subview")) {
+    auto parent = As<TensorType>(parent_type);
+    INTERNAL_CHECK_SPAN(parent && call->args_.size() == 4, call->span_)
+        << "Internal error: tensor.subview must have a Tensor parent and shape/offset/steps operands";
+    auto offsets = As<MakeTuple>(call->args_[2]);
+    INTERNAL_CHECK_SPAN(offsets && offsets->elements_.size() == parent->shape_.size(), call->span_)
+        << "Internal error: tensor.subview offset rank does not match its parent";
+    const auto view = parent->tensor_view_.value_or(TensorView{});
+    const auto strides = view.stride.empty() ? tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                   parent->shape_, view.layout)
+                                             : view.stride;
+    INTERNAL_CHECK_SPAN(strides.size() == offsets->elements_.size(), call->span_)
+        << "Internal error: tensor.subview parent stride rank mismatch";
+    ExprPtr elements = MakeZeroByteOffset();
+    for (size_t i = 0; i < offsets->elements_.size(); ++i) {
+      elements = AddByteOffsets(elements, MulByteOffsets(offsets->elements_[i], strides[i]));
+    }
+    const uint64_t storage_bits = storage_size::GetStorageBitWidth(parent->dtype_);
+    INTERNAL_CHECK_SPAN(storage_bits > 0 && storage_bits % 8 == 0, call->span_)
+        << "Internal error: tensor.subview requires byte-addressable storage";
+    return MulByteOffsets(elements, std::make_shared<ConstInt>(static_cast<int64_t>(storage_bits / 8),
+                                                               DataType::INDEX, Span::unknown()));
+  }
 
   if (IsOp(call, "tensor.slice") || IsOp(call, "tile.slice")) {
     auto shaped = std::dynamic_pointer_cast<const ShapedType>(parent_type);

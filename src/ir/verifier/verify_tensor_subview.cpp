@@ -1,0 +1,661 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
+#include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
+
+namespace pypto::ir {
+namespace {
+// One ordered walk, indexed provenance, scoped arithmetic facts: O(N) visits.
+// Roots are caller-owned parameters. Borrowed descriptors are identified from
+// their defining tensor.subview call and tracked through metadata aliases.
+class SubviewVerifier : public IRVisitor {
+ public:
+  SubviewVerifier(const FunctionPtr& function, const std::unordered_set<const Expr*>& required_provenance)
+      : function_(function),
+        analyzer_(std::make_shared<arith::Analyzer>()),
+        required_provenance_(required_provenance) {
+    for (const auto& param : function->params_) {
+      if (As<TensorType>(param->GetType())) roots_.insert(param.get());
+    }
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    VisitExpr(op->value_);
+    auto call = As<Call>(op->value_);
+    const bool borrowed_value = IsBorrowedExpr(op->value_);
+    bool alias = roots_.count(op->value_.get()) != 0;
+    if (call &&
+        (IsOp(call, "tensor.subview") || IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape"))) {
+      alias = !call->args_.empty() && roots_.count(call->args_[0].get());
+    }
+    // A canonical view may defer symbolic shape equality during deduction.
+    // Prove it in the defining context before trusting it as a subview root.
+    // Only demanded ancestors are checked; unrelated ordinary views retain
+    // their existing contract in functions that happen to contain a subview.
+    if (alias && call && (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) &&
+        required_provenance_.count(op->var_.get()) && !IsBorrowedExpr(call->args_[0])) {
+      if (IsOp(call, "tensor.view")) {
+        CheckView(call);
+      } else {
+        CheckValidShape(call);
+      }
+    }
+    if (borrowed_value) {
+      auto tensor = As<TensorType>(op->var_->GetType());
+      CHECK_SPAN(tensor, op->span_) << "tensor.subview requires an ordinary Tensor alias";
+      CHECK_SPAN(alias, op->span_) << "tensor.subview requires verified caller-owned GM provenance";
+      CheckBorrowedType(op->var_->GetType(), op->value_->GetType(), op->span_);
+      borrowed_roots_.insert(op->var_.get());
+      local_borrowed_roots_.push_back(op->var_.get());
+    }
+    if (alias) {
+      roots_.insert(op->var_.get());
+      local_roots_.push_back(op->var_.get());
+    }
+    if (auto scalar = As<ScalarType>(op->var_->GetType());
+        scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX)) {
+      scalar_arithmetic_safe_[op->var_.get()] = ScalarArithmeticIsSafe(op->value_);
+      analyzer_->Bind(op->var_, op->value_);
+    }
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    if (IsOp(op, "tensor.subview")) {
+      CheckSubview(op);
+    }
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      const auto& arg = op->args_[i];
+      if (!IsBorrowedExpr(arg)) continue;
+      CHECK_SPAN(roots_.count(arg.get()), op->span_)
+          << "tensor.subview descriptor is outside its defining scope or lacks provenance";
+      CHECK_SPAN(!As<GlobalVar>(op->op_), op->span_)
+          << "tensor.subview cannot cross a non-inlined call boundary";
+      auto& registry = OpRegistry::GetInstance();
+      const auto& entry = registry.GetEntry(op->op_->name_);
+      CHECK_SPAN(entry.GetIRStage() == OpIRStage::Functional, op->span_)
+          << "tensor.subview borrowed descriptors are not supported by Buffer IR consumers";
+      CHECK_SPAN(!ArgEffectWrites(entry.GetArgEffect(i, op->kwargs_)), op->span_)
+          << "tensor.subview is read-only; writer " << op->op_->name_ << " is not supported";
+      // Pure metadata aliases preserve the borrowed address map. Other tensor
+      // operations materialize results normally and do not inherit it.
+      if (IsOp(op, "tensor.view") || IsOp(op, "tensor.set_validshape")) {
+        CHECK_SPAN(!op->args_.empty() && IsBorrowedExpr(op->args_[0]), op->span_)
+            << "tensor.subview metadata aliases cannot introduce borrowed provenance";
+        auto deduced = registry.Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
+        CheckBorrowedType(op->GetType(), deduced->GetType(), op->span_);
+        if (IsOp(op, "tensor.set_validshape")) CheckValidShape(op);
+        if (IsOp(op, "tensor.view")) CheckView(op);
+      }
+      CHECK_SPAN(entry.GetOpCategory() == "TensorOp" || IsOp(op, "tile.load"), op->span_)
+          << "tensor.subview supports tensor read consumers and explicit loads only";
+      CHECK_SPAN(!IsOp(op, "tensor.reshape") && !IsOp(op, "tensor.transpose") &&
+                     !IsOp(op, "tensor.reinterpret_view") && !IsOp(op, "tensor.read"),
+                 op->span_)
+          << "tensor.subview requires an explicit load before " << op->op_->name_;
+      if (IsOp(op, "tile.load")) CheckLoad(op);
+    }
+    if (!op->args_.empty() &&
+        (IsOp(op, "tensor.subview") || IsOp(op, "tensor.view") || IsOp(op, "tensor.set_validshape")) &&
+        roots_.count(op->args_[0].get())) {
+      roots_.insert(op.get());
+      local_roots_.push_back(op.get());
+    }
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    for (const auto& arg : op->args_) {
+      CHECK_SPAN(!IsBorrowedExpr(arg), op->span_) << "tensor.subview cannot cross a submit boundary";
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const ReturnStmtPtr& op) override { CheckEscape(op->value_, op->span_); }
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    CheckEscape(op->value_, op->span_);
+    yielded_bounds_.clear();
+    yielded_safe_.clear();
+    for (const auto& value : op->value_) {
+      yielded_bounds_.push_back(analyzer_->const_int_bound(value));
+      yielded_safe_.push_back(ScalarArithmeticIsSafe(value));
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    for (const auto& arg : op->iter_args_) {
+      CHECK_SPAN(!borrowed_roots_.count(arg.get()) && !IsBorrowedExpr(arg->initValue_), op->span_)
+          << "tensor.subview cannot be loop carried";
+    }
+    auto start = analyzer_->const_int_bound(op->start_);
+    auto stop = analyzer_->const_int_bound(op->stop_);
+    auto step = analyzer_->const_int_bound(op->step_);
+    const bool safe_bounds = ScalarArithmeticIsSafe(op->start_) && ScalarArithmeticIsSafe(op->stop_) &&
+                             ScalarArithmeticIsSafe(op->step_);
+    scalar_arithmetic_safe_[op->loop_var_.get()] = safe_bounds;
+    // Analyzer ranges are mathematical. Never bind an induction variable from
+    // a narrow expression that may already have wrapped before index widening.
+    if (safe_bounds && start.min_value > arith::ConstIntBound::kNegInf &&
+        stop.max_value < arith::ConstIntBound::kPosInf && step.min_value > 0 &&
+        start.min_value < stop.max_value) {
+      analyzer_->Bind(op->loop_var_, start.min_value, stop.max_value);
+    }
+    auto saved = local_roots_.size();
+    auto borrowed_saved = local_borrowed_roots_.size();
+    VisitStmt(op->body_);
+    LeaveScope(saved, borrowed_saved);
+    analyzer_->Unbind(op->loop_var_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& arg : op->iter_args_) {
+      CHECK_SPAN(!borrowed_roots_.count(arg.get()) && !IsBorrowedExpr(arg->initValue_), op->span_)
+          << "tensor.subview cannot be loop carried";
+    }
+    auto saved = local_roots_.size();
+    auto borrowed_saved = local_borrowed_roots_.size();
+    {
+      auto scope = SafeConstraintContext(op->condition_);
+      VisitStmt(op->body_);
+    }
+    LeaveScope(saved, borrowed_saved);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    auto saved = local_roots_.size();
+    auto borrowed_saved = local_borrowed_roots_.size();
+    auto outer_yields = std::move(yielded_bounds_);
+    auto outer_safe = std::move(yielded_safe_);
+    yielded_bounds_.clear();
+    yielded_safe_.clear();
+    {
+      auto scope = SafeConstraintContext(op->condition_);
+      VisitStmt(op->then_body_);
+    }
+    auto then_bounds = std::move(yielded_bounds_);
+    auto then_safe = std::move(yielded_safe_);
+    yielded_bounds_.clear();
+    yielded_safe_.clear();
+    LeaveScope(saved, borrowed_saved);
+    if (op->else_body_) {
+      auto scope = SafeConstraintContext(MakeNot(op->condition_));
+      VisitStmt(*op->else_body_);
+      LeaveScope(saved, borrowed_saved);
+    }
+    // Scalar phis carry the union of both branch ranges. Descriptor phis are
+    // rejected by CheckEscape; geometry can be merged before constructing one.
+    if (then_bounds.size() == op->return_vars_.size() && yielded_bounds_.size() == op->return_vars_.size()) {
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        auto var = op->return_vars_[i];
+        if (!As<ScalarType>(var->GetType())) continue;
+        scalar_arithmetic_safe_[var.get()] = then_safe[i] && yielded_safe_[i];
+        const auto lo = std::min(then_bounds[i].min_value, yielded_bounds_[i].min_value);
+        const auto hi = std::max(then_bounds[i].max_value, yielded_bounds_[i].max_value);
+        if (lo > arith::ConstIntBound::kNegInf && hi < arith::ConstIntBound::kPosInf - 1) {
+          analyzer_->Bind(var, lo, hi + 1);
+        }
+      }
+    }
+    yielded_bounds_ = std::move(outer_yields);
+    yielded_safe_ = std::move(outer_safe);
+  }
+
+ private:
+  bool IsBorrowedExpr(const ExprPtr& expr) const {
+    if (!expr) return false;
+    if (borrowed_roots_.count(expr.get())) return true;
+    if (auto tuple = As<MakeTuple>(expr)) {
+      for (const auto& element : tuple->elements_) {
+        if (IsBorrowedExpr(element)) return true;
+      }
+      return false;
+    }
+    if (auto item = As<TupleGetItemExpr>(expr)) return IsBorrowedExpr(item->tuple_);
+    auto call = As<Call>(expr);
+    if (!call) return false;
+    return IsOp(call, "tensor.subview") ||
+           ((IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) && !call->args_.empty() &&
+            IsBorrowedExpr(call->args_[0]));
+  }
+  std::optional<arith::ConstraintContext> SafeConstraintContext(const ExprPtr& condition) {
+    // A predicate is evidence only when its original machine arithmetic agrees
+    // with the mathematical expressions modeled by Analyzer. Untrusted guards
+    // contribute no facts; the usual prove-or-reject checks remain in force.
+    if (!ScalarArithmeticIsSafe(condition)) return std::nullopt;
+    return analyzer_->GetConstraintContext(condition);
+  }
+  // The range analyzer models Add/Sub/Mul mathematically. A widening cast
+  // cannot repair overflow that already happened in a narrower operand.
+  // Record scalar definitions once; do not rescan alias chains at every use.
+  bool ScalarArithmeticIsSafe(const ExprPtr& expression) {
+    class CheckArithmetic : public IRVisitor {
+     public:
+      CheckArithmetic(arith::Analyzer& analyzer, const std::unordered_map<const Expr*, bool>& definitions)
+          : analyzer_(analyzer), definitions_(definitions) {}
+      bool safe = true;
+      void VisitExpr(const ExprPtr& expr) override {
+        if (!safe || !seen_.insert(expr.get()).second) return;
+        if (auto var = AsVarLike(expr)) {
+          auto it = definitions_.find(var.get());
+          if (it != definitions_.end()) safe &= it->second;
+          return;
+        }
+        auto scalar = As<ScalarType>(expr->GetType());
+        bool widening_cast = false;
+        if (auto cast = As<Cast>(expr)) {
+          auto operand = As<ScalarType>(cast->operand_->GetType());
+          if (operand && scalar && operand->dtype_.IsInt() && scalar->dtype_.IsInt()) {
+            const auto from_bits = operand->dtype_.GetBit();
+            const auto to_bits = scalar->dtype_.GetBit();
+            widening_cast =
+                (scalar->dtype_.IsSignedInt() == operand->dtype_.IsSignedInt() && to_bits >= from_bits) ||
+                (operand->dtype_.IsUnsignedInt() && scalar->dtype_.IsSignedInt() && to_bits > from_bits);
+          }
+        }
+        if (scalar && scalar->dtype_.IsInt() && !As<Call>(expr) && !widening_cast) {
+          auto bound = analyzer_.const_int_bound(expr);
+          const auto bits = scalar->dtype_.GetBit();
+          int64_t lo = arith::ConstIntBound::kNegInf + 1;
+          int64_t hi = arith::ConstIntBound::kPosInf - 1;
+          if (scalar->dtype_.IsUnsignedInt()) lo = 0;
+          if (bits > 0 && bits < 64) {
+            if (scalar->dtype_.IsUnsignedInt()) {
+              hi = (int64_t{1} << bits) - 1;
+            } else {
+              lo = -(int64_t{1} << (bits - 1));
+              hi = (int64_t{1} << (bits - 1)) - 1;
+            }
+          }
+          safe &= bound.min_value >= lo && bound.max_value <= hi;
+        }
+        IRVisitor::VisitExpr(expr);
+      }
+
+     private:
+      arith::Analyzer& analyzer_;
+      const std::unordered_map<const Expr*, bool>& definitions_;
+      std::unordered_set<const Expr*> seen_;
+    } check(*analyzer_, scalar_arithmetic_safe_);
+    check.VisitExpr(expression);
+    return check.safe;
+  }
+  void LeaveScope(size_t root_begin, size_t borrowed_begin) {
+    for (size_t i = root_begin; i < local_roots_.size(); ++i) roots_.erase(local_roots_[i]);
+    local_roots_.resize(root_begin);
+    for (size_t i = borrowed_begin; i < local_borrowed_roots_.size(); ++i) {
+      borrowed_roots_.erase(local_borrowed_roots_[i]);
+    }
+    local_borrowed_roots_.resize(borrowed_begin);
+  }
+  void CheckBorrowedType(const TypePtr& actual, const TypePtr& expected, const Span& span) {
+    auto a = As<TensorType>(actual);
+    auto e = As<TensorType>(expected);
+    CHECK_SPAN(a && e && a->tensor_view_.has_value() && e->tensor_view_.has_value() &&
+                   a->dtype_ == e->dtype_ && a->shape_.size() == e->shape_.size() &&
+                   a->tensor_view_->layout == e->tensor_view_->layout &&
+                   a->tensor_view_->pad == e->tensor_view_->pad &&
+                   a->tensor_view_->stride.size() == e->tensor_view_->stride.size() &&
+                   a->tensor_view_->valid_shape.size() == e->tensor_view_->valid_shape.size(),
+               span)
+        << "tensor.subview alias type does not preserve its defining address map";
+    const auto& a_metadata = a->tensor_view_;
+    const auto& e_metadata = e->tensor_view_;
+    CHECK_SPAN(a_metadata.has_value() && e_metadata.has_value(), span)
+        << "tensor.subview aliases require affine addressing metadata";
+    const auto& a_view = a_metadata.value();
+    const auto& e_view = e_metadata.value();
+    auto compare = [&](const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+      for (size_t i = 0; i < lhs.size(); ++i) {
+        Prove(MakeEq(lhs[i], rhs[i]), span, "alias geometry equality");
+      }
+    };
+    compare(a->shape_, e->shape_);
+    compare(a_view.stride, e_view.stride);
+    compare(a_view.valid_shape, e_view.valid_shape);
+  }
+  void CheckEscape(const std::vector<ExprPtr>& values, const Span& span) {
+    for (const auto& value : values) {
+      CHECK_SPAN(!IsBorrowedExpr(value), span)
+          << "tensor.subview cannot escape through return/yield or a geometry phi";
+      VisitExpr(value);
+    }
+  }
+  void Prove(const ExprPtr& condition, const Span& span, const char* obligation) {
+    CHECK_SPAN(analyzer_->CanProve(condition), span)
+        << "tensor.subview cannot prove " << obligation << "; false and unknown bounds are rejected";
+  }
+  void CheckFinite(const ExprPtr& value, const Span& span) {
+    const auto bound = analyzer_->const_int_bound(value);
+    CHECK_SPAN(bound.min_value >= 0 && bound.max_value < arith::ConstIntBound::kPosInf, span)
+        << "tensor.subview cannot prove nonnegative overflow-free index arithmetic";
+  }
+  void CheckSubview(const CallPtr& op) {
+    CHECK_SPAN(function_->ir_stage_ == FunctionIRStage::Functional, op->span_)
+        << "tensor.subview requires the functional Tensor/Tile compilation profile";
+    CHECK_SPAN(IsInCoreType(function_->func_type_), op->span_)
+        << "tensor.subview is supported only inside InCore functions";
+    CHECK_SPAN(op->args_.size() == 4 && roots_.count(op->args_[0].get()), op->span_)
+        << "tensor.subview requires a caller-owned ordinary GM Tensor root";
+    auto parent = As<TensorType>(op->args_[0]->GetType());
+    auto result = As<TensorType>(op->GetType());
+    CHECK_SPAN(parent && result, op->span_) << "tensor.subview requires ordinary Tensor types";
+    auto shape = As<MakeTuple>(op->args_[1]);
+    auto offsets = As<MakeTuple>(op->args_[2]);
+    auto steps = As<MakeTuple>(op->args_[3]);
+    const auto rank = parent->shape_.size();
+    CHECK_SPAN(shape && offsets && steps && shape->elements_.size() == rank &&
+                   offsets->elements_.size() == rank && steps->elements_.size() == rank && rank > 0,
+               op->span_)
+        << "tensor.subview geometry rank mismatch";
+    auto parent_view = parent->tensor_view_.value_or(TensorView{});
+    CHECK_SPAN(parent_view.pad == PadValue::null &&
+                   (parent_view.layout == TensorLayout::ND || parent_view.layout == TensorLayout::DN),
+               op->span_)
+        << "tensor.subview requires unpadded ND/DN parent addressing";
+    if (!IsBorrowedExpr(op->args_[0])) {
+      auto canonical = tensor_view_semantics::CheckCanonicalView(
+          parent->shape_,
+          parent_view.stride.empty()
+              ? tensor_view_semantics::BuildLogicalStridesFromLayout(parent->shape_, parent_view.layout)
+              : parent_view.stride,
+          parent_view.layout, true);
+      CHECK_SPAN(canonical.ok, op->span_)
+          << "tensor.subview requires a canonical GM root: " << canonical.reason;
+    }
+    CHECK_SPAN(result->tensor_view_.has_value(), op->span_)
+        << "tensor.subview result requires affine addressing metadata";
+    CHECK_SPAN(result->dtype_ == parent->dtype_ && result->tensor_view_->layout == parent_view.layout &&
+                   result->tensor_view_->pad == PadValue::null && result->tensor_view_->valid_shape.empty(),
+               op->span_)
+        << "tensor.subview result must preserve parent dtype/layout with a fully valid borrowed window";
+    const auto& extent = parent_view.valid_shape.empty() ? parent->shape_ : parent_view.valid_shape;
+    auto strides = parent_view.stride.empty() ? tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                    parent->shape_, parent_view.layout)
+                                              : parent_view.stride;
+    CHECK_SPAN(extent.size() == rank && strides.size() == rank, op->span_)
+        << "tensor.subview parent metadata rank mismatch";
+    std::vector<ExprPtr> geometry = shape->elements_;
+    geometry.insert(geometry.end(), offsets->elements_.begin(), offsets->elements_.end());
+    geometry.insert(geometry.end(), steps->elements_.begin(), steps->elements_.end());
+    geometry.insert(geometry.end(), strides.begin(), strides.end());
+    geometry.insert(geometry.end(), extent.begin(), extent.end());
+    geometry.insert(geometry.end(), parent->shape_.begin(), parent->shape_.end());
+    CHECK_SPAN(ScalarArithmeticIsSafe(std::make_shared<MakeTuple>(geometry, op->span_)), op->span_)
+        << "tensor.subview cannot prove overflow-free geometry arithmetic in its original dtype";
+    auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, op->span_);
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, op->span_);
+    bool strict = false;
+    ExprPtr max_address = zero;
+    for (size_t i = 0; i < rank; ++i) {
+      const auto& size = shape->elements_[i];
+      const auto& offset = offsets->elements_[i];
+      const auto& step = steps->elements_[i];
+      Prove(MakeGt(size, zero), op->span_, "shape > 0");
+      Prove(MakeGt(step, zero), op->span_, "steps > 0");
+      Prove(MakeGe(offset, zero), op->span_, "offsets >= 0");
+      CheckFinite(size, op->span_);
+      CheckFinite(step, op->span_);
+      CheckFinite(offset, op->span_);
+      auto span = MakeMul(MakeSub(size, one), step);
+      CheckFinite(span, op->span_);
+      auto last = MakeAdd(offset, span);
+      CheckFinite(last, op->span_);
+      // Validity metadata cannot enlarge the physical GM descriptor.
+      Prove(MakeLe(extent[i], parent->shape_[i]), op->span_, "parent valid extent inside physical shape");
+      Prove(MakeLt(last, extent[i]), op->span_, "sampled window inside immediate parent");
+      strict |= analyzer_->CanProve(MakeLt(size, extent[i]));
+      CheckFinite(strides[i], op->span_);
+      auto pitch = MakeMul(strides[i], step);
+      CheckFinite(pitch, op->span_);
+      CHECK_SPAN(result->shape_.size() == rank && result->tensor_view_->stride.size() == rank &&
+                     analyzer_->CanProveEqual(result->shape_[i], size) &&
+                     analyzer_->CanProveEqual(result->tensor_view_->stride[i], pitch),
+                 op->span_)
+          << "tensor.subview result metadata does not match its defining geometry";
+      auto address = MakeMul(last, strides[i]);
+      CheckFinite(address, op->span_);
+      max_address = MakeAdd(max_address, address);
+      CheckFinite(max_address, op->span_);
+    }
+    CHECK_SPAN(strict, op->span_) << "tensor.subview cannot prove strictly smaller parent window";
+    CheckFinite(
+        MakeMul(max_address, std::make_shared<ConstInt>(static_cast<int64_t>(parent->dtype_.GetByte()),
+                                                        DataType::INDEX, op->span_)),
+        op->span_);
+  }
+  void CheckView(const CallPtr& op) {
+    auto parent = As<TensorType>(op->args_[0]->GetType());
+    auto result = As<TensorType>(op->GetType());
+    // Ordinary view deduction deliberately defers symbolic product equality.
+    // Borrowed windows cannot inherit that optimism: a symbolic reshape must
+    // prove the same storage footprint before its new extents can bound loads.
+    auto count = [&](const std::vector<ExprPtr>& shape) {
+      ExprPtr product = std::make_shared<ConstInt>(1, DataType::INDEX, op->span_);
+      for (const auto& dim : shape) {
+        CHECK_SPAN(ScalarArithmeticIsSafe(dim), op->span_)
+            << "tensor.subview cannot prove overflow-free view shape arithmetic";
+        Prove(MakeGt(dim, std::make_shared<ConstInt>(0, DataType::INDEX, op->span_)), op->span_,
+              "view shape > 0");
+        product = MakeMul(product, dim);
+        CheckFinite(product, op->span_);
+      }
+      return product;
+    };
+    Prove(MakeEq(count(parent->shape_), count(result->shape_)), op->span_,
+          "view preserves parent element count");
+    CheckCanonicalAddressMap(op);
+  }
+  void CheckCanonicalAddressMap(const CallPtr& op) {
+    auto result = As<TensorType>(op->GetType());
+    auto deduced_expr = OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
+    auto deduced = deduced_expr ? As<TensorType>(deduced_expr->GetType()) : nullptr;
+    CHECK_SPAN(result && deduced, op->span_) << "tensor.subview metadata alias requires Tensor types";
+    auto normalize = [&](const TensorTypePtr& tensor) {
+      auto view = tensor->tensor_view_.value_or(TensorView{});
+      if (view.stride.empty()) {
+        view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, view.layout);
+      }
+      if (view.valid_shape.empty()) view.valid_shape = tensor->shape_;
+      return std::make_shared<TensorType>(tensor->shape_, tensor->dtype_, std::nullopt, view);
+    };
+    CheckBorrowedType(normalize(result), normalize(deduced), op->span_);
+  }
+  void CheckValidShape(const CallPtr& op) {
+    CheckCanonicalAddressMap(op);
+    auto parent = As<TensorType>(op->args_[0]->GetType());
+    auto result = As<TensorType>(op->GetType());
+    auto parent_view = parent->tensor_view_.value_or(TensorView{});
+    auto result_view = result->tensor_view_.value_or(TensorView{});
+    const auto& extent = parent_view.valid_shape.empty() ? parent->shape_ : parent_view.valid_shape;
+    const auto& result_valid = result_view.valid_shape.empty() ? result->shape_ : result_view.valid_shape;
+    CHECK_SPAN(result_valid.size() == extent.size(), op->span_)
+        << "tensor.subview set_validshape rank mismatch";
+    for (size_t i = 0; i < extent.size(); ++i) {
+      Prove(MakeGt(result_valid[i], std::make_shared<ConstInt>(0, DataType::INDEX, op->span_)), op->span_,
+            "valid shape > 0");
+      Prove(MakeLe(result_valid[i], extent[i]), op->span_, "valid shape narrows the parent");
+    }
+  }
+
+  void CheckLoad(const CallPtr& op) {
+    auto source = As<TensorType>(op->args_[0]->GetType());
+    CHECK_SPAN(source, op->span_) << "tensor.subview load requires an ordinary Tensor";
+    const auto& source_metadata = source->tensor_view_;
+    CHECK_SPAN(source_metadata.has_value(), op->span_) << "tensor.subview load requires addressing metadata";
+    const auto& source_view = source_metadata.value();
+    auto tile = As<TileType>(op->GetType());
+    const auto rank = source->shape_.size();
+    CHECK_SPAN(tile && (tile->shape_.size() == rank || (rank > 2 && tile->shape_.size() == 2)), op->span_)
+        << "tensor.subview load result must match the original or flattened window rank";
+    // Existing ND/DN loads copy contiguous elements along the innermost
+    // storage axis. A borrowed address map must be expressible by that
+    // consumer; descriptor geometry itself has no such restriction.
+    const size_t contiguous_axis = source_view.layout == TensorLayout::DN ? rank - 2 : rank - 1;
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, op->span_);
+    CHECK_SPAN(analyzer_->CanProveEqual(source_view.stride[contiguous_axis], one), op->span_)
+        << "tensor.subview load requires a contiguous inner storage axis";
+    auto ci = [&](int64_t value) { return std::make_shared<ConstInt>(value, DataType::INDEX, op->span_); };
+    auto offsets = As<MakeTuple>(op->args_[1]);
+    auto shapes = As<MakeTuple>(op->args_[2]);
+    auto requested_valid = As<MakeTuple>(op->args_[3]);
+    CHECK_SPAN(offsets && shapes && requested_valid && offsets->elements_.size() == rank &&
+                   shapes->elements_.size() == rank && requested_valid->elements_.size() == rank,
+               op->span_)
+        << "tensor.subview load geometry rank mismatch";
+    // FlattenTileNdTo2D keeps the tensor-rank load operands and collapses
+    // only the result Tile. Prove bounds in the original coordinate system,
+    // then check that the result still describes that same allocation/window.
+    // Source bounds use carrier coordinates. Destination deduction may change
+    // the FP4 packing axis, so its shape/validity cannot bound source accesses.
+    // Reuse the ordinary load's window inference before that conversion.
+    const auto& physical = shapes->elements_;
+    auto valid = InferWindowReadValidShape({
+        /*source_physical=*/source->shape_,
+        /*source_valid=*/GetEffectiveTensorValidShape(*source),
+        /*offsets=*/offsets->elements_,
+        /*window=*/physical,
+        /*requested_valid=*/requested_valid->elements_,
+        /*kind=*/WindowReadKind::kClampedWindow,
+        /*clamp=*/GetKwargOr<bool>(op->kwargs_, "clamp", false),
+        /*op_name=*/op->op_->name_,
+        /*bounds_remedy=*/"Use an in-bounds subview load window or pass clamp=True",
+        /*span=*/op->span_,
+    });
+    // Compare the actual result against the destination geometry produced by
+    // the existing deducer (including FP4 repacking), then optionally flattened.
+    auto deduced = OpRegistry::GetInstance().Create(op->op_->name_, op->args_, op->kwargs_, op->span_);
+    auto original_tile = As<TileType>(deduced->GetType());
+    CHECK_SPAN(original_tile, op->span_) << "tensor.subview load requires a Tile result";
+    CHECK_SPAN(valid.size() == rank, op->span_) << "tensor.subview load validity rank mismatch";
+    const auto& extent = source_view.valid_shape.empty() ? source->shape_ : source_view.valid_shape;
+    ExprPtr last_address = ci(0);
+    for (size_t i = 0; i < rank; ++i) {
+      auto offset = offsets->elements_[i];
+      CHECK_SPAN(ScalarArithmeticIsSafe(offset) && ScalarArithmeticIsSafe(valid[i]) &&
+                     ScalarArithmeticIsSafe(physical[i]),
+                 op->span_)
+          << "tensor.subview cannot prove overflow-free load geometry";
+      Prove(MakeGt(valid[i], ci(0)), op->span_, "load valid extents > 0");
+      Prove(MakeLe(valid[i], physical[i]), op->span_, "load validity inside the Tile allocation");
+      Prove(MakeGe(offset, ci(0)), op->span_, "load offsets >= 0");
+      Prove(MakeLe(MakeAdd(offset, valid[i]), extent[i]), op->span_, "load inside the borrowed window");
+      last_address =
+          MakeAdd(last_address, MakeMul(MakeSub(MakeAdd(offset, valid[i]), ci(1)), source_view.stride[i]));
+      CheckFinite(last_address, op->span_);
+    }
+    auto check_result = [&](const std::vector<ExprPtr>& original, const std::vector<ExprPtr>& result) {
+      auto expected = original;
+      if (tile->shape_.size() != rank) {
+        ExprPtr leading = ci(1);
+        for (size_t i = 0; i + 1 < rank; ++i) {
+          leading = MakeMul(leading, original[i]);
+          CheckFinite(leading, op->span_);
+        }
+        expected = {leading, original.back()};
+      }
+      CHECK_SPAN(result.size() == expected.size(), op->span_)
+          << "tensor.subview load result geometry rank mismatch";
+      for (size_t i = 0; i < expected.size(); ++i) {
+        CHECK_SPAN(ScalarArithmeticIsSafe(result[i]), op->span_)
+            << "tensor.subview cannot prove overflow-free result geometry";
+        Prove(MakeEq(expected[i], result[i]), op->span_, "load result matches the original window");
+      }
+    };
+    check_result(original_tile->shape_, tile->shape_);
+    const auto& tile_valid = tile->tile_view_ && !tile->tile_view_->valid_shape.empty()
+                                 ? tile->tile_view_->valid_shape
+                                 : tile->shape_;
+    const auto& destination_valid =
+        original_tile->tile_view_ && !original_tile->tile_view_->valid_shape.empty()
+            ? original_tile->tile_view_->valid_shape
+            : original_tile->shape_;
+    check_result(destination_valid, tile_valid);
+  }
+  FunctionPtr function_;
+  std::shared_ptr<arith::Analyzer> analyzer_;
+  std::unordered_set<const Expr*> roots_;
+  std::vector<const Expr*> local_roots_;
+  std::unordered_set<const Expr*> borrowed_roots_;
+  std::vector<const Expr*> local_borrowed_roots_;
+  std::vector<arith::ConstIntBound> yielded_bounds_;
+  std::vector<bool> yielded_safe_;
+  std::unordered_map<const Expr*, bool> scalar_arithmetic_safe_;
+  const std::unordered_set<const Expr*>& required_provenance_;
+};
+}  // namespace
+void VerifyTensorSubviews(const FunctionPtr& function) {
+  // Keep ordinary kernels off the arithmetic-analysis path. Detection is a
+  // separate linear walk so false/unknown proofs are never silently skipped
+  // just because the descriptor does not have a well-formed defining call.
+  class Presence : public IRVisitor {
+   public:
+    bool found = false;
+    std::unordered_map<const Expr*, const Expr*> aliases;
+    std::vector<const Expr*> pending_roots;
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (auto call = As<Call>(op->value_);
+          call && !call->args_.empty() &&
+          (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape") ||
+           IsOp(call, "tensor.subview"))) {
+        aliases.emplace(op->var_.get(), call->args_[0].get());
+      } else if (AsVarLike(op->value_)) {
+        aliases.emplace(op->var_.get(), op->value_.get());
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+    void VisitVarLike_(const VarPtr&) override {}
+    void VisitExpr_(const CallPtr& call) override {
+      found |= IsOp(call, "tensor.subview");
+      if (IsOp(call, "tensor.subview") && !call->args_.empty()) {
+        pending_roots.push_back(call->args_[0].get());
+      }
+      IRVisitor::VisitExpr_(call);
+    }
+  } presence;
+  presence.VisitStmt(function->body_);
+  if (!presence.found) return;
+  // Follow each demanded alias edge once, rather than rescanning every view
+  // chain at each subview. The ordered proof walk below still uses facts from
+  // each ancestor's own defining control-flow scope.
+  std::unordered_set<const Expr*> required_provenance;
+  while (!presence.pending_roots.empty()) {
+    auto root = presence.pending_roots.back();
+    presence.pending_roots.pop_back();
+    if (!required_provenance.insert(root).second) continue;
+    auto alias = presence.aliases.find(root);
+    if (alias != presence.aliases.end()) presence.pending_roots.push_back(alias->second);
+  }
+  SubviewVerifier verifier(function, required_provenance);
+  verifier.VisitStmt(function->body_);
+}
+}  // namespace pypto::ir
