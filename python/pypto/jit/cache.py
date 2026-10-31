@@ -16,11 +16,14 @@ extents do not create unnecessary specializations.
 
 import dataclasses
 import hashlib
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
-from pypto.pypto_core import DataType
+from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
+from pypto.pypto_core import DataType, backend
 from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
 
 if TYPE_CHECKING:
@@ -142,6 +145,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     enable_buffer_ir: bool = True,
     enable_software_pipeline: bool = False,
+    hardware_loop_identity: tuple[str, ...] = (),
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -211,6 +215,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         enable_software_pipeline: Effective software pipeline opt-in. Separates
             rotating-slot kernels from kernels produced by unroll lowering.
 
+        hardware_loop_identity: Target profile and compiler version identity. A change
+            invalidates compiled loops even when their source is unchanged.
+
     Returns:
         Hashable CacheKey tuple.
     """
@@ -247,6 +254,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("enable_buffer_ir", enable_buffer_ir),
         ("buffer_ir_version", 7 if enable_buffer_ir else 0),
         ("enable_software_pipeline", enable_software_pipeline),
+        ("hardware_loop_identity", hardware_loop_identity),
     )
     return CacheKey(
         source_hash,
@@ -265,3 +273,36 @@ __all__ = [
     "compute_source_hash",
     "make_cache_key",
 ]
+
+
+def hardware_loop_cache_identity(backend_type: Any) -> tuple[str, ...]:
+    """Identify capability inputs and installed PTOAS without loading its compiler."""
+    profile = backend.get_backend_instance(backend_type).get_handler().get_hardware_loop_profile()
+    try:
+        ptoas_version = version("ptoas")
+    except PackageNotFoundError:
+        ptoas_version = "unavailable"
+    fields = (
+        profile.profile_id,
+        profile.toolchain_id,
+        profile.supported,
+        profile.counter_bits,
+        profile.allow_negative_step,
+        profile.max_trip_count,
+        profile.max_depth,
+        profile.max_body_nodes,
+        profile.allow_scalar_carry,
+        profile.allow_reg_carry,
+        profile.allow_tile_carry,
+        tuple(sorted(profile.allowed_ops)),
+    )
+    # Match compiler discovery, including downloaded PTOAS_ROOT archives and
+    # PATH-selected binaries whose Python package metadata may be absent.
+    launcher = find_ptoas_binary()
+    if launcher is None:
+        selected = ("unavailable",)
+    else:
+        resolved = os.path.realpath(launcher)
+        stamp = os.stat(resolved)
+        selected = (resolved, check_ptoas_version(launcher), str(stamp.st_size), str(stamp.st_mtime_ns))
+    return ("hardware-loop-contract-v1", *(str(value) for value in fields), ptoas_version, *selected)

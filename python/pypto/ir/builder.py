@@ -153,6 +153,7 @@ class IRBuilder:
         span: ir.Span | None = None,
         kind: ir.ForKind = ir.ForKind.Sequential,
         attrs: dict[str, object] | None = None,
+        hardware_loop_policy: ir.HardwareLoopPolicy = ir.HardwareLoopPolicy.Auto,
     ) -> Iterator["ForLoopBuilder"]:
         """Context manager for building for loops.
 
@@ -192,6 +193,7 @@ class IRBuilder:
             begin_span,
             kind,
             attrs=attrs_list,
+            hardware_loop_policy=hardware_loop_policy,
         )
         builder_obj = ForLoopBuilder(self)
         body_ok = False

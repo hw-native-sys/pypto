@@ -294,3 +294,8 @@ kernels and cross-core pipelines exist as concepts; see
 - [Passes](../dev/passes/index.md) — every pass in the pipeline, in execution order.
 - [IR Overview](../dev/ir/00-overview.md) — the IR's structure and design principles.
 - [Cluster Architecture](../reference/pto-isa/00-cluster_architecture.md) — the Cube + Vector cluster the execution model targets.
+
+For a loop that must use a hardware loop when the target supports it, use
+`pl.hardware_loop`. It has the same bounds and carried-value syntax as
+`pl.range`; target qualification and final artifact evidence are checked during
+code generation.

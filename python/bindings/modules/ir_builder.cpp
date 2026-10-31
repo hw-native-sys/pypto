@@ -141,11 +141,14 @@ void BindIRBuilder(nb::module_& m) {
       .def(
           "begin_for_loop",
           [](IRBuilder& self, const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
-             const ExprPtr& step, const Span& span, ForKind kind, const nb::object& attrs_or_none) {
-            self.BeginForLoop(loop_var, start, stop, step, span, kind, ConvertAttrsFromPython(attrs_or_none));
+             const ExprPtr& step, const Span& span, ForKind kind, const nb::object& attrs_or_none,
+             HardwareLoopPolicy policy) {
+            self.BeginForLoop(loop_var, start, stop, step, span, kind, ConvertAttrsFromPython(attrs_or_none),
+                              policy);
           },
           nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("span"),
           nb::arg("kind") = ForKind::Sequential, nb::arg("attrs") = nb::none(),
+          nb::arg("hardware_loop_policy") = HardwareLoopPolicy::Auto,
           "Begin building a for loop.\n\n"
           "Creates a new for loop context. Must be closed with end_for_loop().\n\n"
           "Args:\n"

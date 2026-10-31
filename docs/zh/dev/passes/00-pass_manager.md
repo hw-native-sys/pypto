@@ -50,6 +50,7 @@
 | `OutParamNotShadowed` | Out/InOut 参数未被创建 tensor 的算子重新赋值 |
 | `NoNestedInCore` | 无嵌套 InCore 作用域（ScopeStmt 内再嵌 ScopeStmt） |
 | `InOutUseValid` | 调用之后不再读取以 InOut/Out 传入的变量（RFC #1026） |
+| `HardwareLoopContractValid` | Require 策略合法且仅用于 Sequential 循环；资格及最终产物证据在 codegen 检查 |
 | `PipelineLoopValid` | 双向不变量：`ForStmt.kind_ == Pipeline` ⇔ 带有 `pipeline_stages` 属性 |
 | `PipelineResolved` | 不再残留 `ForKind::Pipeline`；由 CanonicalizeIOOrder 产生 |
 | `CallDirectionsResolved` | 每个非 builtin Call 都带有显式的 `attrs['arg_directions']` |
