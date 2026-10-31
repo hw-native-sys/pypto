@@ -85,7 +85,13 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 - An explicit `signal` needs one lane per block: `[world_size(), stride]` with
   `stride >= core_num`. A rank-1 `[world_size()]` signal only works for
   `core_num=1`.
-- InCore kernels keep `core_num=1` and use an enclosing `pl.spmd(...)` instead.
+- InCore kernels keep `core_num=1`. An InCore collective runs on one block:
+  calling it inside a multi-block `pl.spmd` launch (or `pl.spmd_submit` with
+  `core_num > 1`) is a compile error, because every block would repeat the
+  whole collective. Placing it in the `pl.spmd` body beside the kernel call
+  (outside the launched kernel) is also a compile error at any width, including
+  `1`, because codegen launches only the inner call. For multi-core collectives
+  use `core_num` on the HOST rail, or `all_to_all_v` in a CHIP orchestration.
 
 ### Mutation
 

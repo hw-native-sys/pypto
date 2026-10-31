@@ -77,7 +77,12 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
   block 同时准入，因此超额请求会在编译期被拒绝。
 - 显式 `signal` 需要每个 block 一条 lane：`[world_size(), stride]` 且
   `stride >= core_num`。rank-1 的 `[world_size()]` signal 只适用于 `core_num=1`。
-- InCore kernel 保持 `core_num=1`，改用外层 `pl.spmd(...)`。
+- InCore kernel 保持 `core_num=1`。InCore collective 只在一个 block 上运行：在多 block
+  的 `pl.spmd` launch（或 `core_num > 1` 的 `pl.spmd_submit`）中调用它会导致编译错误，
+  因为每个 block 都会重复执行整个 collective。若把它放在 `pl.spmd` 函数体中、kernel 调用旁边
+  （位于被 launch 的 kernel 之外），则无论宽度为何（包括 `1`）都会编译报错，因为 codegen
+  只发出内层调用。多核 collective 请使用 HOST 通路的 `core_num`，或在 CHIP orchestration
+  中使用 `all_to_all_v`。
 
 ### 变更
 

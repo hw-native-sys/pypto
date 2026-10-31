@@ -318,6 +318,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/scalar_output_hoist.cpp
     src/ir/transforms/utils/scope_outline_utils.cpp
     src/ir/transforms/utils/split_axis_utils.cpp
+    src/ir/transforms/utils/spmd_launch_utils.cpp
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/utils/wrapper_call_utils.cpp

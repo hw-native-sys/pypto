@@ -595,7 +595,7 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
 | 取值 | 编译期正整数，默认 `1`（与既有行为一致） |
 | 调度 | 仅 mesh —— `mode="ring"` 要求 `core_num == 1` |
 | 容量 | 不超过 backend 的 AIV 核数（经 `rt_submit_aiv_task` 提交，一个 block 对应一个 AIV 核） |
-| InCore | 必须保持 `1`，多核应使用外层 `pl.spmd(...)` |
+| InCore | 必须保持 `1`。InCore collective 是单 block 的；位于多 block `pl.spmd` launch 中的会被 `LowerCompositeOps` 拒绝。位于 launch wrapper 函数体（被 launch 的 kernel 之外）的集合通信无论宽度为何（包括 `1`）都会被拒绝，因为 codegen 只发出 wrapper 的内层调用 |
 
 **Signal 布局。** signal 是 peer-major、lane 连续的
 `[world_size, signal_stride]` 矩阵，且 `signal_stride >= core_num`。block `b` 在

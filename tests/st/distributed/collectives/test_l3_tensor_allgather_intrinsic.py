@@ -106,6 +106,47 @@ def _build_allgather_program(n_ranks: int, size: int):
     return host_orch
 
 
+def _build_allgather_in_spmd_program(n_ranks: int, size: int, blocks: int):
+    """The allgather kernel dispatched from a ``blocks``-wide ``pl.spmd`` launch.
+
+    The composite expansion never reads the block index, so every block would
+    repeat the whole collective; compilation must reject it.
+    """
+    nr = n_ranks
+    SIZE = size
+    BLOCKS = blocks
+
+    @pl.jit.incore
+    def gather_step(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+        return pld.tensor.allgather(inp, data, signal)
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+        with pl.spmd(BLOCKS):
+            data = gather_step(inp, data, signal)
+        return data
+
+    @pl.jit.host
+    def host_orch(inputs: pl.Tensor[[nr, 1, SIZE], pl.FP32]) -> pl.Tensor[[nr, 1, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(nr * SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [nr, SIZE], dtype=pl.FP32)
+            sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], data, sig, device=r)
+        return inputs
+
+    return host_orch
+
+
 class TestL3TensorAllGatherIntrinsic:
     """L3 distributed runtime: N-rank push-based allgather via ``pld.tensor.allgather``.
 
@@ -158,6 +199,22 @@ class TestL3TensorAllGatherIntrinsic:
         expected = _expected_allgather(inputs)
         assert torch.allclose(outputs, expected), (
             f"allgather intrinsic P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+
+def test_allgather_in_multi_block_spmd_launch_is_rejected():
+    """An InCore collective in a 4-block ``pl.spmd`` launch fails to compile (no device needed)."""
+    n_ranks, size = 2, 64
+    program = _build_allgather_in_spmd_program(n_ranks, size, blocks=4)
+    inputs = _make_rank_inputs(n_ranks, size)
+    with pytest.raises(ValueError, match="pld.tensor.allgather runs inside an SPMD launch of 4 blocks"):
+        program.compile(
+            inputs,
+            config=RunConfig(
+                platform="a2a3sim",
+                codegen_only=True,
+                distributed_config=DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+            ),
         )
 
 

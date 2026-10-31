@@ -28,6 +28,7 @@ import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import tile as _ir_ops_tile
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics.exceptions import ParserError
 from pypto.pypto_core import ir as _ir_core
 
@@ -4129,6 +4130,328 @@ def test_allgather_accepts_runtime_transfer_extent(default_pass_manager, ascend_
     loop_bounds = re.findall(r"scf\.for [^=]+= %c0_index to (%\w+) step", mlir)
     assert loop_bounds, mlir
     assert len(set(loop_bounds)) == 1, loop_bounds
+
+
+# ---------------------------------------------------------------------------
+# A composite collective inside a multi-block SPMD launch is rejected
+# ---------------------------------------------------------------------------
+# The expansion never reads the block index, so each of N blocks would run the
+# whole collective: the transfers repeat N times and the barrier gets N credits
+# per sync point against a wait expecting one, so it can release before every
+# block's data has landed. By LowerCompositeOps the launch is already outlined,
+# so the check must see through each dispatch form to the kernel holding the call.
+
+_SPMD_S = _ALLREDUCE_SIZE
+_SPMD_NR = _ALLREDUCE_NRANKS
+_SPMD_KERNEL = f"""
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        inp: pl.Tensor[[1, {_SPMD_S}], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, {_SPMD_S}], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, {_SPMD_S}], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[{_SPMD_NR}, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, {_SPMD_S}], pl.FP32]:
+        local = pl.load(inp, [0, 0], [1, {_SPMD_S}])
+        data = pl.store(local, [0, 0], data)
+        data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+        acc = pl.load(data, [0, 0], [1, {_SPMD_S}])
+        return pl.store(acc, [0, 0], out)
+"""
+_SPMD_CALL = "self.reduce_step(inp, out, data, signal)"
+
+
+def _spmd_program(body: str, params: str = "", orch_kwargs: str = "", kernels: str = ""):
+    """An orchestration ``main`` whose ``body`` (8-space indented) dispatches ``reduce_step``."""
+    return pl.parse_program(f"""
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+@pl.program
+class Prog:
+{_SPMD_KERNEL}{kernels}
+    @pl.function(type=pl.FunctionType.Orchestration{orch_kwargs})
+    def main(
+        self,
+        inp: pl.Tensor[[1, {_SPMD_S}], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, {_SPMD_S}], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, {_SPMD_S}], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[{_SPMD_NR}, 1], pl.INT32]],{params}
+    ) -> pl.Tensor[[1, {_SPMD_S}], pl.FP32]:
+{body}
+        return out
+""")
+
+
+def _lower_through_composites(program):
+    """Run the Default pipeline up to and including LowerCompositeOps (after the SPMD outlining)."""
+    manager = PassManager(OptimizationStrategy.Default)
+    stop = manager.pass_names.index("LowerCompositeOps")
+    for pass_obj in manager.passes[: stop + 1]:
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(pass_obj)
+        program = pipeline.run(program)
+    return program
+
+
+_SPMD_REJECTED = {
+    "scope_dispatch": (f"        with pl.spmd(4):\n            out = {_SPMD_CALL}\n", "", "", "4 blocks"),
+    "spmd_submit": (
+        "        with pl.manual_scope():\n"
+        "            out, _tid = pl.spmd_submit(self.reduce_step, inp, out, data, signal, core_num=4)\n",
+        "",
+        ", auto_scope=False",
+        "4 blocks",
+    ),
+    "cluster_nested_spmd": (
+        f"        with pl.cluster():\n            with pl.spmd(4):\n                out = {_SPMD_CALL}\n",
+        "",
+        "",
+        "4 blocks",
+    ),
+    # The loop body is auto-outlined into an InCore kernel holding the composite itself.
+    "spmd_for_loop_body": (
+        f"""        for _ in pl.spmd(4):
+            local = pl.load(inp, [0, 0], [1, {_SPMD_S}])
+            data = pl.store(local, [0, 0], data)
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            acc = pl.load(data, [0, 0], [1, {_SPMD_S}])
+            out = pl.store(acc, [0, 0], out)
+""",
+        "",
+        "",
+        "4 blocks",
+    ),
+    # A runtime width cannot be proven to be 1.
+    "runtime_width": (
+        f"        with pl.spmd(n):\n            out = {_SPMD_CALL}\n",
+        "\n        n: pl.Scalar[pl.INDEX],",
+        "",
+        "a runtime number of blocks",
+    ),
+    # The launched kernel holds no collective itself but calls one that does.
+    "nested_incore_call": (
+        "        with pl.spmd(4):\n            out = self.outer(inp, out, data, signal)\n",
+        "",
+        "",
+        "4 blocks",
+        f"""
+    @pl.function(type=pl.FunctionType.InCore)
+    def outer(
+        self,
+        inp: pl.Tensor[[1, {_SPMD_S}], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, {_SPMD_S}], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, {_SPMD_S}], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[{_SPMD_NR}, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, {_SPMD_S}], pl.FP32]:
+        out = {_SPMD_CALL}
+        return out
+""",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_SPMD_REJECTED))
+def test_composite_in_multi_block_spmd_launch_is_rejected(case):
+    body, params, orch_kwargs, width, *kernels = _SPMD_REJECTED[case]
+    with pytest.raises(ValueError, match=f"pld.tensor.allreduce runs inside an SPMD launch of {width}"):
+        _lower_through_composites(_spmd_program(body, params, orch_kwargs, *kernels))
+
+
+_SPMD_PLAIN_KERNEL = f"""
+    @pl.function(type=pl.FunctionType.InCore)
+    def plain_step(
+        self,
+        inp: pl.Tensor[[1, {_SPMD_S}], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, {_SPMD_S}], pl.FP32]],
+    ) -> pl.Tensor[[1, {_SPMD_S}], pl.FP32]:
+        x = pl.load(inp, [0, 0], [1, {_SPMD_S}])
+        return pl.store(x, [0, 0], out)
+"""
+
+
+@pytest.mark.parametrize("width", [1, 4])
+def test_composite_in_spmd_wrapper_body_is_rejected(width):
+    """A collective in the dispatch wrapper body sits beside the single inner
+    kernel call, not inside it. Orchestration codegen submits only that inner
+    call and never emits the rest of the body, so the collective is dropped at
+    any width — a single-block launch included. Unlike a collective inside the
+    launched kernel, this is rejected even when ``core_num == 1``."""
+    body = (
+        f"        with pl.spmd({width}):\n"
+        "            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)\n"
+        "            out = self.plain_step(inp, out)\n"
+    )
+    with pytest.raises(ValueError, match="runs directly in the SPMD launch wrapper body"):
+        _lower_through_composites(_spmd_program(body, "", "", _SPMD_PLAIN_KERNEL))
+
+
+@pytest.mark.parametrize("width", [1, 4])
+def test_composite_in_nested_cluster_wrapper_body_is_rejected(width):
+    """Spmd -> Group -> InCore: the collective sits in the inner Group (cluster)
+    body beside a composite-free kernel call. Codegen drops the Group's
+    non-launch statements too, so the wrapper walk must follow the nested Group,
+    not just the outer Spmd body — including when ``core_num == 1``."""
+    body = (
+        f"        with pl.spmd({width}):\n"
+        "            with pl.cluster():\n"
+        "                data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)\n"
+        "                out = self.plain_step(inp, out)\n"
+    )
+    with pytest.raises(ValueError, match="runs directly in the SPMD launch wrapper body"):
+        _lower_through_composites(_spmd_program(body, "", "", _SPMD_PLAIN_KERNEL))
+
+
+_SPMD_ACCEPTED = {
+    # One block runs the collective once, exactly as an unlaunched kernel does.
+    "single_block_spmd": f"        with pl.spmd(1):\n            out = {_SPMD_CALL}\n",
+    "plain_dispatch": f"        out = {_SPMD_CALL}\n",
+}
+
+
+@pytest.mark.parametrize("case", list(_SPMD_ACCEPTED))
+def test_composite_outside_a_multi_block_launch_is_lowered(case):
+    lowered = _lower_through_composites(_spmd_program(_SPMD_ACCEPTED[case]))
+    op_names = set(_collect_op_names(lowered))
+    # Absence alone would pass if the collective were simply deleted or the IR
+    # came out malformed. Require the chunked decomposition's primitive ops so
+    # the accepted path provably lowered the collective. This matches the other
+    # allreduce-lowering tests (e.g. test_allreduce_is_decomposed_to_primitives);
+    # a full structural Expected is deliberately not pinned for this rule, whose
+    # temp names are an implementation detail (see the section note above).
+    assert "pld.tensor.allreduce" not in op_names
+    missing = _ALLREDUCE_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# The same rejection before OutlineClusterScopes: the width on the raw scope
+# ---------------------------------------------------------------------------
+# The parser leaves the launch width on SpmdScopeStmt::core_num_ and stamps
+# nothing on the dispatch; outlining is what copies it onto the dispatch's
+# attributes. Until this was handled, a pipeline that ran LowerCompositeOps
+# *before* OutlineClusterScopes — or a direct pass call, which several UTs make
+# — saw no launch site at all and lowered the collective into a body that a
+# later outlining step then ran once per block, silently. These tests drive the
+# pass on parsed (not yet outlined) IR and pin the message to the outlined
+# path's, so the two orders cannot drift apart.
+
+_UNOUTLINED_SCOPE = f"        with pl.spmd({{width}}):\n            out = {_SPMD_CALL}\n"
+
+
+def test_unoutlined_spmd_scope_rejects_a_composite_launched_from_it():
+    program = _spmd_program(_UNOUTLINED_SCOPE.format(width=4))
+    with pytest.raises(ValueError, match="pld.tensor.allreduce runs inside an SPMD launch of 4 blocks"):
+        passes.lower_composite_ops()(program)
+
+
+def test_unoutlined_spmd_scope_rejection_matches_the_outlined_message():
+    program = _spmd_program(_UNOUTLINED_SCOPE.format(width=4))
+    with pytest.raises(ValueError) as outlined:
+        _lower_through_composites(program)
+    with pytest.raises(ValueError) as raw:
+        passes.lower_composite_ops()(_spmd_program(_UNOUTLINED_SCOPE.format(width=4)))
+    assert str(raw.value) == str(outlined.value)
+
+
+def test_unoutlined_spmd_scope_rejects_a_runtime_width():
+    program = _spmd_program(
+        "        with pl.spmd(n):\n" + f"            out = {_SPMD_CALL}\n",
+        params="\n        n: pl.Scalar[pl.INDEX],",
+    )
+    with pytest.raises(ValueError, match="runs inside an SPMD launch of a runtime number of blocks"):
+        passes.lower_composite_ops()(program)
+
+
+_UNOUTLINED_OWN_BODY = (
+    "        with pl.spmd({width}):\n"
+    "            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)\n"
+    "            out = self.plain_step(inp, out)\n"
+)
+
+
+def _inline_scope_program(width: int):
+    """`for _ in pl.spmd(N):` with the collective written inline.
+
+    The parser wraps such a body in an InCore scope, and `OutlineIncoreScopes`
+    moves it into the launched kernel — so this is a kernel body, not a wrapper
+    body, and it must follow the kernel rule (one block accepted).
+    """
+    s = _SPMD_S
+    body = (
+        f"        for _ in pl.spmd({width}):\n"
+        f"            local = pl.load(inp, [0, 0], [1, {s}])\n"
+        "            data = pl.store(local, [0, 0], data)\n"
+        "            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)\n"
+        f"            acc = pl.load(data, [0, 0], [1, {s}])\n"
+        "            out = pl.store(acc, [0, 0], out)\n"
+    )
+    return _spmd_program(body)
+
+
+def test_unoutlined_inline_incore_body_is_accepted_at_one_block():
+    passes.lower_composite_ops()(_inline_scope_program(1))
+    # ... and the outlined path agrees, which is the point of the carrier split.
+    _lower_through_composites(_inline_scope_program(1))
+
+
+def test_unoutlined_inline_incore_body_rejects_a_multi_block_launch():
+    with pytest.raises(ValueError, match="pld.tensor.allreduce runs inside an SPMD launch of 4 blocks"):
+        passes.lower_composite_ops()(_inline_scope_program(4))
+
+
+def test_unoutlined_inline_incore_body_message_matches_the_outlined_path():
+    with pytest.raises(ValueError) as outlined:
+        _lower_through_composites(_inline_scope_program(4))
+    with pytest.raises(ValueError) as raw:
+        passes.lower_composite_ops()(_inline_scope_program(4))
+    assert str(raw.value) == str(outlined.value)
+
+
+def test_unoutlined_scope_width_outranks_a_spec_on_the_child_dispatch():
+    """The scope is the launch carrier: outlining turns it into the outer Spmd
+    dispatch, and codegen reads the width stamped there. A stale `core_num=1`
+    already on the child call must not re-enable the lowering."""
+    body = (
+        "        with pl.spmd(4):\n"
+        "            out = self.reduce_step(inp, out, data, signal, attrs={'core_num': 1})\n"
+    )
+    with pytest.raises(ValueError, match="runs inside an SPMD launch of 4 blocks"):
+        passes.lower_composite_ops()(_spmd_program(body))
+
+
+@pytest.mark.parametrize("width", [1, 4])
+def test_unoutlined_spmd_scope_rejects_a_composite_in_its_own_body(width):
+    """The scope body becomes the outlined launch-wrapper body, so a collective
+    sitting beside the kernel dispatch is dropped by codegen exactly as in the
+    outlined case — rejected at any width, with the wrapper-level message."""
+    with pytest.raises(ValueError, match="runs directly in the SPMD launch wrapper body"):
+        passes.lower_composite_ops()(
+            _spmd_program(_UNOUTLINED_OWN_BODY.format(width=width), "", "", _SPMD_PLAIN_KERNEL)
+        )
+
+
+@pytest.mark.parametrize("width", [1, 4])
+def test_unoutlined_scope_body_rejection_matches_the_outlined_message(width):
+    body = _UNOUTLINED_OWN_BODY.format(width=width)
+    with pytest.raises(ValueError) as outlined:
+        _lower_through_composites(_spmd_program(body, "", "", _SPMD_PLAIN_KERNEL))
+    with pytest.raises(ValueError) as raw:
+        passes.lower_composite_ops()(_spmd_program(body, "", "", _SPMD_PLAIN_KERNEL))
+    assert str(raw.value) == str(outlined.value)
+
+
+def test_unoutlined_spmd_scope_rejects_the_for_form():
+    """`for _ in pl.spmd(N):` is the same carrier — SpmdScopeStmt(body=InCore...)."""
+    body = f"        for _ in pl.spmd(4):\n            out = {_SPMD_CALL}\n"
+    with pytest.raises(ValueError, match="runs inside an SPMD launch of 4 blocks"):
+        passes.lower_composite_ops()(_spmd_program(body))
+
+
+def test_unoutlined_single_block_spmd_scope_is_accepted():
+    """One block runs the collective once, so the pre-outline and outlined paths
+    agree on accepting it as well."""
+    passes.lower_composite_ops()(_spmd_program(_UNOUTLINED_SCOPE.format(width=1)))
 
 
 if __name__ == "__main__":

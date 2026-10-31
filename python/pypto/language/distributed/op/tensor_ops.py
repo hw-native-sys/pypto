@@ -730,8 +730,9 @@ def allreduce(
             (keyword-only). Must be a positive compile-time Python integer and
             may not exceed the configured backend's AIV core count. Defaults to
             1. Multicore is ``mode="mesh"`` only — ``mode="ring"`` requires
-            ``core_num=1``. InCore calls must keep this value at 1 and use an
-            enclosing :func:`pl.spmd` for multi-core execution.
+            ``core_num=1``. InCore calls must keep this value at 1: an InCore
+            collective is single-block, and one inside a multi-block
+            :func:`pl.spmd` launch is rejected at compile time.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —

@@ -4,7 +4,7 @@
 
 ## 概览 (Overview)
 
-`LowerCompositeOps` 是函数级 (function-level) Pass，对每条 `var = Call(...)` 形式的 `AssignStmt`，若其被调对象出现在 Pass 的降级分发表里，则将其改写为一个 `SeqStmts`。对 `tile.sin` / `tile.cos`，规则会发射固定形态的基本 tile 算子序列。`tile.tquant_mx` 会变为值返回的 `tile.tquant_mx_raw` + `tile.tmov_x2zz`（gather_compare 形态 SSA）及显式 workspace tile；公开 FP8 alias 经 `reinterpret_view` / `transpose_view` 补齐。对 `pld.tensor.*` 分布式集合通信算子，规则会发射下文记录的跨 rank recipe。
+`LowerCompositeOps` 是程序级 (program-level) Pass。它先拒绝位于多 block SPMD launch 中的 InCore 复合集合通信算子（见下文「在多 block SPMD launch 中被拒绝」一节），然后逐个函数，对每条 `var = Call(...)` 形式的 `AssignStmt`，若其被调对象出现在 Pass 的降级分发表里，则将其改写为一个 `SeqStmts`。对 `tile.sin` / `tile.cos`，规则会发射固定形态的基本 tile 算子序列。`tile.tquant_mx` 会变为值返回的 `tile.tquant_mx_raw` + `tile.tmov_x2zz`（gather_compare 形态 SSA）及显式 workspace tile；公开 FP8 alias 经 `reinterpret_view` / `transpose_view` 补齐。对 `pld.tensor.*` 分布式集合通信算子，规则会发射下文记录的跨 rank recipe。
 
 host-orchestrator 中的 `pld.tensor.allreduce` 调用会跳过本 Pass：`SynthesizeAllReduceSignals` 先把可选 signal 的 host 调用规范化为显式 signal 形态，`MaterializeCommDomainScopes` 再把 data 和 signal window 放入 comm domain，随后由 `LowerHostTensorCollectives` 降级为内部 builtin dispatch。
 
@@ -46,8 +46,9 @@ src/ir/transforms/lower_composite/
 
 src/ir/transforms/lower_composite_ops_pass.cpp
   LowerCompositeOpsMutator         — 语句改写及元组/变量重映射
+  RejectCompositesInSpmdLaunch     — 拒绝位于多 block SPMD launch 中的复合集合通信算子
   TransformLowerCompositeOps       — 函数级上下文与托管集合通信的延后处理
-  LowerCompositeOps                — Pass 工厂
+  LowerCompositeOps                — Pass 工厂（程序级）
 ```
 
 `CompositeLoweringFn` 接收原始 `CallPtr`、已访问的操作数以及 `LoweringBuilder&`，
@@ -273,6 +274,21 @@ cell 推过本次 wait 的期望值，因此相等判断会死锁。同理，`kS
 mesh（`[NR, 1]`，每 rank 一个 cell）和 ring（`[2*(NR-1), NR]`，每轮一行）
 signal 使用互不兼容的 cell 寻址方式，因此共享同一个 buffer 会因形状不匹配
 被拒绝（`ValidateMeshSignalShape`） —— 这是协议仍然施加的唯一限制。
+
+### 在多 block SPMD launch 中被拒绝
+
+展开结果从不读取 block 索引。在 N 个 block 的 SPMD launch 中，每个 block 都会执行整个集合通信：传输重复 N 次，而每个 peer cell 在每个同步点收到 N 个 credit，对应的 `Wait(>= g)` 却只期望一个，因此屏障可能在所有 block 的数据到达之前就释放（或跳过后续同步点）。因此，对于宽度不是字面量 `1` 的 dispatch 可达的任何 InCore 复合集合通信算子，本 Pass 都会报告一个用户错误，并给出该算子、launch 宽度与发起 dispatch 的函数：
+
+| Launch 形式 | 宽度所在位置 |
+| ----------- | ------------ |
+| `with pl.spmd(N): self.kernel(...)` 与 `for _ in pl.spmd(N):` | 指向外提 Spmd wrapper 的 dispatch 上的 `core_num` Call attr |
+| `with pl.cluster(): with pl.spmd(N): ...` | 指向展开后 Group 的 `core_num` Call attr |
+| `pl.spmd_submit(self.kernel, ..., core_num=N)` | `Submit::core_num_` |
+| 以上任一形式，**在 `OutlineClusterScopes` 之前**（直接调用本 Pass，或管线中本 Pass 更早运行） | `SpmdScopeStmt::core_num_`，优先于 dispatch 上已有的 spec |
+
+运行期宽度无法证明为 1，因此会被拒绝；`pl.spmd(1)` 仅在**集合通信位于被 launch 的 kernel 内部**时被接受。若集合通信位于 launch wrapper 自身函数体（或其 dispatch 的嵌套 Group/Spmd wrapper）中，则无论宽度为何（包括 `1`）都会被拒绝：orchestration codegen 只发出 wrapper 的内层调用，它会因此被静默丢弃。搜索会从被 launch 的 kernel 沿调用进入其调用的函数，并跳过 orchestration 函数体（其中的集合通信由托管通路处理）。Launch 点来自与 `HardSyncallOccupancy` verifier 相同的 `ForEachSpmdLaunch`（`utils/spmd_launch_utils.h`）。多核集合通信属于 HOST 通路（`core_num`）与托管 CHIP/L2 通路（`all_to_all_v`、`indexed_all_to_all_v`）。
+
+该检查**与是否已外提无关**：在 `OutlineClusterScopes` 之前运行时，`ForEachSpmdLaunch` 会把尚未外提的 `SpmdScopeStmt` 及其 `core_num_` 作为该 launch 点的宽度上报——scope 优先于 dispatch 上已有的任何 spec，因为外提正是把该 scope 变成 launch，codegen 读取的是它写入的宽度。随后按外提后该 body 的载体分类：位于 `InCoreScopeStmt` 之下则成为被 launch 的 kernel（按 kernel 规则，一个 block 被接受），否则成为 launch wrapper（按 wrapper 规则，任何宽度都被拒绝）。因此两种顺序下的拒绝信息完全一致——这也是本 Pass 不声明 `ClusterOutlined` 前置属性的原因。需要注意，required 属性只在 `VerificationInstrument` 启用时才会被校验，声明前置条件只能记录这一隐患，无法阻止自定义 Pass 顺序下的错误编译。
 
 ### `pld.tensor.allreduce`
 
