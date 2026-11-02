@@ -8,6 +8,11 @@ A one-off compile-and-dispatch call is enough for a quick test. Production
 code instead amortizes setup — forking chip processes, assembling kernels —
 across many dispatches on a reusable `DistributedWorker`.
 
+The `DistributedWorker` APIs below describe HOST/L3 execution. CLUSTER_0/L4
+entries return a synchronous `ClusterWorker`; see
+[Cluster launch configuration](#cluster-launch-configuration-podcluster_0)
+for its launch and host-tensor requirements.
+
 ## DistributedWorker
 
 Obtained via `compiled.prepare()`. Setup (fork, comm bootstrap, kernel assembly)
@@ -236,6 +241,10 @@ cluster = ClusterConfig(
         for host, devices in node_device_assignments
     ],
     python_executable=os.environ["CLUSTER_PYTHON"],
+    mpirun_path=os.environ["CLUSTER_MPIRUN"],
+    mpirun_args=(),
+    runtime="tensormap_and_ringbuffer",
+    startup_timeout_s=120.0,
 )
 config = RunConfig(
     backend_type=BackendType.Ascend910,
@@ -276,6 +285,72 @@ Rank-zero placement is checked by the eventual runtime, not by this config API.
 settings. Every placement and launcher field contributes to the JIT cache key.
 `cluster_config` and `distributed_config` are mutually exclusive; supplying a
 cluster config for a HOST/CHIP program fails before backend discovery.
+
+### Direct MPI session
+
+L4 uses one static MPI world for the lifetime of a prepared session: MPI rank
+0 is the L4 controller, and ranks `1..N` are the L3 executors for the `N`
+configured node entries. Each executor owns that entry's CHIP workers. Thus
+two node entries launch three MPI ranks, regardless of their device counts;
+`ClusterConfig.world_size()` still counts devices.
+
+The caller compiles or loads all prepared programs and their CHIP artifacts
+before launch. Simpler installs the generated source package, initial CHIP
+registrations and executor startup hooks before the executor's inner workers
+start. The MPI controller and generated receivers use packaged code, Torch
+and Simpler without importing PyPTO. Generated L4-to-L3 submissions and global
+domain operations use Simpler's native direct MPI transport.
+
+`compiled.prepare()` keeps the Python calling interface while starting this
+MPI world once. `rt(...)` runs the primary program; `rt.run(other, ...)` selects
+an `extra_compiled` program in the same session. For `ClusterWorker`,
+`prepare(config=...)` supplies the default run configuration; a per-call
+`config=` overrides it. Calls are synchronous, and `submit()` is unsupported. Ordinary arguments must be nonempty contiguous
+CPU tensors or supported scalars. Tensors may be created after `prepare()`:
+
+```python
+with compiled.prepare(extra_compiled=[other]) as rt:
+    x = torch.randn(input_shape, dtype=torch.float32)
+    out = torch.empty(output_shape, dtype=torch.float32)
+    rt(x, out)
+    rt.run(other, x, out)
+```
+
+The caller stages tensor storage through private local memory-mapped files
+shared with rank 0, preserving aliases and view offsets. Rank 0 stages ordinary
+I/O to the selected executors. Writable caller arguments are copied back only
+after successful completion. L4 tensors do not require `.share_memory_()` or
+allocation before `prepare()`. Cross-node overlapping ordinary accesses with
+a writer require explicit transfer and fences and are rejected by this path.
+
+`persistent=True`, `reset_persistent_windows`, and explicit `shared_domains`
+retain their session behavior: windows are retained across runs, reset before
+reuse by default, and shared across programs only through compatible explicit
+bindings. Callback overrides, inherited host buffers and resident-tensor
+allocation APIs are not available through `ClusterWorker`.
+
+### Launch requirements
+
+Run the caller on the first configured node. Rank 0 is placed on that host and
+uses the caller's loopback connection and local mapped files. For a multi-host
+session, the first host must resolve to a local address that every MPI host can
+reach; use routable host names or addresses rather than loopback aliases.
+Loopback placement is suitable for an entirely local session.
+
+Set `python_executable` to the Python available at that path on every MPI host,
+with Simpler, Torch, mpi4py and the selected native runtime installed. Set
+`mpirun_path` to the caller's MPI launcher and use `mpirun_args` for its extra
+options. Simpler selects the static rank count and placement, and checks the
+launcher against mpi4py's MPI vendor. Configure host access and assigned
+devices before launch. The caller still starts with `python script.py`; the
+cluster adapter launches and owns the MPI supervisor.
+
+Startup readiness and caller-side close waits use finite
+`startup_timeout_s` bounds. Normal runs and idle caller periods are not capped
+by the startup timeout; native MPI heartbeat and teardown checks remain
+bounded. Closing checks cleanup reports for the controller and every executor,
+as well as launcher termination; unconfirmed cleanup retains the session's
+I/O journal and private files.
 
 ## One-Shot vs Persistent Worker
 

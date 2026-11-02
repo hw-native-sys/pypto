@@ -408,6 +408,11 @@ def build_cluster_session_bundle(directories: list[Path]) -> tuple[str, bytes]:
     )
     payloads["orchestration/_distributed_support.py"] = helper
     payloads["orchestration/cluster_bootstrap.py"] = bootstrap
+    for portable in ("_cluster_controller.py", "_cluster_channel.py"):
+        remaining = _CLUSTER_MAX_UNPACKED_BYTES - sum(len(data) for data in payloads.values())
+        payloads["orchestration/" + portable] = _read_cluster_source(
+            Path(__file__).parent, portable, remaining
+        )
     programs = []
     for index, directory in enumerate(directories):
         remaining = _CLUSTER_MAX_UNPACKED_BYTES - sum(len(data) for data in payloads.values())

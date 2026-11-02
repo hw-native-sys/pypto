@@ -256,11 +256,24 @@ print('C3C_RUNTIME_SOURCES_PASS')
 """
 
 
+@pytest.fixture(scope="session")
+def cluster_startup_cache(tmp_path_factory):
+    """Keep activated content-addressed roots stable for this test process."""
+    return tmp_path_factory.mktemp("cluster-startup-cache")
+
+
 @pytest.fixture
-def cluster_runner_harness(cluster_artifact, monkeypatch):
+def cluster_runner_harness(cluster_artifact, cluster_startup_cache, tmp_path, monkeypatch):
     """Keep native generated root/metadata and replace only remote process/device I/O."""
     runner = importlib.import_module("pypto.runtime.cluster_runner")
     from simpler.callable_identity import CallableHandle  # noqa: PLC0415
+    from simpler.mpi_direct_bootstrap import decode_startup, encode_startup  # noqa: PLC0415
+    from simpler.startup_artifacts import (  # noqa: PLC0415
+        StartupArtifactSpec,
+        activate_startup_artifacts,
+        install_startup_artifacts,
+    )
+    from simpler.startup_preparation import NodeStartupHook  # noqa: PLC0415
     from simpler.task_interface import RemoteAddressSpace, RemoteBufferHandle  # noqa: PLC0415
     from simpler.worker import RemoteCallable  # noqa: PLC0415
 
@@ -276,6 +289,7 @@ def cluster_runner_harness(cluster_artifact, monkeypatch):
             assert level == 4
             self.memory = {}
             self.in_graph = False
+            self.initialized = False
             state.worker = self
 
         def register(self, target, *, workers=None):
@@ -288,10 +302,13 @@ def cluster_runner_harness(cluster_artifact, monkeypatch):
             )
 
         def add_mpirun_worker_group(self, spec):
-            state.spec = spec
-            return (7, 13)
+            pytest.fail("CLUSTER preparation must launch Direct MPI, not an MPI worker group")
+
+        def _inner_registry_entries_for_spec(self, spec):
+            return []
 
         def init(self, **kwargs):
+            self.initialized = True
             events.append("ready")
 
         def remote_malloc(self, *, worker, nbytes):
@@ -336,10 +353,57 @@ def cluster_runner_harness(cluster_artifact, monkeypatch):
             events.append("drained")
 
         def close(self):
-            events.append("closed")
+            if self.initialized:
+                events.append("closed")
             self.memory.clear()
 
+    class DirectSession:
+        """Run the installed portable engine across the replaced process boundary."""
+
+        def __init__(self, topology, startup_by_rank, controller_target, config):
+            startup_by_rank = {
+                rank: decode_startup(encode_startup(record)) for rank, record in startup_by_rank.items()
+            }
+            records = startup_by_rank[0]["startup_artifacts"]
+            installed = install_startup_artifacts(records, cluster_startup_cache)
+            activate_startup_artifacts(installed)
+            artifacts = []
+            for record in records:
+                archive = tmp_path / (record["sha256"] + ".tar.gz")
+                archive.write_bytes(record["payload"])
+                artifacts.append(StartupArtifactSpec(archive, record["sha256"], record["module_prefix"]))
+            state.spec = SimpleNamespace(
+                startup_artifacts=tuple(artifacts),
+                startup_hooks_by_rank=tuple(
+                    NodeStartupHook(**startup_by_rank[rank]["startup_hook"])
+                    for rank in range(1, len(topology["executor_ranks"]) + 1)
+                ),
+            )
+            parameters = startup_by_rank[0]["parameters"]
+            self.data_dir = parameters["data_dir"]
+            module = importlib.import_module(controller_target.split(":")[0])
+            self.channel = importlib.import_module(module.__package__ + "._cluster_channel")
+            context = SimpleNamespace(
+                topology=SimpleNamespace(
+                    executors=tuple(SimpleNamespace(worker_id=worker_id) for worker_id in (7, 13))
+                ),
+                create_worker=lambda **kwargs: runner.Worker(level=4, **kwargs),
+            )
+            self.controller = module.ClusterController(context, parameters["session"])
+
+        def request(self, record):
+            with self.channel.map_values(record, self.data_dir) as values:
+                try:
+                    self.controller.run(record["program"], values, record["call_config"])
+                finally:
+                    del values
+            return {"type": "done"}
+
+        def close(self):
+            self.controller.close()
+
     monkeypatch.setattr(runner, "Worker", Worker)
+    monkeypatch.setattr(runner, "_DirectSession", DirectSession)
     monkeypatch.setattr(
         runner,
         "_assemble_cluster_chips",
@@ -409,6 +473,170 @@ def _i2_binding(program, *, key="activations", slots=None, domain=0):
     binding = getattr(ir, "SharedDomainBinding", None)
     assert callable(binding), "I2 requires the public pypto.ir.SharedDomainBinding API"
     return binding(program=program, domain=domain, key=key, slots={0: "values"} if slots is None else slots)
+
+
+@pytest.fixture
+def direct_adapter_harness(cluster_runner_harness, monkeypatch):
+    """Replace the external session while forbidding the legacy MPI group path."""
+    from simpler.mpi_direct_bootstrap import decode_startup, encode_startup  # noqa: PLC0415
+
+    runner, state = cluster_runner_harness
+    state.sessions = []
+    base = runner.Worker
+
+    class Worker(base):
+        def add_mpirun_worker_group(self, spec):
+            pytest.fail("CLUSTER preparation must launch Direct MPI, not an MPI worker group")
+
+        def _inner_registry_entries_for_spec(self, spec):
+            return []
+
+    class DirectSession:
+        def __init__(self, topology, startup_by_rank, controller_target, config):
+            self.topology = topology
+            self.startup_by_rank = {
+                rank: decode_startup(encode_startup(record)) for rank, record in startup_by_rank.items()
+            }
+            self.controller_target = controller_target
+            self.config = config
+            self.requests = []
+            self.closed = False
+            state.sessions.append(self)
+
+        def request(self, record):
+            assert not self.closed
+            self.requests.append(record)
+            if state.fail:
+                raise RuntimeError("direct controller DAG failed")
+            return {"type": "done"}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(runner, "Worker", Worker)
+    monkeypatch.setattr(runner, "_DirectSession", DirectSession, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "_assemble_cluster_chips",
+        lambda compiled: {
+            path: (object(), compiled.cluster_config.runtime, {})
+            for entry in compiled.l3_entries["entries"]
+            for path in entry["chip_paths"].values()
+        },
+    )
+    return runner, state
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_direct_adapter_prepares_static_world_and_prefork_programs(
+    i2_programs, direct_adapter_harness, shared
+):
+    _, state = direct_adapter_harness
+    left, right = i2_programs
+    domains = (left.comm_domains, right.comm_domains)
+    bindings = [_i2_binding(left), _i2_binding(right)] if shared else []
+    with left.prepare(
+        extra_compiled=[right],
+        persistent=True,
+        reset_persistent_windows=False,
+        shared_domains=bindings,
+    ):
+        assert len(state.sessions) == 1
+        session = state.sessions[0]
+        assert session.topology["controller_rank"] == 0
+        executors = session.topology["executor_ranks"]
+        assert len(executors) + 1 == 3
+        assert [(item["rank"], item["worker_id"], item["host"]) for item in executors] == [
+            (1, 0, "node-a"),
+            (2, 1, "node-b"),
+        ]
+        assert [tuple(item["device_ids"]) for item in executors] == [(0, 1), (2, 3)]
+        assert [tuple(item["global_device_ranks"]) for item in executors] == [(0, 1), (2, 3)]
+        assert isinstance(session.controller_target, str) and ":" in session.controller_target
+        assert {1, 2}.issubset(session.startup_by_rank)
+        execution = session.startup_by_rank[0]["parameters"]["session"]
+        assert execution["persistent"] is True and execution["reset"] is False
+        assert execution["node_sizes"] == [2, 2]
+        assert len(execution["programs"]) == 2
+        plans = [program["plans"] for program in execution["programs"]]
+        assert all(len(program_plans) == 1 for program_plans in plans)
+        assert (plans[0][0]["pool_key"] == plans[1][0]["pool_key"]) is shared
+        assert all(program["provider"] for program in execution["programs"])
+        prefixes = []
+        for rank in (1, 2):
+            startup = session.startup_by_rank[rank]
+            assert len(startup["startup_artifacts"]) == 1
+            assert startup["inner_l3_worker"] == []
+            hook = startup["startup_hook"]
+            assert hook["import_path"].endswith(".orchestration.cluster_bootstrap:prepare_node")
+            parameters = hook["parameters"]
+            assert parameters["version"] == 1
+            programs = parameters["programs"]
+            assert len(programs) == 2
+            prefixes.append([program["module_prefix"] for program in programs])
+            for index, program in enumerate(programs):
+                assert program["module_prefix"].endswith(f".programs.p{index}")
+                assert program["entries"] == [left, right][index].l3_entries["entries"]
+                assert set(program["domain_bindings"]) == {
+                    entry["logical_path"] for entry in program["entries"]
+                }
+        assert prefixes[0] == prefixes[1] and prefixes[0][0] != prefixes[0][1]
+        assert not session.closed
+        assert (left.comm_domains, right.comm_domains) == domains
+    assert session.closed
+
+
+def test_direct_adapter_single_program_still_uses_session_source_bundle(i2_programs, direct_adapter_harness):
+    _, state = direct_adapter_harness
+    left, _ = i2_programs
+    with left.prepare():
+        session = state.sessions[0]
+        parameters = session.startup_by_rank[1]["startup_hook"]["parameters"]
+        assert parameters["version"] == 1 and len(parameters["programs"]) == 1
+        assert parameters["programs"][0]["module_prefix"].endswith(".programs.p0")
+        # Per-invocation domains keep generated names; canonical bindings are
+        # supplied only when the controller installs its domain provider.
+        assert all(not bindings for bindings in parameters["programs"][0]["domain_bindings"].values())
+
+
+def test_direct_adapter_run_failure_keeps_caller_outputs(i2_programs, direct_adapter_harness):
+    _, state = direct_adapter_harness
+    left, right = i2_programs
+    with left.prepare(extra_compiled=[right], persistent=True) as prepared:
+        session = state.sessions[0]
+        output = torch.full((8,), -29.0)
+        original = output.clone()
+        state.fail = True
+        with pytest.raises(RuntimeError, match="direct controller DAG failed"):
+            prepared.run(right, torch.ones(8), 23, output)
+        assert session.requests
+        assert torch.equal(output, original)
+
+
+def test_direct_adapter_reuses_session_for_programs_and_late_tensors(i2_programs, direct_adapter_harness):
+    _, state = direct_adapter_harness
+    left, right = i2_programs
+    with left.prepare(extra_compiled=[right], persistent=True) as prepared:
+        session = state.sessions[0]
+        outputs = [torch.zeros(8), torch.zeros(8)]
+        for program, output in zip((left, right), outputs, strict=True):
+            assert prepared.run(program, torch.ones(8), 7, output) is None
+        assert len(session.requests) == 2 and len(state.sessions) == 1
+        assert not session.closed
+    assert session.closed
+
+
+def test_direct_adapter_invalid_sharing_precedes_staging(i2_programs, direct_adapter_harness):
+    _, state = direct_adapter_harness
+    left, right = i2_programs
+    with pytest.raises(ValueError, match=r"(?i)(shar|domain|slot)"):
+        left.prepare(
+            extra_compiled=[right],
+            persistent=True,
+            shared_domains=[_i2_binding(left, slots={}), _i2_binding(right)],
+        )
+    assert not state.sessions and not state.registrations
+    assert not hasattr(state, "worker")
 
 
 def test_i2_native_domains_are_immutable_cold_metadata(i2_programs, monkeypatch):
@@ -555,6 +783,8 @@ def i2_runner_harness(cluster_runner_harness, monkeypatch):
             self.pending_releases.clear()
 
         def close(self):
+            if not self.initialized:
+                return super().close()
             if state.close_fails:
                 raise RuntimeError("hierarchy close failed")
             self.tearing_down = True
@@ -779,19 +1009,25 @@ def test_i2_uncertain_close_retains_domain_and_io_journals(i2_programs, i2_runne
         with pytest.raises(RuntimeError, match="hierarchy close failed"):
             prepared.run(right, torch.ones(8), 23, torch.zeros(8))
         assert not retained.released and not retained.freed
-        io, keep = prepared._active_io, tuple(prepared._keep)
+        controller = prepared._session.controller
+        caller_io = prepared._active_io
+        assert caller_io is not None and caller_io._backings
+        assert all(path.exists() for _, _, path, _, _ in caller_io._backings)
+        io, keep = controller._active_io, tuple(controller._keep)
         assert io is not None and io.storages and keep
         before = list(state.events)
         with pytest.raises(RuntimeError, match=r"(?i)(pending|previous|clos|fail)"):
             prepared.run(left, torch.ones(8), 31, torch.zeros(8))
-        assert state.events == before and prepared._active_io is io and tuple(prepared._keep) == keep
+        assert state.events == before and controller._active_io is io and tuple(controller._keep) == keep
+        assert prepared._active_io is caller_io and caller_io._backings
         assert not any(
             isinstance(event, tuple) and event[0] == "copyback" for event in state.events[failure_cursor:]
         )
     finally:
         state.close_fails = False
         prepared.close()
-    assert retained.freed and prepared._active_io is None and not prepared._keep
+    assert retained.freed and prepared._active_io is None
+    assert controller._active_io is None and not controller._keep
     assert not state.worker.memory
 
 
