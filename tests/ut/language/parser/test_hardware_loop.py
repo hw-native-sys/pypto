@@ -103,6 +103,37 @@ def test_hardware_loop_keyword_stop(ascend_backend):
     assert loop.start.value == 0 and loop.stop.value == 8 and loop.step.value == 1
 
 
+@pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
+def test_dynamic_hardware_loop_stop_roundtrip(ascend_backend):
+    @pl.function(type=pl.FunctionType.AIV)
+    def dynamic(n: pl.Scalar[pl.INDEX]):
+        with pl.reg_scope():
+            for i in pl.hardware_loop(n):
+                pass
+
+    required = _loop(dynamic)
+    assert isinstance(required.stop, ir.Var)
+    p = ir.HardwareLoopProfile()
+    p.supported = True
+    assert ir.analyze_hardware_loop(required, p).state == ir.HardwareLoopState.Eligible
+    restored = pl.parse(ir.python_print(dynamic))
+    assert isinstance(_loop(restored).stop, ir.Var)
+
+
+@pytest.mark.parametrize("stop", ["1.5", "n"])
+@pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
+def test_float_hardware_loop_stop_is_rejected(stop, ascend_backend):
+    source = f"""
+@pl.function(type=pl.FunctionType.AIV)
+def invalid(n: pl.Scalar[pl.FP32]):
+    with pl.reg_scope():
+        for i in pl.hardware_loop({stop}):
+            pass
+"""
+    with pytest.raises(ParserError, match="integer scalar stop"):
+        pl.parse(source)
+
+
 @pytest.mark.parametrize("start,step", [(1, 1), (0, 2)])
 @pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
 def test_builder_rejects_noncanonical_required_loop_bounds(start, step, ascend_backend):

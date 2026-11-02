@@ -260,12 +260,15 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
 该 API 表达意图。当前后端对保留的 Require 循环报告不支持的资格状态。
 `ir.analyze_hardware_loop(loop, profile)` 区分 Eligible、Ineligible 和 Unknown；
 Eligible 仍不等于最终产物的硬件证据，计数器窄化与 `scf.for` 均不能替代证据。
-动态边界、动态步长或未知效应保持 Unknown；Auto 在三态下均保持普通循环语义。
+动态整数 `stop` 无需静态范围证明，也不插入运行时范围检查；其迭代次数和终止归纳变量
+保持未知，但仍检查循环体、嵌套及后端能力。浮点及其他非整数上界会被拒绝。
+动态步长或未知效应保持 Unknown；Auto 在三态下均保持普通循环语义。
 
 静态零次 Sequential 循环豁免资格和证据要求，由 Simplify 消除并返回初始 iter_args；
 可能为空的动态循环不豁免。Require 在单次循环中也不能丢失意图。
 Builder 和手工构造的 IR 同样必须使用常量 `start=0`、`step=1`，零次循环也不例外。
-计数器为无符号 16 位：`stop=65535` 合法，`stop=65536` 超出范围。
+静态上界按无符号 16 位计数器检查：`stop=65535` 合法，`stop=65536` 超出范围。
+动态上界由调用者保证在目标支持的范围内，资格分析不要求提供范围证明。
 当 `stop=65535` 时，循环执行 65535 次，归纳变量依次为 0 至 65534，
 终止时归纳变量为 65535。
 

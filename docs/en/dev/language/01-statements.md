@@ -97,7 +97,11 @@ This expresses intent, not a guarantee that the installed backend implements it.
 Current backends report unsupported qualification for surviving Require loops.
 The profile-driven `ir.analyze_hardware_loop(loop, profile)` API distinguishes
 Eligible, Ineligible and Unknown; Eligible still requires final artifact evidence.
-Dynamic bounds/steps or unknown effects remain Unknown. Counter narrowing and
+Dynamic integer `stop` values are accepted without a static range proof or an
+inserted runtime range guard. Their trip count and terminating induction value
+remain unknown; body, nesting and backend checks still apply. Floating-point and
+other noninteger stops are rejected. Dynamic steps or unknown effects remain
+Unknown. Counter narrowing and
 `scf.for` syntax are not hardware evidence. Auto retains ordinary loop semantics
 regardless of qualification.
 
@@ -105,7 +109,9 @@ Static zero-trip Sequential loops are exempt: Simplify removes them and replaces
 results with initial iter_args. A dynamic loop that might be empty is not exempt.
 Require retains intent even for a single trip. Builder and manually constructed
 IR must also use constant `start=0` and `step=1`, even for zero-trip loops.
-The counter is unsigned 16-bit: `stop=65535` fits while `stop=65536` does not.
+For static stops, the counter is unsigned 16-bit: `stop=65535` fits while
+`stop=65536` does not. Callers must supply dynamic stops within the target's
+supported range; no range proof is required by qualification.
 For `stop=65535`, the loop executes 65535 times with induction values 0 through
 65534; the terminating induction value is 65535.
 

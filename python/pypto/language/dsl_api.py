@@ -291,6 +291,8 @@ def hardware_loop(
     """Require a Sequential hardware loop over [0, stop) with step one.
 
     Only valid inside an enclosing ``pl.reg_scope()``, including empty loops.
+    Integer scalar stops may be dynamic without a proven range; static stops
+    must fit the unsigned counter limit. Floating-point stops are rejected.
     Static qualification is distinct from final artifact evidence. Unsupported
     targets fail compilation rather than silently falling back to ordinary loops.
     Static empty loops may be removed with their initial carry values preserved.

@@ -30,6 +30,7 @@ from .syntax_helpers import is_const_int, is_dsl_call
 from .type_resolver import (
     _const_int_value,  # noqa: PLC2701
     _is_dump_call,  # noqa: PLC2701
+    _is_index_expr_type,  # noqa: PLC2701
 )
 
 VALID_ITERATORS = {"hardware_loop", "range", "parallel", "unroll", "pipeline", "while_", "spmd", "split_aiv"}
@@ -475,9 +476,15 @@ class ControlFlowParser:
                     span=self.services.span_tracker.get_span(call),
                 )
             stop_node = call.args[0] if call.args else stop_keywords[0].value
+            stop = self.callbacks.expression(stop_node)
+            if not _is_index_expr_type(stop.type):
+                raise ParserTypeError(
+                    f"pl.hardware_loop() requires an integer scalar stop, got {stop.type}",
+                    span=self.services.span_tracker.get_span(stop_node),
+                )
             hardware_args: dict[str, Any] = {
                 "start": 0,
-                "stop": self.callbacks.expression(stop_node),
+                "stop": stop,
                 "step": 1,
                 "init_values": [],
                 "unroll": None,

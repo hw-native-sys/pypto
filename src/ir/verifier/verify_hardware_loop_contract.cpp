@@ -12,11 +12,14 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto::ir {
@@ -40,6 +43,13 @@ class ContractChecker : public IRVisitor {
     if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
                                 "HardwareLoopPolicy.Require does not support loop attrs", op->span_);
+    }
+    if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
+      const auto stop_type = As<ScalarType>(op->stop_->GetType());
+      if (!stop_type || !(stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX)) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+                                  "HardwareLoopPolicy.Require requires an integer scalar stop", op->span_);
+      }
     }
     IRVisitor::VisitStmt_(op);
   }

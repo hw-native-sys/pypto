@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -64,48 +63,45 @@ HardwareLoopQualification Qualify(const ForStmtPtr& loop, const HardwareLoopProf
   }
   if (!result.step) return finish(HardwareLoopState::Unknown, "HWL_DYNAMIC_STEP");
   if (*result.step == 0) return finish(HardwareLoopState::Ineligible, "HWL_ZERO_STEP");
-  if (!result.lower || !result.upper) return finish(HardwareLoopState::Unknown, "HWL_DYNAMIC_BOUND");
   // Auto loops are still ordinary loops, but can qualify as nested hardware
   // loops only under the same zero-start, unit-step hardware restriction.
   if (!HasCanonicalHardwareLoopBounds(loop)) {
     return finish(HardwareLoopState::Ineligible, "HWL_CANONICAL_BOUNDS");
   }
-
-  // Subtraction, ceil division and the terminating induction update can exceed
-  // int64 even when every input fits. Never divide before validating the step.
-  using Wide = __int128;
-  const Wide lower = *result.lower;
-  const Wide upper = *result.upper;
-  const Wide step = *result.step;
-  const Wide distance = step > 0 ? upper - lower : lower - upper;
-  const Wide stride = step > 0 ? step : -step;
-  const Wide count = distance <= 0 ? 0 : (distance + stride - 1) / stride;
-  const Wide post = lower + count * step;
-  if (count > std::numeric_limits<int64_t>::max() || post > std::numeric_limits<int64_t>::max() ||
-      post < std::numeric_limits<int64_t>::min()) {
-    return finish(HardwareLoopState::Ineligible, "HWL_ARITHMETIC_OVERFLOW");
+  const auto stop_type = As<ScalarType>(loop->stop_->GetType());
+  if (!stop_type || !(stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX)) {
+    return finish(HardwareLoopState::Ineligible, "HWL_STOP_TYPE");
   }
-  result.trip_count = static_cast<int64_t>(count);
-  result.post_iv = static_cast<int64_t>(post);
+
+  // Dynamic integer stops do not require a range proof. Keep their counts
+  // unknown and still check the body/profile below; never narrow or invent a
+  // static trip count here. Constant bounds retain unsigned range validation.
+  using Wide = __int128;
+  if (result.upper) {
+    // Canonical bounds fix start=0 and step=1, so count and post-IV coincide.
+    const int64_t count = std::max<int64_t>(0, *result.upper);
+    result.trip_count = count;
+    result.post_iv = count;
+  }
   if (loop->kind_ != ForKind::Sequential) {
     return finish(HardwareLoopState::Ineligible, "HWL_FOR_KIND");
   }
   // Empty loops have no hardware realization requirement, even for profiles
   // without hardware-loop support. Simplify owns replacement of loop results.
-  if (count == 0) return finish(HardwareLoopState::Eligible, "HWL_STATIC_EMPTY");
-  if (step < 0 &&
-      (loop->hardware_loop_policy_ == HardwareLoopPolicy::Require || !profile.allow_negative_step)) {
-    return finish(HardwareLoopState::Ineligible, "HWL_STEP_SIGN");
-  }
+  if (result.trip_count == 0) return finish(HardwareLoopState::Eligible, "HWL_STATIC_EMPTY");
   if (profile.counter_bits < 1 || profile.counter_bits > 64 || profile.max_trip_count < 0 ||
       profile.max_depth < 1 || profile.max_body_nodes < 0) {
     return finish(HardwareLoopState::Unknown, "HWL_INVALID_PROFILE");
   }
-  const Wide limit = Wide{1} << profile.counter_bits;
-  if (lower < 0 || lower >= limit || post < 0 || post >= limit) {
-    return finish(HardwareLoopState::Ineligible, "HWL_COUNTER_RANGE");
+  if (result.post_iv) {
+    const Wide limit = Wide{1} << profile.counter_bits;
+    if (*result.post_iv < 0 || *result.post_iv >= limit) {
+      return finish(HardwareLoopState::Ineligible, "HWL_COUNTER_RANGE");
+    }
+    if (*result.trip_count > profile.max_trip_count) {
+      return finish(HardwareLoopState::Ineligible, "HWL_TRIP_COUNT");
+    }
   }
-  if (count > profile.max_trip_count) return finish(HardwareLoopState::Ineligible, "HWL_TRIP_COUNT");
   if (body.depth + 1 > profile.max_depth) return finish(HardwareLoopState::Ineligible, "HWL_DEPTH");
   if (body.nodes > profile.max_body_nodes) return finish(HardwareLoopState::Ineligible, "HWL_RESOURCES");
   if (body.forbidden_control) return finish(HardwareLoopState::Ineligible, "HWL_CONTROL_FLOW");

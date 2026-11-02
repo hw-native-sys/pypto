@@ -89,15 +89,55 @@ def test_trip_limit_can_be_stricter_than_unsigned_counter_range():
     assert result.reason == "HWL_TRIP_COUNT"
 
 
-@pytest.mark.parametrize("dynamic_arg", ["upper", "step"])
-def test_dynamic_require_bounds_fail(dynamic_arg):
+def test_dynamic_require_step_fails():
     n = ir.Var("n", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
-    op = loop(**{dynamic_arg: n}, policy=ir.HardwareLoopPolicy.Require)
+    op = loop(step=n, policy=ir.HardwareLoopPolicy.Require)
     result = ir.analyze_hardware_loop(op, profile())
-    state = "Unknown" if dynamic_arg == "upper" else "Ineligible"
-    assert result.state.name == state
-    with pytest.raises(ValueError, match=rf"{state}.*root/loop0"):
+    assert result.state == ir.HardwareLoopState.Ineligible
+    with pytest.raises(ValueError, match=r"Ineligible.*root/loop0"):
         ir.verify_hardware_loop_requirement(op, profile())
+
+
+@pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.INT32, DataType.UINT16, DataType.UINT64])
+def test_dynamic_integer_stop_qualifies_without_range_proof(dtype):
+    n = ir.Var("n", ir.ScalarType(dtype), ir.Span.unknown())
+    op = loop(upper=n, policy=ir.HardwareLoopPolicy.Require)
+    result = ir.analyze_hardware_loop(op, profile())
+    assert result.state == ir.HardwareLoopState.Eligible
+    assert result.upper is None and result.trip_count is None and result.post_iv is None
+    # Dynamic acceptance must not fabricate static counts or hardware evidence.
+    with pytest.raises(ValueError, match="backend evidence missing"):
+        ir.verify_hardware_loop_requirement(op, profile())
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.BOOL])
+def test_noninteger_stop_is_ineligible(dtype):
+    n = ir.Var("n", ir.ScalarType(dtype), ir.Span.unknown())
+    result = ir.analyze_hardware_loop(loop(upper=n), profile())
+    assert result.state == ir.HardwareLoopState.Ineligible
+    assert result.reason == "HWL_STOP_TYPE"
+
+    required = loop(upper=n, policy=ir.HardwareLoopPolicy.Require)
+    function = ir.Function("invalid", [n], [], ir.RegScopeStmt("", required, n.span), n.span)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.HardwareLoopContractValid)
+    diagnostics = passes.PropertyVerifierRegistry.verify(
+        properties, ir.Program([function], "Invalid", n.span)
+    )
+    assert any("integer scalar stop" in diagnostic.message for diagnostic in diagnostics)
+
+
+def test_dynamic_stop_still_checks_nested_depth_and_control_flow():
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    inner = loop(upper=n)
+    assert ir.analyze_hardware_loop(loop(body=inner), profile()).state == ir.HardwareLoopState.Eligible
+    assert ir.analyze_hardware_loop(loop(body=inner), profile(max_depth=1)).reason == "HWL_DEPTH"
+    op = loop(upper=n, body=ir.ReturnStmt([], span))
+    assert ir.analyze_hardware_loop(op, profile()).reason == "HWL_CONTROL_FLOW"
+    assert ir.analyze_hardware_loop(inner, profile(supported=False)).reason == "HWL_UNSUPPORTED_PROFILE"
+    # A dynamic trip count is accepted even when no static limit proof exists.
+    assert ir.analyze_hardware_loop(inner, profile(max_trip_count=0)).state == ir.HardwareLoopState.Eligible
 
 
 def test_eligible_is_not_evidence():
