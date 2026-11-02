@@ -919,7 +919,7 @@ def test_host_submit_rejects_nested_tuple_return():
         _lower(Prog)
 
 
-def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
+def test_host_allreduce_builtin_codegen_uses_submit_chip_with_callable_key():
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -941,13 +941,15 @@ def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
     generated, cg = _lower_host_collectives(Prog)
 
     assert 'callables["builtin.tensor.allreduce__sum__fp32"]' in generated, generated
-    assert "orch.submit_next_level" in generated, generated
-    assert "_ta_1_config = CallConfig()" in generated, generated
-    assert "_ta_1_config.aicpu_thread_num = config.aicpu_thread_num" in generated, generated
+    # The builtin collective must go through _submit_chip with the full run
+    # config, not a fresh CallConfig(): that wrapper is what carries the DFX
+    # output_prefix and stamps the per-dispatch program marker (plan 135).
     assert (
-        'orch.submit_next_level(callables["builtin.tensor.allreduce__sum__fp32"], _ta_1, _ta_1_config'
-        in generated
+        '_submit_chip(orch, callables["builtin.tensor.allreduce__sum__fp32"], _ta_1, config,' in generated
     ), generated
+    assert "_keep.append(_ta_1)" in generated, generated
+    assert "CallConfig()" not in generated, generated
+    assert "orch.submit_next_level" not in generated, generated
     assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
     assert ".add_scalar((64))" not in generated, generated
     assert "distributed_collectives" not in generated, generated
@@ -1133,7 +1135,7 @@ def test_implicit_host_allreduce_builtin_codegen_materializes_signal():
     assert 'buffers["__allreduce_signal_buf_0"]' in generated, generated
     assert 'buffers["data_buf"]' in generated, generated
     assert 'buffers["signal_buf"]' not in generated, generated
-    assert "orch.submit_next_level" in generated, generated
+    assert '_submit_chip(orch, callables["builtin.tensor.allreduce__sum__fp32"]' in generated, generated
     assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
     assert "data = data" not in generated, generated
 
@@ -1338,7 +1340,7 @@ def test_host_allreduce_ring_builtin_codegen_uses_ring_next_level_callable_key()
     generated, cg = _lower_host_collectives(Prog)
 
     assert 'callables["builtin.tensor.allreduce_ring__sum__fp32"]' in generated, generated
-    assert "orch.submit_next_level" in generated, generated
+    assert '_submit_chip(orch, callables["builtin.tensor.allreduce_ring__sum__fp32"]' in generated, generated
     assert "distributed_collectives" not in generated, generated
 
     specs = cg.get_builtin_next_level_specs()

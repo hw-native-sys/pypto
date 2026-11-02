@@ -539,7 +539,7 @@ class TestAsyncDispatchHandle:
         m["worker"]._accepted_run_handles = set()
         m["worker"]._hierarchical_start_cv = threading.Condition()
 
-        def interrupt_after_acceptance(*_args):
+        def interrupt_after_acceptance(*_args, **_kwargs):
             with m["worker"]._hierarchical_start_cv:
                 m["worker"]._accepted_run_handles.add(native)
             raise KeyboardInterrupt("interrupted after native acceptance")
@@ -651,7 +651,7 @@ class TestPreparedSwimlaneTwoPass:
         timing_call_config = MagicMock(name="TimingCallConfig")
         m["make_call_config"].side_effect = [deps_call_config, timing_call_config]
         events: list[str] = []
-        m["submit_dispatch"].side_effect = lambda *args: (
+        m["submit_dispatch"].side_effect = lambda *args, **_kwargs: (
             events.append("deps" if args[self._CALL_CONFIG_ARG] is deps_call_config else "timing"),
             _ImmediateNativeHandle(),
         )[1]
@@ -830,7 +830,7 @@ class TestPerCallValidation:
     def test_accepts_device_tensor_allocated_by_same_worker(self, patched_setup):
         submitted_tensors: dict[str, Any] = {}
 
-        def submit_dispatch(*args):
+        def submit_dispatch(*args, **_kwargs):
             submitted_tensors.update(args[2])
             return _ImmediateNativeHandle()
 
@@ -936,7 +936,7 @@ class TestPerCallValidation:
         # are forwarded verbatim to the entry — common in serving dispatch.
         submitted_tensors: dict[str, Any] = {}
 
-        def submit_dispatch(*args):
+        def submit_dispatch(*args, **_kwargs):
             submitted_tensors.update(args[2])
             return _ImmediateNativeHandle()
 
@@ -2059,7 +2059,7 @@ class TestMultiProgram:
         m = patched_setup
         submitted_tensors: list[dict[str, Any]] = []
 
-        def submit_dispatch(*args):
+        def submit_dispatch(*args, **_kwargs):
             submitted_tensors.append(dict(args[2]))
             return _ImmediateNativeHandle()
 
@@ -2368,16 +2368,64 @@ class TestSubmitChip:
         assert sorted(d.name for d in (tmp_path / "rank0").iterdir()) == ["d0", "d1", "d2"]
         assert [c[2] for c in orch.calls] == [str(tmp_path)] * 3
 
-    def test_counter_resets_when_orch_dispatch_idx_cleared(self, tmp_path):
-        # ``orch_fn`` clears ``_dfx_dispatch_idx`` at the top of every run, so a
-        # given card's dispatch numbering matches across the swimlane two-pass.
+    def test_oneshot_counter_resets_between_passes(self, tmp_path):
+        # The one-shot path forks a fresh child per pass, so its capture counter
+        # restarts; the reset with no ``dispatch_idx`` must mirror that.
         chip_cids = {"chip": object()}
         orch = _RecordingOrch()
-        _reset_dfx_dispatch_state(orch, chip_cids)
         cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+        _reset_dfx_dispatch_state(orch, chip_cids)
         _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)  # pass 1: d0
-        orch._dfx_dispatch_idx = {}  # what orch_fn does between passes
+        _reset_dfx_dispatch_state(orch, chip_cids)  # fresh child per pass
         _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)  # pass 2: d0 again
+        assert [d.name for d in (tmp_path / "rank0").iterdir()] == ["d0"]
+
+    def test_shared_counter_spans_prepared_runs(self, tmp_path):
+        # A prepared or persistent worker reuses one child, whose
+        # ``local_capture_index`` spans the process. The worker-owned dict must
+        # therefore keep counting across runs instead of restarting at d0, or
+        # the marker lands in a directory with no capture (plan 135, RC2).
+        chip_cids = {"chip": object()}
+        shared: dict[str, int] = {}
+        orch = _RecordingOrch()
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+
+        for _ in range(2):  # one two-pass run: graph then timing
+            _reset_dfx_dispatch_state(orch, chip_cids, dispatch_idx=shared)
+            _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)
+
+        # A later run on the same worker continues the child's numbering.
+        _reset_dfx_dispatch_state(orch, chip_cids, dispatch_idx=shared)
+        _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)
+
+        assert sorted(d.name for d in (tmp_path / "rank0").iterdir()) == ["d0", "d1", "d2"]
+        for name in ("d0", "d1", "d2"):
+            assert (tmp_path / "rank0" / name / "dispatch_program.json").is_file()
+
+    def test_rejected_submit_does_not_advance_the_shared_counter(self, tmp_path):
+        # A synchronous rejection creates no capture. Counting it would put every
+        # later marker one directory ahead of the child's numbering -- which the
+        # per-run reset used to hide and a prepared worker's shared counter would
+        # not (plan 135 review, codex P2).
+        chip_cids = {"chip": object()}
+        shared: dict[str, int] = {}
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+
+        class _RejectingOrch(_RecordingOrch):
+            def submit_next_level(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+                raise RuntimeError("stale simpler tensor")
+
+        orch = _RejectingOrch()
+        _reset_dfx_dispatch_state(orch, chip_cids, dispatch_idx=shared)
+        with pytest.raises(RuntimeError, match="stale simpler tensor"):
+            _submit_chip(orch, chip_cids["chip"], "ta", cfg, 0)
+        assert shared.get("rank0", 0) == 0, shared
+
+        # The next accepted submit reuses d0 and overwrites the stale marker.
+        ok = _RecordingOrch()
+        _reset_dfx_dispatch_state(ok, chip_cids, dispatch_idx=shared)
+        _submit_chip(ok, chip_cids["chip"], "ta", cfg, 0)
+        assert shared["rank0"] == 1
         assert [d.name for d in (tmp_path / "rank0").iterdir()] == ["d0"]
 
     def test_dfx_off_forwards_unchanged(self):
@@ -2455,6 +2503,65 @@ class TestSubmitChip:
 
         assert orch.calls == [("chip_a", 0, str(tmp_path))]
         assert not (tmp_path / "rank0" / "d0" / "dispatch_program.json").exists()
+
+
+class TestDfxCounterWiring:
+    """The prepared paths hand their process-scoped counter to the run closure."""
+
+    def test_prepared_native_dispatch_passes_the_worker_counter(self, monkeypatch):
+        import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+        seen: dict[str, object] = {}
+
+        def _fake_submit(*_args: object, **kwargs: object) -> str:
+            seen.update(kwargs)
+            return "handle"
+
+        monkeypatch.setattr(dr, "_submit_dispatch", _fake_submit)
+        worker = dr.DistributedWorker.__new__(dr.DistributedWorker)
+        worker._persistent = False
+        worker._w = object()
+        worker._dfx_dispatch_idx = {}
+        state = {"entry_fn": None, "chip_cids": {}, "sub_ids": {}, "device_nums": 1}
+
+        assert worker._submit_prepared_native(state, {}, None, [], []) == "handle"
+        assert seen["dfx_dispatch_idx"] is worker._dfx_dispatch_idx
+
+    def test_persistent_request_passes_the_worker_counter(self, monkeypatch):
+        import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+        seen: dict[str, object] = {}
+
+        def _fake_reset(_orch: object, _chip_cids: object, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        class _FakeWorker:
+            def submit(self, request):  # noqa: ANN001
+                request(object(), None, None)
+                return "handle"
+
+        monkeypatch.setattr(dr, "_reset_dfx_dispatch_state", _fake_reset)
+        worker = dr.DistributedWorker.__new__(dr.DistributedWorker)
+        worker._persistent_error = None
+        worker._persistent_error_reported = False
+        worker._persistent_domains_by_program = {}
+        worker._reset_persistent_windows = False
+        worker._dfx_dispatch_idx = {}
+        worker._w = _FakeWorker()
+
+        def _entry(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        state = {
+            "persistent_id": "p",
+            "chip_cids": {},
+            "sub_ids": {},
+            "device_nums": 1,
+            "entry_fn": _entry,
+        }
+
+        assert worker._submit_persistent(state, {}, None, [], []) == "handle"
+        assert seen["dispatch_idx"] is worker._dfx_dispatch_idx
 
 
 def _write_dfx_dispatch_dirs(dfx: Path, *rels: str) -> None:
@@ -2807,11 +2914,10 @@ class TestCollectL3Swimlane:
     def test_pairing_recovers_the_program_marker_from_the_graph_capture(
         self, tmp_path, monkeypatch, fake_swimlane_converter
     ):
-        # ``_submit_chip`` derives the marker's directory from *this run's*
-        # dispatch ordinal, so the marker lands on the graph capture and the
-        # records' own capture has none. With two programs in the build the
-        # single-program fallback cannot save it (issue #2169), so the pairing
-        # has to carry the marker across.
+        # Older artifacts (or the one-shot layout) carry the marker only on the
+        # graph capture, and the records' own capture has none. With two
+        # programs in the build the single-program fallback cannot save it
+        # (issue #2169), so the pairing has to carry the marker across.
         seen = self._spy_generate_swimlane(monkeypatch)
         _write_chip_program(tmp_path, "lm_head", "lm_head_dispatch_push")
         _write_chip_program(tmp_path, "mtp_decode_layer", "mtp_projection_rms")
@@ -2825,6 +2931,82 @@ class TestCollectL3Swimlane:
         assert seen[0].work_dir == tmp_path / "next_levels" / "mtp_decode_layer"
         assert json.loads((graph / "name_map.json").read_text())["callable_id_to_name"] == {
             "0": "mtp_projection_rms"
+        }
+
+    def test_two_persistent_runs_each_resolve_their_own_program(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # A prepared/persistent worker's child keeps counting across runs, so the
+        # second run's captures start above zero (d2/d3). Each run's marker must
+        # land on its own graph capture and resolve its own program; two programs
+        # in the build rule out the single-program fallback (plan 135, RC2).
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "first_prog", "first_kernel")
+        _write_chip_program(tmp_path, "second_prog", "second_kernel")
+        rank = tmp_path / "dfx_outputs" / "rank0"
+
+        run1_graph = _write_capture(rank, "d0", deps=True, run_id=1, capture_index=0)
+        _mark_dispatch_program(run1_graph, "first_prog")
+        run1_timing = _write_capture(rank, "d1", records=True, run_id=2, capture_index=1)
+        _mark_dispatch_program(run1_timing, "first_prog")
+
+        run2_graph = _write_capture(rank, "d2", deps=True, run_id=3, capture_index=2)
+        _mark_dispatch_program(run2_graph, "second_prog")
+        run2_timing = _write_capture(rank, "d3", records=True, run_id=4, capture_index=3)
+        _mark_dispatch_program(run2_timing, "second_prog")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert not run1_timing.exists()
+        assert not run2_timing.exists()
+        by_dir = {s.out_dir: s for s in seen}
+        assert by_dir[run1_graph].work_dir == tmp_path / "next_levels" / "first_prog"
+        assert by_dir[run2_graph].work_dir == tmp_path / "next_levels" / "second_prog"
+
+    def test_folding_keeps_the_timing_pass_marker(self, tmp_path, monkeypatch, fake_swimlane_converter):
+        # Both passes are marked once the counter spans the process. Folding must
+        # not drop the timing pass's marker, and must not leave the timing dir
+        # behind just because the graph dir already has one.
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "only_chip", "rms")
+        rank = tmp_path / "dfx_outputs" / "rank0"
+        graph = _write_capture(rank, "d0", deps=True, run_id=1, capture_index=0)
+        _mark_dispatch_program(graph, "only_chip")
+        timing = _write_capture(rank, "d1", records=True, run_id=2, capture_index=1)
+        _mark_dispatch_program(timing, "only_chip")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert not timing.exists()
+        assert json.loads((graph / "dispatch_program.json").read_text()) == {"program": "only_chip"}
+        assert json.loads((graph / "dispatch_program.timing.json").read_text()) == {"program": "only_chip"}
+        assert [s.out_dir for s in seen] == [graph]
+
+    def test_folding_promotes_the_timing_marker_when_the_graph_pass_left_none(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # ``_record_dispatch_program`` is best-effort, so the graph pass can fail
+        # to write its marker while the timing pass succeeds. Filing the survivor
+        # as ``dispatch_program.timing.json`` would hide it from
+        # ``_read_dispatch_program`` and lose the labels (plan 135 review).
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "first_prog", "first_kernel")
+        _write_chip_program(tmp_path, "second_prog", "second_kernel")
+        rank = tmp_path / "dfx_outputs" / "rank0"
+        graph = _write_capture(rank, "d0", deps=True, run_id=1, capture_index=0)
+        timing = _write_capture(rank, "d1", records=True, run_id=2, capture_index=1)
+        _mark_dispatch_program(timing, "second_prog")  # graph pass wrote none
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert not timing.exists()
+        assert json.loads((graph / "dispatch_program.json").read_text()) == {"program": "second_prog"}
+        assert not (graph / "dispatch_program.timing.json").exists()
+        assert [s.out_dir for s in seen] == [graph]
+        # The promoted marker is what lets the converter resolve the labels.
+        assert seen[0].work_dir == tmp_path / "next_levels" / "second_prog"
+        assert json.loads((graph / "name_map.json").read_text())["callable_id_to_name"] == {
+            "0": "second_kernel"
         }
 
     def test_pairing_follows_the_dispatch_not_the_directory_order(

@@ -165,7 +165,6 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       << "Internal error: builtin tensor collective dispatch needs at least one window-bound arg";
 
   const std::string ta_var = codegen.NextTaskArgsVar();
-  const std::string cfg_var = ta_var + "_config";
 
   codegen.Emit(ta_var + " = TaskArgs()");
   // Scalar-typed args (e.g. all_to_all_v's core_num, a genuine argument since
@@ -213,11 +212,11 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   }
 
   // Per-rank comm ordering token, appended as the LAST TENSOR (before the scalars, which
-  // TaskArgs requires). Builtin collectives submit through their own submit_next_level, so
-  // without this they sit outside the ordering chain that EmitCallToWorker builds: a rank
-  // mixing a builtin barrier/collective with a custom comm kernel — or issuing builtins
-  // across separate dispatches — would still let a waiting dispatch be routed ahead of its
-  // producer, which is the deadlock this token exists to prevent. All window args here are
+  // TaskArgs requires). The token is what carries this dispatch into the ordering chain
+  // EmitCallToWorker builds. Without it, a rank mixing a builtin barrier/collective with a
+  // custom comm kernel — or issuing builtins across separate dispatches — could have a
+  // waiting dispatch routed ahead of its producer, which is the deadlock the token exists
+  // to prevent. All window args here are
   // checked above to share one comm domain, so a single token is enough.
   codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + *handle_var + "_ord\"][" +
                rank_expr + "]), TensorArgType.INOUT)");
@@ -235,11 +234,14 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   if (core_num.has_value()) {
     codegen.Emit(ta_var + ".add_scalar(" + std::to_string(*core_num) + ")");
   }
-  codegen.Emit(cfg_var + " = CallConfig()");
-  codegen.Emit(cfg_var + ".aicpu_thread_num = config.aicpu_thread_num");
+  // Route through ``_submit_chip`` — the wrapper every CHIP dispatch uses — so
+  // this dispatch carries the run's DFX ``output_prefix`` and gets its
+  // per-dispatch ``rank{w}/d{k}`` program marker. A fresh ``CallConfig()`` here
+  // copied only ``aicpu_thread_num``, which dropped every DFX field and bypassed
+  // the marker, leaving the builtin collective's swimlane anonymous.
   codegen.Emit("_keep.append(" + ta_var + ")");
-  codegen.Emit("orch.submit_next_level(callables[\"" + variant + "\"], " + ta_var + ", " + cfg_var +
-               ", worker=" + rank_expr + ")");
+  codegen.Emit("_submit_chip(orch, callables[\"" + variant + "\"], " + ta_var + ", config, " + rank_expr +
+               ")");
 }
 
 }  // namespace
