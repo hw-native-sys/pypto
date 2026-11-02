@@ -264,8 +264,15 @@ Z 为向零舍入。H 为 PTOAS 的特定 H 舍入模式，用于 FP32→FP16 �
 | `intlv(lhs, rhs, mask)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
 | `dintlv(lhs, rhs, mask)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
 
+未知索引或动态读取不会关闭同一分配上已知静态读取的初始化检查；调用者仍需保证
+未知读取自身的安全。
+
 双结果通过一个返回元组的 IR Call 和两个 SSA 结果表达。元组、其投影和进借位掩码
-都只能在定义它们的 RegScope 中使用。`mull` 的两部分保留输入的符号性。
+都只能在定义它们的 RegScope 中使用。索引双结果前必须先绑定调用，例如
+`pair = pl.reg.mull(a, b, mask)`，再取 `low = pair[0]`；不支持直接写
+`pl.reg.mull(a, b, mask)[0]`。跨 `if` 合流或循环传递时，必须先拆包为独立
+寄存器，例如 `low, high = pl.reg.mull(a, b, mask)`；校验器拒绝元组类型的
+合流结果和循环携带值。`mull` 的两部分保留输入的符号性。
 减法的进位掩码以 **true 表示无借位**，与控制执行的 mask 是两个不同参数。
 `intlv`/`dintlv` 两个输出的非活动 lane 均为零。PTOAS 0.71 未降低其 mask，
 因此 codegen 在重排后显式选择零。BF16 通过 UINT16 位视图执行选择，保持活动值的位表示。

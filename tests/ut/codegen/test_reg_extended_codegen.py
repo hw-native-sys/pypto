@@ -203,6 +203,23 @@ def kernel():
 """)
 
 
+@pytest.mark.parametrize("op_name", ["mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv"])
+@pytest.mark.parametrize("index", [0, 1])
+def test_direct_paired_call_projection_rejected_before_codegen(op_name, index):
+    args = "x, x, m, m" if op_name in ("addcs", "subcs") else "x, x, m"
+    # Direct indexing leaves the call nested inside TupleGetItemExpr. Reject it
+    # during verification rather than reaching an unbound codegen SSA lookup.
+    with pytest.raises((ValueError, ParserError), match="bind the paired call before indexing"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    with pl.reg_scope():
+        x = pl.reg.broadcast(2, lanes=64, dtype=pl.UINT32)
+        m = pl.reg.full_mask(lanes=64)
+        component = pl.reg.{op_name}({args})[{index}]
+""")
+
+
 def test_unused_pair_projection_and_alias():
     function = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)

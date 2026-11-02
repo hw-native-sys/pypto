@@ -288,8 +288,16 @@ scalar literals for `axpy`/`lrelu` are normalized to the vector dtype.
 | `intlv(lhs, rhs, mask)` | `vintlv` | `(low, high)` interleaved vectors; even lane count |
 | `dintlv(lhs, rhs, mask)` | `vdintlv` | `(even, odd)` deinterleaved vectors; even lane count |
 
+Unknown indexed or dynamic reads do not disable initialization checks for known
+static reads on the same allocation. Their own safety remains the caller's responsibility.
+
 Paired results use one tuple-producing IR Call and two SSA results. The tuple,
 its projections and all carry masks remain local to the defining RegScope.
+Bind a paired call before indexing it: use `pair = pl.reg.mull(a, b, mask)`
+followed by `low = pair[0]`. Direct `pl.reg.mull(a, b, mask)[0]` is rejected.
+Unpack paired results before carrying them through `if` joins or loops: pass
+individual registers (for example, `low, high = pl.reg.mull(a, b, mask)`),
+not the tuple itself. The verifier rejects tuple-valued joins and loop carries.
 `mull` preserves input signedness in both halves. Subtraction carry masks use
 **true for no borrow**; they are distinct from the execution mask.
 Both outputs of `intlv`/`dintlv` have zero in inactive lanes. Codegen explicitly

@@ -64,8 +64,9 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   }
   void VisitExpr_(const CallPtr& call) override {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter"))
+        IsOp(call, "reg.scatter")) {
       memory.push_back(call);
+    }
     IRVisitor::VisitExpr_(call);
   }
 };
@@ -167,8 +168,9 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // Tile. Readwrite preserves dependencies on the untouched contents without
     // claiming that masked-off lanes physically read memory. Store-version
     // aliases share this capture and accumulate its conservative effect.
-    if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))
+    if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter")) {
       artifact.parameter_effects[it->second] = "readwrite";
+    }
   }
   std::vector<std::string> addresses;
   if (!capture_tiles.empty()) {

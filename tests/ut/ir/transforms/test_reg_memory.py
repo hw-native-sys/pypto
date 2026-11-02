@@ -176,5 +176,47 @@ def test_exhaustive_branches_preserve_only_common_initialized_bytes(branches, of
             initialize(program)
 
 
+@pytest.mark.parametrize("read_kind", ["gather", "dynamic_load"])
+@pytest.mark.parametrize("unknown_first", [False, True])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_unknown_read_preserves_static_initialization_checks(read_kind, unknown_first, initialized):
+    ib = IRBuilder()
+    with ib.function("indexed_memory", span=SPAN, type=ir.FunctionType.AIV) as f:
+        offset = f.param("offset", ir.ScalarType(DataType.INDEX), SPAN)
+        storage = ib.let("storage", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            if initialized:
+                value = ib.emit_reg(
+                    "value",
+                    "reg.broadcast",
+                    [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                    {"lanes": 64, "dtype": DataType.FP32},
+                    SPAN,
+                )
+                ib.emit_reg_store("updated", storage, value, span=SPAN)
+            for unknown in [unknown_first, not unknown_first]:
+                if unknown and read_kind == "gather":
+                    offsets = ib.emit_reg(
+                        "offsets",
+                        "reg.index_gen",
+                        [ir.ConstInt(0, DataType.UINT32, SPAN)],
+                        {"lanes": 64, "dtype": DataType.UINT32},
+                        SPAN,
+                    )
+                    mask = ib.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN)
+                    ib.emit_reg("gathered", "reg.gather", [storage, offsets, mask], {}, SPAN)
+                else:
+                    read_offset = offset if unknown else ir.ConstInt(0, DataType.INDEX, SPAN)
+                    ib.emit_reg("read", "reg.load", [storage, read_offset], {"lanes": 64}, SPAN)
+    program = ir.Program([f.get_result()], "RegisterMemory", SPAN)
+    # Unknown reads cannot hide a static read, even one preceding the gather,
+    # and do not initialize storage. A proven store still permits the read.
+    if initialized:
+        initialize(program)
+    else:
+        with pytest.raises(ValueError, match="uninitialized"):
+            initialize(program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

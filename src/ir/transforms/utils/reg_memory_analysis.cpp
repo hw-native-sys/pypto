@@ -43,7 +43,7 @@ using Intervals = std::map<int64_t, int64_t>;
 class RegisterRoots : public IRVisitor {
  public:
   std::set<const Var*> roots;
-  // One dynamic access makes the allocation user-managed. Excluding the
+  // A dynamic write makes the allocation user-managed. Excluding the
   // whole alias group avoids rejecting a static read after a dynamic write.
   std::set<const Var*> dynamic_roots;
 
@@ -59,7 +59,10 @@ class RegisterRoots : public IRVisitor {
           return std::all_of(shape.begin(), shape.end(),
                              [](const ExprPtr& dim) { return As<ConstInt>(dim) != nullptr; });
         };
-        if (!effect.begin || !effect.end || !is_static(tile->shape_) ||
+        // Unknown reads establish no initialization facts and must not hide
+        // known uninitialized reads elsewhere on the same allocation.
+        const bool dynamic_write = effect.access != ArgEffect::Read && (!effect.begin || !effect.end);
+        if (dynamic_write || !is_static(tile->shape_) ||
             (tile->tile_view_ && !is_static(tile->tile_view_->valid_shape))) {
           dynamic_roots.insert(effect.root.get());
         }
@@ -151,6 +154,12 @@ class InitializationChecker : public IRVisitor {
         IsOp(call, "reg.scatter")) {
       auto effect = GetRegMemoryEffect(call);
       if (!effect.root || !roots_.count(effect.root.get())) {
+        IRVisitor::VisitExpr_(call);
+        return;
+      }
+      if (effect.access == ArgEffect::Read && (!effect.begin || !effect.end)) {
+        // The caller owns indexed/dynamic read safety; keep checking all other
+        // accesses on this root, without crediting the read as a write.
         IRVisitor::VisitExpr_(call);
         return;
       }

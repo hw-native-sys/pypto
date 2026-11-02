@@ -74,8 +74,9 @@ class ScopeOperands : public IRVisitor {
   }
   void VisitExpr_(const CallPtr& call) override {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
-        IsOp(call, "reg.scatter"))
+        IsOp(call, "reg.scatter")) {
       memory.push_back(call);
+    }
     IRVisitor::VisitExpr_(call);
   }
   void VisitStmt_(const ForStmtPtr& stmt) override {
