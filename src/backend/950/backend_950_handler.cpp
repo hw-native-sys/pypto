@@ -17,7 +17,9 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/type.h"
 #include "pypto/sync/resource_catalog.h"
@@ -38,9 +40,14 @@ ir::HardwareLoopProfile Ascend950Handler::GetHardwareLoopProfile() const {
   profile.max_depth = 1;
   profile.allow_scalar_carry = false;
   profile.allow_tile_carry = true;  // The helper additionally proves storage identity.
-  profile.allowed_ops = {"reg.load",        "reg.store",   "reg.add",       "reg.sub",       "reg.mul",
-                         "reg.minimum",     "reg.maximum", "reg.broadcast", "reg.index_gen", "reg.full_mask",
-                         "reg.active_mask", "reg.compare", "reg.select"};
+  // Validate each identity now so a typo or rename fails at profile construction.
+  const auto& registry = ir::OpRegistry::GetInstance();
+  auto validated = [&registry](const char* name) { return registry.GetOp(name)->name_; };
+  profile.allowed_ops = {validated("reg.load"),      validated("reg.store"),       validated("reg.add"),
+                         validated("reg.sub"),       validated("reg.mul"),         validated("reg.minimum"),
+                         validated("reg.maximum"),   validated("reg.broadcast"),   validated("reg.index_gen"),
+                         validated("reg.full_mask"), validated("reg.active_mask"), validated("reg.compare"),
+                         validated("reg.select")};
   return profile;
 }
 
