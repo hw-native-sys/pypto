@@ -337,6 +337,12 @@ session, the first host must resolve to a local address that every MPI host can
 reach; use routable host names or addresses rather than loopback aliases.
 Loopback placement is suitable for an entirely local session.
 
+MPI ranks use `/` as their default working directory, so executors do not need
+the caller's checkout path. An explicit working-directory option in
+`mpirun_args` is preserved. Relative launcher paths and launcher file arguments
+resolve on the caller; Python executable paths containing a relative directory
+are made absolute before rank launch.
+
 Set `python_executable` to the Python available at that path on every MPI host,
 with Simpler, Torch, mpi4py and the selected native runtime installed. Set
 `mpirun_path` to the caller's MPI launcher and use `mpirun_args` for its extra

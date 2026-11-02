@@ -305,6 +305,11 @@ fence，当前普通 I/O 路径会拒绝此类访问。
 且所有 MPI 主机均可访问的地址；应使用可路由的主机名或地址，避免 loopback
 别名。完全在本机运行的会话可以使用 loopback 地址。
 
+MPI rank 默认以 `/` 为工作目录，因此 executor 无需拥有调用端的 checkout
+路径。`mpirun_args` 中显式指定的工作目录选项会保留。相对 launcher 路径和
+launcher 文件参数仍在调用端解析；Python 可执行文件路径包含相对目录时，
+会先转换成绝对路径再启动 rank。
+
 `python_executable` 指定的 Python 路径须在每台 MPI 主机上可用，并安装
 Simpler、Torch、mpi4py 及选定的原生运行时。`mpirun_path` 指定调用端的
 MPI launcher，`mpirun_args` 传递其额外选项。Simpler 决定静态 rank 数量

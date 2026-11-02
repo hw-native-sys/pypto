@@ -32,7 +32,18 @@ def _numeric_topology(topology: dict[str, Any]) -> dict[str, Any]:
     result["controller_host"] = socket.gethostbyname(result["controller_host"])
     for spec in result["executor_ranks"]:
         spec["host"] = socket.gethostbyname(spec["host"])
+    arguments = list(result.get("launcher_args", ()))
+    if not any(arg.partition("=")[0] in ("-wdir", "--wdir", "-wd", "--wd") for arg in arguments):
+        # MPI must not require the caller's PyPTO checkout on runtime-only
+        # executors. Keep launcher cwd unchanged for relative launcher files.
+        arguments.extend(("-wdir", "/"))
+    result["launcher_args"] = arguments
     return result
+
+
+def _executable_path(value: str) -> str:
+    """Resolve relative executable paths before MPI changes the rank cwd."""
+    return os.path.abspath(value) if os.path.dirname(value) and not os.path.isabs(value) else value
 
 
 class DirectSession:
@@ -78,8 +89,8 @@ class DirectSession:
             settings = {
                 "topology_path": str(topology_path),
                 "controller": target,
-                "mpirun_path": config.mpirun_path,
-                "python_executable": config.python_executable,
+                "mpirun_path": _executable_path(config.mpirun_path),
+                "python_executable": _executable_path(config.python_executable),
                 "startup_by_rank": {str(rank): record for rank, record in startup.items()},
             }
             filename = self.directory / "startup.json"

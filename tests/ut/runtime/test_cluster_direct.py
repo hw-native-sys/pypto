@@ -18,7 +18,63 @@ from types import SimpleNamespace
 import pytest
 import torch
 from pypto.runtime import _cluster_channel as channel
+from pypto.runtime import _cluster_direct_launch as launcher
+from pypto.runtime import _cluster_direct_session as session_module
 from pypto.runtime._cluster_direct_session import DirectSession
+
+
+def test_direct_launcher_preserves_relative_launcher_arguments(tmp_path, monkeypatch):
+    from pathlib import Path  # noqa: PLC0415
+
+    import simpler.mpi_direct_supervisor as supervisor  # noqa: PLC0415
+    from simpler.mpi_direct_bootstrap import encode_startup  # noqa: PLC0415
+
+    monkeypatch.chdir(tmp_path)
+    settings = {
+        "topology_path": str(tmp_path / "topology.json"),
+        "controller": "portable_package.controller:main",
+        "mpirun_path": "/usr/local/bin/mpirun",
+        "python_executable": "/runtime-only-python",
+        "startup_by_rank": {"0": {}, "1": {}},
+    }
+    startup = tmp_path / "startup.json"
+    startup.write_bytes(encode_startup(settings))
+    seen = []
+
+    def run(topology, controller, **kwargs):
+        seen.append((Path.cwd(), topology, controller, kwargs["startup_by_rank"]))
+        return 0
+
+    monkeypatch.setattr(supervisor, "run_supervisor", run)
+    assert launcher.main(str(startup)) == 0
+    assert seen == [(tmp_path, settings["topology_path"], settings["controller"], {0: {}, 1: {}})]
+    assert json.loads((tmp_path / "cleanup.json").read_text()) == {}
+
+
+@pytest.mark.parametrize("arguments", [[], ["--hostfile", "relative-hosts"]])
+def test_direct_rank_working_directory_does_not_require_caller_checkout(arguments, monkeypatch):
+    monkeypatch.setattr(session_module.socket, "gethostbyname", lambda host: "127.0.0.1")
+    topology = {"controller_host": "node", "executor_ranks": [{"host": "node"}], "launcher_args": arguments}
+    result = session_module._numeric_topology(topology)
+    assert result["launcher_args"] == arguments + ["-wdir", "/"]
+    assert topology["launcher_args"] == arguments
+
+
+def test_direct_rank_working_directory_preserves_explicit_override(monkeypatch):
+    monkeypatch.setattr(session_module.socket, "gethostbyname", lambda host: "127.0.0.1")
+    topology = {
+        "controller_host": "node",
+        "executor_ranks": [{"host": "node"}],
+        "launcher_args": ["-wdir", "/shared"],
+    }
+    assert session_module._numeric_topology(topology)["launcher_args"] == ["-wdir", "/shared"]
+
+
+def test_direct_relative_executables_resolve_before_rank_directory_changes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert session_module._executable_path("./runtime-python") == str(tmp_path / "runtime-python")
+    assert session_module._executable_path("./bin/mpirun") == str(tmp_path / "bin/mpirun")
+    assert session_module._executable_path("python3") == "python3"
 
 
 @pytest.mark.parametrize("value", [float("inf"), -float("inf"), float("nan"), -0.0])
