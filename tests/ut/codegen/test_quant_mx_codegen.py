@@ -42,11 +42,48 @@ def _allocation_range(mlir, name_fragment):
     match = re.search(r"addr = %c(\d+)_i64.*dtype=([^,]+), rows=(\d+), cols=(\d+)", line)
     assert match is not None, line
     address, dtype, rows, cols = match.groups()
-    element_bytes = {"i8": 1, "ui8": 1, "f16": 2, "bf16": 2, "f32": 4}[dtype]
+    element_bytes = {"i8": 1, "ui8": 1, "f16": 2, "bf16": 2, "f32": 4, "!pto.f4E2M1x2": 1}[dtype]
     return int(address), int(address) + int(rows) * int(cols) * element_bytes
 
 
 class TestQuantMxCodegen:
+    def test_fp4_raw_small_tile_codegen(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[3, 64], pl.BF16],
+                out: pl.Tensor[[3, 32], pl.FP4E2M1X2],
+            ):
+                values = pl.load(src, [0, 0], [3, 64])
+                max_workspace = pl.tile.set_validshape(pl.tile.create([1, 16], pl.BF16), 1, 6)
+                scaling_workspace = pl.tile.set_validshape(pl.tile.create([1, 128], pl.BF16), 1, 6)
+                quant, _exp = pl.tile.quant_mx_raw(
+                    values, max_workspace, scaling_workspace, group_axis=1, dtype=pl.FP4E2M1X2
+                )
+                pl.store(quant, [0, 0], out)
+
+        mlir = _generate_mlir(Program)
+        assert "quant_type MXFP4_E2M1" in mlir
+        assert "dtype=!pto.f4E2M1x2, rows=3, cols=32, v_row=3, v_col=32" in mlir
+        assert "dtype=ui8, rows=1, cols=32, v_row=1, v_col=6" in mlir
+
+    @pytest.mark.parametrize("axis", [0, 1])
+    def test_fp4_tensor_quant_materializes_carrier_output(self, axis):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[64, 64], pl.BF16]) -> pl.Tensor[[64, 32], pl.FP4E2M1X2]:
+                quant, _scale = pl.quant_mx(src, group_axis=axis, dtype=pl.FP4E2M1X2)
+                return quant
+
+        mlir = _generate_mlir(Program)
+        assert "quant_type MXFP4_E2M1" in mlir
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line]
+        assert len(stores) == 1
+        assert "dtype=!pto.f4E2M1x2, rows=64, cols=32" in stores[0]
+
     @pytest.mark.parametrize(("case", "slot_num"), [("direct", 4), ("none", 4), ("split", 4), ("none", 2)])
     def test_public_mx_gather_compiles(self, case, slot_num, tmp_path):
         """Both public MX scale orientations survive an explicit AIV/AIC crossing."""
@@ -123,13 +160,16 @@ class TestQuantMxCodegen:
             assert any("blayout=col_major, slayout=col_major" in line for line in scale_pops)
 
     @pytest.mark.parametrize(
-        ("group_axis", "src_shape", "out_shape"),
+        ("group_axis", "src_shape", "out_shape", "dtype", "algorithm"),
         [
-            (1, (16, 64), (16, 64)),
-            (0, (32, 64), (64, 32)),
+            (1, (16, 64), (16, 64), pl.FP8E4M3FN, "ocp"),
+            (0, (32, 64), (64, 32), pl.FP8E4M3FN, "ocp"),
+            (1, (16, 64), (16, 32), pl.FP4E2M1X2, "ocp"),
+            (0, (64, 64), (64, 32), pl.FP4E2M1X2, "ocp"),
+            (0, (64, 64), (64, 32), pl.FP4E2M1X2, "nv"),
         ],
     )
-    def test_packed_quant_codegen(self, group_axis, src_shape, out_shape):
+    def test_packed_quant_codegen(self, group_axis, src_shape, out_shape, dtype, algorithm):
         src_rows, src_cols = src_shape
         out_rows, out_cols = out_shape
 
@@ -139,11 +179,13 @@ class TestQuantMxCodegen:
             def main(
                 self,
                 src: pl.Tensor[[src_rows, src_cols], pl.BF16],
-                out: pl.Tensor[[out_rows, out_cols], pl.FP8E4M3FN],
+                out: pl.Tensor[[out_rows, out_cols], dtype],
             ):
                 quant, _scale = pl.quant_mx(
                     pl.load(src, [0, 0], [src_rows, src_cols]),
                     group_axis=group_axis,
+                    dtype=dtype,
+                    quant_scale_alg=algorithm,
                 )
                 pl.store(quant, [0, 0], out)
 
@@ -151,7 +193,17 @@ class TestQuantMxCodegen:
         tquant = next(line for line in mlir.splitlines() if "pto.tquant.mx" in line)
         x2zz = next(line for line in mlir.splitlines() if "pto.tmov" in line and "x2zz_tmp_static" in line)
         assert tquant.split("outs(", 1)[1].split(" : ", 1)[0].count(",") == 3
-        assert "quant_type MXFP8" in tquant
+        quant_type = "MXFP4_E2M1" if dtype == pl.FP4E2M1X2 else "MXFP8"
+        assert f"quant_type {quant_type}" in tquant
+        assert ("quant_scale_alg nv" in tquant) == (algorithm == "nv")
+        if dtype == pl.FP4E2M1X2:
+            # PTOAS rejects treshape on its custom FP4 type; the static-valid
+            # descriptor must point at the same explicitly allocated carriers.
+            static_dst = next(
+                line for line in mlir.splitlines() if "tquant_dst_static" in line and " = " in line
+            )
+            assert "pto.alloc_tile addr = " in static_dst
+            assert f"rows={out_rows}, cols={out_cols}" in static_dst
         assert f"grpAxis = #pto<mx_group_axis axis{group_axis}>" in tquant
         assert f"grpAxis = #pto<mx_group_axis axis{group_axis}>" in x2zz
         assert ("tq_src_kn" in mlir) == (group_axis == 0)

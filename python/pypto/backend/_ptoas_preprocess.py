@@ -132,9 +132,18 @@ def preprocess_ptoas_output(content: str) -> str:
     # ``ChipTensor`` is only the argument as it arrives at the boundary, and
     # then named the descriptor a kernel actually reads ``Tensor`` in the
     # per-runtime ``tensor.h`` shim (simpler#2044), retiring ``Tensor``.
-    result = re.sub(
-        r'(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void',
-        "static __aicore__ void",
+    # Internalize definitions embedded in this translation unit, but preserve
+    # declarations of separately compiled device functions (including VPTO
+    # helpers). Giving those declarations static linkage prevents device linking.
+    functions = re.compile(
+        r'(?P<prefix>(?:static\s+)?(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void)'
+        r"(?P<signature>\s+(?P<name>\w+)\s*\([^{};]*\)\s*)(?P<end>[{;])"
+    )
+    definitions = {match["name"] for match in functions.finditer(result) if match["end"] == "{"}
+    result = functions.sub(
+        lambda match: ("static __aicore__ void" if match["name"] in definitions else match["prefix"])
+        + match["signature"]
+        + match["end"],
         result,
     )
     return re.sub(r"\bAICORE\b", "__aicore__", result)

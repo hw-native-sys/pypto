@@ -21,13 +21,16 @@ fix in the SPMD context: two sibling loops inside a pl.spmd block may reuse the
 same loop-local names without the renamer emitting an out-of-scope bridge.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
-from pypto import backend
+from pypto import backend, passes
+from pypto.backend import BackendType
 from pypto.ir import compile as compile_ir
 from pypto.jit.decorator import jit
 from pypto.pypto_core import ir
-from pypto.runtime import RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
 
 # Module-level constants — the JIT specializer inlines module-level ints at
 # their use sites, but does NOT capture function-local closure variables.
@@ -340,6 +343,86 @@ def test_inline_spmd_reads_loop_carried_tensor(tmp_path):
     compiled = repro.compile(config=RunConfig(platform="a5", save_kernels_dir=str(tmp_path / "compiled")))
     assert (compiled.output_dir / "orchestration" / "repro.cpp").is_file()
     assert list((tmp_path / "compiled").rglob("*.pto"))
+
+
+def test_constexpr_manual_parallel_tensor_and_taskid_merge_compiles(tmp_path, monkeypatch):
+    """Issue #3115: the first Simplify must preserve a wrapped branch yield.
+
+    Compile the actual inline/SPMD authoring surface through source codegen.
+    The dependency assertion below also checks that the TaskId array reaches
+    the consumer; merely accepting the early SSA shape would miss that loss.
+    """
+    monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "no_optional_ptoas"))
+    tokens_dim = pl.dynamic("T")
+
+    @pl.jit.inline(auto_scope=False)
+    def producer(
+        x: pl.Tensor[[tokens_dim, 32], pl.FP32],
+        tmp: pl.Tensor[[tokens_dim, 32], pl.FP32],
+        group: pl.Scalar[pl.INDEX],
+    ):
+        with pl.spmd(1) as ready:
+            row = group * 32 + pl.tile.get_block_idx() * 32
+            count = pl.min(32, pl.tensor.dim(x, 0) - row)
+            value = pl.load(x, [row, 0], [32, 32], valid_shape=[count, 32])
+            pl.store(pl.add(value, 1.0), [row, 0], tmp)
+        return tmp, ready
+
+    @pl.jit.inline(auto_scope=False)
+    def branch(
+        x: pl.Tensor[[tokens_dim, 32], pl.FP32],
+        out: pl.Tensor[[tokens_dim, 32], pl.FP32],
+        count: pl.constexpr,
+    ):
+        tokens = pl.tensor.dim(x, 0)
+        tmp = pl.create_tensor([tokens, 32], dtype=pl.FP32)
+        deps = pl.array.create(count, pl.TASK_ID)
+        if count == 1:
+            tmp, ready = producer(x, tmp, 0)
+            deps[0] = ready
+        else:
+            with pl.manual_scope():
+                for group in pl.parallel(count):
+                    tmp, ready = producer(x, tmp, group)
+                    deps[group] = ready
+        with pl.spmd(count, deps=[deps]):
+            row = pl.tile.get_block_idx() * 32
+            valid_rows = pl.min(32, tokens - row)
+            value = pl.load(tmp, [row, 0], [32, 32], valid_shape=[valid_rows, 32])
+            pl.store(value, [row, 0], out)
+        return out
+
+    @pl.jit(auto_scope=False)
+    def entry(
+        x: pl.Tensor[[tokens_dim, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[tokens_dim, 32], pl.FP32]],
+    ):
+        if pl.tensor.dim(x, 0) <= 32:
+            out = branch(x, out, 1)
+        else:
+            out = branch(x, out, 2)
+        return out
+
+    compiled = entry.compile(
+        config=RunConfig(
+            backend_type=BackendType.Ascend910B,
+            execution_mode=ExecutionMode.ONBOARD,
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            save_kernels=True,
+            save_kernels_dir=str(tmp_path / "compiled"),
+        )
+    )
+    source = (compiled.output_dir / "orchestration" / "entry.cpp").read_text()
+    dep_arrays = re.findall(r"TaskId (params_t\d+_deps)\[(\d+)\];", source)
+    assert [int(size) for _, size in dep_arrays] == [1, 2]
+    assert source.count(".set_dependencies(") == 2
+    for target, size in dep_arrays:
+        # Both branches must gather every producer handle from the same array,
+        # including slot 1 in the parallel producer branch.
+        reads = re.findall(rf"if \((\w+)\[(\d+)\]\.is_valid\(\)\) {target}\[", source)
+        assert len({array for array, _ in reads}) == 1
+        assert [int(index) for _, index in reads] == list(range(int(size)))
+    assert list(compiled.output_dir.rglob("*.pto"))
 
 
 if __name__ == "__main__":

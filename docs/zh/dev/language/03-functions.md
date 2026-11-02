@@ -6,6 +6,29 @@
 
 函数声明形式、参数方向、跨模块复用，以及如何把 IR 打印回 Python 语法。
 
+## JIT 实现结构
+
+JIT 实现位于 `python/pypto/jit/`。公开的 `jit` 对象和 `JITFunction` 保留在
+`decorator.py`；私有分析模块提供元数据，不持有编译对象缓存，也不负责调度 kernel。
+
+| 模块 | 职责 |
+| ---- | ---- |
+| `decorator.py` | 装饰器、`JITFunction`、依赖发现、缓存所有权，以及编译/执行入口 |
+| `_arguments.py` | 可选 torch 加载、张量实参元数据、注解和 signature/constexpr 校验 |
+| `_ast_analysis.py` | 共享只读 AST 缓存、源码名称和动态维声明 |
+| `_call_binding.py` | 调用点参数映射、constexpr 变体和跨依赖的动态维传播 |
+| `_tensor_meta.py` | 按源码顺序推导局部张量元数据、处理分支/循环绑定及递归依赖返回值 |
+| `specializer.py` | 专门化上下文、注解处理、程序源码组装与诊断源码位置映射 |
+| `_specialize_body.py` | 有状态 AST 函数体改写、变量重命名与词法作用域处理 |
+| `_specialize_values.py` | 专门化与缓存键共用的常量及 dtype/layout 源码渲染 |
+| `_specialize_types.py` | 共享的 `DynDim`、`ShapeDim`、`TensorMeta` 定义；原有 `specializer` 导入路径保持有效 |
+| `_source.py`、`cache.py`、`_persistent.py` | 请求命名空间快照、缓存键和持久产物解析 |
+
+`JITFunction` 持有依赖图状态、编译对象缓存及其锁。缓存键构造与专门化继续共享
+同一次请求的命名空间快照（namespace snapshot）。元数据推导通过显式回调（callback）
+获取依赖，并将回调传入递归返回值分析，因此不需要在运行时导入装饰器模块。
+共享 helper 通过其所属模块查找，使 AST 缓存和测试替换目标保持唯一。
+
 ## JIT 常量与编译复用
 
 `@pl.jit` 的函数体会被转写成 `@pl.program` 源码，并在只含 `pl` 与 `pld` 的命名空间中
@@ -51,6 +74,66 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 快照仅复制绑定：此常量跟踪机制不支持编译期间修改任意配置对象
 内部状态，或修改编译器/源码文件。持久复用还需要完整的
 [产物身份与缓存策略](../10-jit-cache.md)。
+
+### 动态维度元数据
+
+解析特化程序前，JIT 会推导局部 `TensorMeta`，为仅有裸张量注解的 helper 补齐实参类型。
+标量绑定使用 `int` 常量、已有张量轴的 `DynDim` 引用、不可变表达式元组或表示未知的
+`None`。`width = n * 8` 保存为快照 `(ast.Mult, (n_dim, 8))`；赋值别名保留同一元组，
+后续算术则创建不同快照。重新绑定操作数的源变量名不会改变已有快照。
+
+reshape 推导在记录 `TensorMeta.shape` 时，才为标量表达式建立结果专属的 `DynDim`
+符号；标量快照不进入张量类型。同一结果 shape 内重复使用同一快照时共享
+符号；不同结果建立独立绑定。被调函数从实际张量参数的描述符（descriptor）读取维度。
+原始算术及 reshape 校验仍保留在程序中，占位上界不会替代真实运行时尺寸。
+
+`synthesized` 标记自动生成的占位符号，继续沿用既有注解覆盖及 helper 返回行为。
+
+### JIT 内联 helper 的 Tile 参数
+
+内联 helper 可以接收显式声明类型的片上 Tile：
+
+```python
+@pl.jit.inline(auto_scope=False)
+def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]) -> pl.Tile:
+    return tile
+```
+
+专门化（specialization）保留声明的形状、数据类型和内存空间，并折叠注解中引用的
+模块与闭包常量。如果延迟求值的注解引用 helper 自身的 `pl.constexpr` 参数，
+会先代入该调用的 constexpr 绑定，再求值注解；该绑定优先于模块或闭包中的同名常量。
+不同绑定会生成各自的 helper 专门化。`p.Tile` 或直接导入的 `Tile` 等 DSL 别名
+会转换为规范的 `pl` 路径，并保留 `TileView`、`MemRef` 元数据；用户恰好定义了
+无关的同名变量 `pl`，也不会干扰生成结果。若工厂函数的局部常量仅用于立即求值的
+Tile 注解、没有进入函数闭包，专门化可以保留原函数已经求值的注解。
+即使部分形状轴依赖 helper 形参，其他独立的形状轴与 dtype 仍会保留，依赖形参的
+部分则逐次代入调用参数；合并后的类型声明同样参与缓存身份计算。内存空间 constexpr
+同样逐次代入，并保留独立的工厂形状。元数据替换需保持原有类别，无法确定类别时
+会给出明确错误。若同一个表达式
+同时引用形参与无法恢复的工厂局部值，请把该局部值作为另一个 constexpr 参数传入，
+或在 helper 函数体中引用它以保留闭包。
+仅被 Tile 参数类型引用的动态符号也会生成模块级
+`pl.dynamic()` 声明，不再依赖 Tensor 参数同时引用这些符号。
+生成的符号名与 Tile 或 Tensor 形参同名时也会保留声明；真实的 Scalar 维度形参仍使用局部绑定。
+自由动态符号与不同的 Scalar 形参共用名字时，专门化会明确报告歧义；请为自由符号使用唯一的 `pl.dynamic()` 名字。
+
+`InlineFunctions` 在代入实参之前检查 Tile 的数据类型、物理维数与形状，以及双方
+已明确指定的内存空间是否冲突。泛型物理维度绑定到实参的物理尺寸，有效尺寸不参与
+这一检查；支持 `2*M` 绑定到 `16`、得到 `M=8` 等整数仿射绑定。
+推导前先代入已知 Scalar 实参：`n=8`、`n+M=16` 可推导出 `M=8`。
+不同 Tile 实参可以独立绑定各自的泛型物理维度，helper 返回 Tile 形参时也遵循这一规则。
+`tmp = second; return tmp` 等简单不可变别名也会沿用对应实参的返回类型。
+与 Tensor 类型、显式 Tile 视图或 Scalar 形参共用的维度仍需满足共享约束，没有返回值的 helper 也会检查。
+Scalar 实参值也约束只出现在视图中的维度：声明有效尺寸为 `n` 时，`n=8` 不能匹配实际有效尺寸 `3`。
+`n - 1` 等依赖 Scalar 的复合视图表达式也会在代入实参后比较，覆盖有效尺寸、stride 和 offset。
+这也包含通过 `rows = 2*n` 等共享维度间接依赖 Scalar 的表达式。
+实参省略有效形状时使用物理形状，省略 offset 时使用零；依赖 Scalar 的 stride 约定需要实参具有显式 stride 元数据。
+JIT 专门化也会保留嵌套 `pl.Tuple` 参数注解，包括其中完整的 Tile 类型、动态符号和逐次调用的 constexpr 绑定。
+tuple 参数内的 Tile 也会递归检查相同的物理类型和视图约束。
+为 Tile 注解生成的动态维度声明名必须使用 Python 规范化后可赋值的合法标识符，不能是 Python 关键字，也不能覆盖 DSL 别名 `pl` 或 `pld`。
+内联（inlining）直接代入调用方的 Tile，无需复制，并保留其有效形状
+（valid shape）。专门化也会保留非内联函数中可求值的 Tile 注解。
+这会保留类型声明，但不会扩展设备派发接口；普通 InCore 入口仍不支持 Tile 参数。
 
 ### 编译选项与诊断请求
 
@@ -419,6 +502,22 @@ print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b"（自定义�
 捕获的 Python `InlineStmt.body` 排除这些指令，同时保留实现和 docstring。
 引用参数的 attrs 绑定到函数自身的参数。前导区必须位于可执行语句之前
 （允许开头的 docstring）；指令位置错误或键重复都会报错，SubWorker 亦然。
+
+### 打印器实现
+
+私有的 `IRPythonPrinter` 声明位于 `src/ir/transforms/python_printer.h`。
+各实现文件共享同一个访问器（visitor）实例，因此递归打印表达式、类型和语句时，
+变量重命名、签名上下文（signature context）、缩进及作用域状态保持一致。
+
+| `src/ir/transforms/` 中的源文件 | 职责 |
+| ------------------------------- | ---- |
+| `python_printer.cpp` | 公开入口与格式化回调、名称消歧、函数/程序打印及依赖排序 |
+| `python_printer_expr.cpp` | 表达式优先级、常量、调用/提交及属性值 |
+| `python_printer_stmt.cpp` | 控制流、作用域、注释、SSA yield 及窗口缓冲区声明 |
+| `python_printer_type.cpp` | 类型标注、形状、内存引用（memory reference）及张量/Tile 视图 |
+
+公开声明仍位于 `include/pypto/ir/transforms/printer.h`。
+子表达式打印器继承外层的变量名称映射，保留形状表达式、内存偏移和槽位索引中的绑定。
 
 ### 简洁模式 (Concise Mode)
 

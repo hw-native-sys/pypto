@@ -63,6 +63,17 @@ program_outlined = outline_pass(program)
 这正是这类返回值曾经在生成的 C++ 中变成未定义标识符、后来又变成静默错误的
 `= 0` 的原因（issue #631）。
 
+`tile.store` 的目标可以是普通 `Var`，也可以是已有的循环携带参数 `IterArg`。
+两者都需要由提取后的 kernel 返回写入后的值；后续别名和 yield 必须使用该
+返回值，而不是调用前的目标变量。MANUAL 并行区域中的生产者也遵循此规则。
+当条件分支已通过末尾的 runtime 或 split scope 返回结果时，写入目标的传递会
+原地扩展该 yield，保留已有结果槽位和作用域元数据。
+
+已有的 Orchestration 函数也会在捕获变量前正规化声明于参数中的维度读取：
+内联可能在解析后引入 `n = tensor.dim(x, 0)`。当该维度就是签名符号 `T` 时，
+`n` 的使用（包括 Tensor shape）会替换为 `T`，避免提取后的签名捕获调用方
+局部别名。真正的运行时维度读取保持不变。
+
 在任何输入/输出分析之前，`PlanScalarOutputHoist`
 （`utils/scalar_output_hoist.h`）会把每个 Scalar live-out 的定义语句移到调用方、
 放在调用之前：

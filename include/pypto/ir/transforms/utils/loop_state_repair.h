@@ -111,8 +111,9 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts,
 std::vector<StmtPtr> StripDanglingIfReturnVars(const std::vector<StmtPtr>& stmts,
                                                const std::unordered_set<const Var*>& extra_defined = {});
 
-/// `params` are the split function's parameters, forwarded to
-/// `FixupDanglingYieldValues` — see its note on why the walk cannot find them.
+/// `params` are the split function's parameters, visible on entry to both
+/// dangling-yield repair and IfStmt return-value cleanup. Neither walk can
+/// discover these definitions from statements in the body.
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map,
                                            const std::unordered_set<const Var*>& extra_defined,

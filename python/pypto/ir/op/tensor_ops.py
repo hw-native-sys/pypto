@@ -417,6 +417,8 @@ def matmul(
     b_trans: bool = False,
     c_matrix_nz: bool = False,
     span: Span | None = None,
+    *,
+    tf32_mode: str | None = None,
 ) -> Call:
     """Matrix multiplication with optional transpose.
 
@@ -434,6 +436,8 @@ def matmul(
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
         span: Optional source span for debugging (auto-captured if not provided)
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication
@@ -446,6 +450,8 @@ def matmul(
         "b_trans": b_trans,
         "c_matrix_nz": c_matrix_nz,
     }
+    if tf32_mode is not None:
+        kwargs["tf32_mode"] = tf32_mode
     if out_dtype is not None:
         kwargs["out_dtype"] = out_dtype
 
@@ -457,9 +463,10 @@ def quant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
     span: Span | None = None,
 ) -> Call:
-    """Quantize a 2D GM tensor into MXFP8 data and an MX scale tensor.
+    """Quantize a 2D GM tensor into MXFP8/MXFP4 data and an MX scale tensor.
 
     Args:
         src: Source tensor expression. Must be a static-rank 2D FP16, BF16, or
@@ -468,6 +475,8 @@ def quant_mx(
             and an ``MX_A_ZZ`` scale tensor; ``0`` produces B-oriented data
             and an ``MX_B_NN`` scale tensor.
         dtype: Quantized data dtype. Defaults to ``FP8E4M3FN``.
+            ``FP4E2M1X2`` packs two values per output byte.
+        quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
@@ -481,9 +490,10 @@ def quant_mx(
             data dtype.
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call(
-        "tensor.quant_mx", [src], {"group_axis": group_axis, "dtype": dtype}, actual_span
-    )
+    kwargs: dict[str, Any] = {"group_axis": group_axis, "dtype": dtype}
+    if quant_scale_alg != "ocp":
+        kwargs["quant_scale_alg"] = quant_scale_alg
+    return _ir_core.create_op_call("tensor.quant_mx", [src], kwargs, actual_span)
 
 
 def matmul_mx(
@@ -526,6 +536,7 @@ def matmul_acc(
     span: Span | None = None,
     *,
     init_cond: Expr | None = None,
+    tf32_mode: str | None = None,
 ) -> Call:
     """Matrix multiplication with accumulation: acc = acc + lhs @ rhs.
 
@@ -542,12 +553,16 @@ def matmul_acc(
         b_trans: Whether to transpose rhs
         span: Optional source span for debugging (auto-captured if not provided)
         init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans}
+    if tf32_mode is not None:
+        kwargs["tf32_mode"] = tf32_mode
     args = [acc, lhs, rhs] if init_cond is None else [acc, lhs, rhs, init_cond]
     return _ir_core.create_op_call("tensor.matmul_acc", args, kwargs, actual_span)
 

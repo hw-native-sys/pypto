@@ -44,7 +44,22 @@ _DTYPE_MAP: dict[str, str] = {
 
 
 def _torch_dtype(dt: DataType) -> str:
+    if dt in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
+        raise ValueError(
+            "torch_codegen does not implement packed FP4 encoding or decoding; "
+            "use an independent byte-level reference for FP4 verification"
+        )
     return _DTYPE_MAP.get(str(dt), "torch.float32")
+
+
+def _validate_reference_type(typ: _ir.Type) -> None:
+    if isinstance(typ, (_ir.TensorType, _ir.TileType, _ir.BufferType, _ir.ScalarType)):
+        _torch_dtype(typ.dtype)
+    elif isinstance(typ, _ir.TupleType):
+        for element in typ.types:
+            _validate_reference_type(element)
+    elif isinstance(typ, _ir.MultiBufferType):
+        _validate_reference_type(typ.element_type)
 
 
 # ---------------------------------------------------------------------------
@@ -613,11 +628,30 @@ def _buffer_extract(source, row, column, destination):
     data = _buffer_active(source)[int(row):int(row) + rows, int(column):int(column) + cols]
     _buffer_write(destination, data)
 
-def _buffer_matmul(lhs, rhs, destination, accumulate):
+def _hf32_round(value, mode):
+    # HF32 keeps FP32's exponent and ten fraction bits. Drop thirteen fraction
+    # bits, with a half-ULP bias adjusted by the retained LSB for ties-to-even.
+    # Integer rounding handles both signs without changing inputs or global
+    # Torch precision settings. Preserve infinities and NaNs before bit carries.
+    bits = value.contiguous().view(torch.int32)
+    if mode == "round_even":
+        bias = 4095 + ((bits >> 13) & 1)
+    elif mode == "round_away":
+        bias = 4096
+    else:
+        raise ValueError(f"Unsupported HF32 rounding mode: {mode!r}")
+    rounded = ((bits + bias) & -8192).view(torch.float32)
+    return torch.where(torch.isfinite(value), rounded, value)
+
+def _hf32_matmul(lhs, rhs, mode):
+    return torch.matmul(_hf32_round(lhs, mode), _hf32_round(rhs, mode))
+
+def _buffer_matmul(lhs, rhs, destination, accumulate, tf32_mode=None):
     left = _buffer_active(lhs)
     right = _buffer_active(rhs)[:left.shape[1]]
     dtype = torch.int32 if lhs.dtype == torch.int8 else torch.float32
-    product = left.to(dtype) @ right.to(dtype)
+    product = (left.to(dtype) @ right.to(dtype) if tf32_mode is None
+               else _hf32_matmul(left, right, tf32_mode))
     if accumulate:
         product = product + _buffer_active(destination)
     _buffer_write(destination, product)
@@ -756,13 +790,21 @@ def _noop(comment: str = "") -> OpHandler:
     return lambda _a, _kw: f"None  # {comment}" if comment else "None"
 
 
+def _matmul_expr(lhs: str, rhs: str, kw: dict[str, Any]) -> str:
+    """Round only the multiplicands when an operation requests HF32."""
+    mode = kw.get("tf32_mode")
+    if mode is not None:
+        return f"_hf32_matmul({lhs}, {rhs}, {mode!r})"
+    return f"torch.matmul({lhs}, {rhs})"
+
+
 def _handle_tensor_matmul(a: list[str], kw: dict[str, Any]) -> str:
     lhs, rhs = a[0], a[1]
     if kw.get("a_trans"):
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    expr = f"torch.matmul({lhs}, {rhs})"
+    expr = _matmul_expr(lhs, rhs, kw)
     out_dtype = kw.get("out_dtype")
     if isinstance(out_dtype, DataType):
         expr = f"{expr}.to({_torch_dtype(out_dtype)})"
@@ -808,16 +850,16 @@ def _handle_tensor_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    expr = _acc_expr(acc, f"torch.matmul({lhs}, {rhs})", _init_cond_arg(a, 3))
+    expr = _acc_expr(acc, _matmul_expr(lhs, rhs, kw), _init_cond_arg(a, 3))
     out_dtype = kw.get("out_dtype")
     if isinstance(out_dtype, DataType):
         expr = f"{expr}.to({_torch_dtype(out_dtype)})"
     return expr
 
 
-def _tile_matmul_acc(a: list[str], _kw: dict[str, Any]) -> str:
+def _tile_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
     """Accumulating tile matmul; `.float()` matches hardware FP32 accumulation."""
-    return _acc_expr(a[0], f"torch.matmul({a[1]}, {a[2]}).float()", _init_cond_arg(a, 3))
+    return _acc_expr(a[0], f"{_matmul_expr(a[1], a[2], kw)}.float()", _init_cond_arg(a, 3))
 
 
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
@@ -1220,11 +1262,11 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.cmps"] = _handle_cmp
 
     # tile matmul variants — .float() to match hardware FP32 accumulation output
-    m["tile.matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    m["tile.matmul"] = lambda a, kw: f"{_matmul_expr(a[0], a[1], kw)}.float()"
     m["tile.batch_matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.matmul_acc"] = _tile_matmul_acc
     m["tile.batch_matmul_acc"] = _tile_matmul_acc
-    m["tile.matmul_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
+    m["tile.matmul_bias"] = lambda a, kw: f"({_matmul_expr(a[0], a[1], kw)}.float() + {a[2]})"
     m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = _tile_matmul_acc
     m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
@@ -1252,8 +1294,8 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["buffer.set_validshape"] = lambda a, _kw: f"_buffer_set_valid({a[0]}, {a[1]})"
     m["buffer.copy"] = lambda a, _kw: f"_buffer_copy({', '.join(a)})"
     m["buffer.extract"] = lambda a, _kw: f"_buffer_extract({', '.join(a)})"
-    m["buffer.matmul"] = lambda a, _kw: f"_buffer_matmul({', '.join(a)}, False)"
-    m["buffer.matmul_acc"] = lambda a, _kw: f"_buffer_matmul({', '.join(a)}, True)"
+    m["buffer.matmul"] = lambda a, kw: f"_buffer_matmul({', '.join(a)}, False, {kw.get('tf32_mode')!r})"
+    m["buffer.matmul_acc"] = lambda a, kw: f"_buffer_matmul({', '.join(a)}, True, {kw.get('tf32_mode')!r})"
     # Evaluate all inputs before copy_ so exact source/destination aliases remain safe.
     for suffix in (
         "add",
@@ -1546,6 +1588,10 @@ class TorchCodegen(_ir.IRVisitor):
                 self._emit(f"{name} = {param_name}.shape[{axis}]")
 
     def visit_function(self, func: _ir.Function) -> None:
+        for param in func.params:
+            _validate_reference_type(param.type)
+        for result_type in func.return_types:
+            _validate_reference_type(result_type)
         # Keep names function-local. IR may reuse object ids across functions;
         # sharing maps at program scope can emit stale names.
         self._var_names_by_id = {}
@@ -1704,6 +1750,7 @@ class TorchCodegen(_ir.IRVisitor):
         return True
 
     def visit_call(self, op: _ir.Call) -> None:
+        _validate_reference_type(op.type)
         op_name = op.op.name
         handler = _OP_MAP.get(op_name)
 

@@ -213,6 +213,90 @@ def test_caught_child_start_failure_cannot_pass(library, tmp_path):
     assert len(result["compilations"]) == 2
 
 
+@pytest.mark.parametrize("keyword_args", [False, True])
+def test_self_dispatch_collects_each_case(library, tmp_path, keyword_args):
+    invocation = "args=command" if keyword_args else "command"
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "cases = ['golden', 'runner', 'compile', 'module', 'guard', 'last']\n"
+        "if '--case' not in sys.argv:\n"
+        "    for case in cases:\n"
+        "        command = [sys.executable, str(Path(__file__).resolve()),\n"
+        "                   '--case', case, '-d', '3,5', '--label', 'two words']\n"
+        f"        subprocess.run({invocation}, check=True)\n"
+        "else:\n"
+        "    case = sys.argv[2]\n"
+        "    assert sys.argv[1:] == ['--case', case, '-d', '3,5', '--label', 'two words']\n"
+        "    if case in ('golden', 'last'):\n"
+        "        from golden import run\n"
+        "        run('ok', [], False, 'cached')\n"
+        "    elif case == 'runner':\n"
+        "        from golden.runner import run\n"
+        "        run('ok', [])\n"
+        "    elif case == 'compile':\n"
+        "        from pypto.ir import compile\n"
+        "        compile('ok', skip_ptoas=True)\n"
+        "    elif case == 'module':\n"
+        "        from pypto.ir.compile import compile\n"
+        "        compile('ok')\n"
+        "    else:\n"
+        "        from golden.runner import _prepare_inputs, run\n"
+        "        try:\n"
+        "            _prepare_inputs()\n"
+        "        except RuntimeError as error:\n"
+        "            assert 'prepare runtime inputs' in str(error)\n"
+        "        else:\n"
+        "            raise AssertionError('Runtime guard was not installed')\n"
+        "        run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 20)
+    assert result["passed"]
+    assert len(result["compilations"]) == 6
+
+
+@pytest.mark.parametrize(
+    "child_body",
+    [
+        "from golden import run; run('bad', [])",
+        "from golden import run; run('ok', []); raise SystemExit(3)",
+        "raise SystemExit(0)",
+        "import os; os._exit(0)",
+        "from golden import run; run('ok', []); import json; json.dumps = lambda *a, **kw: '['",
+    ],
+)
+def test_self_dispatch_cannot_hide_failed_or_unobserved_child(library, tmp_path, child_body):
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "if '--child' in sys.argv:\n"
+        f"    {child_body}\n"
+        "else:\n"
+        "    subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child'], check=False)\n"
+        "    from golden import run\n"
+        "    run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert not result["passed"]
+    assert any(not record["passed"] for record in result["compilations"])
+    assert any(record["passed"] for record in result["compilations"])
+
+
+def test_unrelated_subprocess_preserves_arguments_and_output(library, tmp_path):
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "result = subprocess.run([sys.executable, '-c', 'print(42)'],\n"
+        "                        check=True, capture_output=True, text=True)\n"
+        "assert result.stdout == '42\\n'\n"
+        "from golden import run\n"
+        "run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
 def test_timeout_cannot_reuse_previous_receipt(library, tmp_path):
     script = library / "models/case.py"
     output = tmp_path / "out"
@@ -253,6 +337,76 @@ def test_unreadable_receipt_fails_without_aborting(library, tmp_path, monkeypatc
     assert result["compilations"] == []
 
 
+@pytest.mark.parametrize(
+    ("child", "passed"), [("ok", True), ("bad", False), ("empty", False), ("exit", False)]
+)
+def test_self_spawned_entry_preserves_audit_and_child_arguments(library, tmp_path, child, passed):
+    # Mirrors entries that dispatch --case=all into independent processes.
+    # The wrapper must preserve each child's arguments and retain failures
+    # even when the parent ignores its exit status or reports success.
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "from golden import run\n"
+        "if '--child' not in sys.argv:\n"
+        "    run('ok', [])\n"
+        "    subprocess.run([sys.executable, __file__, '--child', 'ok'], check=True)\n"
+        f"    subprocess.run(args=[sys.executable, Path(__file__), '--child', {child!r}], check=False)\n"
+        "else:\n"
+        "    assert sys.argv[1] == '--child'\n"
+        "    if sys.argv[2] != 'empty':\n"
+        "        run(sys.argv[2], [])\n"
+        "    if sys.argv[2] == 'exit':\n"
+        "        raise SystemExit(3)\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert result["passed"] is passed
+    statuses = [record["passed"] for record in result["compilations"]]
+    assert statuses == ([True, True, True, False] if child == "exit" else [True, True, passed])
+
+
+def test_cpu_prefill_entry_without_compilations_still_fails(library, tmp_path):
+    # Bypassing selection must not turn a successful CPU check into kernel coverage.
+    entry = "models/glm5_3_flash/prefill_fwd.py"
+    path = library / entry
+    path.parent.mkdir(parents=True)
+    path.write_text("raise SystemExit(0)\n")
+    output = tmp_path / "out"
+    result = audit.run_case(library, entry, "a2a3", output, 10)
+    assert result["exit_code"] == 0
+    assert not result["passed"]
+    assert result["compilations"] == []
+    assert not list((output / Path(entry).with_suffix("")).glob("runtime-*"))
+
+
+@pytest.mark.parametrize("entry", ["hc", "prefill_fwd", "sparse_attention"])
+def test_compile_does_not_enable_replay_or_checkpoint_arguments(library, tmp_path, entry):
+    # Mirror the A5 contracts: replay arguments change the default all-cases
+    # mode, while prefill declares runtime-dir only in an inactive CLI branch.
+    directory = library / "models/deepseek_v4_1_flash"
+    directory.mkdir()
+    (directory / f"{entry}.py").write_text(
+        "import argparse\n"
+        "from pypto.ir import compile\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "parser.add_argument('--compile-only', action='store_true')\n"
+        + (
+            "if False:\n    parser.add_argument('--runtime-dir')\n"
+            if entry == "prefill_fwd"
+            else "parser.add_argument('--runtime-dir')\n"
+        )
+        + "args = parser.parse_args()\n"
+        "assert getattr(args, 'runtime_dir', None) is None, 'replay was enabled'\n"
+        "assert args.compile_only\n"
+        "compile('ok')\n"
+    )
+    result = audit.run_case(library, f"models/deepseek_v4_1_flash/{entry}.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
 def test_entry_arguments_preserve_declared_ranks(tmp_path):
     script = tmp_path / "distributed.py"
     script.write_text('# ci: devices=4\nparser.add_argument("--compile-only")\n')
@@ -289,26 +443,39 @@ def test_selector_failure_is_not_empty_success(library):
         audit.select_entries(library, "a5")
 
 
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
 @pytest.mark.parametrize("include_kernel", [False, True])
-def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, include_kernel):
+def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, include_kernel, platform):
     # These CPU-only self-tests can pass without compiling a PyPTO kernel.
-    entries = ["models/glm5_3_flash/weights.py", "models/glm5_3_flash/prefill_ref.py"]
-    if include_kernel:
-        entries.append("models/case.py")
-        (library / "models/case.py").write_text("from golden import run\nrun('ok', [])")
-    for entry in entries[:2]:
+    entries = [
+        "models/glm5_3_flash/weights.py",
+        "models/glm5_3_flash/prefill_ref.py",
+        "models/glm5_3_flash/prefill_fwd.py",
+    ]
+    for entry in entries:
         path = library / entry
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("raise SystemExit(0)\n")
+    if include_kernel:
+        # Real GLM kernels need coverage even when they lack --compile-only.
+        kernels = ["attention", "kda", "prefill_layer"]
+        for kernel in kernels:
+            entry = f"models/glm5_3_flash/{kernel}.py"
+            entries.append(entry)
+            (library / entry).write_text("from golden import run\nrun('ok', [])")
     selector = library / ".github/scripts/detect_changes.py"
     selector.parent.mkdir(parents=True)
     selector.write_text(f"print({' '.join(entries)!r})\n")
 
     if include_kernel:
-        assert audit.select_entries(library, "a2a3") == ["models/case.py"]
+        assert audit.select_entries(library, platform) == [
+            "models/glm5_3_flash/attention.py",
+            "models/glm5_3_flash/kda.py",
+            "models/glm5_3_flash/prefill_layer.py",
+        ]
     else:
         with pytest.raises(ValueError, match="No formal pypto-lib entries"):
-            audit.select_entries(library, "a2a3")
+            audit.select_entries(library, platform)
 
 
 @pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1), ("truncated", 1)])
@@ -317,7 +484,8 @@ def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, 
     selector.parent.mkdir(parents=True)
     selector.write_text(
         "import sys\nassert sys.argv[1:] == ['--all', '--platform', 'a5']\n"
-        "print('models/case.py models/glm5_3_flash/weights.py models/glm5_3_flash/prefill_ref.py')\n"
+        "print('models/case.py models/glm5_3_flash/weights.py '\n"
+        "      'models/glm5_3_flash/prefill_ref.py models/glm5_3_flash/prefill_fwd.py')\n"
     )
     body = f"from golden import run\nrun({kernel!r}, [])"
     if kernel == "truncated":

@@ -124,6 +124,7 @@ set(PYPTO_SOURCES
     src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
     src/ir/op/buffer_ops/view.cpp
+    src/ir/op/reg_ops/reg_ops.cpp
     src/ir/op/tile_ops/batch_matmul.cpp
     src/ir/op/tile_ops/broadcast.cpp
     src/ir/op/tile_ops/elementwise.cpp
@@ -198,8 +199,18 @@ set(PYPTO_SOURCES
     src/ir/transforms/classify_iter_arg_carry_pass.cpp
     src/ir/transforms/fuse_create_assemble_to_slice_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp
+    src/ir/transforms/memory_reuse/allocation_constraints.cpp
+    src/ir/transforms/memory_reuse/lifetime_analysis.cpp
+    src/ir/transforms/memory_reuse/packing.cpp
+    src/ir/transforms/memory_reuse/semantic_aliases.cpp
+    src/ir/transforms/memory_reuse/storage.cpp
+    src/ir/transforms/memory_reuse/yield_fixup.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
+    src/ir/transforms/tensor_to_tile/gm_access.cpp
+    src/ir/transforms/tensor_to_tile/incore_conversion.cpp
+    src/ir/transforms/tensor_to_tile/output_propagation.cpp
+    src/ir/transforms/tensor_to_tile/type_propagation.cpp
     src/ir/transforms/synthesize_allreduce_signals_pass.cpp
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
@@ -222,6 +233,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp
+    src/ir/transforms/utils/reg_memory_analysis.cpp
     src/ir/transforms/lower_composite/lower_composite_all_to_all.cpp
     src/ir/transforms/lower_composite/lower_composite_all_to_all_v.cpp
     src/ir/transforms/lower_composite/lower_composite_allgather.cpp
@@ -246,9 +258,13 @@ set(PYPTO_SOURCES
     src/ir/transforms/deduplicate_outlined_kernels_pass.cpp
     src/ir/transforms/outline_hierarchy_scopes_pass.cpp
     src/ir/transforms/outline_graph_scopes_pass.cpp
+    src/ir/transforms/expand_mixed_kernel/group_abi.cpp
     src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/lower_auto_vector_split_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp
+    src/ir/transforms/auto_tile_matmul_l0/analysis.cpp
+    src/ir/transforms/auto_tile_matmul_l0/common.cpp
+    src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp
     src/ir/transforms/auto_tile_matmul_l0_pass.cpp
     src/ir/transforms/window_externalization/analysis.cpp
     src/ir/transforms/window_externalization/callee_rewrite.cpp
@@ -269,6 +285,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/passes.cpp
     src/ir/transforms/resolve_backend_op_layouts_pass.cpp
     src/ir/transforms/python_printer.cpp
+    src/ir/transforms/python_printer_expr.cpp
+    src/ir/transforms/python_printer_stmt.cpp
+    src/ir/transforms/python_printer_type.cpp
     src/ir/transforms/simplify_pass.cpp
     src/ir/transforms/inject_gm_pipe_buffer_pass.cpp
     src/ir/transforms/unroll_loops_pass.cpp
@@ -277,6 +296,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/lower_pipeline_to_slots_pass.cpp
     src/ir/transforms/canonicalize_io_order_pass.cpp
     src/ir/transforms/structural_comparison.cpp
+    src/ir/transforms/utils/call_shape_binding.cpp
     src/ir/transforms/utils/signature_symbols.cpp
     src/ir/transforms/utils/acc_init_builder.cpp
     src/ir/transforms/utils/narrow_loop_carry.cpp
@@ -294,6 +314,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/op_predicates.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
     src/ir/transforms/utils/pipeline_loop_utils.cpp
+    src/ir/transforms/utils/software_pipeline.cpp
     src/ir/transforms/utils/return_lineage_utils.cpp
     src/ir/transforms/utils/result_alias_utils.cpp
     src/ir/transforms/utils/scalar_output_hoist.cpp
@@ -321,6 +342,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp
+    src/ir/verifier/verify_reg_scope.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
     src/ir/verifier/verify_inline_functions_eliminated.cpp
     src/ir/verifier/verify_use_after_def.cpp
@@ -365,8 +387,15 @@ set(PYPTO_SOURCES
     src/codegen/codegen_base.cpp
     src/codegen/orchestration/orchestration_analysis.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
+    src/codegen/orchestration/orchestration_control_flow.cpp
+    src/codegen/orchestration/orchestration_stmt_codegen.cpp
+    src/codegen/orchestration/orchestration_task_deps.cpp
+    src/codegen/orchestration/orchestration_task_dispatch.cpp
+    src/codegen/orchestration/orchestration_tensor_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
+    src/codegen/pto/reg_codegen.cpp
+    src/codegen/pto/vf_codegen.cpp
     src/codegen/pto/pto_buffer_codegen.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp
@@ -389,6 +418,11 @@ set(PYPTO_SOURCES
     src/backend/common/backend_config.cpp
     src/backend/common/backend_handler.cpp
     src/backend/common/backend_registry.cpp
+    src/backend/common/isa_macro_resources.cpp
+    src/backend/common/isa_macro_resources_validation.cpp
+    src/backend/common/isa_macro_resources_npu.cpp
+    src/backend/common/isa_macro_resources_comm.cpp
+    src/backend/common/isa_macro_resources_protocol.cpp
     src/backend/common/buffer_elementwise_recipes.cpp
     src/backend/common/buffer_view_semantics.cpp
     src/backend/common/pto_ops_common.cpp
@@ -402,6 +436,8 @@ set(PYPTO_SOURCES
     src/backend/common/pto_ops_distributed.cpp
     src/backend/common/pto_ops_prefetch.cpp
     src/backend/common/soc.cpp
+    src/backend/common/sync_resources.cpp
+    src/sync/resource_catalog.cpp
 )
 
 # Include Python bindings

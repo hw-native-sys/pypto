@@ -13,39 +13,58 @@ import ast
 import importlib
 import inspect
 import re
+import textwrap
+import types
 import warnings
+from copy import deepcopy
 from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import backend
+from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
-from pypto.jit.decorator import (
+from pypto.jit._arguments import (
+    extract_tensor_meta,
+    param_dtypes,
+)
+from pypto.jit._ast_analysis import (
+    scan_dynamic_dims,
+)
+from pypto.jit._call_binding import (
+    SlicedArg,
+    arg_ref,
+    build_param_mapping,
+    compute_per_func_dyndim_maps,
+    extract_call_args_for_dep,
+)
+from pypto.jit._tensor_meta import (
     _SYNTHESIZED_DYN_PREFIX,
+    extract_local_tensor_metas,
+    resolve_dep_call_metadata,
+    scan_dep_io,
+    synthesized_dyn_dim,
+)
+from pypto.jit.decorator import (
     JITFunction,
     _allocate_generated_names,
-    _arg_ref,
-    _build_param_mapping,
-    _compute_per_func_dyndim_maps,
     _discover_dep_bindings,
     _discover_deps,
-    _extract_call_args_for_dep,
-    _extract_local_tensor_metas,
-    _extract_tensor_meta,
-    _param_dtypes,
-    _resolve_dep_call_metadata,
     _rewrite_jit_error,
-    _scan_dep_io,
-    _scan_dynamic_dims,
-    _SlicedArg,
-    _synthesized_dyn_dim,
     jit,
 )
 from pypto.jit.specializer import DynDim, Specializer, TensorMeta
-from pypto.language.parser.diagnostics.exceptions import ParserTypeError
-from pypto.pypto_core import DataType, InternalError, ir
-from pypto.runtime.runner import RunConfig
+from pypto.language.parser.diagnostics.exceptions import (
+    InvalidOperationError,
+    ParserTypeError,
+    UnsupportedFeatureError,
+)
+from pypto.language.typing.direction import InOut as TileDirection
+from pypto.pypto_core import DataType, InternalError, ir, passes
+from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # ---------------------------------------------------------------------------
 # Decoration tests (no torch needed)
@@ -71,7 +90,7 @@ class TestJitDecoration:
         """Unannotated FP32 must not hit DataType.__eq__(None) via ``in``."""
         torch = pytest.importorskip("torch")
         t = torch.empty((4, 8), dtype=torch.float32)
-        meta = _extract_tensor_meta(t)
+        meta = extract_tensor_meta(t)
         assert meta.dtype == DataType.FP32
         assert meta.static_shape() == (4, 8)
 
@@ -80,51 +99,58 @@ class TestJitDecoration:
         torch = pytest.importorskip("torch")
         t = torch.empty((4,), dtype=torch.int64)
         # Even if a caller passes INDEX as expected_dtype, keep torch→INT64 ABI.
-        meta = _extract_tensor_meta(t, expected_dtype=DataType.INDEX)
+        meta = extract_tensor_meta(t, expected_dtype=DataType.INDEX)
         assert meta.dtype == DataType.INT64
         assert meta.static_shape() == (4,)
 
-    def test_param_dtypes_only_records_fp4_family(self):
-        """_param_dtypes is FP4 dual-path only; INDEX/FP32 annotations are omitted."""
+    def test_param_dtypes_only_records_packed_fp4_formats(self):
+        """Only packed annotations select a numerical format for raw byte carriers."""
 
         def kernel(
             idx: pl.Tensor[[4], pl.INDEX],
             x: pl.Tensor[[8, 16], pl.FP32],
             packed: pl.Tensor[[8, 16], pl.FP4E2M1X2],
-            logical: pl.Tensor[[8, 32], pl.FP4],
+            e1m2: pl.Tensor[[8, 16], pl.fp4e1m2x2],
         ):
-            return idx, x, packed, logical
+            return idx, x, packed, e1m2
 
-        assert _param_dtypes(kernel) == {
+        assert param_dtypes(kernel) == {
             "packed": DataType.FP4E2M1X2,
-            "logical": DataType.FP4,
+            "e1m2": DataType.FP4E1M2X2,
         }
 
-    def test_torch_fp4_x2_default_keeps_carrier_shape(self):
-        """Bare / packed annotation: torch float4 stays FP4E2M1X2 carrier extents."""
+    @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+    def test_packed_fp4_annotation_accepts_raw_byte_carriers(self, dtype):
+        torch = pytest.importorskip("torch")
+        data = torch.empty((8, 32), dtype=torch.uint8)
+        meta = extract_tensor_meta(data, expected_dtype=dtype)
+        assert meta.dtype == dtype
+        assert meta.static_shape() == (8, 32)
+        # Untyped bytes keep their type; only the explicit annotation selects FP4.
+        assert extract_tensor_meta(data).dtype == DataType.UINT8
+
+    def test_e1m2_rejects_torch_e2m1_format(self):
+        torch = pytest.importorskip("torch")
+        torch_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if torch_dtype is None:
+            pytest.skip("torch.float4_e2m1fn_x2 required")
+        with pytest.raises(TypeError, match="pass torch.uint8 carriers"):
+            extract_tensor_meta(torch.empty((8, 32), dtype=torch_dtype), expected_dtype=pl.fp4e1m2x2)
+
+    def test_torch_fp4_x2_inference_preserves_carrier_shape(self):
+        """Native Torch x2 tensors use the same dtype and shape with or without an annotation."""
         torch = pytest.importorskip("torch")
         fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
         if fp4_dtype is None:
             pytest.skip("torch.float4_e2m1fn_x2 required")
         packed = torch.empty((128, 32), dtype=fp4_dtype)
-        meta = _extract_tensor_meta(packed)
+        meta = extract_tensor_meta(packed)
         assert meta.dtype == DataType.FP4E2M1X2
         assert meta.static_shape() == (128, 32)
 
-        meta_x2 = _extract_tensor_meta(packed, expected_dtype=DataType.FP4E2M1X2)
+        meta_x2 = extract_tensor_meta(packed, expected_dtype=DataType.FP4E2M1X2)
         assert meta_x2.dtype == DataType.FP4E2M1X2
         assert meta_x2.static_shape() == (128, 32)
-
-    def test_torch_fp4_x2_with_logical_fp4_annotation_expands(self):
-        """pl.FP4 annotation restores legacy carrier→nibble expand at the API boundary."""
-        torch = pytest.importorskip("torch")
-        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-        if fp4_dtype is None:
-            pytest.skip("torch.float4_e2m1fn_x2 required")
-        packed = torch.empty((128, 32), dtype=fp4_dtype)
-        meta = _extract_tensor_meta(packed, expected_dtype=DataType.FP4)
-        assert meta.dtype == DataType.FP4
-        assert meta.static_shape() == (128, 64)
 
     def test_torch_fp4_x2_rejects_empty_packed_dimension(self):
         torch = pytest.importorskip("torch")
@@ -133,7 +159,7 @@ class TestJitDecoration:
             pytest.skip("torch.float4_e2m1fn_x2 required")
         packed = torch.empty((128, 0), dtype=fp4_dtype)
         with pytest.raises(TypeError, match="positive runtime x2 carrier last dimension"):
-            _extract_tensor_meta(packed)
+            extract_tensor_meta(packed)
 
     def test_jit_incore_creates_jitfunction(self):
         @jit.incore
@@ -193,6 +219,192 @@ class TestJitDecoration:
 
         assert isinstance(entry, JITFunction)
         assert entry._auto_scope is True
+
+
+class TestFp4DependencyContracts:
+    """Packed dependencies preserve carrier shapes and numerical formats."""
+
+    @pytest.mark.parametrize(
+        "declared_dtype, caller_dtype",
+        [
+            (DataType.FP4E2M1X2, DataType.FP4E2M1X2),
+            (DataType.FP4E1M2X2, DataType.FP4E1M2X2),
+            (DataType.FP32, DataType.FP4E2M1X2),
+        ],
+    )
+    @pytest.mark.parametrize("width", [31, DynDim(name="width", literal="width", static_bound=32)])
+    def test_dep_metadata_keeps_carrier_shape(self, declared_dtype, caller_dtype, width):
+        @jit.incore
+        def dep(src: pl.Tensor[[16, 32], declared_dtype]):
+            return src
+
+        def caller(src: pl.Tensor):
+            dep(src)
+
+        rows = DynDim(name="rows", literal="rows", static_bound=16)
+        original = TensorMeta(shape=(rows, width), dtype=caller_dtype, layout=ir.TensorLayout.NZ)
+        metas, _ = resolve_dep_call_metadata(
+            dep, caller, {"src": original}, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert metas["src"] == original
+        assert metas["src"].shape[0] is rows
+        assert original.shape == (rows, width)
+        assert original.dtype == caller_dtype
+
+    @pytest.mark.parametrize("return_kind", ["identity", "allocated", "out"])
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_returned_metadata_keeps_carrier_shape(self, return_kind, dtype):
+        @jit.inline
+        def identity(src: pl.Tensor[[16, 32], dtype]):
+            return src
+
+        @jit.inline
+        def allocated(src: pl.Tensor[[16, 32], dtype]):
+            result = pl.create_tensor([16, 32], dtype=dtype)
+            return result
+
+        @jit.incore
+        def out(src: pl.Out[pl.Tensor[[16, 32], dtype]]):
+            return src
+
+        producer = {"identity": identity, "allocated": allocated, "out": out}[return_kind]
+
+        @jit.incore
+        def consume(src: pl.Tensor):
+            return src
+
+        @jit
+        def entry(src: pl.Tensor):
+            packed = producer(src)
+            consume(packed)
+            return packed
+
+        seed = {"src": TensorMeta(shape=(16, 32), dtype=dtype)}
+        contexts = entry._build_contexts(seed, {}, {}, {})
+        consumer = next(ctx for ctx in contexts if ctx.func_name == "consume")
+        assert consumer.tensor_meta["src"] == TensorMeta(shape=(16, 32), dtype=dtype)
+        assert seed["src"] == TensorMeta(shape=(16, 32), dtype=dtype)
+
+    @pytest.mark.parametrize(
+        "declared_dtype, caller_dtype",
+        [
+            (DataType.FP4E2M1X2, DataType.FP32),
+            (DataType.FP4E1M2X2, DataType.FP32),
+            (DataType.FP4E1M2X2, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.FP4E1M2X2),
+        ],
+    )
+    def test_packed_fp4_dependency_format_mismatch_is_rejected(self, declared_dtype, caller_dtype):
+        @jit.incore
+        def dep(src: pl.Tensor[[16, 32], declared_dtype]):
+            return src
+
+        def caller(src: pl.Tensor):
+            dep(src)
+
+        with pytest.raises(TypeError, match="cast explicitly to change formats"):
+            resolve_dep_call_metadata(
+                dep,
+                caller,
+                {"src": TensorMeta(shape=(16, 32), dtype=caller_dtype)},
+                {},
+                {},
+                discover_deps=_discover_dep_bindings,
+            )
+
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    @pytest.mark.parametrize("dependency_kind", ["incore", "inline"])
+    def test_fp4_dep_compiles_full_decoded_width(self, monkeypatch, tmp_path, dtype, dependency_kind):
+        """Decoding 32 carriers produces 64 values without changing the caller ABI."""
+        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
+
+        @jit.incore
+        def incore_decode(
+            src: pl.Tensor[[16, 32], dtype],
+            dst: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+        ):
+            tile = pl.load(src, [0, 0], [16, 32])
+            decoded = pl.cast(tile, pl.BF16)
+            pl.store(decoded, [0, 0], dst)
+            return dst
+
+        @jit.inline
+        def inline_decode(
+            src: pl.Tensor[[16, 32], dtype],
+            dst: pl.Tensor[[16, 64], pl.BF16],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(src, [0, 0], [16, 32])
+                decoded = pl.cast(tile, pl.BF16)
+                pl.store(decoded, [0, 0], dst)
+            return dst
+
+        decode = inline_decode if dependency_kind == "inline" else incore_decode
+
+        @jit
+        def entry(src: pl.Tensor, dst: pl.Out[pl.Tensor]):
+            decode(src, dst)
+            return dst
+
+        # Seed the same metadata the torch boundary produces. This keeps the
+        # compile regression active even when Torch lacks its optional FP4 dtype.
+        backend.reset_for_testing()
+        compiled = entry._compile(
+            {
+                "src": TensorMeta(shape=(16, 32), dtype=dtype),
+                "dst": TensorMeta(shape=(16, 64), dtype=DataType.BF16),
+            },
+            {},
+            {},
+            {},
+            pl,
+            backend_type=backend.BackendType.Ascend950,
+            output_dir=str(tmp_path / "compiled"),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        assert compiled.program is not None
+        # CompiledProgram retains the pre-pass input. Inspect an independently
+        # lowered program as well, under the default verification instruments.
+        parsed = entry._compile_to_program(
+            {
+                "src": TensorMeta(shape=(16, 32), dtype=dtype),
+                "dst": TensorMeta(shape=(16, 64), dtype=DataType.BF16),
+            },
+            {},
+            {},
+            {},
+            pl,
+        )
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(parsed)
+        entry_func = lowered.get_function("entry")
+        assert entry_func is not None
+        entry_type = entry_func.params[0].type
+        assert isinstance(entry_type, ir.TensorType)
+
+        def static_shape(shaped_type: ir.ShapedType) -> list[int]:
+            result = []
+            for dim in shaped_type.shape:
+                assert isinstance(dim, ir.ConstInt)
+                result.append(dim.value)
+            return result
+
+        assert entry_type.dtype == dtype
+        assert static_shape(entry_type) == [16, 32]
+        decoded_shapes: list[list[int]] = []
+
+        class Casts(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                result_type = op.type
+                if (
+                    op.op.name == ir.get_op("tile.cast").name
+                    and isinstance(result_type, ir.TileType)
+                    and result_type.dtype == DataType.BF16
+                ):
+                    decoded_shapes.append(static_shape(result_type))
+                super().visit_call(op)
+
+        Casts().visit_program(lowered)
+        assert decoded_shapes == [[16, 64]]
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +599,7 @@ class TestHostDiscoversOrchestrationDep:
 
 
 class TestScanDepIo:
-    """_scan_dep_io records both Out and InOut params as output-like (so meta
+    """scan_dep_io records both Out and InOut params as output-like (so meta
     propagates to captured dep results), in declaration order."""
 
     def test_includes_inout_params_in_declaration_order(self):
@@ -399,7 +611,7 @@ class TestScanDepIo:
             out = sub(a, cache, out)
             return out
 
-        io = _scan_dep_io(caller)
+        io = scan_dep_io(caller, discover_deps=_discover_dep_bindings)
         assert "sub" in io
         param_names, output_params = io["sub"]
         assert param_names == ["a", "cache", "out"]
@@ -416,7 +628,7 @@ class TestScanDepIo:
             out = sub(a, out)
             return out
 
-        _, output_params = _scan_dep_io(caller)["sub"]
+        _, output_params = scan_dep_io(caller, discover_deps=_discover_dep_bindings)["sub"]
         assert output_params == ["out"]
 
 
@@ -580,7 +792,7 @@ class TestJitCaching:
             c = a
             return c
 
-        dims = _scan_dynamic_dims(ann_kernel._func, ann_kernel._param_names())
+        dims = scan_dynamic_dims(ann_kernel._func, ann_kernel._param_names())
         assert ("a", 0) in dims
         assert ("c", 0) in dims
         # Static dim (128) must stay static.
@@ -745,7 +957,7 @@ class TestAliasedDepCallName:
     def test_scan_dep_io_keyed_by_call_name(self):
         """``_dep_out_metas`` looks the entry up by the AST's ``ast.Name``."""
         entry, _ = self._aliased_entry()
-        io = _scan_dep_io(entry._func)
+        io = scan_dep_io(entry._func, discover_deps=_discover_dep_bindings)
         assert "kern" in io
         assert "copy_incore" not in io
         param_names, output_params = io["kern"]
@@ -759,7 +971,9 @@ class TestAliasedDepCallName:
             "a": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             "c": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
         }
-        dep_meta, _ = _resolve_dep_call_metadata(dep, entry._func, caller_meta, {}, {}, dep_call_name="kern")
+        dep_meta, _ = resolve_dep_call_metadata(
+            dep, entry._func, caller_meta, {}, {}, dep_call_name="kern", discover_deps=_discover_dep_bindings
+        )
         # Positional call-site mapping, not the name-based fallback: the dep's
         # own parameter names appear nowhere in the caller.
         assert dep_meta["src"].shape == (64, 64)
@@ -891,15 +1105,16 @@ class TestAliasedDepCallName:
             out = kern(a, buf)
             return out
 
-        metas = _extract_local_tensor_metas(
+        metas = extract_local_tensor_metas(
             entry._func,
             seed_meta={
                 "a": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
                 "c": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             },
+            discover_deps=_discover_dep_bindings,
         )
         # ``out`` captures the dep's Out param, which the call site bound to
-        # ``buf`` — resolvable only if _scan_dep_io keyed the dep by "kern".
+        # ``buf`` — resolvable only if scan_dep_io keyed the dep by "kern".
         assert metas["out"].shape == (32, 16)
 
 
@@ -1325,7 +1540,7 @@ class TestMultiFuncIntegration:
 
 # Module-level @pl.jit.incore kernel reused by the metadata-tracking tests below.
 # Defined at module level (not inside a test method) so it can be imported by
-# the unit test for ``_extract_local_tensor_metas``; the integration tests
+# the unit test for ``extract_local_tensor_metas``; the integration tests
 # below redefine their own deps inside the method to keep each test isolated.
 @jit.incore
 def _relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
@@ -1337,7 +1552,7 @@ def _relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
 
 
 def _slice_then_dep_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
-    """Plain (undecorated) function used only by the _extract_local_tensor_metas unit test."""
+    """Plain (undecorated) function used only by the extract_local_tensor_metas unit test."""
     view = pl.slice(src, [16, 8], [0, 0])
     buf = pl.create_tensor([16, 8], dtype=pl.FP32)
     mid = _relu_kernel(view, buf)
@@ -1364,7 +1579,7 @@ def _annotated_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
 
 
 def _reshape_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
-    """Plain function for _extract_local_tensor_metas unit test: reshape tracking."""
+    """Plain function for extract_local_tensor_metas unit test: reshape tracking."""
     x_flat = pl.reshape(src, [128, 128])  # noqa: F841 — tracked by JIT AST metadata extraction
     out_flat = pl.reshape(out, [128, 128])
     return out_flat
@@ -1443,7 +1658,7 @@ def _mixed_pair_body(x: pl.Tensor, cfg: pl.Tensor) -> pl.Tensor:
 # --- Runtime-sized local extents (synthesized DynDim) ------------------------
 # Fixtures for the tests covering a local tensor whose extent is only known at
 # runtime: one decorated dep, then plain (undecorated) caller bodies fed straight
-# to ``_extract_local_tensor_metas`` / ``_resolve_dep_call_metadata``.
+# to ``extract_local_tensor_metas`` / ``resolve_dep_call_metadata``.
 
 
 @jit.incore
@@ -1534,7 +1749,7 @@ def _nested_rebind_callsite(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor
 
 
 def _subscript_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
-    """Plain function for _extract_local_tensor_metas unit test: subscript-slice
+    """Plain function for extract_local_tensor_metas unit test: subscript-slice
     sugar tracking (issue #1836). All locals are tracked by JIT AST metadata
     extraction, hence the noqa F841 on the unused names."""
     view = src[0:16, 0:8]  # static bounds → (16, 8)  # noqa: F841
@@ -1560,13 +1775,15 @@ class TestSliceAndDepReturnMetadata:
     results or @pl.jit.incore return-value tensor metadata")."""
 
     def test_extract_local_tensor_metas_slice_and_dep_return(self):
-        """``_extract_local_tensor_metas`` infers metas for pl.slice views,
+        """``extract_local_tensor_metas`` infers metas for pl.slice views,
         pl.create_tensor locals, and @pl.jit.incore call results."""
         seed = {
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_slice_then_dep_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _slice_then_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # pl.slice view: shape from the literal list, dtype inherited from src.
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         # pl.create_tensor: unchanged behaviour.
@@ -1583,7 +1800,9 @@ class TestSliceAndDepReturnMetadata:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 64), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(_runtime_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Runtime-scalar 2nd dim → falls back to src's dim 1 = 64; dtype from src.
         assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
 
@@ -1593,7 +1812,9 @@ class TestSliceAndDepReturnMetadata:
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_annotated_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _annotated_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
@@ -1692,7 +1913,9 @@ class TestSliceAndDepReturnMetadata:
             "x": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_tuple_dep_return_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _tuple_dep_return_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Each target takes the pl.create_tensor meta of the matching returned
         # name — including the dtype, which differs between the two.
         assert metas["a"] == TensorMeta(shape=(1, 8), dtype=DataType.FP32)
@@ -1765,7 +1988,9 @@ class TestSliceAndDepReturnMetadata:
         """A callee whose allocation is sized off a parameter resolves through
         the call site: the seed metas descend with the recursion."""
         seed = {"x": TensorMeta(shape=(4, 64), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(_param_sized_dep_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _param_sized_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # ``pl.create_tensor(..., dtype=pl.FP32)`` sized by ``pl.tensor.dim(src, 1)``
         # of the caller's ``x``.
         assert metas["wide"] == TensorMeta(shape=(2, 64), dtype=DataType.FP32)
@@ -1779,7 +2004,9 @@ class TestSliceAndDepReturnMetadata:
             "x": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
         }
-        metas = _extract_local_tensor_metas(_mixed_pair_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _mixed_pair_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # ``b`` still resolves from the callee's own pl.create_tensor ...
         assert metas["b"] == TensorMeta(shape=(4, 4), dtype=DataType.FP16)
         # ... while ``a`` drops its stale pre-call [16, 8] FP32 rather than
@@ -1791,7 +2018,9 @@ class TestSliceAndDepReturnMetadata:
         declined rather than mis-paired — the clear ``_build_params`` error
         beats a wrong shape."""
         seed = {"x": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_arity_mismatch_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _arity_mismatch_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert "only_one" not in metas
 
     def test_runtime_sized_slice_uses_static_parent_dim(self):
@@ -1891,15 +2120,97 @@ class TestSliceAndDepReturnMetadata:
         assert "missing inferred tensor metadata" not in str(excinfo.value)
 
     def test_extract_local_tensor_metas_reshape(self):
-        """``_extract_local_tensor_metas`` infers metas for pl.reshape results."""
+        """``extract_local_tensor_metas`` infers metas for pl.reshape results."""
         seed = {
             "src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
             "out": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
         }
-        metas = _extract_local_tensor_metas(_reshape_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _reshape_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # reshape changes rank but keeps element count; dtype inherited from src.
-        assert metas["x_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
-        assert metas["out_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+        expected = TensorMeta(shape=(128, 128), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
+        assert metas["x_flat"] == expected
+        assert metas["out_flat"] == expected
+
+    @pytest.mark.parametrize("source_shape", [(256, 512), (2, 256, 256)])
+    def test_whole_nz_flatten_has_nd_metadata(self, source_shape):
+        """A complete physical NZ flatten keeps the storage but has a rank-1 ND type."""
+
+        def body(src):
+            flat = pl.reshape(src, [131072])
+            qualified = pl.tensor.reshape(tensor=src, shape=[131072])
+            return flat, qualified
+
+        seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=ir.TensorLayout.NZ)}
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        expected = TensorMeta(shape=(131072,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
+        assert metas["flat"] == expected
+        assert metas["qualified"] == expected
+        assert metas["src"] == seed["src"]
+
+    @pytest.mark.parametrize(
+        "source_layout", [None, ir.TensorLayout.ND, ir.TensorLayout.NZ], ids=["unannotated", "nd", "nz"]
+    )
+    def test_reshape_result_layout_is_not_overwritten_by_dep_annotation(self, source_layout):
+        """A computed ND view is known metadata, not an omitted layout for a dep to fill."""
+
+        @jit.incore
+        def consume(flat: pl.Tensor[[512], pl.INT8, pl.NZ]):
+            return flat
+
+        def caller(src):
+            flat = pl.reshape(src, [512])
+            alias = flat
+            return consume(alias)
+
+        seed = {"src": TensorMeta(shape=(16, 32), dtype=DataType.INT8, layout=source_layout)}
+        metas, scalar_dtypes = resolve_dep_call_metadata(
+            consume, caller, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        # The helper's declaration must not turn raw one-dimensional storage
+        # back into an NZ matrix when the caller metadata is specialized.
+        assert metas["flat"] == TensorMeta(shape=(512,), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
+        assert scalar_dtypes == {}
+
+    @pytest.mark.parametrize(
+        "source_shape, target_shape, layout",
+        [
+            ((256, 512), (128, 1024), ir.TensorLayout.NZ),
+            ((256, 512), (65536,), ir.TensorLayout.NZ),
+            ((DynDim(name="M", literal="M", static_bound=256), 512), (131072,), ir.TensorLayout.NZ),
+            ((256, 512), (DynDim(name="N", literal="N", static_bound=131072),), ir.TensorLayout.NZ),
+            ((256, 512), (131072,), ir.TensorLayout.DN),
+        ],
+        ids=["rank-2", "wrong-size", "dynamic-source", "dynamic-target", "other-layout"],
+    )
+    def test_unproven_non_nd_reshape_has_no_metadata(self, source_shape, target_shape, layout):
+        """Only the static whole-NZ case is safe; a dynamic upper bound is not its extent."""
+
+        def body(src):
+            flat = pl.reshape(src, target_shape)
+            return flat
+
+        seed = {"src": TensorMeta(shape=source_shape, dtype=DataType.INT8, layout=layout)}
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "flat" not in metas
+
+    def test_nz_flatten_to_dynamic_dim_alias_has_no_metadata(self):
+        """A resolved symbolic target is still not proof of the physical storage size."""
+
+        def body(src, shape_ref):
+            flat = pl.reshape(src, [shape_ref.shape[0]])
+            return flat
+
+        seed = {
+            "src": TensorMeta(shape=(256, 512), dtype=DataType.INT8, layout=ir.TensorLayout.NZ),
+            "shape_ref": TensorMeta(
+                shape=(DynDim(name="N", literal="N", static_bound=131072),), dtype=DataType.INT8
+            ),
+        }
+        assert "flat" not in extract_local_tensor_metas(
+            body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
 
     @staticmethod
     def _resolve_callsite_metadata(caller):
@@ -1907,12 +2218,8 @@ class TestSliceAndDepReturnMetadata:
             "src": TensorMeta(shape=(32,), dtype=DataType.FP32),
             "out": TensorMeta(shape=(4, 8), dtype=DataType.FP32),
         }
-        tensor_meta, scalar_dtypes = _resolve_dep_call_metadata(
-            _callsite_metadata_kernel,
-            caller,
-            seed,
-            {},
-            {},
+        tensor_meta, scalar_dtypes = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, caller, seed, {}, {}, discover_deps=_discover_dep_bindings
         )
         assert scalar_dtypes == {}
         return tensor_meta
@@ -1920,13 +2227,13 @@ class TestSliceAndDepReturnMetadata:
     def test_dep_metadata_uses_plain_rebinding_at_callsite(self):
         """A plain assignment shadows the parameter only until the selected call."""
         metas = self._resolve_callsite_metadata(_plain_rebind_callsite)
-        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
         assert metas["out"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_dep_metadata_uses_annotated_rebinding_at_callsite(self):
         """Annotated and plain assignments expose the same point-in-time metadata."""
         metas = self._resolve_callsite_metadata(_annotated_rebind_callsite)
-        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_dep_metadata_tracks_all_chained_assignment_targets(self):
         """Every target gets RHS metadata from the pre-assignment state."""
@@ -1941,17 +2248,19 @@ class TestSliceAndDepReturnMetadata:
     def test_dep_metadata_nested_scope_preserves_source_order(self):
         """Nested DSL scopes stop at their consumer after processing prior producers."""
         metas = self._resolve_callsite_metadata(_nested_rebind_callsite)
-        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["x"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_extract_local_tensor_metas_subscript_slice(self):
-        """``_extract_local_tensor_metas`` tracks subscript-slice sugar
+        """``extract_local_tensor_metas`` tracks subscript-slice sugar
         ``v = src[a:b, ...]`` the same way it tracks ``pl.slice`` (issue #1836):
         static extents, scalar-index rank reduction, and trailing implicit ``:``."""
         seed = {
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_subscript_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _subscript_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Two static slices → (stop - start) per dim; dtype inherited from src.
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         # Scalar index at dim 0 drops it (numpy-style rank reduction).
@@ -1972,7 +2281,9 @@ class TestSliceAndDepReturnMetadata:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 64), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(_subscript_runtime_slice_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _subscript_runtime_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         # Runtime-scalar 2nd bound → falls back to src's dim 1 = 64; dtype from src.
         assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
 
@@ -1988,7 +2299,7 @@ class TestSliceAndDepReturnMetadata:
             view = src[:, 0:64]  # dim 0 full ``:`` keeps DynDim; dim 1 → 64  # noqa: F841
             return view
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"].shape == (m_dim, 64)
         assert metas["view"].dtype == DataType.BF16
 
@@ -2024,7 +2335,7 @@ class TestDynamicLocalTensorMetadata:
             nxt = pl.create_tensor([tokens, 128], dtype=pl.BF16)
             return current, nxt
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "current" in metas
         assert "nxt" in metas
         assert metas["current"].shape == (m_dim, 128)
@@ -2042,7 +2353,7 @@ class TestDynamicLocalTensorMetadata:
             buf = pl.create_tensor([4, hidden], dtype=pl.FP32)
             return buf
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["buf"].shape == (4, 128)
 
     def test_dynvar_in_create_tensor_substituted(self):
@@ -2115,7 +2426,7 @@ class TestDynamicLocalTensorMetadata:
             buf = pl.create_tensor([tokens, 128], dtype=pl.FP32)
             return buf
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         # ``tokens`` is no longer a clean dim alias, so the dim cannot be
         # statically resolved: it gets a synthesized placeholder. What must NOT
         # happen is inheriting the parent's ``M`` — that is the flow-insensitive
@@ -2177,7 +2488,7 @@ class TestDynamicLocalTensorMetadata:
             flat = pl.reshape(x, [128, tokens])
             return flat
 
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["flat"].shape == (128, t_dim)
         assert metas["flat"].dtype == DataType.BF16
 
@@ -2348,20 +2659,20 @@ _SCALAR_DTYPE = pl.INDEX
 
 
 class TestArgRef:
-    """Unit tests for ``_arg_ref`` — caller-side reference classification."""
+    """Unit tests for ``arg_ref`` — caller-side reference classification."""
 
     @staticmethod
     def _ref(expr_src: str):
-        return _arg_ref(ast.parse(expr_src, mode="eval").body)
+        return arg_ref(ast.parse(expr_src, mode="eval").body)
 
     def test_plain_name(self):
         assert self._ref("x") == "x"
 
     def test_single_integer_index_drops_one_dim(self):
-        assert self._ref("x[r]") == _SlicedArg("x", 1)
+        assert self._ref("x[r]") == SlicedArg("x", 1)
 
     def test_multi_integer_index_drops_each_dim(self):
-        assert self._ref("x[r, 0]") == _SlicedArg("x", 2)
+        assert self._ref("x[r, 0]") == SlicedArg("x", 2)
 
     def test_slice_index_keeps_dim(self):
         # ``x[r:r+1]`` selects a range — the dim survives, so drop == 0 → None.
@@ -2369,7 +2680,7 @@ class TestArgRef:
 
     def test_mixed_integer_and_slice_counts_only_integers(self):
         # One integer index (dropped) + one slice (kept) → drop == 1.
-        assert self._ref("x[r, 0:2]") == _SlicedArg("x", 1)
+        assert self._ref("x[r, 0:2]") == SlicedArg("x", 1)
 
     def test_literal_returns_none(self):
         assert self._ref("3") is None
@@ -2383,33 +2694,35 @@ class TestArgRef:
 
 
 class TestExtractCallArgsSlicedDispatch:
-    """``_extract_call_args_for_dep`` + ``_build_param_mapping`` must carry a
-    per-rank subscript (``x[r]``) through as a ``_SlicedArg``."""
+    """``extract_call_args_for_dep`` + ``build_param_mapping`` must carry a
+    per-rank subscript (``x[r]``) through as a ``SlicedArg``."""
 
     def test_sliced_positional_args_extracted(self):
-        call_args = _extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
+        call_args = extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
         assert call_args == [
-            (None, _SlicedArg("inputs", 1)),
-            (None, _SlicedArg("outputs", 1)),
+            (None, SlicedArg("inputs", 1)),
+            (None, SlicedArg("outputs", 1)),
         ]
 
     def test_param_mapping_pairs_sliced_args_by_position(self):
-        call_args = _extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
+        call_args = extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
         assert call_args is not None
-        mapping = _build_param_mapping(["data", "out"], call_args)
+        mapping = build_param_mapping(["data", "out"], call_args)
         assert mapping == {
-            "data": _SlicedArg("inputs", 1),
-            "out": _SlicedArg("outputs", 1),
+            "data": SlicedArg("inputs", 1),
+            "out": SlicedArg("outputs", 1),
         }
 
 
 class TestWindowLocalMetadata:
-    """``_extract_local_tensor_metas`` must infer metas for ``pld.window`` views
+    """``extract_local_tensor_metas`` must infer metas for ``pld.window`` views
     so a host orchestrator's per-rank window locals propagate into the chip
     orchestrator's ``pld.DistributedTensor`` parameters."""
 
     def test_window_view_meta_inferred(self):
-        metas = _extract_local_tensor_metas(_window_local_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _window_local_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         # Shape from the 2nd positional arg, dtype from the ``dtype=`` keyword.
         assert metas["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
         assert metas["signal"] == TensorMeta(shape=(1, 1), dtype=DataType.INT32)
@@ -2419,7 +2732,7 @@ class TestWindowLocalMetadata:
             data = pld.window(buf, [1, 256])  # no dtype= kw
             return data
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "data" not in metas
 
     def test_window_missing_shape_untracked(self):
@@ -2427,7 +2740,7 @@ class TestWindowLocalMetadata:
             data = pld.window(buf, dtype=pl.FP32)  # no shape arg
             return data
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "data" not in metas
 
 
@@ -2464,7 +2777,7 @@ class TestPldTensorRebindPreservesMetadata:
             "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["data"] == seed["data"]
 
     def test_broadcast_rebind_keeps_metadata(self):
@@ -2479,7 +2792,7 @@ class TestPldTensorRebindPreservesMetadata:
             "target": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["target"] == seed["target"]
 
     def test_fresh_name_rebind_gets_target_operand_metadata(self):
@@ -2502,7 +2815,7 @@ class TestPldTensorRebindPreservesMetadata:
             "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["result"] == seed["data"]
 
     def test_rebind_to_a_different_stale_name_gets_operand_metadata_not_the_stale_one(self):
@@ -2522,7 +2835,7 @@ class TestPldTensorRebindPreservesMetadata:
             "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
             "old": TensorMeta(shape=(32, 32), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["old"] == seed["window"]
 
     def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
@@ -2538,7 +2851,7 @@ class TestPldTensorRebindPreservesMetadata:
             return d
 
         seed = {"a": TensorMeta(shape=(64, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "d" not in metas
 
     def test_window_three_segment_form_gets_metadata(self):
@@ -2558,7 +2871,7 @@ class TestPldTensorRebindPreservesMetadata:
             "buf": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "win": TensorMeta(shape=(64, 64), dtype=DataType.FP16),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["win"] == TensorMeta(shape=(128, 128), dtype=DataType.FP32)
 
     def test_pl_tensor_slice_three_segment_form_gets_metadata(self):
@@ -2572,7 +2885,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_pl_tensor_reshape_three_segment_form_gets_metadata(self):
@@ -2585,8 +2898,8 @@ class TestPldTensorRebindPreservesMetadata:
             return flat
 
         seed = {"src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
-        assert metas["flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
 
     def test_alloc_window_buffer_does_not_preserve_stale_metadata(self):
         """``pld.tensor.alloc_window_buffer`` returns a ``Ptr``, not a
@@ -2600,7 +2913,7 @@ class TestPldTensorRebindPreservesMetadata:
             return buf
 
         seed = {"buf": TensorMeta(shape=(64, 64), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "buf" not in metas
 
     def test_window_three_segment_form_missing_dtype_untracked(self):
@@ -2614,7 +2927,7 @@ class TestPldTensorRebindPreservesMetadata:
             win = pld.tensor.window(buf, [1, 256])  # no dtype= kw
             return win
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "win" not in metas
 
     def test_all_to_all_v_rebind_inside_a_for_loop_keeps_metadata(self):
@@ -2636,7 +2949,7 @@ class TestPldTensorRebindPreservesMetadata:
             "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["data"] == seed["data"]
 
     def test_call_rooted_attribute_chain_is_not_mistaken_for_a_qualified_call(self):
@@ -2649,7 +2962,7 @@ class TestPldTensorRebindPreservesMetadata:
             x = other().tensor.window([1, 1], dtype=pl.FP32)
             return x
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert "x" not in metas
 
     def test_slice_with_drop_dims_declines_rather_than_advertise_the_wrong_rank(self):
@@ -2667,7 +2980,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "view" not in metas
 
     def test_slice_with_an_explicitly_empty_drop_dims_still_gets_metadata(self):
@@ -2681,7 +2994,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == seed["src"]
 
     def test_slice_with_a_closure_constant_empty_drop_dims_still_gets_metadata(self):
@@ -2699,7 +3012,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == seed["src"]
 
     def test_slice_with_a_name_bound_to_none_drop_dims_still_gets_metadata(self):
@@ -2715,7 +3028,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["view"] == seed["src"]
 
     def test_slice_with_a_constexpr_empty_drop_dims_still_gets_metadata(self):
@@ -2729,7 +3042,9 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed, constexpr_values={"dd": "[]"})
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, constexpr_values={"dd": "[]"}, discover_deps=_discover_dep_bindings
+        )
         assert metas["view"] == seed["src"]
 
     def test_slice_with_an_unresolvable_local_drop_dims_declines_rather_than_guess(self):
@@ -2746,7 +3061,7 @@ class TestPldTensorRebindPreservesMetadata:
             return view
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert "view" not in metas
 
     def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
@@ -2763,9 +3078,9 @@ class TestPldTensorRebindPreservesMetadata:
             return sliced, flat
 
         seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["sliced"] == seed["src"]
-        assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32)
+        assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
 
 class TestDtypeOperandResolution:
@@ -2776,7 +3091,9 @@ class TestDtypeOperandResolution:
     metadata" — naming that dep, not the line that built the tensor."""
 
     def test_window_dtype_module_constant(self):
-        metas = _extract_local_tensor_metas(_window_dtype_constant_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _window_dtype_constant_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         assert metas["win"] == TensorMeta(shape=(1, 256), dtype=DataType.INT32)
 
     def test_create_tensor_dtype_closure_constant(self):
@@ -2786,7 +3103,7 @@ class TestDtypeOperandResolution:
             t = pl.create_tensor([4, 8], dtype=acc_dtype)
             return t
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16)
 
     def test_create_tensor_positional_dtype(self):
@@ -2794,18 +3111,22 @@ class TestDtypeOperandResolution:
             t = pl.create_tensor([4, 8], pl.BF16)
             return t
 
-        metas = _extract_local_tensor_metas(body, seed_meta={})
+        metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16)
 
     def test_create_tensor_dtype_of_tracked_tensor(self):
         seed = {"src": TensorMeta(shape=(16, 16), dtype=DataType.INT8)}
-        metas = _extract_local_tensor_metas(_create_tensor_dtype_of_src_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _create_tensor_dtype_of_src_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.INT8)
 
     def test_local_shadowing_dtype_constant_untracked(self):
         # The specializer does not fold a name the body binds, so neither may
         # the walker: the parameter, not the module constant, is what it names.
-        metas = _extract_local_tensor_metas(_window_dtype_shadowed_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _window_dtype_shadowed_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         assert "win" not in metas
 
     def test_host_window_dtype_constant_reaches_nested_deps(self):
@@ -2852,7 +3173,9 @@ class TestShapeOperandResolution:
 
     def test_every_spelling_resolves_to_the_same_static_shape(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_shape_spellings_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _shape_spellings_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         expected = TensorMeta(shape=(4, 8), dtype=DataType.FP32)
         for name in (
             "by_keyword",
@@ -2871,19 +3194,25 @@ class TestShapeOperandResolution:
         # through by name instead of being replaced by a synthesized symbol.
         rows = DynDim(name="M", literal="M", static_bound=4)
         seed = {"src": TensorMeta(shape=(rows, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_shape_spellings_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _shape_spellings_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["by_unpacked_dims"].shape == (rows, 8)
         assert metas["by_src_shape"].shape == (rows, 8)
 
     def test_view_ops_accept_shape_constant_and_keywords(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(_shape_constant_views_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _shape_constant_views_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP16)
-        assert metas["flat"] == TensorMeta(shape=(32,), dtype=DataType.FP16)
+        assert metas["flat"] == TensorMeta(shape=(32,), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
         assert metas["win"] == TensorMeta(shape=(4, 8), dtype=DataType.INT32)
 
     def test_local_shadowing_extent_constant_is_runtime(self):
-        metas = _extract_local_tensor_metas(_shadowed_rows_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _shadowed_rows_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         leading = metas["t"].shape[0]
         assert isinstance(leading, DynDim) and leading.synthesized
 
@@ -2891,12 +3220,16 @@ class TestShapeOperandResolution:
         # Resolved when bound, not when used: reshaping ``src`` afterwards must
         # not turn ``rows`` into the reshaped tensor's leading dim.
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_rebound_source_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _rebound_source_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
 
     def test_loop_target_drops_bound_dim(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_loop_rebinds_dim_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _loop_rebinds_dim_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         rows, cols = metas["t"].shape
         assert isinstance(rows, DynDim) and rows.synthesized
         assert cols == 8
@@ -2921,7 +3254,9 @@ class TestShapeOperandResolution:
 
     def test_starred_unpack_binds_no_dim(self):
         seed = {"src": TensorMeta(shape=(2, 4, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_starred_unpack_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _starred_unpack_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         cols = metas["t"].shape[1]
         assert isinstance(cols, DynDim) and cols.synthesized
 
@@ -2931,7 +3266,7 @@ class TestLayoutOperandResolution:
     ignored, so an NZ local reached a dep declaring no layout as ND, silently."""
 
     def test_layout_resolved_by_value(self):
-        metas = _extract_local_tensor_metas(_layout_body, seed_meta={})
+        metas = extract_local_tensor_metas(_layout_body, seed_meta={}, discover_deps=_discover_dep_bindings)
         nz = TensorMeta(shape=(16, 16), dtype=DataType.FP16, layout=ir.TensorLayout.NZ)
         assert metas["nz"] == nz
         assert metas["by_constant"] == nz
@@ -2940,7 +3275,9 @@ class TestLayoutOperandResolution:
 
     def test_unresolved_layout_untracked(self):
         # Claiming ND for a layout the walker cannot see would mis-declare deps.
-        metas = _extract_local_tensor_metas(_unresolved_layout_body, seed_meta={})
+        metas = extract_local_tensor_metas(
+            _unresolved_layout_body, seed_meta={}, discover_deps=_discover_dep_bindings
+        )
         assert "t" not in metas
 
 
@@ -2949,15 +3286,21 @@ class TestConstexprOperandResolution:
     the folded value rather than to a synthesized runtime extent."""
 
     def test_constexpr_binding_folds_into_meta(self):
-        metas = _extract_local_tensor_metas(
-            _constexpr_sized_body, seed_meta={}, constexpr_values={"rows": "16", "acc_dtype": "pl.BF16"}
+        metas = extract_local_tensor_metas(
+            _constexpr_sized_body,
+            seed_meta={},
+            constexpr_values={"rows": "16", "acc_dtype": "pl.BF16"},
+            discover_deps=_discover_dep_bindings,
         )
         assert metas["t"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
 
     def test_constexpr_whole_shape_folds_into_slice(self):
         seed = {"src": TensorMeta(shape=(8, 8), dtype=DataType.FP16)}
-        metas = _extract_local_tensor_metas(
-            _constexpr_slice_body, seed_meta=seed, constexpr_values={"shp": "[4, 8]"}
+        metas = extract_local_tensor_metas(
+            _constexpr_slice_body,
+            seed_meta=seed,
+            constexpr_values={"shp": "[4, 8]"},
+            discover_deps=_discover_dep_bindings,
         )
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP16)
 
@@ -3028,7 +3371,7 @@ def test_scalar_param_dtype_constant_is_rendered_by_value():
 
 
 class TestSlicedDispatchMetadata:
-    """``_resolve_dep_call_metadata`` must give a per-rank chip orchestrator dep
+    """``resolve_dep_call_metadata`` must give a per-rank chip orchestrator dep
     the base tensor's meta with the subscripted leading dims removed, and the
     DynDim cascade must not flow through a dropped dim."""
 
@@ -3038,13 +3381,14 @@ class TestSlicedDispatchMetadata:
             "inputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
             "outputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
         }
-        tensor_meta, _ = _resolve_dep_call_metadata(
+        tensor_meta, _ = resolve_dep_call_metadata(
             _sliced_chip,
             _per_rank_dispatch_body,
             seed,
             {},
             {},
             caller_func_type="host",
+            discover_deps=_discover_dep_bindings,
         )
         assert tensor_meta["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
         assert tensor_meta["out"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
@@ -3056,13 +3400,14 @@ class TestSlicedDispatchMetadata:
             "inputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
             "outputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
         }
-        tensor_meta, _ = _resolve_dep_call_metadata(
+        tensor_meta, _ = resolve_dep_call_metadata(
             _sliced_chip,
             _per_rank_dispatch_body,
             seed,
             {},
             {},
             caller_func_type="host",
+            discover_deps=_discover_dep_bindings,
         )
         assert "data" not in tensor_meta
         assert "out" not in tensor_meta
@@ -3070,15 +3415,15 @@ class TestSlicedDispatchMetadata:
     def test_dyndim_cascade_skips_sliced_arg(self):
         # The dep declares a dynamic leading dim; the host reaches it via
         # ``_dyn_sliced_chip(inputs[r], ...)``. The DynDim must NOT cascade onto
-        # a ``_SlicedArg`` key — doing so would corrupt the caller's dim map with
+        # a ``SlicedArg`` key — doing so would corrupt the caller's dim map with
         # a non-string key (and is semantically wrong: the rank dim is dropped).
-        call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None] = {
+        call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | SlicedArg | None]] | None] = {
             (id(_per_rank_dispatch_body), "_dyn_sliced_chip"): [
-                (None, _SlicedArg("inputs", 1)),
-                (None, _SlicedArg("outputs", 1)),
+                (None, SlicedArg("inputs", 1)),
+                (None, SlicedArg("outputs", 1)),
             ]
         }
-        maps = _compute_per_func_dyndim_maps(
+        maps = compute_per_func_dyndim_maps(
             entry_func=_per_rank_dispatch_body,
             entry_param_names=["inputs", "outputs"],
             deps=[_dyn_sliced_chip],
@@ -3090,8 +3435,8 @@ class TestSlicedDispatchMetadata:
         assert maps[id(_dyn_sliced_chip._func)]["data"][0].literal == "M_SLICE"
         # The host map must only ever be keyed by parameter name strings.
         assert all(isinstance(key, str) for key in host_map)
-        assert _SlicedArg("inputs", 1) not in host_map
-        assert _SlicedArg("outputs", 1) not in host_map
+        assert SlicedArg("inputs", 1) not in host_map
+        assert SlicedArg("outputs", 1) not in host_map
 
 
 class TestInlineFuncIntegration:
@@ -3326,7 +3671,7 @@ class TestInlineFuncIntegration:
         @jit
         def entry_mixed(a: pl.Tensor, out: pl.Out[pl.Tensor]):
             # Positional ``a`` plus keyword ``out=out`` — the keyword binding
-            # used to be silently dropped by _extract_call_args_for_dep.
+            # used to be silently dropped by extract_call_args_for_dep.
             out = helper(a, out=out)
             return out
 
@@ -3490,7 +3835,7 @@ class TestInlineFuncIntegration:
     def test_inline_with_reshape_compiles(self):
         """Regression: @pl.jit.inline + pl.reshape in caller compiles.
 
-        Previously failed because ``_extract_local_tensor_metas`` did not track
+        Previously failed because ``extract_local_tensor_metas`` did not track
         ``pl.reshape``, so the specializer couldn't find metadata for the
         reshaped tensor passed to the inline dep.
         """
@@ -3528,7 +3873,7 @@ class TestInlineFuncIntegration:
         """Regression for #1836: a subscript-slice view ``src[a:b]`` forwarded into
         an @pl.jit.inline dep compiles.
 
-        Previously failed because ``_extract_local_tensor_metas`` did not track the
+        Previously failed because ``extract_local_tensor_metas`` did not track the
         subscript-slice sugar (an ``ast.Subscript``, unlike ``pl.slice``'s Call),
         so the inline dep's param got no inferred metadata and ``_build_params``
         raised ``missing inferred tensor metadata``. Mirrors
@@ -3589,6 +3934,726 @@ class TestInlineFuncIntegration:
             return y
 
         entry.compile(torch.zeros(16, 64), torch.zeros(16, 64))
+
+
+class TestInlineTileAnnotations:
+    """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
+
+    @staticmethod
+    def _entry(copy_incore: JITFunction, shape) -> JITFunction:
+        """Wrap an in-core caller without moving its helper bindings out of the test."""
+
+        @jit
+        def entry(src: pl.Tensor[shape, pl.FP32], dst: pl.Out[pl.Tensor[shape, pl.FP32]]):
+            return copy_incore(src, dst)
+
+        return entry
+
+    @staticmethod
+    def _compile(entry: JITFunction, *args, output_dir: Path | None = None) -> CompiledProgram:
+        compiled = entry.compile(
+            *args,
+            config=RunConfig(
+                backend_type=BackendType.Ascend910,
+                execution_mode=ExecutionMode.SIM,
+                codegen_only=True,
+                save_kernels_dir=str(output_dir) if output_dir is not None else None,
+            ),
+        )
+        assert isinstance(compiled, CompiledProgram)
+        return compiled
+
+    @staticmethod
+    def _postponed(raw, annotations: dict[str, str], **namespace):
+        """Keep inspectable source while emulating a module's postponed annotations."""
+        function = types.FunctionType(
+            raw.__code__, {**raw.__globals__, **namespace}, raw.__name__, closure=raw.__closure__
+        )
+        function.__annotations__ = annotations
+        return function
+
+    @staticmethod
+    def _pto_source(output_dir: Path) -> str:
+        paths = list(output_dir.rglob("*.pto"))
+        assert paths
+        return "\n".join(path.read_text() for path in paths)
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested_mixed"])
+    def test_tuple_tile_parameters_compile(self, postponed, nested):
+        """Tuple leaves retain independent Tile dimensions and the selected caller's type."""
+        ROWS = pl.dynamic("TUPLE_TILE_ROWS")
+        if nested:
+
+            def choose(
+                pair: pl.Tuple[
+                    pl.Tensor[[32, 64], pl.FP32],
+                    pl.Scalar[pl.INDEX],
+                    pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]],
+                ],
+            ) -> pl.Tile:
+                return pair[2][1]
+
+            annotation = (
+                "pl.Tuple[pl.Tensor[[32, 64], pl.FP32], pl.Scalar[pl.INDEX], "
+                "pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]]]"
+            )
+        else:
+
+            def choose(
+                pair: pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]],
+            ) -> pl.Tile:
+                return pair[1]
+
+            annotation = "pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]]"
+
+        raw = choose
+        if postponed:
+            raw = self._postponed(raw, {"pair": annotation, "return": "pl.Tile"}, ROWS=ROWS)
+        choose = jit.inline(auto_scope=False)(raw)
+
+        if nested:
+
+            @jit.incore
+            def copy_incore(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+                first = pl.load(src, [0, 0], [16, 64])
+                second = pl.load(src, [0, 0], [32, 64])
+                # Pyright cannot correlate the nested flag with the conditional helper signature.
+                selected = choose((src, pl.const(7, pl.INDEX), (first, second)))  # pyright: ignore[reportArgumentType]
+                result = pl.add(selected, second)
+                return pl.store(result, [0, 0], dst)
+
+        else:
+
+            @jit.incore
+            def copy_incore(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+                first = pl.load(src, [0, 0], [16, 64])
+                second = pl.load(src, [0, 0], [32, 64])
+                selected = choose((first, second))
+                # The selected Tile keeps the second caller's extent before inline expansion.
+                result = pl.add(selected, second)
+                return pl.store(result, [0, 0], dst)
+
+        self._compile(self._entry(copy_incore, [32, 64]))
+
+    def test_tuple_factory_annotations_specialize_each_leaf_and_invalidate_cache(self):
+        """Erased factory values and distinct constexpr formals survive in separate Tuple leaves."""
+
+        def factory(columns):
+            FIRST = 8
+            SECOND = 8
+            VIEW = pl.TileView(valid_shape=[3, columns])
+
+            @jit.inline(auto_scope=False)
+            def choose(
+                pair: pl.Tuple[
+                    pl.Tile[[FIRST, columns], pl.FP32],
+                    pl.Tuple[pl.Tile[[SECOND, columns], pl.FP32, pl.Mem.Vec, VIEW]],
+                ],
+                FIRST: pl.constexpr,
+                SECOND: pl.constexpr,
+            ) -> pl.Tile:
+                return pair[1][0]
+
+            return choose
+
+        choose = factory(64)
+        assert not choose._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [8, 64], valid_shape=[3, 64], target_memory=pl.Mem.Vec)
+            second = pl.load(src, [0, 0], [16, 64], valid_shape=[3, 64], target_memory=pl.Mem.Vec)
+            selected = choose((first, (second,)), 8, 16)
+            output = pl.store(selected, [0, 0], dst)
+            swapped = choose((second, (first,)), 16, 8)
+            return pl.store(swapped, [0, 0], output)
+
+        entry = self._entry(copy_incore, [16, 64])
+
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        compiled = self._compile(entry)
+        assert self._compile(entry) is compiled
+
+        choose = factory(128)
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        with pytest.raises(ValueError, match=r"Inline call to 'choose.*physical shape dimension\[1\]"):
+            self._compile(entry)
+
+    def test_tuple_tile_contract_is_checked_for_an_unused_leaf(self):
+        """The retained tuple signature reaches recursive validation before the helper disappears."""
+
+        @jit.inline(auto_scope=False)
+        def choose(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], pl.Tile[[8, 64], pl.FP32]]) -> pl.Tile:
+            return pair[0]
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [8, 64])
+            second = pl.load(src, [0, 0], [16, 64])
+            selected = choose((first, second))
+            return pl.store(selected, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [16, 64])
+
+        with pytest.raises(
+            ValueError, match=r"Inline call to 'choose'.*parameter 'pair'.*tuple element\[1\].*physical shape"
+        ):
+            self._compile(entry)
+
+    @pytest.mark.parametrize("affine", [False, True])
+    def test_immutable_tile_alias_return_compiles(self, affine):
+        """A returned local alias can be consumed before inline expansion resolves generic dimensions."""
+        rows = pl.dynamic("JIT_IMMUTABLE_ALIAS_ROWS")
+        extent = 2 * rows if affine else rows
+
+        @jit.inline(auto_scope=False)
+        def choose_second(first: pl.Tile[[extent, 64], pl.FP32], second: pl.Tile[[extent, 64], pl.FP32]):
+            alias = second
+            result = alias
+            return result
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [16, 64])
+            second = pl.load(src, [0, 0], [32, 64])
+            selected = choose_second(first, second)
+            result = pl.add(selected, second)
+            return pl.store(result, [0, 0], dst)
+
+        self._compile(self._entry(copy_incore, [32, 64]))
+
+    @pytest.mark.parametrize("physical_rows, constexpr_rows", [(8, 16), (16, 8)])
+    @pytest.mark.parametrize("mixed_axes", [False, True])
+    def test_free_dynvar_is_independent_of_same_named_constexpr(
+        self, physical_rows, constexpr_rows, mixed_axes
+    ):
+        """A canonical DynVar label must not make a generic extent use an unrelated constexpr."""
+        M = pl.dynamic("ROWS")
+        ROWS = 99
+        if mixed_axes:
+
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[M, ROWS], pl.FP32], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            cols = constexpr_rows
+        else:
+
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[M, 64], pl.FP32], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            cols = 64
+
+        @jit.incore
+        def copy_incore(
+            src: pl.Tensor[[physical_rows, cols], pl.FP32],
+            dst: pl.Out[pl.Tensor[[physical_rows, cols], pl.FP32]],
+        ):
+            tile = pl.load(src, [0, 0], [physical_rows, cols])
+            kept = keep_tile(tile, constexpr_rows)
+            return pl.store(kept, [0, 0], dst)
+
+        self._compile(self._entry(copy_incore, [physical_rows, cols]))
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    @pytest.mark.parametrize("symbol_name", ["tile", "anchor"])
+    def test_generic_tile_symbol_matching_nonscalar_parameter_compiles(self, postponed, symbol_name):
+        """A module-level shape symbol can share a name with a Tile or Tensor formal."""
+        ROWS = pl.dynamic(symbol_name)
+
+        def keep_tile(anchor: pl.Tensor[[8, 64], pl.FP32], tile: pl.Tile[[ROWS, 64], pl.FP32]) -> pl.Tile:
+            return tile
+
+        raw = keep_tile
+        if postponed:
+            raw = self._postponed(
+                raw,
+                {
+                    "anchor": "pl.Tensor[[8, 64], pl.FP32]",
+                    "tile": "pl.Tile[[ROWS, 64], pl.FP32]",
+                    "return": "pl.Tile",
+                },
+                ROWS=ROWS,
+            )
+        keep_tile = jit.inline(auto_scope=False)(raw)
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64])
+            kept = keep_tile(src, tile)
+            return pl.store(kept, [0, 0], dst)
+
+        self._compile(self._entry(copy_incore, [8, 64]))
+
+    @pytest.mark.parametrize("changed", ["factory-shape", "memory-space"])
+    def test_eager_factory_shape_with_constexpr_space_compiles_and_invalidates_cache(self, changed):
+        """SPACE specialization retains erased rows and rechecks changed contracts."""
+        SPACE = pl.Mem.Vec
+
+        def factory(rows):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[rows, 64], pl.FP32, SPACE], SPACE: pl.constexpr) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(8)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile, SPACE)
+            return pl.store(kept, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [8, 64])
+
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        first = self._compile(entry)
+        assert self._compile(entry) is first
+        if changed == "factory-shape":
+            keep_tile = factory(16)
+            conflict = "physical shape dimension"
+        else:
+            # Intentionally rebind the annotation constant to test cache invalidation.
+            SPACE = pl.Mem.Mat  # pyright: ignore[reportConstantRedefinition]
+            conflict = "memory space"
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        with pytest.raises(ValueError, match=f"Inline call to 'keep_tile'.*{conflict}"):
+            self._compile(entry)
+
+    @pytest.mark.parametrize(
+        "changed",
+        ["dynvar", "shape", "view", "constexpr-view", "Out", "InOut", "direction-alias", "contract"],
+    )
+    def test_postponed_annotation_rebinding_invalidates_cache(self, changed):
+        """Each annotation form enters both cache keys and rechecks a rebound contract."""
+        ROWS = pl.dynamic("FIRST_ROWS") if changed == "dynvar" else 99
+        SHAPE = [pl.dynamic("FIRST_ROWS"), 64]
+        VIEW = pl.TileView(valid_shape=[1, 64], stride=[64, 1])
+        CONTRACT = pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec]
+        if changed == "dynvar":
+
+            def keep_tile(tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec]"
+        elif changed == "contract":
+            # Runtime Tile aliases are valid DSL annotations, outside Python's static type grammar.
+            def keep_tile(tile: CONTRACT) -> pl.Tile:  # pyright: ignore[reportInvalidTypeForm]
+                return tile
+
+            annotation = "CONTRACT"
+        elif changed == "Out":
+
+            def keep_tile(tile: pl.Out[pl.Tile[[ROWS, 64], pl.FP32, VIEW]], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Out[pl.Tile[[ROWS, 64], pl.FP32, VIEW]]"
+        elif changed == "InOut":
+
+            def keep_tile(tile: pl.InOut[pl.Tile[[ROWS, 64], pl.FP32, VIEW]], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            annotation = "pl.InOut[pl.Tile[[ROWS, 64], pl.FP32, VIEW]]"
+        elif changed == "direction-alias":
+
+            def keep_tile(
+                tile: TileDirection[pl.Tile[[ROWS, 64], pl.FP32, VIEW]], ROWS: pl.constexpr
+            ) -> pl.Tile:
+                return tile
+
+            annotation = "TileDirection[pl.Tile[[ROWS, 64], pl.FP32, VIEW]]"
+        elif changed == "constexpr-view":
+
+            def keep_tile(
+                tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec, VIEW], ROWS: pl.constexpr
+            ) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec, VIEW]"
+        else:
+
+            def keep_tile(tile: pl.Tile[SHAPE, pl.FP32, pl.Mem.Vec, VIEW], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            annotation = "pl.Tile[SHAPE, pl.FP32, pl.Mem.Vec, VIEW]"
+
+        annotations = {"tile": annotation, "return": "pl.Tile"}
+        if changed not in ("dynvar", "contract"):
+            annotations["ROWS"] = "pl.constexpr"
+        postponed = self._postponed(
+            keep_tile, annotations, ROWS=ROWS, SHAPE=SHAPE, VIEW=VIEW, CONTRACT=CONTRACT
+        )
+        keep_tile = jit.inline(auto_scope=False)(postponed)
+        if changed in ("dynvar", "contract"):
+
+            @jit.incore
+            def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+                tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                kept = keep_tile(tile)
+                return pl.store(kept, [0, 0], dst)
+
+        else:
+
+            @jit.incore
+            def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+                tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                kept = keep_tile(tile, 8)
+                return pl.store(kept, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [8, 64])
+        source_hash, persistent_digest = entry._get_source_hash(), entry._persistent_source_digest()
+        first = self._compile(entry)
+        assert self._compile(entry) is first
+
+        name, value = {
+            "dynvar": ("ROWS", pl.dynamic("SECOND_ROWS")),
+            "shape": ("SHAPE", [pl.dynamic("SECOND_ROWS"), 64]),
+            "contract": ("CONTRACT", pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec]),
+        }.get(changed, ("VIEW", pl.TileView(valid_shape=[2, 64], stride=[64, 1])))
+        postponed.__globals__[name] = value
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        if changed == "contract":
+            # A stale artifact would skip validation of the new 16-row contract.
+            with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
+                self._compile(entry)
+        else:
+            assert self._compile(entry) is not first
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    def test_eager_factory_annotation_compiles_and_invalidates_cache(self, rows, tmp_path):
+        """Annotation-only factory values survive and rebinding rechecks the cached contract."""
+
+        def factory(tile_rows):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[tile_rows, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(rows)
+        assert "tile_rows" not in keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[rows, 64], pl.FP32], dst: pl.Out[pl.Tensor[[rows, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [rows, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [rows, 64])
+        static_hash = entry._get_static_source_hash()
+        source_hash, persistent_digest = entry._get_source_hash(), entry._persistent_source_digest()
+        self._compile(entry, output_dir=tmp_path)
+        source = self._pto_source(tmp_path)
+        assert f"rows={rows}, cols=64" in source
+        assert source.count("pto.tload ") == source.count("pto.tstore ") == 1
+
+        # Saving generated files bypasses caching; use normal compiles to check artifact reuse.
+        compiled = self._compile(entry)
+        assert self._compile(entry) is compiled
+        keep_tile = factory(rows * 2)
+        assert entry._get_static_source_hash() == static_hash
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        # Reusing the old artifact would bypass validation of the changed shape.
+        with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
+            self._compile(entry)
+
+    def test_rebound_parameterized_factory_contract_invalidates_cached_artifact(self):
+        """A constexpr axis must not hide a changed annotation-only factory axis."""
+        ROWS = 99
+
+        def factory(cols):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(64)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 128], pl.FP32], dst: pl.Out[pl.Tensor[[8, 128], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile, 8)
+            return pl.store(kept, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [8, 128])
+
+        static_hash = entry._get_static_source_hash()
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        compiled = self._compile(entry)
+        assert self._compile(entry) is compiled
+
+        keep_tile = factory(128)
+        assert entry._get_static_source_hash() == static_hash
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        with pytest.raises(ValueError, match="Inline call to 'keep_tile'.*physical shape dimension"):
+            self._compile(entry)
+
+    def test_eager_generic_tile_with_dynamic_tensor_anchor_compiles(self, tmp_path):
+        """A Tensor anchor declares M while the helper's physical M binds to eight."""
+        M = pl.dynamic("M")
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(tile: pl.Tile[[M, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return tile
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            valid_rows = pl.min(pl.tensor.dim(src, 0), 8)
+            tile = pl.load(src, [0, 0], [8, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [M, 64])
+
+        self._compile(entry, output_dir=tmp_path)
+        source = self._pto_source(tmp_path)
+        assert "rows=8, cols=64" in source
+        assert "v_row=?" in source
+        assert source.count("pto.tload ") == source.count("pto.tstore ") == 1
+
+    @pytest.mark.parametrize("symbol_name", ["M", "TILE_ROWS"])
+    def test_tile_only_generic_dim_compiles(self, symbol_name, tmp_path):
+        """A generic Tile formal declares its symbol even when every Tensor is static."""
+        ROWS = pl.dynamic(symbol_name)
+
+        def factory(dimension):
+            @jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+                return tile
+
+            return keep_tile
+
+        keep_tile = factory(ROWS)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+            tile = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        entry = self._entry(copy_incore, [8, 64])
+
+        self._compile(entry, output_dir=tmp_path)
+        source = self._pto_source(tmp_path)
+        assert "rows=8, cols=64" in source
+        assert source.count("pto.tload ") == source.count("pto.tstore ") == 1
+
+    @pytest.mark.parametrize(
+        "shape, dtype, space, mismatch",
+        [
+            ([16, 64], pl.FP32, pl.Mem.Vec, "physical shape dimension"),
+            ([8, 64], pl.BF16, pl.Mem.Vec, "dtype"),
+            ([8, 64], pl.FP32, pl.Mem.Mat, "memory space"),
+        ],
+        ids=["shape", "dtype", "memory-space"],
+    )
+    def test_compile_rejects_conflicting_inline_tile(self, shape, dtype, space, mismatch):
+        """The default compile pipeline checks a Tile before erasing the helper."""
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return tile
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], dtype]):
+            tile = pl.load(src, [0, 0], shape, target_memory=space)
+            _kept = keep_tile(tile)
+
+        @jit
+        def entry(src: pl.Tensor[[16, 64], dtype]):
+            copy_incore(src)
+
+        with pytest.raises(ValueError, match=f"Inline call to 'keep_tile' parameter 'tile': .*{mismatch}"):
+            self._compile(entry)
+
+    @classmethod
+    def _dynamic_entries(cls):
+        M = pl.dynamic("INLINE_TILE_ROWS")
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(t: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return t
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            valid_rows = pl.min(pl.tensor.dim(src, 0), 8)
+            tile = pl.load(src, [0, 0], [8, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Vec)
+            kept = keep_tile(tile)
+            return pl.store(kept, [0, 0], dst)
+
+        @jit.incore
+        def baseline_incore(src: pl.Tensor[[M, 64], pl.FP32], dst: pl.Out[pl.Tensor[[M, 64], pl.FP32]]):
+            valid_rows = pl.min(pl.tensor.dim(src, 0), 8)
+            tile = pl.load(src, [0, 0], [8, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Vec)
+            return pl.store(tile, [0, 0], dst)
+
+        return cls._entry(copy_incore, [M, 64]), cls._entry(baseline_incore, [M, 64])
+
+    @staticmethod
+    def _assert_tile_type(ty: ir.Type, rows: int) -> ir.TileType:
+        assert isinstance(ty, ir.TileType)
+        assert len(ty.shape) == 2
+        for dim, expected in zip(ty.shape, (rows, 64)):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == expected
+        assert ty.dtype == DataType.FP32
+        assert ty.memory_space == ir.MemorySpace.Vec
+        return ty
+
+    @staticmethod
+    def _tile_calls(program: ir.Program) -> list[ir.Call]:
+        calls: list[ir.Call] = []
+        load_name = ir.get_op("tile.load").name
+        store_name = ir.get_op("tile.store").name
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name in (load_name, store_name):
+                    calls.append(op)
+                super().visit_call(op)
+
+        Collector().visit_program(program)
+        return calls
+
+    def test_dynamic_tensor_to_inline_tile_preserves_type_and_valid_shape(self):
+        """The helper's static allocation shape must not erase its caller's valid rows."""
+        torch = pytest.importorskip("torch")
+        entry, _ = self._dynamic_entries()
+        program = entry.specialize(torch.empty(3, 64), torch.empty(3, 64))
+        helper = program.get_function("keep_tile")
+        assert helper is not None
+        self._assert_tile_type(helper.params[0].type, 8)
+
+        # Runtime samples supply dtype/rank, not a fixed value for M. Both
+        # Tensor boundaries remain dynamic while the on-core Tile stays 8x64.
+        for name in ("entry", "copy_incore"):
+            func = program.get_function(name)
+            assert func is not None
+            for param in func.params:
+                assert isinstance(param.type, ir.TensorType)
+                assert not isinstance(param.type.shape[0], ir.ConstInt)
+                assert isinstance(param.type.shape[1], ir.ConstInt)
+                assert param.type.shape[1].value == 64
+
+        inlined = passes.inline_functions()(program)
+        assert inlined.get_function("keep_tile") is None
+        calls = self._tile_calls(inlined)
+        assert len(calls) == 2
+        load, store = calls
+        stored_type = self._assert_tile_type(store.args[0].type, 8)
+        actual_view = stored_type.get_effective_tile_view()
+        assert not isinstance(actual_view.valid_shape[0], ir.ConstInt)
+        # The formal annotation has no view. Inlining must retain the actual
+        # argument's dynamic view instead of restoring an implicit 8x64 view.
+        ir.assert_structural_equal(load.type, store.args[0].type, enable_auto_mapping=True)
+
+    def test_inline_tile_compiles_like_direct_load_store(self, tmp_path):
+        """The Tile identity helper adds no storage or memory-space transfer."""
+        torch = pytest.importorskip("torch")
+        entry, baseline = self._dynamic_entries()
+        sources: list[str] = []
+        for kernel, name in ((entry, "inline"), (baseline, "baseline")):
+            output_dir = tmp_path / name
+            self._compile(kernel, torch.empty(3, 64), torch.empty(3, 64), output_dir=output_dir)
+            sources.append(self._pto_source(output_dir))
+            if find_ptoas_binary() is not None:
+                cpp_files = list((output_dir / "kernels").rglob("*.cpp"))
+                assert cpp_files
+                assert all("TMOV" not in path.read_text() for path in cpp_files)
+
+        for source in sources:
+            assert source.count("pto.tload ") == 1
+            assert source.count("pto.tstore ") == 1
+            assert "pto.tmov" not in source
+            assert "v_row=?" in source
+        # An inline return can introduce a second tile declaration for its
+        # alias. Both declarations must address the baseline's single buffer.
+        allocation_addresses = [
+            set(re.findall(r"pto\.alloc_tile addr = (%[\w.$]+)", source)) for source in sources
+        ]
+        assert len(allocation_addresses[0]) == len(allocation_addresses[1]) == 1
+        # Match operation lines, excluding type names such as !pto.tile_buf.
+        tile_op_pattern = r"^\s*(?:%[\w.$]+\s*=\s*)?(pto\.t\w+)\b"
+        assert re.findall(tile_op_pattern, sources[0], re.MULTILINE) == re.findall(
+            tile_op_pattern, sources[1], re.MULTILINE
+        )
+
+    @pytest.mark.parametrize("direction", ["bare", "Out", "InOut"])
+    def test_inline_tile_shape_uses_each_constexpr_binding(self, tmp_path, direction):
+        """Two calls retain an erased factory column and bind their own row extent."""
+        # This ambient value makes Python's eager annotation legal. The JIT
+        # must fold each call's ROWS first, rather than capture this value or
+        # reuse the first helper specialization at the second call site.
+        ROWS = 99
+
+        def factory(cols):
+            if direction == "Out":
+
+                @jit.inline(auto_scope=False)
+                def keep_tile(
+                    t: pl.Out[pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec]], ROWS: pl.constexpr
+                ) -> pl.Tile:
+                    return t
+
+            elif direction == "InOut":
+
+                @jit.inline(auto_scope=False)
+                def keep_tile(
+                    t: pl.InOut[pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec]], ROWS: pl.constexpr
+                ) -> pl.Tile:
+                    return t
+
+            else:
+
+                @jit.inline(auto_scope=False)
+                def keep_tile(t: pl.Tile[[ROWS, cols], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr) -> pl.Tile:
+                    return t
+
+            return keep_tile
+
+        keep_tile = factory(64)
+        assert not keep_tile._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[24, 64], pl.FP32], dst: pl.Out[pl.Tensor[[24, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            second = pl.load(src, [8, 0], [16, 64], target_memory=pl.Mem.Vec)
+            first = keep_tile(first, 8)
+            second = keep_tile(second, 16)
+            dst = pl.store(first, [0, 0], dst)
+            return pl.store(second, [8, 0], dst)
+
+        entry = self._entry(copy_incore, [24, 64])
+
+        program = entry.specialize()
+        for name, rows in (("keep_tile", 8), ("keep_tile__2", 16)):
+            helper = program.get_function(name)
+            assert helper is not None
+            assert len(helper.params) == 1
+            self._assert_tile_type(helper.params[0].type, rows)
+
+        self._compile(entry, output_dir=tmp_path)
+        source = self._pto_source(tmp_path)
+        assert source.count("pto.tload ") == 2
+        assert source.count("pto.tstore ") == 2
+        assert "rows=8, cols=64" in source
+        assert "rows=16, cols=64" in source
+        assert "rows=99" not in source
 
 
 class TestOpaqueFuncIntegration:
@@ -4323,6 +5388,46 @@ class TestClosureConstantFolding:
         assert not re.search(r"\b_CLOSURE_FOLD_ROWS\b", source)
 
 
+_PAGES_3033 = pl.dynamic("PAGES_3033")
+_DIM_ROW_AXIS_3033 = 0
+
+
+@jit.incore
+def _copy_key_3033(keys: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    value = pl.load(keys, [0, 0], [1, 128])
+    pl.store(value, [0, 0], out)
+    return out
+
+
+@jit
+def _descriptor_reshape_chain_3033(
+    src: pl.Tensor[[_PAGES_3033, 4160], pl.INT8],
+    out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+) -> pl.Tensor:
+    pages = pl.tensor.dim(src, 0)
+    width = pl.tensor.dim(src, 1)
+    flat = pl.reshape(src, [pages * width])
+    shifted = flat[64 : 64 + ((pages * width - 64) // 128) * 128]
+    keys = pl.reshape(shifted, [(pages * width - 64) // 128, 128])
+    return _copy_key_3033(keys, out)
+
+
+@jit
+def _descriptor_reshape_alias_chain_3033(
+    src: pl.Tensor[[_PAGES_3033, 4160], pl.INT8],
+    out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+) -> pl.Tensor:
+    pages = pl.tensor.dim(src, 0)
+    width = pl.tensor.dim(src, 1)
+    total = pages * width
+    rows = (total - 64) // 128
+    alias = rows
+    flat = pl.reshape(src, [total])
+    shifted = flat[64 : 64 + alias * 128]
+    keys = pl.reshape(shifted, [alias, 128])
+    return _copy_key_3033(keys, out)
+
+
 class TestRuntimeSizedLocalExtents:
     """A local tensor whose extent is only known at runtime (issue #2450).
 
@@ -4347,7 +5452,9 @@ class TestRuntimeSizedLocalExtents:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_runtime_create_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_create_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "tmp")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4359,7 +5466,9 @@ class TestRuntimeSizedLocalExtents:
     def test_runtime_window_extent_synthesizes_dyn_dim(self):
         """pld.window sized by pld.world_size() gets a synthesized DynDim."""
         seed = {"out": TensorMeta(shape=(16, 8), dtype=DataType.FP32)}
-        metas = _extract_local_tensor_metas(_runtime_window_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_window_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "win")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4372,7 +5481,9 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(DynDim(name="M", literal="M", static_bound=32), 8), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_dyn_arith_create_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _dyn_arith_create_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "tmp")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4383,20 +5494,1754 @@ class TestRuntimeSizedLocalExtents:
             "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_slice_then_dep_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _slice_then_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
         assert all(not isinstance(d, DynDim) for d in metas["buf"].shape)
 
     def test_reshape_stays_strict(self):
-        """A reshape dim is constrained by the source's element count, which an
-        invented symbol cannot express — it still declines the meta."""
+        """An arbitrary tensor.read extent is not descriptor-derived arithmetic,
+        so reshape still declines its metadata."""
         seed = {
             "src": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas = _extract_local_tensor_metas(_runtime_reshape_body, seed_meta=seed)
+        metas = extract_local_tensor_metas(
+            _runtime_reshape_body, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
         assert "flat" not in metas
+
+    def test_issue_3033_descriptor_reshape_chain_specializes(self):
+        """Flatten/slice/reshape reaches a bare-annotated dep without samples or a device."""
+        program = _descriptor_reshape_chain_3033.specialize()
+        assert isinstance(program, ir.Program)
+        kernel = program.get_function("_copy_key_3033")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        shape = param_type.shape
+        assert len(shape) == 2
+        assert not isinstance(shape[0], ir.ConstInt)
+        assert isinstance(shape[1], ir.ConstInt) and shape[1].value == 128
+        entry = program.get_function("_descriptor_reshape_chain_3033")
+        assert entry is not None
+        source = entry.as_python()
+        reshapes = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "reshape"
+        ]
+        assert len(reshapes) == 2
+        assert any(isinstance(node, ast.Mult) for node in ast.walk(reshapes[0].args[1]))
+        assert any(isinstance(node, ast.FloorDiv) for node in ast.walk(reshapes[1].args[1]))
+
+    def test_descriptor_reshape_nested_integer_arithmetic(self):
+        """Supported integer operators stay descriptor-derived through nesting and unary minus."""
+        rows = DynDim(name="M", literal="M", static_bound=16)
+        seed = {"src": TensorMeta(shape=(rows, 128), dtype=DataType.FP32)}
+
+        def body(src):
+            rows = src.shape[0]
+            nested = pl.reshape(src, [((rows + 4) * 2 - -8) // 4])
+            signed = pl.reshape(src, [-(-rows)])
+            return nested, signed
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        for name in ("nested", "signed"):
+            dim = self._leading_dim(metas, name)
+            assert isinstance(dim, DynDim) and dim.synthesized
+            assert dim.name != rows.name
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "transitive_shape_alias",
+            "annotated_shape_alias",
+            "rebound_shape_alias",
+            "rebound_source_shape_alias",
+        ],
+    )
+    def test_descriptor_reshape_local_integer_unary_plus_stays_unknown(self, source):
+        """An inferred integer does not by itself prove unary plus can fold in generated source."""
+
+        def transitive_shape_alias(src):
+            width = src.shape[1]
+            saved = width
+            flat = pl.reshape(src, [+saved])
+            return flat
+
+        def annotated_shape_alias(src):
+            width: int = src.shape[1]
+            flat = pl.reshape(src, [+width])
+            return flat
+
+        def rebound_shape_alias(src):
+            width = src.shape[1]
+            width = 128
+            flat = pl.reshape(src, [+width])
+            return flat
+
+        def rebound_source_shape_alias(src, other):
+            src = other
+            width = src.shape[1]
+            flat = pl.reshape(src, [+width])
+            return flat
+
+        seed = {
+            "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+            "other": TensorMeta(shape=(1, 64), dtype=DataType.INT8),
+        }
+        bodies = {
+            "transitive_shape_alias": transitive_shape_alias,
+            "annotated_shape_alias": annotated_shape_alias,
+            "rebound_shape_alias": rebound_shape_alias,
+            "rebound_source_shape_alias": rebound_source_shape_alias,
+        }
+        metas = extract_local_tensor_metas(
+            bodies[source], seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
+        assert "flat" not in metas
+
+    @pytest.mark.parametrize(
+        "rows_expr,total_expr,error",
+        [
+            ("src.shape[-2]", "rows * 128", "Only constant integer indices supported for tuple access"),
+            ("pl.tensor.dim(src, 0)", "+rows", "Unsupported unary operator: UAdd"),
+            ("pl.tensor.dim(src, 0)", "+(rows * 128)", "Unsupported unary operator: UAdd"),
+            ("128", "+rows", "Unsupported unary operator: UAdd"),
+            ("pl.tensor.dim(src, 1)", "+rows", "Unsupported unary operator: UAdd"),
+            ("128", "+pl.tensor.dim(src, 1)", "Unsupported unary operator: UAdd"),
+        ],
+    )
+    def test_descriptor_reshape_unsupported_shape_syntax_rejected(
+        self, monkeypatch, rows_expr, total_expr, error
+    ):
+        """The actual parser still rejects unsupported shape indices and scalar unary plus."""
+
+        def body(src: pl.Tensor[[_PAGES_3033, 128], pl.INT8]):
+            rows = 128
+            total = rows
+            flat = pl.reshape(src, [total])
+            return flat
+
+        # Supply the unsupported DSL spelling through source text, keeping
+        # Python's own Tensor/Scalar typing separate from parser diagnostics.
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source = "".join(lines).replace("rows = 128", f"rows = {rows_expr}")
+        source = source.replace("total = rows", f"total = {total_expr}")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        entry = jit(body)
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="PAGES", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
+            )
+        }
+        assert "flat" not in extract_local_tensor_metas(
+            entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
+        with pytest.raises(UnsupportedFeatureError, match=error):
+            entry.specialize()
+
+    @pytest.mark.parametrize(
+        "source",
+        ["literal", "global_constant", "inline_shape", "nested_shape"],
+    )
+    def test_descriptor_reshape_compile_time_unary_plus_supported(self, monkeypatch, source):
+        """Unary plus remains supported for expressions the parser can fold at compile time."""
+
+        def body(src: pl.Tensor[[1, 128], pl.INT8]):
+            rows = 128
+            flat = pl.reshape(src, [+rows])
+            return flat
+
+        spellings = {
+            "literal": ("rows = 128", "+128"),
+            "global_constant": ("rows = 128", "+(_DIM_ROW_AXIS_3033 + 128)"),
+            "inline_shape": ("rows = 128", "+src.shape[1]"),
+            "nested_shape": ("rows = 128", "+(src.shape[1] + 1 - 1)"),
+        }
+        assignment, expression = spellings[source]
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source_text = "".join(lines).replace("rows = 128", assignment).replace("[+rows]", f"[{expression}]")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source_text.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        entry = jit(body)
+        seed = {"src": TensorMeta(shape=(1, 128), dtype=DataType.INT8)}
+        metas = extract_local_tensor_metas(entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["flat"].shape == (128,)
+        assert isinstance(entry.lower(), ir.Program)
+
+    @pytest.mark.parametrize("source", ["shape_alias", "unpack", "future_write", "one_prior_write"])
+    def test_descriptor_reshape_static_shape_unary_plus_cross_dep(self, monkeypatch, source):
+        """Static shape aliases that the specializer inlines must continue to type a dependency."""
+
+        def body(
+            src: pl.Tensor[[1, 128], pl.INT8],
+            out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+        ):
+            rows = 128
+            view = pl.reshape(src, [1, +rows])
+            out = _copy_key_3033(view, out)
+            return out
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        func_def = ast.parse(textwrap.dedent("".join(lines))).body[0]
+        assert isinstance(func_def, ast.FunctionDef)
+        assignments = {
+            "shape_alias": "rows = src.shape[1]",
+            "unpack": "height, rows = src.shape",
+            "future_write": "rows = src.shape[1]",
+            "one_prior_write": "rows = 1\nrows = src.shape[1]",
+        }
+        func_def.body[:1] = ast.parse(assignments[source]).body
+        if source == "future_write":
+            func_def.body.insert(-1, ast.parse("rows = 128").body[0])
+        source_text = ast.unparse(func_def) + "\n"
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source_text.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        entry = jit(body)
+        seed = {
+            "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+            "out": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+        }
+        metas = extract_local_tensor_metas(entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["view"].shape == (1, 128)
+        assert isinstance(entry.lower(), ir.Program)
+
+    def test_descriptor_reshape_static_shape_unary_plus_nested_dep(self, monkeypatch):
+        """An inlined shape alias inside a branch also reaches a real consumer."""
+
+        def body(
+            src: pl.Tensor[[1, 128], pl.INT8],
+            out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+            flag: pl.Scalar[pl.INDEX],
+        ):
+            if flag > 0:
+                rows = 128
+                view = pl.reshape(src, [1, +rows])
+                updated = _copy_key_3033(view, out)
+                result = pl.yield_(updated)
+            else:
+                result = pl.yield_(out)
+            return result
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source = "".join(lines).replace("rows = 128", "rows = src.shape[1]")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        entry = jit(body)
+        seed = {
+            "src": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+            "out": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+        }
+        assert extract_local_tensor_metas(entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings)[
+            "view"
+        ].shape == (1, 128)
+        assert isinstance(entry.lower(), ir.Program)
+
+    def test_descriptor_reshape_static_shape_unary_plus_active_rename_rejected(self, monkeypatch):
+        """A shape assignment does not remove an earlier runtime SSA rename."""
+
+        def body(src: pl.Tensor[[1, 128], pl.INT8]):
+            rows = 1
+            rows = 2
+            rows = 128
+            view = pl.reshape(src, [1, +rows])
+            return view
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source = "".join(lines).replace("rows = 128", "rows = src.shape[1]")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        entry = jit(body)
+        seed = {"src": TensorMeta(shape=(1, 128), dtype=DataType.INT8)}
+        assert "view" not in extract_local_tensor_metas(
+            entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+        )
+        with pytest.raises(UnsupportedFeatureError, match="Unsupported unary operator: UAdd"):
+            entry.specialize()
+
+    def test_descriptor_reshape_arithmetic_alias_chain(self):
+        """Transitive arithmetic aliases cross a dep boundary with no sample tensors."""
+        program = _descriptor_reshape_alias_chain_3033.lower()
+        assert isinstance(program, ir.Program)
+        kernel = program.get_function("_copy_key_3033")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert len(param_type.shape) == 2
+        assert not isinstance(param_type.shape[0], ir.ConstInt)
+        assert isinstance(param_type.shape[1], ir.ConstInt) and param_type.shape[1].value == 128
+
+    @pytest.mark.parametrize("entry", [_descriptor_reshape_chain_3033, _descriptor_reshape_alias_chain_3033])
+    def test_descriptor_reshape_arithmetic_stays_dynamic(self, entry):
+        """Aliased products retain dynamic shape information independently of sample bounds."""
+        shapes = []
+        for pages, width in ((8, 64), (16, 128)):
+            seed = {
+                "src": TensorMeta(
+                    shape=(
+                        DynDim(name="PAGES", literal="PAGES", static_bound=pages),
+                        DynDim(name="WIDTH", literal="WIDTH", static_bound=width),
+                    ),
+                    dtype=DataType.INT8,
+                ),
+                "out": TensorMeta(shape=(1, 128), dtype=DataType.INT8),
+            }
+            metas = extract_local_tensor_metas(
+                entry._func, seed_meta=seed, discover_deps=_discover_dep_bindings
+            )
+            flat_dim = self._leading_dim(metas, "flat")
+            keys_dim = self._leading_dim(metas, "keys")
+            assert isinstance(flat_dim, DynDim) and flat_dim.synthesized
+            assert isinstance(keys_dim, DynDim) and keys_dim.synthesized
+            assert flat_dim.name != keys_dim.name
+            assert metas["keys"].shape[1] == 128
+            shapes.append((metas["flat"].shape, metas["keys"].shape))
+        assert shapes[0] == shapes[1]
+
+    def test_descriptor_reshape_repeated_snapshot_shares_only_result_axes(self):
+        """Repeated aliases share one shape symbol without merging independent snapshots or results."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4)
+        seed = {"src": TensorMeta(shape=(rows, rows), dtype=DataType.FP32)}
+
+        def body(src):
+            n = src.shape[0] * 1
+            alias = n
+            square = pl.reshape(src, [n, alias])
+            another = pl.reshape(src, [n, n])
+            m = src.shape[1] * 1
+            independent = pl.reshape(src, [n, m])
+            saved = n
+            n = src.shape[0] * 2
+            rebound = pl.reshape(src, [saved, n])
+            inline = pl.reshape(src, [src.shape[0] * 1, src.shape[1] * 1])
+            work = pl.create_tensor([saved], dtype=pl.FP32)
+            result = pl.reshape(work, [saved])
+            return square, another, independent, rebound, inline, work, result
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        square = metas["square"].shape
+        another = metas["another"].shape
+        assert isinstance(square[0], DynDim) and square[0].synthesized
+        assert square[0] is square[1]
+        assert isinstance(another[0], DynDim)
+        assert another[0] is another[1]
+        assert square[0] is not another[0]
+        assert square[0].name != another[0].name
+        for name in ("independent", "rebound", "inline"):
+            first, second = metas[name].shape
+            assert isinstance(first, DynDim) and isinstance(second, DynDim)
+            assert first is not second
+            assert first.name != second.name
+        assert metas["work"].shape[0] != metas["result"].shape[0]
+
+    def test_descriptor_reshape_repeated_snapshot_square_dep_specializes(self):
+        """A square reshape retains axis equality for transpose/fmod inside a bare-annotated dep."""
+
+        @jit.incore
+        def square_dep(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            remainder = pl.fmod(x, pl.transpose(x, 0, 1))
+            out = pl.assemble(out, remainder, [0, 0])
+            return out
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_PAGES_3033, _PAGES_3033], pl.FP32],
+            out: pl.Out[pl.Tensor[[_PAGES_3033, _PAGES_3033], pl.FP32]],
+        ):
+            n = pl.tensor.dim(src, 0) // 2
+            block = pl.slice(src, [n, n], [0, 0])
+            view = pl.reshape(block, [n, n])
+            return square_dep(view, out)
+
+        assert isinstance(entry.specialize(), ir.Program)
+
+    def test_descriptor_reshape_repeated_snapshot_square_tile_dep(self):
+        """The shared square type also survives verified lowering with fixed-size tile computation."""
+
+        @jit.incore
+        def square_tile_dep(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            value = pl.load(x, [0, 0], [2, 2])
+            remainder = pl.fmod(value, pl.transpose(value, 0, 1))
+            pl.store(remainder, [0, 0], out)
+            return out
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_PAGES_3033, _PAGES_3033], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 2], pl.FP32]],
+        ):
+            n = pl.tensor.dim(src, 0) // 2
+            block = pl.slice(src, [n, n], [0, 0])
+            view = pl.reshape(block, [n, n])
+            return square_tile_dep(view, out)
+
+        program = entry.lower()
+        assert isinstance(program, ir.Program)
+        kernel = program.get_function("square_tile_dep")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        first, second = param_type.shape
+        assert isinstance(first, ir.Var) and isinstance(second, ir.Var)
+        assert first.unique_id == second.unique_id
+
+    def test_descriptor_reshape_alias_snapshots_scalar_rebindings(self):
+        """An alias keeps its old expression when its source scalar is rebound or becomes unknown."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="PAGES", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
+            ),
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+        }
+
+        def body(src, cfg):
+            pages = pl.tensor.dim(src, 0)
+            total = pages * 128
+            saved = total
+            total = total - 64
+            rows = total // 128
+            pages = pl.tensor.read(cfg, [0])
+            total = pages
+            original = pl.reshape(src, [saved])
+            derived = pl.reshape(src, [rows, 128])
+            unknown = pl.reshape(src, [total])
+            return original, derived, unknown
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        for name in ("original", "derived"):
+            dim = self._leading_dim(metas, name)
+            assert isinstance(dim, DynDim) and dim.synthesized
+        assert "unknown" not in metas
+
+    def test_descriptor_reshape_integer_aliases_use_assignment_values(self):
+        """Integer aliases fold exactly and read the RHS before updating a rebound name."""
+        seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
+
+        def body(src):
+            pages = src.shape[0]
+            width = src.shape[1]
+            total = pages * width
+            saved = total
+            total = half = total // 2
+            pages = 2
+            width = 4
+            block = pages * width
+            extent = ((saved + 16 - 8) // 2) - -12
+            original = pl.reshape(src, [saved])
+            rebound = pl.reshape(src, [half, 2])
+            constants = pl.reshape(src, [block, 4])
+            arithmetic = pl.reshape(src, [extent])
+            return original, rebound, constants, arithmetic
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["original"].shape == (32,)
+        assert metas["rebound"].shape == (16, 2)
+        assert metas["constants"].shape == (8, 4)
+        assert metas["arithmetic"].shape == (32,)
+
+    def test_descriptor_reshape_chained_aliases_cross_dep(self, monkeypatch, tmp_path):
+        """Chained aliases and rebound shape snapshots compile across a dependency."""
+        torch = pytest.importorskip("torch")
+        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
+
+        @jit.incore
+        def consume(first: pl.Tensor, second: pl.Tensor, out: pl.Out[pl.Tensor]):
+            left = pl.load(first, [0, 0], [1, 32])
+            right = pl.load(second, [0, 0], [1, 32])
+            pl.store(pl.add(left, right), [0, 0], out)
+            return out
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_PAGES_3033, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ):
+            PAGES = alias = pl.dynamic("PAGES")
+            src.bind_dynamic(0, PAGES)
+            total = alias * 128
+            total = half = total // 2
+            total = total * 2
+            first = pl.reshape(src, [total // 32, 32])
+            second = pl.reshape(src, [half // 16, 32])
+            return consume(first, second, out)
+
+        @jit
+        def alias_first(src: pl.Tensor, out: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
+            alias = PAGES = pl.dynamic("PAGES")
+            src.bind_dynamic(0, PAGES)
+            total = alias * 128
+            view = pl.reshape(src, [total // 32, 32])
+            return consume(view, view, out)
+
+        for kernel in (entry, alias_first):
+            compiled = kernel.compile(torch.empty(4, 128), torch.empty(1, 32))
+            assert isinstance(compiled, CompiledProgram)
+
+        def rebound(
+            src: pl.Tensor[[1, 128], pl.FP32],
+            other: pl.Tensor[[4, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ):
+            src = other
+            rows, cols = pl.tensor.dim(src, 0), pl.tensor.dim(src, 1)
+            width = pl.tensor.dim(src, 1)
+            half = width // 2
+            view = pl.reshape(src, [rows * cols // half, half])
+            return consume(view, view, out)
+
+        def via_add(
+            src: pl.Tensor[[4, 64], pl.FP32],
+            other: pl.Tensor[[4, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                src = pl.add(src, other)
+                rows, cols = pl.tensor.dim(src, 0), pl.tensor.dim(src, 1)
+                _shape_view = pl.reshape(src, shape=[rows, cols])
+                _buffer = pl.create_tensor([rows, cols], dtype=pl.FP32)
+                view = pl.reshape(src, [rows * cols // 32, 32])
+                out[:, :] = view[:1, :]
+            return out
+
+        def via_reshape(src: pl.Tensor, out: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
+            src = pl.reshape(src, [256])
+            length = pl.tensor.dim(src, 0)
+            view = pl.reshape(src, [length // 32, 32])
+            return consume(view, view, out)
+
+        # Trace indexed shape syntax without Tensor.shape's optional Python type.
+        get_lines = inspect.getsourcelines
+        for func, args in (
+            (rebound, (torch.empty(1, 128), torch.empty(4, 64), torch.empty(1, 32))),
+            (via_add, (torch.empty(4, 64), torch.empty(4, 64), torch.empty(1, 32))),
+            (via_reshape, (torch.empty(4, 64), torch.empty(1, 32))),
+        ):
+            lines, line = get_lines(func)
+            source = "".join(lines).replace(
+                "rows, cols = pl.tensor.dim(src, 0), pl.tensor.dim(src, 1)", "rows, cols = src.shape"
+            )
+            source = source.replace("length = pl.tensor.dim(src, 0)", "length, = src.shape")
+            source = source.replace("pl.tensor.dim(src, 1)", "src.shape[1]")
+            source = source.replace("pl.tensor.dim(src, 0)", "src.shape[0]")
+            source = source.replace("shape=[rows, cols]", "shape=src.shape")
+            source = source.replace("dtype=pl.FP32", "dtype=src.dtype")
+            monkeypatch.setattr(
+                inspect,
+                "getsourcelines",
+                lambda f, func=func, source=source, line=line: (
+                    (source.splitlines(keepends=True), line) if f is func else get_lines(f)
+                ),
+            )
+            compiled = jit(func).compile(*args)
+            assert isinstance(compiled, CompiledProgram)
+
+    def test_descriptor_reshape_alias_invalid_rebindings_are_forgotten(self):
+        """Unknown rebindings and loop targets invalidate an earlier known arithmetic alias."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="symbol", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
+            ),
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+        }
+
+        def body(src, cfg, runtime):
+            pages = pl.tensor.dim(src, 0)
+            symbol = pages
+            total = pages * 128
+            known = pl.reshape(src, [total])
+            total = runtime
+            scalar_sized = pl.reshape(src, [total])
+            total = pages * 128
+            total = pl.tensor.read(cfg, [0])
+            read_sized = pl.reshape(src, [total])
+            total = pages * 128
+            for total in pl.range(2):
+                loop_sized = pl.reshape(src, [total])
+            symbol = pl.tensor.read(cfg, [0])
+            symbol_sized = pl.reshape(src, [symbol])
+            return known, scalar_sized, read_sized, loop_sized, symbol_sized
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "known" in metas
+        assert not {"scalar_sized", "read_sized", "loop_sized", "symbol_sized"} & metas.keys()
+
+    def test_descriptor_reshape_aliases_reject_invalid_arithmetic(self):
+        """Invalid arithmetic cannot become descriptor-derived by copying its scalar alias."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="PAGES", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
+            )
+        }
+
+        def body(src):
+            pages = src.shape[0]
+            zero = 2 - 2
+            invalid = pages // zero
+            alias = invalid
+            zero_sized = pl.reshape(src, [alias])
+            invalid = pages % 2
+            alias = invalid + 1
+            modulo_sized = pl.reshape(src, [alias])
+            invalid = pages / 2
+            alias = invalid
+            true_div_sized = pl.reshape(src, [alias])
+            invalid = pages**2
+            alias = invalid
+            power_sized = pl.reshape(src, [alias])
+            return zero_sized, modulo_sized, true_div_sized, power_sized
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert not {"zero_sized", "modulo_sized", "true_div_sized", "power_sized"} & metas.keys()
+
+    def test_descriptor_reshape_alias_control_flow_stays_strict(self):
+        """Control-flow writes must not advertise the last syntactic scalar value as certain."""
+        seed = {"src": TensorMeta(shape=(64,), dtype=DataType.FP32)}
+
+        def body(src, runtime):
+            extent = 32
+            if runtime:
+                extent = 64
+            after_branch = pl.reshape(src, [extent])
+            extent = 32
+            for _ in pl.range(2):
+                before_write = pl.reshape(src, [extent])
+                extent = 64
+            after_loop = pl.reshape(src, [extent])
+            return after_branch, before_write, after_loop
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert not {"after_branch", "before_write", "after_loop"} & metas.keys()
+
+    @pytest.mark.parametrize("scope_kind", ["if", "for"])
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_descriptor_reshape_alias_unrelated_scope_keeps_callsite(self, scope_kind, dynamic):
+        """A later scope's writes cannot invalidate a dimension at an earlier dependency call."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        meta = TensorMeta(shape=(rows, 8), dtype=DataType.FP32)
+        seed = {"src": meta, "out": meta}
+
+        def conditional_body(src, out, flag, other):
+            rows = src.shape[0]
+            if flag:
+                view = pl.reshape(src, [rows, 8])
+                out = _callsite_metadata_kernel(view, out)
+            if other:
+                rows = 1
+            return out
+
+        def loop_body(src, out, flag, other):
+            rows = src.shape[0]
+            for _ in pl.range(2):
+                view = pl.reshape(src, [rows, 8])
+                out = _callsite_metadata_kernel(view, out)
+            if other:
+                rows = 1
+            return out
+
+        body = conditional_body if scope_kind == "if" else loop_body
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert dep_metas["x"] == TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=ir.TensorLayout.ND)
+
+    def test_descriptor_reshape_alias_unrelated_condition_specializes(self):
+        """The review's earlier conditional dependency still specializes with dynamic dimensions."""
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_PAGES_3033, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[_PAGES_3033, 8], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+            other: pl.Scalar[pl.BOOL],
+        ):
+            rows = pl.tensor.dim(src, 0)
+            if flag:
+                view = pl.reshape(src, [rows, 8])
+                out = _callsite_metadata_kernel(view, out)
+            if other:
+                rows = 1
+            return out
+
+        program = entry.specialize()
+        kernel = program.get_function("_callsite_metadata_kernel")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert not isinstance(param_type.shape[0], ir.ConstInt)
+
+    @pytest.mark.parametrize("scope_kind", ["if", "for"])
+    def test_descriptor_reshape_alias_scope_assignments_are_definite(self, scope_kind):
+        """A loop's carried value is unknown before its write; definite body assignments remain usable."""
+        seed = {"src": TensorMeta(shape=(64,), dtype=DataType.FP32)}
+
+        def conditional_body(src, flag):
+            extent = 32
+            if flag:
+                before_write = pl.reshape(src, [extent])
+                extent = 64
+                assigned = pl.reshape(src, [extent])
+            return before_write, assigned
+
+        def loop_body(src, flag):
+            extent = 32
+            for _ in pl.range(2):
+                before_write = pl.reshape(src, [extent])
+                extent = 64
+                assigned = pl.reshape(src, [extent])
+            return before_write, assigned
+
+        body = conditional_body if scope_kind == "if" else loop_body
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        if scope_kind == "if":
+            assert metas["before_write"].shape == (32,)
+        else:
+            assert "before_write" not in metas
+        assert metas["assigned"].shape == (64,)
+
+    @pytest.mark.parametrize(
+        "arm_kind,unknown,dynamic",
+        [("else", False, False), ("else", True, True), ("elif", False, True), ("elif", True, False)],
+    )
+    def test_descriptor_reshape_alias_sibling_arm_keeps_parent(self, monkeypatch, arm_kind, unknown, dynamic):
+        """Each sibling reads the incoming scalar; conditional writes remain unknown after the join."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        meta = TensorMeta(shape=(rows, 8), dtype=DataType.FP32)
+        seed = {"src": meta, "out": meta}
+
+        def body(src, out, flag, other, runtime):
+            rows = src.shape[0]
+            if flag:
+                rows = runtime
+            else:
+                view = pl.reshape(src, [rows, 8])
+                out = _callsite_metadata_kernel(view, out)
+            after = pl.reshape(src, [rows, 8])
+            return out, after
+
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
+        func_def = deepcopy(get_func_def(body))
+        branch = func_def.body[1]
+        assert isinstance(branch, ast.If)
+        if not unknown:
+            branch.body = ast.parse("rows = 1").body
+        if arm_kind == "elif":
+            branch.orelse = [ast.If(test=ast.Name(id="other", ctx=ast.Load()), body=branch.orelse, orelse=[])]
+        monkeypatch.setattr(
+            ast_analysis, "get_func_def", lambda f: func_def if f is body else get_func_def(f)
+        )
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "after" not in metas
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert dep_metas["x"] == TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=ir.TensorLayout.ND)
+
+    @pytest.mark.parametrize("arm_kind", ["else", "elif"])
+    def test_descriptor_reshape_alias_sibling_arm_crosses_dep(self, arm_kind):
+        """A sibling branch can pass a view of the original dynamic dimension into a bare callee."""
+
+        @jit.incore
+        def consume(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            value = pl.load(x, [0, 0], [1, 8])
+            pl.store(value, [0, 0], out)
+            return out
+
+        @jit
+        def entry_else(
+            src: pl.Tensor[[_PAGES_3033, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+            other: pl.Scalar[pl.BOOL],
+        ):
+            rows = pl.tensor.dim(src, 0)
+            if flag:
+                rows = 1
+                result = pl.yield_(out)
+            else:
+                view = pl.reshape(src, [rows, 8])
+                updated = consume(view, out)
+                result = pl.yield_(updated)
+            return result
+
+        @jit
+        def entry_elif(
+            src: pl.Tensor[[_PAGES_3033, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+            other: pl.Scalar[pl.BOOL],
+        ):
+            rows = pl.tensor.dim(src, 0)
+            if flag:
+                rows = 1
+                result = pl.yield_(out)
+            else:
+                if other:
+                    view = pl.reshape(src, [rows, 8])
+                    updated = consume(view, out)
+                    inner_result = pl.yield_(updated)
+                else:
+                    inner_result = pl.yield_(out)
+                result = pl.yield_(inner_result)
+            return result
+
+        entry = entry_else if arm_kind == "else" else entry_elif
+        program = entry.lower()
+        assert isinstance(program, ir.Program)
+        kernel = program.get_function("consume")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert not isinstance(param_type.shape[0], ir.ConstInt)
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_descriptor_reshape_alias_sibling_arm_keeps_loop_carry_unknown(self, dynamic):
+        """Recovering a sibling's parent value cannot recover a loop-carried value from before the loop."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        seed = {"src": TensorMeta(shape=(rows, 8), dtype=DataType.FP32)}
+
+        def body(src, flag):
+            rows = src.shape[0]
+            for _ in pl.range(2):
+                if flag:
+                    rows = 1
+                else:
+                    view = pl.reshape(src, [rows, 8])
+            return view
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "view" not in metas
+
+    @pytest.mark.parametrize(
+        "arm_kind,unknown,dynamic",
+        [("else", False, False), ("else", True, True), ("elif", False, True), ("elif", True, False)],
+    )
+    def test_descriptor_reshape_tensor_sibling_reads_parent(self, monkeypatch, arm_kind, unknown, dynamic):
+        """Tensor writes in one arm cannot change dimension arithmetic in its sibling."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        seed = {
+            "a": TensorMeta(shape=(rows, 8), dtype=DataType.FP32),
+            "b": TensorMeta(shape=(7, 16), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(1, 4), dtype=DataType.FP32),
+        }
+
+        def body(a, b, out, flag, other, runtime):
+            current = a
+            if flag:
+                current = runtime
+            else:
+                extent = current.shape[0] * 2
+                view = pl.reshape(current, [extent, current.shape[1] // 2])
+                out = _callsite_metadata_kernel(view, out)
+            return out
+
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
+        func_def = deepcopy(get_func_def(body))
+        branch = func_def.body[1]
+        assert isinstance(branch, ast.If)
+        if not unknown:
+            branch.body = ast.parse("current = b").body
+        if arm_kind == "elif":
+            branch.orelse = [ast.If(test=ast.Name(id="other", ctx=ast.Load()), body=branch.orelse, orelse=[])]
+        monkeypatch.setattr(
+            ast_analysis, "get_func_def", lambda f: func_def if f is body else get_func_def(f)
+        )
+        # Historical collection includes the branch-local view; the call snapshot must match it.
+        collected = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert dep_metas["x"] == collected["view"]
+        if dynamic:
+            extent = dep_metas["x"].shape[0]
+            assert isinstance(extent, DynDim) and extent.synthesized
+            assert dep_metas["x"].shape[1] == 4
+        else:
+            assert dep_metas["x"].shape == (8, 4)
+
+    def test_descriptor_reshape_tensor_sibling_crosses_dep(self):
+        """A compatible tensor rebind preserves dynamic sibling views through specialization."""
+
+        @jit.incore
+        def consume(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            value = pl.load(x, [0, 0], [1, 4])
+            pl.store(value, [0, 0], out)
+            return out
+
+        @jit
+        def entry(
+            a: pl.Tensor[[_PAGES_3033, 8], pl.FP32],
+            b: pl.Tensor[[_PAGES_3033, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 4], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ):
+            current = a
+            if flag:
+                current = b
+            else:
+                extent = pl.tensor.dim(current, 0) * 2
+                view = pl.reshape(current, [extent, pl.tensor.dim(current, 1) // 2])
+                consume(view, out)
+            return out
+
+        program = entry.lower()
+        assert isinstance(program, ir.Program)
+        kernel = program.get_function("consume")
+        assert kernel is not None
+        param_type = kernel.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert not isinstance(param_type.shape[0], ir.ConstInt)
+        assert isinstance(param_type.shape[1], ir.ConstInt) and param_type.shape[1].value == 4
+
+    @pytest.mark.parametrize("unknown", [False, True])
+    def test_descriptor_reshape_tensor_conditional_rebind_is_unknown_after_join(self, unknown):
+        """A later dependency cannot use either arm's tensor as a guaranteed post-if value."""
+        seed = {
+            "a": TensorMeta(shape=(4, 8), dtype=DataType.FP32),
+            "b": TensorMeta(shape=(7, 16), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(1, 4), dtype=DataType.FP32),
+        }
+
+        def known_body(a, b, out, flag, runtime):
+            current = a
+            if flag:
+                current = b
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        def unknown_body(a, b, out, flag, runtime):
+            current = a
+            if flag:
+                current = runtime
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        body = unknown_body if unknown else known_body
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert "x" not in dep_metas
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_descriptor_reshape_tensor_conditional_return_is_unknown(self, dynamic):
+        """Helper return inference uses live state instead of the historical branch collection."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        other_rows = DynDim(name="OTHER_ROWS", literal="OTHER_ROWS", static_bound=7) if dynamic else 7
+        seed = {
+            "a": TensorMeta(shape=(rows, 8), dtype=DataType.FP32),
+            "b": TensorMeta(shape=(other_rows, 16), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(1, 4), dtype=DataType.FP32),
+        }
+
+        @jit.inline
+        def choose(a: pl.Tensor, b: pl.Tensor, flag: pl.Scalar[pl.BOOL]) -> pl.Tensor:
+            current = a
+            if flag:
+                current = b
+            return current
+
+        def body(a, b, out, flag):
+            selected = choose(a, b, flag)
+            out = _callsite_metadata_kernel(selected, out)
+            return out
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "selected" not in metas
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert "x" not in dep_metas
+
+    @pytest.mark.parametrize(
+        "replacement", ["equal", "different", "unknown", "nd_left", "nd_right", "layout_conflict"]
+    )
+    def test_descriptor_reshape_tensor_sibling_return_join(self, replacement):
+        """Only matching tensor types from both definite arms may reach a helper consumer."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4)
+        meta = TensorMeta(shape=(rows, 8), dtype=DataType.FP32)
+        seed = {"a": meta, "out": meta}
+        nd_meta = TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=ir.TensorLayout.ND)
+        if replacement in ("nd_left", "layout_conflict"):
+            seed["a"] = nd_meta
+        if replacement != "unknown":
+            seed["b"] = {
+                "different": TensorMeta((7, 16), DataType.FP32),
+                "nd_right": nd_meta,
+                "layout_conflict": TensorMeta(meta.shape, meta.dtype, layout=ir.TensorLayout.NZ),
+            }.get(replacement, meta)
+
+        @jit.inline
+        def choose(a: pl.Tensor, b: pl.Tensor, flag: pl.Scalar[pl.BOOL]) -> pl.Tensor:
+            if flag:
+                current = a
+            else:
+                current = b
+            return current
+
+        def body(a, b, out, flag):
+            selected = choose(a, b, flag)
+            out = _callsite_metadata_kernel(selected, out)
+            return out
+
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        if replacement in ("equal", "nd_left", "nd_right"):
+            assert dep_metas["x"] == (meta if replacement == "equal" else nd_meta)
+            assert dep_metas["x"].shape[0] is rows
+        else:
+            assert "x" not in dep_metas
+        if replacement == "layout_conflict":
+            # An omitted layout is the default ND, not a wildcard for NZ.
+            seed["a"] = meta
+            dep_metas, _ = resolve_dep_call_metadata(
+                _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+            )
+            assert "x" not in dep_metas
+
+    @pytest.mark.parametrize(
+        "arm,nested,dynamic",
+        [("body", False, False), ("orelse", False, True), ("body", True, True), ("orelse", True, False)],
+    )
+    def test_descriptor_reshape_tensor_restores_if_incoming_binding(self, monkeypatch, arm, nested, dynamic):
+        """A temporary unknown followed by the incoming tensor remains known after the join."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        original = TensorMeta(shape=(rows, 8), dtype=DataType.FP32)
+        seed = {
+            "a": original,
+            "b": TensorMeta(shape=(7, 16), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(1, 4), dtype=DataType.FP32),
+        }
+
+        def body(a, b, out, flag, inner, runtime):
+            current = a
+            if flag:
+                pass
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
+        func_def = deepcopy(get_func_def(body))
+        conditional = func_def.body[1]
+        assert isinstance(conditional, ast.If)
+        statements = "current = runtime(current)\ncurrent = a"
+        if nested:
+            statements = (
+                "current = b\nif inner:\n    current = runtime(current)\n    current = b\ncurrent = a"
+            )
+        setattr(conditional, arm, ast.parse(statements).body)
+        monkeypatch.setattr(
+            ast_analysis, "get_func_def", lambda func: func_def if func is body else get_func_def(func)
+        )
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
+        assert metas["current"] == original
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert dep_metas["x"] == original
+
+    @pytest.mark.parametrize("different", ["shape", "synthesized_identity"])
+    def test_descriptor_reshape_tensor_restored_arm_conflict_stays_unknown(self, different):
+        """Restoring one arm's parent cannot hide a conflicting value from the other arm."""
+        original = TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        replacement = TensorMeta(shape=(7, 16), dtype=DataType.FP32)
+        if different == "synthesized_identity":
+            original = TensorMeta(
+                shape=(DynDim(name="shared", literal="shared", static_bound=0, synthesized=True), 8),
+                dtype=DataType.FP32,
+            )
+            replacement = TensorMeta(
+                shape=(DynDim(name="shared", literal="shared", static_bound=0, synthesized=True), 8),
+                dtype=DataType.FP32,
+            )
+
+        def body(a, b, out, flag, runtime):
+            current = a
+            if flag:
+                current = runtime(current)
+                current = a
+            else:
+                current = b
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        seed = {"a": original, "b": replacement, "out": original}
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
+        assert "current" not in metas
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert "x" not in dep_metas
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_descriptor_reshape_tensor_nested_arms_restore_outer_incoming(self, dynamic):
+        """Two inner arms can restore a tensor invalidated earlier in their outer arm."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        original = TensorMeta(shape=(rows, 8), dtype=DataType.FP32)
+
+        def body(a, out, outer, inner, runtime):
+            current = a
+            if outer:
+                current = runtime(current)
+                if inner:
+                    current = a
+                else:
+                    current = a
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        seed = {"a": original, "out": original}
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
+        assert metas["current"] == original
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        assert dep_metas["x"] == original
+
+    @pytest.mark.parametrize("arm", ["body", "orelse"])
+    def test_descriptor_reshape_tensor_restored_if_crosses_dep(self, monkeypatch, arm):
+        """A real tensor operation followed by restoring the input still reaches its consumer."""
+
+        @jit.incore
+        def consume(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            value = pl.load(x, [0, 0], [1, 8])
+            pl.store(value, [0, 0], out)
+            return out
+
+        def body(
+            src: pl.Tensor[[4, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ):
+            current = src
+            if flag:
+                pass
+            return consume(current, out)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        func_def = ast.parse(textwrap.dedent("".join(lines))).body[0]
+        assert isinstance(func_def, ast.FunctionDef)
+        conditional = func_def.body[1]
+        assert isinstance(conditional, ast.If)
+        setattr(conditional, arm, ast.parse("current = pl.tensor.add(current, current)\ncurrent = src").body)
+        source = ast.unparse(func_def) + "\n"
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is body else get_lines(func),
+        )
+        assert isinstance(jit(body).lower(), ir.Program)
+
+    @pytest.mark.parametrize("inner_definite", [False, True])
+    def test_descriptor_reshape_tensor_nested_join_requires_definite_arms(self, inner_definite):
+        """Equal outer-arm shapes merge only if the nested arm actually establishes its tensor."""
+        original = TensorMeta(shape=(7, 16), dtype=DataType.FP32)
+        replacement = TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        seed = {"a": replacement, "b": original, "out": replacement}
+
+        def partial_body(a, b, out, outer, inner):
+            current = b
+            if outer:
+                if inner:
+                    current = a
+            else:
+                current = a
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        def definite_body(a, b, out, outer, inner):
+            current = b
+            if outer:
+                if inner:
+                    current = a
+                else:
+                    current = a
+            else:
+                current = a
+            out = _callsite_metadata_kernel(current, out)
+            return out
+
+        body = definite_body if inner_definite else partial_body
+        metas = extract_local_tensor_metas(
+            body, seed_meta=seed, visible_only=True, discover_deps=_discover_dep_bindings
+        )
+        dep_metas, _ = resolve_dep_call_metadata(
+            _callsite_metadata_kernel, body, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
+        if inner_definite:
+            assert metas["current"] == replacement
+            assert dep_metas["x"] == replacement
+        else:
+            assert "current" not in metas
+            assert "x" not in dep_metas
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_descriptor_reshape_tensor_same_shape_out_loop_remains_visible(self, dynamic):
+        """Same-shaped Out updates retain their incoming metadata through loops and branches."""
+        rows = DynDim(name="ROWS", literal="ROWS", static_bound=4) if dynamic else 4
+        meta = TensorMeta(shape=(rows, 8), dtype=DataType.FP32)
+
+        def body(src, out, flag):
+            for _ in pl.range(2):
+                out = _callsite_metadata_kernel(src, out)
+            if flag:
+                out = _callsite_metadata_kernel(src, out)
+            else:
+                out = _callsite_metadata_kernel(src, out)
+            return out
+
+        metas = extract_local_tensor_metas(
+            body,
+            seed_meta={"src": meta, "out": meta},
+            visible_only=True,
+            discover_deps=_discover_dep_bindings,
+        )
+        assert metas["out"] == meta
+
+    def test_descriptor_reshape_tensor_distinct_allocations_return_independent_symbols(self):
+        """A helper's two runtime allocations remain independent when its tuple reaches the caller."""
+
+        @jit.inline
+        def allocate(first: pl.Scalar[pl.INDEX], second: pl.Scalar[pl.INDEX]):
+            view = pl.create_tensor([first], dtype=pl.FP32)
+            saved = view
+            view = pl.create_tensor([second], dtype=pl.FP32)
+            return saved, view
+
+        def body(first, second):
+            saved, rebound = allocate(first, second)
+            return saved, rebound
+
+        metas = extract_local_tensor_metas(body, visible_only=True, discover_deps=_discover_dep_bindings)
+        saved = self._leading_dim(metas, "saved")
+        rebound = self._leading_dim(metas, "rebound")
+        assert isinstance(saved, DynDim) and saved.synthesized
+        assert isinstance(rebound, DynDim) and rebound.synthesized
+        assert saved.name != rebound.name
+
+    def test_descriptor_reshape_alias_runtime_param_shadows_dim_symbol(self):
+        """A runtime scalar parameter must not fall back to a same-named DynDim anchor."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="PAGES", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
+            )
+        }
+
+        def body(src, PAGES):
+            total = PAGES * 128
+            flat = pl.reshape(src, [total])
+            return flat
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "flat" not in metas
+
+    def test_descriptor_reshape_static_dim_call_folds_axis_arithmetic(self):
+        """A statically folded negative axis resolves to its actual static extent."""
+
+        def body(src):
+            rows = pl.tensor.dim(axis=_DIM_ROW_AXIS_3033 - 2, tensor=src)
+            flat = pl.reshape(src, [rows * 128])
+            return flat
+
+        seed = {"src": TensorMeta((4, 128), DataType.FP32)}
+        assert extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)[
+            "flat"
+        ].shape == (512,)
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "pl.tensor.dim(axis=0)",
+            "pl.tensor.dim(src)",
+            "pl.tensor.dim(src, 0, 1)",
+            "pl.tensor.dim(src, 0, tensor=src)",
+            "pl.tensor.dim(src, 0, axis=0)",
+            "pl.tensor.dim(src, axis=0, axis=1)",
+            "pl.tensor.dim(tensor=src, tensor=src, axis=0)",
+            "pl.tensor.dim(src, 0, unknown=0)",
+            "pl.tensor.dim(*src)",
+            "pl.tensor.dim(**runtime)",
+            "pl.tensor.dim(src, runtime)",
+            "pl.tensor.dim(src, True)",
+            "pl.tensor.dim(src, 0.0)",
+            "pl.tensor.dim(src, 2)",
+            "pl.tensor.dim(src, -3)",
+            "src.shape[-2]",
+            "src.shape[+0]",
+            "src.shape[_DIM_ROW_AXIS_3033]",
+            "src.shape[True]",
+        ],
+    )
+    def test_descriptor_reshape_invalid_dim_expressions_stay_unknown(self, monkeypatch, expression):
+        """Malformed dimension calls, invalid axes and unsupported subscripts cannot create metadata."""
+
+        def body(src, runtime):
+            rows = pl.tensor.dim(src, 0)
+            total = rows * 128
+            flat = pl.reshape(src, [total])
+            return flat
+
+        ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+        get_func_def = ast_analysis.get_func_def
+        func_def = deepcopy(get_func_def(body))
+        assignment = func_def.body[0]
+        assert isinstance(assignment, ast.Assign)
+        assignment.value = ast.parse(expression, mode="eval").body
+        monkeypatch.setattr(
+            ast_analysis, "get_func_def", lambda func: func_def if func is body else get_func_def(func)
+        )
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="ROWS", literal="ROWS", static_bound=4), 128), dtype=DataType.FP32
+            )
+        }
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert "flat" not in metas
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "pl.tensor.dim(src, axis=0)",
+            "pl.tensor.dim(axis=0, tensor=src)",
+            "pl.tensor.dim(src, _DIM_ROW_AXIS_3033)",
+            "pl.tensor.dim(src, axis=-2)",
+            "pl.tensor.dim(src, axis=_DIM_ROW_AXIS_3033 - 2)",
+        ],
+    )
+    def test_descriptor_reshape_dim_spellings_cross_dep(self, monkeypatch, expression):
+        """Supported dimension calls survive parsing and verified lowering across a helper."""
+
+        def body(
+            src: pl.Tensor[[_PAGES_3033, 128], pl.INT8],
+            out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+        ):
+            rows = pl.tensor.dim(src, 0)
+            total = rows * 128
+            flat = pl.reshape(src, [total])
+            keys = pl.reshape(flat, [rows, 128])
+            return _copy_key_3033(keys, out)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(body)
+        source = "".join(lines).replace("pl.tensor.dim(src, 0)", expression)
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda f: (source.splitlines(keepends=True), line) if f is body else get_lines(f),
+        )
+        assert isinstance(jit(body).lower(), ir.Program)
+
+    @pytest.mark.parametrize("symbol_name", ["PAGES", "N"])
+    def test_descriptor_reshape_alias_local_dynamic_declaration(self, symbol_name):
+        """A recognized dynamic declaration retains its anchor, including an aliased literal name."""
+        dim = DynDim(name=symbol_name, literal="PAGES", static_bound=4)
+        seed = {"src": TensorMeta(shape=(dim, 128), dtype=DataType.INT8)}
+
+        def body(src):
+            PAGES = pl.dynamic("PAGES")
+            src.bind_dynamic(0, PAGES)
+            total = PAGES * 128
+            direct = pl.reshape(src, [PAGES, 128])
+            aliased = pl.reshape(src, [total])
+            return direct, aliased
+
+        def renamed_body(src):
+            N = pl.dynamic("PAGES")
+            src.bind_dynamic(0, N)
+            total = N * 128
+            direct = pl.reshape(src, [N, 128])
+            aliased = pl.reshape(src, [total])
+            return direct, aliased
+
+        metas = extract_local_tensor_metas(
+            body if symbol_name == "PAGES" else renamed_body,
+            seed_meta=seed,
+            discover_deps=_discover_dep_bindings,
+        )
+        assert metas["direct"].shape == (dim, 128)
+        derived = self._leading_dim(metas, "aliased")
+        assert isinstance(derived, DynDim) and derived.synthesized
+        assert derived.name != dim.name
+
+    def test_descriptor_reshape_alias_augassign_invalidates_target_only(self):
+        """Unsupported augmented assignment invalidates its target but preserves earlier snapshots."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="PAGES", literal="PAGES", static_bound=4), 128), dtype=DataType.INT8
+            )
+        }
+
+        def body(src, runtime):
+            extent = 16
+            saved = extent
+            extent += 16
+            augmented = pl.reshape(src, [extent])
+            snapshot = pl.reshape(src, [saved, 32])
+            total = pl.tensor.dim(src, 0) * 128
+            prior = total
+            total -= 64
+            derived = pl.reshape(src, [total])
+            prior_view = pl.reshape(src, [prior])
+            total += runtime
+            unknown = pl.reshape(src, [total])
+            return augmented, snapshot, derived, prior_view, unknown
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert not {"augmented", "derived", "unknown"} & metas.keys()
+        assert metas["snapshot"].shape == (16, 32)
+        dim = self._leading_dim(metas, "prior_view")
+        assert isinstance(dim, DynDim) and dim.synthesized
+
+    def test_descriptor_reshape_alias_augassign_remains_unsupported(self):
+        """Metadata tracking does not expand the DSL's accepted assignment syntax."""
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_PAGES_3033, 128], pl.INT8],
+            out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+        ):
+            total = pl.tensor.dim(src, 0) * 128
+            total += 1
+            return out
+
+        with pytest.raises(UnsupportedFeatureError, match="Augmented assignment is not supported"):
+            entry.specialize()
+
+    @pytest.mark.parametrize("same_line", [False, True])
+    def test_descriptor_reshape_alias_rebinding_has_distinct_descriptors(self, monkeypatch, same_line):
+        """Separate reshape sites keep separate symbols when a name is rebound and aliased."""
+
+        def body(a, b):
+            ma = a.shape[0]
+            mb = b.shape[0]
+            first_extent = ma * 2
+            second_extent = mb * 4
+            view = pl.reshape(a, [first_extent, 64])
+            saved = view
+            view = pl.reshape(b, [second_extent, 32])
+            return saved, view
+
+        if same_line:
+            ast_analysis = importlib.import_module("pypto.jit._ast_analysis")
+            get_func_def = ast_analysis.get_func_def
+            func_def = deepcopy(get_func_def(body))
+            calls = [
+                node
+                for node in ast.walk(func_def)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "reshape"
+            ]
+            calls[1].lineno = calls[0].lineno
+            calls[1].col_offset = calls[0].col_offset + 80
+            monkeypatch.setattr(
+                ast_analysis, "get_func_def", lambda func: func_def if func is body else get_func_def(func)
+            )
+
+        shapes = []
+        for a_rows, b_rows in ((3, 5), (9, 7)):
+            seed = {
+                "a": TensorMeta(
+                    shape=(DynDim(name="A", literal="A", static_bound=a_rows), 128), dtype=DataType.FP32
+                ),
+                "b": TensorMeta(
+                    shape=(DynDim(name="B", literal="B", static_bound=b_rows), 128), dtype=DataType.FP32
+                ),
+            }
+            metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+            saved_dim = self._leading_dim(metas, "saved")
+            current_dim = self._leading_dim(metas, "view")
+            assert isinstance(saved_dim, DynDim) and saved_dim.synthesized
+            assert isinstance(current_dim, DynDim) and current_dim.synthesized
+            assert saved_dim.name != current_dim.name
+            assert metas["saved"].shape[1] == 64
+            assert metas["view"].shape[1] == 32
+            shapes.append((metas["saved"].shape, metas["view"].shape))
+        assert shapes[0] == shapes[1]
+
+    def test_descriptor_reshape_alias_rebinding_crosses_dep(self):
+        """Two differently sized views of separate inputs do not share a callee dimension symbol."""
+
+        @jit.incore
+        def consume(first: pl.Tensor, second: pl.Tensor, out: pl.Out[pl.Tensor]):
+            left = pl.load(first, [0, 0], [1, 32])
+            right = pl.load(second, [0, 0], [1, 32])
+            pl.store(pl.add(left, right), [0, 0], out)
+            return out
+
+        @jit
+        def entry(
+            a: pl.Tensor[[_PAGES_3033, 128], pl.FP32],
+            b: pl.Tensor[[_M_SLICE, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ):
+            ma = pl.tensor.dim(a, 0)
+            mb = pl.tensor.dim(b, 0)
+            first_extent = ma * 2
+            second_extent = mb * 4
+            view = pl.reshape(a, [first_extent, 64])
+            saved = view
+            view = pl.reshape(b, [second_extent, 32])
+            return consume(saved, view, out)
+
+        program = entry.lower()
+        kernel = program.get_function("consume")
+        assert kernel is not None
+        first_type = kernel.params[0].type
+        second_type = kernel.params[1].type
+        assert isinstance(first_type, ir.TensorType)
+        assert isinstance(second_type, ir.TensorType)
+        assert not first_type.shape[0].same_as(second_type.shape[0])
+
+    def test_descriptor_reshape_alias_rebinding_preserves_direct_dim_identity(self):
+        """Direct dimensions keep their source identity instead of acquiring a site symbol."""
+        a_dim = DynDim(name="A", literal="A", static_bound=3)
+        b_dim = DynDim(name="B", literal="B", static_bound=5)
+        seed = {
+            "a": TensorMeta(shape=(a_dim, 128), dtype=DataType.FP32),
+            "b": TensorMeta(shape=(b_dim, 128), dtype=DataType.FP32),
+        }
+
+        def body(a, b):
+            ma = a.shape[0]
+            mb = b.shape[0]
+            view = pl.reshape(a, [ma, 128])
+            saved = view
+            view = pl.reshape(b, [mb, 128])
+            return saved, view
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["saved"].shape[0] is a_dim
+        assert metas["view"].shape[0] is b_dim
+
+    def test_descriptor_reshape_alias_helper_return_calls_specialize_independently(self):
+        """Chained aliases share a result; separate calls get independent symbols.
+
+        Lowering helper-local dimension expressions additionally requires IR
+        return-type closure support, outside this metadata regression.
+        """
+
+        @jit.inline
+        def flatten(src: pl.Tensor):
+            value = pl.reshape(src, [pl.tensor.dim(src, 0) * 128])
+            return value
+
+        @jit.incore
+        def consume(first: pl.Tensor, second: pl.Tensor, out: pl.Out[pl.Tensor]):
+            left = pl.load(first, [0], [128])
+            right = pl.load(second, [0], [128])
+            pl.store(pl.add(left, right), [0], out)
+            return out
+
+        @jit
+        def entry(
+            a: pl.Tensor[[_PAGES_3033, 128], pl.FP32],
+            b: pl.Tensor[[_M_SLICE, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[128], pl.FP32]],
+        ):
+            first = first_alias = flatten(a)
+            second = flatten(b)
+            if pl.tensor.dim(a, 0) > 0:
+                selected = first
+            else:
+                selected = first_alias
+            return consume(selected, second, out)
+
+        program = entry.specialize()
+        kernel = program.get_function("consume")
+        assert kernel is not None
+        first_type = kernel.params[0].type
+        second_type = kernel.params[1].type
+        assert isinstance(first_type, ir.TensorType)
+        assert isinstance(second_type, ir.TensorType)
+        first_dim = first_type.shape[0]
+        second_dim = second_type.shape[0]
+        assert isinstance(first_dim, ir.Var)
+        assert isinstance(second_dim, ir.Var)
+        assert first_dim.name_hint != second_dim.name_hint
+        assert not first_dim.same_as(second_dim)
+
+    def test_descriptor_reshape_alias_helper_tuple_return_preserves_shared_alias(self):
+        """A tuple's shared view stays shared within a call, while separate calls get fresh symbols."""
+
+        @jit.inline
+        def flatten_pair(src: pl.Tensor):
+            pages = pl.tensor.dim(src, 0)
+            value = pl.reshape(src, [pages * 128])
+            return value, value
+
+        def body(a, b):
+            first, first_alias = flatten_pair(a)
+            second, second_alias = flatten_pair(b)
+            return first, first_alias, second, second_alias
+
+        shapes = []
+        for a_rows, b_rows in ((3, 5), (9, 7)):
+            seed = {
+                "a": TensorMeta(
+                    shape=(DynDim(name="A", literal="A", static_bound=a_rows), 128), dtype=DataType.FP32
+                ),
+                "b": TensorMeta(
+                    shape=(DynDim(name="B", literal="B", static_bound=b_rows), 128), dtype=DataType.FP32
+                ),
+            }
+            metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+            assert metas["first"].shape == metas["first_alias"].shape
+            assert metas["second"].shape == metas["second_alias"].shape
+            first = self._leading_dim(metas, "first")
+            second = self._leading_dim(metas, "second")
+            assert isinstance(first, DynDim) and first.synthesized
+            assert isinstance(second, DynDim) and second.synthesized
+            assert first.name != second.name
+            shapes.append((metas["first"].shape, metas["second"].shape))
+        assert shapes[0] == shapes[1]
+
+    @pytest.mark.parametrize("synthesized", [False, True])
+    def test_descriptor_reshape_alias_helper_return_preserves_input_identity(self, synthesized):
+        """Returning an input preserves its dimensions even when the caller synthesized them."""
+
+        @jit.inline
+        def passthrough(src: pl.Tensor):
+            return src
+
+        def body(a, b):
+            first = passthrough(a)
+            second = passthrough(b)
+            return first, second
+
+        a_dim = DynDim(name="A", literal="A", static_bound=3, synthesized=synthesized)
+        b_dim = DynDim(name="B", literal="B", static_bound=5, synthesized=synthesized)
+        seed = {
+            "a": TensorMeta(shape=(a_dim, 128), dtype=DataType.FP32),
+            "b": TensorMeta(shape=(b_dim, 128), dtype=DataType.FP32),
+        }
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert metas["first"].shape[0] is a_dim
+        assert metas["second"].shape[0] is b_dim
+
+    def test_descriptor_reshape_dep_uses_argument_descriptor(self):
+        """The callee reads the reshaped argument's leading dim, rather than src's pages."""
+
+        @jit.incore
+        def copy_rows(keys: pl.Tensor, out: pl.Out[pl.Tensor]):
+            rows, cols = keys.shape
+            for row in pl.range(rows):
+                value = pl.load(keys, [row, 0], [1, cols])
+                pl.store(value, [row, 0], out)
+            return out
+
+        @jit
+        def entry(
+            src: pl.Tensor[[_PAGES_3033, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[_PAGES_3033, 128], pl.FP32]],
+        ):
+            pages = pl.tensor.dim(src, 0)
+            keys = pl.reshape(src, [pages * 2, 64])
+            result = pl.reshape(out, [pages * 2, 64])
+            return copy_rows(keys, result)
+
+        program = entry.specialize()
+        kernel_source = program.get_function("copy_rows").as_python()
+        assert "pl.tensor.dim(keys, 0)" in kernel_source
+        assert "pl.tensor.dim(src, 0)" not in kernel_source
+
+    def test_reshape_unknown_runtime_extent_stays_strict(self):
+        """A descriptor dim mixed with a scalar or tensor.read must not invent metadata."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="M", literal="M", static_bound=16), 128), dtype=DataType.FP32
+            ),
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+        }
+
+        def body(src, cfg, n):
+            rows = src.shape[0]
+            count = pl.tensor.read(cfg, [0])
+            scalar_sized = pl.reshape(src, [rows * n])
+            read_sized = pl.reshape(src, [rows + count])
+            direct_read_sized = pl.reshape(src, [rows + pl.tensor.read(cfg, [0])])
+            modulo_sized = pl.reshape(src, [rows % 2])
+            true_div_sized = pl.reshape(src, [rows / 2])
+            power_sized = pl.reshape(src, [rows**2])
+            return scalar_sized, read_sized, direct_read_sized, modulo_sized, true_div_sized, power_sized
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert (
+            not {
+                "scalar_sized",
+                "read_sized",
+                "direct_read_sized",
+                "modulo_sized",
+                "true_div_sized",
+                "power_sized",
+            }
+            & metas.keys()
+        )
+
+    def test_reshape_zero_divisor_stays_strict(self):
+        """Known invalid divisions remain unresolved even inside otherwise valid arithmetic."""
+        seed = {
+            "src": TensorMeta(
+                shape=(DynDim(name="M", literal="M", static_bound=16), 128), dtype=DataType.FP32
+            )
+        }
+
+        def body(src):
+            rows = pl.tensor.dim(src, 0)
+            direct = pl.reshape(src, [rows // 0])
+            folded = pl.reshape(src, [rows // (2 - 2)])
+            nested = pl.reshape(src, [(rows // 0) + 1])
+            nested_denominator = pl.reshape(src, [rows // (1 // 0)])
+            return direct, folded, nested, nested_denominator
+
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        assert not {"direct", "folded", "nested", "nested_denominator"} & metas.keys()
+
+    def test_static_reshape_size_mismatch_still_rejected(self):
+        """Metadata propagation leaves the IR's element-count validation in force."""
+
+        @jit
+        def invalid(src: pl.Tensor[[2, 128], pl.FP32]):
+            return pl.reshape(src, [3, 128])
+
+        with pytest.raises(InvalidOperationError, match="cannot reshape tensor of size 256"):
+            invalid.specialize()
 
     def test_synthesized_dim_reaches_dep_parameter(self):
         """The dep parameter is typed instead of raising "missing inferred
@@ -4405,7 +7250,9 @@ class TestRuntimeSizedLocalExtents:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas, _ = _resolve_dep_call_metadata(_synth_dim_kernel, _runtime_create_then_dep, seed, {}, {})
+        metas, _ = resolve_dep_call_metadata(
+            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, {}, discover_deps=_discover_dep_bindings
+        )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -4421,8 +7268,13 @@ class TestRuntimeSizedLocalExtents:
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
         dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
-        metas, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, dep_dyn_map
+        metas, _ = resolve_dep_call_metadata(
+            _synth_dim_kernel,
+            _runtime_create_then_dep,
+            seed,
+            {},
+            dep_dyn_map,
+            discover_deps=_discover_dep_bindings,
         )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)
@@ -4465,8 +7317,8 @@ class TestRuntimeSizedLocalExtents:
         """Two functions each holding a runtime-sized local of the same name get
         distinct symbols, so a dumped program never shows one name on two
         unrelated tensors."""
-        a = _synthesized_dyn_dim("host_entry", "tmp", 0)
-        b = _synthesized_dyn_dim("mid", "tmp", 0)
+        a = synthesized_dyn_dim("host_entry", "tmp", 0)
+        b = synthesized_dyn_dim("mid", "tmp", 0)
         assert a.name != b.name
         assert a.name.startswith(_SYNTHESIZED_DYN_PREFIX)
         assert b.name.startswith(_SYNTHESIZED_DYN_PREFIX)
@@ -4479,8 +7331,13 @@ class TestRuntimeSizedLocalExtents:
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
         dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
-        metas, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _dyn_alias_create_then_dep, seed, {}, dep_dyn_map
+        metas, _ = resolve_dep_call_metadata(
+            _synth_dim_kernel,
+            _dyn_alias_create_then_dep,
+            seed,
+            {},
+            dep_dyn_map,
+            discover_deps=_discover_dep_bindings,
         )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)

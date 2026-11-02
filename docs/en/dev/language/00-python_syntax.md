@@ -193,10 +193,12 @@ than Vec / Mat / Acc, a runtime valid shape, or a slot carried out of an `if` or
 phi. Those are errors naming the shape, not silent fallbacks, because a fallback would
 undo the separation you declared.
 
-The default PyPTO planner is unaffected: it bakes addresses and keeps the `alloc_tile`
-form. A region at `--pto-level=level3` needs an explicit base `addr`, which codegen does
-not emit yet; ptoas itself has supported that form since 0.55
-([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106), closed).
+With the default PyPTO planner, the default codegen still bakes addresses into
+`alloc_tile`. Opting into `enable_software_pipeline=True` allows eligible uniform
+slot allocations to become `alloc_multi_tile addr = <base>` regions at level3;
+PyPTO retains address assignment and reserves all slots. The same option lowers
+eligible Vec `pl.pipeline` loops to preload/main/drain with a prefetch distance
+of `stage - 1`; see [LowerPipelineToSlots](../passes/31-lower_pipeline_to_slots.md).
 
 A declared name lives in its own namespace — it never resolves to a Python variable that
 happens to share it. The memory space **is** required (a `TileType` always pairs a
@@ -379,9 +381,9 @@ pl.create_tensor([64], dtype=pl.FP32)       # Promoted from tensor
 # System operations (synchronization primitives)
 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-pl.system.bar_v()                        # Vector barrier
-pl.system.bar_m()                        # Matrix barrier
-pl.system.bar_all()                      # Global barrier
+pl.system.barrier(pipe=pl.PipeType.V)     # Vector pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.M)     # Matrix pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.ALL)   # All pipelines on the current core
 
 # Cross-core operations (TPUSH/TPOP protocol)
 pl.tpush_to_aic(tile0, split=0, id=0)        # Vector → Cube push on pipe 0
@@ -402,6 +404,15 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 # a5 -> slot_size * slot_num.
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
+
+`pl.system.barrier(*, pipe)` requires a `pl.PipeType.V`, `M`, or `ALL` member.
+It orders preceding and following work on the selected pipeline(s), without
+using an event slot. `ALL` covers the current core, not other cores; use
+`pl.system.syncall(...)` for a cross-core barrier. The old `bar_v()`,
+`bar_m()`, and `bar_all()` APIs have been removed. The Python IR
+printer always emits the corresponding `barrier(pipe=...)` spelling. Internal
+IR operator names and native barrier lowering remain unchanged. The separate
+`set_flag` / `wait_flag` calls retain their directional pipeline-event semantics.
 
 #### Cross-path arguments on unified ops
 

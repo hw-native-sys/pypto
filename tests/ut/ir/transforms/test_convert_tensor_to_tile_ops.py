@@ -6024,6 +6024,71 @@ class TestConvertGatherOp:
         _assert_convert_equal(before, expected)
 
 
+class TestConvertCmpOp:
+    """Comparison materialization must not read unwritten predicate rows or bits."""
+
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    @pytest.mark.parametrize("rhs_kind", ["scalar", "tensor"])
+    @pytest.mark.parametrize("region", ["full", "rows", "columns", "dynamic"])
+    def test_cmp_preserves_valid_region(self, rhs_kind, region, ascend_backend):
+        # GLM vision's merger compares an [8, 128] tail tile with dynamic rows.
+        # Also cover a non-byte-aligned column tail: the mask uses bytes, while
+        # the materialized 0/1 result must retain the exact element count.
+        specs = [("lhs", [8, 128], DataType.FP32)]
+        if rhs_kind == "tensor":
+            specs.append(("rhs", [8, 128], DataType.FP32))
+        extras: list[ExtraSpec] = [("rows", ir.ScalarType(DataType.INDEX))] if region == "dynamic" else []
+
+        def valid_shape(params) -> tuple[int | ir.Expr, int | ir.Expr]:
+            if region == "dynamic":
+                return params[0], 125
+            return {"full": (8, 128), "rows": (3, 128), "columns": (8, 125)}[region]
+
+        def before_body(ib, inputs, params=()):
+            lhs = ib.let("lhs_valid", tensor_ops.set_validshape(inputs[0], *valid_shape(params)))
+            rhs = inputs[1] if rhs_kind == "tensor" else ir.ConstFloat(0.0, DataType.FP32, ir.Span.unknown())
+            return ib.let("result", tensor_ops.cmp(lhs, rhs, cmp_type=5))
+
+        def expected_body(ib, inputs, params=()):
+            shape = valid_shape(params)
+            lhs = ib.let("lhs_valid", tile_ops.set_validshape(inputs[0], *shape))
+            if rhs_kind == "tensor":
+                mask = ib.let("mask", tile_ops.cmp(lhs, inputs[1], cmp_type=5))
+            else:
+                mask = ib.let("mask", tile_ops.cmps(lhs, 0.0, cmp_type=5))
+            one = ib.let("one", tile_ops.full([8, 128], dtype=DataType.FP32, value=1.0))
+            if region != "full":
+                one = ib.let("one_valid", tile_ops.set_validshape(one, *shape))
+            zero = ib.let("zero", tile_ops.full([8, 128], dtype=DataType.FP32, value=0.0))
+            if region != "full":
+                zero = ib.let("zero_valid", tile_ops.set_validshape(zero, *shape))
+            # TSEL uses a UINT32 [1, 16] scratch on A2/A3 and UINT8 [1, 32] on A5.
+            scratch_dtype, scratch_cols = (
+                (DataType.UINT32, 16) if ascend_backend == BackendType.Ascend910 else (DataType.UINT8, 32)
+            )
+            scratch = ib.let(
+                "scratch",
+                tile_ops.create([1, scratch_cols], dtype=scratch_dtype, target_memory=MemorySpace.Vec),
+            )
+            return ib.let("result", tile_ops.sel(mask, one, zero, scratch))
+
+        before = _make_before(
+            in_specs=specs,
+            out_shape=[8, 128],
+            out_dtype=DataType.FP32,
+            body=before_body,
+            extra_specs=extras,
+        )
+        expected = _make_expected(
+            in_specs=specs,
+            out_shape=[8, 128],
+            out_dtype=DataType.FP32,
+            body=expected_body,
+            extra_specs=extras,
+        )
+        _assert_convert_equal(before, expected)
+
+
 class TestConvertScatterOp:
     """Test conversion of tensor.scatter (rank-2 dim=-1 MVP) and tensor.scatter_mask."""
 
@@ -8382,6 +8447,247 @@ def test_col_sum_binary_uses_half_row_scratch(rows):
             return stored
 
     _assert_convert_equal(Before, Expected)
+
+
+@pytest.mark.parametrize("mapping", ["chain", "swap", "self_expression"])
+@pytest.mark.parametrize("parameter_count", [2, 256])
+def test_shared_callee_instantiates_shapes_simultaneously(mapping, parameter_count):
+    """Caller expressions are opaque even when they reuse a callee Var object."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    index = ir.ScalarType(DataType.INDEX)
+    n, m = ir.Var("N", index, span), ir.Var("M", index, span)
+    x = ir.Var("x", ir.TensorType([n], DataType.FP32), span)
+    y = ir.Var("y", ir.TensorType([m], DataType.FP32), span)
+    result = ir.Var("result", x.type, span)
+    extra_params = [ir.Var(f"extra_{i}", x.type, span) for i in range(parameter_count - 2)]
+    kernel = ir.Function(
+        "shared",
+        [x, y, *extra_params],
+        [x.type],
+        ir.SeqStmts([ir.AssignStmt(result, tensor_ops.add(x, x), span), ir.ReturnStmt([result], span)], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    if mapping == "chain":
+        first, second = m, ir.ConstInt(128, DataType.INDEX, span)
+    elif mapping == "swap":
+        first, second = m, n
+    else:
+        first, second = n + 1, m
+    a = ir.Var("a", ir.TensorType([first], DataType.FP32), span)
+    b = ir.Var("b", ir.TensorType([second], DataType.FP32), span)
+    output = ir.Var("output", a.type, span)
+    main = ir.Function(
+        "main",
+        [a, b],
+        [a.type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    output,
+                    ir.Call(ir.GlobalVar("shared"), [a, b, *([a] * len(extra_params))], a.type, span),
+                    span,
+                ),
+                ir.ReturnStmt([output], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, main], "test", span))
+    dispatches = []
+    allocations = []
+
+    class Collector(ir.IRVisitor):
+        def visit_call(self, op):
+            if isinstance(op.op, ir.GlobalVar):
+                dispatches.append(op)
+            elif op.op.name == ir.get_op("tensor.create").name:
+                allocations.append(op)
+            super().visit_call(op)
+
+    lowered_main = after.get_function("main")
+    assert lowered_main is not None
+    Collector().visit_function(lowered_main)
+    assert len(allocations) == 1 and len(dispatches) == 1
+    call = dispatches[0]
+    assert call.args[0] is a and call.args[1] is b
+    ir.assert_structural_equal(call.type, a.type)
+    ir.assert_structural_equal(call.args[-1].type, a.type)
+    ir.assert_structural_equal(allocations[0].type, a.type)
+
+
+@pytest.mark.parametrize("wrapper_type", [ir.FunctionType.Group, ir.FunctionType.Spmd])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_private_wrapper_output_rebinds_tensor_dim_operand(wrapper_type, use_submit):
+    """A simple wrapper can acquire a richer output type from its child kernel."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([64], DataType.FP32)
+    x = ir.Var("kernel_input", tensor_type, span)
+    create = tensor_ops.create([tensor_ops.dim(x, 0)], DataType.FP32)
+    result = ir.Var("result", create.type, span)
+    load = tile_ops.load(x, [0], [64], target_memory=MemorySpace.Vec)
+    loaded = ir.Var("loaded", load.type, span)
+    kernel = ir.Function(
+        "kernel",
+        [x],
+        [result.type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(result, create, span),
+                ir.AssignStmt(loaded, load, span),
+                ir.EvalStmt(tile_ops.store(loaded, [0], result), span),
+                ir.ReturnStmt([result], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    w = ir.Var("wrapper_input", tensor_type, span)
+    wrapped_type = ir.TensorType([tensor_ops.dim(w, 0)], DataType.FP32)
+    wrapper = ir.Function(
+        "wrapper",
+        [w],
+        [],
+        ir.SeqStmts(
+            [
+                ir.EvalStmt(ir.Call(ir.GlobalVar("kernel"), [w], wrapped_type, span), span),
+                ir.ReturnStmt([], span),
+            ],
+            span,
+        ),
+        span,
+        type=wrapper_type,
+    )
+    a = ir.Var("caller_input", tensor_type, span)
+    dispatch = (
+        ir.Submit(
+            ir.GlobalVar("wrapper"), [a], [], {}, {}, ir.TupleType([ir.ScalarType(DataType.TASK_ID)]), span
+        )
+        if use_submit
+        else ir.Call(ir.GlobalVar("wrapper"), [a], ir.UnknownType(), span)
+    )
+    main = ir.Function(
+        "main",
+        [a],
+        [],
+        ir.SeqStmts([ir.EvalStmt(dispatch, span), ir.ReturnStmt([], span)], span),
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, wrapper, main], "test", span))
+    lowered_main = after.get_function("main")
+    lowered_wrapper = after.get_function("wrapper")
+    assert lowered_main is not None and lowered_wrapper is not None
+    allocation = _find_first_call_to(lowered_main, "tensor.create")
+    assert allocation is not None and isinstance(allocation.type, ir.TensorType)
+    extent = allocation.type.shape[0]
+    assert isinstance(extent, ir.Call) and extent.op.name == ir.get_op("tensor.dim").name
+    assert extent.args[0] is a  # Must not reference the out-of-scope wrapper_input.
+    private_type = lowered_wrapper.params[-1].type
+    assert isinstance(private_type, ir.TensorType)
+    private_extent = private_type.shape[0]
+    assert isinstance(private_extent, ir.Call) and private_extent.args[0] is w
+
+
+@pytest.mark.parametrize("wrapper_type", [ir.FunctionType.Group, ir.FunctionType.Spmd])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_dependent_private_outputs_bind_earlier_storage(wrapper_type, use_submit):
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    first = ir.Var("first", ir.TensorType([64], DataType.FP32), span)
+    second = ir.Var("second", ir.TensorType([tensor_ops.dim(first, 0)], DataType.FP32), span)
+    kernel = ir.Function(
+        "kernel",
+        [(first, ir.ParamDirection.Out), (second, ir.ParamDirection.Out)],
+        [],
+        ir.ReturnStmt([], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    task_type = ir.TupleType([ir.ScalarType(DataType.TASK_ID)])
+    inner = ir.Submit(ir.GlobalVar("kernel"), [], [], {}, {}, task_type, span)
+    wrapper = ir.Function("wrapper", [], [], ir.EvalStmt(inner, span), span, type=wrapper_type)
+    outer = (
+        ir.Submit(ir.GlobalVar("wrapper"), [], [], {}, {}, task_type, span)
+        if use_submit
+        else ir.Call(ir.GlobalVar("wrapper"), [], ir.UnknownType(), span)
+    )
+    main = ir.Function("main", [], [], ir.EvalStmt(outer, span), span, type=ir.FunctionType.Orchestration)
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, wrapper, main], "test", span))
+    lowered_main = after.get_function("main")
+    lowered_wrapper = after.get_function("wrapper")
+    assert lowered_main is not None and lowered_wrapper is not None
+    assert isinstance(lowered_main.body, ir.SeqStmts)
+    allocations = [stmt for stmt in lowered_main.body.stmts if isinstance(stmt, ir.AssignStmt)]
+    assert len(allocations) == 2
+    second_type = allocations[1].var.type
+    assert isinstance(second_type, ir.TensorType)
+    extent = second_type.shape[0]
+    assert isinstance(extent, ir.Call) and extent.args[0] is allocations[0].var
+    second_param_type = lowered_wrapper.params[1].type
+    assert isinstance(second_param_type, ir.TensorType)
+    private_extent = second_param_type.shape[0]
+    assert isinstance(private_extent, ir.Call) and private_extent.args[0] is lowered_wrapper.params[0]
+
+
+def test_added_output_rebinds_omitted_original_out_storage():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([64], DataType.FP32)
+    x = ir.Var("x", tensor_type, span)
+    out = ir.Var("out", tensor_type, span)
+    create = tensor_ops.create([tensor_ops.dim(out, 0)], DataType.FP32)
+    result = ir.Var("result", create.type, span)
+    load = tile_ops.load(x, [0], [64], target_memory=MemorySpace.Vec)
+    loaded = ir.Var("loaded", load.type, span)
+    kernel = ir.Function(
+        "kernel",
+        [(x, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+        [],  # Return type is inferred from the body during conversion.
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(result, create, span),
+                ir.AssignStmt(loaded, load, span),
+                ir.EvalStmt(tile_ops.store(loaded, [0], result), span),
+                ir.ReturnStmt([result], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    actual = ir.Var("actual", tensor_type, span)
+    task_type = ir.TupleType([tensor_type, ir.ScalarType(DataType.TASK_ID)])
+    dispatch = ir.Submit(ir.GlobalVar("kernel"), [actual], [], {}, {}, task_type, span)
+    main = ir.Function(
+        "main", [actual], [], ir.EvalStmt(dispatch, span), span, type=ir.FunctionType.Orchestration
+    )
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(ir.Program([kernel, main], "test", span))
+    lowered_main = after.get_function("main")
+    assert lowered_main is not None and isinstance(lowered_main.body, ir.SeqStmts)
+    allocations = [stmt for stmt in lowered_main.body.stmts if isinstance(stmt, ir.AssignStmt)]
+    assert len(allocations) == 2
+    output_type = allocations[1].var.type
+    assert isinstance(output_type, ir.TensorType)
+    extent = output_type.shape[0]
+    assert isinstance(extent, ir.Call) and extent.args[0] is allocations[0].var
+    statement = lowered_main.body.stmts[-1]
+    assert isinstance(statement, ir.EvalStmt) and isinstance(statement.expr, ir.Submit)
+    assert isinstance(statement.expr.type, ir.TupleType)
+    ir.assert_structural_equal(statement.expr.type.types[0], output_type)
 
 
 if __name__ == "__main__":

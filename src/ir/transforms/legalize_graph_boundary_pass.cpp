@@ -96,15 +96,6 @@ constexpr size_t kMaxBoundaryTensors = 128;  ///< GRAPH_MAX_TENSOR_ARGS, host_bu
 constexpr size_t kMaxBoundaryScalars = 64;   ///< GRAPH_MAX_SCALAR_ARGS, host_build_graph/runtime/types.h
 constexpr size_t kMaxGraphNodes = 1024;      ///< GRAPH_MAX_NODES, common/host_build_graph/graph_execution.h
 
-/// Directions a Graph parameter may carry.
-///
-/// `ArgDirection::Output` means "the runtime allocates this buffer", which
-/// `rt_graph_args_cacheable` rejects outright: a recorded graph's boundary
-/// tensors must already exist so replay can patch their addresses.
-[[nodiscard]] bool IsLegalGraphParamDirection(ParamDirection dir) {
-  return dir == ParamDirection::In || dir == ParamDirection::InOut;
-}
-
 /// True when `type` is a scalar, i.e. a candidate boundary scalar.
 [[nodiscard]] bool IsScalarType(const TypePtr& type) { return As<ScalarType>(type) != nullptr; }
 
@@ -1170,11 +1161,9 @@ void CheckGraphSignature(const FunctionPtr& func) {
       continue;
     }
     ++tensor_params;
-    CHECK_SPAN(IsLegalGraphParamDirection(dir), param->span_)
-        << "Graph function '" << func->name_ << "' declares tensor parameter '" << param->name_hint_
-        << "' as Out, meaning the runtime allocates it. A recorded graph's boundary tensors must "
-           "already exist so replay can patch their addresses, so allocate it at the call site and "
-           "pass it in as InOut.";
+    // ParamDirection describes access, not allocation. An Out parameter may
+    // receive an existing tensor; call-site directions distinguish that from
+    // runtime-allocated Output, which a Graph boundary cannot represent.
   }
 
   CHECK_SPAN(tensor_params >= 1, func->span_)
@@ -1244,6 +1233,7 @@ class GraphCallSiteChecker : public IRVisitor {
     auto callee = LookupGraph(op->op_);
     if (!callee) return;
     CheckArity(op->args_, callee, op->span_);
+    CheckDirections(op->GetArgDirections(), callee, op->span_);
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
@@ -1251,6 +1241,7 @@ class GraphCallSiteChecker : public IRVisitor {
     auto callee = LookupGraph(op->op_);
     if (!callee) return;
     CheckArity(op->args_, callee, op->span_);
+    CheckDirections(op->GetArgDirections(), callee, op->span_);
 
     CHECK_SPAN(op->deps_.empty(), op->span_)
         << "Graph function '" << callee->name_ << "' is submitted from '" << caller_->name_
@@ -1275,14 +1266,23 @@ class GraphCallSiteChecker : public IRVisitor {
 
   void CheckArity(const std::vector<ExprPtr>& args, const FunctionPtr& callee, const Span& span) const {
     // A Submit may normally pass a prefix of the callee's parameters, letting
-    // the runtime allocate the tail Out params. A Graph has no such tail —
-    // CheckGraphSignature already rejected Out params — so every parameter must
-    // be supplied here.
+    // the runtime allocate the tail Out params. A Graph accepts Out parameters
+    // only with caller-supplied storage, so every parameter must be supplied.
     CHECK_SPAN(args.size() == callee->params_.size(), span)
         << "Graph function '" << callee->name_ << "' is called from '" << caller_->name_ << "' with "
         << args.size() << " argument(s) but declares " << callee->params_.size()
         << " parameter(s). A graph cannot leave outputs for the runtime to allocate, so every "
            "parameter must be passed at the call site.";
+  }
+
+  void CheckDirections(const std::vector<ArgDirection>& directions, const FunctionPtr& callee,
+                       const Span& span) const {
+    for (const auto direction : directions) {
+      CHECK_SPAN(direction != ArgDirection::Output, span)
+          << "Graph function '" << callee->name_
+          << "' is called with a runtime-allocated Output argument. Allocate the tensor before "
+             "the Graph and pass the existing tensor instead.";
+    }
   }
 
   FunctionPtr caller_;
@@ -1327,11 +1327,11 @@ class GraphCallSiteChecker : public IRVisitor {
   }
   // Step C: a region allocation becomes an `InOut` boundary tensor.
   //
-  // `Out` is what it would be by dataflow — nothing reads it before the region
-  // writes it — but `Out` on a Graph boundary means "the runtime allocates
-  // this", which `rt_graph_args_cacheable` refuses outright. `InOut` is the
-  // spelling for a buffer the caller owns and the region writes, and it is what
-  // `CheckGraphSignature` accepts. `In` would under-declare: codegen would emit
+  // These parameters are introduced after direction/dependency derivation,
+  // so retain conservative InOut ordering when callers reuse the allocation.
+  // Existing write-only parameters remain Out; DeriveCallDirections has already
+  // selected OutputExisting or promoted InOut for each original call argument.
+  // `In` would under-declare: codegen would emit
   // `add_input`, the launch would never register as a writer, and a caller that
   // hoisted the create out of its own loop would get no ordering between
   // successive launches over the same buffer.
@@ -1545,6 +1545,10 @@ class CallSiteExtender : public IRMutator {
         dirs.push_back(ArgDirection::Scalar);
       } else if (h.direction == ParamDirection::InOut) {
         dirs.push_back(ArgDirection::InOut);
+      } else if (h.direction == ParamDirection::Out) {
+        // A hoisted view already exists. Its original boundary root remains an
+        // argument and retains any InOut promotion needed at this call site.
+        dirs.push_back(ArgDirection::OutputExisting);
       } else {
         dirs.push_back(ArgDirection::Input);
       }

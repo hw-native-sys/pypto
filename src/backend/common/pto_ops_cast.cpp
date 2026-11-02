@@ -31,7 +31,10 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -51,6 +54,29 @@ using pto_ops_detail::round_modes;
 
 // Target differences belong to this operator and are captured at registration.
 enum class CastTarget { A2A3, A5 };
+
+std::string EnsurePackedFp4DnStaticView(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
+                                        const std::string& name_hint) {
+  const auto tile_type = As<ir::TileType>(expr->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, expr->span_) << "Internal error: dense DN cast view requires a TileType";
+  if (!tile_type->dtype_.IsPackedFp4()) {
+    return EnsureStaticViewTileSsa(expr, codegen, name_hint);
+  }
+  // PTOAS treshape does not accept custom FP4 types. Bind a descriptor with
+  // static valid dimensions to the existing planned address instead: TCVT's
+  // contiguous DN implementation is selected by the descriptor's static type.
+  const auto memref = ir::GetDefinedMemRef(tile_type);
+  const auto offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr;
+  CHECK_SPAN(codegen.EmitTileAddr() && offset, expr->span_)
+      << "Packed FP4 DN cast requires static PYPTO or DSA_RP memory allocation; "
+         "use ND storage with the PTOAS memory planner";
+  const std::string view = codegen.NewNamedTemp(name_hint);
+  const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(tile_type);
+  const std::string address = codegen.GetOrEmitConstant(offset->value_, DataType::INT64);
+  codegen.RegisterTileBufType(view, view_type, tile_type);
+  codegen.Emit(view + " = pto.alloc_tile addr = " + address + " : " + view_type);
+  return view;
+}
 
 // PTOAS v0.60 makeTCvtTmpType head block: 4 bytes * 64 cols * min(cols/64, 255).
 constexpr int64_t kTcvtHeadBlockCols = 64;
@@ -194,6 +220,25 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
 
   auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
+  const bool dense_fp4_dn = ir::IsDensePackedFp4DnCast(op);
+  const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_type);
+  CHECK_SPAN(!(src_type->dtype_.IsPackedFp4() || op->GetKwarg<DataType>("target_type").IsPackedFp4()) ||
+                 src_view.blayout != ir::TileLayout::col_major || dense_fp4_dn,
+             op->span_)
+      << "Packed FP4 DN casts require full static dense tiles with zero start_offset; "
+         "use ND storage for partial or padded views";
+  if (dense_fp4_dn) {
+    CHECK_SPAN(target == CastTarget::A5, op->span_) << "Packed FP4 DN casts require the A5 target";
+    const auto dst_var = codegen.GetCurrentResultVar();
+    const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
+    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: dense DN cast requires a result TileType";
+    const std::string src_ssa = EnsurePackedFp4DnStaticView(op->args_[0], codegen, "tcvt_dn_src");
+    const std::string dst_ssa = EnsurePackedFp4DnStaticView(dst_var, codegen, "tcvt_dn_dst");
+    EmitInsOutsWithViewTypes(codegen, "pto.tcvt",
+                             {{src_ssa, codegen.GetViewTileBufTypeStringFromTileType(src_type)}}, dst_ssa,
+                             dst_type, config_attr);
+    return "";
+  }
   const bool explicit_tmp = op->args_.size() == 2;
   const OpScratchRequest request{src_type->dtype_, std::nullopt, op->GetKwarg<DataType>("target_type"),
                                  saturation_mode == static_cast<int>(ir::SaturationMode::kOn), src_type};
@@ -251,7 +296,8 @@ void RegisterCastOps(Backend& backend, BackendType backend_type) {
       INTERNAL_CHECK(false) << "Internal error: no cast rules for backend";
       return;
   }
-  // pto.tcvt mis-orders col_major source elements; both sides must be row_major.
+  // Ordinary TCVT needs ND. Layout resolution preserves only dense packed FP4
+  // DN casts, whose codegen above supplies the required static-valid views.
   backend.RegisterOp("tile.cast")
       .f_plan_scratch([target](const OpScratchRequest& request) { return PlanCastScratch(target, request); })
       .f_codegen([&backend, target](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

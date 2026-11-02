@@ -27,12 +27,12 @@
 
 | 组件 | 职责 | 位置 |
 | ---- | ---- | ---- |
-| `OrchestrationInfoCollector` | IR 访问器，收集元数据（元组映射、张量赋值） | orchestration_codegen.cpp |
-| `OrchestrationStmtCodegen` | 语句级 C++ 代码生成器（继承 CodegenBase） | orchestration_codegen.cpp |
+| `OrchestrationInfoCollector` | IR 访问器，收集元数据（元组映射、张量赋值） | orchestration_analysis.h / .cpp |
+| `OrchestrationStmtCodegen` | 语句级 C++ 代码生成器（继承 CodegenBase） | orchestration_stmt_codegen.h / .cpp |
 | `OrchestrationOpRegistry` | 张量操作代码生成处理器的单例注册表 | orchestration_op_registry.h |
 | `GenerateOrchestration()` | 主入口函数，组合所有生成阶段 | orchestration_codegen.cpp |
-| `VarLineageCollector` | 通过 VarPtr 身份追踪函数体变量到函数参数的来源 | orchestration_codegen.cpp |
-| `GetSSABaseName()` | 剥离 SSA/流水线后缀用于 C++ 名称生成（非身份判定） | orchestration_codegen.cpp |
+| `VarLineageCollector` | 通过 VarPtr 身份追踪函数体变量到函数参数的来源 | orchestration_analysis.h / .cpp |
+| `GetSSABaseName()` | 剥离 SSA/流水线后缀用于 C++ 名称生成（非身份判定） | orchestration_analysis.h / .cpp |
 
 ### OrchestrationInfoCollector
 
@@ -50,6 +50,22 @@ IR 访问器，预扫描函数体以收集：
 - **ForStmt** → `for` 循环及迭代参数初始化和 yield 更新
 - **IfStmt** → 每个分支带 `SIMPLER_SCOPE` 的条件块及返回变量处理
 - **YieldStmt** → 循环携带值的变量重赋值
+
+私有头文件 `orchestration_stmt_codegen.h` 声明访问器并统一持有共享状态。
+方法实现在 `src/codegen/orchestration/` 下按职责组织：
+
+| 文件 | 职责 |
+| ---- | ---- |
+| `orchestration_codegen.cpp` | 入口/Graph 函数、参数解包及生成文件的样板代码 |
+| `orchestration_stmt_codegen.cpp` | 访问器初始化、表达式渲染、赋值/求值及生成名称 |
+| `orchestration_control_flow.cpp` | 循环、分支、运行时作用域及 yield/carry 处理 |
+| `orchestration_task_deps.cpp` | TaskId 绑定、跨作用域提升、依赖数组及屏障 |
+| `orchestration_task_dispatch.cpp` | 任务 ABI 参数、启动提示及直接/Spmd/Group/Graph 调度 |
+| `orchestration_tensor_codegen.cpp` | 张量批量分配、存储生命周期检查及返回值别名 |
+
+这些文件共同实现每个生成函数对应的同一个访问器实例。作用域快照、TaskId 绑定、
+张量生命周期及名称分配仍由该实例统一管理；拆分实现不会引入独立状态或改变输出顺序。
+私有头文件不属于公开 C++ API。
 
 ### 操作注册表
 

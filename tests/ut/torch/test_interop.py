@@ -12,7 +12,7 @@
 import ctypes
 import gc
 import weakref
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -100,6 +100,18 @@ def test_each_call_snapshots_values_and_current_stream(npu):
         setattr(first, "device_index", 1)
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_accepts_borrowed_byte_carriers(npu, dtype):
+    value = _tensor(dtype=torch.uint8)
+    frame = interop.CallSignature([_param(dtype=dtype)]).describe_call((value,))
+    assert frame.tensors[0].tensor is value
+    assert frame.tensors[0].metadata.dtype == dtype
+    assert frame.tensors[0].metadata.shape == (2, 3)
+    assert frame.tensors[0].metadata.nbytes == 6
+    with pytest.raises(TypeError, match="expects dtype"):
+        interop.CallSignature([_param(dtype=dtype)]).describe_call((_tensor(dtype=torch.float16),))
+
+
 def test_frame_keeps_storage_and_return_aliases_alive(npu):
     """Deleting caller references preserves the exact tensor and its borrowed storage."""
     value = _tensor()
@@ -158,13 +170,12 @@ def test_empty_slice_can_have_offset_at_or_beyond_storage(npu, column_start):
     assert frame.alias_result() is view
 
 
-def test_signature_copies_mutable_parameter_metadata(npu):
-    """Mutating the caller's ParamInfo later does not change the prepared signature."""
-    param = _param()
+def test_signature_owns_immutable_parameter_metadata(npu):
+    """Mutating the input shape list does not change the prepared signature."""
+    shape = [2, 3]
+    param = ParamInfo("x", ParamDirection.In, shape, DataType.FP32)
     signature = interop.CallSignature([param])
-    assert param.shape is not None
-    param.shape[0] = 10
-    param.dtype = DataType.INT32
+    shape[0] = 10
     assert signature.describe_call((_tensor(),)).tensors[0].metadata.shape == (2, 3)
 
 
@@ -358,7 +369,7 @@ def test_import_does_not_require_npu_or_simpler(run_without_optional_runtime):
 import pypto
 import pypto.torch
 import pypto.torch.interop
-assert pypto.torch.__all__ == []
+assert pypto.torch.__all__ == ["init"]
 """
     result = run_without_optional_runtime(source)
     assert result.returncode == 0, result.stderr
@@ -392,6 +403,144 @@ def test_invalid_storage_descriptions_fail_before_current_context(npu, monkeypat
     with pytest.raises(ValueError, match="storage bounds|logical data pointer"):
         interop.CallSignature([_param()]).describe_call((tensor,))
     npu.npu.current_device.assert_not_called()
+
+
+def test_exact_byte_alias_with_different_dtype_and_shape(npu):
+    """A full-span dtype view remains the original externally supplied object."""
+    x = _tensor((8,))
+    out = x.view(torch.bfloat16)
+    signature = interop.CallSignature(
+        [_param("x", (8,)), _param("out", (16,), DataType.BF16, ParamDirection.Out)], return_aliases=(1, 0, 1)
+    )
+    frame = signature.describe_call((x, out))
+    assert frame.tensors[0].metadata.nbytes == frame.tensors[1].metadata.nbytes
+    assert frame.return_tensors[0] is out
+    assert frame.return_tensors[1] is x
+    assert frame.return_tensors[2] is out
+    with pytest.raises(ValueError, match="writable alias"):
+        interop.CallSignature(
+            [_param("x", (8,)), _param("out", (8,), DataType.BF16, ParamDirection.Out)]
+        ).describe_call((x, out[:8]))
+
+
+@pytest.mark.parametrize("layout,platform", [(None, "a2a3"), ("NZ", None), ("NZ", "a5")])
+def test_native_nz_requires_declared_layout_and_target(npu, monkeypatch, layout, platform):
+    npu.get_npu_format.return_value = 29
+    query = Mock()
+    monkeypatch.setattr(interop, "_native_storage_shape", query)
+    param = _param(shape=(32, 64), dtype=DataType.BF16)
+    param = replace(param, layout=layout)
+    with pytest.raises(ValueError, match="base format"):
+        interop.CallSignature([param], platform=platform).describe_call((_tensor((32, 64), torch.bfloat16),))
+    query.assert_not_called()
+
+
+def test_native_nz_preserves_layout_and_validates_physical_storage(npu, monkeypatch):
+    npu.get_npu_format.return_value = 29
+    query = Mock(return_value=(4, 2, 16, 16))
+    monkeypatch.setattr(interop, "_native_storage_shape", query)
+    param = _param(shape=(32, 64), dtype=DataType.BF16)
+    param = replace(param, layout="NZ")
+    signature = interop.CallSignature([param], platform="a2a3")
+    param = replace(param, layout=None)
+    tensor = _tensor((32, 64), torch.bfloat16)
+    assert signature.describe_call((tensor,)).tensors[0].tensor is tensor
+    for invalid in ((2, 4, 16, 16), (4, 2, 16), (4, 3, 16, 16)):
+        query.return_value = invalid
+        with pytest.raises(ValueError, match="complete unpadded"):
+            signature.describe_call((tensor,))
+    query.side_effect = RuntimeError("native storage descriptor failed")
+    with pytest.raises(RuntimeError, match="descriptor failed"):
+        signature.describe_call((tensor,))
+
+
+@pytest.mark.parametrize(
+    "direction,dtype,torch_dtype",
+    [
+        (ParamDirection.Out, DataType.BF16, torch.bfloat16),
+        (ParamDirection.InOut, DataType.BF16, torch.bfloat16),
+        (ParamDirection.In, DataType.FP32, torch.float32),
+    ],
+)
+def test_native_nz_rejects_writes_and_unsupported_dtype(npu, monkeypatch, direction, dtype, torch_dtype):
+    npu.get_npu_format.return_value = 29
+    query = Mock()
+    monkeypatch.setattr(interop, "_native_storage_shape", query)
+    param = _param(shape=(32, 64), dtype=dtype, direction=direction)
+    param = replace(param, layout="NZ")
+    with pytest.raises(ValueError, match="read-only"):
+        interop.CallSignature([param], platform="a2a3").describe_call((_tensor((32, 64), torch_dtype),))
+    query.assert_not_called()
+
+
+@pytest.mark.parametrize("offset", [0, 32])
+def test_native_nz_rejects_subviews_of_larger_storage(npu, monkeypatch, offset):
+    npu.get_npu_format.return_value = 29
+    monkeypatch.setattr(interop, "_native_storage_shape", lambda tensor: (4, 2, 16, 16))
+    param = _param(shape=(32, 64), dtype=DataType.BF16)
+    param = replace(param, layout="NZ")
+    view = _tensor((64, 64), torch.bfloat16)[offset : offset + 32]
+    with pytest.raises(ValueError, match="complete unpadded"):
+        interop.CallSignature([param], platform="a2a3").describe_call((view,))
+    npu.npu.current_stream.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "dtype,torch_dtype,blocked",
+    [
+        (DataType.FP16, torch.float16, (1, 4, 2, 16, 16)),
+        (DataType.BF16, torch.bfloat16, (1, 4, 2, 16, 16)),
+        (DataType.INT8, torch.int8, (1, 2, 2, 16, 32)),
+    ],
+)
+def test_native_nz_compiled_signature_accepts_logical_tensor(npu, monkeypatch, dtype, torch_dtype, blocked):
+    """Torch validates logical dimensions; the native storage query validates blocking."""
+    npu.get_npu_format.return_value = 29
+    monkeypatch.setattr(interop, "_native_storage_shape", lambda tensor: blocked[1:])
+    param = _param(shape=(32, 64), dtype=dtype)
+    param = replace(param, layout="NZ")
+    tensor = _tensor((32, 64), torch_dtype)
+    frame = interop.CallSignature([param], platform="a2a3").describe_call((tensor,))
+    assert frame.tensors[0].tensor is tensor
+    assert frame.tensors[0].metadata.shape == (32, 64)
+
+
+@pytest.mark.parametrize("batch", [1, 3])
+def test_native_nz_dynamic_batch_uses_logical_rank_three(npu, monkeypatch, batch):
+    """The signature wildcard refers to the logical batch extent."""
+    npu.get_npu_format.return_value = 29
+    monkeypatch.setattr(interop, "_native_storage_shape", lambda tensor: (batch, 4, 2, 16, 16))
+    param = _param(shape=(-1, 32, 64), dtype=DataType.BF16)
+    param = replace(param, layout="NZ")
+    tensor = _tensor((batch, 32, 64), torch.bfloat16)
+    frame = interop.CallSignature([param], platform="a2a3").describe_call((tensor,))
+    assert frame.tensors[0].metadata.shape == (batch, 32, 64)
+
+
+@pytest.mark.parametrize("shape", [(32, 64), (1, 2, 32, 64)])
+def test_native_nz_dynamic_batch_rejects_other_logical_ranks(npu, shape):
+    """Blocking must not hide a rank incompatible with entry-code batch lookup."""
+    param = _param(shape=(-1, 32, 64), dtype=DataType.BF16)
+    param = replace(param, layout="NZ")
+    with pytest.raises(ValueError, match="expects shape"):
+        interop.CallSignature([param], platform="a2a3").describe_call((_tensor(shape, torch.bfloat16),))
+    npu.load.assert_not_called()
+
+
+@pytest.mark.parametrize("shape", [(16, 64), (32, 32), (2, 32, 64), (31, 64)])
+def test_native_nz_signature_mismatch_fails_before_storage_queries(npu, shape):
+    """Static logical dimensions and unaligned shapes remain invalid."""
+    param = _param(shape=(32, 64), dtype=DataType.BF16)
+    param = replace(param, layout="NZ")
+    with pytest.raises(ValueError, match="expects shape"):
+        interop.CallSignature([param], platform="a2a3").describe_call((_tensor(shape, torch.bfloat16),))
+    npu.load.assert_not_called()
+
+
+def test_finite_fp32_overflow_is_rejected_before_framework_queries(npu):
+    with pytest.raises(ValueError, match="overflows"):
+        interop.CallSignature([_param("scale", None, DataType.FP32)]).describe_call((1e100,))
+    npu.load.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -40,24 +40,22 @@ SHA-256 源码和特化摘要。其记录保留每个环境组件摘要和两个
 
 ## 执行能力与完整参数绑定
 
-当前编译器在 `compiled_meta.json`（schema 2）和 `distributed_meta.json`
-（schema 3）中写入 `supported_execution_modes: ["program"]`。
-`pypto._artifact_contract` 中的 `ExecutionCapabilities` 是经过校验的不可变记录；
-`CompiledProgram`、其 orchestration 子对象和 `DistributedCompiledProgram`
-在 `from_dir()` 后保留该记录，无需加载二进制或初始化 Worker。
-program 消费者拒绝仅声明 kernel 的产物。`kernel` 名称为后续生产者保留，
-声明它不等于实现 kernel ABI。本次不增加用户 mode 选择，普通 JIT/program 调用保持原行为。
+公开 program 编译声明 `["program"]`，内部 kernel 契约编译声明 `["kernel"]`。
+单芯片 `compiled_meta.json` schema 3 保存逻辑签名、lowered 签名及有序外部返回别名。
+分布式 metadata 保持 schema 3 和 PROGRAM 专用能力。`CompiledProgram` 组合公共
+`CompiledArtifact`；metadata 恢复不加载二进制或初始化 Worker。消费者要求对应的
+能力，本次不切换公开 JIT 调用模式。
 
 `ArtifactSpec.execution_capabilities` 将同一声明写入 schema 2 的 artifact manifest，
 并纳入 spec 摘要；不同能力不会复用同一阶段 slot。generated 到 ready 晋级保留能力声明，
 绑定 program 时会拒绝 manifest 与 compiled metadata 的能力不一致。
 能力与 generated/ready 状态独立：允许 program executor 消费不代表二进制已就绪。
 
-旧 sidecar schema 报错并提示重新编译；缺失、空列表、重复、未知或不兼容的能力声明
-不通过猜测补齐。artifact schema 2 同时改变编译 key 的命名空间，因此旧持久条目正常
-未命中且不被修改。运行时 Scalar 值、Tensor 地址和 stream 仍不进入特化 identity。
-`execute_artifact` 在组装前校验已有的单芯片 sidecar；没有 sidecar 的历史目录
-保留既有 program 专用执行路径。
+旧单芯片 schema 1/2 sidecar 仅按 PROGRAM 恢复，不补造返回别名或 kernel 能力。
+kernel 必需字段缺失、能力声明非法时要求重编译。`ArtifactKey.contract` 将请求的
+编译契约纳入公共身份；SDK/toolchain 身份仍由 `ToolchainIdentity` 承载。
+运行时 Scalar 值、Tensor 地址和 stream 不进入身份。`execute_artifact` 在 assembly
+前校验已有 sidecar；没有 sidecar 的目录保留 program 专用兼容路径。
 
 `pypto.ir.param_info.bind_complete_args` 是内部共享绑定设施：要求全部位置参数，
 包括 Out/InOut，并按签名顺序返回原对象。它不分配、不复制、不转换 Scalar，也不初始化

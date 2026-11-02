@@ -9,18 +9,13 @@
 
 """Runtime tests for tile.assemble using @pl.jit kernels.
 
-tile.assemble lowers to TINSERT (Ascend 950 only). Mode is inferred from
-operand memory spaces:
-
-  Acc->Mat (TInsertMode::NZ):
-    source: Acc (L0C), FP32, fractal layout (output of tile.matmul)
-    target: Mat (L1), FP32, fractal layout
-
-  Vec->Vec (TInsertMode::ND_VEC):
-    source: Vec (UB), FP32, ND/RowMajor layout
-    target: Vec (UB), FP32, ND/RowMajor layout
+Floating-point ND Vec insertion uses TINSERT on A2/A3 and A5. The issue #2717
+cases verify column offsets, distinct row pitches, narrowed valid regions, and
+preservation of surrounding target data. Historical examples keep their separate
+platform restrictions and known skips below.
 """
 
+import pypto.language as pl
 import pytest
 import torch
 from examples.intermediate.assemble import (
@@ -107,7 +102,8 @@ def _double_loop_broadcast_case():
     )
 
 
-# tile.assemble lowers to TINSERT, which is only available on Ascend 950.
+# Preserve the historical example matrix; the Vec regression matrix below also
+# exercises A2/A3.
 @pytest.mark.platforms("a5", "a5sim")
 @st.cases(
     pytest.param(
@@ -128,6 +124,56 @@ def _double_loop_broadcast_case():
 )
 def test_tile_assemble(case_run):
     """Each tile.assemble pattern matches its torch reference."""
+    case_run.assert_passed()
+
+
+def _vec_columns_case(dtype, rows, row_offset, col_offset, valid_rows, valid_cols):
+    """Distinct source rows expose pitch errors; nonzero targets expose clobbers."""
+
+    @pl.jit
+    def insert_columns(x: pl.Tensor, initial: pl.Tensor, out: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            source = pl.load(x, [0, 0], [16, 128], valid_shape=[valid_rows, valid_cols])
+            target = pl.load(initial, [0, 0], [rows, 512])
+            result = pl.assemble(target, source, [row_offset, col_offset])
+            pl.store(result, [0, 0], out)
+        return out
+
+    x = (torch.arange(16 * 128).reshape(16, 128) % 127).to(dtype)
+    initial = torch.full((rows, 512), 7, dtype=dtype)
+    out = torch.empty_like(initial)
+
+    def golden(tensors):
+        expected = tensors["initial"].clone()
+        expected[row_offset : row_offset + valid_rows, col_offset : col_offset + valid_cols] = tensors["x"][
+            :valid_rows, :valid_cols
+        ]
+        return expected
+
+    return st.case(
+        insert_columns,
+        x,
+        initial,
+        out,
+        name=f"vec_columns_{dtype}_{rows}_{row_offset}_{col_offset}_{valid_rows}_{valid_cols}",
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+@st.cases(
+    *[
+        _vec_columns_case(dtype, *geometry)
+        for dtype in (torch.float32, torch.float16, torch.bfloat16)
+        for geometry in ((16, 0, 128, 16, 128), (16, 0, 0, 16, 128), (32, 16, 128, 8, 96))
+    ],
+    _loop_col_broadcast_case(),
+    _double_loop_broadcast_case(),
+)
+def test_vec_assemble_columns(case_run):
+    """Issue #2717: insertion preserves every element outside the valid window."""
     case_run.assert_passed()
 
 

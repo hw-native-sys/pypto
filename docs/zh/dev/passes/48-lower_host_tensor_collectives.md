@@ -186,3 +186,8 @@ signal 可复用（对自清理的 host builtin 而言）：这些 kernel 会在
 - 实现：[src/ir/transforms/lower_host_tensor_collectives_pass.cpp](../../../../src/ir/transforms/lower_host_tensor_collectives_pass.cpp)
 - 头文件：[include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
 - 测试：[tests/ut/ir/transforms/test_lower_host_tensor_collectives.py](../../../../tests/ut/ir/transforms/test_lower_host_tensor_collectives.py)
+
+## A5 URMA 索引交换
+
+`pld.tensor.indexed_all_to_all_v` 仅支持 L2 编排，直接在 HOST 编排器中调用
+会在窗口解析之前被拒绝。

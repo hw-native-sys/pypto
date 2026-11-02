@@ -32,7 +32,10 @@ struct DeepCloneResult {
 
 /// Deep-clone a statement subtree, creating fresh Var/IterArg/MemRef objects
 /// at every definition site (DefField). All references to those variables within
-/// the subtree are consistently remapped to the fresh copies.
+/// the subtree are consistently remapped to the fresh copies. External captures
+/// retain their identities unless explicitly substituted. Loop-owned IterArgs
+/// remain fresh even when clone_def_vars is false, including references between
+/// sibling IterArgs in type metadata.
 ///
 /// @param body    Statement subtree to clone
 /// @param var_map Pre-seeded substitutions. Entries map original Var pointers to

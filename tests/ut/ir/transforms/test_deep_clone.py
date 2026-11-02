@@ -77,6 +77,88 @@ class TestDeepCloneBasic:
         assert cloned_body is not func.body
 
 
+class TestDeepCloneWindows:
+    def test_many_views_share_unchanged_external_window(self):
+        """Memoized external slots retain identity without entering the definition map."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        size = n
+        for _ in range(256):
+            size = ir.Add(size, n, DataType.INDEX, span)
+        window = ir.WindowBuffer(ir.Var("buffer", ir.PtrType(), span), size)
+        tensor_type = ir.DistributedTensorType([ir.ConstInt(64, DataType.INDEX, span)], DataType.FP32, window)
+        before = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    ir.Var(f"view{i}", tensor_type, span),
+                    ir.Call(ir.GlobalVar("view"), [], {}, tensor_type, span),
+                    span,
+                )
+                for i in range(256)
+            ],
+            span,
+        )
+
+        after, mapping = ir.deep_clone(before)
+
+        assert len(mapping) == 256
+        assert all(original is not window and original is not n for original, _ in mapping)
+        for assignment in ir.flatten_to_stmts(after):
+            assert isinstance(assignment, ir.AssignStmt)
+            for value in (assignment.var, assignment.value):
+                assert isinstance(value.type, ir.DistributedTensorType)
+                assert value.type.window_buffer is window
+
+    @pytest.mark.parametrize("storage", ["external", "substituted", "local"])
+    @pytest.mark.parametrize("call_kind", ["call", "submit"])
+    def test_window_identity_shared_by_definition_and_call(self, storage, call_kind):
+        """Captured slots stay external; cloned storage has one shared replacement."""
+        span = ir.Span.unknown()
+        base = ir.Var("buffer", ir.PtrType(), span)
+        replacement = ir.Var("replacement", ir.PtrType(), span)
+        window = ir.WindowBuffer(base, ir.ConstInt(256, DataType.INDEX, span))
+        tensor_type = ir.DistributedTensorType([ir.ConstInt(64, DataType.INDEX, span)], DataType.FP32, window)
+        result_type = (
+            tensor_type
+            if call_kind == "call"
+            else ir.TupleType([tensor_type, ir.ScalarType(DataType.TASK_ID)])
+        )
+        view = ir.Var("view", result_type, span)
+        if call_kind == "call":
+            value = ir.Call(ir.GlobalVar("view"), [], {}, result_type, span)
+        else:
+            value = ir.Submit(ir.GlobalVar("view"), [], [], result_type, span)
+        before = ir.AssignStmt(view, value, span)
+        if storage == "local":
+            allocation = ir.AssignStmt(
+                base, ir.Call(ir.GlobalVar("allocate"), [], {}, ir.PtrType(), span), span
+            )
+            before = ir.SeqStmts([allocation, before], span)
+        after, mapping = ir.deep_clone(
+            before, var_map=[(base, replacement)] if storage == "substituted" else []
+        )
+        assignments = ir.flatten_to_stmts(after)
+        assignment = assignments[-1]
+        assert isinstance(assignment, ir.AssignStmt)
+        windows = []
+        for result in (assignment.var, assignment.value):
+            result_type = result.type
+            if isinstance(result_type, ir.TupleType):
+                result_type = result_type.types[0]
+            assert isinstance(result_type, ir.DistributedTensorType)
+            windows.append(result_type.window_buffer)
+        assert windows[0] is windows[1]
+        cloned_window = windows[0]
+        assert cloned_window is not None
+        if storage == "external":
+            assert cloned_window is window
+        else:
+            assert cloned_window is not window
+            expected_base = replacement if storage == "substituted" else dict(mapping)[base]
+            assert cloned_window.base is expected_base
+        ir.assert_structural_equal(assignment.var.type, assignment.value.type)
+
+
 class TestDeepCloneLoopCarries:
     """Only carries defined inside the cloned subtree receive fresh identities."""
 
@@ -289,6 +371,92 @@ class TestDeepCloneTypeRemap:
         assert cloned_tile_type.tile_view is not None
         # External vars pass through VisitExpr_(VarPtr) unchanged (no substitution).
         assert cloned_tile_type.tile_view.valid_shape[0] is i_orig
+
+
+class TestDeepCloneIterArgScope:
+    """Cloning a use must not create a definition for an enclosing loop's state."""
+
+    @pytest.mark.parametrize("substitute", [False, True])
+    def test_external_iter_arg_in_value_and_type(self, substitute):
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, DataType.INDEX, span)
+        old = ir.IterArg("old", ir.ScalarType(DataType.INDEX), zero, span)
+        replacement = ir.Var("replacement", old.type, span)
+        view = ir.TileView(valid_shape=[old], stride=[old], start_offset=old)
+        # Keep valid_shape distinct from shape: equal expressions are canonicalized away.
+        tile_type = ir.TileType([ir.Add(old, zero, DataType.INDEX, span)], DataType.FP32, None, view, None)
+        tile = ir.Var("tile", tile_type, span)
+        # Deliberately inspect metadata independently of op type inference.
+        body = ir.AssignStmt(tile, old, span)
+        cloned, mapping = ir.deep_clone(body, [(old, replacement)] if substitute else [])
+        expected = replacement if substitute else old
+
+        assert isinstance(cloned, ir.AssignStmt)
+        assert cloned.var is not tile
+        assert cloned.value is expected
+        assert isinstance(cloned.var.type, ir.TileType)
+        assert isinstance(cloned.var.type.shape[0], ir.Add)
+        assert cloned.var.type.shape[0].left is expected
+        cloned_view = cloned.var.type.tile_view
+        assert cloned_view is not None
+        assert cloned_view.valid_shape[0] is expected
+        assert cloned_view.stride[0] is expected
+        assert cloned_view.start_offset is expected
+        assert all(original is not old for original, _ in mapping)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("substitute", [False, True])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_owned_iter_args_are_fresh_and_capture_outer_state(self, loop_kind, substitute, reverse):
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, DataType.INDEX, span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        stop = ir.ConstInt(4, DataType.INDEX, span)
+        scalar = ir.ScalarType(DataType.INDEX)
+        # Equal names must not confuse the external capture with the owned definition.
+        outer = ir.IterArg("state", scalar, zero, span)
+        replacement = ir.Var("replacement", scalar, span)
+        state = ir.IterArg("state", scalar, outer, span)
+        view = ir.TileView(valid_shape=[state], stride=[one], start_offset=zero)
+        tile_type = ir.TileType([stop], DataType.FP32, None, view, None)
+        initial_tile = ir.Var("initial_tile", tile_type, span)
+        tile_state = ir.IterArg("tile", tile_type, initial_tile, span)
+        body = ir.YieldStmt([ir.Add(state, one, DataType.INDEX, span), tile_state], span)
+        returns = [ir.Var("result", scalar, span), ir.Var("tile_result", tile_type, span)]
+        owned = [state, tile_state]
+        if reverse:
+            # Type references need not follow iter-arg list order.
+            owned.reverse()
+            returns.reverse()
+            body = ir.YieldStmt(list(reversed(body.value)), span)
+        if loop_kind == "for":
+            loop = ir.ForStmt(ir.Var("i", scalar, span), zero, stop, one, owned, body, returns, span)
+        else:
+            loop = ir.WhileStmt(ir.Lt(state, stop, DataType.BOOL, span), owned, body, returns, span)
+
+        first, _ = ir.deep_clone(loop, [(outer, replacement)] if substitute else [])
+        second, mapping = ir.deep_clone(loop, [(outer, replacement)] if substitute else [])
+        assert isinstance(first, (ir.ForStmt, ir.WhileStmt))
+        assert isinstance(second, (ir.ForStmt, ir.WhileStmt))
+        scalar_index, tile_index = (1, 0) if reverse else (0, 1)
+        fresh, fresh_tile = second.iter_args[scalar_index], second.iter_args[tile_index]
+        assert fresh is not state and fresh is not first.iter_args[scalar_index]
+        assert fresh_tile is not tile_state and fresh_tile is not first.iter_args[tile_index]
+        assert fresh.initValue is (replacement if substitute else outer)
+        assert fresh_tile.initValue is initial_tile
+        assert isinstance(fresh_tile.type, ir.TileType)
+        assert fresh_tile.type.tile_view is not None
+        assert fresh_tile.type.tile_view.valid_shape[0] is fresh
+        assert isinstance(second.body, ir.YieldStmt)
+        yielded_state = second.body.value[scalar_index]
+        assert isinstance(yielded_state, ir.Add)
+        assert yielded_state.left is fresh
+        assert second.body.value[tile_index] is fresh_tile
+        if isinstance(second, ir.WhileStmt):
+            assert isinstance(second.condition, ir.Lt)
+            assert second.condition.left is fresh
+        assert all(original is not outer for original, _ in mapping)
+        assert any(original is state and clone is fresh for original, clone in mapping)
 
 
 if __name__ == "__main__":

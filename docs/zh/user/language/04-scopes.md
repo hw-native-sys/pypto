@@ -312,9 +312,15 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
 `pl.system.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`。例如 MTE2 加载后由向量流水线使用：
 
 ```python
+a = pl.tile.load(input_a, [0, 0], [16, 16])
 pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+b = pl.tile.load(input_b, [0, 0], [16, 16])  # Used later with its own synchronization
 pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+result = pl.tile.adds(a, 1.0)
 ```
+
+MTE2 在 `a` 加载完成后发信号，wait 控制 V 的后续执行。因此 V 可以在无关的 `b`
+加载期间计算 `result`；不同流水线之间，源码顺序并不等于完成顺序。
 
 两者都是有副作用的语句，一对操作的三个标识必须一致。源和目标必须是不同的具体
 `pl.PipeType`；`ALL` 不能作为事件端点。常量事件 ID 为 0 到 7。也可传入运行时
@@ -326,6 +332,24 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 仅有动态 flag 尚不会触发 PTOAS 的跳过逻辑；若要接管整个函数的同步放置，请使用一对静态 flag。
 显式 flag 必须放在 `pl.pipeline` 循环之外。当前流水线调度无法保持它们的源码顺序，
 因此 PyPTO 会拒绝循环中的任一 flag。需要在循环内手工同步时，请使用 `pl.range`。
+
+流水线屏障统一使用 `pl.system.barrier(*, pipe)`，必选关键字仅接受
+`pl.PipeType.V`、`M` 或 `ALL`。`V`、`M` 为对应流水线的前后工作建立顺序；
+`ALL` 等待当前核所有流水线此前的工作完成。例如，若在上面两次加载后使用
+`ALL` 屏障，就需要等 `a`、`b` 都完成加载，再执行向量计算。屏障既不分配也不
+消费事件槽；尚未配对的 `set_flag` 仍须对应一次 `wait_flag`。
+
+已移除的旧接口需迁移为以下写法：
+
+| 已移除的调用 | 统一调用 |
+| ------------ | -------- |
+| `pl.system.bar_v()` | `pl.system.barrier(pipe=pl.PipeType.V)` |
+| `pl.system.bar_m()` | `pl.system.barrier(pipe=pl.PipeType.M)` |
+| `pl.system.bar_all()` | `pl.system.barrier(pipe=pl.PipeType.ALL)` |
+
+原有包装接口不再可用。Python IR printer 将三种形式统一打印为新写法，内部 IR
+及原生屏障保持相同。`ALL` 不表示跨核同步；跨核到达同步使用下文的
+`pl.system.syncall(...)`。
 
 AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定序 —— 这正是这次传输的含义 ——
 但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序。先发布 producer

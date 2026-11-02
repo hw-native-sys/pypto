@@ -1,42 +1,94 @@
-# PyPTO 中的 FP4
+# PyPTO 中的打包 FP4 类型
 
-FP4 / packed FP4 的权威说明页。类型表短述见 [类型](../user/language/00-types.md)；
-本页写角色、单位约定、cast 策略，以及当前可手写的安全路径。
+PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的类型与字节载体
+（byte carrier）ABI、数值转换以及当前支持的算子。类型简表见[类型](../user/language/00-types.md)。
 
-本切片**尚未**提供自动 `PackFp4`（逻辑 `pl.FP4` → 打包 carrier）；在 pass
-落地前请优先手写 `pl.FP4E2M1X2`。
+## 类型与单位约定
 
-## 角色
+| DSL 类型 | 大写别名 | 存储方式 | PTO 类型 |
+| -------- | -------- | -------- | -------- |
+| `pl.fp4e2m1x2` | `pl.FP4E2M1X2` | 每字节存放两个 E2M1 值 | `!pto.f4E2M1x2` |
+| `pl.fp4e1m2x2` | `pl.FP4E1M2X2` | 每字节存放两个 E1M2 值 | `!pto.f4E1M2x2` |
 
-| 类型 | 含义 |
-| ---- | ---- |
-| `pl.FP4` | 前端**逻辑** E2M1 nibble（`GetBit()==4`）；shape / `valid_shape` 按 nibble 计数。解析短名会发 `UserWarning`（推荐 `FP4E2M1X2`）。 |
-| `pl.FP4E2M1X2` | **打包** carrier（每元素两个 nibble，`GetBit()==8`）。物理末维对齐 `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2`。 |
+两种类型都满足 `get_bit() == 8` 和 `get_byte() == 1`。Tensor 和 tile 的 shape、
+`valid_shape`、步长（stride）与偏移量均按字节载体计数。`[2,256]` 张量占用
+512 字节，包含 1,024 个 FP4 值。载体维度或偏移量不必为偶数，因为每个载体已包含
+完整的一对数值；各算子的对齐与布局限制仍然适用。
 
-偶数末维约束针对**逻辑 nibble** 几何（以及 wider→packed、需要静态偶数末维再减半的
-cast）。手写 **carrier** 末维可以为奇数。请优先用 ND row-major + Vec；Cube / DN /
-NZ / col_major / distributed 的 FP4 族路径在本切片不支持（硬拒随 PackFp4 落地）。
+不再提供未打包的 FP4 类型或按半字节（nibble）计数的 ABI。旧的 `pl.FP4`、
+`DataType.FP4` 和 `DT_FP4` 名称已移除。JIT 特化、函数参数和返回值、运行时分配以及
+持久化参数元数据均保留载体维度，不会将某个维度隐式加倍或减半。
 
-`tensor` / `tile` 的 `reshape` 与 `transpose` 会拒绝 FP4 族（见报错与支持矩阵）。
+即使 shape 和字节数相同，这两种格式仍是不同的类型。修改函数注解不会转换数据：
+依赖函数调用（包括无返回值调用和 submit）中，只要实参或形参任一方为打包 FP4，
+双方 dtype 就必须相同。在支持字节别名的路径上，UINT8/INT8 值需要显式使用
+`reinterpret_view`；仅修改被调用函数的注解不会重新解释字节。
+两种 FP4 格式之间的数值转换应显式使用 `pl.cast`。
 
-## 单位约定
+## Torch 与运行时载体
 
-| 层 | 单位 |
-| -- | ---- |
-| 前端逻辑 `pl.FP4` shape / `valid_shape` | nibble |
-| 手写 `pl.FP4E2M1X2` IR / `tile_buf` / Torch ABI | carrier |
-| 打包 `make_tensor_view` / `partition_view`（PTOAS v0.67+） | carrier；PTOAS 将 DMA 描述符转换为 nibble 单位 |
-| runtime Tensor / `torch.float4_e2m1fn_x2` | carrier 元素 |
+- `torch.float4_e2m1fn_x2` 直接映射为 `FP4E2M1X2`，物理 shape 不变。
+  E1M2 注解会拒绝这种专用于 E2M1 的 Torch dtype。
+- 两种打包类型的显式注解均接受 `torch.uint8` 载体。未标注的 UINT8 数据仍为
+  UINT8；FP4 格式由注解指定。
+- E2M1 返回值优先使用 Torch 原生 x2 dtype 分配，不可用时使用 UINT8。
+  E1M2 使用 UINT8，因为 Torch 没有对应的原生 dtype。
+- 编译后或重新加载的参数元数据保留数值格式和相同的载体 shape。
+  打包运行时张量的秩至少为一，且最后一个载体维度必须为正。
 
-多行 ND packed 张量请用 **carrier** 末维与 leading stride（例如每行 512 逻辑
-nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 保留 GM view 的 carrier 单位。
-PTOAS v0.67 会将传输描述符转换为 pto-isa 所需的 nibble 单位；PyPTO 再次扩展会导致行步长翻倍。在 `FP4E2M1X2` 上误用逻辑宽度，
-可能导致 GM 行 stride 错位；在自动 PackFp4 将 nibble 尺寸转换为 carrier 之前，in-core PTO codegen 会拒绝逻辑 `pl.FP4`——见 issue
-[#2754](https://github.com/hw-native-sys/pypto/issues/2754)。
+原始载体存储不等于主机端数值实现。`torch_codegen` 会拒绝打包 FP4 参考代码，
+而不会把这些字节当作 FP32 值。验证数值结果时，应使用显式解码对应格式的参考实现。
 
-## 通过 UB alias 解码 UINT8 carrier（Ascend950）
+## Ascend950 上的算子支持
 
-GM 保持 UINT8 打包字节，在 UB 内使用零拷贝 FP4E2M1X2 视图（zero-copy view）：
+两种格式均支持 ND 转换、完整静态连续 DN 转换及下表中的数据搬运。
+原生 MXFP4 量化仅支持 E2M1。
+
+| 操作 | 支持范围 |
+| ---- | -------- |
+| 打包 GM 视图与 load/store | 两种格式均支持 ND/DN 载体维度、步长和偏移；宽度为一个载体时仍保持 ND；PTOAS v0.67 负责 DMA 描述符转换 |
+| 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同、连续且带地址的二维行主序 Vec 存储；使用 PYPTO 或 DSA_RP 内存规划器 |
+| 任一打包格式 ↔ BF16 转换 | 无分块 Vec 上的原生 TCVT；ND 列或完整静态连续 DN 行按 2:1 展开或收缩 |
+| 任一打包格式 → FP8E4M3FN/FP8E5M2 转换 | 经 BF16 和 FP32 合法化，并发出警告；也可使用主机参考实现或查找表 |
+| E2M1↔E1M2 转换 | 经 BF16 进行数值转换，载体 shape 不变 |
+| 其他宽类型转换 | 使用现有合法化路径，要求中间转换无损；编码限制见下文 |
+| 打包 Vec 布局转换 | ND→NZ；载体维度随打包轴变化，数值维度保持不变 |
+| 打包 Vec→Mat 搬运 | 布局相同，且显式使用 AIV 函数；通用 InCore 混合核展开会被拒绝 |
+| 原生打包 `extract` / `assemble` | 仅支持保持布局且打包轴偏移为零的 cube/NZ 路径；通用 Vec 提取使用 INT8 别名，ND 插入使用 UINT8 别名 |
+| `fillpad`、`fillpad_expand`、`fillpad_inplace` | 两种格式的 ND Vec；零值、最小值和最大值填充均保留有效载体矩形 |
+| DN 数值转换 | 完整静态连续的二维 BF16↔打包或打包↔打包转换；使用 PYPTO/DSA_RP 静态地址；部分有效、带填充及分块布局均被拒绝 |
+| 直接对打包类型执行 `reshape` 或 `transpose` | 不支持；在现有别名契约允许时，先对字节别名执行 reshape |
+| 原生打包 FP4 `matmul_mx` | 固定版本 PTOAS 的维度契约不支持；先把 ND 操作数转换为 FP8 |
+| MXFP4 `quant_mx` | 仅 E2M1，输入为 FP16/BF16，支持 OCP 和 axis0 上受支持的 NV 路径；使用 PYPTO/DSA_RP 静态分配 |
+| `pl.tile.quant_mx_raw` | 显式提供工作区，返回原生 E2M1 数据（MXFP8 返回 INT8）及原始 UINT8 指数；支持静态部分有效区域和 axis0 交错 |
+| Ascend910/A2A3 上执行打包 FP4 | 不支持 |
+
+PTO GM 视图保留载体坐标。底层指令所用数值维度的转换由 PTOAS 负责；若 PyPTO
+再次缩放 GM shape，会把行跨度加倍。物理 tile 仍须满足 ISA 对齐要求，包括 ND Vec
+的 32 字节行跨度；较窄的载体窗口应使用带填充的存储，并通过 `valid_shape` 指定有效区域。
+
+## 数值转换限制
+
+BF16 编码支持 `rint`、`round`、`floor`、`ceil` 和 `trunc`，拒绝 `odd`。
+打包要求完整的数值对：源维度为正偶数，或动态 `valid_shape` 可证明为偶数，
+例如 `2 * n`。解码会展开载体维度，不要求该载体维度为偶数。
+
+所有打包转换均要求 `none_box` 存储；更宽类型的转换链要求 ND 布局。
+经 BF16 解码可精确保留每个 FP4 值。隐式编码链同样要求经 BF16 后保留原始源值：
+FP16/FP32 及较宽整数源会被拒绝，因为该中间步骤可能导致两次舍入。
+若确实需要中间舍入，应先显式转换为 BF16。固定版本模拟器对小数 FP4 转换的舍入有误，
+因此数值验收使用 A5 硬件。
+
+DN 转换要求完整静态二维矩形、规范的连续列主序步长、零 tile 起始偏移，且两端类型
+均为 BF16 或打包 FP4。DN `[M,K]` 载体解码为 BF16 `[2*M,K]`。
+可对完整 ND BF16 tile 使用 `pl.tile.transpose_view` 来准备列主序 BF16 源。
+Tensor 转换遵守相同契约。PYPTO 或 DSA_RP 必须提供静态 tile 地址；代码生成绑定
+完整静态有效描述符，以选择安全的原生转换路径。动态有效 DN 描述符即使针对完整矩形
+也可能触发故障，因此仍不支持。
+
+## 通过 UB 别名解码 UINT8 载体（Ascend950）
+
+GM 张量保持 UINT8 类型，并按实际编码格式为其 UB 存储创建别名：
 
 ```python
 import pypto.language as pl
@@ -50,109 +102,50 @@ def decode_bytes(
     with pl.spmd(1):
         row = pl.tile.get_block_idx() * 32
         payload = pl.tile.load(packed, [row, 0], [32, 256])
-        fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+        fp4 = pl.reinterpret_view(payload, pl.fp4e2m1x2)
         decoded = pl.cast(fp4, pl.BF16)
         pl.tile.store(decoded, [row, 0], output)
     return output
 ```
 
-`payload` 与 `fp4` 的 carrier shape 都是 `[32,256]`，在同一 UB 地址共享
-8,192 字节。数值 cast 将末轴展开为新的 BF16 `[32,512]` tile，并使用原生
-`TCVT`。GM 输入仍采用 UINT8 字节寻址（本例为 `row * 256`）；不会生成 FP4 GM
-partition 或软件 nibble 解码序列。
+该别名保留 `[32,256]` 载体 shape，并共享原有的 8,192 字节分配。
+只有数值转换会创建新的 BF16 `[32,512]` tile。若源字节编码为 E1M2，
+应改用 `pl.fp4e1m2x2`。
 
-同 shape 的 alias 接受 FP4E2M1X2 ↔ UINT8 / INT8，要求二维 packed row-major Vec tile、
-`slayout=none_box`、无显式 stride，且 tile `start_offset` 为零。显式 `shape`
-必须与源 shape 完全相同。carrier `valid_shape` 保留，随后 cast 展开其末轴。
-需要改变 shape 时，先 reshape 字节视图，再解释回 FP4E2M1X2 后 cast；每次 alias
-都必须保持输入 shape 和连续存储。InCore tensor alias 降低到同一 tile 路径。
-逻辑 FP4 alias、原生 packed-FP4 reshape 和 orchestration tensor alias 仍被拒绝。
-GM load 可使用非零偏移；它与 UB tile 的 `start_offset` 不同。
+别名要求 `slayout=none_box`、连续存储、零 tile `start_offset`，以及具有静态 UB
+字节偏移的带地址内存引用（MemRef）。源字节跨度必须等于载体元素数量。
+非连续 UB 切片（包括其间接别名和 reshape）以及无地址输入会被拒绝。
+GM 加载偏移可为非零或动态值，它不同于 UB 偏移。显式别名 shape 必须与源相同；
+需要 reshape 时，应先单独变形字节视图，再重新创建别名。
+InCore tensor 别名降低为相同的 tile 路径；编排层 tensor 别名仍不支持。
 
-源 tile 必须具有显式地址的内存引用（MemRef），其字节跨度必须等于静态 carrier
-元素数。非连续 UB 列切片（包括其 alias 和 reshape）以及 `tile.tpop_from_aic`
-等无 MemRef 的输入，会在生成 FP4 转换前被拒绝。请直接从 UINT8 GM 加载所需窗口，
-得到连续 UB tile 后再创建 alias。包括中间视图在内，alias 的 UB 字节偏移必须
-为静态值；GM load 仍可使用运行时偏移。
+PYPTO 和 DSA_RP 内存规划器生成带地址别名。PTOAS 内存规划器的 `treshape`
+拒绝打包 FP4 类型，因此不支持此路径。别名保留比特，不会将一种 FP4 格式数值转换为另一种。
 
-**PTOAS 0.65 足以支持 PYPTO 和 DSA_RP 内存规划器**：两者生成有显式地址的
-类型 alias。此 alias 会拒绝 PTOAS 内存规划器，因为 0.65
-的 `pto.treshape` 不支持 packed FP4。其他 reinterpret-view dtype 保持原有
-规划器支持。本路径不修复通用 typed FP4 GM partition 偏移，也不引入 PackFp4。
-InCore tensor alias 会下降为同样经过检查的 UB alias。
+部分搬运的硬件测试逐字节比较所有载体，包括未写入的输出区域。固定版本模拟器的 DN
+结果会损坏；部分 ND 用例虽字节比较一致，仍在清理阶段崩溃，因此这些用例仅在 A5 上运行。
 
-## Cast 策略（Ascend950）
+## MX 量化
 
-`LegalizeTileCast` 对 FP4 族如下处理：
+`pl.quant_mx(..., dtype=pl.fp4e2m1x2)` 每 32 个 FP16/BF16 值分为一组进行量化。
+axis1 将 `[M,K]` 转为数据 `[M,K/2]` 和缩放因子 `[M,K/32]`；axis0 将 `[N,K]`
+转为数据 `[K,N/2]` 和缩放因子 `[K/32,N]`。数据 shape 按字节载体计数。
+公开量化接口要求 tile 完全有效、`K%64==0`、axis1 的 `M%16==0`，以及 FP4 axis0
+的 `N%64==0`，以满足 32 字节载体行跨度。
 
-| Cast | 行为 |
-| ---- | ---- |
-| `FP4` / `FP4E2M1X2` ↔ `BF16` | 原生 TCVT（DSv4.1 c1a）。静默。Packed ↔ 更宽类型按末轴 **2:1** 调整（打包时要求静态偶数末维）。 |
-| `FP4` / `FP4E2M1X2` → `FP8E4M3FN` / `FP8E5M2` | 合法化为 FP4→BF16→FP32→FP8，并带 **Warning**（更推荐 LUT / 主机预转换）。 |
-| `FP4` ↔ `FP4E2M1X2` | **拒绝**（几何不一致）；经更宽类型绕行或显式改 shape。 |
-| Wider → `FP4E2M1X2` 且末维动态 | **拒绝**（仅静态正偶数）。 |
+默认采用 `quant_scale_alg="ocp"`。`"nv"` 支持 FP16/BF16 的 axis0 路径；PTOAS
+不支持 FP16/BF16 的 axis1 NV 路径或 E1M2 量化。打包量化要求 PYPTO 或 DSA_RP
+提供静态地址，因为 PTOAS 无法将其自定义 FP4 类型 reshape 为所需的静态有效描述符。
 
-### 手写 `FP4E2M1X2` → BF16
-
-Carrier 末维 `32` 展开为 BF16 末维 `64`：
-
-```python
-import pypto.language as pl
-
-
-@pl.function(type=pl.FunctionType.InCore)
-def fp4x2_to_bf16(
-    x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
-    out: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
-) -> pl.Tensor[[16, 64], pl.BF16]:
-    t = pl.load(x, [0, 0], [16, 32])
-    c = pl.cast(t, pl.BF16)
-    return pl.store(c, [0, 0], out)
-```
-
-### 手写 `FP4E2M1X2` → FP8
-
-同样 2:1 末轴展开；预期 LegalizeTileCast Warning：
-
-```python
-import pypto.language as pl
-
-
-@pl.function(type=pl.FunctionType.InCore)
-def fp4x2_to_fp8(
-    x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
-    out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
-) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
-    t = pl.load(x, [0, 0], [16, 32])
-    c = pl.cast(t, pl.FP8E4M3FN)
-    return pl.store(c, [0, 0], out)
-```
-
-## 支持矩阵（本切片）
-
-图例：✅ 支持 · ⚠️ 部分 / Warning · ❌ 不支持 · ⏳ 本切片未提供
-
-| 特性 | PyPTO | 说明 |
-| ---- | ----- | ---- |
-| 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端；**仅 ND** |
-| 无 PackFp4 的逻辑 `pl.FP4` | ❌ | In-core PTO codegen 拒绝 nibble 单位的 GM view；请使用 carrier 尺寸的 `FP4E2M1X2` |
-| 打包 GM view 保留 carrier 单位 | ✅ | PTOAS v0.67 负责 DMA 转换（ND） |
-| FP4E2M1X2 ↔ UINT8/INT8 UB alias | ✅ | InCore tensor / tile；二维 packed row-major Vec；carrier shape 不变；仅 PYPTO / DSA_RP |
-| `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop；结果 stride 重建为连续 |
-| `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning；更推荐 LUT / 主机 |
-| `FP4` ↔ `FP4E2M1X2` cast | ❌ | 拒绝 |
-| 自动 PackFp4 | ⏳ | 后续 |
-| `FP4E2M1X2` 的 `reshape` / `transpose` / DN / NZ / 列向量 `[M,1]` / layout `tensor.view` | ❌ | 仅 ND row-major；隐式 DN 与显式 layout 转化硬拒 |
-| `matmul_mx` 原生 FP4 数据 | ⏳ | 需要时先 cast lhs 到 FP8 |
-
-## 推荐路径
-
-1. 手写 `pl.FP4E2M1X2` 并用物理 carrier shape（避免 `#2754` 类 stride 问题）。
-2. 需要更宽浮点时 cast 到 BF16。
-3. FP4→FP8 优先 **LUT / 主机**；设备 cast 仅 Warning。
-4. PackFp4 落地前，in-core GM 访问请使用 `pl.FP4E2M1X2`。
+`pl.tile.quant_mx_raw` 保持源朝向，返回原生打包数据及 UINT8 指数编码，不进行复合
+缩放因子分块。工作区使用源 dtype；axis0 工作区保留源的物理列跨度，axis1 的
+FP16/BF16 OCP 缩放工作区容量将组数向上取整到 128 个元素。
+支持静态部分有效区域；axis1 要求物理列数等于有效列数，且 FP4 物理列数为 64 的倍数。
+axis0 每 32 个有效行分组；`interleave=True` 要求 FP16/BF16 的物理行数和有效行数
+均为 64 的倍数。量化入口见[算子目录](../user/ops/01-catalog.md)。
+原生打包 FP4 `matmul_mx` 仍不支持；量化结果本身不会建立原生矩阵计算路径。
 
 ## 另见
 
-- [类型](../user/language/00-types.md) — FP4 / FP4E2M1X2 短表
-- [算子 / MX](ir/05-operators.md) — `matmul_mx` FP4 说明
+- [类型](../user/language/00-types.md) — 公开别名与载体 ABI
+- [算子 / MX](ir/05-operators.md) — 现有 MXFP8 矩阵路径

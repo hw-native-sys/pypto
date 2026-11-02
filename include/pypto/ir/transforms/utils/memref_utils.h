@@ -586,7 +586,7 @@ inline ExprPtr ComputeAccumulatorSliceByteOffset(const std::vector<ExprPtr>& off
 ///    parent's. A row-narrowing window has NO correct standalone base address —
 ///    its box columns are strided by the parent's `rows`, its descriptor's by its
 ///    own — so it is left on the arithmetic it has always had rather than swapped
-///    for a differently wrong number. See docs/en/dev/passes/33-init_memref.md.
+///    for a differently wrong number. See docs/en/dev/passes/35-init_memref.md.
 ///  * a non-zero row origin, which is only reachable together with a narrowed row
 ///    extent and is unrepresentable for the same reason;
 ///  * a static column origin that is not a multiple of the 16-wide box. Such a
@@ -635,8 +635,9 @@ inline std::optional<tile_view_semantics::AccumulatorTileGeometry> GetSliceAccum
 /// Compute byte offset for a slice operation.
 /// byte_offset = (o0 * s1 * ... * sN + o1 * s2 * ... * sN + ... + oN) * storage_bits / 8
 ///
-/// MemRef carries a byte offset rather than a nibble offset. Packed 4-bit
-/// slices therefore require a static, byte-aligned logical origin in v1.
+/// MemRef carries a byte offset rather than a nibble offset. INT4/UINT4/HF4
+/// slices therefore require a static, byte-aligned origin. FP4 x2 carrier
+/// offsets are already byte offsets and need no sub-byte alignment conversion.
 ///
 /// @param acc_geometry NZ box geometry, supplied by ``GetSliceAccumulatorGeometry``
 ///        for the accumulator (L0C) windows it can address exactly. Every other

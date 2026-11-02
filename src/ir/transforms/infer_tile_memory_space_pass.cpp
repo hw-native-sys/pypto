@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -640,7 +641,11 @@ class TileMemorySpaceMutator : public IRMutator {
     if (tile_type->memory_space_ != mem_it->second) {
       TileView source = tile_view_semantics::GetEffectiveTileView(*tile_type);
       TileView target_layout = tile_view_semantics::GetImplicitTileView(tile_type->shape_, mem_it->second);
-      source.blayout = target_layout.blayout;
+      // Vec FP4 layouts identify the carrier packing axis. Preserve an
+      // explicit ND/DN producer view when resolving the memory space.
+      if (!tile_type->dtype_.IsPackedFp4() || mem_it->second != MemorySpace::Vec) {
+        source.blayout = target_layout.blayout;
+      }
       source.slayout = target_layout.slayout;
       source.fractal = target_layout.fractal;
       new_view = std::move(source);
@@ -718,14 +723,13 @@ class TileMemorySpaceMutator : public IRMutator {
     };
 
     for (const auto& [key, value] : op->attrs_) {
-      if (key == kAttrManualDepEdges || key == kAttrCompilerManualDepEdges ||
-          key == kAttrArgDirOverrideVars || key == kAttrDumpVars) {
+      if (key == kAttrDumpVars) {
         if (const auto* vars = std::any_cast<std::vector<VarPtr>>(&value)) {
           std::vector<VarPtr> remapped_vars;
           bool attr_changed = false;
           remapped_vars.reserve(vars->size());
           for (const auto& var : *vars) {
-            if (key == kAttrDumpVars && var) {
+            if (var) {
               auto replacements = arg_replacements.find(var.get());
               if (replacements != arg_replacements.end() &&
                   (replacements->second.size() != 1 || replacements->second.front().get() != var.get())) {
@@ -745,16 +749,15 @@ class TileMemorySpaceMutator : public IRMutator {
             continue;
           }
         }
-      } else if (key == kAttrWorker) {
-        if (const auto* device = std::any_cast<ExprPtr>(&value); device && *device) {
-          auto remapped = IRMutator::VisitExpr(*device);
-          INTERNAL_CHECK_SPAN(remapped, op->span_) << "Call worker attribute mutated to null";
-          if (remapped.get() != device->get()) {
-            changed = true;
-            new_attrs.emplace_back(key, std::any(std::move(remapped)));
-            continue;
-          }
-        }
+      }
+      // Attributes contain live IR references regardless of their name. Keep
+      // dump_vars' operand-move expansion above, then remap every supported
+      // expression-valued attribute using the same rules as IRMutator.
+      auto remapped = MapAttrExprs(value, [&](const ExprPtr& expr) { return IRMutator::VisitExpr(expr); });
+      if (remapped) {
+        changed = true;
+        new_attrs.emplace_back(key, std::move(*remapped));
+        continue;
       }
       new_attrs.emplace_back(key, value);
     }
@@ -881,7 +884,24 @@ class TileMemorySpaceMutator : public IRMutator {
             const bool probe_describes_this_call =
                 probe_type &&
                 tile_view_semantics::ShapeExprListsEquivalent(probe_type->shape_, old_call_type->shape_);
-            if (probe_describes_this_call) {
+            // Packed FP4 changes carrier geometry when Mat promotion changes
+            // its packing axis. That shape difference is intentional, not an
+            // ND-to-2D flattening mismatch. Re-deduce the original load first
+            // to establish that its region arguments still describe this tile.
+            bool packed_load_geometry_changed = false;
+            if (!probe_describes_this_call && probe_type && IsOp(call, "tile.load") &&
+                old_call_type->dtype_.IsPackedFp4()) {
+              auto original_probe = registry.Create(call_op_name, call->args_, call->kwargs_, call->span_);
+              auto original_type = As<TileType>(original_probe->GetType());
+              packed_load_geometry_changed =
+                  original_type &&
+                  tile_view_semantics::ShapeExprListsEquivalent(original_type->shape_, old_call_type->shape_);
+            }
+            auto promoted_shape = old_call_type->shape_;
+            if (packed_load_geometry_changed) {
+              promoted_shape = probe_type->shape_;
+              promoted_view = tile_view_semantics::GetEffectiveTileView(*probe_type);
+            } else if (probe_describes_this_call) {
               TileView probe_view = tile_view_semantics::GetEffectiveTileView(*probe_type);
               promoted_view.blayout = probe_view.blayout;
               promoted_view.slayout = probe_view.slayout;
@@ -891,7 +911,7 @@ class TileMemorySpaceMutator : public IRMutator {
                   promoted_view, tile_view_semantics::GetImplicitTileLayout(old_call_type->shape_, promoted));
             }
 
-            auto promoted_type = std::make_shared<TileType>(old_call_type->shape_, old_call_type->dtype_,
+            auto promoted_type = std::make_shared<TileType>(promoted_shape, old_call_type->dtype_,
                                                             old_call_type->memref_, promoted_view, promoted);
             new_value = std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->attrs_,
                                                std::move(promoted_type), call->span_);
@@ -1044,7 +1064,7 @@ class TileMemorySpaceMutator : public IRMutator {
     // Look up backend layout spec so tile.move carries the correct layout for the consumer.
     // This avoids a later ResolveBackendOpLayouts repair pass needing to insert tile.reshape.
     const backend::BackendTileLayoutSpec* layout_spec = nullptr;
-    if (backend::BackendConfig::IsConfigured()) {
+    if (backend::BackendConfig::IsConfigured() && !IsDensePackedFp4DnCast(call)) {
       layout_spec = backend::GetBackend()->GetTileLayoutSpec(call->op_->name_);
     }
 

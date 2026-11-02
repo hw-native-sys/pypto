@@ -266,6 +266,7 @@ REGISTER_OP("tile.row_expand")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand");
@@ -283,6 +284,7 @@ REGISTER_OP("tile.row_expand_sub")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_sub");
@@ -300,6 +302,7 @@ REGISTER_OP("tile.row_expand_div")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_div");
@@ -317,6 +320,7 @@ REGISTER_OP("tile.row_expand_mul")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_mul");
@@ -356,6 +360,7 @@ REGISTER_OP("tile.row_expand_max")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_max");
@@ -373,6 +378,7 @@ REGISTER_OP("tile.row_expand_min")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_min");
@@ -390,6 +396,7 @@ REGISTER_OP("tile.row_expand_expdif")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_expdif");
@@ -406,6 +413,7 @@ REGISTER_OP("tile.col_expand")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand");
@@ -423,6 +431,7 @@ REGISTER_OP("tile.col_expand_mul")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_mul");
@@ -440,6 +449,7 @@ REGISTER_OP("tile.col_expand_add")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_add");
@@ -457,6 +467,7 @@ REGISTER_OP("tile.col_expand_div")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_div");
@@ -474,6 +485,7 @@ REGISTER_OP("tile.col_expand_sub")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_sub");
@@ -491,6 +503,7 @@ REGISTER_OP("tile.col_expand_max")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_max");
@@ -508,6 +521,7 @@ REGISTER_OP("tile.col_expand_min")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_min");
@@ -525,6 +539,7 @@ REGISTER_OP("tile.col_expand_expdif")
     // The broadcast vector (arg 1) is re-read for every output row/col, so the
     // output must not alias its buffer (it would clobber the vector mid-op).
     .forbid_output_alias(1)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_expdif");

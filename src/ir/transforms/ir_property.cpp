@@ -125,6 +125,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileStorageLegalized";
     case IRProperty::TileStorageAllocated:
       return "TileStorageAllocated";
+    case IRProperty::RegScopeValid:
+      return "RegScopeValid";
     default:
       return "Unknown";
   }
@@ -168,6 +170,7 @@ std::string IRPropertySet::ToString() const {
 const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
+                                   IRProperty::RegScopeValid,
                                    IRProperty::InlineFunctionsEliminated,
                                    IRProperty::MixedKernelExpanded,
                                    IRProperty::AllocatedMemoryAddr,
@@ -214,27 +217,29 @@ VerificationLevel GetDefaultVerificationLevel() {
 }
 
 const IRPropertySet& GetStructuralProperties() {
-  static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-                                   IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid,
-                                   IRProperty::ArrayNotEscaped,     IRProperty::ManualDepsOnSubmitOnly,
-                                   IRProperty::AtomicAddDtypeValid, IRProperty::NoScalarKernelReturn,
-                                   IRProperty::AssignTypeSymmetry};
-  return props;
-}
-
-const IRPropertySet& GetDefaultVerifyProperties() {
-  static const IRPropertySet props{IRProperty::SSAForm,
-                                   IRProperty::TypeChecked,
-                                   IRProperty::NoNestedCalls,
+  static const IRPropertySet props{IRProperty::TypeChecked,
+                                   IRProperty::RegScopeValid,
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
                                    IRProperty::UseAfterDef,
                                    IRProperty::OutParamNotShadowed,
                                    IRProperty::NoNestedInCore,
-                                   IRProperty::TileTypeCoherence,
-                                   IRProperty::ArrayNotEscaped};
+                                   IRProperty::InOutUseValid,
+                                   IRProperty::PipelineLoopValid,
+                                   IRProperty::ArrayNotEscaped,
+                                   IRProperty::ManualDepsOnSubmitOnly,
+                                   IRProperty::AtomicAddDtypeValid,
+                                   IRProperty::NoScalarKernelReturn,
+                                   IRProperty::AssignTypeSymmetry};
+  return props;
+}
+
+const IRPropertySet& GetDefaultVerifyProperties() {
+  static const IRPropertySet props{
+      IRProperty::SSAForm,           IRProperty::TypeChecked,         IRProperty::RegScopeValid,
+      IRProperty::NoNestedCalls,     IRProperty::BreakContinueValid,  IRProperty::NoRedundantBlocks,
+      IRProperty::UseAfterDef,       IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
+      IRProperty::TileTypeCoherence, IRProperty::ArrayNotEscaped};
   return props;
 }
 

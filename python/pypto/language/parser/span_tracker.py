@@ -187,4 +187,16 @@ class SpanTracker:
         return ir.Span(orig_file, orig_line, column, orig_line, column)
 
 
-__all__ = ["SpanTracker", "active_source_map", "ast_column_to_span_column"]
+def get_span_or_unknown(span_tracker: SpanTracker | None, node: ast.AST) -> ir.Span:
+    """Return ``node``'s span, or an unknown span when no tracker is available.
+
+    ``ExprEvaluator`` and ``TypeResolver`` can both be constructed without a
+    tracker in unit-level paths, so they need the same fallback. Keeping it in
+    one place is what stops them drifting on which span a diagnostic points at.
+    """
+    if span_tracker is not None:
+        return span_tracker.get_span(node)
+    return ir.Span.unknown()
+
+
+__all__ = ["SpanTracker", "active_source_map", "ast_column_to_span_column", "get_span_or_unknown"]

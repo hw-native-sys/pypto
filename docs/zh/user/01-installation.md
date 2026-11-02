@@ -152,6 +152,25 @@ CMAKE_BUILD_TYPE=Release pip install .
 SKBUILD_CMAKE_DEFINE=PYPTO_DEBUG_INFO_LEVEL=1 pip install .
 ```
 
+`libbacktrace` 依赖库针对两种构建生成器采用不同的并行策略。使用 Unix Makefiles 时，
+构建和安装步骤共享外层 GNU Make 的任务调度器（jobserver），由
+`cmake --build build --parallel N` 控制共享预算。使用 Ninja 时，两步都采用有限的局部预算，
+在 CMake 配置阶段按以下优先级确定：
+
+1. 显式 CMake 选项 `-DPYPTO_EXTERNAL_BUILD_JOBS=N`。
+2. 非空的 `CMAKE_BUILD_PARALLEL_LEVEL` 环境变量。
+3. 两者都未提供时，默认一个任务。
+
+对于使用 Ninja 的 pip 构建，可以这样显式指定依赖库预算：
+
+```bash
+SKBUILD_CMAKE_DEFINE=PYPTO_EXTERNAL_BUILD_JOBS=2 pip install .
+```
+
+选中的值必须是十进制正整数；显式传入空的 CMake 选项会报错，空环境变量则使用默认值。
+该选项仅适用于非 Makefile 生成器。Ninja 的外层任务与依赖库不共享全局预算。
+仅修改后续构建命令的 `--parallel` 不会改变依赖库预算；需要重新配置才能更新。
+
 检测到 `ccache` 时会自动启用，能显著降低重复构建的成本：
 
 ```bash

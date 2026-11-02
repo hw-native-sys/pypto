@@ -375,14 +375,18 @@ nav:
           - en/dev/language/03-functions.md
           - en/dev/language/04-external-kernels.md
           - en/dev/language/05-cache-policy.md
+          - en/dev/language/06-register-operations.md
       - Code Generation:
           - en/dev/codegen/index.md
           - en/dev/codegen/00-pto_codegen.md
           - en/dev/codegen/01-orchestration_codegen.md
           - en/dev/codegen/02-kernel_wrapper.md
+          - en/dev/codegen/03-vpto-vf-integration.md
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md
+          - en/dev/backend/01-sync_resources.md
+          - en/dev/backend/02-macro_resources.md
       - Debug:
           - en/dev/debug/index.md
           - en/dev/debug/00-torch_codegen.md

@@ -30,6 +30,7 @@ from pypto.jit.cache import (
 from pypto.jit.decorator import (
     _resolve_enable_buffer_ir,
     _resolve_enable_pypto_l0c_double_buffer,
+    _resolve_enable_software_pipeline,
     _resolve_memory_planner,
     _resolve_runtime,
 )
@@ -84,6 +85,7 @@ class TestMakeCacheKey:
         dep_layouts=(),
         runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir=False,
+        enable_software_pipeline=False,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -101,6 +103,7 @@ class TestMakeCacheKey:
             dep_layouts=dep_layouts,
             runtime=runtime,
             enable_buffer_ir=enable_buffer_ir,
+            enable_software_pipeline=enable_software_pipeline,
         )
 
     def test_basic_key_structure(self):
@@ -128,6 +131,7 @@ class TestMakeCacheKey:
             ("runtime", "tensormap_and_ringbuffer"),
             ("enable_buffer_ir", False),
             ("buffer_ir_version", 0),
+            ("enable_software_pipeline", False),
         )
 
     def test_tensor_shape_in_key(self):
@@ -410,9 +414,11 @@ class TestMakeCacheKey:
         assert len(set(keys)) == len(keys), f"planner must split the cache key, got {keys}"
 
     def test_dbc_double_buffer_flag_splits_legacy_pypto_key(self):
-        """The legacy-PyPTO dbC=2 opt-in changes AutoTileMatmulL0/MemoryReuse output,
-        so a kernel compiled with it off must not reuse that artifact when later
-        called with it on."""
+        """Preserve the historical PYPTO key split for the compatibility flag.
+
+        Automatic dbC is disabled regardless of this value; distinct keys
+        preserve the legacy cache contract, not different AutoTile output.
+        """
         key_off = self._make_key(
             param_names=["a"],
             tensor_shapes={"a": (8, 8)},
@@ -427,11 +433,11 @@ class TestMakeCacheKey:
             memory_planner=MemoryPlanner.PYPTO,
             enable_pypto_l0c_double_buffer=True,
         )
-        assert key_off != key_on, "dbC=2 opt-in must split the cache key"
+        assert key_off != key_on, "legacy PYPTO flag values must retain distinct compatibility keys"
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
-    def test_dbc_double_buffer_flag_does_not_split_automatic_planner_key(self, planner):
-        """DSA_RP and PTOAS enable dbC automatically, so the legacy-PyPTO flag is inert."""
+    def test_dbc_double_buffer_flag_does_not_split_non_pypto_key(self, planner):
+        """Non-PYPTO keys omit the legacy flag; their dbC policy is planner-owned."""
         kwargs: dict[str, Any] = {
             "param_names": ["a"],
             "tensor_shapes": {"a": (8, 8)},
@@ -450,6 +456,9 @@ class TestMakeCacheKey:
         assert off.compile_opts is not None and on.compile_opts is not None
         assert ("buffer_ir_version", 0) in off.compile_opts
         assert ("buffer_ir_version", 7) in on.compile_opts
+
+    def test_software_pipeline_splits_key(self):
+        assert self._make_key() != self._make_key(enable_software_pipeline=True)
 
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
@@ -504,16 +513,39 @@ def test_buffer_ir_cache_option_follows_active_context():
     assert _resolve_enable_buffer_ir() is True
 
 
+def test_software_pipeline_cache_option_follows_active_context():
+    assert _resolve_enable_software_pipeline() is False
+    with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=True):
+        assert _resolve_enable_software_pipeline() is True
+        with passes.PassContext([]):
+            assert _resolve_enable_software_pipeline() is False
+        assert _resolve_enable_software_pipeline() is True
+    assert _resolve_enable_software_pipeline() is False
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_cache_option_uses_explicit_value(enabled):
+    assert _resolve_enable_software_pipeline(enabled) == enabled
+
+
+@pytest.mark.parametrize("software", [None, False, True])
+def test_explicit_software_pipeline_selects_tile_ir_in_cache_key(software):
+    """Caching must mirror compile's effective default storage representation."""
+    assert _resolve_enable_buffer_ir(software) is (not software)
+
+
 class TestResolveEnablePyptoL0cDoubleBuffer:
-    """The legacy-PyPTO dbC=2 opt-in must match what ``ir.compile()`` inherits."""
+    """Preserve the legacy compatibility state inherited by ``ir.compile()``."""
 
     def test_defaults_to_off(self):
         assert _resolve_enable_pypto_l0c_double_buffer() is False
 
     def test_reads_the_active_pass_context(self):
-        """The flag is set by wrapping the call in a PassContext, which never
-        reaches RunConfig; keying only on RunConfig would let a flag-on call
-        reuse the flag-off artifact."""
+        """A PassContext-only value must survive even without a RunConfig field.
+
+        This preserves the historical PYPTO cache-key distinction, although
+        neither value enables automatic dbC.
+        """
         with passes.PassContext([], enable_pypto_l0c_double_buffer=True):
             assert _resolve_enable_pypto_l0c_double_buffer() is True
         assert _resolve_enable_pypto_l0c_double_buffer() is False
@@ -914,7 +946,7 @@ class TestGlobalDependencies:
 
         monkeypatch.setattr(entry, "_compute_static_source_hash", unexpected_recomputation)
         monkeypatch.setattr(
-            importlib.import_module("pypto.jit.decorator"), "_param_layouts", unexpected_recomputation
+            importlib.import_module("pypto.jit._arguments"), "param_layouts", unexpected_recomputation
         )
         with capture_namespaces():
             assert entry._get_source_hash() == initial_hash
@@ -981,7 +1013,7 @@ class TestGlobalDependencies:
             "def implementation(x: 'not a valid expression'):\n    return pl.add(x, _CACHE_BLOCK)\n"
         ).body[0]
         monkeypatch.setattr(
-            importlib.import_module("pypto.jit.decorator"), "_get_func_def", lambda _: definition
+            importlib.import_module("pypto.jit._ast_analysis"), "get_func_def", lambda _: definition
         )
         kernel = pl.jit(implementation)
         assert kernel._get_source_hash() == kernel._get_source_hash()

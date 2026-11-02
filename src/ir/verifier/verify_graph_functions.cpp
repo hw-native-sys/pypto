@@ -145,6 +145,7 @@ class GraphReferenceChecker : public IRVisitor {
     if (!callee) return;
     CheckCaller(callee, op->span_);
     CheckLaunchArity(callee, op->args_.size(), op->span_);
+    CheckDirections(callee, op->GetArgDirections(), op->span_);
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
@@ -153,6 +154,7 @@ class GraphReferenceChecker : public IRVisitor {
     if (!callee) return;
     CheckCaller(callee, op->span_);
     CheckLaunchArity(callee, op->args_.size(), op->span_);
+    CheckDirections(callee, op->GetArgDirections(), op->span_);
 
     if (!op->deps_.empty()) {
       Report(callee, op->span_,
@@ -190,6 +192,17 @@ class GraphReferenceChecker : public IRVisitor {
                std::to_string(callee->params_.size()) +
                " parameters. A graph boundary has no runtime-allocated tail, so every parameter "
                "must be supplied at the call.");
+  }
+
+  void CheckDirections(const FunctionPtr& callee, const std::vector<ArgDirection>& directions,
+                       const Span& span) const {
+    for (const auto direction : directions) {
+      if (direction == ArgDirection::Output) {
+        Report(callee, span,
+               "is launched with a runtime-allocated Output argument. Supply an existing tensor "
+               "at every Graph boundary slot.");
+      }
+    }
   }
 
   void CheckCaller(const FunctionPtr& callee, const Span& span) const {
@@ -259,12 +272,8 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
       continue;
     }
     ++tensor_params;
-    if (dir == ParamDirection::Out) {
-      report("declares tensor parameter '" + param->name_hint_ +
-                 "' as Out, meaning the runtime allocates it. A recorded graph's boundary tensors "
-                 "must already exist so replay can patch their addresses.",
-             param->span_);
-    }
+    // Out is a write-only signature, not an allocation request. The caller
+    // must supply existing storage; launch checks reject runtime Output.
   }
 
   if (tensor_params == 0) {

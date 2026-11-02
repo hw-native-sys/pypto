@@ -26,7 +26,8 @@ declares no annotation, so both the original build and the reparse agree.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import ir
+from pypto import DataType, ir
+from pypto.language.parser.diagnostics.exceptions import ParserError
 
 
 def _user_call_types(program: ir.Program, callee_name: str) -> list[ir.Type]:
@@ -182,6 +183,119 @@ def test_annotationless_callee_dynamic_shape_is_substituted():
     assert isinstance(call_type, ir.TensorType)
     assert [str(d) for d in call_type.shape] == ["32", "16"]
     _assert_roundtrips(Prog)
+
+
+@pytest.mark.parametrize(
+    "formal_dtype, actual_dtype, width, expected_width",
+    [
+        (DataType.FP4E2M1X2, DataType.FP4E2M1X2, 32, 32),
+        (DataType.FP4E1M2X2, DataType.FP4E1M2X2, 32, 32),
+    ],
+)
+def test_symbolic_fp4_return_metadata_preserves_carrier_units(
+    formal_dtype, actual_dtype, width, expected_width
+):
+    """Return dimensions, valid shape, and strides retain packed carrier units."""
+    span = ir.Span.unknown()
+
+    def dim(value: int) -> ir.ConstInt:
+        return ir.ConstInt(value, DataType.INDEX, span)
+
+    k, valid, stride = (
+        ir.Var(name, ir.ScalarType(DataType.INDEX), span) for name in ("K", "VALID", "STRIDE")
+    )
+    formal_view = ir.TensorView(
+        valid_shape=[dim(16), valid], stride=[stride, dim(1)], layout=ir.TensorLayout.ND
+    )
+    formal_type = ir.TensorType([dim(16), k], formal_dtype, None, formal_view)
+    formal = ir.Var("formal", formal_type, span)
+    valid_width, row_stride = width * 3 // 4, width * 2
+    actual_view = ir.TensorView(
+        valid_shape=[dim(16), dim(valid_width)],
+        stride=[dim(row_stride), dim(1)],
+        layout=ir.TensorLayout.ND,
+    )
+    actual_type = ir.TensorType([dim(16), dim(width)], actual_dtype, None, actual_view)
+    actual = ir.Var("actual", actual_type, span)
+
+    (deduced,) = ir.deduce_call_return_type([formal], [actual], [formal_type])
+    assert isinstance(deduced, ir.TensorType)
+    assert deduced.dtype == formal_dtype
+    assert [str(d) for d in deduced.shape] == ["16", str(expected_width)]
+    assert deduced.tensor_view is not None
+    assert [str(d) for d in deduced.tensor_view.valid_shape] == ["16", str(expected_width * 3 // 4)]
+    assert [str(d) for d in deduced.tensor_view.stride] == [str(expected_width * 2), "1"]
+    assert actual.type is actual_type
+    assert actual_type.dtype == actual_dtype
+    assert [str(d) for d in actual_type.shape] == ["16", str(width)]
+    assert [str(d) for d in actual_view.valid_shape] == ["16", str(valid_width)]
+    assert [str(d) for d in actual_view.stride] == [str(row_stride), "1"]
+
+
+@pytest.mark.parametrize("type_class", [ir.TensorType, ir.TileType])
+@pytest.mark.parametrize(
+    "formal_dtype,actual_dtype",
+    [
+        (DataType.FP4E2M1X2, DataType.FP4E1M2X2),
+        (DataType.FP4E1M2X2, DataType.FP4E2M1X2),
+        (DataType.FP4E2M1X2, DataType.UINT8),
+        (DataType.FP4E1M2X2, DataType.UINT8),
+        (DataType.FP4E2M1X2, DataType.INT8),
+        (DataType.FP4E1M2X2, DataType.INT8),
+        (DataType.UINT8, DataType.FP4E2M1X2),
+        (DataType.UINT8, DataType.FP4E1M2X2),
+        (DataType.INT8, DataType.FP4E2M1X2),
+        (DataType.INT8, DataType.FP4E1M2X2),
+    ],
+)
+@pytest.mark.parametrize("has_return", [False, True])
+def test_packed_fp4_calls_reject_format_relabeling(type_class, formal_dtype, actual_dtype, has_return):
+    """Equal byte sizes do not permit implicit FP4 format changes or byte aliases."""
+    span = ir.Span.unknown()
+    formal_type = type_class([16, 32], formal_dtype)
+    formal = ir.Var("formal", formal_type, span)
+    actual = ir.Var("actual", type_class([16, 32], actual_dtype), span)
+    returns = [formal_type] if has_return else []
+    with pytest.raises(ValueError, match="packed FP4 formats must match"):
+        ir.deduce_call_return_type([formal], [actual], returns)
+    matched = ir.Var("matched", formal_type, span)
+    assert ir.deduce_call_return_type([formal], [matched], returns) == returns
+    if formal_dtype in (DataType.UINT8, DataType.INT8) or actual_dtype in (DataType.UINT8, DataType.INT8):
+        # An explicit alias changes the argument's IR dtype before the call.
+        ops = ir.op.tensor if type_class is ir.TensorType else ir.op.tile
+        alias = ops.reinterpret_view(actual, formal_dtype)
+        assert ir.deduce_call_return_type([formal], [alias], returns) == returns
+
+
+@pytest.mark.parametrize(
+    "dispatch",
+    [
+        "self.sink(x, out)",
+        "_tid = pl.submit(self.sink, x)",
+        "_tid = pl.spmd_submit(self.sink, x, core_num=1)",
+    ],
+)
+@pytest.mark.parametrize("actual_dtype", ["FP4E2M1X2", "UINT8", "INT8"])
+def test_void_packed_fp4_dispatch_checks_format_before_lowering(dispatch, actual_dtype):
+    """Void dispatches validate formats even when runtime-allocated outputs are omitted."""
+    source = f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def sink(self, x: pl.Tensor[[16, 32], pl.FP4E1M2X2],
+             out: pl.Out[pl.Tensor[[16, 32], pl.FP4E1M2X2]]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def caller(self, x: pl.Tensor[[16, 32], pl.{actual_dtype}],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP4E1M2X2]]):
+        with pl.manual_scope():
+            {dispatch}
+        return
+"""
+    with pytest.raises(ParserError, match="packed FP4 formats must match"):
+        pl.parse_program(source)
+    assert isinstance(pl.parse_program(source.replace(f"pl.{actual_dtype}", "pl.FP4E1M2X2")), ir.Program)
 
 
 def test_explicit_return_annotation_still_roundtrips():
@@ -589,6 +703,251 @@ def test_tensor_dim_is_not_folded_in_an_inline_callee():
     body = ir.python_print(Prog)
     assert "pl.tensor.dim(x, 0)" in body
     _assert_roundtrips(Prog)
+
+
+@pytest.mark.parametrize(
+    "expression, extent", [("signed_shift", 21), ("same_symbol", 16), ("constant_actual", 16)]
+)
+def test_call_return_type_solves_single_variable_integer_affine_extents(expression, extent):
+    """Infer a concrete return extent through signed offsets or repeated uses of one symbol."""
+    span = ir.Span.unknown()
+    rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+    if expression == "signed_shift":
+        scaled = ir.Mul(ir.ConstInt(2, pl.INDEX, span), rows, pl.INDEX, span)
+        pattern = ir.Sub(ir.ConstInt(5, pl.INDEX, span), ir.Neg(scaled, pl.INDEX, span), pl.INDEX, span)
+    else:
+        pattern = ir.Add(rows, rows, pl.INDEX, span)
+    param = ir.Var("tile", ir.TileType([pattern, 64], pl.FP32), span)
+    actual_extent = (
+        ir.Add(ir.ConstInt(8, pl.INDEX, span), ir.ConstInt(8, pl.INDEX, span), pl.INDEX, span)
+        if expression == "constant_actual"
+        else extent
+    )
+    actual = ir.Var("actual", ir.TileType([actual_extent, 64], pl.FP32), span)
+    return_type = ir.TileType([rows, 64], pl.FP32)
+
+    (deduced,) = ir.deduce_call_return_type([param], [actual], [return_type])
+
+    ir.assert_structural_equal(deduced, ir.TileType([8, 64], pl.FP32))
+
+
+@pytest.mark.parametrize("is_inline", [False, True])
+@pytest.mark.parametrize("order", ["forward", "reverse", "chain"])
+def test_call_return_type_solves_affine_axes_from_the_same_tile(order, is_inline):
+    """Later axes can supply the constants needed to solve an earlier affine extent."""
+    span = ir.Span.unknown()
+    rows = ir.Var("M", ir.ScalarType(pl.INDEX), span)
+    cols = ir.Var("N", ir.ScalarType(pl.INDEX), span)
+    tail = ir.Var("K", ir.ScalarType(pl.INDEX), span)
+
+    def add(left, right):
+        return ir.Add(left, right, pl.INDEX, span)
+
+    shape, actual_shape, expected_cols = {
+        "forward": ([rows, add(rows, cols)], [8, 16], 8),
+        "reverse": ([add(rows, cols), cols], [24, 16], 16),
+        "chain": ([add(rows, cols), add(cols, tail), tail], [32, 40, 16], 24),
+    }[order]
+    param = ir.Var("tile", ir.TileType(shape, pl.FP32), span)
+    actual = ir.Var("actual", ir.TileType(actual_shape, pl.FP32), span)
+    (deduced,) = ir.deduce_call_return_type(
+        [param], [actual], [ir.TileType([rows, cols], pl.FP32)], is_inline=is_inline
+    )
+    ir.assert_structural_equal(deduced, ir.TileType([8, expected_cols], pl.FP32))
+
+
+@pytest.mark.parametrize("expression", ["multiple_symbols", "nonlinear", "narrow_overflow"])
+def test_call_return_type_does_not_invent_unsafe_affine_bindings(expression):
+    """Ambiguous, nonlinear, and out-of-range solutions leave the return symbol unbound."""
+    span = ir.Span.unknown()
+    dtype = pl.INT8 if expression == "narrow_overflow" else pl.INDEX
+    rows = ir.Var("rows", ir.ScalarType(dtype), span)
+    if expression == "multiple_symbols":
+        other = ir.Var("other", ir.ScalarType(dtype), span)
+        pattern = ir.Add(rows, other, dtype, span)
+    elif expression == "nonlinear":
+        pattern = ir.Mul(rows, rows, dtype, span)
+    else:
+        pattern = ir.Mul(ir.ConstInt(2, dtype, span), rows, dtype, span)
+    extent = 256 if expression == "narrow_overflow" else 16
+    param = ir.Var("tile", ir.TileType([pattern, 64], pl.FP32), span)
+    actual = ir.Var("actual", ir.TileType([extent, 64], pl.FP32), span)
+    return_type = ir.TileType([rows, 64], pl.FP32)
+
+    (deduced,) = ir.deduce_call_return_type([param], [actual], [return_type])
+
+    ir.assert_structural_equal(deduced, return_type)
+
+
+@pytest.mark.parametrize("contract", ["surviving_tile", "inline_tensor", "inline_explicit_tile_view"])
+def test_call_return_type_keeps_shared_shape_contracts_strict(contract):
+    """Inline physical placeholders do not relax surviving calls or explicit shared metadata."""
+    span = ir.Span.unknown()
+    rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+    pattern = ir.Mul(ir.ConstInt(2, pl.INDEX, span), rows, pl.INDEX, span)
+    if contract == "inline_explicit_tile_view":
+        formal_type = ir.TileType([64, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[rows, 64]))
+        first_type = ir.TileType([64, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[16, 64]))
+        second_type = ir.TileType([64, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[32, 64]))
+    else:
+        shaped_type = ir.TensorType if contract == "inline_tensor" else ir.TileType
+        formal_type = shaped_type([pattern, 64], pl.FP32)
+        first_type = shaped_type([16, 64], pl.FP32)
+        second_type = shaped_type([32, 64], pl.FP32)
+    params = [ir.Var("first", formal_type, span), ir.Var("second", formal_type, span)]
+    args = [ir.Var("first_actual", first_type, span), ir.Var("second_actual", second_type, span)]
+
+    with pytest.raises(ValueError, match="conflicting bindings"):
+        ir.deduce_call_return_type(params, args, [formal_type], is_inline=contract != "surviving_tile")
+
+
+@pytest.mark.parametrize("is_inline", [False, True], ids=["surviving", "inline"])
+def test_inline_return_deduction_preserves_transitive_shared_tensor_bindings(is_inline):
+    """A = 2*B and A = 32 must retain their proven binding after a later argument binds B = 16."""
+    span = ir.Span.unknown()
+    first_dim = ir.Var("A", ir.ScalarType(pl.INDEX), span)
+    later_dim = ir.Var("B", ir.ScalarType(pl.INDEX), span)
+    two = ir.ConstInt(2, pl.INDEX, span)
+    shared_type = ir.TensorType([first_dim], pl.FP32)
+    params = [
+        ir.Var("first", shared_type, span),
+        ir.Var("second", shared_type, span),
+        ir.Var("marker", ir.TensorType([later_dim], pl.FP32), span),
+    ]
+    args = [
+        ir.Var("first_actual", ir.TensorType([ir.Mul(two, later_dim, pl.INDEX, span)], pl.FP32), span),
+        ir.Var("second_actual", ir.TensorType([32], pl.FP32), span),
+        ir.Var("marker_actual", ir.TensorType([16], pl.FP32), span),
+    ]
+
+    (deduced,) = ir.deduce_call_return_type(params, args, [shared_type], is_inline=is_inline)
+
+    expected = ir.TensorType([ir.Mul(two, ir.ConstInt(16, pl.INDEX, span), pl.INDEX, span)], pl.FP32)
+    ir.assert_structural_equal(deduced, expected)
+
+
+def test_external_inline_call_uses_independent_tile_dimension_deduction():
+    """A separately decorated Inline function uses the same parser policy as self.method calls."""
+    rows = pl.dynamic("EXTERNAL_INLINE_GENERIC_ROWS")
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def select_first(first: pl.Tile[[2 * rows, 64], pl.FP32], second: pl.Tile[[2 * rows, 64], pl.FP32]):
+        return first
+
+    @pl.program
+    class Prog:
+        @pl.function
+        def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+            return select_first(first, second)
+
+    (deduced,) = _user_call_types(Prog, "select_first")
+    ir.assert_structural_equal(deduced, ir.TileType([16, 64], pl.FP32))
+
+
+@pytest.mark.parametrize("actual_dtype", [pl.FP4E2M1X2, pl.UINT8], ids=["other-fp4", "byte-carrier"])
+def test_external_void_inline_keeps_packed_format_checks(actual_dtype):
+    """Deferring generic Tile checks must still reject a known packed-format mismatch."""
+
+    @pl.function(type=pl.FunctionType.Inline)
+    def consume(tile: pl.Tile[[8, 64], pl.FP4E1M2X2]):
+        return
+
+    with pytest.raises(ParserError, match="packed FP4 formats must match"):
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, tile: pl.Tile[[8, 64], actual_dtype]):
+                consume(tile)
+
+
+@pytest.mark.parametrize("extent", ["ROWS", "2 * ROWS"], ids=["plain", "affine"])
+@pytest.mark.parametrize("returned", ["first", "second", "chain", "tuple"])
+def test_inline_immutable_alias_return_keeps_actual_tile_type(extent, returned):
+    """An alias of an independently specialized Tile retains the chosen caller operand's type."""
+    bodies = {
+        "first": "alias = first\n        return alias",
+        "second": "alias = second\n        return alias",
+        "chain": "alias = second\n        another = alias\n        result = another\n        return result",
+        "tuple": "left = first\n        right = second\n        return left, right",
+    }
+    target = "first" if returned == "first" else "second"
+    call = "_left, selected" if returned == "tuple" else "selected"
+    program = pl.parse_program(f"""
+ROWS = pl.dynamic("IMMUTABLE_ALIAS_ROWS")
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def choose(self, first: pl.Tile[[{extent}, 64], pl.FP32], second: pl.Tile[[{extent}, 64], pl.FP32]):
+        {bodies[returned]}
+
+    @pl.function
+    def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+        {call} = self.choose(first, second)
+        return pl.add(selected, {target})
+""")
+    (deduced,) = _user_call_types(program, "choose")
+    if returned == "tuple":
+        assert isinstance(deduced, ir.TupleType)
+        deduced = deduced.types[1]
+    ir.assert_structural_equal(deduced, ir.TileType([16 if returned == "first" else 32, 64], pl.FP32))
+
+
+def test_inline_alias_of_tuple_projection_keeps_actual_tile_type():
+    """A transparent tuple alias and projection remain tied to the original argument."""
+    program = pl.parse_program("""
+ROWS = pl.dynamic("TUPLE_ALIAS_ROWS")
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def choose(self, pair: pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]]):
+        alias = pair
+        selected = alias[1]
+        result = selected
+        return result
+
+    @pl.function
+    def main(self, first: pl.Tile[[16, 64], pl.FP32], second: pl.Tile[[32, 64], pl.FP32]):
+        selected = self.choose((first, second))
+        return pl.add(selected, second)
+""")
+    (deduced,) = _user_call_types(program, "choose")
+    ir.assert_structural_equal(deduced, ir.TileType([32, 64], pl.FP32))
+
+
+@pytest.mark.parametrize("mutation", ["alias", "formal", "returned_formal", "conditional", "computed"])
+def test_inline_alias_recovery_keeps_mutation_and_computation_guards(mutation):
+    """Rebound, conditional, and computed results must keep native provisional metadata."""
+    bodies = {
+        "alias": "alias = second\n        alias = first\n        return alias",
+        "formal": "alias = second\n        second = first\n        return alias",
+        "returned_formal": "first = second\n        return first",
+        "conditional": (
+            "alias = second\n        if condition > 0:\n            alias = first\n        return alias"
+        ),
+        "computed": "alias = pl.add(first, second)\n        return alias",
+    }
+    program = pl.parse_program(f"""
+ROWS = pl.dynamic("GUARDED_ALIAS_ROWS")
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def choose(self, first: pl.Tile[[ROWS, 64], pl.FP32], second: pl.Tile[[ROWS, 64], pl.FP32],
+               condition: pl.Scalar[pl.INDEX]):
+        {bodies[mutation]}
+
+    @pl.function
+    def main(self, first: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[4, 64])],
+             second: pl.Tile[[16, 64], pl.FP32, pl.TileView(valid_shape=[3, 64])]):
+        return self.choose(first, second, 1)
+""")
+    (deduced,) = _user_call_types(program, "choose")
+    # Native deduction stays provisional; incoming valid extents 4/3 cannot
+    # be claimed for a rebound, conditional, or computed result at parse time.
+    assert isinstance(deduced, ir.TileType)
+    valid_rows = deduced.get_effective_tile_view().valid_shape[0]
+    assert isinstance(valid_rows, ir.ConstInt)
+    assert valid_rows.value == 16
 
 
 if __name__ == "__main__":

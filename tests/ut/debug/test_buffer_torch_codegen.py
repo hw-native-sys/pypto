@@ -79,6 +79,62 @@ def test_public_lower_and_compiled_pass_dumps_remain_numerically_debuggable(
     compiled.validate_ir({"a": a, "b": b, "out": torch.empty_like(out)}, {"out": expected})
 
 
+@jit
+def hf32_matrix_debug(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor], mode: pl.constexpr):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        product = pl.matmul(a[:, :], b[:, :], tf32_mode=mode)
+        accumulated = pl.matmul_acc(product, a[:, :], b[:, :], tf32_mode=mode)
+        out[:, :] = pl.matmul_acc(accumulated, a[:, :], b[:, :])
+    return out
+
+
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+def test_hf32_compiled_pass_dumps_preserve_rounding(tmp_path, monkeypatch, mode):
+    """validate_ir must accept HF32 results throughout the default A5 pipeline."""
+    monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
+    a = torch.zeros((16, 16))
+    b = torch.zeros((16, 16))
+    a[:, 0], a[:, 1] = 1 + 2**-11, -1
+    b[0, :], b[1, :] = 1024, 1024
+    # Each HF32 product is 0 (ties-even) or 1 (ties-away). The final FP32
+    # product is 0.5 and must not inherit rounding from either preceding op.
+    expected = torch.full((16, 16), 0.5 if mode == "round_even" else 2.5)
+    config = RunConfig(platform="a5sim", save_kernels_dir=str(tmp_path / "compiled"), dump_passes=True)
+    with passes.PassContext([], enable_buffer_ir=True):
+        compiled = hf32_matrix_debug.compile(a, b, torch.empty_like(expected), mode, config=config)
+    compiled.validate_ir(
+        {"a": a, "b": b, "out": torch.empty_like(expected)}, {"out": expected}, rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_hf32_buffer_matmul_reference(mode, accumulate):
+    """Exercise explicit Buffer IR; A5's default pipeline currently selects Tile IR."""
+    span = ir.Span.unknown()
+    lhs = ir.Var("lhs", ir.BufferType([16, 16], pl.FP32, ir.MemorySpace.Left), span)
+    rhs = ir.Var("rhs", ir.BufferType([16, 16], pl.FP32, ir.MemorySpace.Right), span)
+    out = ir.Var("out", ir.BufferType([16, 16], pl.FP32, ir.MemorySpace.Acc), span)
+    op = "buffer.matmul_acc" if accumulate else "buffer.matmul"
+    call = ir.Call(ir.get_op(op), [lhs, rhs, out], {"tf32_mode": mode}, ir.VoidType(), span)
+    function = ir.Function(
+        "kernel", [lhs, rhs, out], [], ir.EvalStmt(call, span), span, ir_stage=ir.FunctionIRStage.Buffer
+    )
+    namespace = {}
+    exec(torch_codegen(function), namespace)  # noqa: S102
+    a, b = torch.zeros((16, 16)), torch.zeros((16, 16))
+    # Put a halfway value in each operand; rounding only one side is insufficient.
+    a[:, 0], a[:, 1], a[:, 2] = 1 + 2**-11, -1, 1024
+    b[0, :], b[1, :], b[2, :] = 1024, 1024, 1 + 2**-11
+    result = torch.full((16, 16), 3 + 2**-11)
+    for value in (a, b, result):
+        namespace["_buffer_set_valid"](value, (16, 16))
+    namespace["kernel"](a, b, result)
+    product = 1024 if mode == "round_even" else 1026
+    expected = product + (3 + 2**-11 if accumulate else 0)
+    torch.testing.assert_close(result, torch.full_like(result, expected), rtol=0, atol=0)
+
+
 def test_buffer_storage_views_alias_bytes_and_destination_writes():
     span = ir.Span.unknown()
     byte_type = ir.BufferType([4, 32], pl.UINT8, ir.MemorySpace.Vec)

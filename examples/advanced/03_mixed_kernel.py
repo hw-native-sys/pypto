@@ -11,10 +11,10 @@
 Mixed kernel: cube (AIC) and vector (AIV) work inside one scope.
 
 An Ascend core group pairs a cube unit with vector units. A matmul runs on the
-cube; the bias-add that follows runs on the vector units. Written as two separate
-scopes, the vector units idle while the cube works and vice versa. A *mixed*
-kernel puts both in one scope and adds ``pl.split(...)``, which lets the compiler
-halve the work so the two unit types overlap.
+cube; the bias-add that follows runs on the vector units. A *mixed* kernel puts
+both in one scope and adds ``pl.split(...)``, which shards the vector work across
+two lanes and inserts cube/vector transfers. This example uses a one-slot ring
+to fit safely; it demonstrates mixed dataflow, not a double-buffering speedup.
 
 Kernels:
   staged_matmul_bias    — TWO scopes: cube finishes, then vector starts
@@ -23,7 +23,7 @@ Kernels:
 
 Concepts introduced:
   - pl.split(pl.SplitMode.UP_DOWN) as a pl.at optimization
-  - Why one scope beats two for a cube-then-vector chain
+  - One scope instead of two dispatches for a cube-then-vector chain
   - UP_DOWN (row axis) vs LEFT_RIGHT (column axis)
   - pl.cross_core_slot(slot_num=) — retuning the cube/vector ring depth
 
@@ -67,15 +67,16 @@ def mixed_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[p
     """``a @ b + bias`` as ONE scope, split along the row axis.
 
     ``pl.split(pl.SplitMode.UP_DOWN)`` marks the scope as mixed: the compiler
-    halves it by rows and drives the cube and vector units concurrently.
+    shards the vector work by rows and inserts the cube-to-vector transfer.
     """
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        # The [128,128] FP32 tile that crosses the cube/vector boundary is 64KB.
-        # The C2V ring defaults to 2 slots of it (128KB), which fits the vector
-        # buffer; pl.cross_core_slot(slot_num=...) buys more cube run-ahead, but
-        # 4 slots (256KB) would already overflow that budget here.
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+        # The crossing [128,128] FP32 tile needs 64 KiB per ring slot. Each
+        # vector lane also needs separate 32 KiB bias and output buffers: the
+        # Ascend910 load/TPOP safety guard forbids their in-place reuse. Two
+        # slots would need 192 KiB total, above the safe 184 KiB Vec budget.
+        # One slot keeps this example at 128 KiB; it is not double buffered.
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
         name_hint="mixed_up_down",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)  # cube (AIC)
@@ -88,7 +89,8 @@ def mixed_matmul_bias_lr(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Ou
     """Same as :func:`mixed_matmul_bias`, halved along the column axis."""
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
+        # The column split has the same per-lane footprint as the row split.
+        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT), pl.cross_core_slot(slot_num=1)],
         name_hint="mixed_left_right",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)

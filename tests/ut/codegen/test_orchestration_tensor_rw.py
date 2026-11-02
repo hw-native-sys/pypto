@@ -16,7 +16,9 @@ import pypto.language.distributed as pld
 import pytest
 from _orchestration_codegen_common import (
     _generate_orch_code,
+    _generate_orch_full_pipeline,
     _generate_orch_result,
+    _out_of_scope_tensor_refs,
 )
 from pypto import backend, codegen, passes
 from pypto.backend import BackendType
@@ -1290,6 +1292,48 @@ class TestWindowScalarReadWriteCodegen:
         assert "set_tensor_data<float>" in code, (
             f"tensor.write on a window must emit the runtime accessor:\n{code}"
         )
+
+
+@pytest.mark.parametrize("manual_dep", [False, True])
+@pytest.mark.parametrize("scope_name", ["scope", "manual_scope"])
+def test_inline_tensor_identity_return_across_runtime_scope(manual_dep, scope_name):
+    """Issue #3107: tuple-return self-assignment must not escape as a C++ local.
+
+    The buffer and dependency array belong to the parent. Keep the producer
+    and array publication inside the scope, with one consumer on either side.
+    """
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Inline, auto_scope=False)
+    def produce(self, x: pl.Tensor[[16, 32], pl.FP32], q: pl.Tensor[[16, 32], pl.FP32]):
+        with pl.spmd(1) as ready:
+            row = pl.tile.get_block_idx() * 16
+            q[row:row + 16, :] = pl.add(x[row:row + 16, :], 1.0)
+        return q, ready
+
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16, 32], pl.FP32],
+             out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+             captured: pl.Out[pl.Tensor[[16, 32], pl.FP32]]):
+        q = pl.create_tensor([16, 32], dtype=pl.FP32, manual_dep={manual_dep})
+        signals = pl.array.create(1, pl.TASK_ID)
+        signals[0] = pl.system.task_invalid()
+        with pl.{scope_name}():
+            q, ready = self.produce(x, q)
+            signals[0] = ready
+            with pl.spmd(1, deps=[signals]):
+                row = pl.tile.get_block_idx() * 16
+                out[row:row + 16, :] = pl.mul(q[row:row + 16, :], 2.0)
+        with pl.spmd(1, deps=[signals]):
+            row = pl.tile.get_block_idx() * 16
+            captured[row:row + 16, :] = q[row:row + 16, :]
+        return out
+""")
+    code = _generate_orch_full_pipeline(program)
+    assert not _out_of_scope_tensor_refs(code), code
+    assert "params_t2.add_input(q);" in code, code
+    assert "params_t2.set_dependencies(" in code, code
 
 
 if __name__ == "__main__":

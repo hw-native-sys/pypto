@@ -912,5 +912,80 @@ class TestOriginalKVProjOuterParallelSwimlane:
         assert len(case_run.swimlane()["tasks"]) > 0
 
 
+_TOKENS = pl.dynamic("TOKENS")
+
+
+@pl.jit.inline(auto_scope=False)
+def _constexpr_producer(
+    x: pl.Tensor[[_TOKENS, 32], pl.FP32],
+    tmp: pl.Tensor[[_TOKENS, 32], pl.FP32],
+    group: pl.Scalar[pl.INDEX],
+):
+    with pl.spmd(1) as ready:
+        row = group * 32 + pl.tile.get_block_idx() * 32
+        count = pl.min(32, pl.tensor.dim(x, 0) - row)
+        value = pl.load(x, [row, 0], [32, 32], valid_shape=[count, 32])
+        pl.store(pl.add(value, 1.0), [row, 0], tmp)
+    return tmp, ready
+
+
+@pl.jit.inline(auto_scope=False)
+def _constexpr_manual_branch(
+    x: pl.Tensor[[_TOKENS, 32], pl.FP32],
+    out: pl.Tensor[[_TOKENS, 32], pl.FP32],
+    count: pl.constexpr,
+):
+    tokens = pl.tensor.dim(x, 0)
+    tmp = pl.create_tensor([tokens, 32], dtype=pl.FP32)
+    deps = pl.array.create(count, pl.TASK_ID)
+    if count == 1:
+        tmp, ready = _constexpr_producer(x, tmp, 0)
+        deps[0] = ready
+    else:
+        with pl.manual_scope():
+            for group in pl.parallel(count):
+                tmp, ready = _constexpr_producer(x, tmp, group)
+                deps[group] = ready
+    with pl.spmd(count, deps=[deps]):
+        row = pl.tile.get_block_idx() * 32
+        valid_rows = pl.min(32, tokens - row)
+        value = pl.load(tmp, [row, 0], [32, 32], valid_shape=[valid_rows, 32])
+        pl.store(value, [row, 0], out)
+    return out
+
+
+@pl.jit(auto_scope=False)
+def constexpr_manual_pipeline(
+    x: pl.Tensor[[_TOKENS, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[_TOKENS, 32], pl.FP32]],
+):
+    if pl.tensor.dim(x, 0) <= 32:
+        out = _constexpr_manual_branch(x, out, 1)
+    else:
+        out = _constexpr_manual_branch(x, out, 2)
+    return out
+
+
+def _constexpr_manual_case(rows: int):
+    # Dyadic fractions make x + 1 exactly representable in FP32.
+    x = ((torch.arange(rows * 32).reshape(rows, 32) % 127) - 63).float() / 16
+    out = torch.full_like(x, float("nan"))
+    return st.case(
+        constexpr_manual_pipeline,
+        x,
+        out,
+        name=f"constexpr_manual_rows_{rows}",
+        golden=lambda tensors: tensors["x"] + 1,
+        rtol=0,
+        atol=0,
+    )
+
+
+@st.cases(*(_constexpr_manual_case(rows) for rows in (1, 17, 31, 32, 33, 47, 63, 64)))
+def test_constexpr_manual_parallel_yields(case_run):
+    """Issue #3115: preserve tensor and TaskId merges across the manual scope."""
+    case_run.assert_passed()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

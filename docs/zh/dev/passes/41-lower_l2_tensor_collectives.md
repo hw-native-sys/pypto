@@ -67,7 +67,7 @@ data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
 | 参数 | `input, target, signal, send_counts, recv_counts` —— 规范化类型，**不是**调用点的类型：`input` / `send_counts` 声明为普通 `Tensor`，其余三个为 `DistributedTensor` |
 | 方向 | `In, InOut, InOut, In, InOut` |
 | 函数体 | `return target` —— 单条 `ReturnStmt`，永不参与代码生成 |
-| Attrs | `builtin_template_dir`、`builtin_template_vars` |
+| Attrs | `builtin_template_dir`、`builtin_template_vars`、`require_contiguous_operands` |
 
 每个 variant 只合成一个函数，被该 variant 的所有调用点共享。
 
@@ -165,7 +165,7 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 - **运行期 `core_num`**。仅接受编译期 `core_num`。运行期值需要在生成的 orchestration 中计算 `B`，并做
   运行期 `S >= B` 检查，而 orchestration 目前没有抛出该致命错误的途径。HOST 通路因其 entry 运行在
   host 上而接受运行期值。
-- **操作数校验是静态的，且别名只覆盖了一部分**。`pld.tensor.all_to_all_v` 的类型
+- **除连续性外，操作数校验是静态的，且别名只覆盖了一部分**。`pld.tensor.all_to_all_v` 的类型
   推导只拒绝仅凭操作数类型即可证明的违规：非 ND 布局、与紧凑步长不符的 stride
   向量、比 shape 更窄的 `valid_shape`，以及 `input` 与 `target` 是**同一个表达式**。
   它**不会**拒绝同一块 allocation 上的两个不同 `pld.window()` 视图 —— 类型推导在
@@ -175,9 +175,26 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   `LowerHostTensorCollectives` 能在同一个 `host_orch` 函数体内把每个操作数溯源回
   其 `WindowBuffer`，并对五个操作数运行 `CheckPairwiseDistinctWindows`。本通路
   —— 与 InCore composite 通路一样 —— 看到的操作数是外层 pipeline 的参数，没有这样
-  的溯源能力，因此在这里「窗口两两互不相同」是调用方的义务。此外，在提交 AIV task
-  前也没有运行期复检 —— 需要复检的项（signal stride `>= B`）改由 lowering 阶段静
-  态校验：`S` 与折叠出的 `B` 都是编译期常量。
+  的溯源能力，因此在这里「窗口两两互不相同」是调用方的义务。**连续性在本 pass 中于编译期判定，
+  并保留运行期兜底**。类型推导看不到切片的步长（切片类型不携带 stride），而运行期判定是按
+  rank 独立做出的：若只抑制某一个 rank 的提交而其对端仍然启动，对端会阻塞在 kernel 的
+  `ExchangeBarrier` 上（表现为挂死，而非拒绝）。因此本 pass 沿着所有可能到达的值（赋值、
+  循环携带值以及 `if`/`for`/`while` 的结果；循环结果还会追溯其初值，因为零次迭代的循环
+  返回的就是初值）追溯调用中按原样书写的每个操作数，并采用
+  **白名单**：参数、窗口、`tensor.create` 以及 `pl.submit` 交由运行期分配的 Out 是行主序的根；
+  `reshape`、`view`、`set_validshape`、`assemble`（其目标）、collective 的结果（其目标）、
+  kernel 或 `pl.submit` 的结果或其元组元素（其返回的实参）以及仅收窄静态形状 tensor 首维的切片
+  会被继续追溯到其来源；其余一律拒绝，包括 `tensor.transpose` 及其他任何切片；链上任何非 ND
+  布局、或显式 stride 不等于紧凑 stride 的值也会被拒绝（上述各步都假定来源是紧凑行主序的，而切片
+  会丢弃其父 tensor 的 stride：DN 或带填充 stride 的 tensor 的首维切片并不连续，而 DN tensor 的
+  ND `view` 会降级为运行期转置）。一些安全的程序也会被拒绝 ——
+  `tensor.write` 的结果、`[1, W]` tensor 的 `[1, N]` 切片、偏移不是字面元组的切片、被调函数
+  ReturnStmt 未直接写为参数的结果 —— 因为漏掉一次接受是安全的，错误的接受则不是。合成的
+  kernel 仍带有 `require_contiguous_operands`，orchestration codegen 会在提交之前为每个
+  tensor 操作数生成一条 `is_contiguous` 检查，并在第一个违规处锁存
+  `SIMPLER_ERROR_INVALID_ARGS`，作为调用方提供的操作数的兜底：参数打包会拒绝非连续的 host
+  torch tensor，但预先构建的运行期 `Tensor` 只在这里检查。另一项需要运行期形式的检查
+  （signal stride `>= B`）仍由 lowering 阶段静态校验：`S` 与折叠出的 `B` 都是编译期常量。
 - **rank 数**。kernel 读取 `CommContext::rankNum`，因此当显式设备子集小于 context
   的 rank 数时，其行为与传入 comm domain `domain_size` 的 HOST 通路不同。
 - **「同属一个通信域」是未经检查的前置条件**。kernel 通过单个 `CommContext`
@@ -207,3 +224,16 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   它把三条通路约束到同一份链路 golden；外加三条结构断言：不产生 builtin chip
   dispatch、builtin kernel 被渲染进 pipeline 自己的子构建、HOST 通路渲染出逐字节
   相同的 kernel 源码。
+
+## A5 URMA 索引交换
+
+`pld.tensor.indexed_all_to_all_v(input, target, signal, send_counts,
+recv_counts, index, core_num=L)` 使用托管 L2 任务流程及独立的内核模板。
+六个 Tensor 操作数之后，第一个 CommContext 位于槽位 6。input、index 和
+recv_counts 可以是本地 Tensor；send_counts 必须是窗口。
+包括 `index` 在内的全部六个操作数，与普通算子一样接受连续性检查与兜底（见[当前限制](#当前限制)）。
+`L` 为编译期正整数，表示精确启动核数。全部 AIV 在远端提交与 CQ 等待之间
+分担本地搬运；超过 P 的 AIV 只参与本地搬运。仅支持 A5 URMA PER_PEER 传输，
+每个目标队列只有一个写入者。调用者必须为共享队列的交换建立顺序；即使
+payload 窗口不同，复用同一个 InOut signal 也能建立此依赖。
+不支持 HOST 和 InCore 调用。参见[用户约定](../../user/distributed/20-all_to_all.md#a5-urma-索引-alltoallv)。

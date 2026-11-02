@@ -395,6 +395,97 @@ class TestSpmdScopeTaskIdCodegen:
         ):
             assert line in code, f"missing {line!r}\n{code}"
 
+    @pytest.mark.parametrize("argument_kind", ["aliases", "view", "fresh"])
+    def test_mixed_spmd_bridge_resolves_complete_parameter_aliases(self, argument_kind):
+        """Inline handles in an Spmd wrapper retain the complete tensor ABI (#3138)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+                left = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                right = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                product = pl.matmul(
+                    pl.move(left, target_memory=pl.MemorySpace.Left),
+                    pl.move(right, target_memory=pl.MemorySpace.Right),
+                )
+                value = pl.add(product, pl.load(bias, [0, 0], [64, 64]))
+                return pl.store(value, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main_aliases(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    b_alias = b
+                    bias_alias = bias
+                    nested_bias = bias_alias
+                    out = self.kernel(a, b_alias, nested_bias, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main_view(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    viewed_bias = pl.tensor.view(bias, [64, 64])
+                    out = self.kernel(a, b, viewed_bias, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main_fresh(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    fresh_bias = pl.create_tensor([64, 64], dtype=pl.FP32)
+                    out = self.kernel(a, b, fresh_bias, out)
+                return out
+
+        entry_name = f"main_{argument_kind}"
+        before = ir.Program(
+            [func for func in Before.functions.values() if func.name in ("kernel", entry_name)],
+            Before.name,
+            Before.span,
+        )
+        transformed = self._mixed_spmd_pipeline(before)
+        if argument_kind != "aliases":
+            # A descriptor-changing view and a fresh allocation must never be
+            # guessed to be the caller's complete bias parameter.
+            with pytest.raises(RuntimeError, match="does not map to any Spmd-wrapper parameter"):
+                self._codegen(transformed)
+            return
+
+        code = self._codegen(transformed)
+        for line in (
+            "params_t0.add_input(ext_a);",
+            "params_t0.add_input(ext_b);",
+            "params_t0.add_input(ext_bias);",
+            "params_t0.add_output(ext_out);",
+            "rt_submit_task(mixed_0, params_t0);",
+        ):
+            assert line in code, f"missing {line!r}\n{code}"
+
     def test_captured_dispatch_mixed_consumer_in_equals_out(self):
         """The original KNOWN_ISSUES repro: a captured ``as tid`` MIXED dispatch
         whose tensor output feeds a downstream MIXED dispatch that also reuses it

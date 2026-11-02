@@ -9,10 +9,13 @@
 
 """Tests for system operation DSL parsing and round-trip."""
 
+import inspect
+
 import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.ir.op import system_ops
+from pypto.ir.utils import use_parser_span
 from pypto.pypto_core import DataType
 
 
@@ -131,56 +134,117 @@ class TestSystemOpsParsing:
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
-    def test_bar_v_round_trip(self):
-        """Test round-trip for pl.system.bar_v."""
+    @pytest.mark.parametrize("pipe", [pl.PipeType.V, pl.PipeType.M, pl.PipeType.ALL])
+    def test_barrier_round_trip(self, pipe):
+        """The unified spelling round-trips without changing the barrier IR."""
 
         @pl.program
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.bar_v()
+                pl.system.barrier(pipe=pipe)
                 return x
 
         printed = Before.as_python()
-        assert "pl.system.bar_v()" in printed
+        assert f"pl.system.barrier(pipe=pl.PipeType.{pipe.name})" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
 
-        reparsed = pl.parse_program(printed)
-        assert isinstance(reparsed, ir.Program)
-        ir.assert_structural_equal(Before, reparsed)
+    @pytest.mark.parametrize("pipe", [pl.PipeType.V, pl.PipeType.M, pl.PipeType.ALL])
+    def test_barrier_printer_respects_custom_prefix(self, pipe):
+        """Both the canonical operation and its pipe enum use the requested alias."""
+        call = system_ops.barrier(pipe=pipe)
+        assert call.as_python(prefix="dsl") == f"dsl.system.barrier(pipe=dsl.PipeType.{pipe.name})"
 
-    def test_bar_m_round_trip(self):
-        """Test round-trip for pl.system.bar_m."""
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    @pytest.mark.parametrize(
+        "pipe, op_name",
+        [
+            (pl.PipeType.V, "system.bar_v"),
+            (pl.PipeType.M, "system.bar_m"),
+            (pl.PipeType.ALL, "system.bar_all"),
+        ],
+    )
+    def test_barrier_preserves_existing_ir(self, barrier_api, pipe, op_name):
+        """A barrier remains one operand-free, event-free call with its source span."""
+        span = ir.Span("barrier.py", 7, 3)
+        call = barrier_api(pipe=pipe, span=span)
+        expected = ir.create_op_call(op_name, [], {}, span)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.bar_m()
-                return x
+        ir.assert_structural_equal(call, expected)
+        assert call.span.filename == "barrier.py"
+        assert call.span.begin_line == 7
+        assert call.span.begin_column == 3
 
-        printed = Before.as_python()
-        assert "pl.system.bar_m()" in printed
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_captures_caller_span(self, barrier_api):
+        frame = inspect.currentframe()
+        assert frame is not None
+        line_before = frame.f_lineno
+        call = barrier_api(pipe=pl.PipeType.V)
 
-        reparsed = pl.parse_program(printed)
-        assert isinstance(reparsed, ir.Program)
-        ir.assert_structural_equal(Before, reparsed)
+        assert call.span.filename == __file__
+        assert call.span.begin_line == line_before + 1
 
-    def test_bar_all_round_trip(self):
-        """Test round-trip for pl.system.bar_all."""
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_preserves_parser_span_and_explicit_override(self, barrier_api):
+        parser_span = ir.Span("kernel.py", 11, 8)
+        explicit_span = ir.Span("explicit.py", 21, 4)
+        with use_parser_span(parser_span):
+            parsed_call = barrier_api(pipe=pl.PipeType.V)
+            explicit_call = barrier_api(pipe=pl.PipeType.V, span=explicit_span)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                pl.system.bar_all()
-                return x
+        assert parsed_call.span.filename == "kernel.py"
+        assert parsed_call.span.begin_line == 11
+        assert parsed_call.span.begin_column == 8
+        assert explicit_call.span.filename == "explicit.py"
+        assert explicit_call.span.begin_line == 21
+        assert explicit_call.span.begin_column == 4
 
-        printed = Before.as_python()
-        assert "pl.system.bar_all()" in printed
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    @pytest.mark.parametrize("pipe", [4, "V", True])
+    def test_barrier_rejects_non_enum_pipe(self, barrier_api, pipe):
+        with pytest.raises(TypeError, match="pipe must be a PipeType member"):
+            barrier_api(pipe=pipe)
 
-        reparsed = pl.parse_program(printed)
-        assert isinstance(reparsed, ir.Program)
-        ir.assert_structural_equal(Before, reparsed)
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    @pytest.mark.parametrize(
+        "pipe", [pl.PipeType.MTE1, pl.PipeType.MTE2, pl.PipeType.MTE3, pl.PipeType.S, pl.PipeType.FIX]
+    )
+    def test_barrier_rejects_unsupported_pipe(self, barrier_api, pipe):
+        with pytest.raises(ValueError, match=r"PipeType\.V.*PipeType\.M.*PipeType\.ALL"):
+            barrier_api(pipe=pipe)
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_requires_pipe_keyword(self, barrier_api):
+        with pytest.raises(TypeError, match="pipe"):
+            barrier_api()
+        with pytest.raises(TypeError, match="positional"):
+            barrier_api(pl.PipeType.V)
+
+    @pytest.mark.parametrize("pipe", ["V", "M", "ALL"])
+    def test_barrier_compiler_attrs_round_trip(self, pipe):
+        """Canonical barrier printing preserves attrs attached by compiler passes."""
+        source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        pl.system.barrier(pipe=pl.PipeType.{pipe}, attrs={{"barrier_marker": 7}})
+        return x
+"""
+        before = pl.parse_program(source)
+        printed = before.as_python()
+
+        assert f'pl.system.barrier(pipe=pl.PipeType.{pipe}, attrs={{"barrier_marker": 7}})' in printed
+        ir.assert_structural_equal(before, pl.parse_program(printed))
+
+    @pytest.mark.parametrize("name", ["bar_v", "bar_m", "bar_all"])
+    def test_removed_barrier_names(self, name):
+        """Only the parameterized barrier API is exposed at either Python layer."""
+        assert not hasattr(pl.system, name)
+        assert not hasattr(system_ops, name)
 
     def test_fence_round_trip(self):
         """Test round-trip for pl.system.fence."""
@@ -476,16 +540,16 @@ class TestSystemOpsParsing:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-                pl.system.bar_v()
+                pl.system.barrier(pipe=pl.PipeType.V)
                 pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
-                pl.system.bar_all()
+                pl.system.barrier(pipe=pl.PipeType.ALL)
                 return x
 
         printed = Before.as_python()
         assert "pl.system.sync_src(" in printed
-        assert "pl.system.bar_v()" in printed
+        assert "pl.system.barrier(pipe=pl.PipeType.V)" in printed
         assert "pl.system.sync_dst(" in printed
-        assert "pl.system.bar_all()" in printed
+        assert "pl.system.barrier(pipe=pl.PipeType.ALL)" in printed
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)

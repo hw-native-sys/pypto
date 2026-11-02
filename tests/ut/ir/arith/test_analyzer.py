@@ -9,6 +9,8 @@
 
 """Tests for the Analyzer coordinator and ConstraintContext."""
 
+import math
+
 import pytest
 from pypto import DataType, ir
 from pypto.arith import Analyzer, ConstIntBound, RewriteSimplifier
@@ -94,6 +96,142 @@ class TestBindRange:
 
 
 class TestBindExpr:
+    def test_symbolic_interval_analyzer_unbind(self):
+        local_analyzer = Analyzer()
+        source = make_var("source")
+        local_analyzer.int_set.bind(source, ci(1), ci(4))
+        local_analyzer.int_set.unbind(source)
+        interval = local_analyzer.int_set(source)
+        assert interval.min_value is source
+        assert interval.max_value is source
+
+    def test_float_comparison_nan_negation_stays_explicit(self):
+        local_analyzer = Analyzer()
+        nan = ir.ConstFloat(float("nan"), DataType.FP32, S)
+        zero = ir.ConstFloat(0.0, DataType.FP32, S)
+        condition = ir.Not(ir.Lt(nan, zero, BOOL, S), BOOL, S)
+        ir.assert_structural_equal(local_analyzer.simplify(condition), condition)
+        assert not local_analyzer.can_prove(condition)
+
+    @pytest.mark.parametrize("use_range", [False, True])
+    def test_unbind_clears_symbolic_intervals(self, use_range):
+        local_analyzer = Analyzer()
+        source = make_var("source")
+        condition = ir.Ge(source, ci(0), BOOL, S)
+        if use_range:
+            local_analyzer.bind(source, 1, 4)
+        else:
+            local_analyzer.bind(source, ci(1))
+        assert local_analyzer.can_prove(condition)
+
+        local_analyzer.unbind(source)
+        assert not local_analyzer.can_prove(condition)
+        interval = local_analyzer.int_set(source)
+        assert interval.min_value is source
+        assert interval.max_value is source
+
+    @pytest.mark.parametrize(
+        ("dtype", "value"),
+        [(DataType.FP16, 1.0001), (DataType.FP32, 1.00000001), (DataType.BF16, 1.001)],
+    )
+    @pytest.mark.parametrize("compare", [ir.Eq, ir.Ne, ir.Lt, ir.Le, ir.Gt, ir.Ge])
+    def test_float_comparisons_preserve_unmodeled_rounding(self, dtype, value, compare):
+        """Both values round to 1 in their declared format; raw doubles differ."""
+        local_analyzer = Analyzer()
+        source = ir.Var("source", ir.ScalarType(dtype), S)
+        local_analyzer.bind(source, ir.ConstFloat(value, dtype, S))
+        condition = compare(source, ir.ConstFloat(1.0, dtype, S), BOOL, S)
+        assert not isinstance(local_analyzer.simplify(condition), ir.ConstBool)
+        assert not local_analyzer.can_prove(condition)
+        assert not local_analyzer.can_prove(ir.Not(condition, BOOL, S))
+
+    @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.BF16])
+    @pytest.mark.parametrize("value", [0.0, -0.0, 1.25])
+    def test_bind_float_literal_and_alias(self, dtype, value):
+        """Value substitution preserves floating dtype and the sign of zero."""
+        local_analyzer = Analyzer()
+        source = ir.Var("source", ir.ScalarType(dtype), S)
+        alias = ir.Var("alias", ir.ScalarType(dtype), S)
+        literal = ir.ConstFloat(value, dtype, S)
+
+        local_analyzer.bind(source, literal)
+        local_analyzer.bind(alias, source)
+        for bound_var in (source, alias):
+            result = local_analyzer.simplify(bound_var)
+            assert isinstance(result, ir.ConstFloat)
+            assert result.dtype == dtype
+            assert result.value == value
+            assert math.copysign(1.0, result.value) == math.copysign(1.0, value)
+
+        local_analyzer.unbind(alias)
+        assert local_analyzer.simplify(alias) is alias
+        local_analyzer.unbind(source)
+        assert local_analyzer.simplify(source) is source
+
+    def test_bind_float_iter_arg(self):
+        """An explicit IterArg binding is applied without assuming its initial value."""
+        local_analyzer = Analyzer()
+        dtype = DataType.FP32
+        initial = ir.ConstFloat(1.0, dtype, S)
+        carried = ir.IterArg("carried", ir.ScalarType(dtype), initial, S)
+        assert local_analyzer.simplify(carried) is carried
+
+        local_analyzer.bind(carried, ir.ConstFloat(-0.0, dtype, S))
+        result = local_analyzer.simplify(carried)
+        assert isinstance(result, ir.ConstFloat)
+        assert result.dtype == dtype
+        assert result.value == 0.0 and math.copysign(1.0, result.value) == -1.0
+        local_analyzer.unbind(carried)
+        assert local_analyzer.simplify(carried) is carried
+
+    def test_float_algebra_stays_unmodified(self):
+        """Leaf substitution must not enable cancellation or zero identities.
+
+        x - x cannot fold when x is NaN, and x + 0.0 may change signed zero.
+        """
+        local_analyzer = Analyzer()
+        dtype = DataType.FP32
+        source = ir.Var("source", ir.ScalarType(dtype), S)
+        zero = ir.ConstFloat(0.0, dtype, S)
+        for expression in (ir.Add(source, zero, dtype, S), ir.Sub(source, source, dtype, S)):
+            ir.assert_structural_equal(local_analyzer.simplify(expression), expression)
+
+    @pytest.mark.parametrize("value", [False, True])
+    @pytest.mark.parametrize("integer_literal", [False, True])
+    def test_bind_bool_constant(self, value, integer_literal):
+        """BOOL values fold without constructing unsupported numeric comparisons.
+
+        A BOOL-typed ConstInt is also accepted by the IR constructor, so the
+        binding behavior must follow the variable's dtype, not the node kind.
+        """
+        local_analyzer = Analyzer()
+        flag = ir.Var("flag", ir.ScalarType(BOOL), S)
+        literal = ci(int(value), BOOL) if integer_literal else ir.ConstBool(value, S)
+
+        local_analyzer.bind(flag, literal)
+        ir.assert_structural_equal(local_analyzer.simplify(flag), literal)
+        assert local_analyzer.can_prove(flag) is value
+
+        local_analyzer.unbind(flag)
+        assert local_analyzer.simplify(flag) is flag
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_bind_bool_alias_and_negation(self, value):
+        """A symbolic boolean alias can resolve after its source is bound."""
+        local_analyzer = Analyzer()
+        source = ir.Var("source", ir.ScalarType(BOOL), S)
+        alias = ir.Var("alias", ir.ScalarType(BOOL), S)
+        negated = ir.Var("negated", ir.ScalarType(BOOL), S)
+
+        local_analyzer.bind(alias, source)
+        assert local_analyzer.simplify(alias) is source
+        local_analyzer.bind(source, ir.ConstBool(value, S))
+        local_analyzer.bind(negated, ir.Not(alias, BOOL, S))
+
+        assert local_analyzer.can_prove(alias) is value
+        assert local_analyzer.can_prove(negated) is not value
+        ir.assert_structural_equal(local_analyzer.simplify(negated), ir.ConstBool(not value, S))
+
     def test_bind_expr_const(self):
         analyzer.bind(x, ci(42))
         bound = analyzer.const_int_bound(x)
@@ -337,8 +475,9 @@ class TestConstraintContext:
         with analyzer.constraint_context(ir.Gt(f, cf_one, BOOL, S)):
             assert analyzer.const_int_bound(f).min_value == 1
             assert analyzer.can_prove(ir.Ge(f, cf_two, BOOL, S)) is False
-            # The relaxed bound is still a bound: weaker facts stay provable.
-            assert analyzer.can_prove(ir.Ge(f, cf_half, BOOL, S)) is True
+            # Integer interval information is retained, but it must not decide
+            # floating comparisons without declared-format rounding semantics.
+            assert analyzer.can_prove(ir.Ge(f, cf_half, BOOL, S)) is False
 
     def test_nested_constraints(self):
         analyzer.bind(x, 0, 100)

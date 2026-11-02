@@ -136,7 +136,7 @@ DataType DeserializeDataType(const msgpack::object& fields_obj, const std::strin
   }
 
   if (is_dtype) {
-    return DataType(dtype_code);
+    return detail::DataTypeFromSerializedCode(dtype_code);
   } else {
     throw TypeError("Invalid kwarg MAP type for key: " + field_name);
   }
@@ -212,6 +212,13 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
           }
         }
       }
+      // The enum/layout-valued kwargs below all carry their payload in the
+      // "value" field; keep that shape check in one place.
+      auto require_value = [&](const char* expected_type) {
+        if (value_str.empty()) {
+          throw TypeError("Missing 'value' field for " + std::string(expected_type) + " kwarg: " + key);
+        }
+      };
       if (type_name == "ArgDirection") {
         if (!has_value_obj || value_obj_inner.type != msgpack::type::POSITIVE_INTEGER) {
           throw TypeError("ArgDirection kwarg '" + key + "' must have integer value");
@@ -238,35 +245,21 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
         }
         kwargs.emplace_back(key, std::move(dirs));
       } else if (type_name == "TensorLayout") {
-        if (value_str.empty()) {
-          throw TypeError("Missing 'value' field for TensorLayout kwarg: " + key);
-        }
+        require_value("TensorLayout");
         kwargs.emplace_back(key, StringToTensorLayout(value_str));
       } else if (type_name == "TileLayout") {
-        if (value_str.empty()) {
-          throw TypeError("Missing 'value' field for TileLayout kwarg: " + key);
-        }
+        require_value("TileLayout");
         kwargs.emplace_back(key, StringToTileLayout(value_str));
       } else if (type_name == "MemorySpace") {
-        if (value_str.empty()) {
-          throw TypeError("Missing 'value' field for MemorySpace kwarg: " + key);
-        }
+        require_value("MemorySpace");
         kwargs.emplace_back(key, StringToMemorySpace(value_str));
       } else if (type_name == "PadValue") {
-        if (value_str.empty()) {
-          throw TypeError("Missing 'value' field for PadValue kwarg: " + key);
-        }
-        if (value_str == "null") {
-          kwargs.emplace_back(key, PadValue::null);
-        } else if (value_str == "zero") {
-          kwargs.emplace_back(key, PadValue::zero);
-        } else if (value_str == "max") {
-          kwargs.emplace_back(key, PadValue::max);
-        } else if (value_str == "min") {
-          kwargs.emplace_back(key, PadValue::min);
-        } else {
+        require_value("PadValue");
+        auto pad = TryStringToPadValue(value_str);
+        if (!pad.has_value()) {
           throw TypeError("Unknown PadValue: " + value_str + " for kwarg: " + key);
         }
+        kwargs.emplace_back(key, *pad);
       } else if (type_name == "Var") {
         // Reserved Var-valued attr (kAttrTaskIdVar). Resolved through the node
         // table so it round-trips by identity. A missing 'value' field is a
@@ -810,6 +803,20 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     }
   }
 
+  // Omission alone means legacy Auto. Do not use GetOptionalFieldObj here:
+  // it conflates explicit nil with absence, hiding corrupt semantic metadata.
+  HardwareLoopPolicy policy = HardwareLoopPolicy::Auto;
+  bool seen_policy = false;
+  for (uint32_t i = 0; i < fields_obj.via.map.size; ++i) {
+    const auto& entry = fields_obj.via.map.ptr[i];
+    if (entry.key.as<std::string>() != "hardware_loop_policy") continue;
+    CHECK(!seen_policy) << "Duplicate hardware_loop_policy";
+    seen_policy = true;
+    CHECK(entry.val.type == msgpack::type::POSITIVE_INTEGER && entry.val.via.u64 <= 1)
+        << "Unknown or malformed hardware_loop_policy";
+    policy = static_cast<HardwareLoopPolicy>(entry.val.via.u64);
+  }
+
   // Deserialize kind with backward compatibility (defaults to Sequential)
   ForKind kind = ForKind::Sequential;
   auto kind_obj = GetOptionalFieldObj(fields_obj, "kind", ctx);
@@ -834,7 +841,7 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
       << "version (chunked loops can be expressed with manual tiling).";
 
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
-                                   std::move(attrs), DeserializeLeadingComments(fields_obj));
+                                   std::move(attrs), DeserializeLeadingComments(fields_obj), policy);
 }
 
 // Deserialize WhileStmt
@@ -947,6 +954,16 @@ static IRNodePtr DeserializeGraphScopeStmt(const msgpack::object& fields_obj, ms
   return std::make_shared<GraphScopeStmt>(std::move(name_hint), body, span,
                                           DeserializeLeadingComments(fields_obj),
                                           DeserializeScopeAttrs(fields_obj, ctx, zone));
+}
+
+static IRNodePtr DeserializeRegScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                         DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<RegScopeStmt>(std::move(name_hint), body, span,
+                                        DeserializeLeadingComments(fields_obj),
+                                        DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize HierarchyScopeStmt
@@ -1374,6 +1391,7 @@ static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmd
 static TypeRegistrar _split_aiv_scope_stmt_registrar("SplitAivScopeStmt", DeserializeSplitAivScopeStmt);
 static TypeRegistrar _runtime_scope_stmt_registrar("RuntimeScopeStmt", DeserializeRuntimeScopeStmt);
 static TypeRegistrar _comm_domain_scope_stmt_registrar("CommDomainScopeStmt", DeserializeCommDomainScopeStmt);
+static TypeRegistrar _reg_scope_stmt_registrar("RegScopeStmt", DeserializeRegScopeStmt);
 static TypeRegistrar _graph_scope_stmt_registrar("GraphScopeStmt", DeserializeGraphScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);

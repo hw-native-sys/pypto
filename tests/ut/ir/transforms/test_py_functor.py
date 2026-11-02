@@ -284,5 +284,102 @@ class TestPipelineIntegration:
         assert call_count_holder[0] >= 2  # at least add and mul
 
 
+@pytest.mark.parametrize("base", [ir.IRVisitor, ir.IRMutator])
+def test_all_trampoline_handlers_fit_one_instance(base):
+    """A Python subclass must have enough nanobind slots for every node handler."""
+
+    class Walker(base):  # pyright: ignore[reportUntypedBaseClass]
+        pass
+
+    def forward(name):
+        def visit(self, node):
+            return getattr(super(Walker, self), name)(node)
+
+        return visit
+
+    for name in dir(base):
+        if name.startswith("visit_"):
+            setattr(Walker, name, forward(name))
+
+    walker = Walker()
+    span = ir.Span.unknown()
+    scalar = ir.ScalarType(pl.INT32)
+    var = ir.Var("x", scalar, span)
+    one = ir.ConstInt(1, pl.INT32, span)
+    two = ir.ConstInt(2, pl.INT32, span)
+    condition = ir.ConstBool(True, span)
+    tup = ir.MakeTuple([one], span)
+    expressions: list[ir.Expr] = [
+        var,
+        ir.IterArg("carry", scalar, one, span),
+        ir.MemRef("mem", 0, 64, span),
+        ir.WindowBuffer(ir.Var("ptr", ir.PtrType(), span), two),
+        one,
+        ir.ConstFloat(1.0, pl.FP32, span),
+        condition,
+        ir.Call(ir.Op("opaque"), [], {}, scalar, span),
+        ir.Submit(ir.GlobalVar("task"), [], [], ir.ScalarType(pl.TASK_ID), span),
+        tup,
+        ir.TupleGetItemExpr(tup, 0, span),
+        ir.Cast(one, pl.INT64, span),
+    ]
+    for name in (
+        "Add",
+        "Sub",
+        "Mul",
+        "FloorDiv",
+        "FloorMod",
+        "FloatDiv",
+        "Min",
+        "Max",
+        "Pow",
+        "Eq",
+        "Ne",
+        "Lt",
+        "Le",
+        "Gt",
+        "Ge",
+        "BitAnd",
+        "BitOr",
+        "BitXor",
+        "BitShiftLeft",
+        "BitShiftRight",
+    ):
+        dtype = pl.BOOL if name in ("Eq", "Ne", "Lt", "Le", "Gt", "Ge") else pl.INT32
+        expressions.append(getattr(ir, name)(one, two, dtype, span))
+    for name in ("And", "Or", "Xor"):
+        expressions.append(getattr(ir, name)(condition, condition, pl.BOOL, span))
+    for name in ("Abs", "Neg", "BitNot"):
+        expressions.append(getattr(ir, name)(one, pl.INT32, span))
+    expressions.append(ir.Not(condition, pl.BOOL, span))
+    for expr in expressions:
+        walker.visit_expr(expr)
+
+    body = ir.EvalStmt(one, span)
+    statements = [
+        ir.AssignStmt(var, one, span),
+        ir.IfStmt(condition, body, None, [], span),
+        ir.ForStmt(var, one, two, one, [], body, [], span),
+        ir.WhileStmt(condition, [], body, [], span),
+        ir.InCoreScopeStmt(body=body, span=span),
+        ir.ClusterScopeStmt(body=body, span=span),
+        ir.GraphScopeStmt("graph", body=body, span=span),
+        ir.RegScopeStmt("reg", body, span),
+        ir.HierarchyScopeStmt(ir.Level.CORE_GROUP, body=body, span=span),
+        ir.SpmdScopeStmt(1, body=body, span=span),
+        ir.SplitAivScopeStmt(ir.SplitMode.NONE, body=body, span=span),
+        ir.RuntimeScopeStmt(body=body, span=span),
+        ir.SeqStmts([body], span),
+        ir.YieldStmt([], span),
+        ir.ReturnStmt([], span),
+        body,
+        ir.BreakStmt(span),
+        ir.ContinueStmt(span),
+    ]
+    for stmt in statements:
+        walker.visit_stmt(stmt)
+    walker.visit_program(ir.Program([ir.Function("f", [], [], body, span)], "AllHandlers", span))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

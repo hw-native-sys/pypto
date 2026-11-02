@@ -26,13 +26,25 @@ InCore/AIC/AIV members, in first-use order. Internal callees and known
 The pass uses exact structural hash/equality with `enable_auto_mapping=False`.
 Bound parameters and signature symbols are alpha-renamed; semantic attrs, directions,
 result relationships, dtypes, layouts and constant bits remain significant.
-Aliasing additionally requires exact signature types with shape/view symbol
-identities preserved, for the root and every Group member. This restriction is
-separate from structural equality: tensor-to-tile lowering allocates outputs from
-the callee signature without mapping its symbols into each call's coordinates.
-Thus `[N]` and `[M]` kernels remain separate even when alpha-equivalent; kernels
-sharing the same symbols can still merge. Keeping the original call result type
-alone does not protect downstream output allocation.
+Ordinary InCore kernels with different physical-shape symbol identities can
+merge when every affected Call/Submit binds the canonical signature consistently
+and reproduces the original caller-coordinate result type. This includes calls
+inside Spmd wrappers, scalar parameters also used as dimensions, repeated symbols,
+and same-structure expressions such as `N * 128`. Bindings come from supplied
+arguments, never from a missing output. Shape-distinct aliases must supply every
+parameter, including Submit outputs: runtime-synthesized outputs still read the
+callee signature directly, without these call-site bindings. Identical-signature
+merges retain their existing omitted-output behavior. No algebraic inversion or runtime shape
+guard is introduced. Return aliases and void memory effects remain unchanged.
+
+The initial contract accepts scalar parameters and ordinary Tensor types without
+storage, optionally carrying a layout-only TensorView (including NZ weights).
+Strides, valid-shape metadata, distributed storage, unsupported expressions and
+Group bundles retain exact signature-symbol identity requirements. Signature
+parameter/return counts and unique shape-expression nodes are capped at 256 for
+the new proof; larger signatures retain the old path. A failed proof retains the
+entire candidate, even if another call could be rewritten safely.
+
 Binding verification and closure inspection include types, shapes, views and attrs.
 Free captures, unresolved value types, explicit storage/communication resources, external or
 builtin kernels, runtime bindings and unsupported helper graphs are skipped.
@@ -55,7 +67,7 @@ Two narrowly checked exceptions admit additional kernels:
 
 Admission checks every incoming expression edge, including shared DAG nodes,
 and nested type payloads. These exceptions do not relax structural equality or
-the signature-symbol identity check.
+the applicable signature proof.
 
 ## Rewriting and complexity
 
@@ -66,7 +78,9 @@ Group aliases are applied atomically, followed by a dangling-reference check.
 Units are considered in name order. Each hash bucket has at most eight representatives;
 hash collisions still require exact equality. A comparison is charged both units'
 projection weights against a budget of eight times the new unit's weight. Exhaustion
-retains the original definition. The private projection inspection uses the same
+retains the original definition. Call-shape proof additionally consumes a global
+budget equal to the inspected Program weight, with at most 65,536 matching steps
+per site; shared expression pairs are memoized. The private projection inspection uses the same
 DAG memoization and reflected fields as equality, including payload bytes. Overall
 work is O(N log N) with O(N) storage; this is not a promise to find every duplicate.
 

@@ -9,8 +9,10 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -33,6 +35,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/call_shape_binding.h"
 #include "pypto/ir/type.h"
 #include "utils/bounded_kernel_index.h"
 #include "utils/structural_inspection.h"
@@ -324,6 +327,8 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
   std::map<std::string, FunctionInfo> info;
   std::map<std::string, std::set<std::string>> callers, peer_users;
   std::set<std::string> pinned, group_members;
+  std::map<std::string, std::vector<ExprPtr>> sites;
+  size_t site_budget = 0;
   // Complete the reference index before considering any removal. An unknown
   // payload can hide a reference, so an uninspectable program stays unchanged.
   try {
@@ -332,6 +337,16 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
       // outlined-kernel naming contract used by the reference index below.
       if (gv->name_ != func->name_) return program;
       auto item = InspectFunction(func);
+      const size_t allowance = item.inspection.weight;
+      site_budget += std::min(allowance, std::numeric_limits<size_t>::max() - site_budget);
+      // Inspect already memoizes nodes; each call site is proved once per
+      // candidate comparison, including calls inside Spmd wrappers.
+      for (const auto& node : item.inspection.nodes) {
+        auto call = As<Call>(node);
+        auto submit = As<Submit>(node);
+        auto op = call ? call->op_ : submit ? submit->op_ : nullptr;
+        if (op && As<GlobalVar>(op)) sites[op->name_].push_back(As<Expr>(node));
+      }
       for (const auto& name : item.callees) callers[name].insert(func->name_);
       for (const auto& name : item.peers) peer_users[name].insert(func->name_);
       for (const auto& [op, rewritable] : item.inspection.operators) {
@@ -427,13 +442,51 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
 
   deduplication_detail::BoundedIndex<Unit> index;
   Names aliases;
+  std::map<std::string, CallShapeBindingPlan> shape_plans;
+  auto check_sites = [&](const Unit& candidate, const Unit& representative) {
+    // Group/rich-view admission remains identity-based in this first increment.
+    // Ordinary kernels may be called through Spmd: their incoming Call still
+    // supplies that wrapper's own arguments and shape symbols.
+    if (candidate.names.size() != 1 || representative.names.size() != 1 ||
+        info.at(candidate.names[0]).function->func_type_ != FunctionType::InCore) {
+      return false;
+    }
+    const auto& name = representative.names[0];
+    auto plan = shape_plans.find(name);
+    if (plan == shape_plans.end()) {
+      plan = shape_plans.emplace(name, CallShapeBindingPlan(info.at(name).function)).first;
+    }
+    if (!plan->second.supported()) return false;
+    for (const auto& site : sites[candidate.names[0]]) {
+      auto call = As<Call>(site);
+      auto submit = As<Submit>(site);
+      // Keep the proof conservative if the incoming-site index ever expands
+      // beyond the two call-like kinds collected today.
+      if (!call && !submit) return false;
+      const auto& args = call ? call->args_ : submit->args_;
+      // Runtime-synthesized Submit outputs still read the callee's parameter
+      // shapes directly. A local proof cannot transport those bindings into
+      // codegen, so shape-distinct aliases must supply every output explicitly.
+      if (args.size() != info.at(name).function->params_.size()) return false;
+      CallShapeMap binding;
+      // Use the same per-call cap as lowering, within the global search budget.
+      size_t remaining = std::min(site_budget, kCallShapeBudget);
+      const size_t allowance = remaining;
+      const auto status = plan->second.Bind(args, binding, remaining);
+      const bool matched =
+          status == CallShapeStatus::Success && plan->second.MatchesResult(site, binding, remaining);
+      site_budget -= allowance - remaining;
+      if (!matched) {
+        LOG_DEBUG << "DeduplicateOutlinedKernels: keep " << candidate.names[0]
+                  << ": call shape proof failed (status " << static_cast<int>(status) << ")";
+        return false;
+      }
+    }
+    return true;
+  };
   for (auto& unit : units) {
-    // Tensor-to-tile lowering allocates outputs from the callee's signature,
-    // without substituting symbols into each caller's coordinates. Function
-    // equality alpha-maps those symbols, so it alone cannot authorize aliasing.
-    // Project all signatures as standalone types: their variables remain free
-    // and must have identical identities, including in views and Group members.
-    // One tuple projection memoizes shared type/shape DAGs across the whole unit.
+    // Exact identity remains the compatibility path. Alpha-equivalent physical
+    // signatures additionally need a proof at every affected incoming site.
     std::vector<TypePtr> signatures;
     for (const auto& name : unit.names) {
       const auto& func = info.at(name).function;
@@ -444,10 +497,10 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
       signatures.push_back(std::make_shared<TupleType>(types));
     }
     unit.signature = std::make_shared<TupleType>(signatures);
-    const auto hash = structural_hash(unit.normalized, false) ^ structural_hash(unit.signature, false);
-    auto canonical = index.FindOrInsert(hash, unit, [](const Unit& left, const Unit& right) {
-      return structural_equal(left.signature, right.signature, false) &&
-             structural_equal(left.normalized, right.normalized, false);
+    const auto hash = structural_hash(unit.normalized, false);
+    auto canonical = index.FindOrInsert(hash, unit, [&](const Unit& left, const Unit& right) {
+      return structural_equal(left.normalized, right.normalized, false) &&
+             (structural_equal(left.signature, right.signature, false) || check_sites(left, right));
     });
     if (canonical == &unit) continue;
     INTERNAL_CHECK_SPAN(unit.names.size() == canonical->names.size(), program->span_)

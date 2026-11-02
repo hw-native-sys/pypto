@@ -46,8 +46,9 @@ runtime-assigned ``__doc__`` renders as an empty description on exactly the page
 
 Scope and deliberate limits:
 
-* Only module-level functions defined in *both* layers of the same namespace are paired. A helper
-  that exists on one side only, or a name re-exported from elsewhere, is not this check's business.
+* Only module-level functions defined in *both* layers of the same namespace are paired. Definitions
+  in private `_<namespace>_*.py` implementation modules are included after a namespace is split.
+  A helper that exists on one side only, or a name re-exported from another namespace, is not paired.
 * A DSL wrapper with *no* docstring at all is reported, not skipped: it is the extreme of the same
   defect, since the published page then renders an empty description. Nothing else catches it --
   ``[tool.ruff.lint] select`` is ``PL, I, E, W, F, UP``, so pydocstyle (``D``) is not enabled. No op
@@ -203,6 +204,20 @@ def public_functions(path: Path) -> dict[str, tuple[FunctionNode, str | None]]:
     return out
 
 
+def namespace_functions(path: Path) -> dict[str, tuple[FunctionNode, str | None, Path]]:
+    """Collect a namespace's definitions, retaining their source paths for diagnostics."""
+    namespace = path.stem.removesuffix("_ops")
+    # The public module may only re-export operators after a split. Scan its
+    # private implementation siblings as well so moving a wrapper cannot
+    # silently remove it from the IR/DSL documentation parity check.
+    paths = [path, *sorted(path.parent.glob(f"_{namespace}_*.py"))]
+    return {
+        name: (node, doc, source)
+        for source in paths
+        for name, (node, doc) in public_functions(source).items()
+    }
+
+
 def find_violations(root_dir: Path) -> list[tuple[str, str, int, str, str]]:
     """Return (namespace, op, dsl lineno, dsl relative path, what went wrong) per violation."""
     violations = []
@@ -211,12 +226,12 @@ def find_violations(root_dir: Path) -> list[tuple[str, str, int, str, str]]:
         dsl_path = root_dir / "python" / "pypto" / "language" / "op" / f"{namespace}_ops.py"
         if not (ir_path.is_file() and dsl_path.is_file()):
             continue
-        ir_funcs = public_functions(ir_path)
-        dsl_funcs = public_functions(dsl_path)
-        rel = dsl_path.relative_to(root_dir).as_posix()
+        ir_funcs = namespace_functions(ir_path)
+        dsl_funcs = namespace_functions(dsl_path)
         for name in sorted(ir_funcs.keys() & dsl_funcs.keys()):
-            ir_node, ir_doc = ir_funcs[name]
-            dsl_node, dsl_doc = dsl_funcs[name]
+            ir_node, ir_doc, _ = ir_funcs[name]
+            dsl_node, dsl_doc, source = dsl_funcs[name]
+            rel = source.relative_to(root_dir).as_posix()
             if ir_doc is None:
                 continue  # nothing to carry across
 

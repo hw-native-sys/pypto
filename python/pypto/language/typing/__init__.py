@@ -25,6 +25,7 @@ from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.memref import MemRef
 from pypto.language.typing.prefetch_handle import AsyncEvent, AsyncSession, PrefetchAsyncContext
 from pypto.language.typing.ptr import Ptr
+from pypto.language.typing.reg import Reg
 from pypto.language.typing.scalar import (
     RUNTIME,
     BoolLike,
@@ -54,6 +55,7 @@ __all__ = [
     "Out",
     "PrefetchAsyncContext",
     "Ptr",
+    "Reg",
     "RuntimeScalarMarker",
     "Scalar",
     "Tensor",

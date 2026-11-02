@@ -8,6 +8,28 @@ IR 解析器 (Parser) 使用装饰器（`@pl.function`、`@pl.program`）将 Pyt
 
 参见 [IR 构建器](06-builder.md) 了解手动 IR 构建，以及 [Python IR 语法](../language/00-python_syntax.md) 了解完整语法。
 
+## 实现结构
+
+`ASTParser` 仍是函数解析、语句/表达式分派和变量绑定的入口，通过组合专用解析器拆分职责，不使用解析混入类（Mixin）。
+
+| 模块 | 职责 |
+| ---- | ---- |
+| `control_flow_parser.py` | 循环、条件分支、yield、break 和 continue |
+| `scope_parser.py` | 作用域指令、SPMD 和 split-AIV 展开，复用公共作用域生成逻辑 |
+| `call_parser.py` | 内核、外部和内联调用；submit 结果绑定 |
+| `op_parser.py` | 算子调用、分布式操作和缓冲区元数据 |
+| `subscript_parser.py` | Tensor/Tile 索引、切片和下标赋值 |
+| `attr_parser.py` | 函数和调用属性解析 |
+| `dispatch_semantics.py` | TaskId 生产者、依赖和调度谓词 |
+| `source_comments.py` | 注释附着与块边界处理 |
+| `region_context.py` | 活跃作用域、split 和手动区域状态 |
+| `parser_state.py` | 共享服务、递归回调和状态契约 |
+| `syntax_helpers.py`、`type_semantics.py` | 共享语法识别与类型/形状辅助函数 |
+
+组件接收显式依赖和少量递归回调，不持有整个 `ASTParser`。每个解析器共享同一个构建器、作用域管理器、求值器、类型解析器和源码位置跟踪器。内联展开临时修改现有求值器和源码跟踪器，因此索引、算子和嵌套语句始终使用一致的闭包和源码坐标。
+
+函数元数据、控制流状态和内联状态分别管理。程序级缓冲区元数据保留装饰器传入的对象身份。调用和作用域共享同一个 `DispatchSemantics` 实例，以统一追踪 TaskId 生产者和绑定代次。
+
 ## 用法
 
 ### 基本函数

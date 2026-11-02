@@ -135,7 +135,7 @@ program_optimized = reuse_pass(program)
   | `tile.{row,col}_expand{,_mul,_add,_sub,_div}` | `forbid_output_alias(1)`（广播向量） | 行/列向量（arg 1）会被**每个**输出行/列重读,输出若 alias 它则在第一行/列后被覆盖 |
   | `tile.cast`（所有目标的升精度；A2/A3 的降精度） | 输出和输入字节范围不得重叠 | 写入可能覆盖尚未读取的源元素（见上） |
 
-- **流水线 stage 守卫**（容量门控，仅针对复制路径）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [30-lower_pipeline_loops.md](32-lower_pipeline_loops.md)）。本守卫只作用于这条复制路径。在 `memory_planner=PTOAS` 下，合格循环会先被 [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) 接手：它给每个 load 一个以 `iv % F` 索引的 `pl.MemRef(..., slots=F)`，循环体只有一份——没有副本，也没有 `pipeline_membership`，而且该流水线本就跳过 MemoryReuse。以下描述仅适用于被那个 pass 拒绝的循环。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号——把并发副本合并到同一块缓冲会注入一条虚假的写后读（write-after-read），使各 stage 串行化（即 #1475 的 cube matmul 操作数坍缩）。MemoryReuse 因此在**每个内存空间**（包括 L0 matmul 空间 Left/Right/Acc/Bias，且无论 tile 是 load 还是 `tile.move` 的结果）都把并发副本保持在**不同的缓冲**中，最多到**可负担的双缓冲深度** `F_g = min(depth_g, ⌊C_s / slot_g⌋)`：stage `k` 的副本落在残数 `ordinal(k) mod F_g`（**稠密**的 stage 序号，因此稀疏 stage ID 如 `{0, 2}` 不会因 `2 mod 2 == 0 mod 2` 而错误合并），因此并发副本永不共享（放得下时是完整 ping-pong，空间紧张时尽量分散）。分离是否放得下由**精确的按空间分配器足迹**（`SpaceFootprint`，与 `AllocateMemoryAddr` 共享——按构造保证一致）决定，而非估算。当某空间在所有 group 的可负担深度下仍然溢出时，采用**优雅的跨 group 削减**：将某个 group 的深度降低一个残数并重新打包（按 `MaxRelief` 启发式选择 group——优先释放最多字节，平局取最小 group id）；若削减耗尽，则整体回退到 **legacy 重新打包**（`force_legacy`），从而绝不会在 legacy 打包本可放下的情况下溢出。容量未知的空间（未配置 backend）使用 legacy 判据，因此容量门控路径绝不比 legacy 更差。当门控把某个 group 的深度降到其请求的 `stage=` 之下（或某空间触发 legacy 回退）时，MemoryReuse 通过统一诊断通道发出诊断——一条 `PH-MR-001` **性能提示**（回退情形则为 **warning**），指出请求深度与实际深度以及修复方式（把每 stage 的 tile 缩小到 `≤ C_s / stage`，或把 `stage=` 降到能放下的值）——因此容量导致的串行化绝不会静默发生。若单个物理 buffer 自身已经超过整个内存空间，则不发出该 fallback warning：这不是复用或 stage 深度退化，而是不可能完成的分配，应由面向具体算子的检查或 `AllocateMemoryAddr` 作为硬错误报告。复用决策完成后，MemoryReuse 会剥离已消费的 `pipeline_membership` attr，使其不会带到下游 pass 或 codegen。
+- **流水线 stage 守卫**（容量门控，仅针对复制路径）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [32-lower_pipeline_loops.md](32-lower_pipeline_loops.md)）。本守卫只作用于这条复制路径。在 `memory_planner=PTOAS` 下，合格循环会先被 [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) 接手：它给每个 load 一个以 `iv % F` 索引的 `pl.MemRef(..., slots=F)`，循环体只有一份——没有副本，也没有 `pipeline_membership`，而且该流水线本就跳过 MemoryReuse。以下描述仅适用于被那个 pass 拒绝的循环。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号——把并发副本合并到同一块缓冲会注入一条虚假的写后读（write-after-read），使各 stage 串行化（即 #1475 的 cube matmul 操作数坍缩）。MemoryReuse 因此在**每个内存空间**（包括 L0 matmul 空间 Left/Right/Acc/Bias，且无论 tile 是 load 还是 `tile.move` 的结果）都把并发副本保持在**不同的缓冲**中，最多到**可负担的双缓冲深度** `F_g = min(depth_g, ⌊C_s / slot_g⌋)`：stage `k` 的副本落在残数 `ordinal(k) mod F_g`（**稠密**的 stage 序号，因此稀疏 stage ID 如 `{0, 2}` 不会因 `2 mod 2 == 0 mod 2` 而错误合并），因此并发副本永不共享（放得下时是完整 ping-pong，空间紧张时尽量分散）。分离是否放得下由**精确的按空间分配器足迹**（`SpaceFootprint`，与 `AllocateMemoryAddr` 共享——按构造保证一致）决定，而非估算。当某空间在所有 group 的可负担深度下仍然溢出时，采用**优雅的跨 group 削减**：将某个 group 的深度降低一个残数并重新打包（按 `MaxRelief` 启发式选择 group——优先释放最多字节，平局取最小 group id）；若削减耗尽，则整体回退到 **legacy 重新打包**（`force_legacy`），从而绝不会在 legacy 打包本可放下的情况下溢出。容量未知的空间（未配置 backend）使用 legacy 判据，因此容量门控路径绝不比 legacy 更差。当门控把某个 group 的深度降到其请求的 `stage=` 之下（或某空间触发 legacy 回退）时，MemoryReuse 通过统一诊断通道发出诊断——一条 `PH-MR-001` **性能提示**（回退情形则为 **warning**），指出请求深度与实际深度以及修复方式（把每 stage 的 tile 缩小到 `≤ C_s / stage`，或把 `stage=` 降到能放下的值）——因此容量导致的串行化绝不会静默发生。若单个物理 buffer 自身已经超过整个内存空间，则不发出该 fallback warning：这不是复用或 stage 深度退化，而是不可能完成的分配，应由面向具体算子的检查或 `AllocateMemoryAddr` 作为硬错误报告。复用决策完成后，MemoryReuse 会剥离已消费的 `pipeline_membership` attr，使其不会带到下游 pass 或 codegen。
 - `DSA_RP` 跳过 `MemoryReuse`；它把请求的流水线深度表示为硬分离，并在
   `AllocateMemoryAddr` 中执行仅放宽流水线意图的回退。
 
@@ -178,7 +178,7 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 *不同*槽位的两个 tile 本来就应该同时存活（这正是 ping-pong 的用途），只有落在同一槽位的 tile
 才会互相破坏。下标是运行期表达式时（`l0c[i % 2]`）没有静态的槽位归属可比，该检查被跳过——轮转
 的正确性由作者负责——而与其他分配之间的隔离依然成立。该检查由本 pass 负责，因为这里才有生命周期信息
-（`ComputeLifetimes`）；判据与 packer 自己的 `var_overlap` 一致，因此**首尾相接是允许的**
+（`AnalyzeAllocationLifetimes`）；判据与 packer 自己的 `var_overlap` 一致，因此**首尾相接是允许的**
 （一个 tile 的最后一次读，可以正是产出下一个成员的那条语句）。通过继承而非绑定落到该 buffer
 上的 tile——view、原地结果、裸 SSA 别名——被排除在外：它们与源 tile 是同一份数据，重叠是预期
 行为。
@@ -199,11 +199,13 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 - writer 的定义 op 消费了 `tile.tpop_from_aic` 的值，**且**
 - 它将要原地复用的那个 buffer 成员（其 last use 正是该 writer 的定义语句）是 load 派生的。
 
-两种分类都以 `Var` 标识（identity）为键。读取**操作数（operand）**时还需多一步：值可能经由**循环携带（loop carry）**到达 writer，而 `IterArg` 本身从来不是 `AssignStmt` 的定义，因此 `Var` 标识永远无法对其分类。由于 [`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) 已经把每条 carry 链（init value、`IterArg`、yield value）融合到同一个 MemRef base 上，`IterArg` 操作数改为按该 base 的污染（taint）状态来分类。而让这条 carry 首先变得可见的前提，是用 `AsVarLike` 读取操作数（绝不能用 `As<Var>`，它不匹配 `IterArg` 自己的 `ObjectKind`）；否则 `down_next = tile.add(down_prev, pipe_carry)` 中被携带的 `tpop` 值会静默丢失污染标记，从而形成危害性的原地复用。
+两种分类都以 `Var` 标识（identity）为键，而不依赖 MemRef 是否存在。TPOP 结果、其零复制视图和普通 SSA 别名使用预留管道存储，不占用通用分配池，因此 `InitMemRef` 有意不为它们创建 MemRef。收集器仍识别这些 producer，并沿缓冲区别名视图和普通别名传播来源，再对消费它们的 writer 分类。仅仅消费 TPOP 输入并产生独立值，不会让新结果成为 TPOP 别名。
+
+值经由**循环携带（loop carry）**到达 writer 时，还需额外处理：`IterArg` 本身不是 `AssignStmt` 的定义。对于带有 MemRef 的 carry，[`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) 已将 carry 链（init value、`IterArg`、yield value）融合到同一 base，收集器可进一步检查该 base 的污染（taint）状态。必须用 `AsVarLike` 读取操作数，才能识别这种 carry（`As<Var>` 不匹配 `IterArg` 自己的 `ObjectKind`）。
 
 carry 同时也打破了程序序，因此收集器会对函数体遍历**两次**。污染某条 carry buffer 的 producer 可能位于它所污染的那个 use **之后**——例如 `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p`，从第 1 次迭代起 `w` 就读到了 tpop 值，但单次前向遍历在见到 `p` 之前就已经对 `w` 完成了分类。第三次遍历不会带来任何新信息：第一次遍历后 base 集合即已完备（`tile.tpop_from_aic` 的定义与顺序无关，而 view 与其 source 共享 base），因此第二次遍历中只有 `Var` 集合会增长，且它们在该次遍历内部按程序序传播。两次遍历均为 O(N)。
 
-该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
+共享分配分析以 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910 为 true）以及函数为 split-AIV 这两个条件门控该 guard；其他 backend / 函数类型不启用此危害分类，复用行为不变。没有活动 `PassContext` 时，分析仍解析同一个已配置 backend handler，而不是关闭 guard。MemoryReuse 拒绝危害性的共享；DSA_RP 将其导出为硬性目标危害分离约束（hard target-hazard separation），而不是可放松的复用惩罚。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
 
 ## 被写工作区危害 {#written-workspace-hazard}
 
@@ -220,6 +222,11 @@ carry 同时也打破了程序序，因此收集器会对函数体遍历**两次
 进入循环后这个方向性就失效了。回边会在第 *i+1* 次迭代用标量流水重写工作区，而第 *i* 次迭代对同缓冲区上任何值的向量读——`dst` 以及消费它的算子——可能仍在飞，单次迭代内的生命期先后证明不了下一次迭代的安全性。因此被 `ForStmt` 或 `WhileStmt` 包裹的工作区取**独占**缓冲区，两个方向都拦。在 MemoryReuse 运行时，只有这两种语句会重复执行 body：`pl.pipeline` 已被 [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) / [`LowerPipelineLoops`](32-lower_pipeline_loops.md) 降为循环。
 
 它以 registry 为依据，而非算子名或后端开关，且**不按后端门控**：PyPTO 无从得知某条指令用哪条流水写工作区，因此所有声明过的工作区一律隔离。A5 的 TSELS 恰好不碰 `tmp`（它用 `vdup` 把标量送进向量寄存器），在那里多付一小块缓冲区，是不把逐指令的流水知识编码进 pass 所付的代价。同一事实也被 DSA-RP 作为 `TargetHazard` 分离约束消费，两个规划器结论一致。
+
+通过 `LaneInvariantArg::Scratch` 识别的既有归约临时工作区，仅在软件流水变换
+标记为 `software_pipeline_slots` 的循环内受到同样的循环生命周期隔离。
+该额外隔离作用于带标记的稳态循环；循环外的预取和尾部计算沿用既有分配约束。
+仅开启选项，以及普通或回退循环，均保留既有 scratch 分配策略。
 
 若无该守卫，由 `pl.tile.select` 构建的 clamp 会恰好损坏比较源的第 0 个元素：复合算子合成的工作区在一条语句内生死，因而是前一条 `tile.cmps` 仍在读的那块缓冲区最优先的复用候选。
 
@@ -297,8 +304,20 @@ Pass MemoryReuse();
 
 **实现文件**：`src/ir/transforms/memory_reuse_pass.cpp`
 
+**内部模块**（`src/ir/transforms/memory_reuse/`）：
+
+- `semantic_aliases.cpp` 负责语义必需别名（must-alias）的重定向及各规划器对应的执行流程。
+- `lifetime_analysis.cpp` 实现公开的分配生命周期分析重载。
+- `allocation_constraints.cpp` 收集硬件与禁止别名约束，为两种规划器验证声明式分配。
+- `packing.cpp` 选择放置位置并应用物理 MemRef 共享。
+- `yield_fixup.cpp` 修复控制流存储边界、规范化恒等别名并清理失效分配。
+- `storage.cpp` / `storage.h` 共享物理窗口判定、存储搬移和小型访问器辅助类。
+- `internal.h` 声明内部阶段接口；入口文件保留 pass 注册及 MemoryReuse 阶段顺序。
+
+**关键算法**：
+
 - `LifetimeAnalyzer` 遍历完整 IR 树计算变量生命周期（包括嵌套控制流）
-- `ComputeLifetimes` 构建 MemRef 共享组和生命周期区间
+- `AnalyzeAllocationLifetimes` 构建 MemRef 共享组和生命周期区间
 - `IdentifyReuseOpportunities` 查找复用候选，在已知容量溢出时重试对齐子区间放置，并记录每个成员的 placement offset
 - `ApplyMemRefSharing` 通过 `MemRefSharingMutator` 更新 MemRef 指针
 - `TopDownRetargeter::CoalesceAccumulatorIfPhis` 通过把失效分支的 seed 重定向到就地累加器缓冲区，合并被剥离的循环携带累加器 `if`-phi，使 `YieldFixupMutator` 不再产生非法的 `acc→acc tile.move`（见算法步骤 5）

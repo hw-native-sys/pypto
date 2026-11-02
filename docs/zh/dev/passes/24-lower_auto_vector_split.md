@@ -522,16 +522,21 @@ out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
 | # | 条件 | 由谁决定 | 拦住的情形 |
 | - | ---- | -------- | ---------- |
 | 1 | 折半后的节点仍能与其自身实参通过类型检查 | 算子自己的 `f_deduce_type`，无需任何元数据 | 全宽的 `tile.add` 操作数、落在拆分轴上的 rank-1 bias、`row_argmax` 形状匹配的 `tmp`、`tile.transpose_view` 的轴置换 |
-| 2 | 条件 1 **看不见**的操作数必须 lane 局部、沿拆分轴广播、或被**显式声明** | 注册表声明 | `tile.sel` 的全宽 `mask`——其结果推导根本不读它 |
+| 2 | 条件 1 **看不见**的操作数必须 lane 局部、沿拆分轴广播、或被**显式声明** | 注册表声明 | `tile.sel` / `tile.sels` 的全宽 mask：覆盖关系无法证明 lane 来源 |
 
 ### 条件 1 —— 折半后的节点仍能通过类型检查
 
-改写完实参之后，pass 会用尾部 `Substitute` 将要装入的实参（每个被跟踪的操作数换成其折半
-替身）重新推导一次结果，并把推导出的**物理** shape 与折半后的结果类型比对。valid shape 不
-参与比较：`HalveTileShape` 会按 lane 做本地化，而类型推导无法复现这一点。若重新推导对折半
-后的实参直接报错，同样计为不一致——算子正在拒绝它将要收到的那个节点。
+改写 shape 参数后，pass 会重新推导尾部 `Substitute` 将要装入的实际逐 lane 实参。
+推导拒绝实参或**物理** shape 不匹配时，这项检查失败；有效范围遵循算子自身的契约。
 
-这一问是问算子本身，因此不需要任何逐算子元数据，也不会随着算子新增或契约变化而过时。
+`set_pointwise_validity_args` 将元素索引方式和单位相同的数据分为一组，
+`BroadcastValidRegionsAgree` 证明有效区广播兼容，并接受代数等价表达式。
+空组交由算子推导：partial-combine 可复制唯一有效的输入，但不扩大结果有效区；
+谓词要求字节覆盖；`tile.assemble` 要求并集为矩形。分区检查覆盖全部数据和谓词，
+仅排除已声明的工作区与 lane 不变操作数。工作区形状和类型仍须通过实际逐 lane 推导。
+重复执行的 singleton 计算也检查逐点有效区，其暂存写入要求实际使用 lane 私有 Vec 存储。
+
+物理 shape 探测直接询问算子，无需逐算子的拆分映射，并随算子契约的变化生效。
 最常见的情形正是由它拦下的：
 
 ```python
@@ -565,17 +570,16 @@ def split_auto(data: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec], ...):
 `[256, 1]` 相矛盾。与 `tile.transpose` 不同，它是纯视图，不在 `FindTransposeSplitHazard`
 的覆盖范围内（后者只匹配 `tile.transpose`）。
 
-描述 shape 的算子（`tile.full`、`tile.create`、`tile.slice`、`tile.reshape`、
-`tile.reinterpret_view`）在该检查之前就改写了自己的操作数，且全宽源在其语义中有明确含义。
-
-`tile.reshape` 与 `tile.reinterpret_view` 的这一点来自一次更早的改写：对未被跟踪的源，
-其无偏移视图会先以全宽发出，再跟一个 per-subblock 的 `tile.slice`，使每条 lane 读到自己
-的那一半，而不是两条都读第一半。该 slice 只能由**静态**的半宽 extent 物化，因此全宽源上
-动态的拆分 extent 会被直接拒绝，而不是落到普通的结果折半上。
+shape 参数在类型推导前归一化。对已跟踪输入的 `tile.reshape`，`PlanReshapeSplit`
+分别换算容量和逻辑步长，再改写目标 shape。同形视图保留布局；其他视图要求源为无盒化、
+无显式 stride 的行主序布局，或线性列主序向量。列主序矩阵、盒化布局和显式 stride
+需要独立的分区映射，因此自动分核拒绝这些布局上的非同形 reshape。
+未跟踪输入的 `reshape` / `reinterpret_view` 仍保留全宽视图，再跟逐 lane 的
+`tile.slice`，使两条 lane 不会都读第一半。动态半宽 extent 无法物化该 slice，因此被拒绝。
 
 ### 条件 2 —— 类型推导看不见的操作数
 
-推导器若从不读某个操作数的 extent，那么它"接受"这件事本身什么也不能说明。pass 会逐调用
+推导器接受超宽操作数且结果不变，并不能证明该操作数的 lane 来源。pass 会逐调用
 就地判定这一点，同样无需元数据：把该操作数在拆分轴上**加倍**再推导一次。若推导报错或结果
 发生变化，说明推导器**盯着**这个操作数，条件 1 已经替它做过判断；若答案不变，说明推导器对
 它**视而不见**，此时只有声明才能回答全宽是否符合契约。
@@ -584,11 +588,11 @@ def split_auto(data: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec], ...):
 picked = pl.tile.sel(mask, lhs, rhs, tmp)   # `mask` 为全宽时被拒绝
 ```
 
-`tile.sel` 仅从 `BroadcastShapes(lhs, rhs)` 推导结果，对 `mask` 只检查它是不是 `TileType`；
-于是"全宽 mask + 折半 lhs/rhs"能干干净净地重新推导通过——可两条 lane 都会去读 mask 的第
-`0..127` 行。`tile.sels` 是同一类陷阱：它只校验 mask *覆盖* src 的有效行，而超宽的 mask
-恰好满足覆盖。两者都只声明了自己的 `tmp` 位置，因此它们的 mask 会被拒绝。无人分类过的操作
-数一律按 lane 数据对待——这是安全的默认值。
+`tile.sel` 从 `BroadcastShapes(lhs, rhs)` 推导数据 shape。`tile.sel` 与 `tile.sels`
+都会检查压缩谓词的字节范围是否覆盖数据有效区。覆盖关系允许超宽 mask，却无法证明其内容
+属于哪条 lane：两条 lane 仍可能读取 mask 的前几行。因此全宽 mask 可以通过类型推导，
+但仍被分区检查或盲操作数检查拒绝。两者都没有把 mask 声明为 lane 不变操作数，`tmp`
+则是工作区。未分类的操作数一律按 lane 数据对待。
 
 把这道关卡限定在"推导器看不见"的操作数上，正是它不越界的关键。否则每个带有合法全宽操作数
 的算子都得写一条注册表声明，只为压掉一个本就不该运行的检查——`tile.rsqrt` 就是这么给一个
@@ -597,8 +601,8 @@ picked = pl.tile.sel(mask, lhs, rhs, tmp)   # `mask` 为全宽时被拒绝
 对推导器已经能决定、因而永远走不到的声明直接判失败，并钉住盲区集合，使新增算子或放松的
 推导器必须被分类，而不是悄悄漏过。
 
-**"处于盲区"通常是症状，而推导器往往才是解药。** 一个操作数落进盲区，是因为推导器从不读
-它的形状——这常常只是契约校验不足，而非该维度真的自由。此时正确的做法是*把算子本就写明的
+**"处于盲区"通常是症状，而推导器往往才是解药。** 一个操作数落进盲区，是因为推导器没有充分
+约束它的形状——这常常只是契约校验不足，而非该维度真的自由。此时正确的做法是*把算子本就写明的
 关系补成检查*，而不是把它声明为 lane 无关：补上检查后，任何调用方传入形状不符的操作数都会
 被拒绝，而拆分 pass 也顺带拿到了一个"被钉住"的答案。`tile.scatter_update` 的 `index` 与
 `src` 之所以在盲区，是因为推导只是把输入类型原样抄回；把 tensor 路径的下降早已断言的关系
@@ -667,88 +671,64 @@ picked = pl.tile.gather(src, indices, tmp)   # 被拒绝：表被折半了
 - **结果为 tuple** 时走自己的路径（见下）：通用块只跟随一个 `result_split_dim`，而 tuple
   的拆分轴是**逐元素**的。
 
-### tuple 结果——每个元素各有一条拆分轴
+### tuple 结果——每个元素各有一个逻辑分区
 
-`tile.gather_compare` 返回 `Tuple[dst[rows, out_cols], cdst[1, rows]]`。在按行拆分时，
-这两个元素**并不**沿同一条轴移动：`dst` 在 dim 0 折半，而 `cdst`——按行计数连续排布的单行
-——在 dim 1 折半。没有单一的结果轴可循，因此通用路径无法表达。
+`tile.gather_compare` 返回行索引和逐行计数。对 32 位计数，两者的物理 shape 分别为
+`[rows, out_cols]` 和 `[1, align_up(rows, 8)]`，计数的 `valid_shape` 为
+`[1, valid_rows]`。因此按行拆分时，索引沿 dim 0 分区，计数沿 dim 1 分区，各自保留
+独立的物理容量。
 
-该映射是**推导出来的，而非声明的**：用折半后节点将要携带的实参重新做一次类型推导，读出每个
-元素移动的是哪条轴。这样新增 tuple 返回算子无需任何注册，映射也不会像逐算子元数据那样过期
-（见 gh#2612 的讨论）。重新推导只提供**轴**；折半本身仍由 `HalveTileShape` 完成，因此奇数
-extent 的逐 lane 局部化与单 `TileType` 路径完全一致。
+`ProcessStmt` 根据实际逐 lane 实参取得 tuple 类型。分区证明逐元素比较原类型与推导后的
+类型，不重复推导调用，也不再折半旧结果。它优先把有效 `valid_shape` 的变化与输入的
+逻辑分区匹配，即使对齐后的容量不变，也可以证明分区成立。只有相关输入轴和输出轴都
+完全有效时，才允许回退到物理折半判定。每个元素必须有且只有一个可证明的分区；shape
+和有效范围**都不变**时无法证明。因此 LEFT_RIGHT `tile.gather_compare` 仍不支持：
+拆分源的列不会划分两个输出各自按行定义的结果。
 
-每个元素都必须恰好在一条轴上折半。元素**原样返回**才是危险情形而非无害情形——算子用每个
-lane 只拥有一半的操作数产生了全宽输出，于是两个 lane 都没有完整答案，而形状看起来仍然正确。
-这也正是 `tile.gather_compare` 的 LEFT_RIGHT 拆分被正确拒绝的原因：它的两个输出都由源的
-**行数**定尺寸，折半列数不会让任何一个移动。
+最终 tuple 保留**完整的重新推导类型**，包括物理容量和逐 lane `valid_shape`，
+不会再次对旧元素调用 `HalveTileShape`。对完全有效的源执行 UP_DOWN 拆分：
 
-`x = tup[i]` 投影由 `split_axis::RetypeTupleProjection` 依据折半后的 tuple 重新定型，并记录
-每个元素自己的轴，使后续 `tile.store` 偏移正确的维度。**两条**下降路径都要调用它：AUTO 路径
-的亲和性门只把叶子 *call* 送进 `ProcessStmts`，投影若落到其"原样透传"兜底分支，就会在已折半
-的 tuple 之上保留全宽的声明类型。
+| 源行数 | 完整计数容量 | 每条 lane 的计数容量 | 两条 lane 的有效计数 | 逻辑步长 |
+| ------ | ------------ | -------------------- | -------------------- | -------- |
+| 8 | 8 | 8 | 4 / 4 | 4 |
+| 10 | 16 | 8 | 5 / 5 | 5 |
+| 18 | 24 | 16 | 9 / 9 | 9 |
 
-投影也可以完全不绑定：`pl.tile.store(pair[0], [0, 0], out)` 直接**内联**传入
-`TupleGetItemExpr`，没有任何环节会把它提取成变量。因此任何在 tile 操作数上只匹配 `Var` 的
-代码都会漏掉它，而该操作数之后仍会被替换，于是在逐 lane 数据之上留下全宽的声明类型。
-`split_axis::OperandSplitInfo` 是"这个操作数是否被拆分、沿哪条轴"的唯一答案，绑定的 `Var`
-与内联投影一视同仁；`BuildHalvedCallArgs` 则在折半后的 tuple 之上重建投影，使类型一致性探测
-也看到逐 lane 的操作数。所有消费者都走它们——通用路径的被跟踪输入扫描、`LocalizeStoreOffset`，
-以及 `GetFirstTileArgMemory`（它现在读操作数的**类型**，向量算子不会再被误判成 SHARED 并复制
-到两条 lane）。
+`TileInfo` 为每个元素记录 `split_dim`、实际逐 lane 容量 `half_dim_size` 和逻辑
+偏移步长 `logical_step`。已证明的逻辑分区即使步长等于容量也会记录该字段；字段为空
+时按普通 body 步长或物理折半约定解析，仍须执行消费者检查。有效范围保留在 tile 类型
+的 `valid_shape` 中。`LocalizeStoreOffset` 沿该元素自己的轴使用
+`lane * logical_step`，因此十行计数的写入偏移为 0 和 5，而不是 0 和 8。
 
-所有"这个操作数是否被拆分"的提问都走 `OperandSplitInfo`。这个问题的消费者远不止折半本身，
-而每一处对内联投影答"否"的后果各不相同：
+tuple 容器通过 `TileInfo::tuple_elements` 共享不可变的逐元素记录。
+`RetypeTrackedBinding` 在两条下降路径中都为 tile 别名、tuple 别名和绑定的 tuple
+投影传递替换后的类型及分区记录。`OperandSplitInfo` 也能解析
+`pl.tile.store(pair[0], [0, 0], out)` 这样的内联投影。`BuildHalvedCallArgs` 和
+`ReplacedOperand` 在替换后的 tuple 上重建投影，使探测与最终消费者看到相同的逐 lane
+类型。查询拆分状态必须统一使用这个 helper：
 
-| 提问方 | 答错的代价 |
-| ------ | ---------- |
-| 通用路径的被跟踪输入扫描 | 结果在逐 lane 操作数之上保留全宽类型 |
-| `LocalizeStoreOffset` | 两条 lane 写到同一批行 |
-| `GetFirstTileArgMemory` | 向量算子被判为 SHARED，复制到两条 lane |
-| 绝对索引闸门 | `tile.gather` 的表已减半而索引仍绝对——**无任何诊断**，因为 `gather` 的结果尺寸取自 `indices` |
-| `tile.reshape` / `tile.reinterpret_view` | 在一个即将被折半的操作数上生成全宽视图 + 逐 lane 切片 |
-| `tile.slice` 偏移 | 在已是 lane 局部的偏移上再加 `+ subblock_idx * half`，lane 1 读越界 |
-| V→C 边界 | 合法的 `tile.move(pair[0], target_memory=Mat)` 被当作全宽拒绝 |
-| `RepairIterArgs`（循环初值） | 初值已折半，而携带值、出口及循环之后全部停留在全宽 |
-| `YieldedTileInfo`（回边 / 合并） | **两个方向都错**：全宽携带值被喂 `pl.yield_(pair[1])` 却放行，合法折半的反被拒绝 |
-| `FindFullWidthOperand`（条件 2） | 已分区的投影被报成全宽操作数——误拒 |
+| 消费者 | 所需记录 |
+| ------ | -------- |
+| 通用算子、绝对索引闸门 | 是否分区、分区轴 |
+| `LocalizeStoreOffset`、slice 和 view 改写 | 容量、逻辑步长、分区轴 |
+| `GetFirstTileArgMemory` | 用于亲和性判定的替换后操作数类型 |
+| V→C 边界 | 替换后的操作数及传输支持的分区 |
+| 循环携带值与分支合并 | tuple 类型及逐元素分区一致性 |
 
-pass 里仅剩的 `AsVarLike` 查找只有两类：`OperandSplitInfo` / `ReplacedOperand` 自身的实现，
-以及刻意按变量身份识别**整个 tuple** 的两处（`YieldedHalvedTupleType`、`RetypeTupleProjection`）。
-除此之外任何询问操作数拆分状态的代码都应走该 helper——这才是阻止这类问题按调用点逐个复发的办法。
+`RepairIfReturnVars`、`RepairIterArgs` 和 `RepairReturnVars` 同时保留推导后的 tuple
+类型和逐元素记录。分支与循环回边必须在容量、有效范围、分区轴及实际逻辑步长上保持
+一致。容量包含 padding 时，仅凭 tuple 类型无法恢复计数的步长。
 
-边界处的 `tile.aic_gather` 也改用 `ReplacedOperand` 构造——它在折半后的 tuple 之上重建投影，
-使 gather 无论哪种写法都是 HALF → FULL 的加倍。
+类型推导也可能拒绝逐 lane 实参：例如拆分后不再满足 `tile.tquant_mx` 的约束，或
+`tile.tquant_mx_raw` 收到了按完整源尺寸分配的 scratch。诊断会保留算子本身的拒绝原因，
+自动重设这类已分配工作区的大小尚不支持。推导成功但无法证明某个元素的分区时，
+下降也会拒绝该 tuple。
 
-tuple 还会穿过**分支合并与循环携带**，两者都不从 `tile_vars` 读取拆分信息——tuple 变量从不
-在其中。两者改为直接采用折半后的**类型**，其元素本就带着逐元素拆分，没有单一的轴可记录：
-
-| 形态 | 修复者 | 一致性规则 |
-| ---- | ------ | ---------- |
-| `if` 合并 | `RepairIfReturnVars` | 两个分支必须产出相同的折半 tuple |
-| 循环携带 + 出口 | `RepairIterArgs` / `RepairReturnVars` | 回边 `Yield` 必须与携带值一致 |
-
-DSL 对两者都无法写注解，但 `ConvertToSSA` 会为"在分支里被重新赋值的 tuple"合成正是这种 phi，
-而 `pl.range(..., init_values=(tup,))` 可以直接携带一个 tuple。
-
-这里有**两种**不同的失败都会以拒绝告终，诊断信息把它们分开。一是算子**直接拒绝**折半后的
-实参：可能是某条约束在折半后不再成立（`tile.tquant_mx` 要求 `M % 16 == 0`，而 per-lane 的
-`M` 可能破坏它），也可能是 workspace 按完整源尺寸分配——`LowerCompositeOps` 分解之后，
-`tile.tquant_mx_raw` 要求其 `[1, groups]` scratch 与由 `src` 推出的数量精确相等，而那个
-单元素 dim 0 使通用路径不会折半它。重新划分这类 workspace **尚未实现**：它的尺寸算在推导
-函数内部，且其分配语句早已按全宽发射。两种情况下诊断都直接引用算子自己的报错，而不去猜测。
-二是算子**接受**了折半实参但某个元素没有移动，即上面那种"内容错、形状对"的情形。
-
-条件 2（盲操作数兜底）不在这条路径上运行——它是围绕单一结果轴写的。"每个元素都必须移动"这条
-规则覆盖了常见情形：**主**逐 lane 操作数若保持全宽，元素就不再移动，从而被拒绝。它无法覆盖
-任何元素形状都不依赖的**次要**逐 lane 操作数；当前已注册的 tuple 返回算子都没有这类操作数
-（其余 tile 操作数都是已声明的工作区），而新增算子会出现在
-`test_lane_invariant_arg_coverage.py` 的盲操作数清单里，迫使这个问题在合入前被回答。
-
-只在*部分* arity 下才是 scratch 的位置无法声明：`tile.mrgsort_format2` 的 `tmp_or_src2`
-在 3/4 路归并里是第三个已排序输入、在 2 路里才是工作区，而 arity 由位置实参个数决定。
-但实际上并不需要声明——推导函数总是用持有 `tmp` 的那个位置（永远是最后一个）来给结果定尺寸，
-因此类型一致性在任何 arity 下都能判定该位置，其余位置则是必须被分片的真实排序输入。
+条件 2 的盲操作数检查只跟随单一结果轴，不在 tuple 路径运行。逐元素发现覆盖主要的
+被分区输入；对于任何结果 extent 都不依赖的次要操作数，仍须依靠可靠的算子契约与
+盲操作数清单审查。例如，仅在部分 arity 下才是 scratch 的位置不能无条件声明：
+`tile.mrgsort_format2` 的 `tmp_or_src2` 在 2 路归并中是工作区，在 3/4 路归并中则是
+已排序输入，推导器会检查实际的工作区位置。
 
 ### 循环携带值、分支归并与被丢弃的轴
 

@@ -1,0 +1,462 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// Generated from {{template_package}}.
+
+#include <cstdint>
+#include <pto/pto-inst.hpp>
+
+#include "platform_comm/comm_context.h"
+#include "pto/comm/comm_types.hpp"
+#include "pto/comm/pto_comm_inst.hpp"
+#include "tensor.h"
+
+#ifndef __gm__
+#define __gm__
+#endif
+
+#ifndef __aicore__
+#define __aicore__ [aicore]
+#endif
+
+// Keep this after the qualifier fallbacks so hardware builds retain the
+// [aicore] entry annotation while using simpler's logical SPMD context.
+#include "intrinsic.h"
+
+#if !defined(PTO_URMA_SUPPORTED) || !defined(PTO_NPU_ARCH_A5)
+#error "indexed_all_to_all_v requires A5 URMA"
+#endif
+
+namespace {
+
+// Peer counts are read after Barrier A. Barrier B follows payload completion.
+// Credits add +1/+1, wait GE(1)/GE(2), then subtract 2: never reset a signal
+// that may already contain the next invocation's credits. All ranks use the
+// same block count and collective order; receive-window reuse follows its consumer.
+// Callers must order tasks sharing URMA queues (e.g. with the same InOut signal).
+// One writer per peer here does not provide exclusion between independent tasks.
+
+template <typename T>
+AICORE inline __gm__ T* CommRemotePtr(__gm__ CommContext* ctx, __gm__ T* local_ptr, int pe) {
+  uint64_t local_base = ctx->windowsIn[ctx->rankId];
+  uint64_t offset = reinterpret_cast<uint64_t>(local_ptr) - local_base;
+  return reinterpret_cast<__gm__ T*>(ctx->windowsIn[pe] + offset);
+}
+
+static constexpr uint32_t kBarrierThreads = 256;
+
+__simt_vf__ __aicore__ __launch_bounds__(kBarrierThreads) void ExchangeCredits(
+    __gm__ CommContext* ctx, __gm__ int32_t* signal, uint32_t rank, uint32_t peers, uint64_t stride,
+    uint32_t block, int32_t threshold, uint32_t drop) {
+  if (drop == 0) {
+    const uint64_t offset = reinterpret_cast<uint64_t>(signal + rank * stride + block) - ctx->windowsIn[rank];
+    for (uint32_t peer = threadIdx.x; peer < peers; peer += kBarrierThreads) {
+      if (peer != rank) {
+        auto* remote = reinterpret_cast<__gm__ int32_t*>(ctx->windowsIn[peer] + offset);
+        atomicAdd(remote, int32_t{1});
+      }
+    }
+  }
+  for (uint32_t peer = threadIdx.x; peer < peers; peer += kBarrierThreads) {
+    if (peer == rank) continue;
+    auto* local = signal + static_cast<uint64_t>(peer) * stride + block;
+    if (drop != 0) {
+      atomicAdd(local, int32_t{-2});
+    } else {
+      uint32_t spins = 0;
+      while (atomicAdd(local, int32_t{0}) < threshold) {
+        if (++spins == 100000000U) *reinterpret_cast<__gm__ volatile uint8_t*>(~uint64_t{0}) = 0;
+// Match DeepEP's backoff: do not flood one remote atomic address.
+#pragma unroll 1
+        for (uint32_t delay = 0; delay < 20; ++delay) __nop();
+      }
+    }
+  }
+}
+
+AICORE inline void RunCreditRound(__gm__ CommContext* ctx, __gm__ int32_t* signal, int rank, int peers,
+                                  int64_t stride, int32_t block, int32_t threshold, uint32_t drop) {
+  set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+  cce::async_invoke<ExchangeCredits>(cce::dim3{kBarrierThreads, 1, 1}, ctx, signal,
+                                     static_cast<uint32_t>(rank), static_cast<uint32_t>(peers),
+                                     static_cast<uint64_t>(stride), static_cast<uint32_t>(block), threshold,
+                                     drop);
+  set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+  dsb(DSB_DDR);
+}
+
+AICORE inline void ExchangeBarrier(__gm__ CommContext* ctx, __gm__ int32_t* signal, int rank, int peers,
+                                   int64_t stride, int32_t block, int32_t threshold) {
+  RunCreditRound(ctx, signal, rank, peers, stride, block, threshold, 0);
+}
+
+AICORE inline void DropBarrierCredits(__gm__ int32_t* signal, int rank, int peers, int64_t stride,
+                                      int32_t block) {
+  RunCreditRound(nullptr, signal, rank, peers, stride, block, 0, 1);
+}
+
+// Fixed 4-WQEBB slots hold a 48-byte WRITE header and up to 12 16-byte
+// SGEs. Like DeepEP dispatch, unused trailing WQEBBs contain valid NOPs.
+static constexpr uint32_t kSgesPerSqe = 12;
+static constexpr uint32_t kBbsPerSlot = 4;
+static constexpr uint32_t kSimtThreads = 256;
+static constexpr uint32_t kSqesPerDoorbell = 64;
+
+__simt_vf__ __aicore__ __launch_bounds__(kSimtThreads) void BuildIndexedSqes(
+    __gm__ uint64_t* sq, __gm__ const int32_t* index, uint64_t input, uint64_t remote, uint32_t row_bytes,
+    uint32_t local_token, uint32_t head, uint32_t depth, uint32_t first, uint32_t rows, uint32_t num_sqes,
+    uint64_t header0, uint64_t header1, uint64_t eid0, uint64_t eid1, uint64_t token, uint32_t input_rows) {
+  const uint32_t lane = threadIdx.x % 32;
+  const uint32_t warp = threadIdx.x / 32;
+  for (uint32_t q = warp; q < num_sqes; q += kSimtThreads / 32) {
+    const uint32_t slot = first + q * kSgesPerSqe;
+    const uint32_t n = rows - slot < kSgesPerSqe ? rows - slot : kSgesPerSqe;
+    const uint32_t slot_head = head + q * kBbsPerSlot;
+    const uint32_t bb_head = slot_head + lane / 8;
+    const uint64_t owner = static_cast<uint64_t>((bb_head & depth) == 0) << 31;
+    const uint32_t used_bbs = (48 + 16 * n + 63) / 64;
+    uint64_t word = 0;
+    if (lane == 0) {
+      // Normal odr=1; final WRITE odr=5, fence=1, CQE=1 (DeepEP).
+      const uint64_t flags = slot + n == rows ? 0x2dULL : 0x01ULL;
+      word = header0 | owner | (slot_head % depth) | (flags << 16);
+    } else if (lane == 1) {
+      word = header1 | (static_cast<uint64_t>(n) << 24);
+    } else if (lane == 2) {
+      word = eid0;
+    } else if (lane == 3) {
+      word = eid1;
+    } else if (lane == 4) {
+      word = token;
+    } else if (lane == 5) {
+      word = remote + static_cast<uint64_t>(slot) * row_bytes;
+    } else if (lane < 6 + n * 2) {
+      const uint32_t j = (lane - 6) / 2;
+      if ((lane & 1) == 0) {
+        word = row_bytes | (static_cast<uint64_t>(local_token) << 32);
+      } else {
+        const int32_t t = index[slot + j];
+        if (t < 0 || static_cast<uint32_t>(t) >= input_rows)
+          *reinterpret_cast<__gm__ volatile uint8_t*>(~uint64_t{0}) = 0;
+        word = input + static_cast<uint64_t>(t) * row_bytes;
+      }
+    } else if (lane / 8 >= used_bbs && lane % 8 == 0) {
+      word = (0x11ULL << 40) | owner | (bb_head % depth);
+    }
+    __stg<ST_L2CacheType::L2_CACHE_HINT_NORMAL_FV, L1CacheType::NON_CACHEABLE>(
+        sq + static_cast<uint64_t>(bb_head % depth) * 8 + lane % 8, word);
+  }
+}
+
+// Self traffic uses a DeepEP-style stage ring. MTE2 can load a later token
+// while MTE3 stores an earlier one; only slot reuse and the final drain wait.
+AICORE inline void FailIndexed(__gm__ const char* message) {
+  PTO_ASSERT(false, message);
+  trap();
+}
+
+static constexpr uint32_t kSelfStageBytes = 8192;
+static constexpr uint32_t kSelfStages = 8;
+
+AICORE inline void CopyIndexedSelf(__gm__ uint8_t* input, __gm__ uint8_t* target, __gm__ const int32_t* index,
+                                   uint32_t rows, uint32_t row_bytes, uint32_t input_rows,
+                                   uint32_t worker = 0, uint32_t workers = 1) {
+  const uint32_t first = static_cast<uint64_t>(rows) * worker / workers;
+  const uint32_t end = static_cast<uint64_t>(rows) * (worker + 1) / workers;
+  if (first == end) return;
+  using Shape = pto::Shape<1, 1, 1, 1, pto::DYNAMIC>;
+  using Stride = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, 1>;
+  using Global = pto::GlobalTensor<uint8_t, Shape, Stride, pto::Layout::ND>;
+  using Tile = pto::Tile<pto::TileType::Vec, uint8_t, 1, kSelfStageBytes, pto::BLayout::RowMajor, -1, -1>;
+  for (uint32_t slot = 0; slot < kSelfStages; ++slot)
+    set_flag(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>(slot));
+  uint32_t slot = 0;
+  for (uint32_t row = first; row < end;) {
+    const int32_t token = index[row];
+    if (token < 0 || static_cast<uint32_t>(token) >= input_rows) {
+      FailIndexed("indexed_all_to_all_v: self index outside [0,Nmax)");
+      return;
+    }
+    uint32_t run = 1;
+    while (row + run < end && static_cast<uint64_t>(token) + run < input_rows &&
+           static_cast<int64_t>(index[row + run]) == static_cast<int64_t>(token) + run)
+      ++run;
+    const uint64_t bytes = static_cast<uint64_t>(run) * row_bytes;
+    for (uint64_t offset = 0; offset < bytes;) {
+      const uint32_t count = bytes - offset < kSelfStageBytes ? bytes - offset : kSelfStageBytes;
+      const auto event = static_cast<event_t>(slot);
+      wait_flag(PIPE_MTE3, PIPE_MTE2, event);
+      Tile staging(1, count);
+      TASSIGN(staging, slot * kSelfStageBytes);
+      Shape shape(1, 1, 1, 1, count);
+      Stride stride(count, count, count, count, 1);
+      Global src(input + static_cast<uint64_t>(token) * row_bytes + offset, shape, stride);
+      Global dst(target + static_cast<uint64_t>(row) * row_bytes + offset, shape, stride);
+      TLOAD(staging, src);
+      set_flag(PIPE_MTE2, PIPE_MTE3, event);
+      wait_flag(PIPE_MTE2, PIPE_MTE3, event);
+      pto::TSTORE<pto::TStoreL2Hint::NotAllocClean>(dst, staging);
+      set_flag(PIPE_MTE3, PIPE_MTE2, event);
+      slot = (slot + 1) % kSelfStages;
+      offset += count;
+    }
+    row += run;
+  }
+  for (uint32_t stage = 0; stage < kSelfStages; ++stage)
+    wait_flag(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>(stage));
+  set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  dsb(DSB_DDR);
+}
+
+AICORE inline void SubmitIndexed(__gm__ CommContext* ctx, int peer, __gm__ uint8_t* input,
+                                 __gm__ uint8_t* target, __gm__ const int32_t* index, uint32_t rows,
+                                 uint32_t row_bytes, uint32_t input_rows) {
+  if (rows == 0) return;
+  using namespace pto::comm;
+  using namespace pto::comm::urma;
+  AsyncSession session;
+  if (!BuildAsyncSession<DmaEngine::URMA>(reinterpret_cast<__gm__ uint8_t*>(ctx->workSpace), peer, session)) {
+    FailIndexed("indexed_all_to_all_v: invalid URMA session");
+    return;
+  }
+  auto* info = reinterpret_cast<__gm__ UrmaInfo*>(session.contextGm);
+  auto* wq = urma::detail::GetWqContextAt(session, peer, 0);
+  auto* cq = urma::detail::GetCqContextAt(session, peer, 0);
+  auto* mem = urma::detail::GetRemoteMemInfo(info, peer, 0);
+  if (wq->wqeShiftSize != 6 || wq->depth < kBbsPerSlot || wq->depth > 65536 ||
+      (wq->depth & (wq->depth - 1)) != 0 || cq->depth == 0) {
+    FailIndexed("indexed_all_to_all_v: unsupported queue geometry");
+    return;
+  }
+  const uint64_t offset = reinterpret_cast<uint64_t>(target) - ctx->windowsIn[ctx->rankId];
+  const uint64_t bytes = static_cast<uint64_t>(rows) * row_bytes;
+  if (offset > mem->len || bytes > mem->len - offset) {
+    FailIndexed("indexed_all_to_all_v: target exceeds registered peer window");
+    return;
+  }
+  const uint64_t remote = mem->addr + offset;
+  const uint64_t header0 = (static_cast<uint64_t>(mem->tokenValueValid) << 28) |
+                           (static_cast<uint64_t>(mem->rmtJettyType) << 29) |
+                           (static_cast<uint64_t>(mem->targetHint) << 32) | (0x03ULL << 40);
+  const uint64_t header1 = (mem->tpn & 0xffffffULL) | (static_cast<uint64_t>(mem->tid & 0xfffffU) << 32);
+  auto* eid = reinterpret_cast<__gm__ uint64_t*>(mem->eidAddr);
+  const uint64_t eid0 = eid[0], eid1 = eid[1];
+  uint32_t head = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wq->headAddr), 0);
+  uint32_t completions = wq->submittedWqeCount;
+  const uint32_t total_sqes = (rows + kSgesPerSqe - 1) / kSgesPerSqe;
+  // Like DeepEP, the entire peer transfer must fit before publishing any SQE.
+  if (total_sqes > wq->depth / kBbsPerSlot) {
+    FailIndexed("indexed_all_to_all_v: peer transfer exceeds SQ capacity");
+    return;
+  }
+  const uint32_t required_bbs = total_sqes * kBbsPerSlot;
+  if (!urma::detail::UrmaRingHasRoom(wq, cq, head, completions, required_bbs, 1)) {
+    bool done = false;
+    if (!urma::detail::UrmaPollCqAt(session, peer, 0, head, completions, true, done) || !done ||
+        !urma::detail::UrmaRingHasRoom(wq, cq, head, completions, required_bbs, 1)) {
+      FailIndexed("indexed_all_to_all_v: cannot reclaim queue space");
+      return;
+    }
+  }
+  for (uint32_t first = 0; first < rows;) {
+    const uint32_t left = (rows - first + kSgesPerSqe - 1) / kSgesPerSqe;
+    const uint32_t n = left < kSqesPerDoorbell ? left : kSqesPerDoorbell;
+    // DeepEP local source SGEs use tokenId=0. mem->localTokenId describes
+    // the symmetric window registration, which does not cover a local input Tensor.
+    set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+    wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+    cce::async_invoke<BuildIndexedSqes>(
+        cce::dim3{kSimtThreads, 1, 1}, reinterpret_cast<__gm__ uint64_t*>(wq->bufAddr), index,
+        reinterpret_cast<uint64_t>(input), remote, row_bytes, uint32_t{0}, head, wq->depth, first, rows, n,
+        header0, header1, eid0, eid1, static_cast<uint64_t>(mem->rmtTokenValue), input_rows);
+    // Match DeepEP's V->S handoff before publishing the fully constructed SQ.
+    set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+    dsb(DSB_DDR);
+    head += n * kBbsPerSlot;
+    first += n * kSgesPerSqe;
+    // Intermediate doorbells start transport while the next SQEs are built.
+    // Only the final WRITE requests a CQE for the entire peer transfer.
+    if (first >= rows) ++completions;
+    urma::detail::CommitPostedWqes(wq, head, completions);
+  }
+}
+
+AICORE inline void WaitIndexed(__gm__ CommContext* ctx, int peer) {
+  using namespace pto::comm;
+  using namespace pto::comm::urma;
+  AsyncSession session;
+  if (!BuildAsyncSession<DmaEngine::URMA>(reinterpret_cast<__gm__ uint8_t*>(ctx->workSpace), peer, session)) {
+    FailIndexed("indexed_all_to_all_v: invalid URMA completion session");
+    return;
+  }
+  auto* wq = urma::detail::GetWqContextAt(session, peer, 0);
+  const uint32_t head = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wq->headAddr), 0);
+  const uint32_t completions = wq->submittedWqeCount;
+  bool done = false;
+  if (!urma::detail::UrmaPollCqAt(session, peer, 0, head, completions, true, done) || !done) {
+    FailIndexed("indexed_all_to_all_v: payload completion failed");
+    return;
+  }
+}
+
+}  // namespace
+
+extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
+  __gm__ Tensor* input_tensor = reinterpret_cast<__gm__ Tensor*>(args[0]);
+  __gm__ Tensor* target_tensor = reinterpret_cast<__gm__ Tensor*>(args[1]);
+  __gm__ Tensor* signal_tensor = reinterpret_cast<__gm__ Tensor*>(args[2]);
+  __gm__ Tensor* send_counts_tensor = reinterpret_cast<__gm__ Tensor*>(args[3]);
+  __gm__ Tensor* recv_counts_tensor = reinterpret_cast<__gm__ Tensor*>(args[4]);
+  // Six tensor operands, followed by the first materialized CommContext.
+  __gm__ CommContext* comm_ctx = reinterpret_cast<__gm__ CommContext*>(args[6]);
+  auto* index_tensor = reinterpret_cast<__gm__ Tensor*>(args[5]);
+  auto* index_base =
+      reinterpret_cast<__gm__ int32_t*>(index_tensor->buffer.addr) + index_tensor->start_offset;
+  int nranks = static_cast<int>(comm_ctx->rankNum);
+  int32_t block_idx = get_block_idx(args);
+  int32_t block_num = get_block_num(args);
+
+  const int my_rank = static_cast<int>(comm_ctx->rankId);
+  const int64_t signal_stride = signal_tensor->shapes[1];
+  if (nranks <= 0 || my_rank < 0 || my_rank >= nranks || block_num <= 0 || signal_tensor->ndims != 2 ||
+      signal_tensor->shapes[0] != nranks || signal_stride < block_num || comm_ctx->workSpace == 0) {
+    FailIndexed("indexed_all_to_all_v: invalid domain, launch, signal or URMA workspace");
+    return;
+  }
+  auto* urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo*>(comm_ctx->workSpace);
+  if (urma_info->layout != pto::comm::urma::UrmaLayout::PER_PEER) {
+    FailIndexed("indexed_all_to_all_v requires PER_PEER queues");
+    return;
+  }
+  const int32_t remote_blocks = block_num < nranks ? block_num : nranks;
+
+  int64_t max_recv = static_cast<int64_t>(target_tensor->shapes[0]) / nranks;
+  if (max_recv <= 0) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  // row_numel = SIZE (target is 2D [NR*MAX_RECV, SIZE]).
+  int64_t row_numel = 1;
+  for (uint32_t dim = 1; dim < target_tensor->ndims; ++dim) {
+    row_numel *= static_cast<int64_t>(target_tensor->shapes[dim]);
+  }
+  if (row_numel <= 0) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+
+  // Source storage cannot overlap the incoming receive window.
+  __gm__ {{dtype_cpp}}* input_local =
+      reinterpret_cast<__gm__ {{dtype_cpp}}*>(input_tensor->buffer.addr) + input_tensor->start_offset;
+  __gm__ {{dtype_cpp}}* target =
+      reinterpret_cast<__gm__ {{dtype_cpp}}*>(target_tensor->buffer.addr) + target_tensor->start_offset;
+  __gm__ int32_t* signal_base =
+      reinterpret_cast<__gm__ int32_t*>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
+  __gm__ int32_t* send_counts_base =
+      reinterpret_cast<__gm__ int32_t*>(send_counts_tensor->buffer.addr) + send_counts_tensor->start_offset;
+  __gm__ int32_t* recv_counts_base =
+      reinterpret_cast<__gm__ int32_t*>(recv_counts_tensor->buffer.addr) + recv_counts_tensor->start_offset;
+
+  // Barrier A publishes counts and protects receive-window reuse.
+  pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
+  // Each admitted block rendezvous-blocks independently on its own signal lane
+  // (signal_base + peer*signal_stride + block_idx), so this remains correct
+  // whether block_num is 1 or many — no per-block ordering (e.g. block 0
+  // leading the rest) is required for this barrier's own correctness.
+  // Threshold GE(1): first of this call's two credit rounds.
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(1));
+
+  // A single block publishes recv_counts with non-cacheable scalar stores.
+  {
+    if (block_idx == 0) {
+      // Self: my own send vector is local.
+      {
+        int32_t self_rows = send_counts_base[my_rank];
+        if (self_rows < 0 || self_rows > max_recv) {
+          FailIndexed("indexed_all_to_all_v: self count outside [0,C]");
+          return;
+        }
+        st_dev(self_rows, recv_counts_base + my_rank, 0);
+      }
+
+      for (int src = 0; src < nranks; ++src) {
+        if (src == my_rank) continue;
+        __gm__ int32_t* remote_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+        int32_t pulled = static_cast<int32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t*>(remote_slot), 0));
+        if (pulled < 0 || pulled > max_recv) {
+          FailIndexed("indexed_all_to_all_v: peer count outside [0,C]");
+          return;
+        }
+        st_dev(pulled, recv_counts_base + src, 0);
+      }
+
+      // recv_counts and signal may occupy different 32-byte window slots
+      // in one 64-byte cache line. A cached store + DCCI would write stale
+      // barrier credits back over peer atomic updates. Publish counts with
+      // non-cacheable scalar stores, never a whole-line writeback.
+      dsb(DSB_DDR);
+    }
+    pipe_barrier(PIPE_ALL);
+  }
+
+  // Each remote peer has exactly one writer among the first min(B,P) AIVs.
+  for (int dest = block_idx; dest < nranks; dest += remote_blocks) {
+    if (dest == my_rank) continue;
+    const int32_t count = send_counts_base[dest];
+    if (count < 0 || count > max_recv) {
+      FailIndexed("indexed_all_to_all_v: count outside [0,C]");
+      return;
+    }
+    SubmitIndexed(
+        comm_ctx, dest, reinterpret_cast<__gm__ uint8_t*>(input_local),
+        reinterpret_cast<__gm__ uint8_t*>(target + static_cast<int64_t>(my_rank) * max_recv * row_numel),
+        index_base + static_cast<int64_t>(dest) * max_recv, count,
+        static_cast<uint32_t>(row_numel * sizeof({{dtype_cpp}})), input_tensor->shapes[0]);
+  }
+
+  // All AIVs share whole local rows while posted URMA transfers progress.
+  const int32_t self_count = send_counts_base[my_rank];
+  if (self_count < 0 || self_count > max_recv) {
+    FailIndexed("indexed_all_to_all_v: self count outside [0,C]");
+    return;
+  }
+  CopyIndexedSelf(
+      reinterpret_cast<__gm__ uint8_t*>(input_local),
+      reinterpret_cast<__gm__ uint8_t*>(target + static_cast<int64_t>(my_rank) * max_recv * row_numel),
+      index_base + static_cast<int64_t>(my_rank) * max_recv, self_count,
+      static_cast<uint32_t>(row_numel * sizeof({{dtype_cpp}})), input_tensor->shapes[0], block_idx,
+      block_num);
+
+  // One final CQE per nonempty remote peer covers all submitted SQEs.
+  for (int dest = block_idx; dest < nranks; dest += remote_blocks) {
+    if (dest != my_rank && send_counts_base[dest] > 0) WaitIndexed(comm_ctx, dest);
+  }
+
+  // Barrier B certifies payload completion and counts lifetime.
+  pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
+  // Second credit round: credits accumulate across the call's two barrier
+  // phases, so this rendezvous waits for GE(2) rather than GE(1).
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(2));
+
+  // Credit epilogue: this block added +1 (A) and +1 (B) to every peer's lane;
+  // drop both in ONE AtomicAdd(-2) per lane. Never reset to zero - a credit
+  // from the next invocation may already have arrived, and keeping the
+  // arithmetic additive is what makes back-to-back calls safe.
+  DropBarrierCredits(signal_base, my_rank, nranks, signal_stride, block_idx);
+  pipe_barrier(PIPE_ALL);
+}

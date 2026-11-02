@@ -198,9 +198,11 @@ class ModularSetAnalyzer {
 ///
 /// Designed primarily for index arithmetic and integer shape calculations.
 /// Applies ~180 algebraic identities (e.g., x + 0 -> x, x - x -> 0) using
-/// pattern matching. Float-typed expressions are returned unchanged since
-/// integer-style identities are not semantics-preserving for floating-point
-/// (rounding errors, NaN). Supports variable substitution and constraint scoping.
+/// pattern matching. Float arithmetic and comparisons are preserved since integer-style
+/// identities are not semantics-preserving for floating-point (rounding errors,
+/// NaN) and format-aware comparison rounding is not modeled. Float variables
+/// still follow explicit bindings. Supports variable
+/// substitution and constraint scoping.
 class RewriteSimplifier {
  public:
   /// Construct a standalone simplifier (no parent Analyzer).
@@ -341,6 +343,9 @@ class IntSetAnalyzer {
   /// Bind a variable to a half-open symbolic range [min_val, max_val_exclusive).
   void Bind(const VarPtr& var, const ExprPtr& min_val, const ExprPtr& max_val_exclusive);
 
+  /// Remove a variable's interval, restoring its default symbolic point [var, var].
+  void Unbind(const VarPtr& var);
+
   /// Enter a constraint scope. Returns a recovery function.
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 
@@ -373,7 +378,8 @@ class Analyzer : public std::enable_shared_from_this<Analyzer> {
   TransitiveComparisonAnalyzer transitive_cmp;
   IntSetAnalyzer int_set;
 
-  /// Bind a variable to an expression: propagates information to all sub-analyzers.
+  /// Bind a variable to an expression, updating substitution and numeric facts.
+  /// Boolean bindings update substitution only, without numeric ordering facts.
   /// \note allow_override is reserved for future use and currently has no effect.
   void Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override = false);
 

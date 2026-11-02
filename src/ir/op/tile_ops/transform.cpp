@@ -284,8 +284,8 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "tile.reshape requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tile_type->dtype_.IsFp4Family(), args[0]->span_)
-      << "tile.reshape is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
+  CHECK_SPAN(!tile_type->dtype_.IsPackedFp4(), args[0]->span_)
+      << "tile.reshape is not supported for FP4E2M1X2/FP4E1M2X2 (see docs/en/dev/fp4.md)";
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());
@@ -484,8 +484,8 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 
   CHECK(axis1 != axis2) << "tile.transpose: axis1 and axis2 must be different, but got axis1=" << axis1
                         << ", axis2=" << axis2;
-  CHECK_SPAN(!input_type->dtype_.IsFp4Family(), args[0]->span_)
-      << "tile.transpose does not support FP4/FP4E2M1X2; PTOAS ttrans has no f4E2M1x2 lowering";
+  CHECK_SPAN(!input_type->dtype_.IsPackedFp4(), args[0]->span_)
+      << "tile.transpose does not support FP4E2M1X2/FP4E1M2X2; PTOAS ttrans has no packed FP4 lowering";
 
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
@@ -500,8 +500,8 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
   // tile.transpose_view(input) — zero-copy fractal-layout reinterpretation that swaps
   // the trailing two dims and maps the block/scatter layout to its transpose
   // dual (NZ<->ZN, NN<->ZZ, ND<->DN). A tile and its dual over the same bytes are
-  // mutual transposes (docs/_build/nz_zn_layout_qa.md), so the result aliases the
-  // source buffer byte-for-byte — no data movement is emitted in codegen, and
+  // mutual transposes, so the result aliases the source buffer byte-for-byte —
+  // no data movement is emitted in codegen, and
   // InitMemRef shares the source MemRef via set_output_memory_inherit_input.
   CHECK(args.size() == 1) << "tile.transpose_view requires exactly 1 argument (input), but got "
                           << args.size();
@@ -686,9 +686,34 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
          "Acc->Mat FIXPIPE downcast to bf16/f16, or an explicit pre_quant scale), but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
+  if (source_type->dtype_.IsPackedFp4()) {
+    const auto src_view = tile_view_semantics::GetEffectiveTileView(*source_type);
+    const auto dst_view = tile_view_semantics::GetEffectiveTileView(*target_type);
+    const bool source_vec =
+        !source_type->memory_space_.has_value() || source_type->memory_space_ == MemorySpace::Vec;
+    const bool target_vec_or_mat = !target_type->memory_space_.has_value() ||
+                                   target_type->memory_space_ == MemorySpace::Vec ||
+                                   target_type->memory_space_ == MemorySpace::Mat;
+    CHECK_SPAN(source_vec && target_vec_or_mat && src_view.blayout == TileLayout::col_major &&
+                   src_view.slayout == TileLayout::row_major && dst_view.blayout == TileLayout::col_major &&
+                   dst_view.slayout == TileLayout::row_major && src_view.fractal == dst_view.fractal,
+               args[0]->span_)
+        << "tile.assemble: native packed FP4 insertion requires matching NZ layouts from Vec to Vec/Mat; "
+           "the native ND insert uses incorrect packed-byte strides. For ND data, alias to UINT8, "
+           "assemble the byte carriers, then alias back using PYPTO or DSA_RP memory planning";
+    const auto offset_tuple = As<MakeTuple>(args[2]);
+    CHECK_SPAN(offset_tuple->elements_.size() == 2, args[2]->span_)
+        << "tile.assemble: packed FP4 insertion requires two offsets";
+    const auto packed_offset = As<ConstInt>(offset_tuple->elements_[0]);
+    CHECK_SPAN(packed_offset && packed_offset->value_ == 0, args[2]->span_)
+        << "tile.assemble: PTOAS v0.67 packed FP4 insertion requires zero offset on the packed axis; "
+           "its native offset conversion disagrees with carrier dimensions";
+  }
+
   // The result holds what the target already held plus what was just written.
-  // ``pto.tinsert`` copies the whole source subview rather than consulting its
-  // valid extent, so the *physical* source is what has to fit inside the target.
+  // TINSERT transfers the source's valid region. Fallback lowering creates a
+  // destination subview with the source's physical shape before moving that
+  // region, so the source allocation must still fit inside the target.
   // As for tensor.assemble, the union is derivable only when the source, the
   // offsets, and the target share one rank; a rank-mismatched write is a
   // reinterpreting one whose axes do not correspond, and keeps its previous result.
@@ -705,9 +730,8 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
         /*kind=*/WriteBoundsKind::kExactSubview,
         /*op_name=*/"tile.assemble",
         /*bounds_remedy=*/
-        "tile.assemble lowers to pto.tinsert, which copies the whole source subview rather than only "
-        "its valid region, so the source allocation itself has to fit -- unlike tensor.assemble, "
-        "which transfers only the valid extent",
+        "tile.assemble may create a destination subview with the source's physical shape, so that "
+        "allocation must fit even though only the source's valid region is transferred",
         /*span=*/args[0]->span_,
     });
   }
@@ -842,11 +866,30 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   // hardcoded layouts mirror the L0A/L0B formats the hardware imposes on
   // TEXTRACT outputs (and differ from `tile.move`'s TMOV-side L0 formats).
   if (target == MemorySpace::Left) {
-    tile_view.blayout = TileLayout::row_major;
+    tile_view.blayout = src_type->dtype_.IsPackedFp4() ? TileLayout::col_major : TileLayout::row_major;
     tile_view.slayout = TileLayout::row_major;
   } else if (target == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  }
+
+  if (src_type->dtype_.IsPackedFp4()) {
+    const auto src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+    const bool source_vec =
+        !src_type->memory_space_.has_value() || src_type->memory_space_ == MemorySpace::Vec;
+    CHECK_SPAN(!source_vec || target != MemorySpace::Vec, args[0]->span_)
+        << "tile.extract: native packed FP4 Vec-to-Vec extraction uses incorrect packed-byte strides; "
+           "alias to INT8, extract byte carriers, then alias back using PYPTO or DSA_RP memory planning";
+    CHECK_SPAN(
+        src_view.blayout == tile_view.blayout && (!source_vec || src_view.slayout == tile_view.slayout),
+        args[0]->span_)
+        << "tile.extract: PTOAS v0.67 cannot change the packed FP4 packing axis or convert Vec layout; "
+           "load or convert the source to the destination layout first";
+    const size_t packed_axis = src_view.blayout == TileLayout::col_major ? 0 : 1;
+    const auto packed_offset = As<ConstInt>(args[packed_axis + 1]);
+    CHECK_SPAN(packed_offset && packed_offset->value_ == 0, args[packed_axis + 1]->span_)
+        << "tile.extract: PTOAS v0.67 packed FP4 extraction requires zero offset on the packed axis; "
+           "its native offset conversion disagrees with carrier dimensions";
   }
 
   // A partial Mat->L0A/L0B extract is a compact boundary transfer, not a
@@ -1112,16 +1155,6 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   // a fully-written accumulator here must therefore leave its non-compact
   // reading pitch alone.
   TileView tile_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
-  if (tile_type->dtype_ == DataType::FP4 && tile_type->memory_space_ == MemorySpace::Vec) {
-    const size_t packed_dim = tile_view.blayout == TileLayout::col_major ? 0 : 1;
-    const ExprPtr& packed_valid = args[packed_dim + 1];
-    auto packed_const = As<ConstInt>(packed_valid);
-    CHECK_SPAN(packed_const, packed_valid->span_)
-        << "tile.set_validshape requires the packed FP4 valid dimension to be a static positive even value";
-    CHECK_SPAN(packed_const->value_ > 0 && packed_const->value_ % 2 == 0, packed_valid->span_)
-        << "tile.set_validshape requires the packed FP4 valid dimension to be a positive even value, but got "
-        << packed_const->value_;
-  }
   tile_view.valid_shape = {args[1], args[2]};
 
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);

@@ -602,7 +602,7 @@ def test_c1d2_actual_cluster_entry_owns_signature_and_metadata(tmp_path):
     compiled = DistributedCompiledProgram(program, str(tmp_path), cluster_config=_c1d2_cluster_config())
     infos, outputs, returns = compiled._get_metadata()
     assert [p.name for p in infos] == ["cluster_root_input", "cluster_root_output"]
-    assert [p.shape for p in infos] == [[64], [64]]
+    assert [p.shape for p in infos] == [(64,), (64,)]
     assert outputs == [1] and len(returns) == 1
     assert compiled.entry_kind == "cluster" and compiled.entry_name == "cluster_root"
     record = json.loads((tmp_path / _DISTRIBUTED_META_FILENAME).read_text())

@@ -27,6 +27,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -242,8 +243,22 @@ TypePtr IRMutator::RemapTypeViaVisitor(const TypePtr& type) {
         << "MemRef to a non-MemRef expression — not supported)";
     new_memref_opt = as_memref;
   }
-  return CloneTypeWithMemRefAndRemapExprs(
+  auto new_type = CloneTypeWithMemRefAndRemapExprs(
       type, new_memref_opt, [this](const ExprPtr& e) { return ExprFunctor<ExprPtr>::VisitExpr(e); });
+  // A distributed view carries a pointer-identity link to its domain's window
+  // slot. Follow the same visitor used for slots, including when only that
+  // link changes. The shared shape/MemRef helper preserves this field verbatim.
+  if (auto distributed = As<DistributedTensorType>(new_type);
+      distributed && distributed->window_buffer_.has_value()) {
+    auto window = As<WindowBuffer>(ExprFunctor<ExprPtr>::VisitExpr(*distributed->window_buffer_));
+    INTERNAL_CHECK_SPAN(window, (*distributed->window_buffer_)->span_)
+        << "DistributedTensorType window buffer mutated to non-WindowBuffer";
+    if (window != *distributed->window_buffer_) {
+      return std::make_shared<DistributedTensorType>(distributed->shape_, distributed->dtype_,
+                                                     distributed->memref_, distributed->tensor_view_, window);
+    }
+  }
+  return new_type;
 }
 
 ExprPtr IRMutator::ResolveVarRemapHit(const Expr* key, ExprPtr remapped) {
@@ -392,6 +407,11 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   // from args, so the args walk alone won't propagate substitutions into a
   // returned TileType/TensorType's shape/view fields.
   auto new_type = RemapTypeViaVisitor(op->GetType());
+  if (args_changed && IsOp(op, "reg.store")) {
+    // reg.store's result is exactly its destination type, including storage
+    // metadata rewritten by InitMemRef, MemoryReuse or AllocateMemoryAddr.
+    new_type = new_args[0]->GetType();
+  }
   bool type_changed = (new_type.get() != op->GetType().get());
 
   // Var-typed dependency attrs reference Vars defined elsewhere
@@ -965,6 +985,22 @@ StmtPtr IRMutator::VisitStmt_(const GraphScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "GraphScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "GraphScopeStmt body mutated to null";
+  // ``kAttrDumpVars`` (``pl.dump_tag`` / ``dumps=``) names Vars, so a
+  // Var-substituting pass must rewrite it like the InCore / Spmd handlers do.
+  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+  if (new_body.get() != op->body_.get() || attrs_changed) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
+    return result;
+  }
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const RegScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "RegScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "RegScopeStmt body mutated to null";
   // ``kAttrDumpVars`` (``pl.dump_tag`` / ``dumps=``) names Vars, so a
   // Var-substituting pass must rewrite it like the InCore / Spmd handlers do.
   auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);

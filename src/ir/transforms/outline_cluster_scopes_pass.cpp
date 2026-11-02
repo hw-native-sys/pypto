@@ -360,15 +360,14 @@ Pass OutlineClusterScopes() {
       // First pass: outline Cluster scopes
       outline_utils::VarCollector type_collector;
       for (const auto& var : func->params_) {
-        type_collector.var_types[var.get()] = var->GetType();
-        type_collector.var_objects[var.get()] = var;
-        type_collector.known_names.insert(var->name_hint_);
+        type_collector.CollectParameter(var);
       }
       type_collector.VisitStmt(func->body_);
 
       outline_utils::ScopeOutliner cluster_outliner(
           func->name_, type_collector.var_types, type_collector.var_objects, type_collector.known_names,
-          ScopeKind::Cluster, FunctionType::Group, "_cluster_", program, reserved_func_names);
+          type_collector.runtime_bindings, ScopeKind::Cluster, FunctionType::Group, "_cluster_", program,
+          reserved_func_names);
       auto body_after_cluster = cluster_outliner.VisitStmt(func->body_);
 
       // Unwrap a ``pl.spmd`` nested inside each freshly outlined Group and move
@@ -404,9 +403,7 @@ Pass OutlineClusterScopes() {
       // Second pass: outline standalone Spmd scopes (those not inside a Cluster)
       outline_utils::VarCollector refreshed_collector;
       for (const auto& var : func->params_) {
-        refreshed_collector.var_types[var.get()] = var->GetType();
-        refreshed_collector.var_objects[var.get()] = var;
-        refreshed_collector.known_names.insert(var->name_hint_);
+        refreshed_collector.CollectParameter(var);
       }
       refreshed_collector.VisitStmt(body_after_cluster);
 
@@ -423,8 +420,8 @@ Pass OutlineClusterScopes() {
 
       outline_utils::ScopeOutliner spmd_outliner(
           func->name_, refreshed_collector.var_types, refreshed_collector.var_objects,
-          refreshed_collector.known_names, ScopeKind::Spmd, FunctionType::Spmd, "_spmd_", lookup_program,
-          reserved_func_names);
+          refreshed_collector.known_names, refreshed_collector.runtime_bindings, ScopeKind::Spmd,
+          FunctionType::Spmd, "_spmd_", lookup_program, reserved_func_names);
       auto body_after_spmd = spmd_outliner.VisitStmt(body_after_cluster);
 
       const auto& spmd_outlined = spmd_outliner.GetOutlinedFunctions();

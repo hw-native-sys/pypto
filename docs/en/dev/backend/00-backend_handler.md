@@ -52,11 +52,13 @@ to global state.
 | Method | Purpose | Ascend910 | Ascend950 |
 | ------ | ------- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
+| `GetSyncResourceCatalog()` | Immutable [synchronization resource facts](01-sync_resources.md) owned by this backend | A2/A3 pools | A5 pools |
 | `GetLaunchSpecCoreCountMethod()` | runtime API name for the logical block count on `launch_spec` | `"set_block_num"` | `"set_block_num"` |
 | `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA selects a distinct algorithm from the `precisionType` attribute that `high_precision=True` emits; when false, both PTO emitters (Tile op callbacks and Buffer IR) warn that the request is dropped | `false` | `true` |
 | `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` |
+| `SupportsRuntimeBoundLocalSoftwarePipeline()` | enable local Vec software-pipeline lowering for runtime trip counts | `true` | `false` |
 | `SupportsLocalPipeDepth()` | local consumer depth can differ from the cross-core transport ring depth | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse load + tpop_from_aic in-place hazard guard | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef materialize level-3 explicit tmp; codegen static-view bridges | `true` | `false` |
@@ -66,6 +68,10 @@ to global state.
 | `SplitsCubeToVectorTransportInHardware()` | a split Cube-to-Vector push hands each AIV lane half of the transported extent, so that extent is the lane partition | `false` | `true` |
 | `GetL0cMAlignment(dtype)` | physical M-row alignment shared by L0C tiling, dbC capacity, and allocation | 32 for INT32; otherwise 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
+
+`SupportsRuntimeBoundLocalSoftwarePipeline()` defaults to `false`, preserving
+the existing loop fallback until a backend enables this lowering. It is
+independent of cross-core transport and does not describe hardware event support.
 
 ## Registered operator rules
 
@@ -161,7 +167,9 @@ cost-model parameters remain separate from capacity.
 3. Override `Backend<Arch>::GetHandler()` to return your handler singleton.
 4. Append the new backend to `BackendType` and to the factory switch in
    `src/backend/common/backend.cpp` (`GetBackendInstance` and
-   `BackendTypeToString`). These are the only places that fan out by enum.
+   `BackendTypeToString`). Also add it to the backend list used by
+   `FindResourceCatalog` in `src/backend/common/sync_resources.cpp`, so target-string
+   queries reach the new handler's synchronization catalog.
 
 No pass or codegen file needs to change. Validate with
 `tests/ut/backend/test_backend_handler.py` plus the regression tests in

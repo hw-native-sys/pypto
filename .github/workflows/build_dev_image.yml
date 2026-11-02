@@ -1,0 +1,171 @@
+name: Maintain Development Images
+
+on:
+  schedule:
+    - cron: '37 19 * * *'  # UTC; Beijing 03:37, away from the hourly peak.
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'toolchain/versions.env'
+      - 'build-constraints.txt'
+      - 'tests/lint/test_dev_image_ci.py'
+      - 'tests/lint/test_dev_container_scripts.py'
+      - '.github/workflows/build_dev_image.yml'
+  pull_request:
+    paths:
+      - 'docker/**'
+      - 'toolchain/versions.env'
+      - 'build-constraints.txt'
+      - 'tests/lint/test_dev_image_ci.py'
+      - 'tests/lint/test_dev_container_scripts.py'
+      - '.github/workflows/build_dev_image.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the validated image (upstream main only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Validate configuration
+        id: matrix
+        run: |
+          matrix="$(python docker/ci/maintain.py matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Install script test dependencies
+        run: python -m pip install pytest==8.4.2 pytest-xdist==3.8.0 uv==0.9.2
+      - name: Test image maintenance scripts
+        run: |
+          source .claude/skills/testing/load-env.sh
+          python -m pytest tests/lint/test_dev_image_ci.py tests/lint/test_dev_container_scripts.py -n "$PYPTO_TEST_JOBS" -q -o addopts=''
+
+  image:
+    needs: config
+    # Only explicitly trusted PR source repositories may execute on this host.
+    # Review additions to this allowlist as changes to runner trust.
+    if: >-
+      github.repository == 'hw-native-sys/pypto' &&
+      (github.event_name != 'pull_request' ||
+       contains(fromJSON('["hw-native-sys/pypto", "luohuan19/pypto"]'),
+                github.event.pull_request.head.repo.full_name))
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
+    runs-on: ${{ matrix.runners }}
+    timeout-minutes: 240
+    concurrency:
+      group: pypto-dev-image-${{ matrix.name }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: image-checkout
+    env:
+      IMAGE_NAME: ${{ matrix.name }}
+      PYPTO_DOCKER_PROXY: http://127.0.0.1:7892
+      PYPTO_PR_REPOSITORY: ${{ github.event.pull_request.head.repo.clone_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: image-checkout
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Prepare isolated Docker credentials directory
+        id: prepare
+        run: |
+          # RUNNER_TEMP is available only after a runner has been assigned.
+          # Separate state/credentials for every attempt; never write HOME.
+          identity="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$IMAGE_NAME"
+          image_state="$RUNNER_TEMP/pypto-image-$identity"
+          docker_config="$RUNNER_TEMP/pypto-docker-$identity"
+          mkdir -m 700 -p "$docker_config" "$image_state"
+          echo "IMAGE_STATE=$image_state" >> "$GITHUB_ENV"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+      - name: Install Buildx in the isolated Docker configuration
+        uses: docker/setup-buildx-action@v3
+        env:
+          HTTP_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+          HTTPS_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+        with:
+          version: v0.35.0
+          driver: docker
+          use: false
+          # Keep the host builder/cache; our cleanup removes DOCKER_CONFIG.
+          cleanup: false
+          # Its binary directory is removed before the action's post step.
+          cache-binary: false
+      - name: Build native image from frozen revisions
+        run: |
+          pypto-toolchain verify --require python=3.10
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          source .claude/skills/testing/load-env.sh
+          python3.10 docker/ci/maintain.py build --image "$IMAGE_NAME" --directory "$IMAGE_STATE"
+      - name: Validate doctor and single-card and two-card cases
+        run: |
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          python3.10 docker/ci/maintain.py validate --directory "$IMAGE_STATE"
+      - name: Publish validated image to SWR
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name != 'workflow_dispatch' || inputs.publish)
+        env:
+          SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+          SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+        run: |
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          python3.10 docker/ci/maintain.py publish --directory "$IMAGE_STATE"
+      - name: Clean up this run's containers and queued tasks
+        if: always() && steps.prepare.outcome == 'success'
+        run: |
+          bundle_env="$(pypto-toolchain export)"
+          eval "$bundle_env"
+          python3.10 docker/ci/maintain.py cleanup --directory "$IMAGE_STATE"
+      - name: Remove isolated credentials
+        if: always() && steps.prepare.outcome == 'success'
+        run: |
+          if [ -d "$DOCKER_CONFIG" ]; then
+            rm -rf -- "$DOCKER_CONFIG"
+          fi
+      - name: Record build and validation summary
+        if: always() && steps.prepare.outcome == 'success'
+        run: |
+          for record in state validated published; do
+            if [ -f "$IMAGE_STATE/$record.json" ]; then
+              printf '\n### %s\n\n```json\n' "$record" >> "$GITHUB_STEP_SUMMARY"
+              cat "$IMAGE_STATE/$record.json" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - name: Upload image maintenance evidence
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        env:
+          HTTP_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+          HTTPS_PROXY: ${{ env.PYPTO_DOCKER_PROXY }}
+        with:
+          name: image-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.IMAGE_STATE }}
+          if-no-files-found: warn
+          retention-days: 14

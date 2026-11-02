@@ -182,15 +182,23 @@ FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func, int64_t gm_buffer_elem
   return result;
 }
 
+/// Append @p gm_param to every call/submit of a function in @p modified_funcs.
+///
+/// Walks one statement level and recurses only into bodies that can hold a
+/// call. Rewritten nodes are mutable copies; a subtree that produces no change
+/// is returned by pointer so unchanged statements stay shared.
 StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<std::string>& modified_funcs,
                                 const VarPtr& gm_param) {
   auto stmts = FlattenBody(body);
   std::vector<StmtPtr> new_stmts;
   bool any_changed = false;
+  // A call site is rewritten only when its callee took the injected GM pipe parameter.
   auto should_rewrite = [&](const OpPtr& op) -> bool {
     auto gv = std::dynamic_pointer_cast<const GlobalVar>(op);
     return gv && modified_funcs.count(gv->name_);
   };
+  // Copy-on-write for the two call-like kinds; Submit is not a Call subclass
+  // and must keep its kind and deps.
   auto try_rewrite_expr = [&](const ExprPtr& expr) -> ExprPtr {
     if (!expr) return nullptr;
     if (auto call = std::dynamic_pointer_cast<const Call>(expr)) {
@@ -207,6 +215,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     }
     return nullptr;
   };
+  // Dispatch on statement kind, recursing into control-flow and scope bodies.
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (auto rw = try_rewrite_expr(assign->value_)) {
@@ -225,6 +234,8 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
         continue;
       }
     }
+    // Control-flow and scope statements: recurse into the body, and rebuild
+    // the node only when that body changed.
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param);
       if (nb != for_stmt->body_) {
@@ -277,6 +288,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
       new_stmts.push_back(stmt);
     }
   }
+  // Nothing changed: keep the original node so callers can compare by pointer.
   if (!any_changed) return body;
   return SeqStmts::Flatten(std::move(new_stmts), body->span_);
 }
@@ -291,6 +303,12 @@ CallPtr CreateGMPipeBufferTensorCreate(const Span& span) {
                                           span);
 }
 
+/// Append a per-call GM pipe buffer to every call/submit of a function in
+/// @p modified_funcs.
+///
+/// Unlike :func:`RewriteCallsForGMBuffer`, each rewritten call gets its own
+/// allocation (``gm_pipe_buffer_<counter>``), returned alongside the rewritten
+/// expression so the caller can place it next to the call it serves.
 StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
                                         const std::unordered_set<std::string>& modified_funcs,
                                         int64_t gm_buffer_elems, const Span& span, int& counter) {
@@ -334,6 +352,8 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
     return std::make_pair(StmtPtr{}, ExprPtr{});
   };
 
+  // Dispatch on statement kind, threading each call's allocation in front of
+  // the statement that uses it.
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       auto [create, rw] = try_rewrite(assign->value_);
@@ -356,6 +376,8 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         continue;
       }
     }
+    // Control-flow and scope statements: recurse into the body, and rebuild
+    // the node only when that body changed.
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto nb =
           RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, gm_buffer_elems, span, counter);

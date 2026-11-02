@@ -301,5 +301,115 @@ def test_c3b_return_copy_uses_real_cpu_dag_and_mapped_views(
     assert f"C3B_RETURN_COPY_CPU_{view.upper()}_PASS" in result.stdout
 
 
+_DOMAIN_DESCRIPTOR_CPU_PROOF = r"""
+import importlib.abc
+import importlib.util
+import sys
+
+class RejectPyPTO(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "pypto" or fullname.startswith("pypto."):
+            raise ModuleNotFoundError("Forbidden runtime-only import: " + fullname)
+        return None
+
+sys.meta_path.insert(0, RejectPyPTO())
+
+import torch
+from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
+from simpler.task_interface import ChipDomainContext, CommDomainHandle, DataType, GlobalCommDomainView
+
+# Import the actual installed runtime descriptors before loading the portable
+# production source. No duck-typed replacement may hide the unified handle API.
+assert CommDomainHandle.__module__ == "simpler.task_interface"
+assert GlobalCommDomainView.__module__ == "simpler.task_interface"
+assert not any(name == "pypto" or name.startswith("pypto.") for name in sys.modules)
+spec = importlib.util.spec_from_file_location("_domain_descriptor_support", sys.argv[1])
+assert spec is not None and spec.loader is not None
+support = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = support
+spec.loader.exec_module(support)
+
+buffer = create_host_shared_buffer(64, mint_owner_instance_id(), 1)
+try:
+    # Context addresses are descriptor metadata only: this CPU contract test
+    # constructs no Worker and submits no device work.
+    context = ChipDomainContext("local", 0, 1, 1, 0, 64, {"values": buffer})
+    local = CommDomainHandle(
+        name="local", workers=(0,), contexts={0: context}, allocation_id=23,
+        domain_id=91, generation=7, _release_fn=None,
+    )
+    assert local.domain_id == 91 and local.generation == 7
+    assert not hasattr(local, "committed")
+    assert support._ordering_domain_key(local) == ("local", 23)
+    assert support._domain_context(local, 0) is context
+
+    frame = support._EmbeddedFrame({}, None)
+    local_token = torch.zeros(1, dtype=torch.int32).share_memory_()
+    global_token = torch.zeros(1, dtype=torch.int32).share_memory_()
+    frame.local_specs["node"] = ((0,), {0: local_token})
+    frame.bind_local_domain(local, "node", ("values",))
+    assert frame.local_tokens[23][0] is local_token
+    tokens = frame.ordering_tokens((local, local), 0)
+    assert len(tokens) == 1 and tokens[0] is local_token
+
+    # The overlapping runtime IDs must not apply global slot translation to
+    # an owning local handle, even though it also exposes domain_id/generation.
+    frame.window_slots = {(91, 7, "values"): "canonical"}
+    tensor = frame.window_tensor(local, 0, "values", shapes=(1,), dtype=DataType.INT32)
+    assert tensor.buffer == buffer.to_descriptor()
+    imported_context = ChipDomainContext("global", 0, 1, 1, 0, 64, {"canonical": buffer})
+    imported = GlobalCommDomainView(
+        name="global", members=(), contexts={0: imported_context},
+        domain_id=91, generation=7, mapping_size=64,
+    )
+    assert support._ordering_domain_key(imported) == ("global", 91, 7)
+    assert not imported.committed
+    frame.domain_tokens[(91, 7)] = {0: global_token}
+    for operation in (
+        lambda: support._domain_context(imported, 0),
+        lambda: frame.ordering_tokens((imported,), 0),
+        lambda: frame.window_tensor(imported, 0, "values", shapes=(1,), dtype=DataType.INT32),
+    ):
+        try:
+            operation()
+        except ValueError as error:
+            assert "not committed" in str(error), str(error)
+        else:
+            raise AssertionError("Uncommitted real global view must be rejected")
+
+    # Emulate only the descriptor's post-COMMIT state, without transport setup;
+    # the production guard above remains exercised against its initial state.
+    imported._committed = True
+    assert support._domain_context(imported, 0) is imported_context
+    tokens = frame.ordering_tokens((local, imported, local, imported), 0)
+    assert len(tokens) == 2 and tokens[0] is local_token and tokens[1] is global_token
+    imported_tensor = frame.window_tensor(imported, 0, "values", shapes=(1,), dtype=DataType.INT32)
+    assert imported_tensor.buffer == buffer.to_descriptor()
+    assert not any(name == "pypto" or name.startswith("pypto.") for name in sys.modules)
+    print("REAL_DOMAIN_DESCRIPTOR_CPU_PASS")
+finally:
+    buffer.close()
+"""
+
+
+def test_modern_local_handle_and_imported_global_view_use_distinct_ordering(tmp_path):
+    runtime_python = os.environ.get("L4_RUNTIME_ONLY_PYTHON")
+    runtime_pythonpath = os.environ.get("L4_RUNTIME_ONLY_PYTHONPATH")
+    if not runtime_python or not runtime_pythonpath:
+        pytest.skip("Set L4_RUNTIME_ONLY_PYTHON and L4_RUNTIME_ONLY_PYTHONPATH for real Simpler CPU proof")
+    support_path = Path(__file__).resolve().parents[3] / "python/pypto/runtime/_distributed_support.py"
+    result = subprocess.run(
+        [runtime_python, "-c", _DOMAIN_DESCRIPTOR_CPU_PROOF, str(support_path)],
+        cwd=tmp_path,
+        env=os.environ | {"PYTHONPATH": runtime_pythonpath, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, f"Real runtime descriptor proof failed:\n{result.stdout}\n{result.stderr}"
+    assert "REAL_DOMAIN_DESCRIPTOR_CPU_PASS" in result.stdout
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

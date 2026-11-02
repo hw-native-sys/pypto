@@ -439,7 +439,8 @@ class SSAConverter {
     if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::ClusterScopeStmt ||
         kind == ObjectKind::HierarchyScopeStmt || kind == ObjectKind::SpmdScopeStmt ||
         kind == ObjectKind::RuntimeScopeStmt || kind == ObjectKind::SplitAivScopeStmt ||
-        kind == ObjectKind::CommDomainScopeStmt || kind == ObjectKind::GraphScopeStmt) {
+        kind == ObjectKind::CommDomainScopeStmt || kind == ObjectKind::GraphScopeStmt ||
+        kind == ObjectKind::RegScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
     return s;
@@ -1017,7 +1018,8 @@ class SSAConverter {
     // stays fully transparent. ``SplitAivScopeStmt`` is likewise transparent:
     // it is never outlined and is lowered in place by LowerAutoVectorSplit
     // (pass 23), so its body shares SSA state with the enclosing function.
-    const bool is_outline_boundary = !As<RuntimeScopeStmt>(op) && !As<SplitAivScopeStmt>(op);
+    const bool is_outline_boundary =
+        !As<RuntimeScopeStmt>(op) && !As<SplitAivScopeStmt>(op) && !As<RegScopeStmt>(op);
     std::unordered_set<const Var*> saved_future_needs;
     if (is_outline_boundary) {
       saved_future_needs = future_needs_;
@@ -1061,6 +1063,7 @@ class SSAConverter {
     if (auto split_aiv = As<SplitAivScopeStmt>(op)) return rewrite(split_aiv);
     if (auto comm_domain = As<CommDomainScopeStmt>(op)) return rewrite(comm_domain);
     if (auto graph = As<GraphScopeStmt>(op)) return rewrite(graph);
+    if (auto reg = As<RegScopeStmt>(op)) return rewrite(reg);
     INTERNAL_UNREACHABLE_SPAN(op->span_) << "Unknown ScopeStmt subclass: " << op->TypeName();
     return op;
   }

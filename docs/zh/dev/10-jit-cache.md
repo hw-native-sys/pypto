@@ -52,6 +52,11 @@ print(pypto.cache_stats())
 和二进制校验。它查询已安装 Simpler SDK 的元数据，不再继承 SDK 编译器或调用其
 构建方法。这些行为适用于现有 runtime pin，不引入 kernel 执行，也不改变 program 调用语义。
 
+CPU 模拟器使用 SDK 提供的完整 incore 编译参数，包括请求的 A2/A3 或 A5 目标
+架构及导出的准入标记。仅使用通用 Host 编译器参数不能选择模拟器架构。未显式
+指定 PTO ISA 根目录时，编译过程解析 SDK 固定版本的根目录，使强制包含的目标
+头文件与 runtime 使用相同的指令定义。
+
 | 原来继承的职责 | 当前负责方 |
 | -------------- | ---------- |
 | SDK 根目录、工具选择、目标参数、runtime 头文件和辅助源码 | Simpler 元数据查询，由 PyPTO 消费 |
@@ -240,7 +245,7 @@ CLI 导入指定的可信模块，只解析显式列出的模块级 JIT 函数�
 标量为有限 JSON 数值或布尔值；它们只用于完成绑定，不再选择产物——标量参数是运行期值。
 除非请求同时给出样例张量（此时绑定按位置进行），否则可以省略标量。
 
-可序列化的 `run_config` 字段为 `platform`、`strategy`、`memory_planner`、
+可序列化的 `run_config` 字段为 `platform`、`strategy`、`memory_planner`、`enable_software_pipeline`、
 `distributed_config`、`dump_passes`、`dump_ptoas_passes`、`save_kernels`、
 `save_kernels_dir`；枚举使用 Python 成员名。分布式设置支持 `device_ids`、
 `num_sub_workers`、`runtime`、`aicpu_thread_num`。预热结果区分共享及私有准备，失败

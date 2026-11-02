@@ -108,8 +108,9 @@ def orch(self, a, out):
         return out
 ```
 
-末尾的 return-var `yield` 保留在 scope 内；printer 会递归穿过 AUTO scope 以保留
-`var = pl.yield_(...)` 的赋值左值；parser 也会把 `pl.scope()` 内的 yield 视为
+末尾的 return-var `yield` 保留在 scope 内；printer 会递归穿过 AUTO 和 MANUAL scope 以保留
+`var = pl.yield_(...)` 的赋值左值。末尾 scope 前有其他语句时也同样适用；空
+scope 体打印为 `pass`，保留其模式和名称。parser 也会把 `pl.scope()` 内的 yield 视为
 外层 for/if 的 return-var。
 
 ## 验证

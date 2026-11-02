@@ -13,18 +13,14 @@
  * @file quant_mx.cpp
  * @brief MX quantization tile ops
  *
- * Public pl.quant_mx / tile.tquant_mx are not yet supported in the same InCore
- * mixed task as matmul_mx. Stage quantized data and FP8E8M0 scales through GM
- * between separate AIV and AIC kernels; automatic cross-core transport is a
- * follow-up.
- *
  * ``group_axis`` matches PTOAS ``grpAxis``: axis1 is the A-side [M,K] path;
  * axis0 is the B-side [N,K] path (LowerCompositeOps transposes to [K,N] first).
  * GM TensorLayout.MX_* remains a tensor/view annotation, not a tile-op kwarg.
  *
  * LowerCompositeOps expands tile.tquant_mx into value-returning
  * tile.tquant_mx_raw + tile.tmov_x2zz (gather_compare-style SSA), then
- * reinterpret / transpose_view to the public FP8 types. Those internal ops run
+ * reinterpret / transpose_view to the public scale and FP8 data types.
+ * FP4E2M1X2 data is already returned in its native packed type. Internal ops run
  * before InferTileMemorySpace; scratch tiles are created with an explicit
  * MemorySpace::Vec annotation so the later memory planner still gets addresses.
  */
@@ -66,9 +62,26 @@ struct MxQuantTypeInfo {
 };
 
 MxQuantTypeInfo ResolveMxQuantType(DataType dtype, const std::string& op_name, const Span& span) {
+  if (dtype == DataType::FP4E2M1X2) return {dtype, dtype};
   CHECK_SPAN(dtype == DataType::FP8E4M3FN, span)
-      << "The operator " << op_name << " requires dtype FP8E4M3FN (MXFP8-only), but got " << dtype.ToString();
+      << "The operator " << op_name << " requires dtype FP8E4M3FN or FP4E2M1X2, but got " << dtype.ToString();
   return {DataType::FP8E4M3FN, DataType::INT8};
+}
+
+void CheckFp4QuantSource(const TileTypePtr& src, DataType dtype, int group_axis, const std::string& op_name,
+                         const Span& span) {
+  if (dtype != DataType::FP4E2M1X2) return;
+  CHECK_SPAN(src->dtype_ == DataType::FP16 || src->dtype_ == DataType::BF16, span)
+      << "The operator " << op_name << " requires FP16 or BF16 source for MXFP4_E2M1";
+  // Axis0 receives a transposed source in the public API. Its contiguous
+  // dimension is N, so its packed row stride must contain 32 whole bytes.
+  auto packed_extent = As<ConstInt>(src->shape_[group_axis == 0 ? 0 : 1]);
+  CHECK_SPAN(packed_extent && packed_extent->value_ > 0 && packed_extent->value_ % 2 == 0, span)
+      << "The operator " << op_name << " requires an even packed FP4 extent";
+  if (group_axis == 0) {
+    CHECK_SPAN(packed_extent->value_ % 64 == 0, span)
+        << "The operator " << op_name << " requires N divisible by 64 for MXFP4 carrier row alignment";
+  }
 }
 
 int64_t GetStaticElementCount(const TileTypePtr& type, const std::string& operand, const std::string& op_name,
@@ -124,12 +137,26 @@ DataType ParseDtype(const std::vector<std::pair<std::string, std::any>>& kwargs)
   return dtype;
 }
 
-void CheckSrcBasics(const TileTypePtr& src_type, const std::string& op_name, const Span& span) {
+void CheckQuantAlgorithm(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType src_dtype,
+                         int group_axis, const std::string& op_name, const Span& span) {
+  std::string algorithm = "ocp";
+  for (const auto& [key, value] : kwargs) {
+    if (key == "quant_scale_alg") algorithm = AnyCast<std::string>(value, "kwarg key: quant_scale_alg");
+  }
+  CHECK_SPAN(algorithm == "ocp" || algorithm == "nv", span)
+      << "The operator " << op_name << " requires quant_scale_alg 'ocp' or 'nv', but got " << algorithm;
+  CHECK_SPAN(algorithm != "nv" || group_axis != 1 || src_dtype == DataType::FP32, span)
+      << "The operator " << op_name << " does not support axis1 FP16/BF16 NV quantization in PTOAS";
+}
+
+void CheckSrcBasics(const TileTypePtr& src_type, const std::string& op_name, const Span& span,
+                    bool require_full_valid = true) {
   CHECK_SPAN(src_type, span) << "The operator " << op_name << " requires src to be a TileType";
   CHECK_SPAN(src_type->shape_.size() == 2, span) << "The operator " << op_name << " requires 2D src tile";
   const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
-  // PTOAS special requirement (static full valid_shape): see EmitStaticValidTileView.
-  CHECK_SPAN(tile_view_semantics::ShapeExprListsEquivalent(src_view.valid_shape, src_type->shape_), span)
+  CHECK_SPAN(!require_full_valid ||
+                 tile_view_semantics::ShapeExprListsEquivalent(src_view.valid_shape, src_type->shape_),
+             span)
       << "The operator " << op_name
       << " does not support a partial src valid_shape; valid_shape must match the physical shape";
   const bool src_supported = src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::BF16 ||
@@ -139,7 +166,7 @@ void CheckSrcBasics(const TileTypePtr& src_type, const std::string& op_name, con
                                   << src_type->dtype_.ToString();
 }
 
-// Public tile.tquant_mx: one src -> TupleType{FP8 quant, FP8E8M0 scale}.
+// Public tile.tquant_mx: one src -> TupleType{FP8 or packed FP4 quant, FP8E8M0 scale}.
 TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
   constexpr const char* kOpName = "tile.tquant_mx";
@@ -151,6 +178,8 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
   const DataType dtype = ParseDtype(kwargs);
   const int group_axis = ParseGroupAxis(kwargs, kOpName, span, /*required=*/true);
   const MxQuantTypeInfo type_info = ResolveMxQuantType(dtype, kOpName, span);
+  CheckFp4QuantSource(src_type, dtype, group_axis, kOpName, span);
+  CheckQuantAlgorithm(kwargs, src_type->dtype_, group_axis, kOpName, span);
 
   ExprPtr dim0 = src_type->shape_[0];
   ExprPtr dim1 = src_type->shape_[1];
@@ -174,6 +203,10 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
 
   std::vector<ExprPtr> dst_shape = src_type->shape_;
   if (group_axis == 0) dst_shape = {dim1, dim0};  // src [N,K] → quant [K,N]
+  if (dtype == DataType::FP4E2M1X2) {
+    const int64_t packed_cols = (group_axis == 0 ? dim0_const->value_ : dim1_const->value_) / 2;
+    dst_shape[1] = std::make_shared<ConstInt>(packed_cols, DataType::INDEX, span);
+  }
   TileView dst_view;
   dst_view.valid_shape = dst_shape;
   dst_view.blayout = TileLayout::row_major;
@@ -199,7 +232,7 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
   return std::make_shared<TupleType>(std::vector<TypePtr>{dst_type, scale_type});
 }
 
-// Internal tile.tquant_mx_raw: (src, max_ws, scaling_ws) -> TupleType{INT8, UINT8 exp}.
+// Raw tile.tquant_mx_raw: (src, max_ws, scaling_ws) -> TupleType{INT8 or packed FP4, UINT8 exp}.
 // max/scaling are write-only workspace inputs (gather_compare tmp style).
 TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -208,28 +241,57 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(args.size() == 3, span) << "The operator " << kOpName
                                      << " requires src, max, and scaling workspaces";
   auto src_type = As<TileType>(args[0]->GetType());
-  CheckSrcBasics(src_type, kOpName, span);
+  CheckSrcBasics(src_type, kOpName, span, /*require_full_valid=*/false);
 
   const DataType dtype = ParseDtype(kwargs);
   const int group_axis = ParseGroupAxis(kwargs, kOpName, span, /*required=*/true);
   const MxQuantTypeInfo type_info = ResolveMxQuantType(dtype, kOpName, span);
+  CheckQuantAlgorithm(kwargs, src_type->dtype_, group_axis, kOpName, span);
+  bool interleave = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "interleave") interleave = AnyCast<bool>(value, "kwarg key: interleave");
+  }
+  CHECK_SPAN(!interleave || (group_axis == 0 && src_type->dtype_ != DataType::FP32), span)
+      << "The operator " << kOpName << " interleave requires axis0 FP16/BF16 source";
+
+  if (dtype == DataType::FP4E2M1X2) {
+    CHECK_SPAN(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::BF16, span)
+        << "The operator " << kOpName << " requires FP16 or BF16 source for MXFP4_E2M1";
+  }
 
   auto dim0_const = As<ConstInt>(src_type->shape_[0]);
   auto dim1_const = As<ConstInt>(src_type->shape_[1]);
   CHECK_SPAN(dim0_const && dim1_const, span) << "The operator " << kOpName << " requires static M and K";
   CHECK_SPAN(dim0_const->value_ > 0 && dim1_const->value_ > 0, span)
       << "The operator " << kOpName << " requires positive dimensions";
+  const auto src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+  CHECK_SPAN(src_view.valid_shape.size() == 2, span)
+      << "The operator " << kOpName << " requires a 2D valid shape";
+  auto valid_rows = As<ConstInt>(src_view.valid_shape[0]);
+  auto valid_cols = As<ConstInt>(src_view.valid_shape[1]);
+  CHECK_SPAN(valid_rows && valid_cols && valid_rows->value_ > 0 && valid_cols->value_ > 0 &&
+                 valid_rows->value_ <= dim0_const->value_ && valid_cols->value_ <= dim1_const->value_,
+             span)
+      << "The operator " << kOpName << " requires static positive valid dimensions within physical shape";
+  CHECK_SPAN(!interleave || (dim0_const->value_ % 64 == 0 && valid_rows->value_ % 64 == 0), span)
+      << "The operator " << kOpName << " interleave requires physical and valid rows divisible by 64";
+  if (dtype == DataType::FP4E2M1X2) {
+    CHECK_SPAN(dim1_const->value_ % 2 == 0 && valid_cols->value_ % 2 == 0, span)
+        << "The operator " << kOpName << " requires even physical and valid columns for packed FP4";
+    CHECK_SPAN(dim1_const->value_ % 64 == 0, span)
+        << "The operator " << kOpName
+        << " requires physical columns divisible by 64 for MXFP4 carrier row alignment";
+  }
   if (group_axis == 1) {
-    CHECK_SPAN(dim0_const->value_ % kMXSFractalRows == 0, span)
-        << "The operator " << kOpName << " requires M divisible by " << kMXSFractalRows << ", but got "
-        << dim0_const->value_;
-    CHECK_SPAN(dim1_const->value_ % kMXGroupSize == 0, span)
+    CHECK_SPAN(valid_cols->value_ == dim1_const->value_, span)
+        << "The operator " << kOpName << " axis1 flat exponents require physical columns equal valid columns";
+    CHECK_SPAN(valid_cols->value_ % kMXGroupSize == 0, span)
         << "The operator " << kOpName << " requires K divisible by " << kMXGroupSize
-        << " for group_axis=1, but got " << dim1_const->value_;
+        << " for group_axis=1, but got " << valid_cols->value_;
   } else {
-    CHECK_SPAN(dim0_const->value_ % kMXGroupSize == 0, span)
+    CHECK_SPAN(valid_rows->value_ % kMXGroupSize == 0, span)
         << "The operator " << kOpName << " requires dim0 divisible by " << kMXGroupSize
-        << " for group_axis=0, but got " << dim0_const->value_;
+        << " for group_axis=0, but got " << valid_rows->value_;
   }
 
   auto max_type = As<TileType>(args[1]->GetType());
@@ -243,8 +305,8 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
       << src_type->dtype_.ToString() << "), but got "
       << (scaling_type ? scaling_type->dtype_.ToString() : std::string("<non-tile>"));
 
-  const int64_t grouped_rows = group_axis == 0 ? dim0_const->value_ / kMXGroupSize : dim0_const->value_;
-  const int64_t grouped_cols = group_axis == 0 ? dim1_const->value_ : dim1_const->value_ / kMXGroupSize;
+  const int64_t grouped_rows = group_axis == 0 ? valid_rows->value_ / kMXGroupSize : valid_rows->value_;
+  const int64_t grouped_cols = group_axis == 0 ? valid_cols->value_ : valid_cols->value_ / kMXGroupSize;
   CHECK_SPAN(grouped_rows <= std::numeric_limits<int64_t>::max() / grouped_cols, span)
       << "The operator " << kOpName << " scale-group count overflows int64";
   const int64_t groups = grouped_rows * grouped_cols;
@@ -254,11 +316,17 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
       << "The operator " << kOpName << " requires scaling scratch valid element count " << groups;
 
   TileView dst_view;
-  dst_view.valid_shape = src_type->shape_;
+  std::vector<ExprPtr> dst_shape = src_type->shape_;
+  if (dtype == DataType::FP4E2M1X2) {
+    dst_shape[1] = std::make_shared<ConstInt>(dim1_const->value_ / 2, DataType::INDEX, span);
+  }
+  dst_view.valid_shape = src_view.valid_shape;
+  if (dtype == DataType::FP4E2M1X2) {
+    dst_view.valid_shape[1] = std::make_shared<ConstInt>(valid_cols->value_ / 2, DataType::INDEX, span);
+  }
   dst_view.blayout = TileLayout::row_major;
   dst_view.slayout = TileLayout::none_box;
-  auto raw_dst_type =
-      std::make_shared<TileType>(src_type->shape_, type_info.raw_dst_dtype, std::nullopt, dst_view);
+  auto raw_dst_type = std::make_shared<TileType>(dst_shape, type_info.raw_dst_dtype, std::nullopt, dst_view);
 
   const int64_t aux_rows = group_axis == 0 ? grouped_rows : 1;
   const int64_t aux_cols = group_axis == 0 ? grouped_cols : groups;
@@ -266,6 +334,19 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> exp_shape = {make_dim(aux_rows), make_dim(aux_cols)};
   TileView exp_view;
   exp_view.valid_shape = exp_shape;
+  if (group_axis == 0) {
+    exp_shape[1] = src_type->shape_[1];
+  } else {
+    CHECK_SPAN(aux_cols <= std::numeric_limits<int64_t>::max() - 31, span)
+        << "The operator " << kOpName << " padded exponent columns overflow int64";
+    exp_shape[1] = make_dim((aux_cols + 31) / 32 * 32);
+  }
+  if (interleave) {
+    CHECK_SPAN(dim1_const->value_ <= (std::numeric_limits<int64_t>::max() - 31) / 2, span)
+        << "The operator " << kOpName << " interleaved exponent columns overflow int64";
+    exp_shape = {make_dim(dim0_const->value_ / 64), make_dim((dim1_const->value_ * 2 + 31) / 32 * 32)};
+    exp_view.valid_shape = {make_dim(valid_rows->value_ / 64), make_dim(valid_cols->value_ * 2)};
+  }
   exp_view.blayout = TileLayout::row_major;
   exp_view.slayout = TileLayout::none_box;
   exp_view.fractal = kMXScaleFractal;
@@ -387,13 +468,15 @@ TypePtr DeduceTileTMovX2ZzType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tile.tquant_mx")
     .set_op_category("TileOp")
     .set_description(
-        "MXFP8 block-32 dynamic quantization: TupleType{quantized FP8E4M3FN, e8m0_scale FP8E8M0}. "
+        "MX block-32 dynamic quantization: TupleType{quantized data, e8m0_scale FP8E8M0}. "
         "LowerCompositeOps rewrites this into tile.tquant_mx_raw + tile.tmov_x2zz (value-returning), "
-        "then reinterpret/transpose_view to the public dtypes. dtype must be FP8E4M3FN. group_axis is "
+        "then reinterpret/transpose_view to the public dtypes. dtype is FP8E4M3FN or FP4E2M1X2. group_axis "
+        "is "
         "PTOAS grpAxis (1=A-side [M,K], 0=B-side [N,K] with transpose).")
     .add_argument("src", "Source tile (FP16/FP32/BF16, 2D)")
     .set_attr<DataType>("dtype")
     .set_attr<int>("group_axis")
+    .set_attr<std::string>("quant_scale_alg")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     // Two results (dst, scale), carried by the deduced TupleType; the single
@@ -409,13 +492,15 @@ REGISTER_OP("tile.tquant_mx")
 REGISTER_OP("tile.tquant_mx_raw")
     .set_op_category("TileOp")
     .set_description(
-        "Internal value-returning MXFP8 TQUANT: ins(src, max_ws, scaling_ws) outs TupleType{raw INT8 "
-        "dst, raw UINT8 exp}. max/scaling are write-only workspace inputs. Lowers to pto.tquant.mx.")
+        "Internal value-returning MX TQUANT: ins(src, max_ws, scaling_ws) outs TupleType{INT8 or "
+        "FP4E2M1X2 dst, UINT8 exp}. max/scaling are write-only workspace inputs. Lowers to pto.tquant.mx.")
     .add_argument("src", "Source tile (FP16/FP32/BF16, 2D)")
     .add_argument("max", "Per-group max workspace matching src dtype (write-only)")
     .add_argument("scaling", "Per-group scaling workspace matching src dtype (write-only)")
     .set_attr<DataType>("dtype")
     .set_attr<int>("group_axis")
+    .set_attr<std::string>("quant_scale_alg")
+    .set_attr<bool>("interleave")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)

@@ -13,27 +13,16 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import cast
 
 import pytest
 from pypto.ir.compiled_program import ParamInfo
-from pypto.pypto_core import DataType
+from pypto.ir.param_info import _datatype_from_string
 from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime.debug.run_script_writer import write_run_script
 
 
-class _FakeDataType:
-    """Stand-in for an IR ``DataType`` — only ``str(dt)`` is consulted."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __str__(self) -> str:
-        return self._name
-
-
 def _info(name: str, direction: ParamDirection, shape: list[int] | None, dtype: str = "fp32") -> ParamInfo:
-    return ParamInfo(name=name, direction=direction, shape=shape, dtype=cast(DataType, _FakeDataType(dtype)))
+    return ParamInfo(name=name, direction=direction, shape=shape, dtype=_datatype_from_string(dtype))
 
 
 def test_writes_to_debug_subdir(tmp_path: Path) -> None:

@@ -1,12 +1,45 @@
 # ConvertTensorToTileOps Pass
 
-Converts tensor operations to tile operations in InCore functions and updates orchestration call sites.
+Converts tensor operations to tile operations in InCore, AIC, and AIV functions and updates orchestration call sites.
 
 ## Overview
 
 After `OutlineIncoreScopes` extracts InCore scopes into separate functions, those functions still operate on `TensorType` variables using `tensor.*` operations. This pass lowers them to `TileType` variables with `tile.*` operations that map directly to PTO-ISA instructions.
 
-The pass also updates call sites in orchestration/opaque functions: for each new output parameter added to an InCore function, a `tensor.create` is inserted at the call site.
+Each logical return is recorded before resolving its storage. A computed Tensor
+result gets an explicit `Out` parameter and a `tile.store`; a complete return of
+a local GM allocation moves that allocation to the caller. Repeated aliases of
+the same result share storage. Existing parameter writebacks keep their binding.
+The selected InCore/AIC/AIV function type is preserved. Without a return type
+annotation, the original returned expression supplies its type. Before adding an
+`Out`, the pass rejects types that reference body-local dimensions: pass the
+extent as a scalar parameter or supply an explicit `Out` tensor instead.
+
+Allocations that need tensor-level staging keep their local Tile storage and get
+an exit store. This preserves Tensor-source assembly and local scalar updates
+instead of introducing unsupported GM operations or mixed store channels.
+Only complete returned allocations needed by explicit GM memory operations
+are lifted before lowering. Functions already at the Buffer IR stage are left
+unchanged.
+
+New output parameters propagate through Group/Spmd wrappers to orchestration or
+opaque callers, where `tensor.create` allocates their storage. Internal Group
+outputs need not be part of the Group's logical return tuple.
+
+For supported physical-shape signatures, each call binds both explicit scalars
+and implicit tensor dimensions before allocating outputs or propagating return
+types. Substitution is simultaneous: for `[N, M] -> [M, 128]`, the first result
+stays `M`. Caller expressions are not recursively substituted as callee symbols.
+Binding uses the original signature before adding output parameters. Tensor
+parameters also map to their actual arguments, so private wrapper outputs acquired
+from richer child signatures can safely use expressions such as `tensor.dim(x, 0)`.
+Each materialized output is then bound to its new storage before instantiating later
+output and result types. This also covers omitted original Out parameters, without
+recursively substituting inside caller expressions. Calls that
+need no output storage keep their existing arguments and caller-coordinate result
+types; runtime-allocated Submit outputs remain omitted. Each Spmd/Group forwarding
+layer uses its own caller coordinates. Richer signatures retain their
+existing lowering path and dedup identity guards.
 
 **Requirements**:
 
@@ -15,6 +48,11 @@ The pass also updates call sites in orchestration/opaque functions: for each new
 - Statement structure must be normalized
 
 **When to use**: Run after `OutlineClusterScopes` and before `OptimizeOrchTensors`.
+
+`tensor.cmp` materializes its numeric 0/1 result with a packed predicate and
+`tile.sel`. For 2D comparisons whose lhs already has the result shape, the generated
+one/zero tiles use the lhs logical valid shape before selection, preserving partial or dynamic rows and columns without treating the
+predicate's packed byte width as an element count.
 
 `tensor.col_sum` uses the single-operand sequential tile form by default.
 With `is_binary=True`, the converter creates Vec scratch of shape `[ceil(M/2), N]` for static 2D inputs
@@ -162,35 +200,27 @@ passes to codegen, the way `target_memory` does. See
 
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
 
-`OutlineClusterScopes` produces Spmd/Group wrappers that are transparent 1:1
-forwarders of their params to a single inner InCore call. When Phase 1 appends
-`Out` params to that InCore callee, the wrapper must mirror the appended params
-on its own signature and forward them through the inner call — otherwise
-orchestration codegen's `BuildWrapperReorderedParams` invariant (every inner-call
-`Var` arg resolves to a wrapper param) breaks.
+Wrappers are processed in call-graph postorder, so nested Spmd/Group wrappers
+see their callees' updated signatures regardless of function name order.
+`OutputParameterRewriter` visits each `Call` and `Submit`, adds private `Out`
+parameters for the storage needed at that call site, and forwards them to the
+callee. Separate calls receive separate storage. No `tensor.create` is inserted
+inside a wrapper, and internal outputs do not extend its logical return tuple.
 
-For each `FunctionType::Spmd` / `FunctionType::Group` function:
-
-1. `ForwardedCallFinder` locates the first call to a transformed InCore (one
-   whose Phase 1 added at least one `Out` param).
-2. If found, the wrapper signature is extended with matching `Out` params (same
-   type as the InCore's appended params, reusing the `name_hint_`), and
-   `WrapperForwardMutator` rewrites the inner call to append the new vars as
-   forward args and adopt the callee's new return type. `tensor.create` is
-   *not* synthesised in the wrapper — allocation remains the caller's
-   responsibility.
-3. If no forwarded transformed-InCore call is found, the wrapper is left
-   unchanged.
+For a `Submit`, any pre-existing omitted-Out gap is filled before inserting new
+outputs, including when the callee gained no new output. New outputs precede
+trailing communication contexts. Argument-position attributes are adjusted and
+the Submit's TaskId result is preserved.
 
 ### Phase 2b: Update Orchestration Call Sites
 
-For each orchestration / opaque function that calls a transformed InCore
+For each orchestration / opaque function that calls a transformed InCore/AIC/AIV
 function or a wrapper that absorbed output params in Phase 2a:
 
 1. Insert `tensor.create` for each added output parameter
-2. Append created tensors as extra arguments to the call
+2. Supply created tensors before any trailing communication contexts
 
-InCore, Spmd, and Group functions are skipped from this phase — they were
+InCore, AIC, AIV, Spmd, and Group functions are skipped from this phase — they were
 already rewritten in Phase 1 / 2a.
 
 ## Where a Bridged Load Lands
@@ -743,7 +773,23 @@ re-declared seed could not name it.
 
 **Header**: `include/pypto/ir/transforms/passes.h`
 
-**Implementation**: `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp`
+**Pass entry**: `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` retains
+program-level phase ordering, direction propagation, carry repair, and the
+`IncoreTileOps` verifier. Private implementations live in
+`src/ir/transforms/tensor_to_tile/`:
+
+| File | Responsibility |
+| ---- | -------------- |
+| `incore_conversion.cpp` | Consumer/value-flow analysis, operand loads and bridges, op conversion, and return storage materialization |
+| `gm_access.cpp` | Scalar-update canonicalization, GM alias/access analysis, mixed-store diagnostics, and parameter direction upgrades |
+| `output_propagation.cpp` | Wrapper output propagation and caller storage allocation, including Call/Submit shape substitution |
+| `type_propagation.cpp` | Shared SSA type propagation through assignments, loops, and branches |
+| `internal.h`, `type_propagation.h` | Private stage contracts and the shared mutator declaration |
+
+Each kernel conversion owns its analyses and mutator state together. The shared
+mutator retains mapped-from variables for its lifetime; moving its methods out of
+line does not change that ownership. The pass API and conversion registry remain
+unchanged.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
@@ -767,16 +813,14 @@ re-declared seed could not name it.
 | `ConsumerSpaceCollector` | IRVisitor — collects each variable's consumer-demanded memory space from `input_reqs` |
 | `TypePropagatingMutator` | Base IRMutator — propagates type changes through control flow |
 | `TensorToTileMutator` | IRMutator — converts tensor ops to tile ops via OpConversionRegistry |
-| `ForwardedCallFinder` | IRVisitor — locates the wrapper's call into a transformed InCore (Phase 2a) |
-| `WrapperForwardMutator` | IRMutator — appends new Out args to the wrapper's inner call (Phase 2a) |
-| `CallSiteUpdateMutator` | IRMutator — inserts tensor.create at orchestration call sites (Phase 2b) |
-| `IncoreTileOpsVerifier` | IRVisitor — verifies no TensorType ops remain in InCore functions |
+| `OutputParameterRewriter` | Propagates output parameters through wrappers or allocates them at orchestration call sites (Phase 2) |
+| `IncoreTileOpsVerifier` | IRVisitor — checks Functional InCore/AIC/AIV bodies with the same external/runtime-bound exclusions as conversion |
 
 ## Scope
 
 | Function type | Action |
 | ------------- | ------ |
-| InCore | Converted (tensor ops → tile ops); Phase 1 may append `Out` params |
-| Spmd / Group (forwarding to a transformed InCore) | Signature mirrors the InCore's new `Out` params; inner call forwards them (Phase 2a) |
-| Spmd / Group (no transformed-InCore forwarding) | Unchanged |
+| Functional InCore / AIC / AIV | Converted (tensor ops → tile ops); Phase 1 may add `Out` params; core type preserved |
+| Any Buffer-stage function | Unchanged; its explicit storage and data/metadata effects are already lowered |
+| Spmd / Group | Exposes storage required by each inner call as private `Out` params (Phase 2a) |
 | Orchestration / Opaque | Call sites updated — `tensor.create` inserted for each new `Out` param (Phase 2b) |

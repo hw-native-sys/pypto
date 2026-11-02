@@ -324,6 +324,42 @@ void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
   }
 }
 
+std::vector<std::pair<std::string, std::any>> NormalizeRegKwargs(
+    const std::string& op_name, const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  auto normalized = kwargs;
+  auto has_kwarg = [&normalized](const std::string& key) {
+    return std::any_of(normalized.begin(), normalized.end(),
+                       [&key](const auto& item) { return item.first == key; });
+  };
+  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
+       op_name == "reg.minimum" || op_name == "reg.maximum") &&
+      !has_kwarg("pmode")) {
+    normalized.emplace_back("pmode", std::string("zero"));
+  }
+  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
+    normalized.emplace_back("order", std::string("ascending"));
+  }
+  return normalized;
+}
+
+void RejectRawNoOpConvert(const std::string& op_name, const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
+  if (op_name != "reg.convert" || args.size() != 1) return;
+  bool has_rounding = false;
+  bool has_saturate = false;
+  const DataType* target = nullptr;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "rounding") has_rounding = true;
+    if (key == "saturate") has_saturate = true;
+    if (key == "dtype") target = std::any_cast<DataType>(&value);
+  }
+  if (has_rounding || has_saturate || target == nullptr || !args[0]) return;
+  auto source = std::dynamic_pointer_cast<const RegType>(args[0]->GetType());
+  if (source && source->dtype_ == *target) {
+    CHECK_SPAN(false, span) << "Raw reg.convert same-dtype no-op is non-canonical; use the operand directly";
+  }
+}
+
 OpRegistry& OpRegistry::GetInstance() {
   static OpRegistry instance;
   return instance;
@@ -355,7 +391,8 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
 
 CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const {
-  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true);
+  return CreateImpl(op_name, args, NormalizeRegKwargs(op_name, kwargs), std::move(span),
+                    /*allow_internal=*/true);
 }
 
 CallPtr OpRegistry::CreateUserFacing(const std::string& op_name, const std::vector<ExprPtr>& args,
@@ -366,7 +403,9 @@ CallPtr OpRegistry::CreateUserFacing(const std::string& op_name, const std::vect
 CallPtr OpRegistry::CreateUserFacing(const std::string& op_name, const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
                                      Span span) const {
-  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/false);
+  auto normalized = NormalizeRegKwargs(op_name, kwargs);
+  RejectRawNoOpConvert(op_name, args, normalized, span);
+  return CreateImpl(op_name, args, normalized, std::move(span), /*allow_internal=*/false);
 }
 
 CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
@@ -377,14 +416,16 @@ CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector
 CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    Span span) const {
-  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true);
+  return CreateImpl(op_name, args, NormalizeRegKwargs(op_name, kwargs), std::move(span),
+                    /*allow_internal=*/true);
 }
 
 CallPtr OpRegistry::CreateInternal(const std::string& op_name, const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    const TypePtr& result_type, Span span) const {
   CHECK_SPAN(result_type, span) << "Operator '" << op_name << "' explicit result type must not be null";
-  return CreateImpl(op_name, args, kwargs, std::move(span), /*allow_internal=*/true, result_type);
+  return CreateImpl(op_name, args, NormalizeRegKwargs(op_name, kwargs), std::move(span),
+                    /*allow_internal=*/true, result_type);
 }
 
 TypePtr OpRegistry::ResolveAndValidateCallType(const OpRegistryEntry& entry, const std::vector<ExprPtr>& args,
@@ -396,7 +437,7 @@ TypePtr OpRegistry::ResolveAndValidateCallType(const OpRegistryEntry& entry, con
   try {
     if (!kwargs.empty()) {
       const auto& allowed_kwargs = op->GetAttrs();
-      if (!allowed_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer) {
+      if (!allowed_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer || entry.GetRegSpec()) {
         ValidateKwargs(kwargs, allowed_kwargs, op_name);
       }
     }

@@ -2761,6 +2761,48 @@ class TestTileMatMulOps:
         assert _const_values(result.shape) == [16, 32]
         assert _valid_of(result) == [16, 32]
 
+    @pytest.mark.parametrize("phase", [ir.AccPhase.Unspecified, ir.AccPhase.Partial, ir.AccPhase.Final])
+    @pytest.mark.parametrize(
+        ("acc_valid", "lhs_valid", "rhs_valid", "matches_product"),
+        [
+            ((16, 32), (8, 16), (16, 32), False),
+            ((16, 32), (16, 16), (16, 24), False),
+            ((8, 24), (8, 16), (16, 24), True),
+        ],
+        ids=["wider_rows", "wider_columns", "equal_valid_padded_physical"],
+    )
+    def test_final_matmul_acc_requires_matching_product_valid_shape(
+        self, phase, acc_valid, lhs_valid, rhs_valid, matches_product
+    ):
+        """Final stores cannot wait for untouched accumulator blocks to be set."""
+        span = ir.Span.unknown()
+        acc = ir.Var(
+            "acc",
+            ir.TileType([16, 32], DataType.FP32, tile_view=ir.TileView(valid_shape=acc_valid)),
+            span,
+        )
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([16, 16], DataType.FP16, tile_view=ir.TileView(valid_shape=lhs_valid)),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([16, 32], DataType.FP16, tile_view=ir.TileView(valid_shape=rhs_valid)),
+            span,
+        )
+        if phase == ir.AccPhase.Final and not matches_product:
+            with pytest.raises(
+                ValueError,
+                match="AccPhase.Final requires the product valid shape to match the accumulator valid shape",
+            ):
+                tile.matmul_acc(acc, lhs, rhs, acc_phase=phase)
+        else:
+            result_type = tile.matmul_acc(acc, lhs, rhs, acc_phase=phase).type
+            assert isinstance(result_type, ir.TileType)
+            assert _valid_of(result_type) == list(acc_valid)
+            assert _const_values(result_type.shape) == [16, 32]
+
     @pytest.mark.parametrize(
         ("acc_valid", "lhs_valid", "rhs_valid", "message"),
         [
@@ -2880,6 +2922,67 @@ class TestTileMatMulOps:
 
         ir_str = str(Program)
         assert "tile.matmul_acc" in ir_str
+
+    @pytest.mark.parametrize("phase", [ir.AccPhase.Unspecified, ir.AccPhase.Partial, ir.AccPhase.Final])
+    @pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+    def test_matmul_phase_preserves_span_and_legacy_init_cond(self, phase, accumulate):
+        """The new keyword must not displace IR spans or DSL init_cond operands."""
+        span = ir.Span("matmul_phase_compat.py", 7, 3, 7, 21)
+        lhs = ir.Var("lhs", ir.TileType([16, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 16], DataType.FP32), span)
+        acc = ir.Var("acc", ir.TileType([16, 16], DataType.FP32), span)
+        predicate = ir.ConstBool(True, span)
+        if accumulate:
+            call = tile.matmul_acc(acc, lhs, rhs, span, init_cond=predicate, acc_phase=phase)
+            dsl_call = pl.tile.matmul_acc(
+                pl.Tile(expr=acc), pl.Tile(expr=lhs), pl.Tile(expr=rhs), True, acc_phase=phase
+            ).unwrap()
+            assert isinstance(dsl_call, ir.Call)
+            assert len(call.args) == 4
+            assert isinstance(call.args[3], ir.ConstBool) and call.args[3].value
+            assert len(dsl_call.args) == 4
+            assert isinstance(dsl_call.args[3], ir.ConstBool) and dsl_call.args[3].value
+            assert dsl_call.args[3].dtype == DataType.BOOL
+            default_call = tile.matmul_acc(acc, lhs, rhs)
+        else:
+            call = tile.matmul(lhs, rhs, span, acc_phase=phase)
+            dsl_call = pl.tile.matmul(pl.Tile(expr=lhs), pl.Tile(expr=rhs), acc_phase=phase).unwrap()
+            assert isinstance(dsl_call, ir.Call)
+            default_call = tile.matmul(lhs, rhs)
+        expected = {} if phase == ir.AccPhase.Unspecified else {"acc_phase": int(phase)}
+        assert dict(call.kwargs) == dict(dsl_call.kwargs) == expected
+        assert dict(default_call.kwargs) == {}
+        assert call.span.filename == "matmul_phase_compat.py"
+
+    @pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+    @pytest.mark.parametrize("phase", [1, 99, "final"])
+    def test_matmul_rejects_invalid_acc_phase(self, accumulate, phase):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 16], DataType.FP32), span)
+        acc = ir.Var("acc", ir.TileType([16, 16], DataType.FP32), span)
+        with pytest.raises(ValueError, match="acc_phase|invalid literal for int"):
+            if accumulate:
+                tile.matmul_acc(acc, lhs, rhs, acc_phase=cast(Any, phase))
+            else:
+                tile.matmul(lhs, rhs, acc_phase=cast(Any, phase))
+
+    def test_matmul_acc_phase_is_keyword_only(self):
+        for wrapper in (pl.tile.matmul, pl.tile.matmul_acc, tile.matmul, tile.matmul_acc):
+            assert inspect.signature(wrapper).parameters["acc_phase"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    @pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+    @pytest.mark.parametrize("phase", ["final", 3.0], ids=["string", "double"])
+    def test_raw_matmul_phase_requires_an_integer_even_with_open_kwargs(self, accumulate, phase):
+        """Native construction bypasses Python coercion; phase still has a fixed type."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 16], DataType.FP32), span)
+        acc = ir.Var("acc", ir.TileType([16, 16], DataType.FP32), span)
+        op_name = "tile.matmul_acc" if accumulate else "tile.matmul"
+        args = [acc, lhs, rhs] if accumulate else [lhs, rhs]
+        with pytest.raises(TypeError, match="Invalid type for kwarg key: acc_phase, expected int"):
+            ir.create_op_call(op_name, args, {"acc_phase": phase}, span)
 
     def test_tile_matmul_bias(self):
         """Test tile.matmul_bias operator - matrix multiplication with bias add."""
@@ -4221,10 +4324,6 @@ class TestTileReinterpretViewIR:
     def test_fp4e2m1x2_byte_alias_rejects_shape_change(self, source_dtype, target_dtype, shape):
         with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
             tile.reinterpret_view(self._var([4, 64], source_dtype), target_dtype, shape=shape)
-
-    def test_rejects_logical_fp4_reinterpret(self):
-        with pytest.raises(ValueError, match="does not support source dtype"):
-            tile.reinterpret_view(self._var([4, 64], DataType.FP4), DataType.UINT8)
 
     @pytest.mark.parametrize("layout", [ir.TileLayout.row_major, ir.TileLayout.col_major])
     def test_complete_mx_scale_byte_alias_preserves_layout(self, layout):
@@ -5909,6 +6008,56 @@ class TestTileBitwiseArithmeticOps:
 
         ir_str = str(Program)
         assert "tile.sel" in ir_str
+
+    @pytest.mark.parametrize(
+        ("src_shape", "src_valid", "mask_valid", "error"),
+        [
+            ([8, 64], [8, 64], [7, 8], "mask carrier"),
+            ([8, 64], [8, 64], [8, 7], "packed bytes"),
+            ([2, 16, 64], [2, 8, 60], [1, 8, 8], "mask carrier"),
+            ([2, 16, 64], [2, 8, 60], [2, 7, 8], "mask carrier"),
+        ],
+        ids=["missing-row", "missing-packed-byte", "missing-nd-batch", "missing-nd-row"],
+    )
+    def test_tile_sel_rejects_insufficient_packed_mask_coverage(
+        self, src_shape, src_valid, mask_valid, error
+    ):
+        """An allocated mask tail cannot supply predicates outside its valid region."""
+        span = ir.Span.unknown()
+        mask = ir.Var(
+            "mask",
+            ir.TileType([*src_shape[:-1], 32], DataType.UINT8, tile_view=ir.TileView(valid_shape=mask_valid)),
+            span,
+        )
+        lhs = _partial_tile(src_shape, src_valid, name="lhs")
+        rhs = _partial_tile(src_shape, src_valid, name="rhs")
+        tmp = ir.Var("tmp", ir.TileType([1, 16], DataType.UINT32), span)
+
+        with pytest.raises(ValueError, match=error):
+            tile.sel(mask, lhs, rhs, tmp)
+
+    @pytest.mark.parametrize(("mask_dtype", "valid_carriers"), [(DataType.UINT8, 8), (DataType.UINT32, 2)])
+    def test_tile_sel_accepts_nd_packed_mask_coverage(self, mask_dtype, valid_carriers):
+        """Each ND row needs eight predicate bytes for 60 initialized data elements."""
+        span = ir.Span.unknown()
+        mask = ir.Var(
+            "mask",
+            ir.TileType(
+                [2, 16, 32],
+                mask_dtype,
+                tile_view=ir.TileView(valid_shape=[2, 8, valid_carriers]),
+            ),
+            span,
+        )
+        lhs = _partial_tile([2, 16, 64], [2, 8, 60], name="lhs")
+        rhs = _partial_tile([2, 16, 64], [2, 8, 60], name="rhs")
+        tmp = ir.Var("tmp", ir.TileType([1, 16], DataType.UINT32), span)
+
+        result = tile.sel(mask, lhs, rhs, tmp)
+
+        assert _tile_result_dtype(result) == DataType.FP32
+        assert _tile_result_shape(result) == [2, 16, 64]
+        assert _valid_of(result.type) == [2, 8, 60]
 
 
 class TestTileScalarOperandDtype:
@@ -8468,8 +8617,16 @@ class TestWriteValidRegionUnion:
         with pytest.raises(ValueError, match="dimensions 0 and 1 at once"):
             tile.assemble(target, source, [20, 0])
 
+    def test_assemble_column_append_requires_matching_valid_rows(self):
+        """A narrower row prefix leaves a hole below the appended columns."""
+        target = self._partial_tile([8, 64], [8, 32], name="dst")
+        source = self._partial_tile([8, 16], [6, 16], name="src")
+
+        with pytest.raises(ValueError, match="must provably equal the target valid extent"):
+            tile.assemble(target, source, [0, 32])
+
     def test_assemble_validates_the_physical_source_subview(self):
-        """``pto.tinsert`` copies the whole subview, so all of it must fit.
+        """Fallback lowering materializes the physical subview, so all of it must fit.
 
         The tensor.assemble counterpart accepts this same write, because a tensor
         transfer moves only the source's valid region.
@@ -8488,8 +8645,12 @@ class TestWriteValidRegionUnion:
         target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
         source = self._partial_tile([48, 128], [8, 128], name="src")
 
-        with pytest.raises(ValueError, match="copies the whole source subview"):
+        with pytest.raises(ValueError, match="writes past the end of dimension 0") as exc_info:
             tile.assemble(target, source, [56, 0])
+        message = str(exc_info.value)
+        assert "destination subview with the source's physical shape" in message
+        assert "allocation must fit" in message
+        assert "only the source's valid region is transferred" in message
 
     def test_assemble_keeps_the_target_layout_while_narrowing(self):
         """A partial union must not cost the target its layout metadata."""
@@ -9430,6 +9591,125 @@ class TestB03TriAndGatherOps:
                 target_memory=ir.MemorySpace.Mat,
                 scratch=scratch,
             )
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_move_preserves_logical_shape_across_packing_axes(dtype):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TileType([32, 64], dtype, None, None, ir.MemorySpace.Vec), span)
+    with pytest.raises(ValueError, match="require matching source and destination layouts"):
+        tile.move(source, target_memory=ir.MemorySpace.Mat)
+    boxed = tile.move(
+        source,
+        target_memory=ir.MemorySpace.Vec,
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+    )
+    assert isinstance(boxed.type, ir.TileType)
+    assert [_const_int(dim) for dim in boxed.type.shape] == [16, 128]
+    moved = tile.move(boxed, target_memory=ir.MemorySpace.Mat)
+    assert isinstance(moved.type, ir.TileType)
+    assert [_const_int(dim) for dim in moved.type.shape] == [16, 128]
+    assert moved.type.tile_view is None or moved.type.tile_view.blayout == ir.TileLayout.col_major
+    # PTOAS still compares raw Mat-source shapes, so a second packing-axis
+    # change cannot be expressed without its shape verifier being fixed.
+    with pytest.raises(ValueError, match="cannot change the packed FP4 axis"):
+        tile.move(moved, target_memory=ir.MemorySpace.Right)
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_mat_load_preserves_gm_window_and_converts_tile_geometry(dtype):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([64, 128], dtype), span)
+    loaded = tile.load(source, [32, 32], [32, 64], valid_shape=[16, 32], target_memory=ir.MemorySpace.Mat)
+    assert isinstance(loaded.type, ir.TileType)
+    assert [_const_int(dim) for dim in loaded.type.shape] == [16, 128]
+    assert loaded.type.tile_view is not None
+    assert [_const_int(dim) for dim in loaded.type.tile_view.valid_shape] == [8, 64]
+    # The source partition remains in ND carrier coordinates.
+    assert isinstance(loaded.args[2], ir.MakeTuple)
+    assert [_const_int(dim) for dim in loaded.args[2].elements] == [32, 64]
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+@pytest.mark.parametrize("layout_pair", ["nd_to_nd", "nd_to_zn", "nz_to_nz"])
+def test_packed_fp4_vec_moves_reject_native_byte_stride_mismatch(dtype, layout_pair):
+    span = ir.Span.unknown()
+    source_nz = layout_pair == "nz_to_nz"
+    source_layout = ir.TileView(
+        blayout=ir.TileLayout.col_major if source_nz else ir.TileLayout.row_major,
+        slayout=ir.TileLayout.row_major if source_nz else ir.TileLayout.none_box,
+    )
+    source = ir.Var(
+        "source",
+        ir.TileType([16, 128] if source_nz else [32, 64], dtype, None, source_layout, ir.MemorySpace.Vec),
+        span,
+    )
+    dst_blayout = ir.TileLayout.col_major if source_nz else ir.TileLayout.row_major
+    dst_slayout = (
+        ir.TileLayout.col_major
+        if layout_pair == "nd_to_zn"
+        else ir.TileLayout.row_major
+        if source_nz
+        else ir.TileLayout.none_box
+    )
+    with pytest.raises(ValueError, match="Vec-to-Vec moves support only ND-to-NZ"):
+        tile.move(source, target_memory=ir.MemorySpace.Vec, blayout=dst_blayout, slayout=dst_slayout)
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_extract_and_assemble_native_boundaries(dtype):
+    span = ir.Span.unknown()
+    nd = ir.Var("nd", ir.TileType([32, 64], dtype, None, None, ir.MemorySpace.Vec), span)
+    with pytest.raises(ValueError, match="Vec-to-Vec extraction uses incorrect packed-byte strides"):
+        tile.extract(nd, 0, 0, [16, 32], target_memory=ir.MemorySpace.Vec)
+    with pytest.raises(ValueError, match="native packed FP4 insertion requires matching NZ layouts"):
+        tile.assemble(nd, nd, [0, 0])
+
+    nz = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major)
+    boxed = ir.Var("boxed", ir.TileType([16, 128], dtype, None, nz, ir.MemorySpace.Vec), span)
+    target = ir.Var("target", ir.TileType([32, 256], dtype, None, nz, ir.MemorySpace.Vec), span)
+    assembled = tile.assemble(target, boxed, [0, 64])
+    assert _tile_result_shape(assembled) == [32, 256]
+    with pytest.raises(ValueError, match="insertion requires zero offset on the packed axis"):
+        tile.assemble(target, boxed, [1, 64])
+
+    mat = ir.Var("mat", ir.TileType([32, 128], dtype, None, nz, ir.MemorySpace.Mat), span)
+    extracted = tile.extract(mat, 0, 64, [16, 64], target_memory=ir.MemorySpace.Left)
+    assert _tile_result_shape(extracted) == [16, 64]
+    assert isinstance(extracted.type, ir.TileType)
+    assert extracted.type.get_effective_tile_view().blayout == ir.TileLayout.col_major
+    with pytest.raises(ValueError, match="extraction requires zero offset on the packed axis"):
+        tile.extract(mat, 1, 64, [16, 64], target_memory=ir.MemorySpace.Left)
+    with pytest.raises(ValueError, match="cannot change the packed FP4 packing axis"):
+        tile.extract(mat, 0, 0, [16, 64], target_memory=ir.MemorySpace.Right)
+
+
+@pytest.mark.parametrize("namespace", ["tensor", "tile"])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize(
+    "mode,dtype,rank,message",
+    [
+        ("nearest", DataType.FP32, 2, "tf32_mode must be"),
+        ("", DataType.FP32, 2, "tf32_mode must be"),
+        ("round_even", DataType.FP16, 2, "requires FP32"),
+        ("round_away", DataType.BF16, 2, "requires FP32"),
+        ("round_even", DataType.FP32, 3, "requires 2D"),
+    ],
+)
+def test_matmul_tf32_mode_rejects_unsupported_inputs(namespace, accumulate, mode, dtype, rank, message):
+    span = ir.Span.unknown()
+    type_cls = ir.TensorType if namespace == "tensor" else ir.TileType
+    shape = [32] * rank
+    lhs = ir.Var("lhs", type_cls(shape, dtype), span)
+    rhs = ir.Var("rhs", type_cls(shape, dtype), span)
+    ops = ir.op.tensor if namespace == "tensor" else ir.op.tile
+    with pytest.raises(ValueError, match=message):
+        if accumulate:
+            acc = ir.Var("acc", type_cls(shape, DataType.FP32), span)
+            ops.matmul_acc(acc, lhs, rhs, tf32_mode=mode)
+        else:
+            ops.matmul(lhs, rhs, tf32_mode=mode)
 
 
 if __name__ == "__main__":

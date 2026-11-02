@@ -111,10 +111,13 @@ A library of real-world models and primitive tensor functions built **on top of*
 **Compiler CI coverage:** The `pypto-lib-compile` job compiles all formal runnable
 entries selected by pypto-lib's `.github/scripts/detect_changes.py --all`, using
 its platform ownership rules for A2/A3 and A5. Drafts and non-runnable helpers are
-excluded, including the CPU-only GLM weights round-trip and prefill reference
-self-tests; helpers are exercised through their callers. Device-only entries are
-included because compilation needs no NPU. The adapter forces `golden.run` into
-compile-only mode, records direct compile calls, and requires PTOAS. Coverage
+excluded, including the CPU-only GLM weights round-trip, prefill reference,
+and `models/glm5_3_flash/prefill_fwd.py` weight checks; helpers are exercised
+through their callers. That GLM prefill CLI defaults to CPU weight checks and
+produces no compilation records.
+Other GLM kernel entries remain covered, including entries without a
+`--compile-only` option. Device-only entries are included because compilation
+needs no NPU. The adapter forces `golden.run` into compile-only mode, records direct compile calls, and requires PTOAS. Coverage
 includes frontend, passes, verification, codegen, and PTOAS.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
@@ -136,13 +139,17 @@ compilations fail the job. Malformed or unreadable receipts fail their entry
 without aborting the remaining entries or losing the matrix summary.
 When an entry dispatches cases by launching its own script with the current
 Python interpreter, each child runs through the same compile-only adapter.
-Child arguments, environment, working directory, and process isolation are
-preserved, and the parent combines their compilation records. A child failure
-or missing, empty, or malformed child receipt fails the entry even if the
-parent exits successfully. This interception applies to the current entry
+Child environment, working directory, and process isolation are preserved,
+and the parent combines their compilation records. The compile-output allowlist
+is currently empty, so the adapter does not inject or rewrite runtime directories.
+`--runtime-dir` may identify a replay input or belong to a separate checkpoint
+mode; merely declaring that option does not enable output-directory injection.
+A child failure or missing, empty, or malformed child receipt fails the entry
+even if the parent exits successfully. This interception applies to the current entry
 script launched by the same Python interpreter.
-CI uploads per-entry logs, results, and a manifest
-containing the tested library revision and selected entries.
+On compilation failure, CI uploads per-entry logs, results, and a manifest
+containing the tested library revision and selected entries. Successful runs
+report results in the job log and summary without uploading artifacts.
 
 ### PTOAS — PTO Assembler & Optimizer
 

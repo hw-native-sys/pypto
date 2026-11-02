@@ -19,6 +19,8 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
+#include "pypto/sync/resource_catalog.h"
+#include "src/backend/common/sync_resources.h"
 
 namespace pypto {
 namespace backend {
@@ -28,6 +30,14 @@ Ascend910BHandler::Ascend910BHandler() : BackendHandler(Backend910B::Instance())
 const Ascend910BHandler& Ascend910BHandler::Instance() {
   static const Ascend910BHandler instance;
   return instance;
+}
+
+/// Own the A2/A3 resource model independently of the process-global target.
+const sync::ResourceCatalog& Ascend910BHandler::GetSyncResourceCatalog() const {
+  // PTOAS UnifiedSyncModel::ResourceModel uses K=0 for A3. Preserve that
+  // unavailable buffer-credit pool for PyPTO's combined a2a3 target.
+  static const auto catalog = MakeAscendSyncResourceCatalog(GetPtoTargetArch(), 0);
+  return catalog;
 }
 
 ir::TileView Ascend910BHandler::BuildCrossCoreTransferView(ir::MemorySpace dest_ms,

@@ -122,7 +122,8 @@ AIV, and `attrs["dual_aiv_dispatch"]` is true.
      - aliases: inherit the substituted value's type and propagate it to uses.
      - any other call producing a TileType: rewrite via
        RebuildLane1CallWithZeroValidShape — tile.load becomes tile.create with
-       valid_shape=[0, 0]; tile.slice / tile.transpose / tile.fmods / tile.rems
+       valid_shape=[0, 0]; tile.slice / tile.transpose / tile.fmods / tile.rems /
+       tile.row_max / tile.row_min / tile.row_sum / tile.row_prod
        also become empty tile.create results because those operations cannot
        safely execute with zero valid extents. tile.set_validshape gets its
        valid_shape zeroed; everything else has its result valid_shape cleared.

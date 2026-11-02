@@ -7,10 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Internal torch integration; kernel execution is not yet a public interface.
+"""Torch kernel initialization; execution integration is still internal.
 
 Importing this package does not import torch_npu, create a Worker or load a
 native launch adapter. Framework-specific dependencies are resolved on demand.
 """
 
-__all__: list[str] = []
+from .execution import init
+
+__all__ = ["init"]

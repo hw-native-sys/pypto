@@ -212,7 +212,7 @@ def test_matmul_has_cube_affinity():
     span = ir.Span.unknown()
     lhs = ir.Var("lhs", _tile([16, 128], ir.MemorySpace.Left), span)
     rhs = ir.Var("rhs", _tile([128, 16], ir.MemorySpace.Right), span)
-    matmul = ir.create_op_call("tile.matmul", [lhs, rhs], {"out_dtype": pl.FP32}, span)
+    matmul = ir.create_op_call("tile.matmul", [lhs, rhs], {}, span)
 
     assert testing.classify_call_affinity(matmul) == "cube"
 

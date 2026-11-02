@@ -436,6 +436,99 @@ class TestSplitVectorKernelNoSplitA2A3:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_no_split_dual_dispatch_replaces_empty_replay_reductions(self):
+        """Keep real reductions on lane 0 and only their empty result on lane 1.
+
+        Both CPU-SIM and A2/A3 row reductions require nonempty inputs. The
+        replay lane still needs its push to balance the cube handshake.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                loaded = pl.tile.load(data, [0, 0], [16, 8], target_memory=pl.MemorySpace.Vec)
+                scratch = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                reduced = pl.tile.row_max(loaded, scratch)
+                pl.tpush_to_aic(reduced, split=0)
+                minimum = pl.tile.row_min(loaded, scratch)
+                pl.tpush_to_aic(minimum, split=0)
+                total = pl.tile.row_sum(loaded, scratch)
+                pl.tpush_to_aic(total, split=0)
+                product = pl.tile.row_prod(loaded, scratch)
+                pl.tpush_to_aic(product, split=0)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                subblock_idx = pl.tile.get_subblock_idx()
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    loaded = pl.tile.load(data, [0, 0], [16, 8], target_memory=pl.MemorySpace.Vec)
+                    scratch = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    reduced = pl.tile.row_max(loaded, scratch)
+                    pl.tpush_to_aic(reduced, split=0)
+                    minimum = pl.tile.row_min(loaded, scratch)
+                    pl.tpush_to_aic(minimum, split=0)
+                    total = pl.tile.row_sum(loaded, scratch)
+                    pl.tpush_to_aic(total, split=0)
+                    product = pl.tile.row_prod(loaded, scratch)
+                    pl.tpush_to_aic(product, split=0)
+                    return out
+                else:
+                    loaded_lane1: pl.Tile[
+                        [16, 8], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    scratch_lane1: pl.Tile[
+                        [16, 8], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 8], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    reduced_lane1: pl.Tile[
+                        [16, 1],
+                        pl.FP32,
+                        pl.MemorySpace.Vec,
+                        pl.TileView(blayout=pl.TileLayout.col_major, valid_shape=[0, 0]),
+                    ] = pl.tile.create([16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(reduced_lane1, split=0)
+                    minimum_lane1: pl.Tile[
+                        [16, 1],
+                        pl.FP32,
+                        pl.MemorySpace.Vec,
+                        pl.TileView(blayout=pl.TileLayout.col_major, valid_shape=[0, 0]),
+                    ] = pl.tile.create([16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(minimum_lane1, split=0)
+                    total_lane1: pl.Tile[
+                        [16, 1],
+                        pl.FP32,
+                        pl.MemorySpace.Vec,
+                        pl.TileView(blayout=pl.TileLayout.col_major, valid_shape=[0, 0]),
+                    ] = pl.tile.create([16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(total_lane1, split=0)
+                    product_lane1: pl.Tile[
+                        [16, 1],
+                        pl.FP32,
+                        pl.MemorySpace.Vec,
+                        pl.TileView(blayout=pl.TileLayout.col_major, valid_shape=[0, 0]),
+                    ] = pl.tile.create([16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    pl.tpush_to_aic(product_lane1, split=0)
+                    return out
+
+        _assert_split_matches_expected(Before, Expected)
+
     def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)

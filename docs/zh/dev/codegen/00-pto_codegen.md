@@ -46,6 +46,27 @@ stride 表达式里的常量 (例如复合参数维度 `M * 2` 中的 `2`) 也�
 仅描述形状的赋值标注只有在直接维度读取临时量能够证明结构等价时才替换推导形状；否则保留
 推导出的运行时形状。常量维度直接发射为 INDEX，包括无符号常量。
 
+### 自动切分边界上的动态尺寸参数
+
+自动切分会捕获 tensor 参数类型所需的标量符号，即使 kernel 正文没有直接读取它们。
+`[B, 16]` 这样的独立维度可以通过 tensor 描述符绑定 `B`。
+`[B * 2, 16]` 等支持反解的维度也保留描述符提取，因此 caller 无需单独绑定标量 `B`；
+`[(B + 15) // 16 * 16 + T * 4, 16]` 这样的复合维度无法绑定 `B` 或 `T`。
+切分器会保守地添加显式 `B`、`T` 参数，并传入 caller 中的值。
+这些符号必须在 caller 中具有运行时绑定：标量参数、正文中的值定义，或 tensor 参数的独立维度。
+仅出现在不可逆类型表达式中的符号会在切分阶段被拒绝，避免成为 orchestration 中未声明的参数。
+原尺寸表达式保持不变，不会替换为新的 `ROWS` 符号。
+
+IR 中标量参数位于引用它们的类型标注之前。运行时分发和原生 kernel 签名则按
+tensor 指针、显式标量 payload、剩余描述符尺寸参数的顺序排列。
+PTO codegen 和 wrapper 共享 `collect_tensor_shape_dyn_vars`，确定最后一组参数。
+显式标量优先于描述符提取，并按 Var 身份去重，因此同时用于 shape 和正文的符号只传一次。
+
+对于手写 kernel，描述符提取仍支持独立维度，以及单符号加减常量、乘非零常量。
+整除没有通用逆运算：`B // 5 == 2` 不能证明 `B == 10`。
+应显式传入该符号，或通过另一支持的维度暴露它，否则 wrapper 生成会报错。
+现有运行时描述符和标量打包格式保持不变。
+
 ## 架构
 
 ### 显式 Buffer 输入
@@ -174,7 +195,7 @@ print(pto_code)
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
-| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
+| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.addc(src0, src1, carry)` | `pto.taddc`（`src0 + src1 + carry`） |
@@ -187,7 +208,7 @@ print(pto_code)
 | `tile.xor(lhs, rhs, tmp)` / `tile.xors(lhs, scalar, tmp)` | `pto.txor` / `pto.txors`；scalar 使用同位宽 signless `iN` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
-**`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
+**`tile.slice` / `tile.assemble` 下沉细节。** `tile.slice` 和 `tile.assemble` 的回退路径通过 `pto.subview`
 下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。
 `pto.subview` 要求结果 `tile_buf` 与源 `tile_buf` 在 `dtype`、`memory_space`、
 `blayout`、`slayout`、`fractal`、`pad` 和 `compact` 上完全一致，因此
@@ -201,9 +222,16 @@ print(pto_code)
   需要 zero/min/max 填充，请在切出来的子 tile 上再调用 `tile.fillpad`。
 
 对 `tile.assemble`，前置的 `pto.tmov target → dst` 仅在缓冲复用未把
-`target` 与目标缓冲合并时才会发出，用于保留写入窗口外的数据；末尾的
-`pto.tmov src → dst_view` 才是真正写入由 `pto.subview` 切出的子窗口的数据
-搬运。
+`target` 与目标缓冲合并时才会发出，用于保留写入窗口外的数据。ND（`row_major`、
+`none_box`）布局下的 FP32、FP16 和 BF16 Vec-to-Vec 复制使用
+`pto.tinsert`，直接传入原目标和显式偏移，保留目标行跨度，只复制源的有效区域，
+其余目标元素保持不变。A2/A3 上的列插入不能使用 `subview + tmov`：PTOAS 会把
+视图解析为父 tile 的物理维度，随后因源和目标形状不一致而拒绝编译（#2717）。
+其他复制继续使用 `pto.subview + pto.tmov`。A2/A3 PTOAS 不接受 INT16/INT32 TINSERT，
+固定版本的 ISA 也不接受有效列数为动态值的 INT8/UINT8 TINSERT；
+因此保留整数类型原有的整块 TMOV 复制。
+A2/A3 的插入列偏移必须满足 32 字节对齐（8 个 FP32 或 16 个 FP16/BF16 元素）。
+代码生成会拒绝违反该限制的常量偏移；动态偏移也必须由调用方保证满足此条件。
 
 **Acc 写回上的 FIXPIPE epilogue。** **发生类型转换的** `Acc → Mat` assemble，
 以及**任何** `Acc → GM` store，都是 cube 的 fix-pipe 在排空 L0C——它可以在写出的
@@ -218,7 +246,7 @@ print(pto_code)
 scale 还**决定**走哪条下沉路径，而不只是搭个便车——`INT32` 累加器之所以能
 抵达 `FP16` 的 Mat tile，正是因为它带了 scale（`DEQF16`）——因此由同一个判据
 `ir::CubeMatWritebackUsesFixpipe` 同时供 emitter 与 `FixpipeEpilogueValid` 使用；
-同 dtype 的 assemble 不发生转换，仍是普通的 `pto.tmov`，**带不了任何 epilogue**。
+同 dtype 的 Acc-to-Mat assemble 不发生转换，仍是普通的 `pto.tmov`，**带不了任何 epilogue**。
 `pto.tinsert` 与 `pto.tstore` 对打包后的 scale 操作数拼写不同，两种形式都无法从
 对方推出——二者连同其出处都逐字钉在各自的发射点上。寄存器编码见
 `codegen::EncodeFixpipePreQuant`，各后端的 dtype 表见 `99-verifier.md`。
@@ -439,10 +467,7 @@ tile 调用 `set_validshape`。
 %l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
         : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %rem = arith.remsi %i, %c2_index : index
-  %negative = arith.cmpi slt, %rem, %c0_index : index
-  %corrected = arith.addi %rem, %c2_index : index
-  %slot = arith.select %negative, %corrected, %rem : index
+  %slot = arith.remsi %i, %c2_index : index
   %t = pto.multi_tile_get %l0c_mb[%slot]
      : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
   ...
@@ -450,6 +475,7 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 ```
 
 有符号整数和 `INDEX` 槽位采用[修正后的向下取模余数](../passes/31-lower_pipeline_to_slots.md#生成的-pto-ir)，保持 Python `%` 的语义。
+当被除数可证明非负且除数为正常量时（如上例），该修正会被跳过，因为此时 `arith.remsi` 的结果已与向下取模一致。
 
 有两点关键：
 
@@ -459,7 +485,7 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
   不会乘以槽位的字节数。ptoas 识别下标（`i % 2`）以判断哪些访问可能落在同一槽位，这才是轮转能拿到按槽位的（动态）event id 的原因
   ——第 *i* 轮的 load 由此与第 *i-1* 轮的计算重叠。
 
-`PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
+PTOAS planner 下，`PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
 不一致、各槽位声明的 valid shape 不一致、循环内有两个槽位同时活跃、内存空间不属于
 Vec / Mat / Acc、valid shape 是运行期值、某个槽位作为 phi 被带出 `if` 或循环、槽位数不在
 ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回退成逐槽位
@@ -473,17 +499,22 @@ ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回�
 | 同一轮迭代内填充并读取两个槽位 | ≤ 0.55 只保护**第一个** `multi_tile_get`，第二个 load 与下一轮迭代的写入竞争（0.54 真机实测算错）。0.56 起用整个区域的一个静态 event 保护循环体——正确，但没有区域形式赖以存在的逐槽位重叠 | [PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)，0.56 修复 |
 | 预取：循环前填充槽位 0，之后每轮迭代填充槽位 `(i+1) % 2`、同时读取槽位 `i % 2` | ≤ 0.62 像一槽位轮转那样为两个槽位的 event 都做 prime 和 drain，在这里差一：迭代次数为偶数时算错，为奇数时设备挂死。0.63 只 prime 循环最先写入的那个槽位；0.64 和 0.65 又对两个槽位都做 prime | [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519)，0.63 修复，0.64 回退 |
 
-`CoLiveSlotCollector` 只按循环体统计槽位选取次数，分不清这两种形态，而第二个缺陷在修复后又
-回来了。真机实测：预取形态在 0.63 下运行正确，但在 0.64 和 0.65 下迭代次数为偶数时读到后面
-块的数据、为奇数时挂死；同轮迭代形态在 0.65 下运行正确。因此代码生成对两者都拒绝，并指向
-PyPTO planner——它的固化地址 `alloc_tile` 路径在真机上能正确运行同轮迭代那种形态。直线代码
-不受影响：没有循环就没有跨迭代复用需要保护。放宽限制只需改 `PlanMultiBufferRegions` 里一个
-条件，但前提是固定的 ptoas 能在真机上正确运行预取形态。
+`CoLiveSlotCollector` 在原有 PTOAS planner 路径上保留保守拒绝。上表记录的预取回退仍是
+工具链约束；开启软件流水并不保证工具链同步正确。在 PyPTO planner 下，codegen 识别
+软件流水变换写入 IR 的槽位标记；对已经 lower 的程序生成代码无需再次传入开关。
+codegen 校验静态等大几何信息、region 固定基地址、
+槽位步长和对齐，允许规范的 Vec 共活槽位。槽位表达式可以是常量，或非负循环变量加
+非负常量后对槽位数取模，整个算术表达式必须使用 index 类型。这些槽位取模复用
+标量表达式生成器生成 `arith.remui`。
 
-`PYPTO` 模式下则完全不发射区域：`--pto-level=level3` 下的区域需要显式的基地址 `addr`，而
-codegen 目前还不发射它。限制不在 ptoas——给定常量 `addr`，ptoas 自 0.55 起在 level3 下推导出的
-逐槽位同步与 level2 相同（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)，
-已关闭）。
+在 level3 下，每次循环迭代至多使用一个存活槽位的调度可以发射
+`pto.alloc_multi_tile addr = <base>`。共活预取槽位（包括静态循环），以及运行时或带条件的调度，
+使用固定地址父 buffer 与 `pto.subview`，避免上文记录的 multi-tile 同步回退。
+两者都保留由 PyPTO 规划的完整槽分配。原版 PTOAS 对动态 subview 的同步仍较保守，
+见 [#1587](https://github.com/hw-native-sys/PTOAS/issues/1587)。
+不支持的用户声明区域仍走普通固定地址 `alloc_tile`，继续保持槽位隔离。
+未变换的程序保持原有路径。preload/main/drain 变换及整循环回退规则见
+[LowerPipelineToSlots](../passes/31-lower_pipeline_to_slots.md)。
 
 ### 加载操作转换
 
@@ -751,6 +782,24 @@ tile_c = pl.mul(tile_a, tile_b)
 | `DataType::INT64` | `i64` |
 | `DataType::INT8` | `i8` |
 | `DataType::UINT8` | `ui8` |
+
+### 标量布尔转换
+
+`pl.cast(flag, dtype)` 将标量 `False` 转为数值零，将 `True` 转为数值一，
+字面量与运行时值遵循相同语义。BOOL 使用 MLIR `i1`，但转换时不能将其解释为
+有符号的一位整数。
+
+| 目标类型 | 降低方式 |
+| -------- | -------- |
+| 有符号整数 | 用 `arith.extui` 将 `i1` 扩展到目标位宽 |
+| 无符号整数 | 用 `arith.extui` 扩展到无符号性（signless）的 `iN`，再桥接到 `uiN` |
+| INDEX | `arith.index_castui` |
+| 浮点 | 零扩展到 `i32`，再使用 `arith.sitofp` |
+| BOOL | 恒等转换 |
+
+浮点路径使用整数中间值，因为 A3 设备编译器拒绝 PTOAS 生成的直接 `(float)bool`
+转换。普通有符号整数扩宽仍使用符号扩展（sign extension）。上述规则针对标量转换；
+Tensor 和 Tile 转换算子有各自的降低规则。
 
 ### 内存空间映射
 

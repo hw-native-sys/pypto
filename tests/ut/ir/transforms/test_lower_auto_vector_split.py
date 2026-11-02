@@ -68,6 +68,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, InternalError, ir, passes
 from pypto import backend as _backend
+from pypto.arith import Analyzer
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tile_ops as T
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -1878,7 +1879,7 @@ def test_dynamic_full_width_reshape_is_rejected():
 # the other, so each needs its own coverage:
 #   (1) every tile operand is lane-local, split-axis-singleton, or DECLARED
 #       scratch  -- violated by tile.sel's full-width mask, which the operator's
-#       type deduction never reads;
+#       coverage validation cannot establish as a matching lane partition;
 #   (2) the halved node still type-checks against its own arguments -- violated
 #       by tile.transpose_view, whose axis permutation the broadcast
 #       right-alignment in (1) is not entitled to describe.
@@ -1888,11 +1889,11 @@ def test_dynamic_full_width_reshape_is_rejected():
 def test_sel_full_width_mask_is_rejected():
     """A per-element operand outside the result deduction is still lane data.
 
-    ``tile.sel(mask, lhs, rhs, tmp)`` deduces its result from ``BroadcastShapes``
-    over lhs/rhs alone and validates only that ``mask`` is a ``TileType``. So with
-    lhs/rhs halved and a full-width ``mask``, the halved node re-deduces cleanly —
-    condition (2) is satisfied and cannot catch this. Both lanes would then read
-    mask rows 0..127 and silently compute the wrong halves.
+    ``tile.sel(mask, lhs, rhs, tmp)`` deduces its result from lhs/rhs and checks
+    that the mask covers the result's valid region. With lhs/rhs halved and a
+    full-width ``mask``, that coverage check still passes — condition (2) cannot
+    establish the mask's lane partition. Both lanes would then read mask rows
+    0..127 and silently compute the wrong halves.
 
     Only condition (1) rejects it, and only because ``tile.sel`` declares arg 3
     (``tmp``) lane-invariant and NOT arg 0.
@@ -2256,6 +2257,727 @@ def test_tuple_result_op_halves_each_element_on_its_own_axis():
     # ... and each store offsets the axis THAT element was halved along.
     assert "pl.tile.store(dst, [0 + subblock_idx * 128, 0], out_0)" in printed
     assert "pl.tile.store(cdst, [0, 0 + subblock_idx * 128], out_1)" in printed
+
+
+@pytest.mark.parametrize(
+    "rows, valid_rows, lane_capacity, lane_valid_rows",
+    [
+        (8, 8, 8, (4, 4)),
+        (9, 9, 8, (5, 4)),
+        (10, 10, 8, (5, 5)),
+        (18, 18, 16, (9, 9)),
+        (16, 16, 8, (8, 8)),
+        (32, 32, 16, (16, 16)),
+        (10, 7, 8, (5, 2)),
+    ],
+)
+def test_tuple_count_partition_keeps_logical_stride_separate_from_capacity(
+    rows, valid_rows, lane_capacity, lane_valid_rows
+):
+    """Aligned storage must not become the logical partition width.
+
+    Eight source rows leave the count capacity unchanged after splitting; ten
+    rows give each lane five counts in an eight-element buffer. Odd and partially
+    valid inputs must also retain the second lane's shorter valid extent. Bound,
+    inline, and aliased projections all carry the same partition through stores
+    and an ordinary elementwise consumer.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[rows, 128], pl.FP32],
+            tmp: pl.Tile[[rows, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_bound: pl.Out[pl.Tensor[[1, rows], pl.INT32]],
+            out_inline: pl.Out[pl.Tensor[[1, rows], pl.INT32]],
+            out_consumer: pl.Out[pl.Tensor[[1, rows], pl.INT32]],
+        ) -> pl.Tensor[[1, rows], pl.INT32]:
+            src = pl.tile.load(
+                t, [0, 0], [rows, 128], valid_shape=[valid_rows, 128], target_memory=pl.Mem.Vec
+            )
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            counts = pair[1]
+            aliased = counts
+            summed = pl.tile.add(pair[1], aliased)
+            bound_store = pl.tile.store(counts, [0, 0], out_bound)  # noqa: F841
+            inline_store = pl.tile.store(pair[1], [0, 0], out_inline)  # noqa: F841
+            return pl.tile.store(summed, [0, 0], out_consumer)
+
+    count_types: list[ir.Type] = []
+    stores: list[ir.Call] = []
+    lane_vars: list[ir.Var] = []
+    gather_calls: list[ir.Call] = []
+
+    class CountPartition(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                if op.value.op.name == ir.get_op("tile.get_subblock_idx").name:
+                    lane_vars.append(op.var)
+                elif op.value.op.name == ir.get_op("tile.gather_compare").name:
+                    assert isinstance(op.var.type, ir.TupleType)
+                    count_types.append(op.var.type.types[1])
+            if op.var.name_hint in ("counts", "aliased", "summed"):
+                count_types.append(op.var.type)
+            super().visit_assign_stmt(op)
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("tile.gather_compare").name:
+                gather_calls.append(op)
+                assert isinstance(op.type, ir.TupleType)
+                count_types.append(op.type.types[1])
+            elif op.op.name == ir.get_op("tile.store").name:
+                stores.append(op)
+                count_types.append(op.args[0].type)
+            elif op.op.name == ir.get_op("tile.add").name:
+                count_types.extend(arg.type for arg in op.args)
+            super().visit_call(op)
+
+    visitor = CountPartition()
+    visitor.visit_program(_lower(Before))
+    assert len(gather_calls) == len(lane_vars) == 1
+    assert len(stores) == 3
+    logical_stride = (rows + 1) // 2
+    valid_shapes = [[1, width] for width in lane_valid_rows]
+    for count_type in count_types:
+        assert isinstance(count_type, ir.TileType)
+        assert count_type.dtype == DataType.INT32
+        assert count_type.memory_space == MS.Vec
+        _assert_split_tile_type(count_type, [1, lane_capacity], valid_shapes, lane_vars[0])
+    for store in stores:
+        _assert_store_offsets(store, lane_vars[0], 1, logical_stride)
+
+
+def _assert_count_consumer_partition(program, op_name, rows, rhs_valid_shapes):
+    """Check assignment, call, and store types without merging their invariants."""
+    consumer_name = ir.get_op(op_name).name
+    consumers: list[ir.Call] = []
+    stores: list[ir.Call] = []
+    lane_vars: list[ir.Var] = []
+    result_types: list[ir.Type] = []
+
+    class Consumers(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                if op.value.op.name == ir.get_op("tile.get_subblock_idx").name:
+                    lane_vars.append(op.var)
+                elif op.value.op.name == consumer_name:
+                    result_types.append(op.var.type)
+            super().visit_assign_stmt(op)
+
+        def visit_call(self, op):
+            if op.op.name == consumer_name:
+                consumers.append(op)
+                result_types.append(op.type)
+            elif op.op.name == ir.get_op("tile.store").name:
+                stores.append(op)
+                result_types.append(op.args[0].type)
+            super().visit_call(op)
+
+    visitor = Consumers()
+    visitor.visit_program(program)
+    assert len(consumers) == len(stores) == len(lane_vars) == 1
+    consumer = consumers[0]
+    assert len(consumer.args) == 2
+    logical_stride = (rows + 1) // 2
+    lane_capacity = ((logical_stride + 7) // 8) * 8
+    result_valid = [[1, min(logical_stride, rows - lane * logical_stride)] for lane in (0, 1)]
+    for tile_type in [*result_types, consumer.args[0].type]:
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.dtype == FP32
+        _assert_split_tile_type(tile_type, [1, lane_capacity], result_valid, lane_vars[0])
+    rhs_type = consumer.args[1].type
+    assert isinstance(rhs_type, ir.TileType)
+    assert rhs_type.dtype == FP32
+    _assert_split_tile_type(rhs_type, [1, lane_capacity], rhs_valid_shapes, lane_vars[0])
+    _assert_store_offsets(stores[0], lane_vars[0], 1, logical_stride)
+
+
+@pytest.mark.parametrize(
+    "rows, valid_rows",
+    [(10, 8), (16, 14), (32, 30)],
+    ids=["padded", "capacity-equals-step-8", "capacity-equals-step-16"],
+)
+def test_aligned_count_partial_combine_preserves_valid_regions(rows, valid_rows):
+    """Partial combine copies a sole valid input without reading its missing tail."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[rows, 128], pl.FP32],
+            tmp: pl.Tile[[rows, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[1, rows], pl.FP32]],
+        ) -> pl.Tensor[[1, rows], pl.FP32]:
+            full = pl.tile.load(t, [0, 0], [rows, 128], target_memory=pl.Mem.Vec)
+            partial = pl.tile.load(
+                t, [0, 0], [rows, 128], valid_shape=[valid_rows, 128], target_memory=pl.Mem.Vec
+            )
+            full_pair = pl.tile.gather_compare(full, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            partial_pair = pl.tile.gather_compare(
+                partial, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16
+            )
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            lhs = pl.tile.cast(full_pair[1], pl.FP32)
+            rhs_counts = pl.tile.cast(partial_pair[1], pl.FP32)
+            combined = pl.tile.part_add(lhs, rhs_counts)
+            return pl.tile.store(combined, [0, 0], out)
+
+    step = (rows + 1) // 2
+    rhs_valid = [[1, max(0, min(step, valid_rows - lane * step))] for lane in (0, 1)]
+    _assert_count_consumer_partition(_lower(Before), "tile.part_add", rows, rhs_valid)
+
+
+def test_aligned_count_rsqrt_workspace_preserves_data_partition():
+    """Workspace capacity matches the lane tile, without narrowing its own validity."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[8, 128], pl.FP32],
+            tmp: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec],
+            scratch: pl.Tile[[1, 8], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+        ) -> pl.Tensor[[1, 8], pl.FP32]:
+            src = pl.tile.load(t, [0, 0], [8, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            counts = pl.tile.cast(pair[1], pl.FP32)
+            scaled = pl.tile.rsqrt(counts, tmp=scratch)
+            return pl.tile.store(scaled, [0, 0], out)
+
+    _assert_count_consumer_partition(_lower(Before), "tile.rsqrt", 8, [[1, 8], [1, 8]])
+
+
+@pytest.mark.parametrize(
+    "full_width_bias, rows, valid_rows, diagnostic",
+    [
+        (True, 8, 8, "outside the aligned tile's logical partition"),
+        (False, 10, 7, "different per-lane valid regions"),
+        (False, 10, 8, "different per-lane valid regions"),
+        (False, 16, 14, "different per-lane valid regions"),
+        (False, 32, 30, "different per-lane valid regions"),
+    ],
+    ids=[
+        "full-width-bias",
+        "padded-tail-7",
+        "padded-tail-8",
+        "capacity-equals-step-8",
+        "capacity-equals-step-16",
+    ],
+)
+def test_aligned_count_consumer_rejects_incompatible_operands(full_width_bias, rows, valid_rows, diagnostic):
+    """Equal capacity and step must not bypass checks for uninitialized tails.
+
+    The 16/14 and 32/30 cases used to lose logical_step because it equalled
+    capacity, accepting lane-1 add inputs with valid widths 8/6 and 16/14.
+    """
+    if full_width_bias:
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def split_auto(
+                t: pl.Tensor[[8, 128], pl.FP32],
+                tmp: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec],
+                bias: pl.Tile[[1, 8], pl.INT32, pl.Mem.Vec],
+                rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+                out: pl.Out[pl.Tensor[[1, 8], pl.INT32]],
+            ) -> pl.Tensor[[1, 8], pl.INT32]:
+                src = pl.tile.load(t, [0, 0], [8, 128], target_memory=pl.Mem.Vec)
+                pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+                seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+                summed = pl.tile.add(pair[1], bias)
+                return pl.tile.store(summed, [0, 0], out)
+
+    else:
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def split_auto(
+                t: pl.Tensor[[rows, 128], pl.FP32],
+                tmp: pl.Tile[[rows, 128], pl.FP32, pl.Mem.Vec],
+                rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+                out: pl.Out[pl.Tensor[[1, rows], pl.INT32]],
+            ) -> pl.Tensor[[1, rows], pl.INT32]:
+                full = pl.tile.load(t, [0, 0], [rows, 128], target_memory=pl.Mem.Vec)
+                partial = pl.tile.load(
+                    t, [0, 0], [rows, 128], valid_shape=[valid_rows, 128], target_memory=pl.Mem.Vec
+                )
+                full_pair = pl.tile.gather_compare(
+                    full, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16
+                )
+                partial_pair = pl.tile.gather_compare(
+                    partial, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16
+                )
+                seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+                summed = pl.tile.add(full_pair[1], partial_pair[1])
+                return pl.tile.store(summed, [0, 0], out)
+
+    with pytest.raises(ValueError, match=diagnostic) as exc_info:
+        _lower(Before)
+    assert "tile.add" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("rows", [16, 32])
+def test_equal_step_partition_checks_survive_set_validshape(rows):
+    """Localizing set_validshape must preserve the partition for its consumers."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            t: pl.Tensor[[rows, 128], pl.FP32],
+            tmp: pl.Tile[[rows, 128], pl.FP32, pl.Mem.Vec],
+            rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[1, rows], pl.INT32]],
+        ) -> pl.Tensor[[1, rows], pl.INT32]:
+            src = pl.tile.load(t, [0, 0], [rows, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
+            narrowed = pl.tile.set_validshape(pair[1], 1, rows - 2)
+            summed = pl.tile.add(pair[1], narrowed)
+            return pl.tile.store(summed, [0, 0], out)
+
+    with pytest.raises(ValueError, match="different per-lane valid regions") as exc_info:
+        _lower(Before)
+    # Failing at set_validshape would hide a regression in argument localization.
+    assert "tile.add" in str(exc_info.value)
+
+
+def _split_calls_and_lane(program, op_name):
+    """Collect one operation's calls and the lane variable from lowered IR."""
+    calls = []
+    lane_vars = []
+
+    class Calls(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.get_subblock_idx").name:
+                lane_vars.append(op.var)
+            super().visit_assign_stmt(op)
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op(op_name).name:
+                calls.append(op)
+            super().visit_call(op)
+
+    Calls().visit_program(program)
+    assert len(lane_vars) == 1
+    return calls, lane_vars[0]
+
+
+def _assert_split_tile_type(tile_type, physical_shape, valid_shapes, lane_var):
+    """Compare capacity and each lane's initialized rectangle independently."""
+    assert isinstance(tile_type, ir.TileType)
+    for dim, expected in zip(tile_type.shape, physical_shape, strict=True):
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == expected
+    # Layout-only views omit valid_shape while still denoting a fully valid tile.
+    valid = tile_type.get_effective_tile_view().valid_shape
+    for lane in (0, 1):
+        analyzer = Analyzer()
+        analyzer.bind(lane_var, ir.ConstInt(lane, DataType.INDEX, ir.Span.unknown()))
+        for extent, expected in zip(valid, valid_shapes[lane], strict=True):
+            folded = analyzer.simplify(extent)
+            assert isinstance(folded, ir.ConstInt)
+            assert folded.value == expected
+
+
+def _assert_store_offsets(store, lane_var, axis, step):
+    """Check each lane's destination independently from its tile allocation."""
+    offsets = store.args[1]
+    assert isinstance(offsets, ir.MakeTuple)
+    for lane in (0, 1):
+        analyzer = Analyzer()
+        analyzer.bind(lane_var, ir.ConstInt(lane, DataType.INDEX, ir.Span.unknown()))
+        for dim, offset in enumerate(offsets.elements):
+            folded = analyzer.simplify(offset)
+            assert isinstance(folded, ir.ConstInt)
+            assert folded.value == (lane * step if dim == axis else 0)
+
+
+def _assert_default_partition_store(program, physical_shape, valid_shapes, axis, step):
+    """Inspect the actual store type and lane offset, retaining roundtrip coverage."""
+    stores, lane_var = _split_calls_and_lane(program, "tile.store")
+    assert len(stores) == 1
+    _assert_split_tile_type(stores[0].args[0].type, physical_shape, valid_shapes, lane_var)
+    _assert_store_offsets(stores[0], lane_var, axis, step)
+
+
+@pytest.mark.parametrize(
+    "source_cols, target_rows, target_cols, split_axis",
+    [(8, 16, 8, 0), (8, 8, 16, None), (1, 1, 16, 1)],
+    ids=["column-major-identity", "column-major-matrix-regrouping", "linear-column-vector"],
+)
+def test_tracked_reshape_requires_a_proven_linear_element_order(
+    source_cols, target_rows, target_cols, split_axis
+):
+    """A byte-preserving reshape cannot treat column-major matrix rows as a flat prefix."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            source: pl.Tile[
+                [16, source_cols],
+                pl.FP32,
+                pl.Mem.Mat,
+                pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box),
+            ],
+            out: pl.Out[pl.Tensor[[target_rows, target_cols], pl.FP32]],
+        ) -> pl.Tensor[[target_rows, target_cols], pl.FP32]:
+            popped = pl.tile.move(source, target_memory=pl.Mem.Vec)
+            vec = pl.tile.move(
+                popped,
+                target_memory=pl.Mem.Vec,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            reshaped = pl.tile.reshape(vec, [target_rows, target_cols])
+            return pl.tile.store(reshaped, [0, 0], out)
+
+    function = next(iter(Before.functions.values()))
+    source_type = function.params[0].type
+    assert isinstance(source_type, ir.TileType) and source_type.tile_view is not None
+    assert source_type.tile_view.blayout == ir.TileLayout.col_major
+    assert source_type.tile_view.slayout == ir.TileLayout.none_box
+    # C2V lowering normalizes the shard's layout. The following Vec-to-Vec move
+    # explicitly restores column-major order, including on the actual lane type.
+    assert isinstance(function.body, ir.SeqStmts)
+    moved = function.body.stmts[1]
+    assert isinstance(moved, ir.AssignStmt) and isinstance(moved.value, ir.Call)
+    assert moved.value.op.name == ir.get_op("tile.move").name
+    moved_type = moved.value.type
+    assert isinstance(moved_type, ir.TileType)
+    if source_cols > 1:
+        assert moved_type.tile_view is not None
+        assert moved_type.tile_view.blayout == ir.TileLayout.col_major
+        assert moved_type.tile_view.slayout == ir.TileLayout.none_box
+
+    if split_axis is None:
+        with pytest.raises(ValueError, match="requires a flat row-major source or a linear vector"):
+            _lower(Before)
+        return
+
+    lowered = _lower(Before)
+    moves, _ = _split_calls_and_lane(lowered, "tile.move")
+    assert len(moves) == 1
+    if source_cols > 1:
+        lane_type = moves[0].type
+        assert isinstance(lane_type, ir.TileType) and lane_type.tile_view is not None
+        assert lane_type.tile_view.blayout == ir.TileLayout.col_major
+        assert lane_type.tile_view.slayout == ir.TileLayout.none_box
+    physical = [target_rows, target_cols]
+    physical[split_axis] //= 2
+    _assert_default_partition_store(lowered, physical, [physical, physical], split_axis, physical[split_axis])
+
+
+@pytest.mark.parametrize("rows", [8, 9, 10, 18])
+def test_aligned_count_reshape_localizes_shape_before_type_deduction(rows):
+    """Identity and migrated views retain aligned capacity and logical store steps."""
+    full_capacity = ((rows + 7) // 8) * 8
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[rows, 128], pl.FP32],
+            tmp: pl.Tile[[rows, 128], pl.FP32, pl.Mem.Vec],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out_row: pl.Out[pl.Tensor[[1, rows], pl.INT32]],
+            out_col: pl.Out[pl.Tensor[[rows, 1], pl.INT32]],
+        ) -> pl.Tensor[[rows, 1], pl.INT32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(data, [0, 0], [rows, 128], target_memory=pl.Mem.Vec)
+            pair = pl.tile.gather_compare(src, pl.const(0.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
+            row = pl.tile.reshape(pair[1], [1, full_capacity])
+            col = pl.tile.reshape(row, [full_capacity, 1])
+            row_store = pl.tile.store(row, [0, 0], out_row)  # noqa: F841
+            return pl.tile.store(col, [0, 0], out_col)
+
+    lowered = _lower(Before)
+    reshapes, lane_var = _split_calls_and_lane(lowered, "tile.reshape")
+    stores, _ = _split_calls_and_lane(lowered, "tile.store")
+    assert len(reshapes) == len(stores) == 2
+    step = (rows + 1) // 2
+    capacity = ((step + 7) // 8) * 8
+    valid = [min(step, rows - lane * step) for lane in (0, 1)]
+    for axis, reshape in zip((1, 0), reshapes, strict=True):
+        physical = [1, capacity] if axis == 1 else [capacity, 1]
+        lane_valid = [[1, extent] if axis == 1 else [extent, 1] for extent in valid]
+        _assert_split_tile_type(reshape.type, physical, lane_valid, lane_var)
+        shape_arg = reshape.args[1]
+        assert isinstance(shape_arg, ir.MakeTuple)
+        for dim, expected in zip(shape_arg.elements, physical, strict=True):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == expected
+    for axis, store in zip((1, 0), stores, strict=True):
+        physical = [1, capacity] if axis == 1 else [capacity, 1]
+        lane_valid = [[1, extent] if axis == 1 else [extent, 1] for extent in valid]
+        _assert_split_tile_type(store.args[0].type, physical, lane_valid, lane_var)
+        _assert_store_offsets(store, lane_var, axis, step)
+
+
+@pytest.mark.parametrize("valid_rows, valid_cols", [(16, 64), (14, 60)])
+def test_default_step_accepts_packed_predicate_selection(valid_rows, valid_cols):
+    """Predicate bytes cover data elements; their valid widths need not be equal."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[16, 64], pl.FP32],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            tmp: pl.Tile[[1, 16], pl.UINT32, pl.Mem.Vec],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(
+                data, [0, 0], [16, 64], valid_shape=[valid_rows, valid_cols], target_memory=pl.Mem.Vec
+            )
+            mask = pl.tile.cmps(src, pl.const(0.0, pl.FP32))
+            result = pl.tile.sels(mask, src, tmp, pl.const(0.0, pl.FP32))
+            return pl.tile.store(result, [0, 0], out)
+
+    lowered = _lower(Before)
+    compares, lane_var = _split_calls_and_lane(lowered, "tile.cmps")
+    selections, _ = _split_calls_and_lane(lowered, "tile.sels")
+    assert len(compares) == len(selections) == 1
+    data_valid = [[8, valid_cols], [valid_rows - 8, valid_cols]]
+    # Eight initialized UINT8 carriers hold 64 predicate bits despite 32-byte capacity.
+    mask_valid = [[8, (valid_cols + 7) // 8], [valid_rows - 8, (valid_cols + 7) // 8]]
+    _assert_split_tile_type(compares[0].type, [8, 32], mask_valid, lane_var)
+    mask_type = selections[0].args[0].type
+    assert isinstance(mask_type, ir.TileType)
+    assert mask_type.dtype == DataType.UINT8
+    _assert_split_tile_type(mask_type, [8, 32], mask_valid, lane_var)
+    _assert_split_tile_type(selections[0].args[1].type, [8, 64], data_valid, lane_var)
+    _assert_split_tile_type(selections[0].type, [8, 64], data_valid, lane_var)
+    _assert_default_partition_store(lowered, [8, 64], data_valid, 0, 8)
+
+
+@pytest.mark.parametrize("valid_rows", [16, 14])
+def test_default_step_accepts_assemble_valid_prefix_growth(valid_rows):
+    """Assemble joins initialized rectangles instead of reading equal valid regions."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[16, 64], pl.FP32],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            target = pl.tile.load(
+                data, [0, 0], [16, 64], valid_shape=[valid_rows, 32], target_memory=pl.Mem.Vec
+            )
+            source = pl.tile.load(
+                data, [0, 0], [16, 16], valid_shape=[valid_rows, 16], target_memory=pl.Mem.Vec
+            )
+            result = pl.tile.assemble(target, source, [0, 32])
+            return pl.tile.store(result, [0, 0], out)
+
+    lowered = _lower(Before)
+    assembles, lane_var = _split_calls_and_lane(lowered, "tile.assemble")
+    assert len(assembles) == 1
+    target_valid = [[8, 32], [valid_rows - 8, 32]]
+    source_valid = [[8, 16], [valid_rows - 8, 16]]
+    result_valid = [[8, 48], [valid_rows - 8, 48]]
+    _assert_split_tile_type(assembles[0].args[0].type, [8, 64], target_valid, lane_var)
+    _assert_split_tile_type(assembles[0].args[1].type, [8, 16], source_valid, lane_var)
+    # Inserting columns 32..47 extends the valid prefix without filling capacity 48..63.
+    _assert_split_tile_type(assembles[0].type, [8, 64], result_valid, lane_var)
+    _assert_default_partition_store(lowered, [8, 64], result_valid, 0, 8)
+
+
+@pytest.mark.parametrize("mode, axis", [(pl.SplitMode.UP_DOWN, 0), (pl.SplitMode.LEFT_RIGHT, 1)])
+@pytest.mark.parametrize("matching", [False, True], ids=["unequal-tails", "matching-partial-tails"])
+def test_default_step_checks_survive_alias_loop_and_branch(mode, axis, matching):
+    """Ordinary loads use a null step override; their derived values still need checks."""
+    partial_valid = [14, 64] if axis == 0 else [16, 62]
+    lhs_valid = partial_valid if matching else [16, 64]
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": mode})
+        def split_auto(
+            data: pl.Tensor[[16, 64], pl.FP32],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            flag: pl.Scalar[pl.INT64],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            lhs = pl.tile.load(data, [0, 0], [16, 64], valid_shape=lhs_valid, target_memory=pl.Mem.Vec)
+            rhs = pl.tile.load(data, [0, 0], [16, 64], valid_shape=partial_valid, target_memory=pl.Mem.Vec)
+            alias = rhs
+            for i, (carry,) in pl.range(2, init_values=(alias,)):  # noqa: B007
+                updated = pl.tile.muls(carry, 1.0)
+                loop_result = pl.yield_(updated)
+            if flag > 0:
+                merged = loop_result
+            else:
+                merged = pl.tile.muls(loop_result, 1.0)
+            result = pl.tile.add(lhs, merged)
+            return pl.tile.store(result, [0, 0], out)
+
+    if not matching:
+        with pytest.raises(ValueError, match="different per-lane valid regions") as exc_info:
+            _lower(Before)
+        assert "tile.add" in str(exc_info.value)
+        return
+    physical = [8, 64] if axis == 0 else [16, 32]
+    valid = [[8, 64], [6, 64]] if axis == 0 else [[16, 32], [16, 30]]
+    _assert_default_partition_store(_lower(Before), physical, valid, axis, physical[axis])
+
+
+@pytest.mark.parametrize("lhs_cols, rhs_cols, accepted", [(64, 32, False), (64, 0, False), (32, 32, True)])
+def test_replicated_singleton_consumers_check_validity(lhs_cols, rhs_cols, accepted):
+    """Singleton arithmetic bypasses ordinary halving, but cannot read an unwritten tail."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[1, 64], pl.FP32],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            lhs = pl.tile.load(data, [0, 0], [1, 64], valid_shape=[1, lhs_cols], target_memory=pl.Mem.Vec)
+            rhs = pl.tile.load(data, [0, 0], [1, 64], valid_shape=[1, rhs_cols], target_memory=pl.Mem.Vec)
+            result = pl.tile.add(lhs, rhs)
+            scratch = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            scaled = pl.tile.rsqrt(result, tmp=scratch)
+            return pl.tile.store(scaled, [0, 0], out)
+
+    if not accepted:
+        with pytest.raises(ValueError, match="different per-lane valid regions") as exc_info:
+            _lower(Before)
+        assert "tile.add" in str(exc_info.value)
+        return
+    _assert_default_partition_store(_lower(Before), [1, 64], [[1, 32], [1, 32]], 0, 0)
+
+
+def test_replicated_singleton_consumer_accepts_provably_equal_valid_extents():
+    """The operator and split checks must agree that 32 equals an unsimplified 16 + 16."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            lhs: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[1, 32])],
+            rhs: pl.Tile[
+                [1, 64],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(valid_shape=[1, pl.const(16, pl.INDEX) + pl.const(16, pl.INDEX)]),
+            ],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            result = pl.tile.div(lhs, rhs)
+            return pl.tile.store(result, [0, 0], out)
+
+    # Typed constants in annotation arithmetic preserve the Add node through
+    # parsing and printing. Folding the fixture first would hide the regression.
+    function = next(iter(Before.functions.values()))
+    lhs_type = function.params[0].type
+    rhs_type = function.params[1].type
+    assert isinstance(lhs_type, ir.TileType) and lhs_type.tile_view is not None
+    assert isinstance(rhs_type, ir.TileType) and rhs_type.tile_view is not None
+    assert isinstance(rhs_type.tile_view.valid_shape[1], ir.Add)
+    assert not ir.structural_equal(lhs_type.tile_view.valid_shape[1], rhs_type.tile_view.valid_shape[1])
+
+    lowered = _lower(Before)
+    divisions, lane_var = _split_calls_and_lane(lowered, "tile.div")
+    assert len(divisions) == 1
+    for tile_type in [divisions[0].args[0].type, divisions[0].args[1].type, divisions[0].type]:
+        _assert_split_tile_type(tile_type, [1, 64], [[1, 32], [1, 32]], lane_var)
+    retained_rhs = divisions[0].args[1].type
+    assert isinstance(retained_rhs, ir.TileType) and retained_rhs.tile_view is not None
+    assert isinstance(retained_rhs.tile_view.valid_shape[1], ir.Add)
+    _assert_default_partition_store(lowered, [1, 64], [[1, 32], [1, 32]], 0, 0)
+
+
+def test_default_step_accepts_matching_broadcast_partial_region():
+    """Only the region the consumer reads must be initialized in a replicated bias."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[16, 64], pl.FP32],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            src = pl.tile.load(data, [0, 0], [16, 64], valid_shape=[14, 32], target_memory=pl.Mem.Vec)
+            bias = pl.tile.load(data, [0, 0], [1, 64], valid_shape=[1, 32], target_memory=pl.Mem.Vec)
+            result = pl.tile.add(src, bias)
+            return pl.tile.store(result, [0, 0], out)
+
+    _assert_default_partition_store(_lower(Before), [8, 64], [[8, 32], [6, 32]], 0, 8)
+
+
+def test_default_step_accepts_partial_combine():
+    """The default-step safety checks must retain partial-combine's copy contract."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[16, 64], pl.FP32],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            lhs = pl.tile.load(data, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+            rhs = pl.tile.load(data, [0, 0], [16, 64], valid_shape=[14, 64], target_memory=pl.Mem.Vec)
+            result = pl.tile.part_add(lhs, rhs)
+            return pl.tile.store(result, [0, 0], out)
+
+    _assert_default_partition_store(_lower(Before), [8, 64], [[8, 64], [8, 64]], 0, 8)
+
+
+def test_default_and_explicit_equal_steps_agree_in_loop_and_branch():
+    """A default stride of eight and an explicit eight describe the same partition."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            data: pl.Tensor[[16, 64], pl.INT32],
+            floats: pl.Tensor[[16, 128], pl.FP32],
+            tmp: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec],
+            cube: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
+            flag: pl.Scalar[pl.INT64],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            seed = pl.tile.move(cube, target_memory=pl.Mem.Mat)  # noqa: F841
+            loaded = pl.tile.load(data, [0, 0], [16, 64], target_memory=pl.Mem.Vec)
+            initial = pl.tile.cast(loaded, pl.FP32)
+            src = pl.tile.load(floats, [0, 0], [16, 128], target_memory=pl.Mem.Vec)
+            for i, (carry,) in pl.range(2, init_values=(initial,)):  # noqa: B007
+                pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=64)
+                projected = pl.tile.cast(pair[0], pl.FP32)
+                loop_result = pl.yield_(projected)
+            other_pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=64)
+            if flag > 0:
+                merged = loop_result
+            else:
+                merged = pl.tile.cast(other_pair[0], pl.FP32)
+            result = pl.tile.add(merged, merged)
+            return pl.tile.store(result, [0, 0], out)
+
+    _assert_default_partition_store(_lower(Before), [8, 64], [[8, 64], [8, 64]], 0, 8)
 
 
 def test_arity_dependent_scratch_needs_no_declaration():
@@ -2765,7 +3487,7 @@ def test_tuple_result_op_whose_elements_do_not_move_is_rejected():
             out_store = pl.tile.store(dst, [0, 0], out_0)
             return out_store
 
-    with pytest.raises(ValueError, match="one halved axis per tuple element") as exc_info:
+    with pytest.raises(ValueError, match="one logical partition axis per tuple element") as exc_info:
         _lower(Before)
     assert "tile.gather_compare" in str(exc_info.value)
 
@@ -5496,6 +6218,48 @@ def test_singleton_arithmetic_stays_replicated():
         _lower(_admission_program(span, _singleton_arithmetic_body, wrap=True)),
         _admission_program(span, _singleton_arithmetic_body, wrap=False),
     )
+
+
+def test_singleton_rsqrt_with_private_vec_scratch_stays_replicated():
+    """AUTO validation admits replicated scratch writes before split data consumes the scale."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            qk: pl.Tile[[16, 64], pl.FP32, pl.Mem.Mat],
+            scales: pl.Tensor[[1, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            scale = pl.tile.load(scales, [0, 0], [1, 64], target_memory=pl.Mem.Vec)
+            scratch = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            inverse_scale = pl.tile.rsqrt(scale, tmp=scratch)
+            scaled = pl.tile.mul(popped, inverse_scale)
+            return pl.tile.store(scaled, [0, 0], out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+        def split_auto(
+            qk: pl.Tile[[16, 64], pl.FP32, pl.Mem.Mat],
+            scales: pl.Tensor[[1, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped = pl.tile.aiv_shard(qk, split=1)
+            scale = pl.tile.load(scales, [0, 0], [1, 64], target_memory=pl.Mem.Vec)
+            scratch = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            inverse_scale = pl.tile.rsqrt(scale, tmp=scratch)
+            scaled: pl.Tile[
+                [8, 64],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+            ] = pl.tile.mul(popped, inverse_scale)
+            return pl.tile.store(scaled, [0 + subblock_idx * 8, 0], out)
+
+    ir.assert_structural_equal(_lower(Before), Expected)
 
 
 def _alias_projection_body(span, stmts, aiv_id, qk_h, data):

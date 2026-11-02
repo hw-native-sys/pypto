@@ -99,6 +99,7 @@ enum class ObjectKind {
   RuntimeScopeStmt,
   CommDomainScopeStmt,
   GraphScopeStmt,
+  RegScopeStmt,
   SeqStmts,
   EvalStmt,
   BreakStmt,
@@ -124,6 +125,7 @@ enum class ObjectKind {
   PrefetchAsyncContextType,
   AsyncEventType,
   AsyncSessionType,
+  RegType,
 
   // Other IR node kinds
   Function,
@@ -132,7 +134,7 @@ enum class ObjectKind {
 
   // Op kinds
   Op,
-  GlobalVar
+  GlobalVar,
 };
 
 /**

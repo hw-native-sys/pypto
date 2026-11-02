@@ -137,17 +137,20 @@ class TestTensorMatmulMx:
 
 
 class TestPackedFp4Shape:
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
     @pytest.mark.parametrize("type_constructor", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
-    @pytest.mark.parametrize("shape", [[], [8, 0], [8, 15]])
-    def test_rejects_non_positive_or_odd_static_last_dimension(self, type_constructor, shape):
-        with pytest.raises(ValueError, match=r"positive even logical last dimension|rank >= 1"):
-            type_constructor(shape, DataType.FP4)
+    def test_odd_carrier_dimensions_preserve_their_units(self, type_constructor, dtype):
+        shaped_type = type_constructor([8, 15], dtype)
+        assert shaped_type.dtype == dtype
+        assert [dim.value for dim in shaped_type.shape if isinstance(dim, ir.ConstInt)] == [8, 15]
 
-    def test_accepts_symbolic_last_dimension(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_accepts_symbolic_carrier_last_dimension(self, dtype):
         span = ir.Span.unknown()
-        logical_width = ir.Var("logical_width", ir.ScalarType(DataType.INDEX), span)
-        tensor_type = ir.TensorType([ir.ConstInt(8, DataType.INDEX, span), logical_width], DataType.FP4)
-        assert tensor_type.dtype == DataType.FP4
+        carrier_width = ir.Var("carrier_width", ir.ScalarType(DataType.INDEX), span)
+        tensor_type = ir.TensorType([ir.ConstInt(8, DataType.INDEX, span), carrier_width], dtype)
+        assert tensor_type.dtype == dtype
+        assert str(tensor_type.shape[1]) == "carrier_width"
 
 
 def _tile(name, shape, dtype, *, valid_shape=None, memory=None):
@@ -228,15 +231,16 @@ class TestMatmulMxTypes:
         with pytest.raises(ValueError, match="requires distinct lhs_scale and rhs_scale tiles"):
             ir.op.tile.matmul_mx(lhs, scale, rhs, scale, span)
 
-    def test_rejects_native_mxfp4_and_requires_cast(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_rejects_native_mxfp4_and_requires_cast(self, dtype):
         span = ir.Span.unknown()
-        fp4_operands = self._mx_operands(span, n=64, dtype=DataType.FP4)
-        with pytest.raises(ValueError, match=r"requires lhs dtype FP8E4M3FN.*pl.cast"):
+        fp4_operands = self._mx_operands(span, n=64, dtype=dtype)
+        with pytest.raises(ValueError, match=r"requires lhs dtype FP8E4M3FN.*PTOAS v0.67.*pl.cast"):
             ir.op.tile.matmul_mx(*fp4_operands, span)
 
         lhs, lhs_scale, _, _ = self._mx_operands(span, n=64)
-        _, _, rhs_fp4, rhs_scale = self._mx_operands(span, n=64, dtype=DataType.FP4)
-        with pytest.raises(ValueError, match=r"requires rhs dtype FP8E4M3FN.*pl.cast"):
+        _, _, rhs_fp4, rhs_scale = self._mx_operands(span, n=64, dtype=dtype)
+        with pytest.raises(ValueError, match=r"requires rhs dtype FP8E4M3FN.*PTOAS v0.67.*pl.cast"):
             ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp4, rhs_scale, span)
 
     def test_rejects_wrong_dtypes_and_alignment(self):
@@ -415,7 +419,7 @@ class TestTGetScaleAddr:
         assert isinstance(call_type, ir.TileType)
         assert call_type.memory_space == ir.MemorySpace.RightScale
 
-        fp4_src = _tile("fp4_rb", [64, 32], DataType.FP4, memory=ir.MemorySpace.Right)
+        fp4_src = _tile("fp4_rb", [64, 32], DataType.FP4E2M1X2, memory=ir.MemorySpace.Right)
         with pytest.raises(ValueError, match="requires src dtype FP8E4M3FN"):
             ir.op.tile.tget_scale_addr(dst, fp4_src, span)
 

@@ -355,6 +355,8 @@ _TYPE_FACTORIES: dict[str, Callable[[], ir.Type]] = {
     "UnknownType": lambda: ir.UnknownType(),
     "VoidType": lambda: ir.VoidType(),
     "ScalarType": lambda: ir.ScalarType(DataType.FP32),
+    "RegType": lambda: ir.RegType(64, DataType.FP32, ir.RegKind.VecReg),
+    "RegType_mask": lambda: ir.RegType(64, DataType.BOOL, ir.RegKind.MaskReg),
     "TensorType": lambda: ir.TensorType([64, 128], DataType.FP32),
     "TensorType_view": lambda: ir.TensorType(
         [64, 128],

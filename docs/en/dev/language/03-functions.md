@@ -7,6 +7,32 @@
 Function declaration forms, parameter directions, cross-module reuse, and how to
 print IR back to Python syntax.
 
+## JIT implementation structure
+
+The JIT implementation lives in `python/pypto/jit/`. The public `jit` object and
+`JITFunction` remain in `decorator.py`; private analysis modules supply metadata
+without owning compiled-object caches or dispatching kernels.
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `decorator.py` | Decorators, `JITFunction`, dependency discovery, cache ownership, and compile/execute entry points |
+| `_arguments.py` | Optional torch loading, tensor argument metadata, annotations, and signature/constexpr validation |
+| `_ast_analysis.py` | Shared read-only AST cache, source names, and declared dynamic dimensions |
+| `_call_binding.py` | Call-site argument mapping, constexpr variants, and dynamic-dimension propagation across dependencies |
+| `_tensor_meta.py` | Source-ordered local tensor metadata, branch/loop bindings, and recursive dependency-return inference |
+| `specializer.py` | Specialization context, annotation handling, program source assembly, and diagnostic source maps |
+| `_specialize_body.py` | Stateful AST body rewriting, variable renaming, and lexical scope handling |
+| `_specialize_values.py` | Shared constant and dtype/layout source rendering for specialization and cache keys |
+| `_specialize_types.py` | Shared `DynDim`, `ShapeDim`, and `TensorMeta` definitions; existing imports from `specializer` remain valid |
+| `_source.py`, `cache.py`, `_persistent.py` | Request namespace snapshots, cache keys, and persistent artifact resolution |
+
+`JITFunction` owns the dependency-graph state, compiled-object caches, and their
+lock. Key construction and specialization continue to share one request's
+namespace snapshot. Metadata inference receives dependency discovery as an
+explicit callback and carries it through recursive return analysis, so it does
+not import the decorator at runtime. Shared helper lookups use their owning
+modules, keeping AST caches and test patch targets in one place.
+
 ## JIT constants and compilation reuse
 
 A `@pl.jit` body is parsed into `@pl.program` source and re-parsed in a namespace
@@ -63,6 +89,93 @@ The snapshot copies bindings only: mutating arbitrary configuration objects
 or editing compiler/source files during compilation is not supported by this
 constant-tracking mechanism. Persistent reuse additionally requires the full
 [artifact identity and cache policy](../10-jit-cache.md).
+
+### Dynamic dimension metadata
+
+Before parsing the specialized program, the JIT infers local `TensorMeta` values
+to type arguments passed to bare-annotated helpers. Scalar bindings use `int`
+constants, existing-axis `DynDim` references, immutable expression tuples, or
+`None` (unknown). For `width = n * 8`, the snapshot is `(ast.Mult, (n_dim, 8))`.
+Assignment aliases retain that tuple; subsequent arithmetic creates a different
+snapshot. Rebinding an operand's source name does not change an earlier snapshot.
+
+Reshape inference gives scalar expressions result-specific `DynDim` symbols
+when recording `TensorMeta.shape`; scalar snapshots stay outside tensor types. Repeated
+uses of the same snapshot within one result shape share a symbol; separate
+results get independent bindings. The callee reads the dimension from its actual
+tensor argument's descriptor. The original arithmetic and reshape validation
+remain in the program; placeholder bounds do not replace runtime extents.
+
+`synthesized` records an automatically generated placeholder symbol and retains
+its existing annotation-overlay and helper-return behavior.
+
+### Tile parameters in JIT inline helpers
+
+An inline helper can take an explicitly typed on-chip Tile:
+
+```python
+@pl.jit.inline(auto_scope=False)
+def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]) -> pl.Tile:
+    return tile
+```
+
+Specialization preserves the declared shape, dtype, and memory space, folding
+module and closure constants in the annotation. When a postponed annotation
+uses the helper's own `pl.constexpr` parameter, that call's constexpr binding is
+substituted before the annotation is evaluated; it takes precedence over a
+same-named module or closure constant. Different bindings produce separate
+helper specializations. DSL aliases such as `p.Tile` or a directly imported
+`Tile` are rendered as canonical `pl` paths, preserving `TileView` and `MemRef`
+metadata. An unrelated user variable named `pl` does not affect this rendering.
+For an eager Tile annotation whose factory-local constants are absent from the
+function closure, specialization can retain the already evaluated annotation.
+Independent shape axes and dtype survive even when other axes depend on helper
+parameters; those dependent components are substituted per call. The merged
+contract also contributes to the cache identity. Constexpr memory space
+parameters are substituted while independent shapes evaluated in the factory
+remain intact. Metadata replacements must retain their original kind; ambiguous
+replacements produce a diagnostic.
+If one dependent expression
+mixes a helper parameter with an unavailable factory local, pass that local as
+another constexpr parameter or capture it in the helper body.
+Dynamic symbols referenced
+only by Tile parameter types receive their own module-level `pl.dynamic()`
+declarations, even when no Tensor parameter uses them.
+This also applies when the emitted symbol name matches a Tile or Tensor
+parameter name; actual Scalar dimension parameters remain local.
+If a free dynamic symbol and a distinct Scalar parameter share a label,
+specialization reports the ambiguity; give the free symbol a unique
+`pl.dynamic()` label.
+
+Before substituting arguments, `InlineFunctions` checks Tile dtype, physical
+rank and shape, and conflicting explicitly resolved memory spaces. Generic
+physical dimensions bind to the actual Tile's physical extents, including
+integer affine bindings such as `2*M` to `16` (`M=8`); valid extents
+do not constrain that check. Known Scalar values are substituted first:
+`n=8` and `n+M=16` infer `M=8`. Separate Tile arguments can bind their generic
+physical dimensions independently, including when the helper returns its Tile parameters.
+Returned-parameter types also follow simple immutable aliases such as
+`tmp = second; return tmp`.
+Dimensions shared with Tensor types, explicit Tile views, or Scalar parameters
+retain their shared constraints, including in helpers with no return value.
+Actual Scalar values also constrain view-only dimensions: `n=8` cannot match
+an actual valid extent of `3` when the declared valid extent is `n`.
+Scalar-dependent view expressions such as `n - 1` are compared after argument
+substitution, including valid extents, strides, and offsets. This includes indirect
+dependencies through shared dimensions such as `rows = 2*n`. An omitted actual
+valid shape uses its physical shape, and an omitted offset is zero. A
+Scalar-dependent stride contract requires explicit actual stride metadata.
+JIT specialization also retains nested `pl.Tuple` parameter annotations, including
+the complete Tile types, their dynamic symbols, and per-call constexpr bindings.
+The same physical and view checks apply recursively to Tiles in tuple parameters.
+Dynamic dimension names emitted from Tile annotations must use assignable Python
+identifiers in normalized spelling, must not be Python keywords, and must not
+shadow the DSL aliases `pl` or `pld`.
+Inlining substitutes the caller's Tile without
+copying it, preserving its valid shape. Specialization also retains evaluable
+Tile annotations on non-inline functions. This preserves their declarations
+without adding Tile arguments to device dispatch interfaces; ordinary InCore
+entry points still reject Tile parameters.
 
 ### Compile options and diagnostic requests
 
@@ -458,6 +571,24 @@ while preserving the implementation and its docstring. Parameter-valued attrs
 resolve to the function's own parameters. The prologue must precede executable
 statements (a leading docstring is allowed); misplaced directives and duplicate
 keys are errors, also for SubWorkers.
+
+### Printer implementation
+
+The private `IRPythonPrinter` declaration lives in
+`src/ir/transforms/python_printer.h`. Its implementations share one visitor
+instance, so variable renaming, signature context, indentation, and scope state
+remain consistent across recursive expression, type, and statement printing.
+
+| Source file in `src/ir/transforms/` | Responsibility |
+| ----------------------------------- | -------------- |
+| `python_printer.cpp` | Public entry points and format callback, name disambiguation, function/program printing and dependency order |
+| `python_printer_expr.cpp` | Expression precedence, constants, calls/submits, and attribute values |
+| `python_printer_stmt.cpp` | Control flow, scopes, comments, SSA yields, and window-buffer declarations |
+| `python_printer_type.cpp` | Type annotations, shapes, memory references, and tensor/tile views |
+
+The public declarations remain in `include/pypto/ir/transforms/printer.h`.
+Sub-expression printers inherit the enclosing variable-name maps, preserving
+bindings in shape expressions, memory offsets, and slot indices.
 
 ### Concise Mode
 

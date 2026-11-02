@@ -134,7 +134,7 @@ class WindowBufferRebinder final : public IRMutator {
 
 // --- IRVisitor trampoline ---
 struct PyIRVisitor : IRVisitor {
-  NB_TRAMPOLINE(IRVisitor, 63);  // 34 base + 23 binary + 5 unary (7 scope kinds)
+  NB_TRAMPOLINE(IRVisitor, 64);  // All virtual handlers, including grouped handlers and dispatchers.
 
   // Top-level entry points
   void VisitProgram(const ProgramPtr& p) override { NB_OVERRIDE_NAME("visit_program", VisitProgram, p); }
@@ -164,7 +164,7 @@ struct PyIRVisitor : IRVisitor {
   }
   void base_visit_unary_expr(const UnaryExprPtr& op) { IRVisitor::VisitUnaryExpr_(op); }
 
-  // Leaf expression types (9)
+  // Leaf expression types (11)
   VISITOR_EXPR_TRAMPOLINE(Var, visit_var)
   VISITOR_EXPR_TRAMPOLINE(IterArg, visit_iter_arg)
   VISITOR_EXPR_TRAMPOLINE(MemRef, visit_mem_ref)
@@ -209,7 +209,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_EXPR_TRAMPOLINE(BitNot, visit_bit_not)
   VISITOR_EXPR_TRAMPOLINE(Cast, visit_cast)
 
-  // Statement types (11 + generic fallback)
+  // Statement types (18)
   VISITOR_STMT_TRAMPOLINE(AssignStmt, visit_assign_stmt)
   VISITOR_STMT_TRAMPOLINE(IfStmt, visit_if_stmt)
   VISITOR_STMT_TRAMPOLINE(ForStmt, visit_for_stmt)
@@ -217,6 +217,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_STMT_TRAMPOLINE(InCoreScopeStmt, visit_in_core_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(ClusterScopeStmt, visit_cluster_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(GraphScopeStmt, visit_graph_scope_stmt)
+  VISITOR_STMT_TRAMPOLINE(RegScopeStmt, visit_reg_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(HierarchyScopeStmt, visit_hierarchy_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(SpmdScopeStmt, visit_spmd_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(SplitAivScopeStmt, visit_split_aiv_scope_stmt)
@@ -231,7 +232,7 @@ struct PyIRVisitor : IRVisitor {
 
 // --- IRMutator trampoline ---
 struct PyIRMutator : IRMutator {
-  NB_TRAMPOLINE(IRMutator, 62);  // 33 base + 23 binary + 5 unary (7 scope kinds)
+  NB_TRAMPOLINE(IRMutator, 63);  // All virtual handlers, including grouped handlers and dispatchers.
 
   // Top-level entry points
   ProgramPtr VisitProgram(const ProgramPtr& p) override {
@@ -262,7 +263,7 @@ struct PyIRMutator : IRMutator {
   }
   ExprPtr base_visit_unary_expr(const UnaryExprPtr& op) { return IRMutator::VisitUnaryExpr_(op); }
 
-  // Leaf expression types (9)
+  // Leaf expression types (11)
   MUTATOR_EXPR_TRAMPOLINE(Var, visit_var)
   MUTATOR_EXPR_TRAMPOLINE(IterArg, visit_iter_arg)
   MUTATOR_EXPR_TRAMPOLINE(MemRef, visit_mem_ref)
@@ -307,7 +308,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_EXPR_TRAMPOLINE(BitNot, visit_bit_not)
   MUTATOR_EXPR_TRAMPOLINE(Cast, visit_cast)
 
-  // Statement types (11 + generic fallback)
+  // Statement types (18)
   MUTATOR_STMT_TRAMPOLINE(AssignStmt, visit_assign_stmt)
   MUTATOR_STMT_TRAMPOLINE(IfStmt, visit_if_stmt)
   MUTATOR_STMT_TRAMPOLINE(ForStmt, visit_for_stmt)
@@ -315,6 +316,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_STMT_TRAMPOLINE(InCoreScopeStmt, visit_in_core_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(ClusterScopeStmt, visit_cluster_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(GraphScopeStmt, visit_graph_scope_stmt)
+  MUTATOR_STMT_TRAMPOLINE(RegScopeStmt, visit_reg_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(HierarchyScopeStmt, visit_hierarchy_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(SpmdScopeStmt, visit_spmd_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(SplitAivScopeStmt, visit_split_aiv_scope_stmt)
@@ -458,6 +460,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, InCoreScopeStmt, visit_in_core_scope_stmt);
   BIND_VISITOR(visitor_cls, ClusterScopeStmt, visit_cluster_scope_stmt);
   BIND_VISITOR(visitor_cls, GraphScopeStmt, visit_graph_scope_stmt);
+  BIND_VISITOR(visitor_cls, RegScopeStmt, visit_reg_scope_stmt);
   BIND_VISITOR(visitor_cls, HierarchyScopeStmt, visit_hierarchy_scope_stmt);
   BIND_VISITOR(visitor_cls, SpmdScopeStmt, visit_spmd_scope_stmt);
   BIND_VISITOR(visitor_cls, SplitAivScopeStmt, visit_split_aiv_scope_stmt);
@@ -557,6 +560,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, InCoreScopeStmt, visit_in_core_scope_stmt);
   BIND_MUTATOR(mutator_cls, ClusterScopeStmt, visit_cluster_scope_stmt);
   BIND_MUTATOR(mutator_cls, GraphScopeStmt, visit_graph_scope_stmt);
+  BIND_MUTATOR(mutator_cls, RegScopeStmt, visit_reg_scope_stmt);
   BIND_MUTATOR(mutator_cls, HierarchyScopeStmt, visit_hierarchy_scope_stmt);
   BIND_MUTATOR(mutator_cls, SpmdScopeStmt, visit_spmd_scope_stmt);
   BIND_MUTATOR(mutator_cls, SplitAivScopeStmt, visit_split_aiv_scope_stmt);

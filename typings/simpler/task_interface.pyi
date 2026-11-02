@@ -22,6 +22,7 @@ from _task_interface import (
     CoreCallable,
     DataType,
     TaskArgs,
+    TensorArgType,
     scalar_to_uint64,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "DataType",
     "TaskArgs",
     "Tensor",
+    "TensorArgType",
     "TensorTransfer",
     "scalar_to_uint64",
 ]

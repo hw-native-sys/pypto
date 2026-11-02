@@ -318,6 +318,39 @@ class ScalarType(Type):
             dtype: Data type
         """
 
+class RegKind(enum.Enum):
+    """Register descriptor kind."""
+
+    VecReg = 0
+    """Vector register holding non-BOOL lanes."""
+
+    MaskReg = 1
+    """Predicate register holding BOOL lanes."""
+
+class RegType(Type):
+    """Static logical register descriptor, independent of ShapedType storage."""
+
+    shape: Final[int]
+    """Logical register lane count as declared by the shape argument."""
+
+    lanes: Final[int]
+    """Logical lane count (alias of shape)."""
+
+    dtype: Final[DataType]
+    """Register element data type."""
+
+    kind: Final[RegKind]
+    """Register descriptor kind."""
+
+    def __init__(self, shape: int, dtype: DataType, kind: RegKind) -> None:
+        """Create a register descriptor with a positive logical lane count.
+
+        Args:
+            shape: Logical lane count.
+            dtype: Register element data type.
+            kind: Register descriptor kind.
+        """
+
 class ShapedType(Type):
     """Base class for shaped types (tensors and tiles)."""
 
@@ -2131,6 +2164,15 @@ class ReturnStmt(Stmt):
         """
         ...
 
+class HardwareLoopPolicy(enum.Enum):
+    """Hardware loop intent."""
+
+    Auto = 0
+    """Use the default hardware-loop lowering policy."""
+
+    Require = 1
+    """Require hardware-loop lowering."""
+
 class ForStmt(Stmt):
     """For loop statement: for loop_var in range(start, stop, step): body."""
 
@@ -2158,6 +2200,9 @@ class ForStmt(Stmt):
     kind: Final[ForKind]
     """Loop kind (Sequential, Parallel, or Unroll)."""
 
+    hardware_loop_policy: Final[HardwareLoopPolicy]
+    """Persistent hardware-loop intent."""
+
     attrs: Final[dict[str, object]]
     """Loop-level attributes (key-value metadata)."""
 
@@ -2173,6 +2218,7 @@ class ForStmt(Stmt):
         span: Span,
         kind: ForKind = ForKind.Sequential,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
+        hardware_loop_policy: HardwareLoopPolicy = HardwareLoopPolicy.Auto,
     ) -> None:
         """Create a for loop statement.
 
@@ -2187,6 +2233,7 @@ class ForStmt(Stmt):
             span: Source location
             kind: Loop kind (default: Sequential)
             attrs: Loop-level attributes (default: empty)
+            hardware_loop_policy: Hardware-loop intent (default: Auto)
         """
 
 class WhileStmt(Stmt):
@@ -2249,6 +2296,9 @@ class ScopeKind(enum.Enum):
 
     Graph = 8
     """Recordable orchestration region (pl.graph, outlined into a Graph function)."""
+
+    Reg = 9
+    """Register lexical region."""
 
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
@@ -2407,6 +2457,19 @@ class GraphScopeStmt(ScopeStmt):
 
     def __init__(self, name_hint: str, *, body: Stmt, span: Span) -> None:
         """Create a Graph scope statement (``name_hint`` is the region name)."""
+
+class RegScopeStmt(ScopeStmt):
+    """Register lexical region with common ScopeStmt fields only."""
+
+    def __init__(
+        self,
+        name_hint: str,
+        body: Stmt,
+        span: Span,
+        leading_comments: list[str] = [],
+        attrs: dict[str, object] | list[tuple[str, object]] | None = None,
+    ) -> None:
+        """Create a register lexical scope statement."""
 
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""
@@ -3517,6 +3580,22 @@ class IRBuilder:
     def __init__(self) -> None:
         """Create an IR builder."""
 
+    def begin_reg_scope(self, span: Span) -> None:
+        """Begin an implicit-capture register region."""
+
+    def end_reg_scope(self, span: Span) -> Stmt:
+        """End a register region and return the built RegScopeStmt."""
+
+    def emit_reg(
+        self, name: str, op_name: str, args: Sequence[Expr], kwargs: dict[str, Any], span: Span
+    ) -> Var:
+        """Infer, validate and assign a register operation inside the open RegScope."""
+
+    def emit_reg_store(
+        self, name: str, tile: Expr, offset: Expr, value: Expr, mask: Expr | None, span: Span
+    ) -> Var:
+        """Assign a register store's Tile alias result."""
+
     # Function building
     def begin_function(
         self,
@@ -4224,6 +4303,7 @@ def deduce_call_return_type(
     callee_params: Sequence[Var],
     args: Sequence[Expr],
     return_types: Sequence[Type],
+    is_inline: bool = False,
 ) -> list[Type]:
     """Deduce return types for a cross-function call.
 
@@ -4234,6 +4314,8 @@ def deduce_call_return_type(
         callee_params: Callee function parameter variables
         args: Actual call argument expressions
         return_types: Callee's declared return types
+        is_inline: Keep conflicting generic Tile physical extents provisional
+            until inline expansion recovers each actual result type
 
     Returns:
         Substituted return types (unchanged if no dynamic vars found)
@@ -4310,6 +4392,7 @@ class IRVisitor:
     def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> None: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> None: ...
     def visit_graph_scope_stmt(self, op: GraphScopeStmt) -> None: ...
+    def visit_reg_scope_stmt(self, op: RegScopeStmt) -> None: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
     def visit_split_aiv_scope_stmt(self, op: SplitAivScopeStmt) -> None: ...
@@ -4393,6 +4476,7 @@ class IRMutator:
     def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> Stmt: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> Stmt: ...
     def visit_graph_scope_stmt(self, op: GraphScopeStmt) -> Stmt: ...
+    def visit_reg_scope_stmt(self, op: RegScopeStmt) -> Stmt: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...
     def visit_split_aiv_scope_stmt(self, op: SplitAivScopeStmt) -> Stmt: ...
@@ -4405,3 +4489,15 @@ class IRMutator:
     def visit_break_stmt(self, op: BreakStmt) -> Stmt: ...
     def visit_continue_stmt(self, op: ContinueStmt) -> Stmt: ...
     def visit_inline_stmt(self, op: InlineStmt) -> Stmt: ...
+
+def returned_param_indices(func: Function, program: Program) -> list[int | None]:
+    """Trace each return to its external parameter."""
+    ...
+
+def get_reg_memory_effect(call: Call) -> dict[str, Any]:
+    """Get target, root, access, begin/end (None if unknown), and mask."""
+    ...
+
+def get_reg_op_spec(op_name: str) -> dict[str, Any]:
+    """Get register schema scope and emitter requirements."""
+    ...

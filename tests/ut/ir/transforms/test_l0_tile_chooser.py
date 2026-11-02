@@ -344,9 +344,152 @@ class TestL0TilingEdgeCases:
         assert _capacities_ok(result.m, result.n, result.k, cfg)
 
 
+@pytest.mark.parametrize(
+    ("M", "N", "fixed_axis", "stationarity", "dba", "dbb"),
+    [
+        (2048, 64, "m", "AStationary", False, True),
+        (64, 2048, "n", "BStationary", True, False),
+    ],
+)
+def test_operand_stationary_survives_an_infeasible_output_stationary_baseline(
+    M, N, fixed_axis, stationarity, dba, dbb
+):
+    """A fixed axis needs the full held-operand buffer, while OS only has half.
+
+    At K=16 the fixed 2048-element axis needs exactly 64 KiB of its operand
+    SRAM. Keeping that operand stationary is legal, and a 16-wide moving
+    axis makes the FP32 Acc fit exactly in 128 KiB. OS cannot form even the
+    minimum tile, so it must not prevent the enabled legal regime's search.
+    """
+    cfg = _default_config(M=M, N=N, K=16)
+    setattr(cfg, f"min_{fixed_axis}", M if fixed_axis == "m" else N)
+    setattr(cfg, f"allow_{stationarity[0].lower()}_stationary", True)
+
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+    assert (result.m, result.n, result.k) == ((2048, 16, 16) if fixed_axis == "m" else (16, 2048, 16))
+    assert result.stationarity == getattr(passes.l0_tile_chooser.Stationarity, stationarity)
+    assert not result.double_buffer_c
+    assert _capacities_ok(result.m, result.n, result.k, cfg, dba=dba, dbb=dbb)
+    assert not _capacities_ok(result.m, result.n, result.k, cfg)
+
+
+@pytest.mark.parametrize(("M", "N", "fixed_axis"), [(2048, 64, "m"), (64, 2048, "n")])
+@pytest.mark.parametrize("gate_mode", ["closed", "opposite", "independent"])
+def test_infeasible_baseline_does_not_enable_an_unrealizable_stationary_regime(M, N, fixed_axis, gate_mode):
+    """Fallback search must respect both explicit gates and the source schedule."""
+    cfg = _default_config(M=M, N=N, K=16)
+    setattr(cfg, f"min_{fixed_axis}", M if fixed_axis == "m" else N)
+    if gate_mode == "opposite":
+        setattr(cfg, "allow_b_stationary" if fixed_axis == "m" else "allow_a_stationary", True)
+    elif gate_mode == "independent":
+        cfg.allow_a_stationary = cfg.allow_b_stationary = True
+        cfg.independent_output_tiles = True
+
+    with pytest.raises(ValueError, match="capacity"):
+        passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+
+@pytest.mark.parametrize(("M", "N", "fixed_axis"), [(2048, 64, "m"), (64, 2048, "n")])
+def test_no_legal_tile_is_reported_after_all_enabled_regimes_are_searched(M, N, fixed_axis):
+    """A minimum K fits the full buffer, but held operands require the full K.
+
+    OS cannot fit K=16 at the fixed axis. Stationary can fit that minimum,
+    but requires K=32, which exceeds even the full operand SRAM. Exhausting
+    both searches must remain a user-facing error rather than a null result.
+    """
+    cfg = _default_config(M=M, N=N, K=32)
+    setattr(cfg, f"min_{fixed_axis}", M if fixed_axis == "m" else N)
+    cfg.allow_a_stationary = cfg.allow_b_stationary = True
+
+    with pytest.raises(ValueError, match=r"no legal \(m, n, k\) tile found"):
+        passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+
 # ---------------------------------------------------------------------------
 # Capacity / alignment invariants
 # ---------------------------------------------------------------------------
+
+
+class TestCanonicalReductionSchedule:
+    @pytest.mark.parametrize("iterations", [1, 2, 8, 32])
+    def test_complete_reduction_reloads_both_operands_but_drains_once(self, iterations):
+        cfg = _default_config(256, 256, 128)
+        cfg.min_m = cfg.min_n = cfg.align_m = cfg.align_n = 128
+        cfg.min_k = cfg.align_k = 128
+        cfg.l0c_bytes = 65536
+        cfg.independent_output_tiles = True
+        cfg.reduction_iterations = iterations
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (result.m, result.n, result.k) == (128, 128, 128)
+        operand_bytes = 4 * (128 * 128 * 2 + 128 * 128 * 2)
+        assert result.estimated_traffic_bytes == iterations * operand_bytes + 256 * 256 * 4
+        loads = 4 * (128 * 128 * 2 / cfg.bw_a + 128 * 128 * 2 / cfg.bw_b)
+        mad = 4 * (cfg.mad_head + 8 * 8 * 8)
+        drain = 4 * (cfg.drain_fixed_cycles + 128 * max(cfg.drain_row_cycles, 512 / cfg.bw_drain))
+        assert result.estimated_cost_cycles == int(iterations * max(loads, mad) + drain + 0.5)
+        assert result.padded_compute_volume == 256 * 256 * 128 * iterations
+
+    @pytest.mark.parametrize("stages", [1, 2, 3, 4])
+    @pytest.mark.parametrize("shape", [(64, 384, 96), (80, 288, 96), (128, 256, 128)])
+    def test_storage_depth_and_arithmetic_count_are_independent(self, stages, shape):
+        cfg = _default_config(*shape)
+        cfg.allow_k_boundary = True
+        cfg.independent_output_tiles = True
+        cfg.reduction_iterations = 3
+        cfg.reduction_pipeline_stages = stages
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        depth = 2 * stages if result.k < cfg.K else max(2, stages)
+        tail_storage = (cfg.K % result.k) * stages if stages > 1 and cfg.K // result.k >= 2 else 0
+        assert result.m * (result.k * depth + tail_storage) * cfg.bytes_a <= cfg.l0a_bytes
+        assert result.n * (result.k * depth + tail_storage) * cfg.bytes_b <= cfg.l0b_bytes
+        assert (result.m, result.n, result.k) == _brute_optimum(cfg)[0]
+
+    def test_independent_grid_does_not_admit_held_panels_or_dbc(self):
+        cfg = _default_config(256, 384, 128)
+        cfg.independent_output_tiles = True
+        cfg.allow_a_stationary = cfg.allow_b_stationary = cfg.allow_double_buffer_c = True
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert result.stationarity == passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert not result.double_buffer_c
+        assert (result.m, result.n, result.k) == _brute_optimum(cfg)[0]
+
+    def test_source_pipeline_reserves_separate_k_tail_operands(self):
+        cfg = _default_config(272, 384, 176)
+        cfg.allow_k_boundary = cfg.independent_output_tiles = True
+        cfg.box_align_m = cfg.box_align_n = 16
+        cfg.reduction_iterations = 3
+        cfg.reduction_pipeline_stages = 2
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        # The old (144,128,48) choice occupied 4*144*48*2 main bytes
+        # plus 2*144*32*2 peel bytes: 73728 > 65536 Left bytes.
+        assert (result.m, result.n, result.k) != (144, 128, 48)
+        assert (result.m, result.n, result.k) == _brute_optimum(cfg)[0]
+
+    def test_unknown_count_is_single_c_lower_bound(self):
+        cfg = _default_config(256, 384, 128)
+        cfg.allow_double_buffer_c = True
+        cfg.reduction_iterations = 0
+        unknown = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        cfg.allow_double_buffer_c = False
+        cfg.reduction_iterations = 1
+        one = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert not unknown.double_buffer_c
+        assert (unknown.m, unknown.n, unknown.k) == (one.m, one.n, one.k)
+        assert unknown.estimated_cost_cycles == one.estimated_cost_cycles
+
+    @pytest.mark.parametrize("field,value", [("reduction_iterations", -1), ("reduction_pipeline_stages", 0)])
+    def test_invalid_reduction_metadata_is_rejected(self, field, value):
+        cfg = _default_config(64, 384, 96)
+        setattr(cfg, field, value)
+        with pytest.raises(ValueError, match=field):
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+    def test_repeated_work_overflow_is_rejected(self):
+        cfg = _default_config(4096, 4096, 4096)
+        cfg.reduction_iterations = 2**31 - 1
+        with pytest.raises(ValueError, match="repeated reduction"):
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
 
 
 class TestL0TilingInvariants:
@@ -537,7 +680,7 @@ def _load_cycles(m: int, n: int, k: int, cfg, stat: str) -> float:
         return held_a
     if stat == _BS:
         return held_b
-    if k >= K:  # OS, full-K: hoist the cheaper operand
+    if k >= K and not cfg.independent_output_tiles:  # OS, full-K sweep: hoist the cheaper operand
         return min(held_a, held_b)
     # OS, split-K: both re-streamed
     return (cfg.bytes_a * M * K * cn) / cfg.bw_a + (cfg.bytes_b * K * N * cm) / cfg.bw_b
@@ -546,7 +689,8 @@ def _load_cycles(m: int, n: int, k: int, cfg, stat: str) -> float:
 def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     """Re-implement the C++ wall objective + lex tie-breaks for one design point."""
     M, N, K = cfg.M, cfg.N, cfg.K
-    load = _load_cycles(m, n, k, cfg, stat)
+    repetitions = max(1, cfg.reduction_iterations)
+    load = _load_cycles(m, n, k, cfg, stat) * repetitions
     kt = max(1, cfg.mad_k_fractal_bytes // cfg.bytes_a)
     # Cube passes per K-fractal: arch-specific mad_fp32_passes for full fp32, else 1 (bf16).
     cpr = max(1, cfg.mad_fp32_passes) if cfg.bytes_a == 4 else max(1, cfg.bytes_a // 2)
@@ -558,7 +702,7 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     k_blocks = num_full + (1 if k_tail > 0 else 0)  # == ceil(K/k)
     k_fractals = num_full * _cdiv(k, kt) + (_cdiv(k_tail, kt) if k_tail > 0 else 0)
     per_mn = k_blocks * cfg.mad_head + cpr * _cdiv(m, cfg.align_m) * k_fractals * _cdiv(n, cfg.align_n)
-    mad = _cdiv(M, m) * _cdiv(N, n) * per_mn
+    mad = _cdiv(M, m) * _cdiv(N, n) * per_mn * repetitions
     # Tile-dependent FIXPIPE drain (mirrors C++ DrainCycles): one drain per (m, n)
     # output block = m-independent fixed issue overhead + a PER-M-ROW cost. FIXPIPE
     # addresses one M-row of the N1 M1 M0 N0 accumulator at a time; the per-row cost is
@@ -584,7 +728,7 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     else:
         wall_f = compute + drain
     wall = int(wall_f + 0.5)
-    pvol = _cdiv(M, m) * m * _cdiv(N, n) * n * _cdiv(K, k) * k
+    pvol = _cdiv(M, m) * m * _cdiv(N, n) * n * _cdiv(K, k) * k * repetitions
     # C_load is a wall-tie-break (after padded-compute + k-blocks, before area/k):
     # among MAD-bound ties it picks the lower-hidden-load aspect.
     return (wall, pvol, _cdiv(K, k), load, -(m * n), -k)
@@ -595,16 +739,16 @@ def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
     C++ EnumerateLegalKs. k is a real search axis: ceil(K/k)*ceil(k/kt) is not
     monotone in k when kt != align_k, so the largest legal k is not always best.
     A non-divisor k (the K-peel) is admitted only when K is itself align_k-aligned
-    (peel_ok); a non-16-aligned K has no legal k here and is rejected upstream.
+    (peel_ok); a misaligned K has no legal peeled k and is rejected upstream.
     """
     boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
     boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
     cap = min(a0 // boxed_m, b0 // boxed_n)  # max k fitting boxed L0a and L0b
-    k_problem = max(_cdiv(cfg.K, cfg.align_k) * cfg.align_k, cfg.min_k) if cfg.allow_padding else cfg.K
+    k_problem = _cdiv(max(cfg.K, cfg.min_k), cfg.align_k) * cfg.align_k if cfg.allow_padding else cfg.K
     k_hi = (min(cap, k_problem) // cfg.align_k) * cfg.align_k
     peel_ok = cfg.allow_k_boundary and cfg.K % cfg.align_k == 0
     ks = []
-    k = cfg.min_k
+    k = _cdiv(cfg.min_k, cfg.align_k) * cfg.align_k
     while k <= k_hi:
         if cfg.allow_padding or peel_ok or cfg.K % k == 0:  # non-divisor k only when peel_ok
             ks.append(k)
@@ -635,6 +779,15 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_inner_pair: bool, require
                 for k in _legal_ks(m, n, cfg, a0, b0):
                     if require_full_k and k != cfg.K:
                         continue
+                    stages = cfg.reduction_pipeline_stages
+                    depth_a = (2 if dba else 1) * stages if k < cfg.K else max(2 if dba else 1, stages)
+                    depth_b = (2 if dbb else 1) * stages if k < cfg.K else max(2 if dbb else 1, stages)
+                    extra_tail = (cfg.K % k) * stages if stages > 1 and cfg.K // k >= 2 else 0
+                    if (
+                        boxed_m * (k * depth_a + extra_tail) * cfg.bytes_a > cfg.l0a_bytes
+                        or boxed_n * (k * depth_b + extra_tail) * cfg.bytes_b > cfg.l0b_bytes
+                    ):
+                        continue
                     key = _wall_key(m, n, k, cfg, stat, dbc)
                     if best is None or key < best[0]:
                         best = (key, (m, n, k))
@@ -652,7 +805,7 @@ def _brute_optimum(cfg) -> tuple:
     assert base is not None
     best_key, best = base[0], (base[1], _OS, False)
     # Explore the rest of the space only when the baseline already tiles.
-    if base[1] != (cfg.M, cfg.N, cfg.K):
+    if base[1] != (cfg.M, cfg.N, cfg.K) and not cfg.independent_output_tiles:
         stats = [_OS]
         if cfg.allow_a_stationary:
             stats.append(_AS)
@@ -660,7 +813,7 @@ def _brute_optimum(cfg) -> tuple:
             stats.append(_BS)
         regimes = []  # built in C++ iteration order: stat, dbc
         for stat in stats:
-            for dbc in [False, True] if cfg.allow_double_buffer_c else [False]:
+            for dbc in [False, True] if cfg.allow_double_buffer_c and cfg.reduction_iterations else [False]:
                 regimes.append((stat, dbc))
         for stat, dbc in regimes:
             if stat == _OS and not dbc:
@@ -980,6 +1133,50 @@ class TestL0TilingRooflineMigration:
             f"(old traffic closed-form picked {old_closed_form})"
         )
         assert _capacities_ok(r.m, r.n, r.k, cfg)
+
+
+@pytest.mark.parametrize("dbc", [False, True])
+@pytest.mark.parametrize("K", [96, 160])
+@pytest.mark.parametrize("min_k", [16, 48, 64])
+def test_k_alignment_is_not_offset_by_a_smaller_minimum(K, dbc, min_k):
+    """A lower bound is rounded onto the K grid, not used as its origin."""
+    cfg = _default_config(M=512, N=32, K=K)
+    cfg.bytes_a = cfg.bytes_b = 1
+    cfg.align_k = 32
+    cfg.min_k = min_k
+    cfg.l0c_align_m = 32
+    cfg.allow_k_boundary = True
+    cfg.allow_double_buffer_c = dbc
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert result.k >= min_k and result.k % 32 == 0
+    assert (K % result.k) % 32 == 0
+    assert _capacities_ok(result.m, result.n, result.k, cfg, dbc=result.double_buffer_c)
+    tile, stat, dbc_choice, cost = _brute_optimum(cfg)
+    assert (result.m, result.n, result.k, result.stationarity, result.double_buffer_c) == (
+        *tile,
+        _STAT_ENUM[stat],
+        dbc_choice,
+    )
+    assert result.estimated_cost_cycles == cost
+
+
+@pytest.mark.parametrize("min_k", [48, 80])
+def test_padded_k_upper_bound_covers_aligned_minimum(min_k):
+    """Padding must round the lower and upper search bounds onto the same grid."""
+    cfg = _default_config(M=16, N=32, K=16)
+    cfg.align_k = 32
+    cfg.min_k = min_k
+    cfg.allow_padding = True
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert result.k == _cdiv(min_k, cfg.align_k) * cfg.align_k
+    assert _capacities_ok(result.m, result.n, result.k, cfg)
+    tile, stat, dbc, cost = _brute_optimum(cfg)
+    assert (result.m, result.n, result.k, result.stationarity, result.double_buffer_c) == (
+        *tile,
+        _STAT_ENUM[stat],
+        dbc,
+    )
+    assert result.estimated_cost_cycles == cost
 
 
 if __name__ == "__main__":

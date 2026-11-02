@@ -7,13 +7,15 @@ Folds arithmetic expressions, type-embedded shape expressions, and scalar consta
 `Simplify` is a function-level pass that rewrites the IR in place using `arith::Analyzer`. It performs three kinds of work:
 
 1. **Arithmetic folding** at every expression leaf (e.g. `x + 0 → x`, `x * 1 → x`, `min(a, a) → a`, comparisons that the analyzer can decide).
-2. **Type rebuild** — re-walks shape expressions embedded in `TensorType`, `TileType`, and `TupleType` so the in-memory IR matches what a fresh parse would produce.
-3. **Scalar binding for folding + DCE** — a scalar `Var` assigned once is registered with the analyzer. A constant assigned at function-body top level is bound fully so its literal propagates into every downstream use; a symbolic value, or a constant inside a loop/branch, contributes only a `ConstIntBound` — enough to fold dead branch guards like `if expr == 0` without inlining the scalar. Bindings left dead are dropped by a conservative scalar DCE.
+2. **Type rebuild** — re-walks expressions embedded in `TensorType`, `TileType`, and `TupleType`, including the slot index of a pinned declared MemRef, so the in-memory IR matches what a fresh parse would produce.
+3. **Scalar binding for folding + DCE** — a scalar `Var` assigned once is registered with the analyzer. A proven constant is bound fully so its literal propagates into downstream uses, including inside loops, branches, and SPMD scopes. A symbolic value contributes only a `ConstIntBound` — enough to fold dead branch guards like `if expr == 0` without inlining the scalar. Bindings are scoped to their defining region, and bindings left dead are dropped by a conservative scalar DCE.
 
 The pass runs **twice** in the `Default` strategy of `pass_manager.py`:
 
 - **Post-SSA** (after `ConvertToSSA`, before `FlattenCallExpr`): propagates closure-captured constants such as `CHUNK_K: Scalar[INDEX] = 512` into shape expressions and types so subsequent tile-lowering passes see literals instead of variables.
-- **End of tile pipeline** (after `DeriveCallDirections`): final cleanup of folds exposed by memory-space inference, layout resolution, and other late lowering.
+- **End of tile pipeline** (after `MaterializeDistTensorCtx`): final cleanup of folds exposed by memory-space inference, layout resolution, and other late lowering.
+
+[InitMemRef](35-init_memref.md) also calls the shared internal helper in **constant-only mode** at entry, before normalizing statement structure and building addresses. This mode propagates proven constants through expressions and type metadata and removes dead scalar assignments, while preserving control-flow, phi, and loop-carry structure. It skips identity `tensor.view` folding, nonconstant algebraic rewrites, and dead yield-slot pruning. This folds constants introduced by intervening lowering passes even when `InitMemRef` is invoked directly, without adding a separate pipeline pass or a new precondition. The named `Simplify` pass retains the full behavior described below.
 
 **Requires**: nothing.
 
@@ -21,13 +23,18 @@ The pass runs **twice** in the `Default` strategy of `pass_manager.py`:
 
 **Invalidates**: nothing.
 
-The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/transforms/pass_properties.h`) is intentional: Simplify is conservative enough to preserve every property its callers may have established (`SSAForm`, `NormalizedStmtStructure`, `IncoreTileOps`, ...) — it only rewrites expressions and prunes scalar bindings, never restructures statements.
+The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/transforms/pass_properties.h`) is intentional: Simplify preserves established properties such as `SSAForm`, `NormalizedStmtStructure`, and `IncoreTileOps` while rewriting expressions, pruning dead bindings, and collapsing proven branches or pure zero-trip/single-trip loops. The constant-only helper used by InitMemRef preserves those control-flow statements and their yielded slots.
 
-Integer and INDEX rewrites preserve the expression's declared result dtype. If simplification selects an operand of a different integer dtype, it retains the conversion with a cast (or folds it into a typed constant). For example, an INT32 `(index + 1) - 1` becomes `cast(index, INT32)`.
+Integer and INDEX rewrites preserve the expression's declared result dtype. If simplification selects an operand of a different integer dtype, it retains the conversion with a cast (or folds it into a typed constant). For example, an INT32 `(index + 1) - 1` becomes `cast(index, INT32)`. The printer preserves non-INDEX integer constant dtypes with `pl.const(value, dtype)`, including constants propagated into nested call arguments.
+
+Boolean bindings use value substitution without numeric ordering analysis; floating-point bindings also substitute known values while leaving floating-point algebraic rewrite rules disabled, preserving dtype and signed zero.
+
+Floating-point comparisons remain explicit until rounding to the declared format is modeled; raw `ConstFloat` doubles must not decide a branch. Scoped unbinding clears symbolic intervals as well as concrete bounds and substitutions. Single-trip cloning carries the original multi-assignment exclusions onto fresh variables, and scalar/yield-slot DCE preserves communication-domain scope fields when rebuilding their bodies.
 
 ## When to Use
 
 - After SSA conversion to propagate scalar constants into types/shapes before the tile pipeline inspects them.
+- Before MemRef initialization, through the shared helper's constant-only mode, so constant coordinates and declared slot indices produce concrete address metadata without changing storage-related control flow.
 - At the end of the tile pipeline as a cleanup pass so that downstream artifacts (printed IR, codegen) are not littered with `K + 0` or `idx * 1` residue.
 - Anywhere else a pass produces fresh expressions that may be foldable; Simplify is cheap and idempotent so it is safe to insert defensively. The one bounded exception is a chain of more than 16 *nested* single-trip loops, where a second run folds further — see [Substitution-depth cap](#substitution-depth-cap-fold-b). No pipeline input reaches that depth.
 
@@ -59,14 +66,15 @@ Implemented by `TransformSimplify` in `src/ir/transforms/simplify_pass.cpp` in f
 1. **Multi-assign collection** — `MultiAssignCollector` walks the function body and records every scalar `Var` assigned more than once. These are excluded from analyzer binding so a stale value cannot be used past a later reassignment. A `Var` assigned exactly once — even inside a loop body or branch — is safe to bind: `SimplifyMutator` scopes every binding to the region the assignment lives in (see phase 2), unbinding it on region exit. Under SSA every `Var` is single-assigned, so nothing is collected.
 2. **`SimplifyMutator` traversal** — extends `arith::IRMutatorWithAnalyzer`. The analyzer carries a constraint stack (loop-var bounds, if-branch conditions, scalar bindings). Folding happens at the leaves rather than only at top-level expressions because the analyzer's top-level `Simplify` does not recurse into non-arithmetic containers (`Call`, `MakeTuple`):
    - `VarPtr` / `IterArgPtr`: substitute via the var-remap table, then run through the analyzer. Loop-carried uses are leaves: only the loop header rebuilds their type and initial value. Revisiting a carry's MemRef offset at a use site can otherwise create a fresh, undefined variable, especially across separately scoped branches.
-   - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node.
+   - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node. An `INDEX` `loop_var OP constant` comparison that the loop's static range decides becomes a `ConstBool` — see [Provable comparison in an operand](#provable-comparison-in-an-operand).
    - `CallPtr`: refresh the result `type_` so a Call whose shape arguments folded ends up structurally equal to a freshly parsed Call.
-   - `AssignStmt`: for a scalar LHS `Var` not in `multi_assigned_`, register the simplified RHS with the analyzer. A `ConstInt`/`ConstFloat`/`ConstBool` RHS at function-body top level is bound fully (the literal is substituted into later uses); a symbolic RHS — or a constant inside a loop/branch — contributes only a `ConstIntBound`, so dead branch guards fold without the scalar being inlined. Every binding is logged so the enclosing region's visitor can unbind it on exit.
-   - `ForStmt`: rebuild `iter_args_` before visiting the body so body references pick up the remapped identity; if both `start_` and `stop_` fold to `ConstInt` with `stop > start`, bind the loop var to that range while visiting the body and unbind on exit; scalars bound inside the body are unbound after the visit; rebuild `return_vars_` after the body so folds discovered inside are visible in return types. Pure single-trip and zero-trip loops are also collapsed in-place — see "Control-flow folding" below.
-   - `IfStmt`: enter `Analyzer::GetConstraintContext(cond)` for the then branch and `Not(cond)` for the else branch; scalars bound inside each branch are unbound after that branch so they do not leak into the other branch or past the `IfStmt`. Conditions the analyzer can prove are also folded — see "Control-flow folding" below.
-   - `WhileStmt`: same as `ForStmt` minus the bounds — rebuild `iter_args_` before the condition and body, snapshot `var_remap_` around the body visit, then rebuild `return_vars_` after it, with the same scoped scalar unbinding. Seeding the remap from the loop header keeps every condition/body use attached to the declared node when its type or initial value changes.
-   - `SpmdScopeStmt`: visit the body with the same scoped scalar unbinding, and additionally fold `core_num_` (closure arithmetic such as `MAX // TILE` may need one pass of simplification after SSA conversion).
-3. **Type rebuild** — `SimplifyType` recurses through `TensorType`, `TileType`, and `TupleType`, calling `SimplifyExpr` on every embedded expression (shape, stride, valid_shape, start_offset, view fields). Identity is preserved when nothing changes so the round-trip identity check stays cheap.
+   - `AssignStmt`: for a scalar LHS `Var` not in `multi_assigned_`, register the simplified RHS with the analyzer. A `ConstInt`/`ConstFloat`/`ConstBool` RHS is bound fully (the literal is substituted into later uses), at both function-body top level and inside nested regions. A symbolic RHS contributes only a `ConstIntBound`, so dead branch guards fold without the scalar being inlined. Every binding is logged so the enclosing region's visitor can unbind it on exit. This does not bind a loop-carried value to its initial value or assume that different branch results agree.
+   - `ForStmt`: simplify every carry's initial value in the enclosing scope. If any header value or type changes, create and register the whole carry group before rebuilding its types, so an allocated offset or slot index can reference a later scalar carry. Unchanged headers retain their original identities. Then visit the body using the complete remap; if both `start_` and `stop_` fold to `ConstInt` with `stop > start`, bind the loop var to that range while visiting the body and unbind on exit; scalars bound inside the body are unbound after the visit; rebuild `return_vars_` after the body so folds discovered inside are visible in return types. Pure single-trip and zero-trip loops are also collapsed in-place — see "Control-flow folding" below.
+   - `IfStmt`: enter `Analyzer::GetConstraintContext(cond)` for the then branch and `Not(cond)` for the else branch; scalars bound inside each branch are unbound after that branch so they do not leak into the other branch or past the `IfStmt`. Retained branches rebuild `return_vars_` under the common baseline mapping so result types follow enclosing binder changes without importing branch-local definitions. Conditions the analyzer can prove are also folded — see "Control-flow folding" below.
+   - `WhileStmt`: same as `ForStmt` minus the bounds — use the same two-phase carry-group rebuild before the condition and body, snapshot `var_remap_` around the body visit, then rebuild `return_vars_` after it, with the same scoped scalar unbinding. Seeding the complete header remap first keeps every condition/body and storage-metadata use attached to the declared node regardless of carry order.
+   - `SpmdScopeStmt`: fold `core_num_` and rewrite expression-valued dispatch attributes, including task dependencies and runtime predicates, under the enclosing carry mappings before visiting the body. Body-local scalar bindings use the same scoped unbinding. This keeps dispatch uses attached to the rebuilt For/While headers without turning runtime predicates into constants.
+   - `CommDomainScopeStmt`: keep slot identities fixed while visiting the body, then resolve slot sizes using the body's unconditional scalar bindings. One non-evaluating sweep updates all dependent window references before DCE; branch-local facts never specialize a domain slot. Symbolic size dependencies remain live even when referenced only by a slot.
+3. **Type rebuild** — `SimplifyType` recurses through `TensorType`, `TileType`, and `TupleType`, calling `SimplifyExpr` on embedded expressions (shape, stride, valid_shape, start_offset, view fields). `RemapPinnedMemRefExprs` also simplifies the slot index of pinned declared allocations before it is converted to a byte offset. Non-pinned MemRefs retain their pointer identity unless an embedded variable is remapped, such as a rebuilt loop carry. Their base, byte offset, and retained slot index then follow that remap without analyzer folding, and a shared cache keeps variable and Call types on the same rebuilt MemRef. Scalar definitions used only by address metadata remain live during DCE. Type identity is preserved when nothing changes so the round-trip identity check stays cheap.
 4. **Scalar DCE + dead yield-slot prune** — after the mutator finishes, `dce::EliminateDeadScalarAssignments` walks the flattened body and drops scalar `AssignStmt`s whose only uses were folded away. The DCE is conservative: it never removes call-backed assignments because the IR has no purity annotations yet and a `Call` may have observable side effects. Between the two scalar-DCE runs, `dce::EliminateDeadYieldSlots` drops the yielded slots nobody reads — an `IfStmt` phi whose `return_vars_[i]` has no user, and a `ForStmt` / `WhileStmt` carry whose `iter_args_[i]` (read inside the body) *and* `return_vars_[i]` (read after the loop) are both unused — together with the matching `YieldStmt` slot. Reusing one Python local across two scopes produces exactly that dead carry: SSA seeds the second loop with the first scope's value, every trip overwrites it, and nothing reads either end. Left in place it makes the earlier scope's value live-out, which for a device scope would force a `Scalar` into the outlined kernel's return set — see [08-outline_incore_scopes.md](09-outline_incore_scopes.md).
 5. **Loop-state repair** — if DCE removed any statements, `loop_repair::MakeBody` reassembles the function body so loop-carried metadata (yield/return mappings) stays consistent.
 
@@ -74,14 +82,31 @@ Implemented by `TransformSimplify` in `src/ir/transforms/simplify_pass.cpp` in f
 
 Two folds run inside the `SimplifyMutator` traversal so they share the analyzer's constraint stack with the surrounding expression-level work:
 
-- **Fold A — constant-condition `IfStmt` collapse.** After the condition is simplified, query the analyzer with `CanProve(cond)` and `CanProve(Not(cond))`. On a proof of either polarity, drop the dead branch and lift the kept branch into the parent scope. When `return_vars_` is non-empty, the kept branch's trailing `YieldStmt` is stripped and each `return_vars[i]` is bound in `var_remap_` to the corresponding yielded value so subsequent siblings (and the function `ReturnStmt`) read the value directly. Symmetric for true / false; the only edge case is "always-false with no else and empty return_vars," which collapses to an empty body.
+- **Fold A — constant-condition `IfStmt` collapse.** After the condition is simplified, query the analyzer with `CanProve(cond)` and `CanProve(Not(cond))` **before visiting either branch body**. On a proof of either polarity, skip the unreachable body entirely, simplify only the surviving body, and lift it into the parent scope when permitted. If a call in the surviving yield prevents lifting, retain the `IfStmt` and remap enclosing variable references and dependent types in the unreachable body without evaluating its arithmetic. Constants-only mode retains its existing traversal behavior. This prevents constant folding from diagnosing invalid arithmetic such as integer division or modulo by zero inside unreachable code. If neither polarity can be proven, simplify both branches under their respective constraints; errors in potentially reachable code still propagate. When `return_vars_` is non-empty, the kept branch's trailing `YieldStmt` is stripped and each `return_vars[i]` is bound in `var_remap_` to the corresponding yielded value so subsequent siblings (and the function `ReturnStmt`) read the value directly. Symmetric for true / false; the only edge case is "always-false with no else and empty return_vars," which collapses to an empty body.
 - **Fold B — pure single/zero-trip `ForStmt` collapse.** Fires only on *pure* sequential loops: `attrs_` empty, `kind_ == ForKind::Sequential`. For these, query the analyzer for the trip count using `CanProveGreaterEqual(step, 1)` plus `CanProve(stop <= start)` (zero trips) or `CanProve(start < stop && stop <= start + step)` (one trip). On zero trips, emit one `AssignStmt(return_vars[i], iter_args[i].initValue_)` per return var and drop the body. On one trip, `DeepClone` the body with `loop_var → start` and `iter_args[i] → init_values[i]` substitutions, re-visit the cloned body so further folds happen in the same pass, then strip the trailing `YieldStmt` and bind each `return_vars[i] → yielded_value[i]` in `var_remap_` (same propagation mechanism as Fold A's lift). The one-trip path is capped at `kMaxNestedSingleTripFolds` (16) levels of *nested* single-trip loops per run — see [Substitution-depth cap](#substitution-depth-cap-fold-b).
 
 `DeepClone` with `clone_def_vars=true` is used (rather than an in-place `var_remap_` override on the body) so the unrolled body gets fresh `Var` identities at every DefField, matching `LoopUnrollMutator`. This keeps the lifted copy structurally independent of the original (discarded) loop body and lets the re-visit bind the body's scalars on identities distinct from the surrounding scope.
 
 Only definitions inside the cloned subtree receive fresh identities. A reference to an enclosing loop's `IterArg` must retain that exact object unless explicitly substituted; its defining loop is not being cloned. Local `ForStmt` and `WhileStmt` carries are registered from their `DefField`s before visiting their uses. This prevents folding two sibling single-trip loops from creating two unbound copies of the same outer carry (issue #2955), which would otherwise become invalid SPMD call arguments during outlining.
 
+Retained `IfStmt` results are new definitions: earlier value aliases and scalar facts for reused pre-SSA variables are cleared before subsequent uses are rewritten.
+
+Window views cloned by Fold B also retain an enclosing domain's slot identity. When cloning or explicit substitution changes the storage base or size, definition and Call/Submit result types share the same remapped slot.
+
 The choice to substitute `return_vars` via `var_remap_` rather than emit a literal `AssignStmt(rv, yielded)` is deliberate: the orchestration codegen's role-aware name disambiguation (`role == "out"` etc.) collapses several role-tagged SSA versions to the same C++ identifier, so an `out__rv_v2 = out__co_l0_rv_v3` alias would lower to the ill-formed `auto out = out;`. Substituting at use sites side-steps the disambiguation entirely.
+
+Trailing yields may be nested inside `RuntimeScopeStmt` (AUTO or MANUAL) or
+`SplitAivScopeStmt`. Folding and dead-slot pruning follow that same trailing
+path, preserving scope metadata and the ordering of all other statements.
+Removing the only yield retains an empty scope body, printed as `pass`.
+
+Constant-branch and single-trip folding retain the control flow when a yielded
+expression contains a `Call` or `Submit`, including a nested call, so substitution
+cannot duplicate, delete, or move the operation. Single-trip folding also retains
+loops with call-containing carry initializers. A call already assigned to a
+variable before yielding that variable does not prevent folding.
+`FlattenCallExpr`, which runs later, can materialize call results before a
+subsequent Simplify folds the control flow.
 
 #### Escaping return vars
 
@@ -93,7 +118,21 @@ Statements the index has never seen answer "does not escape", keeping the substi
 
 For an escaping `return_vars[i]`, `LiftBodyToReturnVars` emits `AssignStmt(return_vars[i], yielded_value[i])` at the fold site instead of recording the remap. The assignment stays *inside* the region being lifted — the yielded value may name body-local `Var`s, so it cannot be hoisted past the loop, and in leak-mode semantics the last iteration writing last is exactly what a post-loop read expects.
 
-Nothing escapes in SSA form: a value defined inside a region is never referenced outside it, and every use is dominated by its definition. Since the pipeline runs Simplify only after `ConvertToSSA` (positions 5 and 46), the materializing path never fires there — it exists for callers that run Simplify directly on pre-SSA IR, where the alias-assignment concern above does not apply because SSA conversion still runs afterwards.
+Nothing escapes in SSA form: a value defined inside a region is never referenced outside it, and every use is dominated by its definition. Since the pipeline runs Simplify only after `ConvertToSSA`, the materializing path never fires there — it exists for callers that run Simplify directly on pre-SSA IR, where the alias-assignment concern above does not apply because SSA conversion still runs afterwards.
+
+### Provable comparison in an operand
+
+Fold A decides `IfStmt` conditions, but a comparison passed as an operand — a call argument such as `tile.matmul_acc`'s `init_cond`, or an assignment value — only gets expression rewriting, which cannot use loop-variable ranges to reach a literal. `VisitBinaryExpr_` therefore decides the **static-bound case** and replaces it with a `ConstBool` — the node the analyzer's own constant folding produces, which Fold A also recognizes:
+
+```python
+# Before (after LowerPipelineLoops replicates a stage=2 split-K loop, ko in [0, 512);
+# the rewriter has already turned ko + 128 == 0 into ko == -128)
+acc = pl.tile.matmul_acc(acc, a, b, init_cond=ko == -128)
+# After Simplify
+acc = pl.tile.matmul_acc(acc, a, b, init_cond=False)
+```
+
+A comparison is decided only when it is `loop_var OP constant` (either order, `OP` one of `==`, `!=`, `<`, `<=`, `>`, `>=`), where `loop_var` is an `INDEX` loop variable of an enclosing loop with constant `INDEX` `start`/`stop` and no other definition in the function, and the constant is an `INDEX` literal. The decision compares the loop's header range `[start, stop - 1]`, which contains every value the variable takes, with the constant: no arithmetic and no analyzer bound is involved. Everything else is left exactly as written, because the analyzer's bounds are unsound at the int64 edges and under narrow-dtype wrap; a missed fold is always safe, a wrong literal is a miscompile.
 
 The two folds compose in a single pass: when Fold B substitutes `loop_var → 0` in a body, predicates like `if loop_var == 0` reduce to `if 0 == 0` → `ConstBool(true)`, which Fold A then collapses without a second Simplify run.
 
@@ -160,6 +199,28 @@ return acc
 ```
 
 `CHUNK_K__ssa_v0` is bound to `512` at its `AssignStmt`. Every downstream reference — including the embedded shape inside the `TileType` of `acc` — folds to the literal during the type-rebuild phase. The now-dead binding is dropped by the DCE phase. This is the primary motivation for the post-SSA scheduling point: tile-lowering passes such as `FlattenTileNdTo2D` and `InferTileMemorySpace` see concrete shape literals instead of opaque scalar `Var`s.
+
+### Constants inside nested regions
+
+**Before**:
+
+```python
+for i in pl.range(0, 8):
+    base: pl.Scalar[pl.INDEX] = 32
+    fixed_row: pl.Scalar[pl.INDEX] = base * 2
+    view = pl.tile.slice(pool, [16, 16], [fixed_row, 0])
+    consume(view, i)
+```
+
+**After**:
+
+```python
+for i in pl.range(0, 8):
+    view = pl.tile.slice(pool, [16, 16], [64, 0])
+    consume(view, i)
+```
+
+The analyzer proves `base * 2` is `64` within the loop body. Substitution works through ordinary call arguments for every op; it is not special handling for slice. For a row-major FP32 pool with 16 columns, `InitMemRef` can now compute a `ConstInt(4096)` byte offset, just as if the author had written `[64, 0]`. A constant declared slot index is simplified through its type metadata in the same way. Runtime-dependent coordinates and loop carries remain symbolic unless independently proven constant.
 
 ### Constant-condition branch (Fold A)
 
@@ -338,5 +399,6 @@ def simplify() -> Pass:
 - Loop-bound aware folding via `ForStmt` analyzer binding.
 - If-branch constraint propagation via `Analyzer::GetConstraintContext`.
 - Scalar constant propagation through SSA-form bindings.
+- Constant propagation in loops, branches, and SPMD scopes, including typed call arguments and pinned MemRef slot indices.
 - Dead branch guards folded via loop-affine scalar `ConstIntBound`s.
 - Conservative scalar DCE — dropped only when every use is foldable.

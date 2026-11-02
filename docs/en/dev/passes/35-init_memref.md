@@ -4,12 +4,13 @@ Materializes compiler-owned PTO level3 scratch, initializes MemRef for all varia
 
 ## Overview
 
-This pass performs four tasks:
+This pass performs five tasks:
 
-1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
-2. **Materializes compiler-owned level3 scratch** for the A2/A3 `tile.ci` and narrowing `tile.cast` ABIs, plus required `tile.sort32` forms on A2/A3 and A5
-3. **Initializes MemRef** for TileType and TensorType variables
-4. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
+1. **Normalizes scalar constants** using the shared [Simplify](05-simplify.md) helper in constant-only mode
+2. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
+3. **Materializes compiler-owned level3 scratch** for the A2/A3 `tile.ci` and narrowing `tile.cast` ABIs, plus required `tile.sort32` forms on A2/A3 and A5
+4. **Initializes MemRef** for TileType and TensorType variables
+5. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
 Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace). Variables without `memory_space` default to DDR.
 
@@ -44,18 +45,38 @@ program_with_memrefs = init_pass(program)
 
 ## Algorithm
 
-1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Materialize level3 scratch**: Under the PyPTO or DSA-RP planner, insert ordinary Vec `tile.create` values for missing compiler-owned scratch. `tile.ci` and narrowing `tile.cast` remain A2/A3-only, while required `tile.sort32` scratch is materialized on both A2/A3 and A5. Explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved. A narrowing `tile.cast` gets scratch **only** when it carries an explicit `saturation_mode=0`: that buffer exists for PTOAS's non-saturating helper, and the saturating form — which is the default, so also the shape a pass-synthesized cast has — is a native conversion that never reads it (see [LegalizeTileCast](18-legalize_tile_cast.md)). The PTOAS planner remains unchanged because its level-2 `PlanMemory` owns implicit scratch.
-3. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
-4. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+1. **Normalize constants**: Call the shared `transform_utils::SimplifyFunction` helper in constant-only mode to propagate proven scalar constants through expressions and type metadata before constructing addresses. The shared binding and type traversal work for all ops, rather than an op-specific slice rewrite. This mode removes dead scalar assignments but preserves control-flow, phi, and loop-carry structure; it skips identity `tensor.view` folding, nonconstant algebraic rewrites, and dead yield-slot pruning.
+2. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
+3. **Materialize level3 scratch**: Under the PyPTO or DSA-RP planner, insert ordinary Vec `tile.create` values for missing compiler-owned scratch. `tile.ci` and narrowing `tile.cast` remain A2/A3-only, while required `tile.sort32` scratch is materialized on both A2/A3 and A5. Explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved. A narrowing `tile.cast` gets scratch **only** when it carries an explicit `saturation_mode=0`: that buffer exists for PTOAS's non-saturating helper, and the saturating form — which is the default, so also the shape a pass-synthesized cast has — is a native conversion that never reads it (see [LegalizeTileCast](18-legalize_tile_cast.md)). The PTOAS planner remains unchanged because its level-2 `PlanMemory` owns implicit scratch.
+4. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
+5. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
-5. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-6. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
-7. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
+7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
+8. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+
+### Constant inputs before address construction
+
+A named scalar can denote a constant even when its assignment is inside a loop:
+`base = 32; fixed_row = base * 2` produces the same slice origin as a literal `64`.
+Entry simplification writes that value into the slice arguments before both layout
+selection and byte-offset construction. For a row-major FP32 pool with 16 columns,
+`[fixed_row, 0]` therefore produces `ConstInt(4096)`, rather than a symbolic
+`fixed_row * 16 * 4`. Later passes that reconstruct a view from its original arguments
+see the same constant, and overlap analysis can recognize the fixed storage interval.
+
+The same normalization covers ordinary arguments of other ops and expressions embedded
+in types, including a declared allocation's slot index. A constant slot index thus
+produces a constant slot byte offset. Bindings are scoped to their defining region;
+runtime inputs, loop-carried values, and unresolved branch results remain dynamic.
+This constant-only normalization is internal to `InitMemRef`, so direct callers and
+custom pipelines receive the same behavior without first scheduling a separate
+`Simplify` pass. Preserving control-flow and carry structure avoids changing the storage
+relationships that the memory passes are about to analyze.
 
 ## Declared allocations
 
@@ -282,6 +303,7 @@ Pass InitMemRef();
 
 **Implementation**: `src/ir/transforms/init_memref.cpp`
 
+- `transform_utils::SimplifyFunction` runs shared constant normalization before address construction, preserving control-flow and carry structure
 - `NormalizeStmtStructure` is called internally before MemRef initialization
 - `MaterializePtoLevel3ScratchMutator` inserts only missing compiler-owned optional scratch (`tile.ci`, narrowing `tile.cast`, required `tile.sort32`) after all tile shape/cast rewrites and before MemRef collection; explicit caller tmp on `tile.sel` / `tile.sels` / `tile.prelu` is preserved
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
@@ -301,6 +323,7 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - Tests addr=-1 for all MemRefs
 - Tests tile.alloc statements are created for non-DDR MemRefs
 - Tests normalized `SeqStmts` structure
+- Tests named constant slice origins and declared slot indices, including nested regions, while preserving dynamic coordinates
 - Tests planner/target-gated `tile.ci`, narrowing `tile.cast`, and `tile.sort32` scratch materialization
 - Tests tile.store result shares MemRef with output param
 - Tests accumulate op (matmul_acc) MemRef sharing with accumulator input

@@ -16,6 +16,7 @@ protection belong to the launch adapter, not to these Python frames.
 
 import ctypes
 import importlib
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -23,7 +24,16 @@ from typing import Any, cast
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
-from pypto.ir.param_info import _DATATYPE_TO_CTYPE, ParamInfo, _to_torch_dtype, bind_complete_args
+from pypto.ir.param_info import (
+    _DATATYPE_TO_CTYPE,
+    ParamInfo,
+    _matches_torch_dtype,
+    _to_torch_dtype,
+    bind_complete_args,
+    block_nz_shape,
+    validate_parameter_names,
+    validate_return_aliases,
+)
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
 
@@ -97,6 +107,12 @@ def _load_torch_npu() -> Any:
         raise RuntimeError("Describing NPU calls requires a compatible torch_npu installation") from exc
 
 
+def _native_storage_shape(tensor: torch.Tensor) -> tuple[int, ...]:
+    """Query physical NZ dimensions only when the optional native adapter is needed."""
+    native = importlib.import_module("pypto._torch_npu")
+    return tuple(native.storage_shape(tensor))
+
+
 def _scalar_value(value: Any, info: ParamInfo) -> int | float | bool:
     """Copy a scalar using the same ctypes representation as program parameters."""
     ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
@@ -123,7 +139,10 @@ def _scalar_value(value: Any, info: ParamInfo) -> int | float | bool:
             raise ValueError(
                 f"Parameter {info.name!r} expects {info.dtype} in [{minimum}, {maximum}], got {value}"
             )
-    return ctype(value).value
+    converted = ctype(value).value
+    if ctype in (ctypes.c_float, ctypes.c_double) and math.isfinite(value) and not math.isfinite(converted):
+        raise ValueError(f"Parameter {info.name!r} overflows {info.dtype}: {value}")
+    return converted
 
 
 def _validate_tensor(tensor: Any, info: ParamInfo, dtype: torch.dtype) -> None:
@@ -143,8 +162,9 @@ def _validate_tensor(tensor: Any, info: ParamInfo, dtype: torch.dtype) -> None:
         raise ValueError(f"Parameter {info.name!r} has an unresolved conjugate or negative view")
     if tensor.requires_grad and torch.is_grad_enabled():
         raise ValueError(f"Parameter {info.name!r} requires gradients; this adapter has no autograd contract")
-    if tensor.dtype != dtype:
+    if not _matches_torch_dtype(info.dtype, tensor.dtype):
         raise TypeError(f"Parameter {info.name!r} expects dtype {dtype}, got {tensor.dtype}")
+    # Torch uses the logical signature; only assembly sees blocked NZ dimensions.
     shape = tuple(tensor.shape)
     assert info.shape is not None
     if len(shape) != len(info.shape) or any(
@@ -153,10 +173,13 @@ def _validate_tensor(tensor: Any, info: ParamInfo, dtype: torch.dtype) -> None:
         raise ValueError(f"Parameter {info.name!r} expects shape {tuple(info.shape)}, got {shape}")
 
 
-def _describe_tensor(tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any) -> TensorArgument:
-    """Capture a contiguous base-format view without moving or normalizing it."""
+def _describe_tensor(
+    tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any, platform: str | None
+) -> TensorArgument:
+    """Borrow a base-format view or explicitly declared native NZ input without conversion."""
     tensor_format = int(npu.get_npu_format(tensor))
-    if tensor_format not in (0, 2):
+    native_nz = tensor_format == 29 and info.layout == "NZ" and platform == "a2a3"
+    if tensor_format not in (0, 2) and not native_nz:
         raise ValueError(
             f"Parameter {info.name!r} requires base format NCHW (0) or ND (2), got {tensor_format}"
         )
@@ -164,6 +187,21 @@ def _describe_tensor(tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any
     pointer, base = tensor.data_ptr(), storage.data_ptr()
     offset, itemsize = int(tensor.storage_offset()), tensor.element_size()
     nbytes, capacity = tensor.numel() * itemsize, storage.nbytes()
+    if native_nz:
+        if info.direction != ParamDirection.In or tensor.dtype not in (
+            torch.float16,
+            torch.bfloat16,
+            torch.int8,
+        ):
+            raise ValueError(f"Parameter {info.name!r}: native NZ requires a read-only FP16/BF16/INT8 input")
+        expected = block_nz_shape(tuple(tensor.shape), tensor.dtype)
+        physical = _native_storage_shape(tensor)
+        normalized = [math.prod(physical[:-4]), *physical[-4:]]
+        if len(physical) < 4 or normalized != expected or offset != 0 or capacity != nbytes:
+            raise ValueError(
+                f"Parameter {info.name!r}: native NZ requires complete unpadded storage; "
+                f"physical={physical}, expected={tuple(expected)}, offset={offset}, capacity={capacity}"
+            )
     # Empty slices may have offsets beyond capacity because they access no elements.
     if offset < 0 or (nbytes and offset * itemsize + nbytes > capacity):
         raise ValueError(f"Parameter {info.name!r} has a view outside its storage bounds")
@@ -202,7 +240,8 @@ def _validate_aliases(tensors: Sequence[TensorArgument]) -> None:
         m = tensor.metadata
         if not m.nbytes:
             continue
-        key = (m.data_ptr, m.nbytes, m.shape, m.strides, str(m.dtype))
+        # Exact byte aliases may have different dtype and shape interpretations.
+        key = (m.data_ptr, m.nbytes)
         writable = m.direction != ParamDirection.In
         previous = views.get(key)
         views[key] = (m, writable or (previous is not None and previous[1]))
@@ -229,27 +268,21 @@ class CallSignature:
         *,
         return_aliases: Sequence[int] = (),
         caller_name: str = "torch call",
+        platform: str | None = None,
     ) -> None:
-        """Copy stable parameter metadata and validate declared return aliases."""
-        self._params = tuple(
-            ParamInfo(p.name, p.direction, list(p.shape) if p.shape is not None else None, p.dtype)
-            for p in params
-        )
+        """Retain immutable parameter metadata and validate declared return aliases."""
+        self._params = tuple(params)
         self._caller_name = caller_name
+        self._platform = platform
         self._return_aliases = tuple(return_aliases)
+        validate_parameter_names(self._params)
+        validate_return_aliases(self._params, self._return_aliases)
         self._torch_dtypes = tuple(_to_torch_dtype(p.dtype) for p in self._params)
         for p, dtype in zip(self._params, self._torch_dtypes, strict=True):
             if p.shape is not None and dtype is None:
                 raise TypeError(f"Parameter {p.name!r} has unsupported tensor dtype {p.dtype}")
             if p.shape is None and str(p.dtype) not in _DATATYPE_TO_CTYPE:
                 raise TypeError(f"Parameter {p.name!r} has unsupported scalar dtype {p.dtype}")
-        for index in self._return_aliases:
-            if (
-                type(index) is not int
-                or not 0 <= index < len(self._params)
-                or self._params[index].shape is None
-            ):
-                raise ValueError(f"Return alias must reference a tensor parameter, got {index!r}")
 
     def describe_call(self, args: Sequence[Any]) -> CallFrame:
         """Validate all arguments, then capture this call's device, stream and owners.
@@ -271,7 +304,7 @@ class CallSignature:
             raise ValueError(f"{self._caller_name} requires one NPU device, got {device_indices}")
         npu = _load_torch_npu()
         tensors = tuple(
-            _describe_tensor(arg, info, index, npu)
+            _describe_tensor(arg, info, index, npu, self._platform)
             for index, (arg, info) in enumerate(zip(bound, self._params, strict=True))
             if info.shape is not None
         )

@@ -1,48 +1,107 @@
-# FP4 in PyPTO
+# Packed FP4 types in PyPTO
 
-Canonical status page for MXFP4 / packed FP4 in the current release. Short type-table
-blurbs live in [Types](../user/language/00-types.md); this page covers roles, units,
-cast policy, and what is safe to write by hand today.
+PyPTO exposes two distinct packed FP4 data types. This page describes their
+shared type and byte-carrier ABI, numerical casts, and current operator support.
+The short type table is in [Types](../user/language/00-types.md).
 
-Automatic `PackFp4` (logical `pl.FP4` → packed carrier) is **not** in this release
-slice; prefer hand-written `pl.FP4E2M1X2` until that pass lands.
+## Type and unit contract
 
-## Roles
+| DSL type | Uppercase alias | Storage | PTO type |
+| -------- | --------------- | ------- | -------- |
+| `pl.fp4e2m1x2` | `pl.FP4E2M1X2` | Two E2M1 values per byte | `!pto.f4E2M1x2` |
+| `pl.fp4e1m2x2` | `pl.FP4E1M2X2` | Two E1M2 values per byte | `!pto.f4E1M2x2` |
 
-| Type | Meaning |
-| ---- | ------- |
-| `pl.FP4` | Frontend **logical** E2M1 nibble (`GetBit()==4`). Shapes / `valid_shape` count nibbles. Resolving this short name emits a `UserWarning` (prefer `FP4E2M1X2`). |
-| `pl.FP4E2M1X2` | **Packed** carrier (two nibbles per element, `GetBit()==8`). Physical last dim matches `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2`. |
+Both types have `get_bit() == 8` and `get_byte() == 1`. Tensor and tile shapes,
+`valid_shape`, strides, and offsets count byte carriers. A `[2,256]` tensor
+occupies 512 bytes and contains 1,024 FP4 values. A carrier extent or offset
+need not be even; each carrier already contains a complete pair of values.
+Operator-specific alignment and layout restrictions still apply.
 
-Even last-axis extents apply to **logical nibble** geometry (and to wider→packed
-casts that halve a static even last dim). A hand-written **carrier** last dim may
-be odd. Prefer ND row-major + Vec; Cube / DN / NZ / col_major / distributed
-FP4-family paths are unsupported in this slice (hard rejects land with PackFp4).
+There is no unpacked FP4 type or nibble-counting ABI. The old `pl.FP4`,
+`DataType.FP4`, and `DT_FP4` names are removed. JIT specialization, function
+arguments and returns, runtime allocation, and persisted argument metadata
+preserve carrier geometry without doubling or halving a dimension.
 
-`tensor` / `tile` `reshape` and `transpose` reject the FP4 family (see error
-strings and the support matrix).
+The two formats are distinct even when their shapes and byte sizes match.
+Changing a function annotation does not convert data: dependency calls,
+including void calls and submits, require equal argument and parameter dtypes
+whenever either is packed FP4. UINT8/INT8 values require an explicit
+`reinterpret_view` where byte aliases are supported; a callee annotation alone
+does not reinterpret them.
+Use an explicit numerical `pl.cast` to convert between the formats.
 
-## Unit convention
+## Torch and runtime carriers
 
-| Layer | Unit |
-| ----- | ---- |
-| Frontend logical `pl.FP4` shape / `valid_shape` | nibble |
-| Hand-written `pl.FP4E2M1X2` IR / `tile_buf` / Torch ABI | carrier |
-| Packed `make_tensor_view` / `partition_view` (PTOAS v0.67+) | carrier; PTOAS converts DMA descriptors to nibble units |
-| runtime Tensor / `torch.float4_e2m1fn_x2` | carrier element |
+- `torch.float4_e2m1fn_x2` maps directly to `FP4E2M1X2`, with its physical shape
+  unchanged. An E1M2 annotation rejects this E2M1-specific Torch dtype.
+- An explicit annotation for either packed type accepts `torch.uint8` carriers.
+  Unannotated UINT8 data remains UINT8; the annotation supplies the FP4 format.
+- E2M1 return allocation uses Torch's native x2 dtype when available, otherwise
+  UINT8. E1M2 uses UINT8 because Torch has no corresponding native dtype.
+- Compiled and reloaded argument metadata keeps the numerical format and the
+  same carrier shape. Packed runtime tensors require rank at least one and a
+  positive final carrier extent.
 
-Write multi-row ND packed tensors with **carrier** last dims and leading strides
-(for example `pl.Tensor[[2, 256], pl.FP4E2M1X2]` for 512 logical nibbles per row).
-Codegen preserves carrier units in GM views. PTOAS v0.67 converts transfer
-descriptors to nibble units for pto-isa; expanding them in PyPTO as well doubles
-the row pitch. Using logical widths on `FP4E2M1X2` can mis-size GM row strides;
-logical `pl.FP4` is rejected by in-core PTO codegen until automatic PackFp4
-converts its nibble dimensions to carriers — see issue
-[#2754](https://github.com/hw-native-sys/pypto/issues/2754).
+Raw carrier storage is not a host numerical implementation. `torch_codegen`
+rejects packed FP4 references instead of treating their bytes as FP32 values.
+Use a reference that explicitly decodes the selected format when checking
+numerical results.
+
+## Operator support on Ascend950
+
+Both formats support ND casts, full static dense DN casts, and the transfers
+below. Native MXFP4 quantization supports E2M1 only.
+
+| Operation | Support |
+| --------- | ------- |
+| Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
+| Either packed format ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
+| Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
+| Either packed format → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1↔E1M2 conversion | Numerical cast through BF16; carrier shape is unchanged |
+| Other wider-type casts | Existing legalization with lossless intermediates; see the encoding constraint below |
+| Packed Vec layout conversion | ND→NZ; carrier geometry changes with the packing axis while preserving the value geometry |
+| Packed Vec→Mat transfer | Matching layouts, explicit AIV function; generic InCore mixed-core expansion is rejected |
+| Native packed `extract` / `assemble` | Restricted layout-preserving cube/NZ paths with zero offset on the packed axis; use INT8 aliases for general Vec extraction and UINT8 aliases for ND insertion |
+| `fillpad`, `fillpad_expand`, `fillpad_inplace` | Both formats, ND Vec; zero/min/max padding preserves the valid carrier rectangle |
+| DN numerical casts | Full static dense 2D BF16↔packed or packed↔packed; PYPTO/DSA_RP static addresses; partial, padded, and boxed cases are rejected |
+| Direct packed `reshape` or `transpose` | Unsupported; reshape a byte alias where the existing alias contract permits it |
+| Native packed FP4 `matmul_mx` | Unsupported by the pinned PTOAS geometry contract; cast ND operands to FP8 first |
+| MXFP4 `quant_mx` | E2M1 only, FP16/BF16 source, OCP or supported axis0 NV; PYPTO/DSA_RP static allocation |
+| `pl.tile.quant_mx_raw` | Native E2M1 payload (INT8 for MXFP8) and raw UINT8 exponents with explicit workspaces; static partial validity and axis0 interleaving |
+| Ascend910/A2A3 packed FP4 execution | Unsupported |
+
+PTO GM views retain carrier coordinates. The conversion to the lower-level
+instruction's value geometry belongs to PTOAS; scaling the GM shape again in
+PyPTO would double its row pitch. Physical tiles still need ISA alignment,
+including a 32-byte ND Vec row pitch; use padded storage with `valid_shape`
+for a narrower carrier window.
+
+## Numerical cast constraints
+
+BF16 encoding supports `rint`, `round`, `floor`, `ceil`, and `trunc`; `odd` is
+rejected. Packing requires complete pairs: a positive even source extent or a
+provably even dynamic `valid_shape`, such as `2 * n`. Decoding expands the
+carrier extent without requiring it to be even.
+
+All packed casts require `none_box` storage. Wider cast chains require ND.
+Decoding through BF16 preserves every FP4 value exactly. Implicit encoding chains must also preserve
+the original source through BF16: FP16/FP32 and larger integer sources are
+rejected because that intermediate can double-round. Write an explicit BF16
+cast first when that intermediate rounding is intended. The pinned simulator
+misrounds fractional FP4 conversions; numerical acceptance uses A5 hardware.
+
+DN casts require a full static 2D rectangle, canonical column-major strides,
+zero tile start offset, and BF16/packed endpoints. DN `[M,K]` carriers decode
+to BF16 `[2*M,K]`. Use `pl.tile.transpose_view` on a full ND BF16 tile to
+prepare a column-major BF16 source. Tensor casts preserve the same contract.
+PYPTO or DSA_RP must supply static tile addresses; codegen binds full static
+valid descriptors to select the safe native conversion path. Dynamic-valid
+DN descriptors can fault even for a full rectangle and remain unsupported.
 
 ## Decode a UINT8 carrier through a UB alias (Ascend950)
 
-Keep packed bytes as UINT8 in GM, then use a zero-copy FP4E2M1X2 view in UB:
+Keep the GM tensor in UINT8 and alias its UB storage with the encoded format:
 
 ```python
 import pypto.language as pl
@@ -56,115 +115,59 @@ def decode_bytes(
     with pl.spmd(1):
         row = pl.tile.get_block_idx() * 32
         payload = pl.tile.load(packed, [row, 0], [32, 256])
-        fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+        fp4 = pl.reinterpret_view(payload, pl.fp4e2m1x2)
         decoded = pl.cast(fp4, pl.BF16)
         pl.tile.store(decoded, [row, 0], output)
     return output
 ```
 
-`payload` and `fp4` both have carrier shape `[32,256]` and occupy the same
-8,192 bytes at the same UB address. The numerical cast expands the last axis
-and writes a fresh BF16 `[32,512]` tile through native `TCVT`. GM input addressing
-continues to use UINT8 byte offsets (`row * 256` for this shape); there is no
-FP4 GM partition and no software nibble-decoding sequence.
+The alias keeps the `[32,256]` carrier shape and the same 8,192-byte allocation.
+Only the numerical cast creates a fresh BF16 `[32,512]` tile. Use
+`pl.fp4e1m2x2` instead when the source bytes encode E1M2.
 
-The same-shape alias accepts FP4E2M1X2 ↔ UINT8 / INT8, 2D packed row-major Vec tiles with
-`slayout=none_box`, no explicit strides, and zero tile `start_offset`. An
-explicit `shape` must match the source shape exactly. Carrier `valid_shape`
-is preserved; the subsequent cast expands its last axis. Reshape the byte view,
-then reinterpret it back to FP4E2M1X2 before casting; each alias must preserve
-its input shape and dense storage. InCore tensor aliases lower to the same tile
-path. Logical FP4 aliases, native packed-FP4 reshape, and orchestration tensor
-aliases remain rejected. GM load offsets may be nonzero; they are distinct
-from a UB tile's `start_offset`.
+The alias requires `slayout=none_box`, dense storage, zero tile `start_offset`,
+and an address-backed MemRef with a static UB byte offset. Its source byte span
+must equal the carrier element count. Noncontiguous UB slices, including
+intermediate aliases or reshapes of them, and addressless inputs are rejected.
+GM load offsets may be nonzero or dynamic; they are distinct from UB offsets.
+An explicit alias shape must match the source. Reshape a byte view separately
+before aliasing back. InCore tensor aliases lower to the same tile path;
+orchestration tensor aliases remain unsupported.
 
-The source must have an address-backed MemRef whose byte span equals the
-static carrier element count. Noncontiguous UB column slices (including aliases
-and reshapes of them) and MemRef-less inputs such as `tile.tpop_from_aic` are
-rejected before emitting the FP4 conversion. Load the desired window directly
-from UINT8 GM into a dense UB tile instead. The alias also requires a static UB
-byte offset, including through intermediate views; a GM load may still use
-runtime offsets.
+PYPTO and DSA_RP planning emit addressed aliases. PTOAS planning remains
+unsupported for this path because its `treshape` rejects the packed FP4 type.
+Aliasing preserves bits; it does not numerically convert one FP4 format into
+the other.
 
-PTOAS **0.65 is sufficient with PYPTO and DSA_RP memory planning**. Both emit
-address-backed typed aliases. The PTOAS memory planner
-is rejected for this alias: its `pto.treshape` primitive rejects packed FP4 in
-0.65. Other reinterpret-view dtypes retain their existing planner support.
-This path does not fix generic typed-FP4 GM partition offsets or introduce
-PackFp4. InCore tensor aliases lower to the same checked UB aliases.
+Partial-transfer hardware tests compare every carrier byte, including untouched
+output regions. The pinned simulator corrupts DN results, and its partial ND
+case crashes during cleanup despite matching bytes; these cases run on A5 only.
 
-## Cast policy (Ascend950)
+## MX quantization
 
-`LegalizeTileCast` treats the FP4 family as follows:
+`pl.quant_mx(..., dtype=pl.fp4e2m1x2)` quantizes FP16/BF16 in groups of 32
+values. Axis1 maps `[M,K]` to payload `[M,K/2]` and scales `[M,K/32]`;
+axis0 maps `[N,K]` to payload `[K,N/2]` and scales `[K/32,N]`. Payload shapes
+count byte carriers. Public quantization requires full valid tiles, `K%64==0`,
+axis1 `M%16==0`, and FP4 axis0 `N%64==0` for its 32-byte carrier stride.
 
-| Cast | Behavior |
-| ---- | -------- |
-| `FP4` / `FP4E2M1X2` ↔ `BF16` | Native TCVT (DSv4.1 c1a). Silent. Packed ↔ wider types adjust the last axis **2:1** (static even last dim required when packing). |
-| `FP4` / `FP4E2M1X2` → `FP8E4M3FN` / `FP8E5M2` | Legalized as FP4→BF16→FP32→FP8 with a **Warning** (prefer LUT / host precast). |
-| `FP4` ↔ `FP4E2M1X2` | **Rejected** (geometry disagree); cast via a wider type or rewrite shapes. |
-| Wider → `FP4E2M1X2` with dynamic last dim | **Rejected** (static positive even only). |
+`quant_scale_alg="ocp"` is the default. `"nv"` supports the FP16/BF16 axis0
+path; axis1 FP16/BF16 NV and E1M2 quantization are unsupported by PTOAS.
+Packed quantization needs PYPTO or DSA_RP with static addresses because PTOAS
+cannot reshape its custom FP4 type into the required static-valid descriptor.
 
-### Hand-written `FP4E2M1X2` → BF16
-
-Carrier last dim `32` expands to BF16 last dim `64`:
-
-```python
-import pypto.language as pl
-
-
-@pl.function(type=pl.FunctionType.InCore)
-def fp4x2_to_bf16(
-    x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
-    out: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
-) -> pl.Tensor[[16, 64], pl.BF16]:
-    t = pl.load(x, [0, 0], [16, 32])
-    c = pl.cast(t, pl.BF16)
-    return pl.store(c, [0, 0], out)
-```
-
-### Hand-written `FP4E2M1X2` → FP8
-
-Same 2:1 last-axis expand; expect a LegalizeTileCast Warning:
-
-```python
-import pypto.language as pl
-
-
-@pl.function(type=pl.FunctionType.InCore)
-def fp4x2_to_fp8(
-    x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
-    out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
-) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
-    t = pl.load(x, [0, 0], [16, 32])
-    c = pl.cast(t, pl.FP8E4M3FN)
-    return pl.store(c, [0, 0], out)
-```
-
-## Support matrix (this release)
-
-Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not in this slice
-
-| Feature | PyPTO | Notes |
-| ------- | ----- | ----- |
-| Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths; **ND only** |
-| Logical `pl.FP4` without PackFp4 | ❌ | In-core PTO codegen rejects nibble-unit GM views; use `FP4E2M1X2` with carrier dimensions |
-| Packed GM views in carrier units | ✅ | PTOAS v0.67 handles DMA conversion (ND) |
-| FP4E2M1X2 ↔ UINT8/INT8 UB alias | ✅ | InCore tensor / tile; 2D packed row-major Vec; same carrier shape; PYPTO / DSA_RP only |
-| `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop; result strides rebuilt contiguous |
-| `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning; prefer LUT / host |
-| `FP4` ↔ `FP4E2M1X2` cast | ❌ | Rejected |
-| Automatic PackFp4 | ⏳ | Follow-up |
-| `reshape` / `transpose` / DN / NZ / column-vector `[M,1]` / layout `tensor.view` for `FP4E2M1X2` | ❌ | ND row-major only; implicit DN and explicit layout conversion hard-rejected |
-| `matmul_mx` native FP4 data | ⏳ | Cast lhs to FP8 first when needed |
-
-## Recommended paths
-
-1. Hand-write `pl.FP4E2M1X2` with physical carrier shapes (avoids `#2754`-class stride bugs).
-2. Cast to BF16 when a native wider float is enough.
-3. Prefer **LUT / host** for FP4→FP8; device cast is Warning-only.
-4. Use `pl.FP4E2M1X2` for in-core GM accesses until PackFp4 lands.
+`pl.tile.quant_mx_raw` keeps source orientation and returns native packed data
+plus UINT8 exponent codes without composite scale boxing. Workspaces use the
+source dtype. Axis0 workspaces retain the source physical column stride; axis1
+FP16/BF16 OCP scaling capacity rounds the group count up to 128 elements.
+Static partial valid regions are supported; axis1 requires tight physical/valid
+columns and FP4 physical columns divisible by 64. Axis0 groups 32 valid rows;
+`interleave=True` requires FP16/BF16 physical and valid rows divisible by 64.
+See the [operator catalog](../user/ops/01-catalog.md) for the quantization entry
+points. Native packed FP4 `matmul_mx` remains unsupported; the quantization
+result does not establish a native matrix path.
 
 ## See also
 
-- [Types](../user/language/00-types.md) — short FP4 / FP4E2M1X2 table
-- [Operators / MX](ir/05-operators.md) — `matmul_mx` FP4 note
+- [Types](../user/language/00-types.md) — public aliases and carrier ABI
+- [Operators / MX](ir/05-operators.md) — existing MXFP8 matrix paths

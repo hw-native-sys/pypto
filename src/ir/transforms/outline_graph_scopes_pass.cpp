@@ -181,9 +181,7 @@ Pass OutlineGraphScopes() {
       // Build symbol table for this function
       outline_utils::VarCollector type_collector;
       for (const auto& var : func->params_) {
-        type_collector.var_types[var.get()] = var->GetType();
-        type_collector.var_objects[var.get()] = var;
-        type_collector.known_names.insert(var->name_hint_);
+        type_collector.CollectParameter(var);
       }
       type_collector.VisitStmt(func->body_);
 
@@ -202,8 +200,9 @@ Pass OutlineGraphScopes() {
       // against the pass's input program, which is what the region's calls name
       // — this pass only ever appends outlined functions.
       outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
-                                            type_collector.known_names, ScopeKind::Graph, FunctionType::Graph,
-                                            "_graph_", program, reserved_func_names);
+                                            type_collector.known_names, type_collector.runtime_bindings,
+                                            ScopeKind::Graph, FunctionType::Graph, "_graph_", program,
+                                            reserved_func_names);
       auto new_body = outliner.VisitStmt(func->body_);
 
       // Preserve the parent function type — containing a Graph region says

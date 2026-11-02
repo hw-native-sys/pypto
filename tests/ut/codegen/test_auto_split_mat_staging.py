@@ -10,12 +10,60 @@
 """Issues #2902 and #2992: Vec operands must reuse their gathered Mat storage."""
 
 import re
+import runpy
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
+import torch
+from pypto import passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
-from pypto.runtime import RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
+
+
+@pytest.mark.parametrize("mode", ["mixed", "left_right", "staged"])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_mixed_example_fits_safe_vec_budget(tmp_path, ascend_backend, planner, mode):
+    """Compile the real example, including both splits and the staged control."""
+    example = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "examples/advanced/03_mixed_kernel.py")
+    )
+    m, n, k = example["M"], example["N"], example["K"]
+    args = (
+        torch.empty(m, k, dtype=torch.float16),
+        torch.empty(k, n, dtype=torch.float16),
+        torch.empty(m, n, dtype=torch.float32),
+        torch.empty(m, n, dtype=torch.float32),
+    )
+    # A two-slot ring plus the independently allocated bias and output needs
+    # 192 KiB on Ascend910. The safety guard must remain enabled; retune only
+    # the example's ring. Compile() exercises allocation and native codegen,
+    # without dispatching to hardware or requiring a simulator installation.
+    # The UT harness already supplies a PassContext; select the planner on a
+    # nested context rather than supplying conflicting RunConfig overrides.
+    with passes.PassContext([], memory_planner=planner):
+        example["_MODES"][mode].compile(
+            *args,
+            config=RunConfig(
+                backend_type=ascend_backend,
+                execution_mode=ExecutionMode.SIM,
+                codegen_only=True,
+                save_kernels=True,
+                save_kernels_dir=str(tmp_path),
+            ),
+        )
+    files = list(tmp_path.rglob("*.pto"))
+    assert files
+    if mode != "staged":
+        # Check the emitted pipe contract, not just the authored optimization.
+        pto = "\n".join(path.read_text() for path in files)
+        pipe_lines = [line for line in pto.splitlines() if "initialize_pipe" in line]
+        assert pipe_lines
+        assert all(re.search(r"\bslot_num\s*=\s*1\b", line) for line in pipe_lines)
+    if find_ptoas_binary() is not None:
+        assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
 def _assert_single_mat_handoff(pto: str, min_consumers: int = 1) -> str:

@@ -13,6 +13,10 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 
 namespace pypto {
 namespace ir {
@@ -39,6 +43,12 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       {"pld.tensor.broadcast", &LowerTensorBroadcastRule},
       {"pld.tensor.all_to_all", &LowerTensorAllToAllRule},
       {"pld.tensor.all_to_all_v", &LowerTensorAllToAllVRule},
+      {"pld.tensor.indexed_all_to_all_v",
+       +[](const CallPtr& call, const std::vector<ExprPtr>&, LoweringBuilder&) -> ExprPtr {
+         CHECK_SPAN(false, call->span_)
+             << "indexed_all_to_all_v supports only L2 orchestration on A5 URMA; InCore is unsupported";
+         return nullptr;
+       }},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;

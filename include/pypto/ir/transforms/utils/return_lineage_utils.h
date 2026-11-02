@@ -20,10 +20,24 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace return_lineage {
+
+/// Share callee return maps across queries into one unchanged Program.
+///
+/// Nesting is allowed; the outermost scope clears the cache on exit. End the
+/// scope before changing callee bodies or querying a different Program, since
+/// a function's lineage can depend on other functions in that Program.
+class ScopedTraceCache {
+ public:
+  ScopedTraceCache();
+  ~ScopedTraceCache();
+  ScopedTraceCache(const ScopedTraceCache&) = delete;
+  ScopedTraceCache& operator=(const ScopedTraceCache&) = delete;
+};
 
 /// Trace the first value of @p func's topmost ReturnStmt back to a Param.
 ///
@@ -51,6 +65,26 @@ std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramP
 ///         and is not a wrapper resolvable through its inner call; otherwise
 ///         one entry per return position (nullopt = not a param writeback).
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program);
+
+/// One declared return position, retaining its value independently of storage lineage.
+struct ReturnedValueBinding {
+  /// Callee-scoped source expression, or nullptr when its source is unknown.
+  /// May be an analysis-only tuple projection. Never substitute this expression
+  /// directly into another function: resolve its storage or materialize an output first.
+  ExprPtr value;
+  /// Declared return type, retained even when the source or storage is unknown.
+  TypePtr type;
+  /// Complete-parameter writeback, if known; nullopt does not erase the returned value.
+  std::optional<size_t> param_index;
+};
+
+/// Preserve every declared return slot before classifying parameter writebacks.
+///
+/// Retains original ReturnStmt expressions, expanding a single forwarded tuple
+/// only for multiple flat declared returns. A single declared TupleType stays
+/// one slot. Wrappers without an explicit return use their unique returning
+/// inner call when recognizable; otherwise their typed slots remain unknown.
+std::vector<ReturnedValueBinding> AnalyzeReturnedValues(const FunctionPtr& func, const ProgramPtr& program);
 
 /// Read the return->param map straight off @p func's ReturnStmt.
 ///
@@ -94,6 +128,32 @@ std::optional<size_t> ExplicitReturnedParamIndex(const FunctionPtr& func);
 /// fast path would pick the trailing one, a pre-order walk the nested one.
 ReturnStmtPtr FindFirstReturn(const StmtPtr& body);
 
+/// Trace multiple Vars in @p body back to complete parameter writebacks.
+///
+/// The body is indexed once, and variable roots and callee return maps are
+/// memoized across all Vars. Follows SSA and call/writeback lineage without
+/// IfStmt merges. Tensor results must retain the parameter's full type/view;
+/// slices, views, fresh buffers, and untraceable values remain nullopt.
+///
+/// @return one entry per Var containing its matching param index, or nullopt.
+std::vector<std::optional<size_t>> TraceToParamIndices(const std::vector<VarPtr>& vars, const StmtPtr& body,
+                                                       const std::vector<VarPtr>& params,
+                                                       const ProgramPtr& program);
+
+/// Expression generalization of TraceToParamIndices.
+///
+/// Also follows direct tuple projections, tuple-variable aliases, and nested
+/// MakeTuple projections. User-call projections use the callee's flat return
+/// positions. The body index, variable roots, tuple sources, and callee return
+/// maps are shared across the batch; unknown or partial-buffer values remain
+/// nullopt under the same full-parameter type/view checks.
+///
+/// @return one entry per expression containing its matching param index, or nullopt.
+std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<ExprPtr>& exprs,
+                                                            const StmtPtr& body,
+                                                            const std::vector<VarPtr>& params,
+                                                            const ProgramPtr& program);
+
 /// Trace multiple Vars in @p body back to @p params for scope outlining.
 ///
 /// The body is indexed once and parameter positions are shared across all Vars.
@@ -112,7 +172,8 @@ std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::ve
 /// Trace @p var defined in @p body back to one of @p params (pointer identity).
 ///
 /// Follows SSA and call/writeback lineage without IfStmt merges, scoped to an
-/// arbitrary body/param-set. Use TraceToParamIndicesForOutlining for multiple Vars.
+/// arbitrary body/param-set. Use TraceToParamIndices for multiple Vars that
+/// must retain the parameter's full type/view.
 ///
 /// @return the matching param, or nullptr when untraceable.
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,

@@ -541,5 +541,122 @@ class TestGraphScopeParsing:
                     return y
 
 
+def test_graph_scope_write_only_capture_retains_caller_storage():
+    """A write-only captured buffer still exists before Graph replay.
+
+    Keep the write-only signature. Call-site direction inference chooses
+    OutputExisting or InOut without changing the Graph's parameter contract.
+    """
+
+    @pl.program
+    class Scope:
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            x = pl.load(a, [0, 0], [16, 128])
+            pl.store(x, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+            out: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            with pl.graph("layer"):
+                result = self.copy(a, out)
+            return result
+
+    outlined = passes.outline_graph_scopes()(passes.convert_to_ssa()(Scope))
+    graph = _graph_funcs(outlined)[0]
+    directions = {p.name_hint: d for p, d in zip(graph.params, graph.param_directions, strict=True)}
+    assert [d for name, d in directions.items() if name.startswith("out")] == [ir.ParamDirection.Out]
+    assert [d for name, d in directions.items() if name.startswith("a")] == [ir.ParamDirection.In]
+
+    @pl.program
+    class Explicit:
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            x = pl.load(a, [0, 0], [16, 128])
+            pl.store(x, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            result = self.copy(a, out)
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+            out: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            result = self.layer(a, out)
+            return result
+
+    # The outliner returns the captured output, while the explicit source names
+    # the alias returned by copy. NormalizeReturnOrder canonicalizes that alias
+    # before dependency derivation and Graph boundary legalization in production.
+    expected = passes.convert_to_ssa()(Explicit)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        for transform in (
+            passes.normalize_return_order(),
+            passes.derive_call_directions(),
+            passes.auto_derive_task_dependencies(),
+            passes.legalize_graph_boundary(),
+        ):
+            outlined = transform(outlined)
+            expected = transform(expected)
+    ir.assert_structural_equal(outlined, expected)
+
+
+def test_graph_scope_captures_caller_allocated_write_only_buffer():
+    """Allocation before the Graph must remain owned by the caller.
+
+    Keep the write-only signature. Call-site direction inference chooses
+    OutputExisting or InOut without changing the Graph's parameter contract.
+    """
+
+    @pl.program
+    class Scope:
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            x = pl.load(a, [0, 0], [16, 128])
+            pl.store(x, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 128], pl.FP32],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            out = pl.create_tensor([16, 128], dtype=pl.FP32)
+            with pl.graph("layer"):
+                result = self.copy(a, out)
+            return result
+
+    outlined = passes.outline_graph_scopes()(passes.convert_to_ssa()(Scope))
+    graph = _graph_funcs(outlined)[0]
+    directions = {p.name_hint: d for p, d in zip(graph.params, graph.param_directions, strict=True)}
+    assert [d for name, d in directions.items() if name.startswith("out")] == [ir.ParamDirection.Out]
+    assert [d for name, d in directions.items() if name.startswith("a")] == [ir.ParamDirection.In]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -28,6 +28,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -44,6 +45,15 @@ Analyzer::~Analyzer() = default;
 
 void Analyzer::Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override) {
   ExprPtr simplified = rewrite_simplify(expr);
+
+  // Boolean bindings support substitution and logical folding, but have no
+  // numeric ordering contract: transitive_cmp.Bind builds a numeric Eq, which
+  // rejects BOOL operands. Check the variable's dtype rather than the literal
+  // kind so BOOL-typed ConstInt values and symbolic boolean aliases are covered.
+  if (GetScalarDtype(var) == DataType::BOOL) {
+    rewrite_simplify.Update(var, simplified);
+    return;
+  }
 
   // Propagate to all sub-analyzers.
   const_int_bound.Update(var, const_int_bound(simplified));
@@ -74,6 +84,7 @@ void Analyzer::Unbind(const VarPtr& var) {
   modular_set.Unbind(var);
   rewrite_simplify.Update(var, nullptr);
   transitive_cmp.Unbind(var);
+  int_set.Unbind(var);
 }
 
 ExprPtr Analyzer::Simplify(const ExprPtr& expr, int steps) {
@@ -116,6 +127,14 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
 
   if (auto cb = As<ConstBool>(simplified)) return cb->value_;
   if (auto ci = As<ConstInt>(simplified)) return ci->value_ != 0;
+
+  // Declared-format floating-point rounding is not modeled by integer bounds.
+  // Leave floating comparisons explicit instead of proving them from raw doubles.
+  if (auto binary = As<BinaryExpr>(simplified)) {
+    auto lhs_type = As<ScalarType>(binary->left_->GetType());
+    auto rhs_type = As<ScalarType>(binary->right_->GetType());
+    if ((lhs_type && lhs_type->dtype_.IsFloat()) || (rhs_type && rhs_type->dtype_.IsFloat())) return false;
+  }
 
   // Recursively handle logical And: both sides must be provable.
   if (auto op = As<And>(simplified)) {

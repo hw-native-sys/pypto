@@ -398,6 +398,9 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
               << "per-lane half first (load or slice the value inside the split function) and "
               << "move that to the cube side, or, if the split axis is a singleton that cannot "
               << "be halved, keep the value on the vector side.";
+          // Existing gather typing doubles physical lane capacity. Reassembly of
+          // aligned tiles with a smaller logical partition needs separate typing.
+          split_axis::CheckGatherPartition(call, tile_vars, var_replacements);
           // ReplacedOperand rebuilds an inline projection over the halved tuple, so the
           // gather doubles HALF -> FULL either way.
           if (auto replaced = split_axis::ReplacedOperand(src, var_replacements)) {
@@ -494,7 +497,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // A tuple projection carries no call, so the gate below would drop it into the
       // pass-through fallback and leave a full-width declared type over a halved
       // tuple. Retype it here, the same way split_axis::ProcessStmt does.
-      if (auto projected = split_axis::RetypeTupleProjection(assign, tile_vars, var_replacements)) {
+      if (auto projected = split_axis::RetypeTrackedBinding(assign, tile_vars, var_replacements)) {
         result.push_back(projected);
         continue;
       }
@@ -529,15 +532,14 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // ProcessStmts, so it cannot reach that branch and used to leave every
       // iter_arg full width and untracked -- a legal tile accumulator whose init
       // was halved then had its carry reported as a full-width operand.
-      auto new_iter_args = split_axis::RepairIterArgs(for_stmt->iter_args_, tile_vars, var_replacements,
-                                                      subblock_idx, lane_stride);
+      auto new_iter_args = split_axis::RepairIterArgs(for_stmt->iter_args_, tile_vars, var_replacements);
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
       split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, for_stmt->span_), new_iter_args,
-                                        tile_vars, var_replacements, for_stmt->span_);
-      auto new_return_vars = split_axis::RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars,
-                                                          var_replacements, subblock_idx, lane_stride);
+                                        tile_vars, var_replacements, for_stmt->span_, lane_stride);
+      auto new_return_vars =
+          split_axis::RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars, var_replacements);
       result.push_back(loop_repair::RebuildForStmt(
           for_stmt, new_iter_args, loop_repair::MakeBody(new_body, for_stmt->span_), new_return_vars));
       continue;
@@ -560,7 +562,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto new_then_body = loop_repair::MakeBody(new_then, if_stmt->span_);
       auto new_return_vars =
           split_axis::RepairIfReturnVars(if_stmt->return_vars_, new_then_body, new_else, tile_vars,
-                                         var_replacements, subblock_idx, lane_stride, if_stmt->span_);
+                                         var_replacements, lane_stride, if_stmt->span_);
       auto new_if = MutableCopy(if_stmt);
       new_if->then_body_ = new_then_body;
       new_if->else_body_ = new_else;
@@ -570,15 +572,14 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     }
     if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       // Same carry repair as the ForStmt arm above.
-      auto new_iter_args = split_axis::RepairIterArgs(while_stmt->iter_args_, tile_vars, var_replacements,
-                                                      subblock_idx, lane_stride);
+      auto new_iter_args = split_axis::RepairIterArgs(while_stmt->iter_args_, tile_vars, var_replacements);
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
                                  lane_stride);
       split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, while_stmt->span_), new_iter_args,
-                                        tile_vars, var_replacements, while_stmt->span_);
-      auto new_return_vars = split_axis::RepairReturnVars(while_stmt->return_vars_, new_iter_args, tile_vars,
-                                                          var_replacements, subblock_idx, lane_stride);
+                                        tile_vars, var_replacements, while_stmt->span_, lane_stride);
+      auto new_return_vars =
+          split_axis::RepairReturnVars(while_stmt->return_vars_, new_iter_args, tile_vars, var_replacements);
       result.push_back(loop_repair::RebuildWhileStmt(
           while_stmt, new_iter_args, loop_repair::MakeBody(new_body, while_stmt->span_), new_return_vars));
       continue;

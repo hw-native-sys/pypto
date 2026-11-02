@@ -38,6 +38,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
+#include "pypto/sync/resource_catalog.h"
 
 namespace nb = nanobind;
 
@@ -145,6 +146,8 @@ void BindBackend(nb::module_& m) {
   nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
+      .def("supports_reg_type", &BackendHandler::SupportsRegType, nb::arg("type"),
+           "Whether this target supports the logical VMI register type")
       .def("get_launch_spec_core_count_method", &BackendHandler::GetLaunchSpecCoreCountMethod,
            "Method name on launch_spec for setting the logical block count "
            "('set_block_num' on both backends and runtimes)")
@@ -157,6 +160,9 @@ void BindBackend(nb::module_& m) {
            "high_precision=True emits (ignored on Ascend910)")
       .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
+      .def("supports_runtime_bound_local_software_pipeline",
+           &BackendHandler::SupportsRuntimeBoundLocalSoftwarePipeline,
+           "Whether this backend enables local Vec software-pipeline lowering with runtime trip counts")
       .def("supports_local_pipe_depth", &BackendHandler::SupportsLocalPipeDepth,
            "Whether cross-core pipes support a local consumer depth independent of the transport ring")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
@@ -179,6 +185,9 @@ void BindBackend(nb::module_& m) {
            "Recommended minimum innermost-dim size, in bytes, for tile ops touching GM")
       .def("get_capacity_bytes", &BackendHandler::GetCapacityBytes, nb::arg("memory_space"),
            "Capacity of one memory component in the owning SoC, in bytes; 0 for an unmodeled space")
+      .def("get_sync_resource_catalog", &BackendHandler::GetSyncResourceCatalog, nb::rv_policy::reference,
+           "Borrow this backend's process-lifetime synchronization resource catalog without changing "
+           "the active backend")
       .def("supports_mat_to_bias_move", &BackendHandler::SupportsMatToBiasMove, nb::arg("source_dtype"),
            nb::arg("bias_dtype"), "Whether the backend supports this Mat-to-Bias tile.move dtype pair")
       .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,
@@ -207,6 +216,10 @@ void BindBackend(nb::module_& m) {
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
       .def("get_registered_op_names", &Backend::GetRegisteredOpNames,
            "Get a sorted snapshot of this backend's registered operator names")
+      .def("find_isa_macro_resources", &Backend::FindIsaMacroResources, nb::arg("name"),
+           "Return symbolic signal claims for a qualified ISA macro, or None if unregistered")
+      .def("get_isa_macro_names", &Backend::GetIsaMacroNames,
+           "Return sorted qualified ISA macro names with registered signal occupancy")
       .def(
           "plan_op_scratch",
           [](const Backend& target, const std::string& op_name, std::optional<DataType> source_dtype,

@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for tuple literal and subscript syntax in parser."""
 
+import textwrap
 from collections.abc import Sequence
 
 import pypto.language as pl
@@ -241,6 +242,34 @@ class TestTupleRoundTrip:
         # Re-binding a projected element forwards the same value, not a fresh read
         assert by_name["_first"].value is by_name["first"].var
         assert by_name["_second"].value is by_name["second"].var
+
+    def test_tensor_shape_reads_preserve_dimension_values(self):
+        """Unpacking and indexing retain dynamic symbols and static constants."""
+        program = pl.parse(
+            textwrap.dedent("""
+                N = pl.dynamic("ROWS")
+                @pl.program
+                class Program:
+                    @pl.function(type=pl.FunctionType.Orchestration)
+                    def main(self, src: pl.Tensor[[N, 64], pl.FP32], other: pl.Tensor[[N, 64], pl.FP32]):
+                        src = pl.add(src, other)
+                        rows, cols = src.shape
+                        indexed = src.shape[0]
+                        static = src.shape[1]
+                        observed = (rows, indexed, cols, static)
+                        return observed
+            """)
+        )
+        assert isinstance(program, ir.Program)
+        func = next(iter(program.functions.values()))
+        tensor_type = func.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        observed = next(stmt for stmt in _assign_stmts(func) if stmt.var.name_hint == "observed")
+        assert _make_tuple(observed).elements[0] is tensor_type.shape[0]
+        assert _make_tuple(observed).elements[1] is tensor_type.shape[0]
+        static = next(stmt for stmt in _assign_stmts(func) if stmt.var.name_hint == "static")
+        assert isinstance(static.value, ir.ConstInt)
+        assert static.value.value == 64
 
 
 if __name__ == "__main__":

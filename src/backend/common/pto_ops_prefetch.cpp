@@ -133,7 +133,7 @@ std::pair<std::string, std::string> EmitWholeTensorPartitionView(const ir::CallP
 
 void RegisterPrefetchOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
-    if (exclude_ops.count(op_name) > 0) return;
+    if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 

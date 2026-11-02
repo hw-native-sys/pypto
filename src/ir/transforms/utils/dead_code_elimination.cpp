@@ -27,7 +27,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -39,6 +38,7 @@ namespace ir {
 namespace dce {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
+using transform_utils::ExprContainsCallLike;
 
 std::string GetStmtOpName(const StmtPtr& stmt) {
   CallPtr call;
@@ -68,11 +68,11 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
   // `IsOp` is the right helper for testing a single operator, not a twelve-way
   // membership test on a hot path.
   //
-  // The list is hand-maintained and is not derived from operator metadata,
-  // because no registry property answers "is a call to this operator
-  // removable"; the write predicates (`WritesAnyArg` and friends) answer
-  // whether an operator writes *through an argument*, which is a different
-  // question and unsound as a stand-in.
+  // The list remains hand-maintained for non-register side effects: writing
+  // through an argument does not generally imply a non-removable operation.
+  // The narrow exception below is a registered RegOp with WritesAnyArg(): a
+  // register store mutates Tile storage through argument 0, which ordinary SSA
+  // uses do not capture, so it must survive even when its alias result is unused.
   static const std::unordered_set<std::string> side_effect_ops = [] {
     const auto& registry = OpRegistry::GetInstance();
     auto validated = [&registry](const char* op_name) { return registry.GetOp(op_name)->name_; };
@@ -96,7 +96,13 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) value = assign->value_;
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) value = eval->expr_;
   if (value && As<Submit>(value)) return true;
-  return side_effect_ops.count(GetStmtOpName(stmt)) > 0;
+  const auto name = GetStmtOpName(stmt);
+  const auto& registry = OpRegistry::GetInstance();
+  if (registry.IsRegistered(name)) {
+    const auto& entry = registry.GetEntry(name);
+    if (entry.GetRegSpec() && entry.WritesAnyArg()) return true;
+  }
+  return side_effect_ops.count(name) > 0;
 }
 
 void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
@@ -125,6 +131,63 @@ namespace {
 using loop_repair::MakeBody;
 using RemovablePredicate = std::function<bool(const StmtPtr&)>;
 
+/// DCE must keep values referenced only by storage metadata alive. In particular,
+/// Simplify preserves allocated MemRef identities, so their byte offsets may
+/// still name a scalar whose ordinary uses were replaced by a constant. The
+/// shared type walker deliberately omits those offsets for SSA verification;
+/// add them here without changing that contract or rebuilding any MemRef.
+class DceVarDefUseCollector : public var_collectors::VarDefUseCollector {
+ public:
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!expr) return;
+    // Covers operand and result types uniformly, including Submit's tuple type.
+    VisitTypeExprs(expr->GetType());
+    var_collectors::VarDefUseCollector::VisitExpr(expr);
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    // Definition types are not visited by VarDefUseCollector: definitions must
+    // not themselves count as uses, but expressions embedded in their types do.
+    if (auto assign = As<AssignStmt>(stmt)) {
+      VisitTypeExprs(assign->var_->GetType());
+    } else if (auto loop = As<ForStmt>(stmt)) {
+      VisitBinderTypes(loop->iter_args_);
+      VisitBinderTypes(loop->return_vars_);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      VisitBinderTypes(loop->iter_args_);
+      VisitBinderTypes(loop->return_vars_);
+    } else if (auto branch = As<IfStmt>(stmt)) {
+      VisitBinderTypes(branch->return_vars_);
+    }
+    var_collectors::VarDefUseCollector::VisitStmt(stmt);
+  }
+
+  void VisitTypeExprs(const TypePtr& type) {
+    // Types may be shared or recursively reference a Var carrying the same
+    // type. Visit each identity once per collection to bound this extra walk.
+    if (!type || !visited_types_.insert(type.get()).second) return;
+    if (auto tuple = As<TupleType>(type)) {
+      for (const auto& element : tuple->types_) VisitTypeExprs(element);
+      return;
+    }
+    var_collectors::VisitTypeExprFields(*this, type);
+    if (auto shaped = As<ShapedType>(type); shaped && shaped->memref_.has_value()) {
+      const auto& memref = *shaped->memref_;
+      if (memref && memref->byte_offset_) VisitExpr(memref->byte_offset_);
+    }
+  }
+
+ private:
+  template <typename Binders>
+  void VisitBinderTypes(const Binders& binders) {
+    for (const auto& binder : binders) {
+      if (binder) VisitTypeExprs(binder->GetType());
+    }
+  }
+
+  std::unordered_set<const Type*> visited_types_;
+};
+
 /// Collect live-root variables.
 ///
 /// A statement is a "live root" when it is NOT classified as a removal
@@ -136,7 +199,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
                                 std::unordered_set<const Var*>& live) {
   auto collect_expr_refs = [&](const ExprPtr& expr) {
     if (!expr) return;
-    var_collectors::VarDefUseCollector collector;
+    DceVarDefUseCollector collector;
     collector.VisitExpr(expr);
     live.insert(collector.var_uses.begin(), collector.var_uses.end());
   };
@@ -156,7 +219,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
                    std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
                    std::dynamic_pointer_cast<const YieldStmt>(stmt);
     if (is_leaf && !is_removable(stmt)) {
-      var_collectors::VarDefUseCollector collector;
+      DceVarDefUseCollector collector;
       collector.VisitStmt(stmt);
       auto all_refs = collector.GetAllVarRefs();
       live.insert(all_refs.begin(), all_refs.end());
@@ -219,6 +282,11 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
       }
       if (auto spmd = std::dynamic_pointer_cast<const SpmdScopeStmt>(scope_stmt)) {
         collect_expr_refs(spmd->core_num_);
+      }
+      // Slot sizes can retain symbolic body-defined scalars even when folding
+      // has removed their ordinary uses. Domain allocation still needs them.
+      if (auto comm = As<CommDomainScopeStmt>(scope_stmt)) {
+        for (const auto& slot : comm->slots_) collect_expr_refs(slot->size_);
       }
       FindLiveRootsRecursiveImpl(FlattenBody(scope_stmt->body_), is_removable, live);
     }
@@ -303,6 +371,10 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
         auto copy = MutableCopy(cluster);
         copy->body_ = new_body;
         new_scope = copy;
+      } else if (auto reg = std::dynamic_pointer_cast<const RegScopeStmt>(stmt)) {
+        auto copy = MutableCopy(reg);
+        copy->body_ = new_body;
+        new_scope = copy;
       } else if (auto hierarchy = std::dynamic_pointer_cast<const HierarchyScopeStmt>(stmt)) {
         auto copy = MutableCopy(hierarchy);
         copy->body_ = new_body;
@@ -321,6 +393,10 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
         new_scope = copy;
       } else if (auto graph = std::dynamic_pointer_cast<const GraphScopeStmt>(stmt)) {
         auto copy = MutableCopy(graph);
+        copy->body_ = new_body;
+        new_scope = copy;
+      } else if (auto comm = std::dynamic_pointer_cast<const CommDomainScopeStmt>(stmt)) {
+        auto copy = MutableCopy(comm);
         copy->body_ = new_body;
         new_scope = copy;
       } else {
@@ -344,9 +420,9 @@ void MarkBinderTypeRefsLive(const std::vector<StmtPtr>& stmts, std::unordered_se
     if (!var) {
       return;
     }
-    for (const Var* ref : var_collectors::CollectTypeVars(var->GetType())) {
-      live.insert(ref);
-    }
+    DceVarDefUseCollector collector;
+    collector.VisitTypeExprs(var->GetType());
+    live.insert(collector.var_uses.begin(), collector.var_uses.end());
   };
   auto mark_all = [&mark](const auto& binders) {
     for (const auto& binder : binders) {
@@ -399,18 +475,10 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
   std::vector<std::unordered_set<const Var*>> assign_uses;
   assign_uses.reserve(all_assigns.size());
   for (const auto& assign : all_assigns) {
-    var_collectors::VarDefUseCollector collector;
+    DceVarDefUseCollector collector;
     collector.VisitExpr(assign->value_);
+    collector.VisitTypeExprs(assign->var_->GetType());
     auto uses = std::move(collector.var_uses);
-    // A Var can also be referenced from a TYPE, not just from an expression: a
-    // tile's valid_shape may be a per-lane extent over the region's subblock
-    // index (split_axis::LocalizeExplicitBoundaryValid). Those are real uses —
-    // the use-after-def verifier already walks type expr fields
-    // (verify_use_after_def.cpp) — so missing them here would delete the
-    // subblock-index binding and leave the type dangling.
-    for (const Var* ref : var_collectors::CollectTypeVars(assign->var_->GetType())) {
-      uses.insert(ref);
-    }
     assign_uses.emplace_back(std::move(uses));
   }
 
@@ -432,37 +500,6 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
 /// a known side-effect op is a removal candidate.
 bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
   return std::dynamic_pointer_cast<const AssignStmt>(stmt) != nullptr && !IsSideEffectOp(stmt);
-}
-
-/// Walk an expression tree and report whether any Call or Submit appears.
-/// Both are call-like and side-effecting from the DCE perspective: a Call
-/// may invoke a kernel with arbitrary side effects, and a Submit launches
-/// an asynchronous task. Either form must be preserved conservatively
-/// because the IR has no purity annotations yet.
-class CallLikeFinder : public IRVisitor {
- public:
-  bool found = false;
-
- private:
-  using IRVisitor::VisitExpr_;
-  void VisitExpr_(const CallPtr& op) override {
-    found = true;
-    // Keep walking — nested args may also contain Calls, but early-exit
-    // would require throwing. The overhead is bounded by the expression
-    // size which is small.
-    IRVisitor::VisitExpr_(op);
-  }
-  void VisitExpr_(const SubmitPtr& op) override {
-    found = true;
-    IRVisitor::VisitExpr_(op);
-  }
-};
-
-bool ExprContainsCallLike(const ExprPtr& expr) {
-  if (!expr) return false;
-  CallLikeFinder finder;
-  finder.VisitExpr(expr);
-  return finder.found;
 }
 
 bool IsTaskIdTupleElement(const AssignStmtPtr& assign) {
@@ -501,23 +538,39 @@ bool IsRemovableScalarAssign(const StmtPtr& stmt) {
 
 /// Filter a branch's trailing YieldStmt in place, keeping only `kept_indices`.
 /// When `kept_indices` is empty, the trailing YieldStmt is removed entirely.
-/// No-op when the branch does not end in a YieldStmt.
+/// Only touches the enclosing control flow's yield; scope contents and their
+/// metadata stay in place even when every slot disappears.
 void FilterTrailingYieldSlots(std::vector<StmtPtr>& branch, const std::vector<size_t>& kept_indices) {
   if (branch.empty()) return;
-  auto yield = std::dynamic_pointer_cast<const YieldStmt>(branch.back());
-  if (!yield) return;
-  if (kept_indices.empty()) {
+  auto tail = transform_utils::RewriteLastYieldStmt(branch.back(), [&](const YieldStmtPtr& yield) -> StmtPtr {
+    if (kept_indices.empty()) return nullptr;
+    auto result = MutableCopy(yield);
+    result->value_.clear();
+    result->value_.reserve(kept_indices.size());
+    for (size_t idx : kept_indices) {
+      INTERNAL_CHECK_SPAN(idx < yield->value_.size(), yield->span_)
+          << "Internal error: yield index " << idx << " out of range " << yield->value_.size();
+      result->value_.push_back(yield->value_[idx]);
+    }
+    return result;
+  });
+  if (tail) {
+    branch.back() = std::move(tail);
+  } else {
     branch.pop_back();
-    return;
   }
-  std::vector<ExprPtr> new_values;
-  new_values.reserve(kept_indices.size());
-  for (size_t idx : kept_indices) {
-    INTERNAL_CHECK_SPAN(idx < yield->value_.size(), yield->span_)
-        << "Internal error: yield index " << idx << " out of range " << yield->value_.size();
-    new_values.push_back(yield->value_[idx]);
+}
+
+/// Resolve the trailing spine once per body, rather than once for every slot.
+/// Pre-SSA loops can have implicit carries without a yield; callers retain
+/// those slots until ConvertToSSA supplies their terminator.
+YieldStmtPtr GetYieldForSlots(const std::vector<StmtPtr>& body, size_t slots, const Span& span) {
+  auto yield = body.empty() ? nullptr : transform_utils::GetLastYieldStmt(body.back());
+  if (yield && slots != 0) {
+    INTERNAL_CHECK_SPAN(yield->value_.size() == slots, span)
+        << "Internal error: control-flow yield must match its " << slots << " result slots";
   }
-  branch.back() = std::make_shared<YieldStmt>(std::move(new_values), yield->span_);
+  return yield;
 }
 
 /// True when the trailing `YieldStmt` of @p body feeds slot @p slot with an
@@ -528,9 +581,7 @@ void FilterTrailingYieldSlots(std::vector<StmtPtr>& branch, const std::vector<si
 /// The IR has no purity annotations, so an effect there keeps the slot alive,
 /// matching how `IsRemovableScalarAssign` refuses to drop a call-backed
 /// assignment.
-bool YieldSlotHasCallLike(const std::vector<StmtPtr>& body, size_t slot) {
-  if (body.empty()) return false;
-  auto yield = std::dynamic_pointer_cast<const YieldStmt>(body.back());
+bool YieldSlotHasCallLike(const YieldStmtPtr& yield, size_t slot) {
   if (!yield || slot >= yield->value_.size()) return false;
   return ExprContainsCallLike(yield->value_[slot]);
 }
@@ -545,6 +596,11 @@ StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt,
   }
   if (auto cluster = std::dynamic_pointer_cast<const ClusterScopeStmt>(scope_stmt)) {
     auto copy = MutableCopy(cluster);
+    copy->body_ = new_body;
+    return copy;
+  }
+  if (auto reg = std::dynamic_pointer_cast<const RegScopeStmt>(scope_stmt)) {
+    auto copy = MutableCopy(reg);
     copy->body_ = new_body;
     return copy;
   }
@@ -570,6 +626,11 @@ StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt,
   }
   if (auto runtime = std::dynamic_pointer_cast<const RuntimeScopeStmt>(scope_stmt)) {
     auto copy = MutableCopy(runtime);
+    copy->body_ = new_body;
+    return copy;
+  }
+  if (auto comm = std::dynamic_pointer_cast<const CommDomainScopeStmt>(scope_stmt)) {
+    auto copy = MutableCopy(comm);
     copy->body_ = new_body;
     return copy;
   }
@@ -626,10 +687,11 @@ StmtPtr RewriteLoopCarrySlots(const std::shared_ptr<const LoopT>& loop,
   kept_indices.reserve(loop->iter_args_.size());
   new_iter_args.reserve(loop->iter_args_.size());
   new_return_vars.reserve(loop->return_vars_.size());
+  auto yield = GetYieldForSlots(rewritten, loop->return_vars_.size(), loop->span_);
   for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
-    if (live_uses.count(loop->iter_args_[i].get()) || live_uses.count(loop->return_vars_[i].get()) ||
-        IsTaskIdCarrier(loop->iter_args_[i]->GetType()) ||
-        ExprContainsCallLike(loop->iter_args_[i]->initValue_) || YieldSlotHasCallLike(rewritten, i)) {
+    if (!yield || live_uses.count(loop->iter_args_[i].get()) ||
+        live_uses.count(loop->return_vars_[i].get()) || IsTaskIdCarrier(loop->iter_args_[i]->GetType()) ||
+        ExprContainsCallLike(loop->iter_args_[i]->initValue_) || YieldSlotHasCallLike(yield, i)) {
       kept_indices.push_back(i);
       new_iter_args.push_back(loop->iter_args_[i]);
       new_return_vars.push_back(loop->return_vars_[i]);
@@ -680,10 +742,13 @@ std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts
       std::vector<VarPtr> new_return_vars;
       kept_indices.reserve(if_stmt->return_vars_.size());
       new_return_vars.reserve(if_stmt->return_vars_.size());
+      auto then_yield = GetYieldForSlots(new_then, if_stmt->return_vars_.size(), if_stmt->span_);
+      auto else_yield = new_else.has_value()
+                            ? GetYieldForSlots(*new_else, if_stmt->return_vars_.size(), if_stmt->span_)
+                            : nullptr;
       for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-        const bool branch_effect =
-            YieldSlotHasCallLike(new_then, i) || (new_else.has_value() && YieldSlotHasCallLike(*new_else, i));
-        if (live_uses.count(if_stmt->return_vars_[i].get()) || branch_effect) {
+        const bool branch_effect = YieldSlotHasCallLike(then_yield, i) || YieldSlotHasCallLike(else_yield, i);
+        if (!then_yield || !else_yield || live_uses.count(if_stmt->return_vars_[i].get()) || branch_effect) {
           kept_indices.push_back(i);
           new_return_vars.push_back(if_stmt->return_vars_[i]);
         }
@@ -750,10 +815,9 @@ std::vector<StmtPtr> EliminateDeadYieldSlots(const std::vector<StmtPtr>& stmts) 
   std::vector<StmtPtr> cur = stmts;
   while (true) {
     // Collect every Var* that appears as a use anywhere in `cur`. The base
-    // visitor walks ScopeStmt attrs via VisitScopeAttrs and Submit::deps_
-    // through Call/Submit traversal, so all known reference channels are
-    // covered without extra plumbing.
-    var_collectors::VarDefUseCollector collector;
+    // visitor walks ScopeStmt attrs and Submit::deps_; the DCE-specific type
+    // walk also keeps a phi/carry used only by a slot index or byte offset.
+    DceVarDefUseCollector collector;
     for (const auto& s : cur) collector.VisitStmt(s);
 
     bool changed = false;

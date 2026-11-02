@@ -69,8 +69,11 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
 //    That ordering constraint is a pipeline-position fact, not an IRProperty.
 //    The rewrite swaps one call for another within the existing vocabulary, and
 //    the synthesized function returns its InOut `target` parameter through an
-//    explicit ReturnStmt, so no property is required, produced or invalidated.
-inline const PassProperties kLowerL2TensorCollectivesProperties{};
+//    explicit ReturnStmt, so nothing is produced or invalidated. The contiguity
+//    check reads each kernel's writeback map off its ReturnStmt, hence the
+//    ReturnParamsExplicit requirement.
+inline const PassProperties kLowerL2TensorCollectivesProperties{
+    .required = {IRProperty::ReturnParamsExplicit}};
 
 // Rebuild control flow before direction/dependency/runtime-scope analysis.
 // ReturnParamsExplicit supplies the unambiguous return-slot -> parameter map.

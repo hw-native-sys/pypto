@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -344,10 +345,10 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     if (As<ir::Cast>(expr)) {
       const auto source = ir::GetScalarDtype(expr->operand_);
       const auto target = ir::GetScalarDtype(expr);
-      // The inherited emitter supports index -> unsigned and same-width
+      // The inherited emitter supports BOOL/index -> unsigned and same-width
       // integer bitcasts. Other unsigned casts need a separate native recipe.
       CHECK_SPAN((!source.IsUnsignedInt() && !target.IsUnsignedInt()) || source == DataType::INDEX ||
-                     source == target ||
+                     source == DataType::BOOL || source == target ||
                      (!source.IsFloat() && target != DataType::INDEX && !target.IsFloat() &&
                       source.GetBit() == target.GetBit()),
                  expr->span_)
@@ -674,7 +675,8 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     std::vector<ir::ExprPtr> inputs{call->args_[0], call->args_[1]};
     if (accumulate) inputs.insert(inputs.begin(), call->args_[2]);
     Emit(std::string(accumulate ? "pto.tmatmul.acc " : "pto.tmatmul ") +
-         BufferInsOutsClause(inputs, call->args_[2]));
+         BufferInsOutsClause(inputs, call->args_[2]) +
+         FormatMatmulTf32Attr(call, GetBackendHandler()->GetPtoTargetArch()));
   } else if (ir::IsOp(call, "buffer.extract")) {
     const std::string row = EmitBufferIntegerOperand(call->args_[1], DataType::INDEX);
     const std::string col = EmitBufferIntegerOperand(call->args_[2], DataType::INDEX);
@@ -694,7 +696,8 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     if (recipe && recipe->precision != backend::BufferPrecisionKind::None &&
         call->GetKwarg<bool>("high_precision", false)) {
       line << " {precisionType = #pto<" << backend::BufferPrecisionAttributeName(recipe->precision)
-           << " high_precision>}";
+           << (recipe->precision == backend::BufferPrecisionKind::Div ? " diff_compensation>}"
+                                                                      : " high_precision>}");
       // Report the logical op, not `recipe->buffer_op`: the user wrote
       // `tile.div`, and lowering it through Buffer IR must not change what the
       // diagnostic names.

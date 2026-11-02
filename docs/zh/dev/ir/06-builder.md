@@ -306,3 +306,8 @@ func = f.get_result()
 | **FunctionBuilder** | Python 函数辅助类 |
 | **ForLoopBuilder** | Python 循环辅助类 |
 | **IfStmtBuilder** | Python if 辅助类 |
+
+## 寄存器区域
+
+`IRBuilder.reg_scope()`、`emit_reg()`、`emit_reg_store()` 与 DSL 共享 schema。
+C++ 对应入口和验证边界见[寄存器操作](../language/06-register-operations.md#builder)。

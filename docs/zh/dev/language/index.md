@@ -15,3 +15,6 @@
 
 - [IR Parser](../ir/07-parser.md) —— 该语法如何变成 IR。
 - [语言指南](../../user/language/index.md) —— 从用户视角看同一门语言。
+
+- [寄存器操作](06-register-operations.md)：P0 schema、隐式捕获、区域归属和 Builder 构造；
+  VF 后端发射需要 PR3。

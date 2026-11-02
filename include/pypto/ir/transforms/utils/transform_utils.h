@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -34,6 +35,18 @@
 
 namespace pypto::ir::transform_utils {
 
+/// True when @p arg carries a tensor-like or tuple type.
+///
+/// ``AsTensorTypeLike`` matches a ``DistributedTensorType`` window as well as a
+/// plain ``TensorType``: at this layer a window is this rank's local GM data.
+/// Tuples count because call arguments are often packed tuples of tensors.
+inline bool IsTensorTypedArg(const ExprPtr& arg) {
+  if (!arg) return false;
+  TypePtr type = arg->GetType();
+  if (!type) return false;
+  return AsTensorTypeLike(type) || As<TupleType>(type);
+}
+
 /// Substitute variable references in an expression by pointer identity.
 ///
 /// Recursively traverses Call, MakeTuple, BinaryExpr, UnaryExpr, and
@@ -48,6 +61,17 @@ ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, Exp
 /// appears in @p var_map with the mapped replacement.
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map);
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map);
+
+/// Rebuild a registered, type-deducible operator from the caller's final args.
+///
+/// The caller owns SSA/geometry rewriting and supplies @p remap_expr for live
+/// expressions in kwargs/attrs. A Substitute-based callback must treat generated
+/// replacements as terminal references, rather than walking an IterArg's seed
+/// back into its own replacement chain. Re-deduce from the new args/kwargs, then
+/// preserve updated attrs and the original span. Never inherit the old result
+/// type/MemRef: aliases, windows and copy placement remain caller/op policy.
+CallPtr RebuildRegisteredCall(const CallPtr& original, const std::vector<ExprPtr>& rewritten_args,
+                              const std::function<ExprPtr(const ExprPtr&)>& remap_expr);
 
 /// Find the first YieldStmt inside a statement body (searches through SeqStmts).
 inline YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
@@ -82,6 +106,19 @@ inline YieldStmtPtr GetLastYieldStmt(const StmtPtr& body) {
   }
   return As<YieldStmt>(body);
 }
+
+/// Rewrite the yield on the same trailing spine as GetLastYieldStmt.
+///
+/// The callback may return nullptr to remove the yield. Empty sequences are
+/// removed too, but runtime/split wrappers retain a non-null empty body and
+/// all their metadata. Never enters nested control flow or outlining scopes:
+/// their yields belong to a different owner. Returns the original body when
+/// no trailing yield exists or the callback leaves it unchanged.
+StmtPtr RewriteLastYieldStmt(const StmtPtr& body, const std::function<StmtPtr(const YieldStmtPtr&)>& rewrite);
+
+/// Conservatively identify expressions whose evaluation must not be duplicated
+/// or deleted. Includes nested Call and Submit nodes; no purity is assumed.
+bool ExprContainsCallLike(const ExprPtr& expr);
 
 /// Unwrap a StmtPtr into a flat vector of statements.
 ///

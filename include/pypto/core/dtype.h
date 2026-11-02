@@ -34,7 +34,7 @@ namespace pypto {
  * It includes:
  * - Signed integers: INT4, INT8, INT16, INT32, INT64
  * - Unsigned integers: UINT4, UINT8, UINT16, UINT32, UINT64
- * - Floating point: FP4, FP8, FP16, FP32
+ * - Floating point: packed FP4 pairs, FP8, FP16, FP32
  * - Brain floating point: BF16
  * - Hisilicon float formats: HF4, HF8
  * - Boolean: BOOL
@@ -69,8 +69,8 @@ class DataType {
   // 0x25-0x2F reserved for future unsigned integer types
 
   // IEEE floating point types: 0x30-0x3F (16 slots reserved)
-  static constexpr uint8_t kIeeeFloatRangeStart = 0x30;
-  static constexpr uint8_t kFp4Code = 0x30;
+  // 0x30 is reserved; no unpacked FP4 dtype exists.
+  static constexpr uint8_t kIeeeFloatRangeStart = 0x31;
   static constexpr uint8_t kFp8e4m3fnCode = 0x31;
   static constexpr uint8_t kFp8e5m2Code = 0x32;
   static constexpr uint8_t kFp16Code = 0x33;
@@ -78,8 +78,9 @@ class DataType {
   static constexpr uint8_t kFp64Code = 0x35;       // Reserved for future FP64 support
   static constexpr uint8_t kFp8e8m0Code = 0x36;    // MX block-scale exponent (E8M0)
   static constexpr uint8_t kFp4e2m1x2Code = 0x37;  // Packed pair of E2M1 FP4 (1 byte)
+  static constexpr uint8_t kFp4e1m2x2Code = 0x38;  // Packed pair of E1M2 FP4 (1 byte)
   static constexpr uint8_t kIeeeFloatRangeEnd = 0x3F;
-  // 0x38-0x3F reserved for future IEEE float types
+  // 0x39-0x3F reserved for future IEEE float types
 
   // Brain/Hisilicon float types: 0x40-0x4F (16 slots reserved)
   static constexpr uint8_t kBrainFloatRangeStart = 0x40;
@@ -109,7 +110,7 @@ class DataType {
   static const DataType UINT16;     // 16-bit unsigned integer
   static const DataType UINT32;     // 32-bit unsigned integer
   static const DataType UINT64;     // 64-bit unsigned integer
-  static const DataType FP4;        // 4-bit floating point (logical nibble; frontend only)
+  static const DataType FP4E1M2X2;  // Packed pair of E1M2 FP4 (1 byte); PTOAS carrier
   static const DataType FP4E2M1X2;  // Packed pair of E2M1 FP4 (1 byte); PTOAS / Torch carrier
   static const DataType FP8E4M3FN;  // 8-bit floating point (IEEE 754 e4m3fn format)
   static const DataType FP8E5M2;    // 8-bit floating point (IEEE 754 e5m2 format)
@@ -148,7 +149,7 @@ class DataType {
    * @brief Get the size in bits of this data type
    *
    * Returns the storage size in bits for each data type. This accurately
-   * represents sub-byte types like INT4, UINT4, FP4, and HF4.
+   * represents sub-byte types like INT4, UINT4, and HF4.
    *
    * @return Size in bits
    */
@@ -157,7 +158,6 @@ class DataType {
       case kBoolCode:
         return 1;
       case kHf4Code:
-      case kFp4Code:
       case kUInt4Code:
       case kInt4Code:
         return 4;
@@ -166,6 +166,7 @@ class DataType {
       case kFp8e5m2Code:
       case kFp8e8m0Code:
       case kFp4e2m1x2Code:
+      case kFp4e1m2x2Code:
       case kUInt8Code:
       case kInt8Code:
         return 8;
@@ -191,7 +192,7 @@ class DataType {
   /**
    * @brief Get the size in bytes of this data type
    *
-   * Returns ceil(GetBit() / 8). For sub-byte types (INT4, UINT4, FP4, HF4, BOOL)
+   * Returns ceil(GetBit() / 8). For sub-byte types (INT4, UINT4, HF4, BOOL)
    * this returns 1 since window buffers operate at byte granularity.
    *
    * @return Size in bytes
@@ -227,10 +228,10 @@ class DataType {
         return "uint32";
       case kUInt64Code:
         return "uint64";
-      case kFp4Code:
-        return "fp4";
       case kFp4e2m1x2Code:
         return "fp4e2m1x2";
+      case kFp4e1m2x2Code:
+        return "fp4e1m2x2";
       case kFp8e4m3fnCode:
         return "fp8e4m3fn";
       case kFp8e5m2Code:
@@ -261,7 +262,7 @@ class DataType {
    *
    * Returns the C/C++ type string representation used in code generation.
    * Covers all DataType variants: signed/unsigned integers (incl. INT4/UINT4),
-   * IEEE float (FP16, FP32, FP64), FP4/FP8, BF16, HF4/HF8, and BOOL.
+   * IEEE float (FP16, FP32, FP64), packed FP4/FP8, BF16, HF4/HF8, and BOOL.
    *
    * @return C style type string (e.g. "float", "int32_t", "half", "bfloat16")
    */
@@ -301,9 +302,10 @@ class DataType {
       case kFp8e8m0Code:
         // Align with PTOAS EmitC for !pto.f8E8M0 → float8_e8m0_t.
         return "float8_e8m0_t";
-      case kFp4Code:
       case kFp4e2m1x2Code:
         return "float4_e2m1x2_t";
+      case kFp4e1m2x2Code:
+        return "float4_e1m2x2_t";
       default:
         return "unknown";
     }
@@ -312,7 +314,7 @@ class DataType {
   /**
    * @brief Check if this data type is a floating point type
    *
-   * @return true if this is FP4, FP8, FP16, FP32, BF16, HF4, or HF8
+   * @return true if this is packed FP4, FP8, FP16, FP32, BF16, HF4, or HF8
    */
   [[nodiscard]] bool IsFloat() const {
     // IEEE float types or Brain/Hisilicon float types
@@ -377,11 +379,10 @@ class DataType {
    */
   [[nodiscard]] constexpr uint8_t Code() const { return code_; }
 
-  /// Frontend logical nibble FP4.
-  [[nodiscard]] constexpr bool IsLogicalFp4() const { return code_ == kFp4Code; }
-  /// Packed E2M1x2 carrier.
-  [[nodiscard]] constexpr bool IsPackedFp4() const { return code_ == kFp4e2m1x2Code; }
-  [[nodiscard]] constexpr bool IsFp4Family() const { return IsLogicalFp4() || IsPackedFp4(); }
+  /// Packed E2M1x2 or E1M2x2 byte carrier.
+  [[nodiscard]] constexpr bool IsPackedFp4() const {
+    return code_ == kFp4e2m1x2Code || code_ == kFp4e1m2x2Code;
+  }
 
  private:
   uint8_t code_;  // Internal type code
@@ -399,8 +400,8 @@ inline constexpr DataType DataType::UINT8 = DataType(kUInt8Code);
 inline constexpr DataType DataType::UINT16 = DataType(kUInt16Code);
 inline constexpr DataType DataType::UINT32 = DataType(kUInt32Code);
 inline constexpr DataType DataType::UINT64 = DataType(kUInt64Code);
-inline constexpr DataType DataType::FP4 = DataType(kFp4Code);
 inline constexpr DataType DataType::FP4E2M1X2 = DataType(kFp4e2m1x2Code);
+inline constexpr DataType DataType::FP4E1M2X2 = DataType(kFp4e1m2x2Code);
 inline constexpr DataType DataType::FP8E4M3FN = DataType(kFp8e4m3fnCode);
 inline constexpr DataType DataType::FP8E5M2 = DataType(kFp8e5m2Code);
 inline constexpr DataType DataType::FP8E8M0 = DataType(kFp8e8m0Code);
@@ -440,8 +441,8 @@ inline std::string DataTypeToString(const DataType& dtype) {
   if (dtype == DataType::UINT16) return "UINT16";
   if (dtype == DataType::UINT32) return "UINT32";
   if (dtype == DataType::UINT64) return "UINT64";
-  if (dtype == DataType::FP4) return "FP4";
   if (dtype == DataType::FP4E2M1X2) return "FP4E2M1X2";
+  if (dtype == DataType::FP4E1M2X2) return "FP4E1M2X2";
   if (dtype == DataType::FP8E4M3FN) return "FP8E4M3FN";
   if (dtype == DataType::FP8E5M2) return "FP8E5M2";
   if (dtype == DataType::FP8E8M0) return "FP8E8M0";

@@ -275,6 +275,8 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
 
   void Update(const VarPtr& var, const IntSet& set) { var_map_[var.get()] = set; }
 
+  void Unbind(const VarPtr& var) { var_map_.erase(var.get()); }
+
   void Bind(const VarPtr& var, const ExprPtr& min_val, const ExprPtr& max_val_exclusive) {
     // Convert half-open [min, max_exclusive) to inclusive [min, max_exclusive - 1]
     ExprPtr one = MakeConstInt(1, DataType::INT64);
@@ -572,6 +574,8 @@ IntSetAnalyzer& IntSetAnalyzer::operator=(IntSetAnalyzer&&) noexcept = default;
 IntSet IntSetAnalyzer::operator()(const ExprPtr& expr) const { return impl_->VisitExpr(expr); }
 
 void IntSetAnalyzer::Update(const VarPtr& var, const IntSet& set) { impl_->Update(var, set); }
+
+void IntSetAnalyzer::Unbind(const VarPtr& var) { impl_->Unbind(var); }
 
 void IntSetAnalyzer::Bind(const VarPtr& var, const ExprPtr& min_val, const ExprPtr& max_val_exclusive) {
   impl_->Bind(var, min_val, max_val_exclusive);

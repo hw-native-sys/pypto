@@ -39,6 +39,7 @@ from pypto.language.typing import (
     AsyncSession,
     PrefetchAsyncContext,
     Ptr,
+    Reg,
     Scalar,
     Tensor,
     Tile,
@@ -90,6 +91,8 @@ def _wrap_arg(arg: Any) -> Any:
         return Tile(expr=arg)
     if isinstance(t, ir.ArrayType):
         return Array(expr=arg)
+    if isinstance(t, ir.RegType):
+        return Reg(arg)
     if isinstance(t, ir.ScalarType):
         return Scalar(expr=arg)
     if isinstance(t, ir.PtrType):
@@ -116,7 +119,8 @@ def _unwrap_result(value: Any) -> Any:
     ``TupleGetItemExpr``s; here we recover that Call.
     """
     if isinstance(
-        value, (Tensor, Tile, Scalar, Array, Ptr, CommCtx, PrefetchAsyncContext, AsyncEvent, AsyncSession)
+        value,
+        (Reg, Tensor, Tile, Scalar, Array, Ptr, CommCtx, PrefetchAsyncContext, AsyncEvent, AsyncSession),
     ):
         return value.unwrap()
     if (

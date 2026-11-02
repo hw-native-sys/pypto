@@ -36,23 +36,40 @@ from __future__ import annotations
 
 import ast
 import copy
-import enum
 import functools
+import importlib
 import inspect
+import keyword
 import textwrap
 import types
+import unicodedata
 import warnings
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
 from pypto.language.typing.array import Array as _LangArray
+from pypto.language.typing.dynamic import DynVar as _LangDynVar
+from pypto.language.typing.scalar import Scalar as _LangScalar
+from pypto.language.typing.tensor import Tensor as _LangTensor
+from pypto.language.typing.tile import Tile as _LangTile
+from pypto.language.typing.tuple import Tuple as _LangTuple
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import TensorLayout
 
-from ._source import _UNBOUND, function_namespace
+from . import _specialize_values as values
+from ._source import _UNBOUND, cache_in_snapshot, function_namespace
+from ._specialize_body import BodyTransformer
+from ._specialize_types import DynDim, ShapeDim, TensorMeta
+
+# Preserve existing imports while source emission and cache hashing share the
+# exact renderer objects defined in the private values module.
+constant_expr = values.constant_expr
+constant_source = values.constant_source
+free_name_source = values.free_name_source
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -60,62 +77,26 @@ from ._source import _UNBOUND, function_namespace
 
 
 @dataclass(frozen=True)
-class DynDim:
-    """A shape dim bound to a DynVar at JIT specialization time.
+class _TileMetadataOverride:
+    """One original metadata expression, its cache spelling and proven eager kind."""
 
-    Attributes:
-        name:        Python variable name used in user source (e.g. ``"M"``).
-        literal:     String passed to ``pl.dynamic("...")``; usually equals
-                     ``name`` but may diverge (e.g. ``rows = pl.dynamic("M")``).
-        static_bound: Concrete extent at this specialization. Replaced by
-                     ``None`` in the cache key so different bounds reuse the
-                     same compilation, but still available as the static-shape
-                     fallback wherever a numeric dim is required (e.g.
-                     ``pl.slice`` parent-dim inheritance, ``ir.compile``).
-        synthesized: True when ``@pl.jit`` invented this symbol for an extent it
-                     could not resolve statically — a runtime-valued dim such as
-                     ``pld.world_size()`` or ``pl.tensor.read(...)``. Such a dim
-                     is a placeholder: a dep that declares the same dim with
-                     ``pl.dynamic`` replaces it with the user's symbol, so a
-                     kernel body referencing that name stays bound. A DynDim the
-                     caller actually derived is never replaced.
-    """
-
-    name: str
-    literal: str
-    static_bound: int
-    synthesized: bool = False
-
-
-ShapeDim = int | DynDim
+    kind: str
+    source: str
+    canonical_source: str
+    path: tuple[int, ...] = ()
 
 
 @dataclass
-class TensorMeta:
-    """Runtime metadata for a single tensor parameter.
+class _EagerTileAnnotations:
+    """Request-local annotation templates shared by specialization and cache hashing."""
 
-    Attributes:
-        shape: Per-dim entries. Each entry is either a static ``int`` or a
-            :class:`DynDim` capturing a JIT-time-bound dynamic dim.
-        dtype: DataType resolved from the torch tensor.
-        layout: Layout the user wrote in the annotation's third slot
-            (``pl.Tensor[[...], dtype, pl.NZ]``), or None when the annotation
-            omits it. Carried so the regenerated ``@pl.function`` source keeps
-            the slot the user wrote — a dropped layout would silently downgrade
-            the parameter to ND.
-    """
-
-    shape: tuple[ShapeDim, ...]
-    dtype: DataType
-    layout: TensorLayout | None = None
-
-    def static_shape(self) -> tuple[int, ...]:
-        """Concrete shape tuple — DynDim dims collapse to their static_bound."""
-        return tuple(d.static_bound if isinstance(d, DynDim) else d for d in self.shape)
-
-    def dynamic_dim_indices(self) -> set[int]:
-        """Indices of dims that are DynDim-bound at this specialization."""
-        return {i for i, d in enumerate(self.shape) if isinstance(d, DynDim)}
+    sources: dict[str, str] = field(default_factory=dict[str, str])
+    dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    fingerprints: dict[str, str] = field(default_factory=dict[str, str])
+    overrides: dict[str, tuple[_TileMetadataOverride, ...]] = field(
+        default_factory=dict[str, tuple[_TileMetadataOverride, ...]]
+    )
+    parameter_placeholders: dict[str, dict[str, str]] = field(default_factory=dict[str, dict[str, str]])
 
 
 @dataclass
@@ -158,6 +139,13 @@ class SpecializeContext:
             bindings. During JIT compilation this is the same namespace used
             for cache-key construction and annotation resolution. The specializer
             inlines referenced int/float/bool constants at their use sites.
+        eager_tile_annotations: Read-only request snapshot of eager inline Tile
+            sources, deferred metadata and fresh parameter names. Independent
+            factory values come from Python's evaluated annotations; call-owned
+            expressions are substituted separately for each specialization.
+        annotation_dynvars: Scalar symbols used by Tile annotation shapes or
+            metadata. These need generated declarations independently of any
+            Tensor parameter's dynamic-dimension bindings.
         orig_file: Path to the user's real source file (``inspect.getsourcefile``),
             or ``None`` when the function has no on-disk source (REPL / exec).
             Used to map generated diagnostics back to the user's ``.py`` (#1612).
@@ -219,6 +207,11 @@ class SpecializeContext:
     # longer identifies the callee. Empty when every call site of a name
     # reaches the same function, which ``dep_func_names`` already covers.
     dep_call_variants: dict[tuple[str, int], str] = field(default_factory=dict[tuple[str, int], str])
+    # Appended for positional compatibility. These sources share the request's
+    # annotation snapshot with the cache key; parameter-dependent components
+    # remain expressions so call bindings and local dimensions take precedence.
+    eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
+    annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
 
     @property
     def source_def_name(self) -> str:
@@ -248,7 +241,7 @@ class SpecializeContext:
         singleton-cached; the constraint is on user source, not on the
         runtime object identity.)
         """
-        out: dict[str, str] = {}
+        out: dict[str, str] = dict(self.annotation_dynvars)
         for meta in self.tensor_meta.values():
             for d in meta.shape:
                 if isinstance(d, DynDim):
@@ -277,122 +270,6 @@ def func_name_lookup(func: Any) -> Mapping[str, Any]:
     this mapping rather than ``__globals__`` alone.
     """
     return function_namespace(func)
-
-
-# ---------------------------------------------------------------------------
-# Free-name folding
-# ---------------------------------------------------------------------------
-#
-# The generated ``@pl.program`` source is parsed in a namespace holding only
-# ``pl`` and ``pld``, so any name the body inherits from its own module or an
-# enclosing function is undefined by the time the parser reads it. Such a name
-# has to be replaced, at its use site, by source text that evaluates back to the
-# same value -- there is nowhere else to put it, because a multi-function
-# ``@pl.jit`` program merges deps that may come from different modules and whose
-# namespaces can therefore disagree about a name.
-#
-# Everything below answers one question: can this value be written as generated
-# source? Values that cannot be are left alone, so the name survives and the
-# parser reports it exactly as before.
-
-
-@functools.lru_cache(maxsize=1)
-def _pl_symbol_index() -> tuple[dict[int, str], dict[Any, str]]:
-    """Index public ``pl`` and ``pld`` values by their canonical source paths.
-
-    Returns ``(enum_classes, values)``: ``id(EnumClass) -> "pl.Mem"`` for
-    exported enum types, and ``value -> "pl.INT8"`` for exported singletons
-    (in practice the ``DataType`` constants). Visit ``pl`` first to preserve
-    existing spellings for shared exports such as ``AtomicType``. Within each
-    namespace, sorted names make alias selection deterministic (``pl.Mem``
-    precedes ``pl.MemorySpace``), matching the IR printer.
-
-    Callables, classes and modules are excluded: a body naming one is not naming
-    a *value* the DSL can consume, and folding it would only turn a clear
-    "undefined name" into a confusing type error further in.
-    """
-    import pypto.language as pl  # noqa: PLC0415 — avoids a circular import at module load
-    from pypto.language import distributed as pld  # noqa: PLC0415 — same circular import
-
-    enum_classes: dict[int, str] = {}
-    values: dict[Any, str] = {}
-    for prefix, namespace in (("pl", pl), ("pld", pld)):
-        for attr in sorted(dir(namespace)):
-            if attr.startswith("_"):
-                continue
-            value = getattr(namespace, attr, None)
-            path = f"{prefix}.{attr}"
-            if isinstance(value, type):
-                if issubclass(value, enum.Enum):
-                    enum_classes.setdefault(id(value), path)
-                continue
-            # Enum members go through their class (above); literals render as
-            # literals; callables and modules are not values.
-            if isinstance(value, (enum.Enum, types.ModuleType, bool, int, float, str)) or callable(value):
-                continue
-            try:
-                values.setdefault(value, path)
-            except TypeError:
-                continue  # unhashable — not reachable by value lookup
-    return enum_classes, values
-
-
-def _pl_symbol_path(value: Any) -> str | None:
-    """The ``pl.`` or ``pld.`` path that evaluates to ``value``, or None."""
-    enum_classes, values = _pl_symbol_index()
-    if isinstance(value, enum.Enum):
-        cls_path = enum_classes.get(id(type(value)))
-        return f"{cls_path}.{value.name}" if cls_path else None
-    try:
-        return values.get(value)
-    except TypeError:
-        return None  # unhashable, or a type whose __eq__ rejects the comparison
-
-
-def _render_free_value(value: Any) -> ast.expr | None:
-    """Render ``value`` as generated-source AST, or None when it cannot be written.
-
-    Covers what a DSL body actually passes to an operator: literals, the ``pl``
-    and ``pld`` enum and ``DataType`` constants, and (possibly nested) lists/tuples
-    of those -- a shape held in a module constant, for instance. A sequence renders only
-    when every element does, so a half-rendered list can never reach the parser.
-    """
-    if isinstance(value, type):
-        return None
-    if isinstance(value, enum.Enum):
-        path = _pl_symbol_path(value)
-        return ast.parse(path, mode="eval").body if path else None
-    if value is None or isinstance(value, (bool, int, float, str)):
-        # Non-finite floats included: ``ast.unparse`` writes them as evaluable
-        # expressions (``1e309``, ``-1e309``, ``(1e309-1e309)``), not as the bare
-        # names ``inf`` / ``nan``, so a fill or padding value bound to one folds
-        # like any other float. Declining them here would have regressed support
-        # that predates this function.
-        return ast.Constant(value=value)
-    if isinstance(value, (list, tuple)):
-        elements = [_render_free_value(element) for element in cast("Sequence[Any]", value)]
-        if any(element is None for element in elements):
-            return None
-        rendered = cast("list[ast.expr]", elements)
-        if isinstance(value, list):
-            return ast.List(elts=rendered, ctx=ast.Load())
-        return ast.Tuple(elts=rendered, ctx=ast.Load())
-    path = _pl_symbol_path(value)
-    return ast.parse(path, mode="eval").body if path else None
-
-
-def _bind_free_name(name: str, py_globals: Mapping[str, Any]) -> ast.expr | None:
-    """Render what ``name`` is bound to in ``py_globals``, or None if it does not fold.
-
-    None covers all three ways a name can fail to fold: it is not bound here, it
-    is an unbound closure cell, or its value has no source form.
-    """
-    if name not in py_globals:
-        return None
-    value = py_globals[name]
-    if value is _UNBOUND:
-        return None
-    return _render_free_value(value)
 
 
 def _reject_constexpr_rebinding(func_def: ast.FunctionDef, ctx: SpecializeContext) -> None:
@@ -438,131 +315,6 @@ def _reject_constexpr_rebinding(func_def: ast.FunctionDef, ctx: SpecializeContex
                         f"name, or annotate '{leaf.id}' as 'pl.Scalar[dtype]' if it should be a "
                         f"runtime value."
                     )
-
-
-def constant_source(value: Any) -> str | None:
-    """The generated-source text ``value`` folds to, or None when it does not fold.
-
-    The value-keyed sibling of :func:`free_name_source`, for a constant the call
-    site supplies directly rather than binds to a name — a ``pl.constexpr``
-    argument. Sharing :func:`_render_free_value` is the point: a constexpr
-    parameter folds by exactly the rule a module-level constant follows, so the
-    two can never admit different value types.
-    """
-    rendered = _render_free_value(value)
-    return None if rendered is None else ast.unparse(rendered)
-
-
-def constant_expr(value: Any, node: ast.expr) -> ast.expr | None:
-    """:func:`constant_source` as AST, positioned at ``node`` so spans survive."""
-    rendered = _render_free_value(value)
-    if rendered is None:
-        return None
-    return ast.fix_missing_locations(ast.copy_location(rendered, node))
-
-
-def free_name_source(name: str, py_globals: Mapping[str, Any]) -> str | None:
-    """The generated-source text ``name`` folds to, or None when it does not fold.
-
-    The JIT cache key reads this so that a constant can never reach the generated
-    source without also reaching the hash: rebinding ``MODE`` from ``"trunc"`` to
-    ``"round"`` must invalidate the artifact exactly as rebinding an ``int``
-    extent does. Hashing the rendered *text* rather than the value keeps the two
-    definitions from drifting — the key depends on precisely what gets emitted.
-    """
-    rendered = _bind_free_name(name, py_globals)
-    return None if rendered is None else ast.unparse(rendered)
-
-
-def _fold_free_name(name: str, py_globals: Mapping[str, Any], node: ast.expr) -> ast.expr | None:
-    """:func:`_bind_free_name`, positioned at ``node`` so spans survive."""
-    rendered = _bind_free_name(name, py_globals)
-    if rendered is None:
-        return None
-    return ast.fix_missing_locations(ast.copy_location(rendered, node))
-
-
-# ---------------------------------------------------------------------------
-# DataType → pl.XXX string mapping
-# ---------------------------------------------------------------------------
-
-_DTYPE_TO_PL: dict[DataType, str] = {
-    DataType.FP4: "pl.FP4",
-    DataType.FP4E2M1X2: "pl.FP4E2M1X2",
-    DataType.FP8E4M3FN: "pl.FP8E4M3FN",
-    DataType.FP8E5M2: "pl.FP8E5M2",
-    DataType.FP8E8M0: "pl.FP8E8M0",
-    DataType.FP16: "pl.FP16",
-    DataType.FP32: "pl.FP32",
-    DataType.BF16: "pl.BF16",
-    DataType.HF4: "pl.HF4",
-    DataType.HF8: "pl.HF8",
-    DataType.INT4: "pl.INT4",
-    DataType.INT8: "pl.INT8",
-    DataType.INT16: "pl.INT16",
-    DataType.INT32: "pl.INT32",
-    DataType.INT64: "pl.INT64",
-    DataType.UINT4: "pl.UINT4",
-    DataType.UINT8: "pl.UINT8",
-    DataType.UINT16: "pl.UINT16",
-    DataType.UINT32: "pl.UINT32",
-    DataType.UINT64: "pl.UINT64",
-    DataType.BOOL: "pl.BOOL",
-    DataType.INDEX: "pl.INDEX",
-}
-
-
-# Set of bare dtype name strings (e.g. "FP32", "INT8") for annotation parsing.
-# Derived from _DTYPE_TO_PL to avoid duplication.
-_DTYPE_NAMES: frozenset[str] = frozenset(v.split(".")[1] for v in _DTYPE_TO_PL.values())
-
-
-def _dtype_str(dt: DataType) -> str:
-    if dt not in _DTYPE_TO_PL:
-        raise ValueError(f"Unsupported DataType: {dt}")
-    return _DTYPE_TO_PL[dt]
-
-
-# TensorLayout → pl.XXX string mapping, for regenerating an annotation's
-# third slot. ND is absent on purpose: it is the default the slot means when
-# omitted, so emitting it would only add noise.
-_LAYOUT_TO_PL: dict[TensorLayout, str] = {
-    TensorLayout.DN: "pl.DN",
-    TensorLayout.NZ: "pl.NZ",
-    TensorLayout.MX_A_ZZ: "pl.MX_A_ZZ",
-    TensorLayout.MX_B_NN: "pl.MX_B_NN",
-}
-
-
-def _layout_str(layout: TensorLayout) -> str | None:
-    """Render a layout to its ``pl.<NAME>`` annotation form.
-
-    Returns:
-        The ``pl.<NAME>`` source form, or None when the layout needs no slot
-        (ND — what an omitted slot already means).
-
-    Raises:
-        ValueError: If the layout has no DSL constant to render
-    """
-    if layout == TensorLayout.ND:
-        return None
-    if layout not in _LAYOUT_TO_PL:
-        raise ValueError(f"Unsupported TensorLayout: {layout}")
-    return _LAYOUT_TO_PL[layout]
-
-
-def _array_dtype_str(dt: DataType) -> str:
-    """Render an ``Array`` element dtype to its ``pl.<NAME>`` source form.
-
-    Prefers the canonical :data:`_DTYPE_TO_PL` mapping so dtypes whose enum
-    ``str`` diverges from the DSL constant render correctly (e.g. ``BF16`` →
-    ``pl.BF16``, not the enum's ``str`` form ``bfloat16`` → ``pl.BFLOAT16``,
-    which does not exist on ``pl``). Falls back to the upper-cased enum string
-    for dtypes outside that map — notably ``TASK_ID``, the TaskId-array element
-    type, which is intentionally absent from ``_DTYPE_TO_PL`` (it is not a
-    tensor/tile element dtype but does have a ``pl.TASK_ID`` constant).
-    """
-    return _DTYPE_TO_PL.get(dt, f"pl.{str(dt).upper()}")
 
 
 # ---------------------------------------------------------------------------
@@ -791,8 +543,8 @@ def _build_tensor_annotation(
     """
     dims = [d.name if isinstance(d, DynDim) else str(d) for d in meta.shape]
     head = "pld.DistributedTensor" if is_distributed else "pl.Tensor"
-    slots = [f"[{', '.join(dims)}]", _dtype_str(meta.dtype)]
-    layout_slot = _layout_str(meta.layout) if meta.layout is not None else None
+    slots = [f"[{', '.join(dims)}]", values.dtype_str(meta.dtype)]
+    layout_slot = values.layout_str(meta.layout) if meta.layout is not None else None
     if layout_slot is not None:
         slots.append(layout_slot)
     inner = f"{head}[{', '.join(slots)}]"
@@ -802,723 +554,20 @@ def _build_tensor_annotation(
 
 
 # ---------------------------------------------------------------------------
-# AST node transformer
-# ---------------------------------------------------------------------------
-
-
-class _BodyTransformer(ast.NodeTransformer):
-    """Rewrites a JIT function body for use inside @pl.program.
-
-    Transformations applied:
-    - Remove ``param.bind_dynamic(...)`` statements.
-    - Remove ``M = pl.dynamic(...)`` assignments (promoted to module level).
-    - Replace ``a.shape`` with a tuple literal ``(128, 128)``.
-    - Replace ``a.shape[i]`` with an integer literal.
-    - Replace ``M, N = a.shape`` tuple-unpack with individual assignments.
-    - Replace ``a.dtype`` with the pl.XXX dtype name.
-    - Multi-function: rewrite bare ``dep_func(...)`` calls to ``self.dep_func(...)``.
-    """
-
-    def __init__(
-        self,
-        tensor_meta: dict[str, TensorMeta],
-        dep_names: set[str],
-        param_names: list[str] | None = None,
-        initial_used_names: set[str] | None = None,
-        py_globals: Mapping[str, Any] | None = None,
-        dep_param_names: dict[str, list[str]] | None = None,
-        dep_func_names: dict[str, str] | None = None,
-        constexpr_values: Mapping[str, str] | None = None,
-        dep_constexpr_params: dict[str, set[str]] | None = None,
-        dep_call_targets: Mapping[int, str] | None = None,
-    ) -> None:
-        super().__init__()
-        self._meta = tensor_meta
-        self._constexpr = dict(constexpr_values or {})
-        self._dep_constexpr_params = dep_constexpr_params or {}
-        self._dep_names = dep_names
-        # Call name → generated function name, for deps this body reaches
-        # under a different name (an aliased import). ``visit_Call`` resolves
-        # through it so ``kern(...)`` becomes ``self.kernel(...)``; a name
-        # absent from the map is its own generated name.
-        self._dep_func_names = dep_func_names or {}
-        # ``id(call node) → generated function name``. Consulted first, so two
-        # call sites of one name that were compiled against different
-        # ``pl.constexpr`` values reach their own generated function instead of
-        # both resolving to whichever one the name happens to map to. Empty
-        # unless some name really does reach more than one function.
-        self._dep_call_targets = dict(dep_call_targets or {})
-        # DynVar name → (anchor_param, anchor_dim_idx). ``visit_Name`` uses
-        # this to rewrite runtime references like ``pl.create_tensor([M, ...])``
-        # via ``_dyn_dim_expr`` so the annotation-only DynVar doesn't leak past
-        # SSA conversion. Each DynVar anchors at the first parameter dim it's
-        # bound to; the AST is built fresh per use site to avoid node sharing.
-        self._dynvar_anchors: dict[str, tuple[str, int]] = {}
-        for pname, meta in tensor_meta.items():
-            for i, dim in enumerate(meta.shape):
-                if isinstance(dim, DynDim) and dim.name not in self._dynvar_anchors:
-                    self._dynvar_anchors[dim.name] = (pname, i)
-        # Maps dep_name → ordered parameter list. Used by ``visit_Call`` to
-        # normalise keyword args to positional, so generated
-        # ``self.<dep>(a, out=out)`` calls become parser-accepted
-        # ``self.<dep>(a, out)``.
-        self._dep_param_names = dep_param_names or {}
-        # Module-level globals from the originating function. Used by
-        # ``visit_Name`` to inline imported int/float/bool constants
-        # (e.g. ``BATCH = 16`` from a config module) at their use sites.
-        self._py_globals = py_globals or {}
-        # Maps local variable names (from `M, N = a.shape`) to their concrete
-        # constant values when all dimensions are static.  Used by visit_Name
-        # to inline constants and by visit_Assign to suppress the assignment.
-        self._shape_inlined: dict[str, int] = {}
-        # Alpha-renaming support: tracks how many times each local has been assigned
-        # (so we can generate x_v1, x_v2, ... on rebindings).
-        self._assign_count: dict[str, int] = {}
-        # Maps local variable name → current (latest) renamed alias.
-        # Empty until the variable is assigned a second time.
-        self._var_renames: dict[str, str] = {}
-        # Reverse map: generated alias → original user variable name.
-        # Used to rewrite error messages so users see their original names.
-        self._alias_to_original: dict[str, str] = {}
-        # Tracks the scope depth at which each variable was first assigned.
-        # Rebindings at a deeper scope (e.g. inside a for/with) are loop-carried
-        # updates and must NOT be renamed.
-        self._assign_depth: dict[str, int] = {}
-        self._scope_depth: int = 0
-        # Pre-register function parameters as "already assigned at depth 0" so
-        # that body assignments like `x = pl.load(x, ...)` are treated as
-        # rebindings and get alpha-renamed to `x_v1`.
-        for name in param_names or []:
-            self._assign_count[name] = 1
-            self._assign_depth[name] = 0
-        # Track all names pre-defined by the user (params + all Store targets) to
-        # avoid generating aliases that collide with user-defined variables.
-        self._used_names: set[str] = (initial_used_names or set()) | set(param_names or [])
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _record_first_assign(self, var_name: str) -> None:
-        """Record a first (or tuple-unpack) assignment so later rebindings can be renamed."""
-        if var_name not in self._assign_count:
-            self._assign_count[var_name] = 1
-            self._assign_depth[var_name] = self._scope_depth
-        self._used_names.add(var_name)
-
-    def _rebind(self, var_name: str) -> str:
-        """Generate a fresh name for a rebinding of ``var_name``.
-
-        Returns the new name and updates ``_var_renames`` so subsequent reads
-        of ``var_name`` resolve to the new alias.  Skips candidate names that
-        are already used by the user to avoid collisions.
-        """
-        count = self._assign_count[var_name]
-        new_name = f"{var_name}_v{count}"
-        # Skip any candidate that collides with a user-defined name.
-        while new_name in self._used_names:
-            count += 1
-            new_name = f"{var_name}_v{count}"
-        self._assign_count[var_name] = count + 1
-        self._var_renames[var_name] = new_name
-        self._alias_to_original[new_name] = var_name
-        self._used_names.add(new_name)
-        return new_name
-
-    @property
-    def rename_map(self) -> dict[str, str]:
-        """Return mapping from generated alias → original user variable name."""
-        return dict(self._alias_to_original)
-
-    def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
-        """Handle a single-target name assignment with alpha-renaming support."""
-        var_name = cast(ast.Name, node.targets[0]).id
-        visited_value = self.visit(node.value)
-        if var_name in self._assign_count:
-            # Only rename at the same scope where the variable was first defined.
-            # Rebindings at a deeper scope (inside for/with) are loop-carried
-            # updates — do not rename them.
-            if self._scope_depth == self._assign_depth[var_name]:
-                new_name = self._rebind(var_name)
-                new_node = ast.Assign(
-                    targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                    value=visited_value,
-                    lineno=node.lineno,
-                    col_offset=node.col_offset,
-                )
-                ast.fix_missing_locations(new_node)
-                return new_node
-            # Deeper scope: if the variable has an active rename (from a bridge
-            # assignment), apply it to the LHS so the loop body consistently
-            # uses the renamed alias (e.g. x_v1 = some_op(x_v1)).
-            if var_name in self._var_renames:
-                renamed = self._var_renames[var_name]
-                node.targets = [ast.Name(id=renamed, ctx=ast.Store())]
-            node.value = visited_value
-            return node
-        # First assignment: record and keep original name.
-        self._record_first_assign(var_name)
-        node.value = visited_value
-        return node
-
-    def _dyn_dim_expr(self, param_name: str, dim_idx: int) -> ast.expr:
-        """Emit ``pl.tensor.dim(<param>, <dim_idx>)`` for a dynamic dim.
-
-        Used by ``_shape_tuple_node`` / ``_shape_dim_node`` / the
-        ``M, N = a.shape`` Case 2 emission so DynVar references never
-        materialize as bare names in runtime expressions. Going through the
-        anchor expression directly keeps these emitted nodes outside the
-        scope where ``visit_Name``'s DynVar→anchor substitution would have
-        rewritten them anyway, and avoids the "Variable 'M' used outside
-        its defining scope" SSA error.
-        """
-        pl_tensor = ast.Attribute(
-            value=ast.Name(id="pl", ctx=ast.Load()),
-            attr="tensor",
-            ctx=ast.Load(),
-        )
-        return ast.fix_missing_locations(
-            ast.Call(
-                func=ast.Attribute(value=pl_tensor, attr="dim", ctx=ast.Load()),
-                args=[ast.Name(id=param_name, ctx=ast.Load()), ast.Constant(value=dim_idx)],
-                keywords=[],
-            )
-        )
-
-    def _shape_tuple_node(self, param_name: str) -> ast.Tuple:
-        meta = self._meta[param_name]
-        elts: list[ast.expr] = []
-        for i, d in enumerate(meta.shape):
-            if isinstance(d, DynDim):
-                elts.append(self._dyn_dim_expr(param_name, i))
-            else:
-                elts.append(ast.Constant(value=d))
-        return ast.Tuple(elts=elts, ctx=ast.Load())
-
-    def _shape_dim_node(self, param_name: str, dim_idx: int) -> ast.expr:
-        d = self._meta[param_name].shape[dim_idx]
-        if isinstance(d, DynDim):
-            return self._dyn_dim_expr(param_name, dim_idx)
-        return ast.Constant(value=d)
-
-    # ------------------------------------------------------------------
-    # Statement-level transforms
-    # ------------------------------------------------------------------
-
-    def visit_Expr(self, node: ast.Expr) -> ast.stmt | None:
-        """Remove bind_dynamic(...) and dynvar assignment statements."""
-        if isinstance(node.value, ast.Call):
-            call = node.value
-            func = call.func
-            # param.bind_dynamic(dim, dynvar) → delete
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "bind_dynamic"
-                and isinstance(func.value, ast.Name)
-                and func.value.id in self._meta
-            ):
-                return None
-        return cast("ast.stmt", self.generic_visit(node))
-
-    def visit_Assign(self, node: ast.Assign) -> ast.stmt | list[ast.stmt] | None:
-        """Handle special assignment patterns.
-
-        1. ``M = pl.dynamic("M")`` → delete (promoted to module level).
-        2. ``M, N = a.shape`` → expand into individual assignments.
-        """
-        # Case 1: M = pl.dynamic("M") → remove
-        if isinstance(node.value, ast.Call):
-            func = node.value.func
-            is_pl_dynamic = (
-                isinstance(func, ast.Attribute)
-                and func.attr == "dynamic"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "pl"
-            ) or (isinstance(func, ast.Name) and func.id == "dynamic")
-            if is_pl_dynamic:
-                return None
-
-        # Case 2: M, N = a.shape  →  individual assignments (dynamic) or inline (static)
-        if (
-            len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Tuple)
-            and isinstance(node.value, ast.Attribute)
-            and node.value.attr == "shape"
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id in self._meta
-        ):
-            param_name = node.value.value.id
-            meta = self._meta[param_name]
-            target_names = node.targets[0].elts
-            if len(target_names) == len(meta.shape):
-                stmts: list[ast.stmt] = []
-                for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
-                    if not isinstance(tgt, ast.Name):
-                        continue
-                    if isinstance(dim, DynDim):
-                        # Dynamic dim: emit M = pl.tensor.dim(<param>, i) so the
-                        # DynVar name never appears as a runtime expression.
-                        lhs_name = tgt.id
-                        if lhs_name in self._assign_count:
-                            lhs_name = self._rebind(lhs_name)
-                        else:
-                            self._record_first_assign(tgt.id)
-                        stmts.append(
-                            ast.Assign(
-                                targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
-                                value=self._dyn_dim_expr(param_name, i),
-                                lineno=node.lineno,
-                                col_offset=node.col_offset,
-                            )
-                        )
-                    else:
-                        # Static dim: inline constant, suppress assignment
-                        self._record_first_assign(tgt.id)
-                        self._shape_inlined[tgt.id] = dim
-                return stmts if stmts else None
-
-        # Case 3: K = a.shape[1]  →  inline static dim, suppress assignment
-        if (
-            len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, ast.Subscript)
-            and isinstance(node.value.value, ast.Attribute)
-            and node.value.value.attr == "shape"
-            and isinstance(node.value.value.value, ast.Name)
-            and node.value.value.value.id in self._meta
-            and isinstance(node.value.slice, ast.Constant)
-            and isinstance(node.value.slice.value, int)
-        ):
-            param_name = node.value.value.value.id
-            dim_idx = node.value.slice.value
-            dim = self._meta[param_name].shape[dim_idx]
-            if not isinstance(dim, DynDim):
-                self._shape_inlined[node.targets[0].id] = dim
-                self._record_first_assign(node.targets[0].id)
-                return None
-
-        # Default: visit the RHS first (applies existing renames to operands),
-        # then handle rebinding rename on the LHS.
-        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            return self._visit_simple_assign(node)
-
-        return cast("ast.stmt", self.generic_visit(node))
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt | None:
-        """Handle annotated assignments (``x: T = value``) with alpha-renaming."""
-        if node.value is None:
-            return cast("ast.stmt", self.generic_visit(node))
-        if not isinstance(node.target, ast.Name):
-            return cast("ast.stmt", self.generic_visit(node))
-        var_name = node.target.id
-        node.value = self.visit(node.value)
-        # Inline shape constants in the local annotation too (e.g. a body-level
-        # ``x: pl.Tile[[1, W_PAD], pl.FP32]`` where ``W_PAD`` is a module-level
-        # int). Without this the un-inlined name leaks into the generated source
-        # and the parser rejects it ("Unknown shape variable: W_PAD").
-        node.annotation = self.visit(node.annotation)
-        if var_name in self._assign_count:
-            if self._scope_depth == self._assign_depth[var_name]:
-                new_name = self._rebind(var_name)
-                new_node = ast.AnnAssign(
-                    target=ast.Name(id=new_name, ctx=ast.Store()),
-                    annotation=node.annotation,
-                    value=node.value,
-                    simple=node.simple,
-                    lineno=node.lineno,
-                    col_offset=node.col_offset,
-                )
-                ast.fix_missing_locations(new_node)
-                return new_node
-        else:
-            self._record_first_assign(var_name)
-        return cast("ast.stmt", node)
-
-    # ------------------------------------------------------------------
-    # Expression-level transforms
-    # ------------------------------------------------------------------
-
-    def visit_Name(self, node: ast.Name) -> ast.expr:
-        """Replace inlined shape constants, renamed rebindings, DynVar runtime
-        references, and free names bound to renderable values.
-
-        Scalar *parameters* are deliberately not replaced: they are runtime
-        values and must survive as real ``pl.Scalar`` parameters. A body that
-        needs a compile-time constant either declares a ``pl.constexpr``
-        parameter (folded below) or reads a module-level or closure name (folded
-        by the free-name rule further down) — the two share one renderer, so
-        they admit exactly the same values.
-        """
-        if isinstance(node.ctx, ast.Load):
-            # Check active renames first — a rebinding supersedes any earlier inlining.
-            if node.id in self._var_renames:
-                return ast.Name(id=self._var_renames[node.id], ctx=ast.Load())
-            # A constexpr parameter folds to its call-site value. This must
-            # precede the ``_used_names`` guard below: a parameter is always a
-            # local, so that guard would skip it and the name would survive into
-            # the generated source as an undefined free variable.
-            constexpr_text = self._constexpr.get(node.id)
-            if constexpr_text is not None:
-                folded = ast.parse(constexpr_text, mode="eval").body
-                return ast.fix_missing_locations(ast.copy_location(folded, node))
-            if node.id in self._shape_inlined:
-                return ast.Constant(value=self._shape_inlined[node.id])
-            # DynVar runtime references — e.g. pl.create_tensor([M, HIDDEN], ...).
-            # Substitute M with pl.tensor.dim(P, k) where (P, k) is the first
-            # parameter dim bound to M. This keeps the IR free of annotation-only
-            # DynVar references in runtime expressions; without it ConvertToSSA
-            # raises "Variable 'M' used outside its defining scope".
-            #
-            # Skipped when the name was assigned earlier in the body (a
-            # ``M, N = a.shape`` Case 2 rebind, the ``M = pl.dynamic("M")``
-            # assignment, or any user shadowing) — ``_used_names`` covers all
-            # those cases. Otherwise the substitution fires for the bare
-            # module-level DynVar reference.
-            if node.id in self._dynvar_anchors and node.id not in self._used_names:
-                pname, dim_idx = self._dynvar_anchors[node.id]
-                return self._dyn_dim_expr(pname, dim_idx)
-            # Free-name inlining: only when the name is not also a local (function
-            # param or assigned-in-body) — those take priority. ``_py_globals``
-            # is the defining function's own globals plus its closure cells, so a
-            # constant from an enclosing factory folds the same as a module one.
-            if node.id not in self._used_names:
-                folded = _fold_free_name(node.id, self._py_globals, node)
-                if folded is not None:
-                    return folded
-        return node
-
-    def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
-        """Replace a.shape → tuple and a.dtype → pl.XXX."""
-        if isinstance(node.value, ast.Name) and node.value.id in self._meta:
-            param_name = node.value.id
-            if node.attr == "shape":
-                return self._shape_tuple_node(param_name)
-            if node.attr == "dtype":
-                dtype_s = _dtype_str(self._meta[param_name].dtype)
-                # Build attribute access: pl.FP32 → Attribute(Name("pl"), "FP32")
-                parts = dtype_s.split(".")
-                result: ast.expr = ast.Name(id=parts[0], ctx=ast.Load())
-                for part in parts[1:]:
-                    result = ast.Attribute(value=result, attr=part, ctx=ast.Load())
-                return result
-        return cast("ast.expr", self.generic_visit(node))
-
-    def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
-        """Replace a.shape[i] → integer constant."""
-        if (
-            isinstance(node.value, ast.Attribute)
-            and node.value.attr == "shape"
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id in self._meta
-        ):
-            param_name = node.value.value.id
-            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int):
-                return self._shape_dim_node(param_name, node.slice.value)
-        return cast("ast.expr", self.generic_visit(node))
-
-    def visit_Call(self, node: ast.Call) -> ast.expr:
-        """Rewrite dep_func(args) → self.dep_func(args) for multi-function JIT.
-
-        The attribute is the dep's *generated* function name, which differs
-        from the name at the call site when the body reaches the dep through
-        an aliased import (``kern(...)`` → ``self.kernel(...)``) and when this
-        site's ``pl.constexpr`` values select one of several compilations of
-        the same dep (``helper(x, 16)`` → ``self.helper(...)`` while
-        ``helper(x, 32)`` → ``self.helper__2(...)``). The per-site map is
-        consulted first for exactly that reason.
-
-        Keyword args are normalised to positional based on the dep's
-        parameter order (so ``dep(a, out=out)`` becomes ``self.dep(a, out)``).
-        Inter-function calls inside ``@pl.program`` only accept positional
-        args — preserving keyword form would make the parser reject the call.
-        """
-        if isinstance(node.func, ast.Name) and node.func.id in self._dep_names:
-            dep_name = self._dep_call_targets.get(
-                id(node), self._dep_func_names.get(node.func.id, node.func.id)
-            )
-            new_func = ast.Attribute(
-                value=ast.Name(id="self", ctx=ast.Load()),
-                attr=dep_name,
-                ctx=ast.Load(),
-            )
-            param_order = self._dep_param_names.get(dep_name)
-            constexpr_params = self._dep_constexpr_params.get(dep_name, set())
-            if param_order is not None and (node.keywords or constexpr_params):
-                pos_args = list(node.args)
-                kw_by_name = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
-                # Append keyword-bound args in dep's parameter order, skipping
-                # params already covered by positional args.
-                for param in param_order[len(pos_args) :]:
-                    if param in kw_by_name:
-                        pos_args.append(kw_by_name.pop(param))
-                # Any remaining keywords (e.g. **kwargs splats or unknown names)
-                # are kept as-is so we don't silently drop them; the parser
-                # will surface them as a clear error.
-                remaining_kw = [kw for kw in node.keywords if kw.arg is None or kw.arg in kw_by_name]
-                if constexpr_params:
-                    # Drop the callee's compile-time arguments. It resolved them
-                    # during specialization and its generated signature no longer
-                    # declares them, so passing one would be an arity mismatch.
-                    # Filter by position against the *declared* order, which still
-                    # includes them; anything beyond it is left alone for the
-                    # parser to report.
-                    pos_args = [
-                        arg
-                        for index, arg in enumerate(pos_args)
-                        if index >= len(param_order) or param_order[index] not in constexpr_params
-                    ]
-                    remaining_kw = [kw for kw in remaining_kw if kw.arg not in constexpr_params]
-                new_node = ast.Call(func=new_func, args=pos_args, keywords=remaining_kw)
-            else:
-                new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
-            ast.copy_location(new_node, node)
-            return cast("ast.expr", self.generic_visit(new_node))
-        return cast("ast.expr", self.generic_visit(node))
-
-    def _visit_scoped_body(self, statements: list[ast.stmt]) -> list[ast.stmt]:
-        """Visit statements within a nested scope, flattening lists and dropping None."""
-        result: list[ast.stmt] = []
-        for stmt in statements:
-            visited = self.visit(stmt)
-            if visited is None:
-                pass
-            elif isinstance(visited, list):
-                result.extend(cast("list[ast.stmt]", visited))
-            else:
-                result.append(visited)
-        return result or [ast.Pass()]
-
-    @staticmethod
-    def _names_by_ctx(node: ast.AST, ctx_type: type) -> set[str]:
-        """Collect ``Name`` ids appearing under the given context (Load/Store)."""
-        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ctx_type)}
-
-    def _collect_upward_exposed(
-        self, statements: list[ast.stmt], written: set[str], exposed: set[str]
-    ) -> None:
-        """Record names *read before being written* within ``statements``.
-
-        A name whose first appearance (in execution order) is a read is
-        *upward-exposed* — live on entry to this body, hence a genuine
-        loop-carried value.  A name first written is a fresh body-local.
-        ``_classify_loop_locals`` uses this to tell genuine carries apart
-        from fresh per-loop locals that merely share a name with a sibling
-        scope's local: a write-before-read name in a sibling loop is a new
-        variable, and bridging it (``x_v1 = x``) would emit a read of ``x``
-        outside its defining scope.
-
-        ``written`` and ``exposed`` are accumulators threaded through nested
-        bodies so execution order is respected across compound statements.
-
-        Names bound only inside a comprehension or lambda are not
-        statement-level assignments, so they never enter ``_assign_count`` and
-        are never ``_classify_loop_locals`` candidates.  ``_names_by_ctx`` does
-        walk into those nested scopes, but only statement *targets* feed
-        ``written`` here — a comprehension/lambda local can at most leak a
-        harmless extra entry into ``exposed``, never affecting classification.
-        """
-        for stmt in statements:
-            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
-                # RHS is evaluated before the target binds.
-                if stmt.value is not None:
-                    exposed.update(self._names_by_ctx(stmt.value, ast.Load) - written)
-                targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
-                for tgt in targets:
-                    # Subscript/attribute targets read their base (``t[i] = ...``).
-                    exposed.update(self._names_by_ctx(tgt, ast.Load) - written)
-                    written.update(self._names_by_ctx(tgt, ast.Store))
-            elif isinstance(stmt, ast.AugAssign):
-                exposed.update(self._names_by_ctx(stmt.value, ast.Load) - written)
-                # ``x += v`` reads then writes ``x``.
-                tgt_names = self._names_by_ctx(stmt.target, ast.Store)
-                exposed.update(tgt_names - written)
-                written.update(tgt_names)
-            elif isinstance(stmt, ast.For):
-                exposed.update(self._names_by_ctx(stmt.iter, ast.Load) - written)
-                written.update(self._names_by_ctx(stmt.target, ast.Store))
-                self._collect_upward_exposed(stmt.body, written, exposed)
-                self._collect_upward_exposed(stmt.orelse, written, exposed)
-            elif isinstance(stmt, ast.If):
-                exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
-                # then/else are alternative paths: analyze each from the same
-                # incoming ``written`` so a read in one branch is not masked by
-                # a write in the other.  A name is exposed if read-before-write
-                # on either path; it is definitely written after the ``if``
-                # only if written on both (no ``else`` → no definite write).
-                then_written = set(written)
-                self._collect_upward_exposed(stmt.body, then_written, exposed)
-                if stmt.orelse:
-                    else_written = set(written)
-                    self._collect_upward_exposed(stmt.orelse, else_written, exposed)
-                    written.update(then_written & else_written)
-            elif isinstance(stmt, ast.With):
-                for item in stmt.items:
-                    exposed.update(self._names_by_ctx(item.context_expr, ast.Load) - written)
-                    if item.optional_vars is not None:
-                        written.update(self._names_by_ctx(item.optional_vars, ast.Store))
-                self._collect_upward_exposed(stmt.body, written, exposed)
-            else:
-                # Expr / Return / Assert / ... — pure reads.
-                exposed.update(self._names_by_ctx(stmt, ast.Load) - written)
-
-    def _classify_loop_locals(self, statements: list[ast.stmt]) -> tuple[list[str], list[str]]:
-        """Classify same-depth name collisions in a loop body into ``(carried, fresh)``.
-
-        A name is considered only if it (1) is already in ``_assign_count`` and
-        (2) had its first assignment at the current scope depth — i.e. it
-        collides with an existing same-depth binding.  Such a name is:
-
-        - *carried* — a genuine loop-carried rebind — when it is upward-exposed
-          (read before written) in the body.  It needs a bridge assignment
-          (``x_v1 = x``) so the carried value threads across the loop boundary.
-        - *fresh* — a new body-local that merely reuses a sibling scope's name
-          (both sit at the same ``_scope_depth``).  It must be neither bridged
-          (the source ``x`` would be read outside its defining scope) nor
-          renamed (the alias would be undefined when the loop runs zero times).
-
-        Depth alone cannot tell these apart — two sibling loop bodies share a
-        depth.  ``visit_For`` drops *fresh* names from the rename bookkeeping so
-        the body re-declares them cleanly, exactly how the ``@pl.program``
-        parser scopes sibling loop bodies.
-        """
-        carried: list[str] = []
-        fresh: list[str] = []
-        seen: set[str] = set()
-        # Names read before written in the body — the only valid bridge sources.
-        exposed: set[str] = set()
-        self._collect_upward_exposed(statements, set(), exposed)
-        for stmt in statements:
-            if isinstance(stmt, ast.Assign):
-                targets = stmt.targets
-            elif isinstance(stmt, ast.AnnAssign):
-                targets = [stmt.target]
-            else:
-                continue
-            # Collect every stored name — covers plain, tuple-unpacking
-            # (``x, y = ...``) and chained (``a = b = ...``) targets.
-            # Subscript/attribute targets contribute nothing: their base is a
-            # Load, not a rebind.
-            for target in targets:
-                for name in self._names_by_ctx(target, ast.Store):
-                    if name in seen:
-                        continue
-                    if name in self._assign_count and self._scope_depth == self._assign_depth.get(name, -1):
-                        seen.add(name)
-                        (carried if name in exposed else fresh).append(name)
-        return carried, fresh
-
-    def _forget_rename_bookkeeping(self, name: str) -> None:
-        """Drop all rename bookkeeping for ``name``.
-
-        After this call ``name`` is unknown to the renamer, so the next
-        assignment to it is treated as a first binding (no rename, no bridge).
-        Used to discard sibling-scope locals — fresh loop-body locals and
-        then-branch locals — that must not leak into a sibling scope.
-        """
-        self._assign_count.pop(name, None)
-        self._assign_depth.pop(name, None)
-        self._var_renames.pop(name, None)
-
-    def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
-        """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
-
-        After this call, ``_var_renames`` is updated so that subsequent reads of the
-        original name resolve to the new alias.  The ``_assign_depth`` is updated to
-        the current (outer) scope depth so that assignments inside the loop body are
-        treated as deeper-scope (loop-carried) and NOT renamed again.
-
-        The returned statements should be inserted before the scope that contains
-        the rebinding assignments.
-        """
-        bridges: list[ast.stmt] = []
-        for var_name in rebind_vars:
-            # Get the current read-name for this variable (could already be an alias)
-            current_name = self._var_renames.get(var_name, var_name)
-            new_name = self._rebind(var_name)
-            # Update assign_depth to the outer scope so the loop body sees a
-            # depth mismatch and does NOT trigger another rebind.
-            self._assign_depth[var_name] = self._scope_depth
-            bridge = ast.Assign(
-                targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                value=ast.Name(id=current_name, ctx=ast.Load()),
-                lineno=0,
-                col_offset=0,
-            )
-            ast.fix_missing_locations(bridge)
-            bridges.append(bridge)
-        return bridges
-
-    def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
-        """Visit For loop, incrementing scope depth for its body.
-
-        Before entering the body, classify same-depth name collisions
-        (:meth:`_classify_loop_locals`).  A *carried* name gets a bridge
-        assignment (``x_v1 = x``) before the loop plus a rename inside it,
-        preserving loop-carried semantics across two sibling loops.  A *fresh*
-        name — a new body-local that merely reuses a sibling loop's name — is
-        dropped from the rename bookkeeping so the body re-declares it cleanly:
-        neither bridged nor renamed.
-        """
-        node.iter = self.visit(node.iter)
-        self._scope_depth += 1
-        carried, fresh = self._classify_loop_locals(node.body)
-        self._scope_depth -= 1
-        # Carried names: bridge + rename so the carried value threads across.
-        bridges = self._make_bridge_assignments(carried)
-        # Fresh names: forget the same-depth sibling binding so the body's
-        # assignment is treated as a first binding (no rename, no bridge).
-        for name in fresh:
-            self._forget_rename_bookkeeping(name)
-        self._scope_depth += 1
-        node.body = self._visit_scoped_body(node.body)
-        self._scope_depth -= 1
-        if bridges:
-            return bridges + [node]
-        return node
-
-    def visit_If(self, node: ast.If) -> ast.stmt:
-        """Visit If; treat the two branches as mutually-exclusive sibling scopes.
-
-        A name first-assigned inside the then-branch is branch-local: the
-        else-branch can never *read* it, so an else-branch assignment of the
-        same name is a fresh local, not a rebind.  Drop then-branch-introduced
-        names before visiting the else-branch so it re-declares them cleanly —
-        no cross-branch rename.  Without this the else-branch assignment is
-        treated as a same-depth rebind (then/else share one ``_scope_depth``)
-        and aliased to ``x_v1``, which is then read out of its defining branch.
-
-        This mirrors :meth:`_classify_loop_locals` for sibling loops.  Per-branch
-        leaks and the conditional merge are handled by the Parser
-        (``exit_scope(leak_vars=True)``) and ConvertToSSA, as for ``@pl.program``.
-        """
-        node.test = self.visit(node.test)
-        self._scope_depth += 1
-        before = set(self._assign_count)
-        node.body = self._visit_scoped_body(node.body)
-        if node.orelse:
-            # then-branch locals are invisible to the else-branch: forget them
-            # so a same-named else-branch assignment is a fresh first binding.
-            for name in set(self._assign_count) - before:
-                self._forget_rename_bookkeeping(name)
-            node.orelse = self._visit_scoped_body(node.orelse)
-        self._scope_depth -= 1
-        return node
-
-    def visit_With(self, node: ast.With) -> ast.stmt:
-        """Visit With block, incrementing scope depth for its body."""
-        node.items = [self.visit(item) for item in node.items]
-        self._scope_depth += 1
-        node.body = self._visit_scoped_body(node.body)
-        self._scope_depth -= 1
-        return node
-
-
-# ---------------------------------------------------------------------------
 # Return-type inference (Option A: from Out params)
 # ---------------------------------------------------------------------------
 
 
-def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr:
+def _annotation_names(node: ast.AST) -> set[str]:
+    """Collect names used by an annotation expression."""
+    return {part.id for part in ast.walk(node) if isinstance(part, ast.Name)}
+
+
+def _fold_const_names(
+    node: ast.expr,
+    py_globals: Mapping[str, Any],
+    constexpr_values: Mapping[str, str] | None = None,
+) -> ast.expr:
     """Replace ``Name`` nodes bound to renderable free values with their source form.
 
     An explicit tuple / scalar return annotation is copied into the generated
@@ -1526,10 +575,16 @@ def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr
     render from). Without folding, a symbolic shape dim (e.g.
     ``pl.Tensor[[BATCH, VOCAB], pl.FP32]``) would reach the parser as an
     unresolved name (``NameError: name 'BATCH' is not defined``). Fold the
-    function's own free names — the same ones the body transformer inlines at use
-    sites, through the same :func:`_render_free_value` — so the emitted annotation
+    function's own free names — including the values the body transformer inlines
+    at use sites — so the emitted annotation
     carries concrete extents and a dtype held in a constant (``pl.Tensor[[64],
     DTYPE]``) survives too.
+
+    A helper's own ``pl.constexpr`` bindings take precedence over free names.
+    Public DSL module/type aliases also become canonical paths, so ``p.Tile``
+    and ``Tile[..., MS.Vec]`` remain defined in the generated module. This
+    rewrites the source AST rather than rebuilding the type from shape/dtype;
+    trailing metadata such as TileView and MemRef must survive unchanged.
 
     The input AST is left untouched (a deep copy is transformed) because
     ``func_def`` is shared with the body specialization pass.
@@ -1537,9 +592,757 @@ def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr
 
     class _Folder(ast.NodeTransformer):
         def visit_Name(self, node: ast.Name) -> ast.expr:
-            return _fold_free_name(node.id, py_globals, node) or node
+            if constexpr_values and node.id in constexpr_values:
+                return ast.copy_location(ast.parse(constexpr_values[node.id], mode="eval").body, node)
+            value = py_globals.get(node.id, _UNBOUND)
+            folded = _render_annotation_value(value)
+            if folded is not None:
+                return ast.copy_location(folded, node)
+            path = _annotation_symbol_index().get(id(value))
+            return ast.copy_location(ast.parse(path, mode="eval").body, node) if path else node
 
     return _Folder().visit(copy.deepcopy(node))
+
+
+@functools.lru_cache(maxsize=1)
+def _annotation_symbol_index() -> dict[int, str]:
+    """Map public DSL symbol identities to paths available in generated annotations.
+
+    Unlike body-value folding, annotation rendering must also recognize module
+    and constructor aliases, including TileView/MemRef and memory-space enums.
+    Only exports of the canonical DSL modules qualify; arbitrary user objects
+    keep their original names and annotation-evaluation behavior.
+    """
+    paths: dict[int, str] = {}
+    for prefix, module_name in (("pl", "pypto.language"), ("pld", "pypto.language.distributed")):
+        namespace = importlib.import_module(module_name)
+        paths[id(namespace)] = prefix
+        for name in sorted(namespace.__all__):
+            paths.setdefault(id(getattr(namespace, name)), f"{prefix}.{name}")
+    return paths
+
+
+def _validate_dynamic_symbol_name(name: str, *, declaration: bool = False) -> None:
+    """Reject names that cannot safely appear in generated annotation source."""
+    if not name.isidentifier() or keyword.iskeyword(name) or name == "__debug__":
+        raise ValueError(
+            f"JIT dynamic symbol '{name}' must be an assignable Python identifier, not a keyword; "
+            "choose a different pl.dynamic() label"
+        )
+    normalized = unicodedata.normalize("NFKC", name)
+    if name != normalized:
+        raise ValueError(
+            f"JIT dynamic symbol '{name}' changes to '{normalized}' when Python parses identifiers; "
+            "choose a different pl.dynamic() label with stable Unicode normalization"
+        )
+    if declaration and name in {"pl", "pld"}:
+        raise ValueError(
+            f"JIT dynamic symbol '{name}' is reserved for generated DSL imports; "
+            "choose a different dynamic symbol name"
+        )
+
+
+def _tuple_annotation_elements(annotation: Any) -> tuple[Any, ...] | None:
+    """Read the DSL Tuple wrapper or Python's built-in tuple annotation."""
+    if isinstance(annotation, _LangTuple):
+        return cast("tuple[Any, ...]", getattr(cast("Any", annotation), "_types", ()))
+    if isinstance(annotation, types.GenericAlias) and annotation.__origin__ is tuple:
+        return annotation.__args__
+    return None
+
+
+def _contains_tile_annotation(annotation: Any) -> bool:
+    if annotation is _LangTile or isinstance(annotation, _LangTile):
+        return True
+    elements = _tuple_annotation_elements(annotation)
+    return elements is not None and any(_contains_tile_annotation(element) for element in elements)
+
+
+def _inline_annotation_ir_type(annotation: Any, path: tuple[int, ...] = ()) -> _ir.Type | None:
+    """Build canonical inline annotation types, retaining mixed Tuple elements."""
+    elements = _tuple_annotation_elements(annotation)
+    if elements is not None:
+        children: list[_ir.Type] = []
+        for index, element in enumerate(elements):
+            child_path = (*path, index)
+            child = _inline_annotation_ir_type(element, child_path)
+            if child is None:
+                raise ValueError(
+                    "Inline Tuple annotation contains an incomplete or unsupported type "
+                    f"at path {child_path!r}"
+                )
+            children.append(child)
+        return _ir.TupleType(children)
+    if isinstance(annotation, DataType):
+        return _ir.ScalarType(annotation)
+    if isinstance(annotation, _LangScalar):
+        return _ir.ScalarType(annotation.dtype) if annotation.dtype is not None else None
+    if isinstance(annotation, _LangArray):
+        if annotation.dtype is None or annotation.extent is None:
+            return None
+        return _ir.ArrayType(annotation.dtype, annotation.extent)
+    # Tensor subclasses can carry a different IR object kind. Do not
+    # silently erase that contract when retaining a mixed Tuple.
+    if not isinstance(annotation, (_LangTile, _LangTensor)) or (
+        isinstance(annotation, _LangTensor) and type(annotation) is not _LangTensor
+    ):
+        return None
+    if annotation.shape is None or annotation.dtype is None:
+        return None
+    # Validate before the native printer's output reaches ast.parse, including
+    # eager snapshots and cache fingerprints. Local Scalar symbols are not
+    # declarations, so import-name conflicts are checked only at emission.
+    _tile_annotation_dynvars(annotation)
+    shape: list[_ir.Expr] = []
+    for extent in cast("Sequence[Any]", annotation.shape):
+        if isinstance(extent, _LangScalar):
+            extent = extent.unwrap()
+        # Native shaped-type constructors accept all-int or all-Expr shapes,
+        # so a generic [M, 64] annotation must normalize its static axes too.
+        if isinstance(extent, int):
+            extent = _ir.ConstInt(extent, DataType.INDEX, _ir.Span.unknown())
+        if not isinstance(extent, _ir.Expr):
+            return None
+        shape.append(extent)
+    if isinstance(annotation, _LangTile):
+        return _ir.TileType(
+            shape,
+            annotation.dtype,
+            memref=annotation.memref,
+            tile_view=annotation.tile_view,
+            memory_space=annotation.memory_space,
+        )
+    view = annotation.layout
+    if isinstance(view, TensorLayout):
+        view = _ir.TensorView(layout=view)
+    return _ir.TensorType(shape, annotation.dtype, memref=annotation.memref, tensor_view=view)
+
+
+def _tile_annotation_source(annotation: Any) -> str | None:
+    """Render a complete annotation through the native printer, including Tuple leaves."""
+    annotation_type = _inline_annotation_ir_type(annotation)
+    return _ir.python_print_type(annotation_type, format=False) if annotation_type is not None else None
+
+
+def _render_annotation_value(value: Any) -> ast.expr | None:
+    """Render annotation constants, including generic shapes and prebuilt metadata.
+
+    Cache fingerprints must serialize these values even when a different
+    component references an as-yet-unbound helper parameter. Use the same
+    native printer as complete Tile annotations; body-value folding continues
+    to accept only its existing operator argument values.
+    """
+    if isinstance(value, _LangDynVar):
+        # The Python alias need not match the DynVar's emitted name.
+        _validate_dynamic_symbol_name(value.name, declaration=True)
+        return ast.Name(id=value.name, ctx=ast.Load())
+    if isinstance(value, (_LangTile, _LangTensor)) or _tuple_annotation_elements(value) is not None:
+        source = _tile_annotation_source(value)
+        return ast.parse(source, mode="eval").body if source is not None else None
+    if isinstance(value, TensorLayout):
+        return ast.parse(f"pl.TensorLayout.{value.name}", mode="eval").body
+    if isinstance(value, (list, tuple)):
+        elements = [_render_annotation_value(element) for element in cast("Sequence[Any]", value)]
+        if any(element is None for element in elements):
+            return None
+        rendered = cast("list[ast.expr]", elements)
+        return (
+            ast.List(elts=rendered, ctx=ast.Load())
+            if isinstance(value, list)
+            else ast.Tuple(elts=rendered, ctx=ast.Load())
+        )
+    if isinstance(value, (_ir.MemRef, _ir.TileView, _ir.TensorView)):
+        # A fresh symbolic extent cannot equal an existing view's valid
+        # shape by identity, preventing TileType from clearing that field
+        # relative to the holder's unrelated physical shape.
+        extent = _ir.Var("_annotation_extent", _ir.ScalarType(DataType.INDEX), _ir.Span.unknown())
+        # Tile's public shape hint describes integer axes; this internal
+        # annotation holder also accepts the Expr axes normalized above.
+        shape = cast("Sequence[Any]", [extent])
+        holder = (
+            _LangTensor(shape, DataType.FP32, layout=cast("Any", value), _annotation_only=True)
+            if isinstance(value, _ir.TensorView)
+            else _LangTile(
+                shape,
+                DataType.FP32,
+                memref=value if isinstance(value, _ir.MemRef) else None,
+                tile_view=value if isinstance(value, _ir.TileView) else None,
+                memory_space=_ir.MemorySpace.Vec if isinstance(value, _ir.MemRef) else None,
+                _annotation_only=True,
+            )
+        )
+        source = _tile_annotation_source(holder)
+        assert source is not None
+        node = ast.parse(source, mode="eval").body
+        assert isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Tuple)
+        # A holder has exactly one metadata object. MemRef precedes the
+        # required memory-space enum; a view is its only trailing argument.
+        default_view = (
+            "pl.TensorView(layout=pl.TensorLayout.ND)"
+            if isinstance(value, _ir.TensorView)
+            else "pl.TileView()"
+        )
+        rendered = (
+            node.slice.elts[2] if len(node.slice.elts) > 2 else ast.parse(default_view, mode="eval").body
+        )
+        if isinstance(value, _ir.TileView):
+            assert isinstance(rendered, ast.Call)
+            # The destination's memory space may change at a call. A layout
+            # omitted relative to this neutral holder would then be inferred
+            # differently (for example row_major Vec versus col_major Mat).
+            fields = {
+                "blayout": f"pl.TileLayout.{value.blayout.name}",
+                "slayout": f"pl.TileLayout.{value.slayout.name}",
+                "fractal": str(value.fractal),
+                "pad": f"pl.PadValue.{value.pad.name}",
+                "compact": f"pl.CompactMode.{value.compact.name}",
+            }
+            existing = {keyword.arg for keyword in rendered.keywords}
+            rendered.keywords.extend(
+                ast.keyword(arg=name, value=ast.parse(source, mode="eval").body)
+                for name, source in fields.items()
+                if name not in existing
+            )
+        return rendered
+    if isinstance(value, (_LangScalar, _ir.Expr)):
+        source = _tile_annotation_source(
+            _LangTile(cast("Sequence[Any]", [value]), DataType.FP32, _annotation_only=True)
+        )
+        if source is None:
+            return None
+        node = ast.parse(source, mode="eval").body
+        assert isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Tuple)
+        shape = node.slice.elts[0]
+        assert isinstance(shape, ast.List)
+        return shape.elts[0]
+    return values.render_free_value(value)
+
+
+def _free_scalar_name_collision(name: str) -> ValueError:
+    """Explain a free/local name ambiguity that canonical source cannot distinguish."""
+    return ValueError(
+        f"Free dynamic symbol '{name}' conflicts with a distinct Scalar parameter; "
+        "choose a unique pl.dynamic() label for the free symbol"
+    )
+
+
+def _scalar_annotation_variable_ids(
+    ann_globals: Mapping[str, Any], scalar_param_names: set[str]
+) -> dict[str, int]:
+    """Identify actual local Scalar bindings rather than matching their spelling alone."""
+    variables: dict[str, int] = {}
+    for name in scalar_param_names:
+        value = ann_globals.get(name)
+        if isinstance(value, _LangScalar):
+            expr = value.unwrap()
+            if isinstance(expr, _ir.Var):
+                variables[name] = expr.unique_id
+    return variables
+
+
+def _tile_annotation_dynvars(
+    annotation: Any, scalar_variable_ids: Mapping[str, int] | None = None
+) -> dict[str, str]:
+    """Collect scalar symbols from annotations or metadata, excluding allocation bases."""
+    declarations: dict[str, str] = {}
+
+    class Collector(_ir.IRVisitor):
+        def visit_var(self, op: _ir.Var) -> None:
+            if isinstance(op.type, _ir.ScalarType):
+                _validate_dynamic_symbol_name(op.name_hint)
+                if (
+                    scalar_variable_ids is not None
+                    and op.name_hint in scalar_variable_ids
+                    and op.unique_id != scalar_variable_ids[op.name_hint]
+                ):
+                    raise _free_scalar_name_collision(op.name_hint)
+                declarations[op.name_hint] = op.name_hint
+            super().visit_var(op)
+
+    collector = Collector()
+
+    def collect_expr(value: Any) -> None:
+        if isinstance(value, _LangScalar):
+            value = value.unwrap()
+        if isinstance(value, _ir.Expr):
+            collector.visit_expr(value)
+
+    def collect(value: Any) -> None:
+        elements = _tuple_annotation_elements(value)
+        if elements is not None:
+            for element in elements:
+                collect(element)
+        elif isinstance(value, (_LangTile, _LangTensor)):
+            for extent in value.shape or ():
+                collect_expr(extent)
+            collect(value.tile_view if isinstance(value, _LangTile) else value.layout)
+            collect(value.memref)
+        elif isinstance(value, (_ir.TileView, _ir.TensorView)):
+            for extent in (*value.valid_shape, *value.stride):
+                collect_expr(extent)
+            if isinstance(value, _ir.TileView):
+                collect_expr(value.start_offset)
+        elif isinstance(value, _ir.MemRef):
+            collect_expr(value.byte_offset_)
+            collect_expr(value.slot_index_)
+
+    collect(annotation)
+    return declarations
+
+
+def _tile_metadata_kind(value: Any) -> str | None:
+    """Identify trailing Tile components by semantic type, independent of order."""
+    for kind, cls in (("MemRef", _ir.MemRef), ("MemorySpace", _ir.MemorySpace), ("TileView", _ir.TileView)):
+        if isinstance(value, cls):
+            return kind
+    if isinstance(value, (_ir.TensorView, TensorLayout)):
+        return "TensorView"
+    return None
+
+
+def _tile_metadata_expression_kind(node: ast.expr, namespace: Mapping[str, Any]) -> str | None:
+    """Identify an existing value or constructor without requiring its operands."""
+    kind = _tile_metadata_kind(_eval_annotation(ast.unparse(node), namespace))
+    if kind is not None:
+        return kind
+    root = node
+    while isinstance(root, ast.Subscript):
+        root = root.value
+    if isinstance(root, ast.Call):
+        constructor = _eval_annotation(ast.unparse(root.func), namespace)
+        language = importlib.import_module("pypto.language")
+        for kind, cls in (("MemRef", _ir.MemRef), ("TileView", _ir.TileView), ("TensorView", _ir.TensorView)):
+            if constructor is cls or constructor is getattr(language, kind):
+                return kind
+    return None
+
+
+def _eager_metadata_override_kinds(
+    extras: list[ast.expr], annotation: Any, namespace: Mapping[str, Any], param_names: set[str]
+) -> dict[int, str]:
+    """Prove originating kinds before deferred metadata can replace an eager slot.
+
+    Eager Tile objects retain one value of each kind but lose source order.
+    Resolve independent values/constructors first, then use a unique remaining
+    kind. Multiple erased aliases cannot be associated safely by position.
+    """
+    values = (
+        (annotation.memref, annotation.memory_space, annotation.tile_view)
+        if isinstance(annotation, _LangTile)
+        else (annotation.memref, annotation.layout)
+    )
+    present = {kind for value in values if (kind := _tile_metadata_kind(value)) is not None}
+    # Tile[...] records validated original order before factory aliases are
+    # lost. Constructor-created/mutated objects can lack a usable record;
+    # validate it against the current fields before using the fallback proof.
+    recorded = cast("tuple[str, ...] | None", getattr(annotation, "_annotation_extra_kinds", None))
+    if recorded is not None and len(recorded) == len(extras) == len(present) and set(recorded) == present:
+        kinds: dict[int, str | None] = dict(enumerate(recorded))
+    else:
+        kinds = {
+            index: _tile_metadata_expression_kind(extra, namespace) for index, extra in enumerate(extras)
+        }
+    remaining = present - {kind for kind in kinds.values() if kind is not None}
+    unknown = [index for index, kind in kinds.items() if kind is None]
+    if len(unknown) == len(remaining) == 1:
+        kinds[unknown[0]] = remaining.pop()
+    result: dict[int, str] = {}
+    for index, extra in enumerate(extras):
+        if not _annotation_names(extra) & param_names:
+            continue
+        kind = kinds[index]
+        if kind is None:
+            raise ValueError(
+                f"Cannot determine original metadata kind of parameter-dependent Tile component "
+                f"{ast.unparse(extra)!r}; make independent metadata constructors explicit"
+            )
+        result[index] = kind
+    return result
+
+
+def _unwrap_direction_annotation(node: ast.expr, namespace: Mapping[str, Any]) -> ast.expr:
+    """Unwrap the DSL's identity direction markers, including imported aliases."""
+    language = importlib.import_module("pypto.language")
+    while isinstance(node, ast.Subscript):
+        wrapper = _eval_annotation(ast.unparse(node.value), namespace)
+        if wrapper is not language.Out and wrapper is not language.InOut:
+            break
+        node = node.slice
+    return node
+
+
+def _annotation_parameter_components(
+    namespace: Mapping[str, Any],
+    param_names: set[str],
+    reserved_names: set[str],
+) -> tuple[Callable[[ast.expr], ast.expr], dict[str, str]]:
+    """Restore call-owned components with fresh names distinct from free DynVars."""
+    # Mark original parameter references before folding free values. A free
+    # M = dynamic("ROWS") may print as ROWS too, but is not the ROWS formal.
+    parameter_placeholders: dict[str, str] = {}
+    markers_by_param: dict[str, str] = {}
+
+    class ParameterMarker(ast.NodeTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.expr:
+            if node.id not in param_names:
+                return node
+            if node.id not in markers_by_param:
+                marker = f"_pypto_tile_param_{len(parameter_placeholders)}"
+                while marker in reserved_names:
+                    marker = f"_{marker}"
+                reserved_names.add(marker)
+                markers_by_param[node.id] = marker
+                parameter_placeholders[marker] = node.id
+            return ast.copy_location(ast.Name(id=markers_by_param[node.id], ctx=ast.Load()), node)
+
+    def parameter_component(node: ast.expr) -> ast.expr:
+        missing = _annotation_names(node) - param_names - namespace.keys()
+        if missing:
+            # Eager evaluation has erased a mixed expression's operands; its
+            # numeric result cannot reveal them once a parameter changes.
+            raise ValueError(
+                f"Cannot recover annotation-only factory value(s) {sorted(missing)!r} "
+                f"in parameter-dependent Tile annotation component {ast.unparse(node)!r}; "
+                "pass them as pl.constexpr arguments or reference them in the helper body"
+            )
+        marked = ParameterMarker().visit(copy.deepcopy(node))
+        return _fold_const_names(marked, namespace)
+
+    return parameter_component, parameter_placeholders
+
+
+def _parameterized_eager_tile_leaf_source(
+    original: ast.expr,
+    eager_source: str,
+    annotation: Any,
+    namespace: Mapping[str, Any],
+    param_names: set[str],
+    reserved_names: set[str],
+) -> tuple[str, tuple[_TileMetadataOverride, ...], dict[str, str]] | None:
+    """Restore call-owned axes/dtype/metadata while keeping independent eager values.
+
+    Overlay whole components: eager evaluation cannot recover a factory-only
+    operand inside an expression such as ``ROWS + factory_padding``.
+    """
+    if not isinstance(original, ast.Subscript) or not isinstance(original.slice, ast.Tuple):
+        return None
+    original_parts = original.slice.elts
+    if len(original_parts) < 2:
+        return None
+    merged = ast.parse(eager_source, mode="eval").body
+    assert isinstance(merged, ast.Subscript) and isinstance(merged.slice, ast.Tuple)
+    parameter_component, parameter_placeholders = _annotation_parameter_components(
+        namespace, param_names, reserved_names
+    )
+
+    def depends_on_parameter(node: ast.expr) -> bool:
+        return bool(_annotation_names(node) & param_names)
+
+    raw_view = (
+        annotation.tile_view if isinstance(annotation, _LangTile) else getattr(annotation, "layout", None)
+    )
+    if isinstance(raw_view, (_ir.TileView, _ir.TensorView)):
+        # A view full relative to the ambient shape must stay explicit when
+        # a call supplies a different shape.
+        merged.slice.elts[2:] = [
+            part
+            for part in merged.slice.elts[2:]
+            if not (
+                isinstance(part, ast.Call)
+                and isinstance(part.func, ast.Attribute)
+                and part.func.attr in {"TileView", "TensorView"}
+            )
+        ]
+        view = _render_annotation_value(raw_view)
+        assert view is not None
+        merged.slice.elts.append(view)
+
+    merged_parts = merged.slice.elts
+    original_shape, merged_shape = original_parts[0], merged_parts[0]
+    if (
+        isinstance(original_shape, (ast.List, ast.Tuple))
+        and isinstance(merged_shape, (ast.List, ast.Tuple))
+        and len(original_shape.elts) == len(merged_shape.elts)
+    ):
+        for index, axis in enumerate(original_shape.elts):
+            if depends_on_parameter(axis):
+                merged_shape.elts[index] = parameter_component(axis)
+    elif depends_on_parameter(original_shape):
+        merged_parts[0] = parameter_component(original_shape)
+    if depends_on_parameter(original_parts[1]):
+        merged_parts[1] = parameter_component(original_parts[1])
+    overrides: list[_TileMetadataOverride] = []
+    extras = original_parts[2:]
+    if any(depends_on_parameter(extra) for extra in extras):
+        for index, kind in _eager_metadata_override_kinds(extras, annotation, namespace, param_names).items():
+            extra = extras[index]
+            overrides.append(
+                _TileMetadataOverride(kind, ast.unparse(extra), ast.unparse(parameter_component(extra)))
+            )
+    return ast.unparse(merged), tuple(overrides), parameter_placeholders
+
+
+def _annotation_node_at_path(node: ast.expr, path: tuple[int, ...]) -> ast.Subscript:
+    for index in path:
+        if not isinstance(node, ast.Subscript):
+            raise ValueError(f"Invalid inline Tuple annotation path {path!r}")
+        elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        if not 0 <= index < len(elements):
+            raise ValueError(f"Invalid inline Tuple annotation path {path!r}")
+        node = elements[index]
+    if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Tuple):
+        raise ValueError(f"Incomplete inline annotation at Tuple path {path!r}")
+    return node
+
+
+def _parameterized_eager_tile_source(
+    original: ast.expr,
+    eager_source: str,
+    annotation: Any,
+    namespace: Mapping[str, Any],
+    param_names: set[str],
+    reserved_names: set[str] | None = None,
+) -> tuple[str, tuple[_TileMetadataOverride, ...], dict[str, str]] | None:
+    """Apply the existing Tile leaf merge recursively under Tuple containers."""
+    original = _unwrap_direction_annotation(original, namespace)
+    if reserved_names is None:
+        # Folding can reveal DynVar labels absent from both raw source and
+        # eager expressions simplified under an ambient parameter value.
+        reserved_names = (
+            _annotation_names(original)
+            | _annotation_names(ast.parse(eager_source, mode="eval").body)
+            | _annotation_names(_fold_const_names(original, namespace))
+            | namespace.keys()
+        )
+    elements = _tuple_annotation_elements(annotation)
+    if elements is not None:
+        merged = ast.parse(eager_source, mode="eval").body
+        if not isinstance(original, ast.Subscript) or not isinstance(merged, ast.Subscript):
+            return None
+        originals = original.slice.elts if isinstance(original.slice, ast.Tuple) else [original.slice]
+        rendered = merged.slice.elts if isinstance(merged.slice, ast.Tuple) else [merged.slice]
+        if len(originals) != len(elements) or len(rendered) != len(elements):
+            raise ValueError("Inline Tuple annotation has inconsistent element counts")
+        overrides: list[_TileMetadataOverride] = []
+        placeholders: dict[str, str] = {}
+        for index, (child, source_node) in enumerate(zip(elements, originals, strict=True)):
+            if not _annotation_names(source_node) & param_names:
+                continue
+            result = _parameterized_eager_tile_source(
+                source_node, ast.unparse(rendered[index]), child, namespace, param_names, reserved_names
+            )
+            if result is None:
+                raise ValueError(f"Cannot recover parameter-dependent inline Tuple element {index}")
+            child_source, child_overrides, child_placeholders = result
+            rendered[index] = ast.parse(child_source, mode="eval").body
+            overrides.extend(replace(override, path=(index, *override.path)) for override in child_overrides)
+            placeholders.update(child_placeholders)
+        merged.slice = ast.Tuple(elts=rendered, ctx=ast.Load())
+        return ast.unparse(merged), tuple(overrides), placeholders
+    if isinstance(annotation, (_LangScalar, DataType)):
+        if isinstance(annotation, _LangScalar) and annotation.dtype is None:
+            return None
+        dtype_node = original.slice if isinstance(original, ast.Subscript) else original
+        if (
+            isinstance(original, ast.Call)
+            and original.args
+            and _eval_annotation(ast.unparse(original.func), namespace) is _LangScalar
+        ):
+            dtype_node = original.args[0]
+        parameter_component, placeholders = _annotation_parameter_components(
+            namespace, param_names, reserved_names
+        )
+        return f"pl.Scalar[{ast.unparse(parameter_component(dtype_node))}]", (), placeholders
+    return _parameterized_eager_tile_leaf_source(
+        original, eager_source, annotation, namespace, param_names, reserved_names
+    )
+
+
+def _unreplaced_template_names(source: str, overrides: tuple[_TileMetadataOverride, ...]) -> set[str]:
+    """Ignore stale eager metadata that a deferred expression is guaranteed to replace."""
+    node = ast.parse(source, mode="eval").body
+    namespace: dict[str, Any] = {"pl": importlib.import_module("pypto.language"), "__builtins__": {}}
+    for override in overrides:
+        leaf = _annotation_node_at_path(node, override.path)
+        assert isinstance(leaf.slice, ast.Tuple)
+        leaf.slice.elts[2:] = [
+            extra
+            for extra in leaf.slice.elts[2:]
+            if _tile_metadata_expression_kind(extra, namespace) != override.kind
+        ]
+    return _annotation_names(node)
+
+
+@cache_in_snapshot
+def _eager_tile_annotation_data(func: Any) -> _EagerTileAnnotations:
+    """Snapshot eager Tile contracts without freezing helper constexpr references.
+
+    Only the evaluated annotation retains factory locals used exclusively in
+    annotations: Python does not put those names in the function's closure.
+    Keep canonical source in the same request snapshot used by cache hashing.
+    Parameter-dependent shape/dtype components come from the source AST:
+    constexpr bindings and runtime scalar dimensions belong to the call,
+    while independent components retain factory values from eager evaluation.
+    """
+    annotations = inspect.get_annotations(func, eval_str=False)
+    if not any(_contains_tile_annotation(annotation) for annotation in annotations.values()):
+        return _EagerTileAnnotations()
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    definition = _find_func_def(tree, func.__name__)
+    assert definition is not None, f"specialize: no def named {func.__name__!r} in its own source"
+    param_names = {arg.arg for arg in definition.args.args}
+    scalar_param_names = set(_classify_params(definition)[3])
+    data = _EagerTileAnnotations()
+    namespace = {name: value for name, value in func_name_lookup(func).items() if name not in param_names}
+    for arg in definition.args.args:
+        annotation = annotations.get(arg.arg)
+        if not _contains_tile_annotation(annotation) or arg.annotation is None:
+            continue
+        source = _tile_annotation_source(annotation)
+        overrides: tuple[_TileMetadataOverride, ...] = ()
+        placeholders: dict[str, str] = {}
+        if source is not None and _annotation_names(arg.annotation) & param_names:
+            merged = _parameterized_eager_tile_source(
+                arg.annotation, source, annotation, namespace, param_names
+            )
+            if merged is None:
+                source = None
+                data.fingerprints[arg.arg] = ast.unparse(_fold_const_names(arg.annotation, namespace))
+            else:
+                source, overrides, placeholders = merged
+        if source is not None:
+            data.sources[arg.arg] = source
+            data.overrides[arg.arg] = overrides
+            data.parameter_placeholders[arg.arg] = placeholders
+            # Both the factory-derived base and deferred expressions affect
+            # generated types. Constexpr values remain request-key-owned.
+            data.fingerprints[arg.arg] = repr(
+                (
+                    source,
+                    tuple(
+                        (override.path, override.kind, override.canonical_source) for override in overrides
+                    ),
+                    tuple(placeholders.items()),
+                )
+            )
+            used_names = _annotation_names(ast.parse(source))
+            symbols = _tile_annotation_dynvars(annotation)
+            # A metadata override may replace an ambient same-named Scalar
+            # with the true local parameter; validate that value at emission.
+            collisions = _unreplaced_template_names(source, overrides) & symbols.keys() & scalar_param_names
+            if collisions:
+                raise _free_scalar_name_collision(sorted(collisions)[0])
+            data.dynvars.update(
+                {
+                    name: literal
+                    for name, literal in symbols.items()
+                    # Only Scalar formals supply local shape values. A Tile
+                    # or Tensor formal with the same spelling is not in scope
+                    # while its own annotation resolves this module symbol.
+                    if name in used_names and name not in scalar_param_names
+                }
+            )
+    return data
+
+
+@cache_in_snapshot
+def tile_annotation_fingerprints(func: Any) -> dict[str, str]:
+    """Hash the canonical annotation spelling, including postponed DynVar aliases.
+
+    Generic annotation aliases have no body-value rendering. Their canonical
+    names still change generated source, so they need annotation-only cache
+    records in both the memory and persistent keys.
+    """
+    fingerprints = dict(_eager_tile_annotation_data(func).fingerprints)
+    namespace = dict(func_name_lookup(func))
+    ann_globals: dict[str, Any] = {
+        "pl": importlib.import_module("pypto.language"),
+        "tuple": tuple,
+        **namespace,
+        "__builtins__": {},
+    }
+    param_names = set(inspect.signature(func).parameters)
+    render_globals = {name: value for name, value in namespace.items() if name not in param_names}
+    for name, annotation in inspect.get_annotations(func, eval_str=False).items():
+        if name == "return" or not isinstance(annotation, str):
+            continue
+        try:
+            node = ast.parse(annotation, mode="eval").body
+        except SyntaxError:
+            continue
+        if not _annotation_names(node) & param_names:
+            # A complete Tile may be named by an alias such as CONTRACT,
+            # without any subscript in this annotation. Emission evaluates
+            # that object too, so both cache paths must include its value.
+            ann_obj = _eval_annotation(ast.unparse(node), ann_globals)
+            source = _tile_annotation_source(ann_obj) if _contains_tile_annotation(ann_obj) else None
+            if source is not None:
+                fingerprints[name] = source
+                continue
+        node = _unwrap_direction_annotation(node, render_globals)
+        if not isinstance(node, ast.Subscript):
+            continue
+        if _eval_annotation(ast.unparse(node.value), ann_globals) in (_LangTile, _LangTuple, tuple):
+            # With unbound formals, fold independent aggregates/metadata and
+            # keep formal expressions for the per-call constexpr identity
+            # layered onto this function hash.
+            fingerprints[name] = ast.unparse(_fold_const_names(node, render_globals))
+    return fingerprints
+
+
+def _specialize_eager_tile_annotation(
+    ctx: SpecializeContext,
+    param_name: str,
+    ann_globals: Mapping[str, Any],
+    scalar_param_names: set[str],
+) -> str:
+    """Apply per-call metadata values without losing the factory-derived base."""
+    annotations = ctx.eager_tile_annotations
+    substitutions = {
+        marker: ctx.constexpr_values.get(param, param)
+        for marker, param in annotations.parameter_placeholders.get(param_name, {}).items()
+    }
+    node = _fold_const_names(ast.parse(annotations.sources[param_name], mode="eval").body, {}, substitutions)
+    assert isinstance(node, ast.Subscript)
+    canonical_globals: dict[str, Any] = {
+        "pl": importlib.import_module("pypto.language"),
+        "__builtins__": {},
+    }
+    for override in annotations.overrides.get(param_name, ()):
+        leaf = _annotation_node_at_path(node, override.path)
+        assert isinstance(leaf.slice, ast.Tuple)
+        # Original spellings must evaluate in the original namespace: a
+        # Python DynVar alias can differ from its emitted canonical name.
+        value = _eval_annotation(override.source, ann_globals)
+        kind = _tile_metadata_kind(value)
+        if kind != override.kind:
+            raise ValueError(
+                f"@pl.jit.inline helper '{ctx.source_def_name}' Tile parameter '{param_name}': "
+                f"metadata component {override.source!r} must retain its original "
+                f"{override.kind} kind, got {type(value).__name__}"
+            )
+        rendered = _render_annotation_value(value)
+        assert rendered is not None
+        # The printer orders fields by kind, not by original source position.
+        # Replace the proven originating kind instead of adding a duplicate.
+        leaf.slice.elts[2:] = [
+            extra
+            for extra in leaf.slice.elts[2:]
+            if _tile_metadata_expression_kind(extra, canonical_globals) != kind
+        ]
+        leaf.slice.elts.append(rendered)
+        # An evaluated override can select a different free DynVar from the
+        # eager branch. Declare its actual symbols, keeping Scalar formals local.
+        ctx.annotation_dynvars.update(
+            {
+                name: literal
+                for name, literal in _tile_annotation_dynvars(
+                    value, _scalar_annotation_variable_ids(ann_globals, scalar_param_names)
+                ).items()
+                if name not in scalar_param_names
+            }
+        )
+    return ast.unparse(node)
 
 
 def _infer_return_type(
@@ -1838,11 +1641,29 @@ def _scalar_dtype_source(dtype_text: str, ann_globals: Mapping[str, Any]) -> str
     return dtype_text if rendered is None else rendered
 
 
+def _bind_scalar_annotation_names(
+    scalar_dtypes: Mapping[str, str],
+    ann_globals: dict[str, Any],
+    canonical_globals: Mapping[str, Any],
+    is_inline: bool,
+) -> None:
+    """Use symbolic local bindings when earlier Scalar parameters size later Tiles."""
+    if not is_inline:
+        return
+    # A same-named ambient constant must not select the Tile's physical size.
+    # These bindings classify the type; the emitted AST keeps the local name.
+    for name, dtype_source in scalar_dtypes.items():
+        dtype = _eval_annotation(dtype_source, canonical_globals)
+        if isinstance(dtype, DataType):
+            var = _ir.Var(name, _ir.ScalarType(dtype), _ir.Span.unknown())
+            ann_globals[name] = _LangScalar(expr=var)
+
+
 def _extract_bare_dtype(node: ast.expr) -> str | None:
     """If node is a bare dtype like pl.FP32 or INDEX, return its string."""
-    if isinstance(node, ast.Name) and node.id in _DTYPE_NAMES:
+    if isinstance(node, ast.Name) and node.id in values.DTYPE_NAMES:
         return f"pl.{node.id}"
-    if isinstance(node, ast.Attribute) and node.attr in _DTYPE_NAMES:
+    if isinstance(node, ast.Attribute) and node.attr in values.DTYPE_NAMES:
         return f"pl.{node.attr}"
     return None
 
@@ -2002,6 +1823,7 @@ class Specializer:
         for ctx in self._contexts:
             for dv_name, dv_literal in ctx.dynvar_literals().items():
                 if dv_name not in dv_seen:
+                    _validate_dynamic_symbol_name(dv_name, declaration=True)
                     dv_seen.add(dv_name)
                     lines.append(f'{dv_name} = pl.dynamic("{dv_literal}")')
         if dv_seen:
@@ -2117,28 +1939,72 @@ class Specializer:
         # Build decorator
         decorator = self._build_decorator(ctx)
 
-        # Non-tensor, non-scalar params with an evaluable typed annotation
-        # (e.g. ``tids: pl.Array[N, pl.TASK_ID]``) — render the annotation with
-        # closure constants folded so the generated source stays parseable.
-        #
-        # The annotation is evaluated in a builtins-free namespace: only the
-        # function's own module globals are exposed (``pl`` plus the int/float
-        # constants that fold into ``Array`` extents), never Python builtins.
-        # Type-form annotations never need builtins, so stripping them keeps the
-        # best-effort eval from running anything beyond pure type construction.
-        ann_globals: dict[str, Any] = {**ctx.py_globals, "__builtins__": {}}
+        # Evaluate original annotations in their own namespace. Folding a
+        # dtype first would introduce ``pl.BF16`` even when the user imports
+        # the DSL as ``p`` and binds an unrelated object to ``pl``.
+        canonical_globals: dict[str, Any] = {
+            "pl": importlib.import_module("pypto.language"),
+            "pld": importlib.import_module("pypto.language.distributed"),
+            "tuple": tuple,
+            "__builtins__": {},
+        }
+        ann_globals: dict[str, Any] = {
+            **canonical_globals,
+            **ctx.py_globals,
+            "__builtins__": {},
+        }
+        # Constexpr sources are compiler-rendered canonical expressions. Decode
+        # them separately before overriding the corresponding original names,
+        # so helper bindings win without replacing the user's module aliases.
+        ann_globals.update(
+            {name: _eval_annotation(value, canonical_globals) for name, value in ctx.constexpr_values.items()}
+        )
         scalar_dtype_strs = {
             name: _scalar_dtype_source(text, ann_globals) for name, text in scalar_dtype_strs.items()
         }
-        array_param_anns: dict[str, str] = {}
+        _bind_scalar_annotation_names(scalar_dtype_strs, ann_globals, canonical_globals, is_inline)
+        scalar_param_names = set(scalar_dtype_strs)
+        extra_param_anns: dict[str, str] = {}
         for arg in func_def.args.args:
-            if arg.arg == "self" or arg.annotation is None:
+            if (
+                arg.arg == "self"
+                or arg.annotation is None
+                or arg.arg in tensor_params
+                or arg.arg in scalar_dtype_strs
+            ):
                 continue
-            if arg.arg in tensor_params or arg.arg in scalar_dtype_strs:
+            # Eager annotations preserve their defining factory's values even
+            # after it returns (or when a module global has the same name).
+            # Parameter-dependent axes remain source expressions in this
+            # snapshot; resolve this call's constexpr variant only now.
+            if is_inline and arg.arg in ctx.eager_tile_annotations.sources:
+                extra_param_anns[arg.arg] = _specialize_eager_tile_annotation(
+                    ctx, arg.arg, ann_globals, scalar_param_names
+                )
                 continue
             ann_obj = _eval_annotation(ast.unparse(arg.annotation), ann_globals)
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
-                array_param_anns[arg.arg] = f"pl.Array[{ann_obj.extent}, {_array_dtype_str(ann_obj.dtype)}]"
+                extra_param_anns[arg.arg] = (
+                    f"pl.Array[{ann_obj.extent}, {values.array_dtype_str(ann_obj.dtype)}]"
+                )
+            elif _contains_tile_annotation(ann_obj):
+                # Keep the declared type independently of the function kind.
+                # Inlining reuses the caller's actual Tile without a Tile copy.
+                # Render the evaluated object so prebuilt TileView/MemRef and
+                # aggregate shapes cannot leave undefined module aliases.
+                # Symbolic Scalar bindings above preserve local dimensions.
+                source = _tile_annotation_source(ann_obj)
+                if source is not None:
+                    extra_param_anns[arg.arg] = source
+                ctx.annotation_dynvars.update(
+                    {
+                        name: literal
+                        for name, literal in _tile_annotation_dynvars(
+                            ann_obj, _scalar_annotation_variable_ids(ann_globals, scalar_param_names)
+                        ).items()
+                        if name not in scalar_param_names
+                    }
+                )
 
         params = self._build_params(
             all_param_names,
@@ -2149,7 +2015,7 @@ class Specializer:
             distributed_params,
             ctx,
             is_inline=is_inline,
-            extra_anns=array_param_anns,
+            extra_anns=extra_param_anns,
         )
 
         # Infer return type
@@ -2173,7 +2039,7 @@ class Specializer:
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             constexpr_values=ctx.constexpr_values,
             dep_names=dep_names,
@@ -2534,6 +2400,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
     param_names = [p for p in inspect.signature(func).parameters if p != "self"]
+    eager_data = _eager_tile_annotation_data(func) if func_type == "inline" else _EagerTileAnnotations()
 
     return SpecializeContext(
         func_name=func_name,
@@ -2550,6 +2417,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         dep_call_variants=dep_call_variants or {},
         auto_scope=auto_scope,
         py_globals=func_name_lookup(func),
+        eager_tile_annotations=eager_data,
+        annotation_dynvars=dict(eager_data.dynvars),
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

@@ -247,8 +247,8 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim);
  * Once a tile var has been partitioned along the split axis, downstream ops
  * (e.g. ``tile.store``, loop ``iter_args``/``return_vars``) need its halved
  * extent to re-localize their split-dim offsets. ``half_dim_size`` is that
- * extent (a ``ConstInt`` for static dims, a ``floordiv`` expression otherwise)
- * — the tile's PHYSICAL half. How far apart the two lanes' data sits is the
+ * capacity (which may remain unchanged when the operator rounds allocation).
+ * How far apart the two lanes' data sits is the
  * partition stride instead (see ResolveLaneStride), which equals this half
  * unless the body was rebalanced onto a ragged boundary's valid region.
  */
@@ -258,7 +258,19 @@ struct TileInfo {
   // dim, but a reshape can migrate the split axis to another dimension (e.g. the
   // rms_norm [N,1]<->[1,N] column reshape), so each tracked tile carries its own.
   int split_dim = 0;
+  // A proven logical partition records its step even when it equals capacity;
+  // its consumers still need valid-region checks. Null is reserved for the
+  // ordinary body stride / physical-half convention. Consumers resolve this
+  // default and still check validity; null never exempts a tracked partition.
+  ExprPtr logical_step = nullptr;
+  // Tuple containers share immutable element facts through aliases and carries.
+  std::shared_ptr<const std::vector<TileInfo>> tuple_elements = nullptr;
 };
+
+/// Reject automatic reassembly when a value's logical partition does not match
+/// the per-lane physical extent expected by the existing gather transport.
+void CheckGatherPartition(const CallPtr& call, const std::unordered_map<const Var*, TileInfo>& tile_vars,
+                          const std::unordered_map<const Var*, VarPtr>& var_replacements);
 
 /// Admission facts for a lowered data-parallel body. Broadcast roots remain
 /// neutral: allowing a replicated producer does not prove its consumers split.
@@ -371,16 +383,14 @@ TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim
 /// carrying a full-width operand even though its init was correctly halved.
 std::vector<IterArgPtr> RepairIterArgs(const std::vector<IterArgPtr>& iter_args,
                                        std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                       std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
+                                       std::unordered_map<const Var*, VarPtr>& var_replacements);
 
 /// Give each loop-exit return_var the tile info of its iter_arg, so a later
 /// tile.store on it gets the per-lane offset. Call AFTER lowering the body.
 std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
                                      const std::vector<IterArgPtr>& new_iter_args,
                                      std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                     std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                     const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
+                                     std::unordered_map<const Var*, VarPtr>& var_replacements);
 
 /// Give each IfStmt merge variable the tile info its branches yield, so it stops
 /// contradicting them and a later tile.store on it gets the per-lane offset.
@@ -408,14 +418,14 @@ std::vector<VarPtr> RepairReturnVars(const std::vector<VarPtr>& return_vars,
 /// only correct answer.
 void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr>& new_iter_args,
                            const std::unordered_map<const Var*, TileInfo>& tile_vars,
-                           const std::unordered_map<const Var*, VarPtr>& var_replacements, const Span& span);
+                           const std::unordered_map<const Var*, VarPtr>& var_replacements, const Span& span,
+                           const ExprPtr& lane_stride = nullptr);
 
 std::vector<VarPtr> RepairIfReturnVars(const std::vector<VarPtr>& return_vars, const StmtPtr& new_then_body,
                                        const std::optional<StmtPtr>& new_else_body,
                                        std::unordered_map<const Var*, TileInfo>& tile_vars,
                                        std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                       const ExprPtr& subblock_idx, const ExprPtr& lane_stride,
-                                       const Span& span);
+                                       const ExprPtr& lane_stride, const Span& span);
 
 /// The split the pass has already applied to one operand, or nullopt when it is not
 /// lane-local. THE single answer to "did the split partition this operand, and along
@@ -443,27 +453,23 @@ ExprPtr ReplacedOperand(const ExprPtr& arg, const std::unordered_map<const Var*,
 /// EvalStmt offset-localization arm, while the trailing Substitute swaps in the
 /// halved tile regardless. Both AIV lanes then write the same rows from different
 /// data and lane 1's half is silently lost. Both lowering arms must call this, for
-/// the same reason they must call RetypeTupleProjection.
+/// the same reason they must call RetypeTrackedBinding.
 StmtPtr LocalizeReturnStores(const std::shared_ptr<const ReturnStmt>& ret,
                              const std::unordered_map<const Var*, TileInfo>& tile_vars,
                              const std::unordered_map<const Var*, VarPtr>& var_replacements,
                              const ExprPtr& subblock_idx, const ExprPtr& lane_stride);
 
-/// Retype an ``x = tup[i]`` projection whose tuple was halved, or nullptr when
-/// @p assign is not such a projection.
+/// Retype aliases of tracked tiles/tuple containers and projections of tracked
+/// tuples. Aliases share the same partition facts; a projection adopts its
+/// element's exact deduced type and recorded axis/step rather than recovering
+/// a logical partition from its physical shape.
 ///
-/// A tuple-returning op has one split axis PER ELEMENT (tile.gather_compare answers a
-/// row split with a ``dst`` halved on dim 0 and a ``cdst`` -- shaped ``[1, rows]`` --
-/// halved on dim 1), so the projection cannot inherit a single result split dim. It
-/// reads the mapping back off the halved tuple type instead, and records the axis that
-/// moved in @p tile_vars so a later ``tile.store`` offsets each lane.
-///
-/// Both lowering arms must call this: the AUTO arm's affinity gate only routes leaf
-/// *calls* into ProcessStmts, so a projection left to its "pass through unchanged"
-/// fallback keeps a full-width declared type over a halved tuple.
-StmtPtr RetypeTupleProjection(const std::shared_ptr<const AssignStmt>& assign,
-                              std::unordered_map<const Var*, TileInfo>& tile_vars,
-                              std::unordered_map<const Var*, VarPtr>& var_replacements);
+/// Both lowering arms call this before their call/affinity dispatch, since these
+/// bindings have no Call node and otherwise bypass the ordinary rewrite path.
+/// Returns nullptr when the binding carries no tracked alias or tuple projection.
+StmtPtr RetypeTrackedBinding(const std::shared_ptr<const AssignStmt>& assign,
+                             std::unordered_map<const Var*, TileInfo>& tile_vars,
+                             std::unordered_map<const Var*, VarPtr>& var_replacements);
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_dim,
                                   std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,

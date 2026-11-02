@@ -414,6 +414,7 @@ PropertyVerifierPtr CreateArrayNotEscapedPropertyVerifier();
  * @return Shared pointer to NoNestedInCore PropertyVerifier
  */
 PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
+PropertyVerifierPtr CreateRegScopePropertyVerifier();
 
 /**
  * @brief Factory function for creating InOutUseValid property verifier

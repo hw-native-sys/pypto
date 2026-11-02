@@ -104,15 +104,17 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK(IsSupportedMxDataType(lhs_type->dtype_))
       << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
       << lhs_type->dtype_.ToString()
-      << (lhs_type->dtype_.IsFp4Family()
-              ? "; native FP4/FP4E2M1X2 matmul is not supported, so cast the lhs to FP8E4M3FN "
+      << (lhs_type->dtype_.IsPackedFp4()
+              ? "; native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
+                "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions; cast the lhs to FP8E4M3FN "
                 "with pl.cast first"
               : "");
   CHECK(IsSupportedMxDataType(rhs_type->dtype_))
       << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
       << rhs_type->dtype_.ToString()
-      << (rhs_type->dtype_.IsFp4Family()
-              ? "; native FP4/FP4E2M1X2 matmul is not supported, so cast the rhs to FP8E4M3FN "
+      << (rhs_type->dtype_.IsPackedFp4()
+              ? "; native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
+                "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions; cast the rhs to FP8E4M3FN "
                 "with pl.cast first"
               : "");
 
@@ -468,9 +470,9 @@ REGISTER_OP("tile.tget_scale_addr")
     .set_output_memory_inherit_input()
     .set_output_reuses_input(0)
     // Binds a derived address into the shared physical scale buffer `dst_scale`
-    // names — a mutation of that buffer, which is why InsertMxScaleAddr never
-    // reuses one binding across two MX matmul consumers. Declaring the write
-    // keeps that hazard visible to any analysis that orders accesses.
+    // names. Only an unchanged scale/data pair with no intervening invalidation
+    // can reuse a binding; declaring the write keeps aliasing hazards visible
+    // to analyses that order accesses.
     .set_arg_effect(0, ArgEffect::Write)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

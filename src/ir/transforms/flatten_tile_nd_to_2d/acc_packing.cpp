@@ -464,7 +464,14 @@ class ChainCollector {
         AddUse(operand.get(), UseKind::kOther, call);
       }
     }
-    if (is_acc) RecordSeed(assign, call);
+    if (is_acc) RecordSeed(assign, call, call->args_[0]);
+    // A declared Acc result cannot be staged through an unrelated Vec buffer.
+    // Analyze it with the same whole-buffer packing contract as accumulators.
+    auto result_type = As<TileType>(assign->var_->GetType());
+    if (IsOp(call, "tile.batch_matmul") && result_type && result_type->memref_ &&
+        result_type->memory_space_ == MemorySpace::Acc) {
+      RecordSeed(assign, call, assign->var_);
+    }
     if (is_window) window_defs_.push_back(assign);
     if (is_matmul_acc) matmul_acc_defs_.push_back(assign);
   }
@@ -515,8 +522,8 @@ class ChainCollector {
   std::vector<AssignStmtPtr> matmul_acc_defs_;
   std::unordered_map<const Var*, std::vector<AssignStmtPtr>> accumulated_windows_;
 
-  void RecordSeed(const AssignStmtPtr& assign, const CallPtr& call) {
-    auto acc_type = As<TileType>(call->args_[0]->GetType());
+  void RecordSeed(const AssignStmtPtr& assign, const CallPtr& call, const ExprPtr& accumulator) {
+    auto acc_type = As<TileType>(accumulator->GetType());
     if (!acc_type || acc_type->shape_.size() <= 2) return;  // 2-D acc: nothing batched to pack.
     auto dims = StaticShape(acc_type->shape_);
     if (!dims) return;  // A symbolic accumulator never reaches the batch unroll anyway.
@@ -524,7 +531,7 @@ class ChainCollector {
     AccSeed seed;
     seed.call = call;
     seed.assign = assign;
-    auto acc_var = AsVarLike(call->args_[0]);
+    auto acc_var = AsVarLike(accumulator);
     seed.acc = acc_var ? acc_var.get() : nullptr;
     seed.nd_shape = *dims;
     seed.rows = (*dims)[dims->size() - 2];
@@ -996,8 +1003,9 @@ void RejectChain(const AccSeed& seed, const ChainVerdict& verdict) {
           : verdict.workaround;
 
   CHECK_SPAN(false, seed.call->span_)
-      << "tile.batch_matmul_acc: cannot lower a batch-" << seed.batch_count << " accumulator of " << seed.rows
-      << "x" << seed.cols << " " << seed.dtype.ToString() << " pages, because " << verdict.reason << ".\n"
+      << (IsOp(seed.call, "tile.batch_matmul") ? "tile.batch_matmul" : "tile.batch_matmul_acc")
+      << ": cannot lower a batch-" << seed.batch_count << " accumulator of " << seed.rows << "x" << seed.cols
+      << " " << seed.dtype.ToString() << " pages, because " << verdict.reason << ".\n"
       << geometry << workaround;
 }
 

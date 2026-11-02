@@ -616,20 +616,25 @@ because the first subsumes the second wherever it can speak:
 | # | Condition | Decided by | Catches |
 | - | --------- | ---------- | ------- |
 | 1 | the halved node still type-checks against its own arguments | the operator's own `f_deduce_type` — no metadata | a full-width `tile.add` operand, a rank-1 bias on the split axis, `row_argmax`'s shape-matched `tmp`, `tile.transpose_view`'s axis permutation |
-| 2 | an operand condition 1 is **blind** to is lane-local, broadcast along the split axis, or **declared** lane-invariant | a registry declaration | `tile.sel`'s full-width `mask`, which its result deduction never reads |
+| 2 | an operand condition 1 is **blind** to is lane-local, broadcast along the split axis, or **declared** lane-invariant | a registry declaration | `tile.sel` / `tile.sels` full-width masks: coverage does not establish lane origin |
 
 ### Condition 1 — the halved node still type-checks
 
-After rewriting the arguments, the pass re-deduces the result from the arguments
-the trailing `Substitute` will install (each tracked operand swapped for its
-halved replacement) and compares the deduced *physical* shape against the halved
-result type. Valid shape is excluded: `HalveTileShape` localizes it per lane,
-which deduction cannot reproduce. A deduction that rejects the halved arguments
-outright counts as a mismatch too — the operator is refusing the very node it
-would receive.
+After shape-argument rewriting, the pass re-deduces the actual per-lane arguments
+the trailing `Substitute` will install. Rejection or a *physical* shape mismatch
+fails the check; valid regions follow the operator's contract.
 
-This asks the operator itself, so it needs no per-operator metadata and cannot go
-stale as operators are added or their contracts change. It is what rejects the
+`set_pointwise_validity_args` groups data with matching element indexing and units.
+`BroadcastValidRegionsAgree` proves broadcast-compatible validity, including equivalent expressions.
+Empty groups defer to deduction: partial-combine copies sole valid inputs without
+widening validity, predicates require byte coverage, and `tile.assemble` requires
+a rectangular union. Partition checks cover all data and predicates, excluding
+declared workspaces and lane-invariant operands. Workspace shape and dtype still
+require actual per-lane deduction. Replicated singleton computation also checks
+pointwise validity; scratch writes require actual lane-private Vec storage.
+
+The physical-shape probe asks the operator itself, so it needs no per-operator
+split mapping and follows changes to the operator's contract. It rejects the
 ordinary case:
 
 ```python
@@ -668,21 +673,21 @@ result contradicts the `[256, 1]` its own operand deduces. Unlike
 `tile.transpose`, this is a pure view and is outside `FindTransposeSplitHazard`,
 which matches `tile.transpose` only.
 
-The shape-describing ops (`tile.full`, `tile.create`, `tile.slice`,
-`tile.reshape`, `tile.reinterpret_view`) rewrite their own operands before this
-check runs, and each has a defined full-width-source meaning.
-
-`tile.reshape` and `tile.reinterpret_view` get that from an earlier rewrite: an
-offsetless view over an untracked source is emitted at full width and followed by
-a per-subblock `tile.slice`, so each lane reads its own half instead of both
-reading the first one. That slice can only be materialized from a **static** half
-extent, so a dynamic split extent over a full-width source is rejected rather
-than left to fall through to plain result halving.
+Shape arguments are normalized before deduction. For tracked `tile.reshape`,
+`PlanReshapeSplit` converts capacity and logical step independently before
+rewriting the target shape. Identity views preserve layout; other views require
+an unboxed, unstrided row-major source or a linear column-major vector.
+Column-major matrices, boxed layouts and explicit strides need a separate
+partition mapping and are rejected for automatic non-identity reshapes.
+Untracked `reshape` / `reinterpret_view` sources retain a full view followed by
+a per-lane `tile.slice`, so both lanes do not read the first half. A dynamic
+half extent cannot materialize that slice and is rejected.
 
 ### Condition 2 — operands type deduction is blind to
 
-A deducer that never reads an operand's extent says nothing by accepting it. The
-pass detects that per call, with no metadata: it re-deduces once more with the
+A deducer that accepts an oversized operand without changing its result does not
+prove that operand's lane origin. The pass probes this per call, with no metadata:
+it re-deduces once more with the
 operand **doubled** on the split axis. If deduction throws or the result changes,
 the deducer *pins* that operand and condition 1 already decided it. If the answer
 is unchanged, the operand is *blind*, and only a declaration can say whether full
@@ -692,13 +697,13 @@ width is in contract.
 picked = pl.tile.sel(mask, lhs, rhs, tmp)   # rejected when `mask` is full width
 ```
 
-`tile.sel` deduces its result from `BroadcastShapes(lhs, rhs)` alone and checks
-only that `mask` is a `TileType`, so a full-width mask over halved lhs/rhs
-re-deduces perfectly cleanly — yet both lanes would read mask rows `0..127`.
-`tile.sels` is the same shape of trap: it validates that the mask *covers* src's
-valid rows, and an oversized mask satisfies coverage. Both declare only their
-`tmp` position, so their masks are rejected. An operand nobody has classified is
-treated as lane data, which is the safe default.
+`tile.sel` derives the data shape from `BroadcastShapes(lhs, rhs)`. Both
+`tile.sel` and `tile.sels` validate that packed predicate bytes cover the data's
+valid region. Coverage permits an oversized mask and does not establish which
+lane owns its contents: both lanes could still read the first mask rows. A
+full-width mask can therefore pass deduction but fail the partition or
+blind-operand check. Neither operator declares its mask lane-invariant; their
+`tmp` operands are workspace. Unclassified operands are treated as lane data.
 
 Restricting this to blind operands is what keeps it in its lane. Without it,
 every operator with a legal full-width operand would need a registry declaration
@@ -710,7 +715,7 @@ unreachable, and pins the blind set so a new operator or a loosened deducer has
 to be classified rather than silently falling through.
 
 **Blind is usually a symptom, and the deducer is usually the cure.** An operand
-lands in the blind set when the deducer never reads its extent — which is often
+lands in the blind set when the deducer does not constrain its extent enough — often
 just an under-validated contract rather than a genuinely free dimension. Then
 the fix is to *enforce the relation the operator already documents*, not to
 declare the operand lane-invariant: the check now rejects a mis-shaped operand
@@ -795,100 +800,76 @@ the trailing `Substitute` rewrites the argument even where nothing is halved:
 - a **tuple result** takes its own path (below), because the generic block follows
   one `result_split_dim` and a tuple has one *per element*.
 
-### Tuple results — one split axis per element
+### Tuple results — one logical partition per element
 
-`tile.gather_compare` returns `Tuple[dst[rows, out_cols], cdst[1, rows]]`. Under a
-row split those two elements do **not** move along the same axis: `dst` halves on
-dim 0, while `cdst` — a single contiguous row of per-row counts — halves on dim 1.
-There is no single result axis to follow, so the generic path cannot express it.
+`tile.gather_compare` returns row indices and per-row counts. For 32-bit counts,
+their physical shapes are `[rows, out_cols]` and `[1, align_up(rows, 8)]`; the
+count's `valid_shape` is `[1, valid_rows]`. A row split therefore partitions the
+indices on dim 0 and the counts on dim 1, with independent physical capacities.
 
-The mapping is **discovered, not declared**: re-deduce the call from the arguments the
-halved node will carry, and read which axis of each element moved. A new tuple-returning
-operator needs no registration, and the mapping cannot go stale the way per-operator
-metadata did (gh#2612). Re-deduction supplies only the *axis*; `HalveTileShape` still
-halves, so odd extents localize per lane as usual.
+`ProcessStmt` obtains the tuple type from actual per-lane arguments. Partition
+proof compares the original and deduced types for each element; it does not
+re-deduce the call or halve the old result again. It first matches the change in
+effective `valid_shape` to the input's logical partition, even when aligned
+capacity is unchanged. A physical-halving fallback requires the relevant input
+and output axes to be fully valid. Each element needs exactly one proven
+partition; unchanged shape **and** validity prove none.
+Thus LEFT_RIGHT `tile.gather_compare` remains unsupported: splitting source
+columns does not partition either output's row-based result.
 
-Every element must halve on exactly one axis. An element that comes back **unchanged**
-is the dangerous case, not the harmless one — the operator produced a full-width output
-from an operand each lane owns only half of, so neither lane holds the whole answer while
-the shape still looks right. That is what correctly rejects a LEFT_RIGHT
-`tile.gather_compare`: both its outputs are sized from the source's *rows*.
+The emitted tuple retains the **exact deduced type**, including physical capacity
+and per-lane `valid_shape`; `HalveTileShape` is not applied to the old elements
+again. For a fully valid source split UP_DOWN:
 
-`split_axis::RetypeTupleProjection` retypes the `x = tup[i]` projections from the halved
-tuple and records each element's own axis, so a later `tile.store` offsets the right
-dimension. **Both** lowering arms call it — the AUTO arm's affinity gate only routes leaf
-*calls* into `ProcessStmts`, so a projection left to its pass-through fallback would keep
-a full-width declared type over a halved tuple.
+| Source rows | Full count capacity | Count capacity per lane | Valid counts per lane | Logical step |
+| ----------- | ------------------- | ----------------------- | --------------------- | ------------ |
+| 8 | 8 | 8 | 4 / 4 | 4 |
+| 10 | 16 | 8 | 5 / 5 | 5 |
+| 18 | 24 | 16 | 9 / 9 | 9 |
 
-A projection need not be bound at all: `pl.tile.store(pair[0], [0, 0], out)` passes the
-`TupleGetItemExpr` **inline**, and nothing hoists it — so anything matching only `Var` on
-a tile operand misses it, and the operand is still substituted afterwards, leaving a
-full-width declared type over per-lane data. `split_axis::OperandSplitInfo` is the single
-answer to "did the split partition this operand, and along which axis"; it handles a
-bound `Var` and an inline projection alike, and `BuildHalvedCallArgs` rebuilds the
-projection over the halved tuple so the type-consistency probe sees per-lane operands
-too. Every consumer goes through them — the generic path's tracked-input scan,
-`LocalizeStoreOffset`, and `GetFirstTileArgMemory` (which reads the operand's *type*, so
-a vector op is no longer misclassified SHARED and replicated onto both lanes).
+`TileInfo` records each element's `split_dim`, actual per-lane capacity in
+`half_dim_size`, and logical offset stride in `logical_step`. Proven logical
+partitions record the step even when it equals capacity; a null step resolves
+to the ordinary body stride or physical-half convention and still requires
+consumer checks. Validity stays in the tile type's `valid_shape`.
+`LocalizeStoreOffset` uses `lane * logical_step` on that element's own axis,
+so the ten-row count example stores at offsets 0 and 5 rather than 0 and 8.
 
-Everything that asks "was this operand partitioned" goes through `OperandSplitInfo`.
-That question has more consumers than the halving itself, and each answered *no* for an
-inline projection with a different consequence:
+Tuple containers retain shared immutable per-element facts in
+`TileInfo::tuple_elements`. `RetypeTrackedBinding` propagates the replacement
+type and split facts for tile aliases, tuple aliases, and bound tuple
+projections in both lowering arms.
+`OperandSplitInfo` also resolves inline projections such as
+`pl.tile.store(pair[0], [0, 0], out)`. `BuildHalvedCallArgs` and
+`ReplacedOperand` rebuild them over the replacement tuple, so probes and emitted
+consumers see the same per-lane type. Split queries must use this helper:
 
-| Asks it | Wrong answer costs |
-| ------- | ------------------ |
-| the generic path's tracked-input scan | the result keeps a full-width type over per-lane operands |
-| `LocalizeStoreOffset` | both lanes store to the same rows |
-| `GetFirstTileArgMemory` | a vector op classifies SHARED and is replicated onto both lanes |
-| absolute-index gate | a halved `tile.gather` table under absolute indices — **no diagnostic**, since `gather` sizes its result from `indices` |
-| `tile.reshape` / `tile.reinterpret_view` | a full-width view plus a per-lane slice over an operand about to be halved |
-| `tile.slice` offset | `+ subblock_idx * half` added to an already lane-local offset, so lane 1 reads past the end |
-| the V→C boundary | a legal `tile.move(pair[0], target_memory=Mat)` refused as full width |
-| `RepairIterArgs` (loop init) | the carry, the exit, and everything after the loop stay full width under a halved init |
-| `YieldedTileInfo` (backedge / merge) | **both** ways: a full-width carry fed `pl.yield_(pair[1])` waved through, and a legally halved one refused |
-| `FindFullWidthOperand` (condition 2) | a partitioned projection reported as a full-width operand — a false rejection |
+| Consumer | Facts needed |
+| -------- | ------------ |
+| generic operations and the absolute-index gate | partition status and axis |
+| `LocalizeStoreOffset`, slice and view rewrites | capacity, logical step and axis |
+| `GetFirstTileArgMemory` | replacement operand type for affinity |
+| V→C boundary | replacement operand and a transport-compatible partition |
+| loop carries and branch merges | tuple type and per-element partition agreement |
 
-The only `AsVarLike` lookups left in the pass are inside `OperandSplitInfo` /
-`ReplacedOperand` themselves, and the two places that deliberately identify a **whole
-tuple** by variable (`YieldedHalvedTupleType`, `RetypeTupleProjection`). Anything else
-asking about an operand's split belongs in the helper — that is what stops this class
-from recurring one call site at a time.
+`RepairIfReturnVars`, `RepairIterArgs`, and `RepairReturnVars` preserve both the
+deduced tuple type and element facts. Branches and loop backedges must agree on
+capacity, validity, axis, and effective logical step. A tuple's type alone
+cannot recover the count stride when capacity includes padding.
 
-The boundary also builds its `tile.aic_gather` from `ReplacedOperand`, which rebuilds an
-inline projection over the halved tuple so the gather doubles HALF → FULL either way.
+Type deduction can also refuse per-lane arguments: `tile.tquant_mx` constraints
+may fail after splitting, or `tile.tquant_mx_raw` may receive scratch sized for
+the full source. The diagnostic preserves the operator's refusal. Automatically
+resizing such a preallocated workspace is unsupported. If deduction succeeds
+but no partition can be proven for an element, lowering rejects that tuple.
 
-A tuple also crosses **merges and loop carries**, and neither reads its split from
-`tile_vars` — a tuple var is never in it. Both adopt the halved *type* instead, whose
-elements already carry the per-element split, so there is no single axis to record:
-
-| Shape | Repaired by | Agreement rule |
-| ----- | ----------- | -------------- |
-| `if` merge | `RepairIfReturnVars` | both branches must yield the same halved tuple |
-| loop carry + exit | `RepairIterArgs` / `RepairReturnVars` | the backedge `Yield` must match the carry |
-
-The DSL cannot annotate either, but `ConvertToSSA` synthesizes exactly the merge phi for
-a tuple reassigned in a branch, and `pl.range(..., init_values=(tup,))` carries one
-directly.
-
-Two different failures end in a rejection, and the diagnostics keep them apart — one
-message cannot explain both:
-
-| The operator... | Cause | Diagnostic |
-| --------------- | ----- | ---------- |
-| **refuses** the halved arguments | a constraint does not survive halving (`tile.tquant_mx` needs `M % 16 == 0`); or a workspace sized from the full source — after `LowerCompositeOps` decomposes it, `tile.tquant_mx_raw` needs its `[1, groups]` scratch to match a count derived from `src`, and that singleton dim 0 keeps the generic path from halving it. Repartitioning one is **not implemented**: the extent lives in the deducer, and the allocation was already emitted at full width | quote the operator rather than guess which |
-| **accepts** them, but an element did not move | the wrong-contents case above | name the stationary element |
-
-Condition 2 (the blind-operand backstop) is written against a single result axis and does
-not run here. "Every element must move" covers a *primary* per-lane operand left full
-width, but not a *secondary* one no element's shape depends on; no registered
-tuple-returning operator has one, and a new one surfaces in the blind inventory first.
-
-A position that is scratch only in *some* arities cannot be declared:
-`tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
-and workspace in a 2-way one, and the arity is the positional argument count. It
-needs no declaration in practice — the deducer sizes the result from whichever
-position holds `tmp` (always the last), so type consistency decides that position at
-every arity, and the remaining positions are real sorted inputs that must be sharded.
+Condition 2's blind-operand check follows one result axis and does not run on
+this tuple path. Per-element discovery covers the primary partitioned input;
+secondary operands whose extents affect no result still require a sound operator
+contract and review through the blind-operand inventory. For example, a position
+that is scratch only at some arities cannot have an unconditional declaration:
+`tile.mrgsort_format2`'s `tmp_or_src2` is workspace for a 2-way merge but a sorted
+input for a 3/4-way merge. Its deducer checks the actual workspace position.
 
 ### Carries, merges and dropped axes
 

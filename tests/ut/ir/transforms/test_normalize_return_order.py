@@ -860,7 +860,10 @@ class Before:
         # These cases must leave the complete input program unchanged.
         Expected = Before
         before_values, _ = self._return_values(Before, "kernel")
-        After = _run_normalize_direct(Before)
+        # Keep the tensor-level lineage/metadata under test: conversion would
+        # rewrite it, while this isolated pass normally requires tile-only input.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = _run_normalize_direct(Before)
         ir.assert_structural_equal(After, Expected)
         values, params = self._return_values(After, "kernel")
         assert values[0] is before_values[0]
@@ -896,7 +899,10 @@ class {name}:
         )
         assert isinstance(Before, ir.Program)
         assert isinstance(Expected, ir.Program)
-        After = _run_normalize_direct(Before)
+        # Keep the tensor-level lineage/metadata under test: conversion would
+        # rewrite it, while this isolated pass normally requires tile-only input.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = _run_normalize_direct(Before)
         ir.assert_structural_equal(After, Expected)
         values, params = self._return_values(After, "kernel")
         assert values[int(narrowed_first)] is params[0]
@@ -936,7 +942,10 @@ class {name}:
         )
         assert isinstance(Before, ir.Program)
         assert isinstance(Expected, ir.Program)
-        After = _run_normalize_direct(Before)
+        # Keep the tensor-level lineage/metadata under test: conversion would
+        # rewrite it, while this isolated pass normally requires tile-only input.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = _run_normalize_direct(Before)
         ir.assert_structural_equal(After, Expected)
         values, params = self._return_values(After, "kernel")
         assert values[int(not restored_first)] is params[0]

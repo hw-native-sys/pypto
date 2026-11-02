@@ -21,6 +21,8 @@ reaches the parser as an un-evaluated ``Add`` (Python never sees two bare
 literals to pre-fold).
 """
 
+import operator
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -30,6 +32,18 @@ from pypto.pypto_core import DataType
 from .storage_test_utils import without_call_memrefs
 
 _OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
+
+
+def _swap_if_branches(program: ir.Program) -> ir.Program:
+    """Exercise the false polarity with the same live and dead branch bodies."""
+
+    class SwapBranches(ir.IRMutator):
+        def visit_if_stmt(self, op: ir.IfStmt) -> ir.Stmt:
+            assert op.else_body is not None
+            return ir.IfStmt(op.condition, op.else_body, op.then_body, op.return_vars, op.span)
+
+    return SwapBranches().visit_program(program)
+
 
 # ============================================================================
 # Pass metadata
@@ -241,8 +255,7 @@ class TestRangeAwareSimplification:
             @pl.function
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    y: pl.Scalar[pl.INT64] = 0
-                    pl.tensor.write(out, [i], y)
+                    pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -301,11 +314,533 @@ class TestRangeAwareSimplification:
             def main(self, out: pl.Tensor[[8, 4], pl.INT64]):
                 for i in pl.range(8):
                     for j in pl.range(4):
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i, j], y)
+                        pl.tensor.write(out, [i, j], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
+
+
+_PY_OPS = {
+    "==": operator.eq,
+    "!=": operator.ne,
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+}
+
+
+def _remake_for(loop, loop_var=None, body=None):
+    """Rebuild `loop` with a different loop variable and/or body (hand-built IR)."""
+    return ir.ForStmt(
+        loop_var if loop_var is not None else loop.loop_var, loop.start, loop.stop, loop.step,
+        list(loop.iter_args), body if body is not None else loop.body, list(loop.return_vars),
+        loop.span, loop.kind,
+    )  # fmt: skip
+
+
+def _with_body(program, body):
+    """Return `program` with its single function's body replaced (hand-built IR). A
+    ForStmt `body` replaces just the leading loop of a `_single_loop` program."""
+    func = next(iter(program.functions.values()))
+    if isinstance(body, ir.ForStmt):
+        func_body = func.body
+        assert isinstance(func_body, ir.SeqStmts)
+        body = ir.SeqStmts([body, *func_body.stmts[1:]], func_body.span)
+    rebuilt = ir.Function(
+        func.name, list(zip(func.params, func.param_directions)), list(func.return_types), body,
+        func.span, func.func_type,
+    )  # fmt: skip
+    return ir.Program([rebuilt], program.name, program.span)
+
+
+@pl.program
+class _SingleLoop:
+    @pl.function
+    def main(
+        self,
+        a: pl.Tensor[[16, 64], pl.BF16],
+        b: pl.Tensor[[64, 64], pl.BF16],
+        acc: pl.Tensor[[16, 64], pl.FP32],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        for i in pl.range(0, 8):
+            acc = pl.matmul_acc(acc, a, b, init_cond=(i == 0))
+        return acc
+
+
+def _single_loop():
+    """`(program, loop, call_stmt)` of `_SingleLoop`, for tests that rebuild it by hand."""
+    func_body = next(iter(_SingleLoop.functions.values())).body
+    assert isinstance(func_body, ir.SeqStmts)
+    loop = func_body.stmts[0]
+    assert isinstance(loop, ir.ForStmt)
+    call_stmt = loop.body
+    if isinstance(call_stmt, ir.SeqStmts):
+        call_stmt = call_stmt.stmts[0]
+    assert isinstance(call_stmt, ir.AssignStmt)
+    return _SingleLoop, loop, call_stmt
+
+
+def _with_init_cond(call_stmt, cond):
+    """`call_stmt` with its matmul_acc `init_cond` operand replaced by `cond`."""
+    call = call_stmt.value
+    assert isinstance(call, ir.Call)
+    args = list(call.args)
+    args[3] = cond
+    new_call = ir.Call(call.op, args, call.kwargs, call.type, call.span)
+    return ir.AssignStmt(call_stmt.var, new_call, call_stmt.span)
+
+
+_MATMUL_ACC_OPS = frozenset({ir.get_op("tensor.matmul_acc").name, ir.get_op("tile.matmul_acc").name})
+
+
+class _ReplaceInitCond(ir.IRMutator):
+    """Replace the `init_cond` operand of the single `matmul_acc` call."""
+
+    def __init__(self, new_cond: ir.Expr) -> None:
+        super().__init__()
+        self._new_cond = new_cond
+        self.replaced = 0
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        new = super().visit_call(op)
+        assert isinstance(new, ir.Call)
+        if new.op.name in _MATMUL_ACC_OPS:
+            args = list(new.args)
+            args[3] = self._new_cond
+            self.replaced += 1
+            return ir.Call(new.op, args, new.kwargs, new.type, new.span)
+        return new
+
+
+def _simplify(program, ssa: bool = True, roundtrip: bool = True):
+    """Run ConvertToSSA (unless `ssa=False`) then Simplify; return the transformed program."""
+    if ssa:
+        program = passes.convert_to_ssa()(program)
+    if roundtrip:
+        return passes.simplify()(program)
+    with passes.PassContext([]):
+        return passes.simplify()(program)
+
+
+def _with_expected_init_cond(program, expected: ir.Expr):
+    """`program` with its single `matmul_acc` predicate replaced by `expected`."""
+    mutator = _ReplaceInitCond(expected)
+    replaced = mutator.visit_program(program)
+    assert mutator.replaced == 1, f"expected one matmul_acc call, replaced {mutator.replaced}"
+    return replaced
+
+
+def _init_cond_of(program) -> ir.Expr:
+    """The single `matmul_acc` predicate, read structurally (not from printed text)."""
+    conds: list[ir.Expr] = []
+
+    class Collect(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name in _MATMUL_ACC_OPS:
+                conds.append(op.args[3])
+            super().visit_call(op)
+
+    Collect().visit_program(program)
+    assert len(conds) == 1, f"expected one matmul_acc call, found {len(conds)}"
+    return conds[0]
+
+
+def _prepare(program, ssa: bool = True):
+    """The input Simplify actually receives (ConvertToSSA unless `ssa=False`)."""
+    return passes.convert_to_ssa()(program) if ssa else program
+
+
+def _assert_simplified(
+    program,
+    expected: ir.Expr | None = None,
+    *,
+    expected_program=None,
+    ssa: bool = True,
+    roundtrip: bool = True,
+):
+    """Assert Simplify's **complete** output, not only the rendered predicate.
+
+    With `expected_program`, the transformed program must be structurally equal to it.
+    Otherwise two structural checks cover every node:
+    * everything except the `matmul_acc` predicate must be unchanged (both sides get the same
+      sentinel predicate, so a dropped statement, a retyped result, or a rewritten sibling
+      operand fails here);
+    * the predicate itself must equal `expected` (a `ConstBool` literal) when the fold applies,
+      or must not be a literal when `expected=None`.
+
+    The predicate's symbolic form is deliberately not compared when the fold does not apply:
+    the ordinary rewrite rules may canonicalize a comparison (`i < c` -> `c > i`), which is
+    out of scope for this test class and covered by the rewriting tests.
+    """
+    prepared = _prepare(program, ssa)
+    after = _simplify(prepared, ssa=False, roundtrip=roundtrip)
+
+    if expected_program is not None:
+        ir.assert_structural_equal(after, expected_program)
+        return after
+
+    sentinel = ir.ConstBool(True, ir.Span.unknown())
+    ir.assert_structural_equal(
+        _with_expected_init_cond(after, sentinel),
+        _with_expected_init_cond(prepared, sentinel),
+    )
+
+    actual = _init_cond_of(after)
+    if expected is None:
+        assert not isinstance(actual, ir.ConstBool), f"predicate was unexpectedly folded: {actual}"
+    else:
+        ir.assert_structural_equal(actual, expected)
+    return after
+
+
+class TestProvableComparisonFold:
+    """Simplify folds `loop_var OP constant` to a literal when the loop's static range decides
+    it, wherever the comparison appears, so a call-argument predicate becomes a literal like
+    an IfStmt condition does. Everything else must be left exactly as written."""
+
+    def test_unbound_int64_min_comparison_is_kept(self):
+        # x is a parameter: x == INT64_MIN is reachable, and the analyzer's -inf sentinel
+        # is INT64_MIN + 1, so a bound-based proof would wrongly decide False.
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+                x: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                r = pl.matmul_acc(acc, a, b, init_cond=(x == -9223372036854775808))
+                return r
+
+        _assert_simplified(Before)
+
+    def test_overflowing_product_comparison_is_kept(self):
+        # i * (2**62 - 1) wraps negative at i == 3, so 0 < product is not always true.
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for i in pl.range(2, 4):
+                    acc = pl.matmul_acc(acc, a, b, init_cond=(0 < i * 4611686018427387903))
+                return acc
+
+        _assert_simplified(Before)
+
+    def test_narrow_loop_var_is_kept(self):
+        # IR built through the bindings: an INT32 loop variable over INDEX bounds outside
+        # INT32 wraps at run time (to -2147483648, -2147483647), so its header range does
+        # not describe it. Only INDEX loop variables are trusted.
+        program, loop, call_stmt = _single_loop()
+        sp = loop.span
+        i32 = ir.Var("i", ir.ScalarType(DataType.INT32), sp)
+        cond = ir.Eq(i32, ir.ConstInt(-2147483647, DataType.INDEX, sp), DataType.BOOL, sp)
+        rebuilt = ir.ForStmt(
+            i32, ir.ConstInt(2147483648, DataType.INDEX, sp), ir.ConstInt(2147483650, DataType.INDEX, sp),
+            loop.step, [], _with_init_cond(call_stmt, cond), [], sp, loop.kind,
+        )  # fmt: skip
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
+
+    def test_loop_var_reassigned_after_a_nested_use_is_kept(self):
+        # Pre-SSA: the second inner iteration reads i == 100, although the use precedes
+        # the reassignment textually. A loop variable assigned anywhere is never trusted.
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for i in pl.range(0, 8):
+                    for j in pl.range(0, 2):  # noqa: B007
+                        acc = pl.matmul_acc(acc, a, b, init_cond=(i < 8))
+                        i = 100
+                return acc
+
+        _assert_simplified(Before, ssa=False)
+
+    def test_reassigned_loop_var_inside_a_single_trip_clone_is_kept(self):
+        # Fold B clones the single-trip `k` body with fresh Vars; the clone's `i` must
+        # inherit the "assigned" exclusion of the original.
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for k in pl.range(0, 1):  # noqa: B007
+                    for i in pl.range(0, 8):
+                        for j in pl.range(0, 2):  # noqa: B007
+                            r = pl.matmul_acc(acc, a, b, init_cond=(i < 8))  # noqa: F841
+                            i = 100
+                return acc
+
+        # Fold B inlines the single-trip `k` loop, so the expected program is the input
+        # with that loop replaced by its (cloned) body; the predicate must survive.
+        prepared = _prepare(Before, ssa=False)
+        func_body = next(iter(prepared.functions.values())).body
+        assert isinstance(func_body, ir.SeqStmts)
+        single_trip = func_body.stmts[0]
+        assert isinstance(single_trip, ir.ForStmt)
+        expected = _with_body(prepared, ir.SeqStmts([single_trip.body, *func_body.stmts[1:]], func_body.span))
+        _assert_simplified(Before, expected_program=expected, ssa=False)
+
+    def test_if_constraint_from_a_wrapping_operand_does_not_decide(self):
+        # `c + 1` wraps to -128 at run time, so the `if` always holds and j == 125 is
+        # reachable. The analyzer believes `c + 1 == 128` and would narrow j to
+        # [128, 135]; the fold reads only the loop header range [120, 135].
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for j in pl.range(120, 136):
+                    for i in pl.range(120, 128):
+                        if i == 127:
+                            c: pl.Scalar[pl.INT8] = pl.cast(i, pl.INT8)
+                            if j >= pl.cast(c + pl.const(1, pl.INT8), pl.INDEX):
+                                acc = pl.matmul_acc(acc, a, b, init_cond=(j == 125))
+                return acc
+
+        # The ordinary rewrite rules canonicalize the wrapping `j >= cast(...)` guard to
+        # `cast(...) <= j`; encode that rewrite so the full program can be compared.
+        prepared = _prepare(Before)
+
+        class CanonicalizeGe(ir.IRMutator):
+            def visit_ge(self, op: ir.Ge) -> ir.Expr:
+                return ir.Le(op.right, op.left, DataType.BOOL, op.span)
+
+        expected = CanonicalizeGe().visit_program(prepared)
+        _assert_simplified(Before, expected_program=expected)
+
+    def test_out_of_range_narrow_loop_bound_is_kept(self):
+        # The INT32 bounds fold to 2147483648 and 2147483650, outside INT32; codegen
+        # emits them as i32 and sign-extends, so i takes -2147483648 and -2147483647.
+        # Only loops with INDEX bounds are trusted. (The out-of-range literal does not
+        # survive the print/parse round trip on main either, hence roundtrip=False.)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for i in pl.range(
+                    pl.const(2147483647, pl.INT32) + pl.const(1, pl.INT32),
+                    pl.const(2147483647, pl.INT32) + pl.const(3, pl.INT32),
+                ):
+                    acc = pl.matmul_acc(acc, a, b, init_cond=(i == -2147483647))
+                return acc
+
+        # Simplify folds the INT32 bound arithmetic; encode that so the whole program
+        # (including the untouched predicate) can be compared structurally.
+        prepared = _prepare(Before)
+
+        class FoldInt32Bounds(ir.IRMutator):
+            def visit_for_stmt(self, op: ir.ForStmt) -> ir.Stmt:
+                new = super().visit_for_stmt(op)
+                assert isinstance(new, ir.ForStmt)
+                if isinstance(new.start, ir.ConstInt):
+                    return new
+                return ir.ForStmt(
+                    new.loop_var,
+                    ir.ConstInt(2147483648, DataType.INT32, new.start.span),
+                    ir.ConstInt(2147483650, DataType.INT32, new.stop.span),
+                    new.step,
+                    list(new.iter_args),
+                    new.body,
+                    list(new.return_vars),
+                    new.span,
+                    new.kind,
+                )
+
+        expected = FoldInt32Bounds().visit_program(prepared)
+        _assert_simplified(Before, expected_program=expected, roundtrip=False)
+
+    def test_loop_var_redefined_by_a_nested_loop_is_kept(self):
+        # IR built directly through the bindings (the parser renames shadowed loop
+        # variables, and cannot re-parse a reused Var, hence roundtrip=False): the inner
+        # loop reuses the outer Var, so inside it i in [10, 19] and i == 15 is reachable.
+        # A Var with more than one definition is never trusted.
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for i in pl.range(0, 4):  # noqa: B007
+                    for j in pl.range(10, 20):
+                        acc = pl.matmul_acc(acc, a, b, init_cond=(j == 15))
+                return acc
+
+        func = next(iter(Before.functions.values()))
+        func_body = func.body
+        assert isinstance(func_body, ir.SeqStmts)
+        outer = func_body.stmts[0]
+        assert isinstance(outer, ir.ForStmt)
+        inner = outer.body
+        assert isinstance(inner, ir.ForStmt)
+        shared = outer.loop_var
+        inner_body = ir.substitute_stmt(inner.body, [(inner.loop_var, shared)])
+        new_outer = _remake_for(outer, body=_remake_for(inner, loop_var=shared, body=inner_body))
+        program = _with_body(Before, ir.SeqStmts([new_outer, *func_body.stmts[1:]], func_body.span))
+        _assert_simplified(program, ssa=False, roundtrip=False)
+
+    def test_parameter_reused_as_loop_var_is_kept(self):
+        # IR built through the bindings: the parameter `n` is also the loop variable, and
+        # Fold A binds r -> n from the always-true branch. `r == 7` means "parameter n is
+        # 7" at that point, not the loop range, so the loop variable must not be trusted.
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                acc: pl.Tensor[[16, 64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                k: pl.Scalar[pl.INDEX] = 3
+                if k > 0:
+                    r: pl.Scalar[pl.INDEX] = pl.yield_(n)
+                else:
+                    r: pl.Scalar[pl.INDEX] = pl.yield_(pl.const(5, pl.INDEX))
+                for i in pl.range(0, 4):  # noqa: B007
+                    acc = pl.matmul_acc(acc, a, b, init_cond=(r == 7))
+                return acc
+
+        func = next(iter(Before.functions.values()))
+        func_body = func.body
+        assert isinstance(func_body, ir.SeqStmts)
+        stmts = list(func_body.stmts)
+        idx = next(k for k, s in enumerate(stmts) if isinstance(s, ir.ForStmt))
+        loop = stmts[idx]
+        assert isinstance(loop, ir.ForStmt)
+        stmts[idx] = _remake_for(loop, loop_var=func.params[3])
+        program = _with_body(Before, ir.SeqStmts(stmts, func_body.span))
+
+        # Fold A collapses the constant `if k > 0` branch and remaps r -> n, so the
+        # expected program drops the pre-loop statements and folds `r == 7` to `n == 7`.
+        param_loop = stmts[idx]
+        assert isinstance(param_loop, ir.ForStmt)
+        loop_body = param_loop.body
+        if isinstance(loop_body, ir.SeqStmts):
+            loop_body = loop_body.stmts[0]
+        assert isinstance(loop_body, ir.AssignStmt)
+        assert isinstance(loop_body.value, ir.Call)
+        old_cond = loop_body.value.args[3]
+        assert isinstance(old_cond, ir.Eq)
+        param_n = func.params[3]
+        new_cond = ir.Eq(param_n, old_cond.right, DataType.BOOL, old_cond.span)
+        expected = _with_body(
+            program,
+            ir.SeqStmts(
+                [_remake_for(param_loop, body=_with_init_cond(loop_body, new_cond)), *stmts[idx + 1 :]],
+                func_body.span,
+            ),
+        )
+        _assert_simplified(program, expected_program=expected, ssa=False, roundtrip=False)
+
+    def test_non_bool_comparison_is_kept(self):
+        # IR built through the bindings: `Eq(i, 100)` typed INT32 feeds an addition.
+        # Folding it to a ConstBool would not type-check there, so only BOOL-typed
+        # comparisons are decided.
+        program, loop, call_stmt = _single_loop()
+        sp = loop.span
+        int_cmp = ir.Eq(loop.loop_var, ir.ConstInt(100, DataType.INDEX, sp), DataType.INT32, sp)
+        shifted = ir.Add(int_cmp, ir.ConstInt(1, DataType.INT32, sp), DataType.INT32, sp)
+        cond = ir.Eq(shifted, ir.ConstInt(2, DataType.INT32, sp), DataType.BOOL, sp)
+        rebuilt = _remake_for(loop, body=_with_init_cond(call_stmt, cond))
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
+
+    def test_narrow_constant_against_an_index_loop_var_is_kept(self):
+        # IR built through the bindings: an INT32 literal 4294967303 wraps to 7 at run
+        # time, so `i == 4294967303` holds at i == 7 although the literal is outside
+        # [0, 7]. Only INDEX constants are decided.
+        program, loop, call_stmt = _single_loop()
+        sp = loop.span
+        cond = ir.Eq(loop.loop_var, ir.ConstInt(4294967303, DataType.INT32, sp), DataType.BOOL, sp)
+        rebuilt = _remake_for(loop, body=_with_init_cond(call_stmt, cond))
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
+
+    @pytest.mark.parametrize("binder", ["if", "for", "while"])
+    def test_loop_var_rebound_by_a_control_flow_result_is_kept(self, binder):
+        # IR built through the bindings: a control-flow statement in the loop body binds
+        # its result to the loop variable i, so at the call i is 100 (outside [0, 7]).
+        program, loop, call_stmt = _single_loop()
+        i, sp = loop.loop_var, loop.span
+        hundred = ir.ConstInt(100, DataType.INDEX, sp)
+        if binder == "if":
+            cond = ir.Lt(i, ir.ConstInt(2, DataType.INDEX, sp), DataType.BOOL, sp)
+            rebind = ir.IfStmt(cond, ir.YieldStmt([hundred], sp), ir.YieldStmt([hundred], sp), [i], sp)
+        elif binder == "for":
+            k, x = ir.Var("k", i.type, sp), ir.IterArg("x", i.type, hundred, sp)
+            zero, one, two = (ir.ConstInt(v, DataType.INDEX, sp) for v in (0, 1, 2))
+            rebind = ir.ForStmt(k, zero, two, one, [x], ir.YieldStmt([x], sp), [i], sp)
+        else:
+            x = ir.IterArg("x", i.type, hundred, sp)
+            rebind = ir.WhileStmt(ir.Lt(x, hundred, DataType.BOOL, sp), [x], ir.YieldStmt([x], sp), [i], sp)
+        cond = ir.Eq(i, hundred, DataType.BOOL, sp)
+        rebuilt = _remake_for(loop, body=ir.SeqStmts([rebind, _with_init_cond(call_stmt, cond)], sp))
+        _assert_simplified(_with_body(program, rebuilt), ssa=False, roundtrip=False)
+
+    @pytest.mark.parametrize("op", list(_PY_OPS))
+    @pytest.mark.parametrize("start, stop", [(0, 8), (-2, 6), (3, 5)])
+    def test_decision_matches_every_loop_value(self, op, start, stop):
+        """Oracle: for both operand orders and constants around the range, the fold yields
+        a literal exactly when every loop value agrees, and that literal is the value."""
+        for constant in range(start - 2, stop + 2):
+            for var_first in (True, False):
+                cond = f"i {op} {constant}" if var_first else f"{constant} {op} i"
+                program = pl.parse_program(f"""
+import pypto.language as pl
+
+@pl.program
+class P:
+    @pl.function
+    def main(self, a: pl.Tensor[[16, 64], pl.BF16], b: pl.Tensor[[64, 64], pl.BF16],
+             acc: pl.Tensor[[16, 64], pl.FP32]) -> pl.Tensor[[16, 64], pl.FP32]:
+        for i in pl.range({start}, {stop}):
+            acc = pl.matmul_acc(acc, a, b, init_cond=({cond}))
+        return acc
+""")
+                outcomes = {
+                    _PY_OPS[op](i, constant) if var_first else _PY_OPS[op](constant, i)
+                    for i in range(start, stop)
+                }
+                expected = (
+                    ir.ConstBool(next(iter(outcomes)), ir.Span.unknown()) if len(outcomes) == 1 else None
+                )
+                _assert_simplified(program, expected)
 
 
 # ============================================================================
@@ -332,8 +867,7 @@ class TestIfBranchConstraint:
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -360,11 +894,9 @@ class TestIfBranchConstraint:
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
                     else:
-                        y2: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y2)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -390,11 +922,9 @@ class TestIfBranchConstraint:
             def main(self, out: pl.Tensor[[16], pl.INT64]):
                 for i in pl.range(16):
                     if i < 8:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
                     else:
-                        z: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], z)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -818,8 +1348,7 @@ class TestControlFlow:
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
                         break
                     else:
                         y2: pl.Scalar[pl.INT64] = i
@@ -849,8 +1378,7 @@ class TestControlFlow:
                 for i in pl.range(8):
                     with pl.at(level=pl.Level.CORE_GROUP):
                         if i < 4:
-                            y: pl.Scalar[pl.INT64] = 0
-                            pl.tensor.write(out, [i], y)
+                            pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -1118,6 +1646,662 @@ class TestScalarConstantPropagation:
         ir.assert_structural_equal(after, Expected)
 
 
+class TestNestedScalarConstantPropagation:
+    """Nested constants fold at every use without freezing runtime control flow."""
+
+    def test_branch_interval_does_not_escape_to_a_later_guard(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], x: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if cond:
+                    x = 1
+                if 0 <= x:
+                    pl.tensor.write(out, [0], x)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_single_trip_clone_preserves_multiple_assignments(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    for _j in pl.range(1):
+                        x: pl.Scalar[pl.INDEX] = 1
+                        x = n
+                        pl.tensor.write(out, [i], x)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    x: pl.Scalar[pl.INDEX] = 1
+                    x = n
+                    pl.tensor.write(out, [i], x)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("value", [1.00000001, -1.00000001])
+    def test_float_rounding_keeps_both_branches(self, value):
+        span = ir.Span.unknown()
+        literal = ir.ConstFloat(value, DataType.FP32, span)
+        rounded = ir.ConstFloat(1.0 if value > 0 else -1.0, DataType.FP32, span)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    x: pl.Scalar[pl.FP32] = literal
+                    if x == rounded:
+                        pl.tensor.write(out, [i], pl.const(1, pl.INDEX))
+                    else:
+                        pl.tensor.write(out, [i], pl.const(2, pl.INDEX))
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    if literal == rounded:
+                        pl.tensor.write(out, [i], pl.const(1, pl.INDEX))
+                    else:
+                        pl.tensor.write(out, [i], pl.const(2, pl.INDEX))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_comm_domain_rebuilds_after_scalar_and_yield_slot_dce(self):
+        before = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[2], pl.INDEX]):
+        with pl._dump.comm_domain(name="domain", devices=[0, 1], slots=[]):
+            for i in pl.range(2):
+                value: pl.Scalar[pl.INDEX] = 1
+                pl.tensor.write(out, [i], value)
+            if cond:
+                pl.tensor.write(out, [0], pl.const(2, pl.INDEX))
+                unused = pl.yield_(1)
+            else:
+                pl.tensor.write(out, [0], pl.const(3, pl.INDEX))
+                unused = pl.yield_(2)
+""")
+        expected = pl.parse_program("""
+@pl.program
+class Expected:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[2], pl.INDEX]):
+        with pl._dump.comm_domain(name="domain", devices=[0, 1], slots=[]):
+            for i in pl.range(2):
+                pl.tensor.write(out, [i], pl.const(1, pl.INDEX))
+            if cond:
+                pl.tensor.write(out, [0], pl.const(2, pl.INDEX))
+            else:
+                pl.tensor.write(out, [0], pl.const(3, pl.INDEX))
+""")
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_nested_slice_and_assemble_origins(self):
+        """A nested alias chain folds for both reading and writing a window."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+                out: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                for _iteration in pl.range(2):
+                    if cond:
+                        base: pl.Scalar[pl.INDEX] = 1
+                        row: pl.Scalar[pl.INDEX] = base * 2
+                        alias: pl.Scalar[pl.INDEX] = row
+                        window = pl.tensor.slice(source, [4, 8], [alias, 0])
+                        _result = pl.tensor.assemble(out, window, [row, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+                out: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                for _iteration in pl.range(2):
+                    if cond:
+                        window = pl.tensor.slice(source, [4, 8], [2, 0])
+                        _result = pl.tensor.assemble(out, window, [2, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_nested_load_and_store_origins(self):
+        """Constant propagation also reaches transfer ops with different signatures."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[8, 4], pl.FP32], out: pl.Tensor[[8, 4], pl.FP32]):
+                for _iteration in pl.range(2):
+                    row: pl.Scalar[pl.INDEX] = 4
+                    loaded = pl.tile.load(source, [row, 0], [4, 4], target_memory=pl.Mem.Vec)
+                    _result = pl.tile.store(loaded, [row, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tensor[[8, 4], pl.FP32], out: pl.Tensor[[8, 4], pl.FP32]):
+                for _iteration in pl.range(2):
+                    loaded = pl.tile.load(source, [4, 0], [4, 4], target_memory=pl.Mem.Vec)
+                    _result = pl.tile.store(loaded, [4, 0], out)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_nested_shape_updates_call_and_assignment_types(self):
+        """Folding a shape must update the Call and its binding together."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for _iteration in pl.range(2):
+                    rows: pl.Scalar[pl.INDEX] = 4
+                    created: pl.Tensor[[rows, 8], pl.FP32] = pl.tensor.create([rows, 8], dtype=pl.FP32)
+                    _reshaped: pl.Tensor[[rows * 2, 4], pl.FP32] = pl.tensor.reshape(created, [rows * 2, 4])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                for _iteration in pl.range(2):
+                    created: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+                    _reshaped: pl.Tensor[[8, 4], pl.FP32] = pl.tensor.reshape(created, [8, 4])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("dtype", [pl.INT32, pl.INT64])
+    def test_nested_typed_constants_round_trip(self, dtype):
+        """Substituting a typed literal into a Call must preserve its dtype."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], dtype]):
+                for i in pl.range(2):
+                    literal: pl.Scalar[dtype] = pl.const(7, dtype)
+                    derived: pl.Scalar[dtype] = literal
+                    pl.tensor.write(out, [i], derived)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], dtype]):
+                for i in pl.range(2):
+                    pl.tensor.write(out, [i], pl.const(7, dtype))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+    @pytest.mark.parametrize("bool_as_int", [False, True])
+    def test_nested_float_and_bool_constants_round_trip(self, bool_as_int):
+        """Float and boolean literals retain their IR kinds and types after substitution."""
+        span = ir.Span.unknown()
+        true_value = ir.ConstInt(1, DataType.BOOL, span) if bool_as_int else ir.ConstBool(True, span)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, floats: pl.Tensor[[2], pl.FP32], flags: pl.Tensor[[2], pl.BOOL]):
+                for i in pl.range(2):
+                    float_value: pl.Scalar[pl.FP32] = pl.const(3.5, pl.FP32)
+                    flag: pl.Scalar[pl.BOOL] = true_value
+                    pl.tensor.write(floats, [i], float_value)
+                    pl.tensor.write(flags, [i], flag)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, floats: pl.Tensor[[2], pl.FP32], flags: pl.Tensor[[2], pl.BOOL]):
+                for i in pl.range(2):
+                    pl.tensor.write(floats, [i], pl.const(3.5, pl.FP32))
+                    pl.tensor.write(flags, [i], true_value)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+    def test_for_carry_does_not_fold_to_its_constant_initializer(self):
+        """A carry changes each iteration even when its first value is literal."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], pl.INDEX]):
+                for i, (carry,) in pl.range(2, init_values=(pl.const(3, pl.INDEX),)):
+                    pl.tensor.write(out, [i], carry)
+                    next_value: pl.Scalar[pl.INDEX] = carry + 1
+                    _result = pl.yield_(next_value)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_if_result_does_not_fold_to_one_branch_constant(self):
+        """Both branch-local constants fold, but the merged value stays dynamic."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
+                if cond:
+                    then_value: pl.Scalar[pl.INDEX] = 2
+                    selected = pl.yield_(then_value)
+                else:
+                    else_value: pl.Scalar[pl.INDEX] = 4
+                    selected = pl.yield_(else_value)
+                pl.tensor.write(out, [0], selected)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
+                if cond:
+                    selected = pl.yield_(pl.const(2, pl.INDEX))
+                else:
+                    selected = pl.yield_(pl.const(4, pl.INDEX))
+                pl.tensor.write(out, [0], selected)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_while_constants_fold_without_freezing_the_carry(self):
+        """A local constant folds while the while-condition still reads its carry."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[4], pl.INDEX]):
+                for (carry,) in pl.while_(init_values=(pl.const(0, pl.INDEX),)):
+                    pl.cond(carry < 4)
+                    step: pl.Scalar[pl.INDEX] = 1
+                    pl.tensor.write(out, [carry], step)
+                    next_value: pl.Scalar[pl.INDEX] = carry + step
+                    _result = pl.yield_(next_value)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[4], pl.INDEX]):
+                for (carry,) in pl.while_(init_values=(pl.const(0, pl.INDEX),)):
+                    pl.cond(carry < 4)
+                    pl.tensor.write(out, [carry], pl.const(1, pl.INDEX))
+                    next_value: pl.Scalar[pl.INDEX] = carry + 1
+                    _result = pl.yield_(next_value)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_allocated_offset_keeps_its_scalar_definition(self):
+        """A scalar used only by an allocated MemRef's offset must remain defined."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[8, 8], pl.FP32]):
+                for _iteration in pl.range(2):
+                    offset: pl.Scalar[pl.INDEX] = 4
+                    view: pl.Tensor[[4, 8], pl.FP32, pl.MemRef("mem", offset * 32, 128)] = pl.tensor.slice(
+                        source, [4, 8], [0, 0]
+                    )
+                    pl.tensor.write(view, [0, 0], pl.const(1.0, pl.FP32))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+        def view_memref(program: ir.Program) -> ir.MemRef:
+            function = next(iter(program.functions.values()))
+            loop = next(stmt for stmt in ir.flatten_to_stmts(function.body) if isinstance(stmt, ir.ForStmt))
+            view = next(
+                stmt.var
+                for stmt in ir.flatten_to_stmts(loop.body)
+                if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "view"
+            )
+            view_type = view.type
+            assert isinstance(view_type, ir.TensorType)
+            assert view_type.memref is not None
+            return view_type.memref
+
+        assert view_memref(after) is view_memref(Before)
+
+    def test_allocated_memref_tracks_a_rebuilt_loop_carry(self):
+        """Imported allocated storage follows a new carry without freezing its address."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[2, 8], pl.FP32]):
+                initial: pl.Scalar[pl.INDEX] = 0
+                seed: pl.Scalar[pl.INDEX] = initial
+                for _iteration, (carry,) in pl.range(2, init_values=(seed,)):
+                    view: pl.Tensor[[1, 8], pl.FP32, pl.MemRef("mem", carry * 32, 32)] = pl.tensor.slice(
+                        source, [1, 8], [carry, 0]
+                    )
+                    alias = view
+                    pl.tensor.write(view, [0, 0], pl.const(1.0, pl.FP32))
+                    pl.tensor.write(alias, [0, 1], pl.const(2.0, pl.FP32))
+                    next_value: pl.Scalar[pl.INDEX] = carry + 1
+                    _result = pl.yield_(next_value)
+
+        def loop_of(program: ir.Program) -> ir.ForStmt:
+            function = next(iter(program.functions.values()))
+            return next(stmt for stmt in ir.flatten_to_stmts(function.body) if isinstance(stmt, ir.ForStmt))
+
+        old_carry = loop_of(Before).iter_args[0]
+        after = passes.simplify()(Before)
+        loop = loop_of(after)
+        carry = loop.iter_args[0]
+        assert not carry.same_as(old_carry), "the initializer must actually rebuild the carry"
+        assert isinstance(carry.initValue, ir.ConstInt) and carry.initValue.value == 0
+
+        statements = ir.flatten_to_stmts(loop.body)
+        views = [
+            stmt.var.type
+            for stmt in statements
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in {"view", "alias"}
+        ]
+        assert len(views) == 2
+        view_type, alias_type = views
+        assert isinstance(view_type, ir.TensorType) and isinstance(alias_type, ir.TensorType)
+        memref = view_type.memref
+        assert memref is not None and not memref.is_pinned_
+        assert alias_type.memref is memref
+        assert isinstance(memref.byte_offset_, ir.Mul), "the address must remain iteration-dependent"
+        assert memref.byte_offset_.left.same_as(carry)
+        assert memref.slot_count_ == 1 and memref.size_ == 32
+
+        writes = [stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt)]
+        assert len(writes) == 2
+        for write in writes:
+            assert isinstance(write, ir.Call)
+            assert write.op.name == ir.get_op("tensor.write").name
+            result_type, input_type = write.type, write.args[0].type
+            assert isinstance(result_type, ir.TensorType) and isinstance(input_type, ir.TensorType)
+            assert result_type.memref is memref and input_type.memref is memref
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("tensor_first", [True, False], ids=["tensor-first", "scalar-first"])
+    @pytest.mark.parametrize("fold_initializer", [True, False], ids=["alias-init", "unchanged-init"])
+    def test_loop_header_storage_rebinding_is_order_independent(
+        self, loop_kind: str, tensor_first: bool, fold_initializer: bool
+    ):
+        """All carry definitions must exist before rebinding any carry's storage type."""
+        span = ir.Span.unknown()
+        index_type = ir.ScalarType(DataType.INDEX)
+
+        def const(value: int) -> ir.ConstInt:
+            return ir.ConstInt(value, DataType.INDEX, span)
+
+        source_type = ir.TensorType([1, 8], DataType.FP32)
+        source = ir.Var("source", source_type, span)
+        sink = ir.Var("sink", ir.TensorType([8, 8], DataType.FP32), span)
+        initial = ir.Var("initial", index_type, span)
+        seed = ir.Var("seed", index_type, span)
+        scalar = ir.IterArg("scalar", index_type, seed if fold_initializer else const(0), span)
+        storage = ir.MemRef(
+            ir.Var("mem", ir.PtrType(), span),
+            ir.Mul(scalar, const(32), DataType.INDEX, span),
+            32,
+            span,
+            slots=2,
+            slot=scalar,
+        )
+        carried_type = ir.TensorType([1, 8], DataType.FP32, storage)
+        tensor = ir.IterArg("tensor", carried_type, source, span)
+        alias = ir.Var("alias", carried_type, span)
+        next_scalar = ir.Var("next_scalar", index_type, span)
+        tensor_result = ir.Var("tensor_result", source_type, span)
+        scalar_result = ir.Var("scalar_result", index_type, span)
+
+        def ordered(tensor_value: ir.Expr, scalar_value: ir.Expr) -> list[ir.Expr]:
+            return [tensor_value, scalar_value] if tensor_first else [scalar_value, tensor_value]
+
+        def write(destination: ir.Var, row: ir.Expr, column: int) -> ir.Call:
+            return ir.create_op_call(
+                "tensor.write",
+                [
+                    destination,
+                    ir.MakeTuple([row, const(column)], span),
+                    ir.ConstFloat(1.0, DataType.FP32, span),
+                ],
+                span,
+            )
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(alias, tensor, span),
+                ir.EvalStmt(write(tensor, const(0), 0), span),
+                ir.EvalStmt(write(alias, const(0), 1), span),
+                ir.AssignStmt(next_scalar, ir.Add(scalar, const(1), DataType.INDEX, span), span),
+                ir.YieldStmt(ordered(tensor, next_scalar), span),
+            ],
+            span,
+        )
+        arguments = [tensor, scalar] if tensor_first else [scalar, tensor]
+        results = [tensor_result, scalar_result] if tensor_first else [scalar_result, tensor_result]
+        if loop_kind == "for":
+            before_loop = ir.ForStmt(
+                ir.Var("iteration", index_type, span),
+                const(0),
+                const(2),
+                const(1),
+                arguments,
+                body,
+                results,
+                span,
+            )
+        else:
+            before_loop = ir.WhileStmt(
+                ir.Lt(scalar, const(2), DataType.BOOL, span), arguments, body, results, span
+            )
+        function = ir.Function(
+            "main",
+            [source, sink],
+            [],
+            ir.SeqStmts(
+                [
+                    ir.AssignStmt(initial, const(0), span),
+                    ir.AssignStmt(seed, initial, span),
+                    before_loop,
+                    ir.EvalStmt(write(tensor_result, const(0), 0), span),
+                    ir.EvalStmt(write(sink, scalar_result, 0), span),
+                ],
+                span,
+            ),
+            span,
+        )
+        before = ir.Program([function], "imported_loop_header", span)
+        # Imported allocated metadata may refer to a later header binder. The DSL
+        # infers carries' types from their outer initializers, so it cannot print/parse
+        # this header type. Keep pass verification and check the complete IR below.
+        instruments: list[passes.PassInstrument] = [
+            passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with passes.PassContext(instruments):
+            after = passes.simplify()(before)
+        after_function = after.get_function("main")
+        assert after_function is not None
+        loop = next(
+            stmt
+            for stmt in ir.flatten_to_stmts(after_function.body)
+            if isinstance(stmt, (ir.ForStmt, ir.WhileStmt))
+        )
+        tensor_index, scalar_index = (0, 1) if tensor_first else (1, 0)
+        new_tensor, new_scalar = loop.iter_args[tensor_index], loop.iter_args[scalar_index]
+        assert isinstance(new_scalar.initValue, ir.ConstInt) and new_scalar.initValue.value == 0
+        assert new_scalar.same_as(scalar) != fold_initializer
+        assert new_tensor.same_as(tensor) != fold_initializer
+        tensor_type = new_tensor.type
+        assert isinstance(tensor_type, ir.TensorType) and tensor_type.memref is not None
+        memref = tensor_type.memref
+        assert memref.is_pinned_ is False and memref.slot_count_ == 2
+        assert isinstance(memref.byte_offset_, ir.Mul), "the address must remain iteration-dependent"
+        assert memref.byte_offset_.left.same_as(new_scalar), "storage names a discarded scalar carry"
+        assert memref.slot_index_ is not None and memref.slot_index_.same_as(new_scalar)
+        assert (memref is storage) != fold_initializer
+
+        statements = ir.flatten_to_stmts(loop.body)
+        alias_assignment = next(stmt for stmt in statements if isinstance(stmt, ir.AssignStmt))
+        assert alias_assignment.value.same_as(new_tensor)
+        alias_type = alias_assignment.var.type
+        assert isinstance(alias_type, ir.TensorType) and alias_type.memref is memref
+        writes = [stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt)]
+        assert len(writes) == 2
+        for write_call, destination in zip(writes, [new_tensor, alias_assignment.var], strict=True):
+            assert isinstance(write_call, ir.Call) and write_call.args[0].same_as(destination)
+            write_type = write_call.type
+            assert isinstance(write_type, ir.TensorType) and write_type.memref is memref
+        update = next(
+            stmt for stmt in statements if isinstance(stmt, ir.AssignStmt) and stmt is not alias_assignment
+        )
+        assert isinstance(update.value, ir.Add) and update.value.left.same_as(new_scalar)
+        yielded = next(stmt for stmt in statements if isinstance(stmt, ir.YieldStmt))
+        assert yielded.value[tensor_index].same_as(new_tensor)
+        assert yielded.value[scalar_index].same_as(update.var)
+        if isinstance(loop, ir.WhileStmt):
+            assert isinstance(loop.condition, ir.Lt) and loop.condition.left.same_as(new_scalar)
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
+    def test_if_result_storage_tracks_a_rebuilt_nested_loop_carry(self):
+        """A retained branch result must share its yielded views' rebound storage."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[2, 8], pl.FP32], cond: pl.Scalar[pl.BOOL]):
+                for _outer in pl.range(2):
+                    initial: pl.Scalar[pl.INDEX] = 0
+                    seed: pl.Scalar[pl.INDEX] = initial
+                    for _inner, (carry,) in pl.range(2, init_values=(seed,)):
+                        view: pl.Tensor[[1, 8], pl.FP32, pl.MemRef("mem", carry * 32, 32)] = pl.tensor.slice(
+                            source, [1, 8], [carry, 0]
+                        )
+                        if cond:
+                            then_view = view
+                            selected = pl.yield_(then_view)
+                        else:
+                            else_view = view
+                            selected = pl.yield_(else_view)
+                        pl.tensor.write(selected, [0, 0], pl.const(1.0, pl.FP32))
+                        next_value: pl.Scalar[pl.INDEX] = carry + 1
+                        _result = pl.yield_(next_value)
+
+        def inner_loop(program: ir.Program) -> ir.ForStmt:
+            function = next(iter(program.functions.values()))
+            outer = next(stmt for stmt in ir.flatten_to_stmts(function.body) if isinstance(stmt, ir.ForStmt))
+            return next(stmt for stmt in ir.flatten_to_stmts(outer.body) if isinstance(stmt, ir.ForStmt))
+
+        original_loop = inner_loop(Before)
+        old_carry = original_loop.iter_args[0]
+        old_branch = next(
+            stmt for stmt in ir.flatten_to_stmts(original_loop.body) if isinstance(stmt, ir.IfStmt)
+        )
+        after = passes.simplify()(Before)
+        loop = inner_loop(after)
+        carry = loop.iter_args[0]
+        assert not carry.same_as(old_carry)
+        assert isinstance(carry.initValue, ir.ConstInt) and carry.initValue.value == 0
+
+        statements = ir.flatten_to_stmts(loop.body)
+        branch = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+        result = branch.return_vars[0]
+        assert not result.same_as(old_branch.return_vars[0]), "the phi definition must adopt its rebound type"
+        result_type = result.type
+        assert isinstance(result_type, ir.TensorType) and result_type.memref is not None
+        memref = result_type.memref
+        assert isinstance(memref.byte_offset_, ir.Mul)
+        assert memref.byte_offset_.left.same_as(carry), "the phi still names the discarded carry"
+        assert branch.else_body is not None
+        for body in (branch.then_body, branch.else_body):
+            yielded = next(stmt for stmt in ir.flatten_to_stmts(body) if isinstance(stmt, ir.YieldStmt))
+            yielded_type = yielded.value[0].type
+            assert isinstance(yielded_type, ir.TensorType)
+            assert yielded_type.memref is memref
+
+        write = next(stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt))
+        assert isinstance(write, ir.Call)
+        assert write.args[0].same_as(result), "the consumer must reference the rebuilt phi definition"
+        write_type = write.type
+        assert isinstance(write_type, ir.TensorType) and write_type.memref is memref
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
+    def test_if_result_used_only_in_a_slot_index_survives(self):
+        """The selected slot is a live phi even when its only use is a type field."""
+        buffers = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[4, 4], pl.FP32],
+                out: pl.Tensor[[4, 4], pl.FP32],
+            ):
+                if cond:
+                    slot = pl.yield_(0)
+                else:
+                    slot = pl.yield_(1)
+                loaded: pl.Tile[[4, 4], pl.FP32, buffers[slot], pl.Mem.Vec] = pl.tile.load(
+                    source, [0, 0], [4, 4], target_memory=pl.Mem.Vec
+                )
+                _result = pl.tile.store(loaded, [0, 0], out)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_for_result_used_only_in_a_slot_index_survives(self):
+        """A return slot keeps the loop's yielded value live through type metadata."""
+        buffers = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[4, 4], pl.FP32], out: pl.Tensor[[4, 4], pl.FP32]):
+                for _iteration, (_slot,) in pl.range(2, init_values=(pl.const(0, pl.INDEX),)):
+                    final_slot = pl.yield_(1)
+                loaded: pl.Tile[[4, 4], pl.FP32, buffers[final_slot], pl.Mem.Vec] = pl.tile.load(
+                    source, [0, 0], [4, 4], target_memory=pl.Mem.Vec
+                )
+                _result = pl.tile.store(loaded, [0, 0], out)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+
 # ============================================================================
 # Scalar dead-code elimination (conservative — preserves Call-RHS assigns)
 # ============================================================================
@@ -1269,6 +2453,799 @@ class TestScalarDCE:
 # ============================================================================
 # Fold A: collapse IfStmt when the analyzer can prove the condition.
 # ============================================================================
+
+
+class TestUnreachableBranchArithmetic:
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_inlined_zero_width_skips_division(self, ssa):
+        """Issue #3114: inlining exposes a zero divisor in an unreachable branch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def lookup(self, query: pl.Scalar[pl.INDEX], width: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                owner = pl.cast(pl.const(-1, pl.INT64), pl.INDEX)
+                if width > 0:
+                    owner = query // width
+                else:
+                    owner = pl.cast(pl.const(0, pl.INT64), pl.INDEX)
+                return owner
+
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                width = pl.cast(pl.const(0, pl.INT64), pl.INDEX)
+                owner = self.lookup(query, width)
+                return owner
+
+        if ssa:
+
+            @pl.program
+            class Expected:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                    return pl.const(0, pl.INDEX)
+
+        else:
+
+            @pl.program
+            class Expected:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                    # Pre-SSA multi-assignment bindings are deliberately not propagated.
+                    value: pl.Scalar[pl.INDEX] = -1
+                    value = 0
+                    owner: pl.Scalar[pl.INDEX] = value
+                    return owner
+
+        before = passes.inline_functions()(Before)
+        if ssa:
+            before = passes.convert_to_ssa()(before)
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_true_condition_skips_else_division(self, ssa):
+        """The unreachable else-body must be skipped just like an unreachable then-body."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    owner: pl.Scalar[pl.INDEX] = query
+                else:
+                    owner = query // pl.const(0, pl.INDEX)
+                return owner
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                owner: pl.Scalar[pl.INDEX] = query
+                return owner
+
+        before = passes.convert_to_ssa()(Before) if ssa else Before
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_false_condition_without_else_skips_modulo(self):
+        """An unreachable expression must not be folded even when it has no users."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if False:
+                    _unused: pl.Scalar[pl.INDEX] = query % pl.const(0, pl.INDEX)
+                return query
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                return query
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_loop_bounds_prove_division_unreachable(self):
+        """Reachability includes analyzer proofs, not just literal boolean conditions."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    if i < 0:
+                        bad: pl.Scalar[pl.INDEX] = i // pl.const(0, pl.INDEX)
+                        pl.tensor.write(out, [i], bad)
+                    pl.tensor.write(out, [i], i)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    pl.tensor.write(out, [i], i)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_outer_constraint_skips_nested_division(self):
+        """An unknown outer condition can still prove its inner branch unreachable."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if query > 0:
+                    if query <= 0:
+                        bad: pl.Scalar[pl.INDEX] = query // pl.const(0, pl.INDEX)
+                        pl.tensor.write(out, [0], bad)
+                    else:
+                        pl.tensor.write(out, [0], query)
+                else:
+                    pl.tensor.write(out, [0], pl.const(0, pl.INDEX))
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if 0 < query:
+                    pl.tensor.write(out, [0], query)
+                else:
+                    pl.tensor.write(out, [0], pl.const(0, pl.INDEX))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_reachable_zero_divisor_still_raises(self, take_then):
+        """Skipping a dead branch must not suppress errors in the surviving branch."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if take_then:
+                    owner: pl.Scalar[pl.INDEX] = query // pl.const(0, pl.INDEX)
+                else:
+                    owner = query % pl.const(0, pl.INDEX)
+                return owner
+
+        message = "Floor division by zero" if take_then else "Floor modulo by zero"
+        with pytest.raises(ValueError, match=message):
+            passes.simplify()(Before)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_effectful_yield_preserves_unvisited_branch(self, take_then):
+        """A retained IfStmt must keep both bodies even when only one is visited."""
+        if take_then:
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX], t: pl.Tensor[[1], pl.INDEX]):
+                    if True:
+                        value = pl.yield_(pl.tensor.read(t, [0]))
+                    else:
+                        value = pl.yield_(query // pl.const(0, pl.INDEX))
+                    return value
+
+        else:
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(self, query: pl.Scalar[pl.INDEX], t: pl.Tensor[[1], pl.INDEX]):
+                    if False:
+                        value = pl.yield_(query // pl.const(0, pl.INDEX))
+                    else:
+                        value = pl.yield_(pl.tensor.read(t, [0]))
+                    return value
+
+        # Lifting the call would move its evaluation. Keep the IfStmt and leave
+        # the unreachable zero division untouched, rather than folding it.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("constant_alias", [False, True])
+    def test_retained_dead_branch_preserves_pre_ssa_assignment(self, take_then, constant_alias):
+        """Dead local definitions shadow enclosing aliases without folding arithmetic."""
+        select_constant = constant_alias if take_then else not constant_alias
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX]):
+                if select_constant:
+                    alias = pl.yield_(pl.const(3, pl.INDEX))
+                else:
+                    alias = pl.yield_(q)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    alias: pl.Scalar[pl.INDEX] = alias // pl.const(0, pl.INDEX)
+                    pl.tensor.write(x, [0], alias)
+                    result = pl.yield_(alias)
+                return result
+
+        # Swapping both IfStmts keeps the selected alias and effectful yield.
+        before = Before if take_then else _swap_if_branches(Before)
+        original = next(iter(before.functions.values()))
+        first = ir.flatten_to_stmts(original.body)[0]
+        assert isinstance(first, ir.IfStmt)
+        target = first.return_vars[0]
+        after = passes.simplify()(before)
+        func = next(iter(after.functions.values()))
+        branch = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        assignment = statements[0]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert assignment.var is target
+        assert isinstance(assignment.value, ir.FloorDiv)
+        if constant_alias:
+            assert isinstance(assignment.value.left, ir.ConstInt)
+            assert assignment.value.left.value == 3
+        else:
+            assert assignment.value.left is func.params[1]
+        assert isinstance(assignment.value.right, ir.ConstInt)
+        assert assignment.value.right.value == 0
+        write = statements[1]
+        assert isinstance(write, ir.EvalStmt)
+        assert isinstance(write.expr, ir.Call)
+        assert write.expr.args[-1] is target
+        yielded = statements[-1]
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[0] is target
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("constant_alias", [False, True])
+    def test_retained_dead_branch_scopes_nested_definitions(self, take_then, constant_alias):
+        """A nested branch definition cannot shadow the enclosing alias in its sibling."""
+        select_constant = constant_alias if take_then else not constant_alias
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]):
+                if select_constant:
+                    alias = pl.yield_(pl.const(3, pl.INDEX))
+                else:
+                    alias = pl.yield_(q)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    if cond:
+                        alias = pl.const(5, pl.INDEX)
+                        pl.tensor.write(x, [0], alias)
+                    else:
+                        pl.tensor.write(x, [0], alias)
+                    result = pl.yield_(pl.const(0, pl.INDEX))
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        inner = next(stmt for stmt in ir.flatten_to_stmts(dead_body) if isinstance(stmt, ir.IfStmt))
+        sibling = inner.else_body
+        assert sibling is not None
+        write = ir.flatten_to_stmts(sibling)[0]
+        assert isinstance(write, ir.EvalStmt)
+        assert isinstance(write.expr, ir.Call)
+        value = write.expr.args[-1]
+        if constant_alias:
+            assert isinstance(value, ir.ConstInt) and value.value == 3
+        else:
+            assert value is func.params[1]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_preserves_nested_return_definition(self, take_then):
+        """Merged branch results shadow outer aliases only after both bodies are visited."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INDEX], cond: pl.Scalar[pl.BOOL]):
+                if take_then:
+                    alias = pl.yield_(pl.const(3, pl.INDEX))
+                else:
+                    alias = pl.yield_(pl.const(4, pl.INDEX))
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    if cond:
+                        alias = pl.yield_(pl.const(5, pl.INDEX))
+                    else:
+                        alias = pl.yield_(alias)
+                    pl.tensor.write(x, [0], alias)
+                    result = pl.yield_(alias)
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        inner, write, yielded = statements
+        assert isinstance(inner, ir.IfStmt)
+        assert isinstance(write, ir.EvalStmt) and isinstance(write.expr, ir.Call)
+        assert isinstance(yielded, ir.YieldStmt)
+        assert write.expr.args[-1] is inner.return_vars[0]
+        assert yielded.value[0] is inner.return_vars[0]
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("constant_alias", [False, True])
+    @pytest.mark.parametrize("return_alias", [False, True])
+    def test_retained_dead_branch_scopes_loop_definitions(
+        self, loop_kind, take_then, constant_alias, return_alias
+    ):
+        """Loop-body shadows expire before result definitions become visible."""
+        select_constant = constant_alias if take_then else not constant_alias
+        header = (
+            "for i, (carry,) in pl.range(2, init_values=(alias,)):"
+            if loop_kind == "for"
+            else "for (carry,) in pl.while_(init_values=(alias,)):"
+        )
+        condition = "                pl.cond(carry < 5)\n" if loop_kind == "while" else ""
+        result_name = "alias" if return_alias else "loop_result"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX]):
+        if {select_constant}:
+            alias = pl.yield_(pl.const(3, pl.INDEX))
+        else:
+            alias = pl.yield_(q)
+        if {take_then}:
+            result = pl.yield_(pl.tensor.read(x, [0]))
+        else:
+            {header}
+{condition}                alias = pl.const(5, pl.INDEX)
+                pl.tensor.write(x, [0], alias)
+                {result_name} = pl.yield_(carry + 1)
+            pl.tensor.write(x, [0], alias)
+            result = pl.yield_({result_name})
+        return result
+""")
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        loop, write, yielded = ir.flatten_to_stmts(dead_body)
+        assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+        assert isinstance(write, ir.EvalStmt) and isinstance(write.expr, ir.Call)
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[0] is loop.return_vars[0]
+        initial = loop.iter_args[0].initValue
+        if constant_alias:
+            assert isinstance(initial, ir.ConstInt) and initial.value == 3
+        else:
+            assert initial is func.params[1]
+        value = write.expr.args[-1]
+        if return_alias:
+            assert value is loop.return_vars[0]
+        elif constant_alias:
+            assert isinstance(value, ir.ConstInt) and value.value == 3
+        else:
+            assert value is func.params[1]
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_retained_dead_branch_preserves_loop_leak_mode(self, loop_kind):
+        """Pre-SSA loops without result variables keep body definitions visible afterward."""
+        header = "for i in pl.range(2):" if loop_kind == "for" else "while flag:"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+        if True:
+            alias = pl.yield_(pl.const(3, pl.INDEX))
+        else:
+            alias = pl.yield_(pl.const(4, pl.INDEX))
+        if True:
+            result = pl.yield_(pl.tensor.read(x, [0]))
+        else:
+            {header}
+                alias = pl.const(5, pl.INDEX)
+                pl.tensor.write(x, [0], alias)
+            result = pl.yield_(alias)
+        return result
+""")
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, Before)
+        after = passes.simplify()(Before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        assert outer.else_body is not None
+        loop, yielded = ir.flatten_to_stmts(outer.else_body)
+        assert isinstance(loop, (ir.ForStmt, ir.WhileStmt))
+        assert not loop.return_vars
+        assignment = ir.flatten_to_stmts(loop.body)[0]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[0] is assignment.var
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("depth", [1, 8])
+    def test_retained_dead_branch_preserves_escaping_retyped_binder(self, take_then, depth):
+        """Result-free nested ifs expose rebuilt identities without exporting value aliases."""
+        nested = "\n".join(f"{' ' * (12 + 4 * i)}if True:" for i in range(depth))
+        assignment = f"{' ' * (12 + 4 * depth)}alias = view"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+        view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+        if {take_then}:
+            value = pl.yield_(pl.tensor.read(x, [0, 0]))
+        else:
+{nested}
+{assignment}
+            value = pl.yield_(pl.tensor.read(alias, [0, 0]))
+        return value
+""")
+        before = Before if take_then else _swap_if_branches(Before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        nested_if, yielded = ir.flatten_to_stmts(dead_body)
+        body = nested_if
+        for _ in range(depth):
+            assert isinstance(body, ir.IfStmt)
+            body = ir.flatten_to_stmts(body.then_body)[0]
+        assert isinstance(body, ir.AssignStmt)
+        assert isinstance(yielded, ir.YieldStmt) and isinstance(yielded.value[0], ir.Call)
+        assert yielded.value[0].args[0] is body.var
+        ir.assert_structural_equal(body.var.type, func.params[0].type)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    @pytest.mark.parametrize("prior_definition", ["folded_constant", "folded_variable", "assignment"])
+    def test_retained_if_result_shadows_pre_ssa_value(self, take_then, prior_definition):
+        """A retained result definition replaces earlier aliases and analyzer bindings."""
+        old_value = "q" if prior_definition == "folded_variable" else "pl.const(3, pl.INDEX)"
+        prefix = (
+            "        result = pl.const(3, pl.INDEX)"
+            if prior_definition == "assignment"
+            else f"""        if {take_then}:
+            result = pl.yield_({old_value})
+        else:
+            result = pl.yield_(pl.const(4, pl.INDEX))"""
+        )
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INDEX], q: pl.Scalar[pl.INDEX]):
+{prefix}
+        if {take_then}:
+            result = pl.yield_(pl.tensor.read(x, [0]))
+        else:
+            result = pl.yield_(q // pl.const(0, pl.INDEX))
+        return result
+""")
+        before = Before if take_then else _swap_if_branches(Before)
+        func = next(iter(before.functions.values()))
+        first, second, _ = ir.flatten_to_stmts(func.body)
+        assert isinstance(first, (ir.IfStmt, ir.AssignStmt))
+        assert isinstance(second, ir.IfStmt)
+        original = first.var if isinstance(first, ir.AssignStmt) else first.return_vars[0]
+        reused = second.return_vars[0]
+
+        class ReuseResult(ir.IRMutator):
+            def visit_var(self, op):
+                return original if op is reused else op
+
+        # Yield syntax normally creates distinct result identities; explicitly
+        # share one to exercise legal pre-SSA rebinding.
+        before = ReuseResult().visit_program(before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        # The DSL parser creates a fresh result Var for each yield, so this
+        # deliberately shared pre-SSA identity cannot roundtrip through text.
+        # Keep property verification enabled for the actual transform.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        statements = ir.flatten_to_stmts(func.body)
+        retained = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+        returned = statements[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        assert returned.value[0] is retained.return_vars[0]
+        assert retained.return_vars[0] is not func.params[1]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_multi_assignment_verifies_after_ssa(self, take_then):
+        """Shared pre-SSA binders are exempt from type symmetry until SSA splits them."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32], q: pl.Scalar[pl.INDEX]):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias = view
+                    pl.tensor.read(alias, [0, 0])
+                    alias = view
+                    bad = q // pl.const(0, pl.INDEX)
+                    result = pl.yield_(pl.tensor.read(alias, [bad, 0]))
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        func = next(iter(before.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        definitions = [
+            stmt.var
+            for stmt in ir.flatten_to_stmts(dead_body)
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "alias"
+        ]
+        assert len(definitions) == 2
+
+        class ReuseAlias(ir.IRMutator):
+            def visit_var(self, op):
+                return definitions[0] if op is definitions[1] else op
+
+        before = ReuseAlias().visit_program(before)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        assert not passes.PropertyVerifierRegistry.verify(properties, after)
+        converted = passes.convert_to_ssa()(after)
+        properties.insert(passes.IRProperty.SSAForm)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, converted)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_parameter_rebind_keeps_sibling_identity(self, take_then):
+        """A parameter's entry definition prevents branch-local RHS retyping."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 4], pl.FP32],
+                p: pl.Tensor[[8, 4], pl.FP32, pl.TensorView(stride=[4, 1], layout=pl.TensorLayout.ND)],
+                q: pl.Scalar[pl.INDEX],
+            ):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    result = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    if q > 0:
+                        p = view
+                    else:
+                        pl.tensor.read(p, [0, 0])
+                    result = pl.yield_(pl.tensor.read(p, [0, 0]))
+                return result
+
+        before = Before if take_then else _swap_if_branches(Before)
+        func = next(iter(before.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        nested = ir.flatten_to_stmts(dead_body)[0]
+        assert isinstance(nested, ir.IfStmt)
+        assignment = ir.flatten_to_stmts(nested.then_body)[0]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert assignment.var is func.params[1]
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        func = next(iter(after.functions.values()))
+        outer = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = outer.else_body if take_then else outer.then_body
+        assert dead_body is not None
+        nested = ir.flatten_to_stmts(dead_body)[0]
+        assert isinstance(nested, ir.IfStmt) and nested.else_body is not None
+        assignment = ir.flatten_to_stmts(nested.then_body)[0]
+        assert isinstance(assignment, ir.AssignStmt) and assignment.var is func.params[1]
+        read = ir.flatten_to_stmts(nested.else_body)[0]
+        assert isinstance(read, ir.EvalStmt) and isinstance(read.expr, ir.Call)
+        assert read.expr.args[0] is func.params[1]
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_remaps_rebuilt_loop_carry(self, take_then):
+        """Skipped arithmetic and dependent types must use the rebuilt loop binder."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, t: pl.Tensor[[2], pl.INDEX]):
+                for i, (carry,) in pl.range(2, init_values=(pl.const(1, pl.INDEX) + pl.const(1, pl.INDEX),)):
+                    if take_then:
+                        value = pl.yield_(pl.tensor.read(t, [i]))
+                    else:
+                        dead: pl.Tensor[[carry], pl.INDEX] = pl.tensor.create([carry], dtype=pl.INDEX)
+                        pl.tensor.read(dead, [0])
+                        value = pl.yield_(carry // pl.const(0, pl.INDEX))
+                    result = pl.yield_(value)
+                return result
+
+        # Swap the bodies for false so the selected yield always contains a call.
+        before = Before if take_then else _swap_if_branches(Before)
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(properties, before)
+        after = passes.simplify()(before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+        func = next(iter(after.functions.values()))
+        loop = next(stmt for stmt in ir.flatten_to_stmts(func.body) if isinstance(stmt, ir.ForStmt))
+        branch = next(stmt for stmt in ir.flatten_to_stmts(loop.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        statements = ir.flatten_to_stmts(dead_body)
+        allocation = next(stmt for stmt in statements if isinstance(stmt, ir.AssignStmt))
+        assert isinstance(allocation.var.type, ir.TensorType)
+        assert allocation.var.type.shape[0].same_as(loop.iter_args[0])
+        yielded = next(stmt for stmt in statements if isinstance(stmt, ir.YieldStmt))
+        assert isinstance(yielded.value[0], ir.FloorDiv)
+        assert yielded.value[0].left.same_as(loop.iter_args[0])
+        assert isinstance(yielded.value[0].right, ir.ConstInt) and yielded.value[0].right.value == 0
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_propagates_retyped_aliases(self, take_then):
+        """An outer identity view changes the types of dead-branch alias chains."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+                view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias = view
+                    second = alias
+                    value = pl.yield_(pl.tensor.read(second, [0, 0]))
+                return value
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]):
+                view: pl.Tensor[[8, 4], pl.FP32] = x
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0, 0]))
+                else:
+                    alias: pl.Tensor[[8, 4], pl.FP32] = view
+                    second: pl.Tensor[[8, 4], pl.FP32] = alias
+                    value = pl.yield_(pl.tensor.read(second, [0, 0]))
+                return value
+
+        before = Before if take_then else _swap_if_branches(Before)
+        expected = Expected if take_then else _swap_if_branches(Expected)
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.AssignTypeSymmetry,
+            passes.IRProperty.SSAForm,
+            passes.IRProperty.UseAfterDef,
+        ):
+            properties.insert(prop)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+        ir.assert_structural_equal(pl.parse_program(ir.python_print(after)), after)
+
+    @pytest.mark.parametrize("take_then", [False, True])
+    def test_retained_dead_branch_remaps_distributed_window(self, take_then):
+        """A dead view must name the domain's rebuilt slot in its Var and Call types."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self, x: pl.Tensor[[1], pl.INDEX]):
+                buffer = pld.alloc_window_buffer(pl.const(128, pl.INDEX) + pl.const(128, pl.INDEX))
+                if take_then:
+                    value = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value
+
+        before = Before if take_then else _swap_if_branches(Before)
+        # Materialization adds WindowBuffer identities shared by domain slots and
+        # view types. Simplify folds the size and must preserve that sharing even
+        # in a branch whose arithmetic is deliberately not visited.
+        instruments: list[passes.PassInstrument] = [
+            passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with passes.PassContext(instruments):
+            materialized = passes.materialize_comm_domain_scopes()(before)
+            after = passes.simplify()(materialized)
+        host = next(func for func in after.functions.values() if func.name == "host")
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        branch = next(stmt for stmt in ir.flatten_to_stmts(scope.body) if isinstance(stmt, ir.IfStmt))
+        dead_body = branch.else_body if take_then else branch.then_body
+        assert dead_body is not None
+        view = next(stmt for stmt in ir.flatten_to_stmts(dead_body) if isinstance(stmt, ir.AssignStmt))
+        assert len(scope.slots) == 1
+        assert isinstance(scope.slots[0].size, ir.ConstInt) and scope.slots[0].size.value == 256
+        for view_type in (view.var.type, view.value.type):
+            assert isinstance(view_type, ir.DistributedTensorType)
+            assert view_type.window_buffer is scope.slots[0]
+
+    def test_unknown_condition_still_checks_else(self):
+        """An unproven branch remains potentially reachable and must be simplified."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, query: pl.Scalar[pl.INDEX], cond: pl.Scalar[pl.BOOL]) -> pl.Scalar[pl.INDEX]:
+                if cond:
+                    owner: pl.Scalar[pl.INDEX] = query
+                else:
+                    owner = query // pl.const(0, pl.INDEX)
+                return owner
+
+        with pytest.raises(ValueError, match="Floor division by zero"):
+            passes.simplify()(Before)
 
 
 class TestConstantIfCollapse:
@@ -2023,6 +4000,126 @@ class TestSpmdScopeCoreNum:
 
 
 class TestManualScopeSubmit:
+    @pytest.mark.parametrize("normalization", ["simplify", "init_mem_ref"])
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_rebuilt_carry_keeps_spmd_scope_dependency_in_scope(self, normalization: str, loop_kind: str):
+        """Pre-outline dependencies and runtime predicates must follow rebuilt loop carries."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, t: pl.Tensor[[4, 8], pl.FP32], gates: pl.Tensor[[4, 8], pl.INT32]
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                initial: pl.Scalar[pl.INDEX] = 0
+                seed: pl.Scalar[pl.INDEX] = initial
+                with pl.manual_scope():
+                    first_tid = pl.system.task_dummy(deps=[])
+                    dependency_seed: pl.Scalar[pl.TASK_ID] = first_tid
+                    for _i, (count, dependency) in pl.range(2, init_values=(seed, dependency_seed)):
+                        with pl.spmd(4, deps=[dependency], predicate=(gates[count, 0] > 0)) as next_tid:
+                            self.kernel(t)
+                        final_count, _final_tid = pl.yield_(count + 1, next_tid)
+                pl.tensor.write(t, [final_count, 0], pl.const(1.0, pl.FP32))
+                return t
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+
+        def verify(program: ir.Program):
+            diagnostics = passes.PropertyVerifierRegistry.verify(properties, program)
+            assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
+        def collect(program: ir.Program):
+            loops: list[ir.ForStmt | ir.WhileStmt] = []
+            scopes: list[ir.SpmdScopeStmt] = []
+
+            class Collector(ir.IRVisitor):
+                def visit_for_stmt(self, op):
+                    loops.append(op)
+                    super().visit_for_stmt(op)
+
+                def visit_while_stmt(self, op):
+                    loops.append(op)
+                    super().visit_while_stmt(op)
+
+                def visit_spmd_scope_stmt(self, op):
+                    scopes.append(op)
+                    super().visit_spmd_scope_stmt(op)
+
+            Collector().visit_program(program)
+            return loops[0], scopes[0]
+
+        program = passes.convert_to_ssa()(Before)
+        if loop_kind == "while":
+            # Reuse the exact SSA carry group and scope body, changing only the
+            # loop kind and its condition so both carry-rebuilding paths are covered.
+            class ToWhile(ir.IRMutator):
+                def visit_for_stmt(self, op):
+                    count = next(
+                        carry
+                        for carry in op.iter_args
+                        if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.INDEX
+                    )
+                    condition = ir.Lt(count, ir.ConstInt(2, DataType.INDEX, op.span), DataType.BOOL, op.span)
+                    return ir.WhileStmt(condition, op.iter_args, op.body, op.return_vars, op.span)
+
+            program = ToWhile().visit_program(program)
+        verify(program)
+        old_loop, old_scope = collect(program)
+        old_count = next(
+            carry
+            for carry in old_loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.INDEX
+        )
+        old_dependency = next(
+            carry
+            for carry in old_loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.TASK_ID
+        )
+        # Keep semantic verification without print/reparse so a stale dependency
+        # is reported as a use outside its binder, not an incidental text mismatch.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            program = getattr(passes, normalization)()(program)
+        loop, scope = collect(program)
+        count = next(
+            carry
+            for carry in loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.INDEX
+        )
+        dependency = next(
+            carry
+            for carry in loop.iter_args
+            if isinstance(carry.type, ir.ScalarType) and carry.type.dtype == DataType.TASK_ID
+        )
+        assert not dependency.same_as(old_dependency), "the constant seed must rebuild the carry group"
+        assert not count.same_as(old_count)
+        assert scope.attrs["manual_dep_edges"][0].same_as(dependency)
+        predicate = scope.attrs["predicate"]
+        assert isinstance(predicate, (ir.Gt, ir.Lt)), "dispatch must still depend on a runtime tensor read"
+        # Full Simplify canonicalizes read > 0 to 0 < read; constant-only
+        # normalization retains the original comparison orientation.
+        read = predicate.left if isinstance(predicate, ir.Gt) else predicate.right
+        threshold = predicate.right if isinstance(predicate, ir.Gt) else predicate.left
+        assert isinstance(threshold, ir.ConstInt) and threshold.value == 0
+        while isinstance(read, ir.Cast):
+            read = read.operand
+        assert isinstance(read, ir.Call) and read.op.name == ir.get_op("tensor.read").name
+        indices = read.args[1]
+        assert isinstance(indices, ir.MakeTuple) and indices.elements[0].same_as(count)
+        if isinstance(loop, ir.WhileStmt):
+            assert isinstance(loop.condition, ir.Lt) and loop.condition.left.same_as(count)
+        assert isinstance(scope.core_num, ir.ConstInt) and scope.core_num.value == 4
+        if normalization == "simplify":
+            assert scope.body.same_as(old_scope.body), "only dispatch attrs need rewriting"
+            assert scope.core_num.same_as(old_scope.core_num)
+        verify(program)
+
     def test_folds_shape_into_submit_arg_preserving_submit(self):
         """A top-level constant folds into a tensor shape that feeds a
         pl.submit inside pl.manual_scope.
@@ -2162,11 +4259,9 @@ class TestDeadIfReturnVarsDCE:
             @pl.function(strict_ssa=True)
             def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
                 if cond:
-                    t1_0: pl.Scalar[pl.INDEX] = 1
-                    pl.tensor.write(out, [0], t1_0)
+                    pl.tensor.write(out, [0], pl.const(1, pl.INDEX))
                 else:
-                    t1_1: pl.Scalar[pl.INDEX] = 2
-                    pl.tensor.write(out, [0], t1_1)
+                    pl.tensor.write(out, [0], pl.const(2, pl.INDEX))
 
         ssa_form = passes.convert_to_ssa()(Before)
         after = passes.simplify()(ssa_form)
@@ -2389,6 +4484,118 @@ class TestDeadLoopCarryDCE:
 
 
 class TestDistributedWindowBufferRemap:
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_single_trip_view_preserves_enclosing_domain_slot(self, ssa):
+        """Fold B clones the view's definition, but captures its enclosing slot."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self):
+                buffer = pld.alloc_window_buffer(256)
+                for i in pl.range(1):
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self):
+                buffer = pld.alloc_window_buffer(256)
+                view = pld.window(buffer, [64], dtype=pl.FP32)
+                self.chip(view, device=0)
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            before = passes.convert_to_ssa()(Before) if ssa else Before
+            before = passes.materialize_comm_domain_scopes()(before)
+            expected = passes.materialize_comm_domain_scopes()(Expected)
+            after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+        host = after.get_function("host")
+        assert host is not None
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        view = next(
+            stmt
+            for stmt in ir.flatten_to_stmts(scope.body)
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.DistributedTensorType)
+        )
+        for value in (view.var, view.value):
+            assert isinstance(value.type, ir.DistributedTensorType)
+            assert value.type.window_buffer is scope.slots[0]
+
+    @pytest.mark.parametrize("ssa", [False, True])
+    def test_slot_size_resolves_body_defined_constants(self, ssa):
+        """Resolve scalar chains before DCE, including a view in a retained dead branch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip(self, data: pld.DistributedTensor[[64], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self, x: pl.Tensor[[1], pl.INDEX]):
+                half: pl.Scalar[pl.INDEX] = 32
+                n: pl.Scalar[pl.INDEX] = half * 2
+                buffer = pld.alloc_window_buffer(n * 4)
+                if True:
+                    value = pl.yield_(pl.tensor.read(x, [0]))
+                else:
+                    view = pld.window(buffer, [64], dtype=pl.FP32)
+                    self.chip(view, device=0)
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            before = passes.convert_to_ssa()(Before) if ssa else Before
+            materialized = passes.materialize_comm_domain_scopes()(before)
+            after = passes.simplify()(materialized)
+        host = after.get_function("host")
+        assert host is not None
+        scope = next(
+            stmt for stmt in ir.flatten_to_stmts(host.body) if isinstance(stmt, ir.CommDomainScopeStmt)
+        )
+        assert isinstance(scope.slots[0].size, ir.ConstInt)
+        assert scope.slots[0].size.value == 256
+        statements = ir.flatten_to_stmts(scope.body)
+        assert not any(
+            isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ScalarType)
+            for stmt in statements
+        )
+        branch = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+        assert branch.else_body is not None
+        view = next(stmt for stmt in ir.flatten_to_stmts(branch.else_body) if isinstance(stmt, ir.AssignStmt))
+        for value in (view.var, view.value):
+            assert isinstance(value.type, ir.DistributedTensorType)
+            assert value.type.window_buffer is scope.slots[0]
+
+    def test_symbolic_slot_size_keeps_its_scalar_definition(self):
+        """A domain slot is a live use even when its size has no body users."""
+        span = ir.Span.unknown()
+        scalar = ir.ScalarType(DataType.INDEX)
+        count = ir.Var("count", scalar, span)
+        size = ir.Var("size", scalar, span)
+        base = ir.Var("buffer", ir.PtrType(), span)
+        definition = ir.AssignStmt(
+            size, ir.Mul(count, ir.ConstInt(4, DataType.INDEX, span), DataType.INDEX, span), span
+        )
+        slot = ir.WindowBuffer(base, size)
+        scope = ir.CommDomainScopeStmt([0], [slot], "domain", body=definition, span=span)
+        before = ir.Program([ir.Function("host", [base, count], [], scope, span)], "P", span)
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.simplify()(before)
+        ir.assert_structural_equal(after, before)
+
     def test_window_buffer_remapped_in_lockstep_with_scope_slot(self):
         """Simplify folding a synthesized signal's window-buffer size
         (``world_size * 1 * 4`` → ``world_size * 4``) must remap the
@@ -2472,6 +4679,333 @@ class TestDistributedWindowBufferRemap:
         # The view Var's window_buffer back-reference must be the SAME object
         # as the scope slot (both post-fold).
         assert signal_type.window_buffer is signal_slots[0]
+
+
+class TestScopeWrappedYields:
+    """Control-flow results cross runtime wrappers without moving their contents."""
+
+    @pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+    @pytest.mark.parametrize("select_then", [False, True])
+    def test_constant_branch_preserves_scope(self, mode, select_then):
+        # Enum literals are syntactic DSL constructs, so specialize the source.
+        amount = 1.0 if select_then else 2.0
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        if pl.const({1 if select_then else 2}, pl.INDEX) == pl.const(1, pl.INDEX):
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="producer"):
+                a = pl.tensor.add(x, 1.0)
+                result = pl.yield_(a)
+        else:
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="producer"):
+                b = pl.tensor.add(x, 2.0)
+                result = pl.yield_(b)
+        return result
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="producer"):
+            result = pl.tensor.add(x, {amount})
+        return result
+""")
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    @pytest.mark.parametrize("mode", ["AUTO", "MANUAL"])
+    def test_fold_yield_only_scope_preserves_empty_wrapper(self, mode):
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        if True:
+            with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="empty"):
+                result = pl.yield_(x)
+        else:
+            result = pl.yield_(x)
+        return result
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        with pl.scope(mode=pl.ScopeMode.{mode}, name_hint="empty"):
+            pass
+        return x
+""")
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_runtime_phi_prunes_wrapped_yield_slots(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.scope(name_hint="outer"):
+                        with pl.manual_scope(name_hint="inner"):
+                            result, _unused = pl.yield_(x, x)
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        result, _unused = pl.yield_(x, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.scope(name_hint="outer"):
+                        with pl.manual_scope(name_hint="inner"):
+                            result = pl.yield_(x)
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        result = pl.yield_(x)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_runtime_phi_removes_all_slots_without_removing_scopes(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.manual_scope(name_hint="then"):
+                        _unused = pl.yield_(x)
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        _unused = pl.yield_(x)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                if flag:
+                    with pl.manual_scope(name_hint="then"):
+                        pass
+                else:
+                    with pl.manual_scope(name_hint="else"):
+                        pass
+                return x
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_for_carry_prunes_wrapped_yield_slots(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                for i, (acc, dead) in pl.range(4, init_values=(x, x)):
+                    with pl.manual_scope():
+                        result, _unused = pl.yield_(x, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                for i, (acc,) in pl.range(4, init_values=(x,)):
+                    with pl.manual_scope():
+                        result = pl.yield_(x)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_while_carry_prunes_wrapped_yield_slots(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                for acc, dead in pl.while_(init_values=(x, x)):
+                    pl.cond(flag)
+                    with pl.manual_scope():
+                        result, _unused = pl.yield_(x, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+                for (acc,) in pl.while_(init_values=(x,)):
+                    pl.cond(flag)
+                    with pl.manual_scope():
+                        result = pl.yield_(x)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_single_trip_loop_preserves_scope(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                for i, (acc,) in pl.range(1, init_values=(x,)):
+                    with pl.manual_scope():
+                        updated = pl.tensor.add(acc, 1.0)
+                        result = pl.yield_(updated)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, x: pl.Tensor[[16], pl.FP32]):
+                with pl.manual_scope():
+                    result = pl.tensor.add(x, 1.0)
+                return result
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_loop_removes_all_slots_preserving_empty_scope(self, loop_kind):
+        header = (
+            "for i, (dead,) in pl.range(4, init_values=(x,)):"
+            if loop_kind == "for"
+            else "for (dead,) in pl.while_(init_values=(x,)):"
+        )
+        condition = "            pl.cond(flag)\n" if loop_kind == "while" else ""
+        expected_header = "for i in pl.range(4):" if loop_kind == "for" else "while flag:"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+        {header}
+{condition}            with pl.manual_scope(name_hint="iteration"):
+                _unused = pl.yield_(x)
+        return x
+""")
+        Expected = pl.parse_program(f"""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, flag: pl.Scalar[pl.BOOL], x: pl.Tensor[[16], pl.FP32]):
+        {expected_header}
+            with pl.manual_scope(name_hint="iteration"):
+                pass
+        return x
+""")
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+    def test_constant_if_preserves_split_scope(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]):
+                if True:
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                        result = pl.yield_(x)
+                else:
+                    result = pl.yield_(x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]):
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    pass
+                return x
+
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
+
+class TestEffectfulYieldsKeepControlFlow:
+    """A call in a yield must stay at its evaluation site, even with no readers."""
+
+    def test_constant_if_keeps_nested_call_yield(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, t: pl.Tensor[[1], pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    value = pl.yield_(pl.tensor.read(t, [0]) + 1)
+                else:
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value + value
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, t: pl.Tensor[[1], pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                if True:
+                    value = pl.yield_(pl.tensor.read(t, [0]) + 1)
+                else:
+                    value = pl.yield_(pl.const(0, pl.INDEX))
+                return value * 2
+
+        # Reusing an expression would duplicate the read; the whole IfStmt stays.
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_single_trip_loop_keeps_unused_call_yield(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+            def main(self, t: pl.Tensor[[1], pl.INDEX]):
+                for i, (acc,) in pl.range(1, init_values=(pl.const(0, pl.INDEX),)):
+                    with pl.manual_scope():
+                        _result = pl.yield_(pl.tensor.read(t, [0]))
+                return t
+
+        # Both the folding guard and DCE must preserve this otherwise-unused call.
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_bound_submit_result_can_fold_inside_manual_scope(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[16], pl.FP32], dep: pl.Scalar[pl.TASK_ID]):
+                with pl.manual_scope():
+                    if True:
+                        out, tid = pl.submit(self.kernel, x, deps=[dep])
+                        result, ready = pl.yield_(out, tid)
+                    else:
+                        other, other_tid = pl.submit(self.kernel, x, deps=[dep])
+                        result, ready = pl.yield_(other, other_tid)
+                    return result, ready
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[16], pl.FP32], dep: pl.Scalar[pl.TASK_ID]):
+                with pl.manual_scope():
+                    out, tid = pl.submit(self.kernel, x, deps=[dep])
+                    return out, tid
+
+        # The launch has already been evaluated: folding reuses its two values,
+        # preserving exactly one Submit, its dependency, and its runtime scope.
+        After = passes.simplify()(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

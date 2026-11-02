@@ -23,11 +23,20 @@ x2 = self.step(x1)
 
 使用唯一的精确结构 hash/equality，`enable_auto_mapping=False`。绑定参数和签名
 符号按角色映射；语义 attrs、方向、返回关系、dtype、layout、常数位模式保持有效。
-合并另要求根函数及每个 Group 成员的签名类型精确相等，保留 shape/view 符号身份。
-这项限制独立于结构等价：tensor-to-tile lowering 直接用 callee 签名分配输出，
-不会将其中符号映射到每个调用的符号空间。因此 `[N]` 和 `[M]` kernel 即使
-alpha 等价也不合并；共享相同符号的 kernel 仍可合并。仅保留原调用的返回类型
-不足以保证后续输出分配正确。
+普通 InCore kernel 的 physical shape 符号身份不同时，若每个受影响的 Call/Submit
+都能一致地绑定规范函数签名，并恢复原调用者坐标中的结果类型，则可以合并。
+支持 Spmd 包装函数内的调用、同时作为维度的 scalar 参数、重复符号，以及
+`N * 128` 等同构表达式。绑定只来自已提供的实参，不能由尚未分配的输出反推。
+形状符号身份不同的候选必须提供所有参数，包括 Submit 输出；运行时合成输出仍直接读取
+callee 签名，尚未使用调用点的形状绑定。签名身份相同的合并保留已有的省略输出行为。
+不进行代数反解，也不增加运行时形状检查；返回别名和 void 函数的内存副作用保持不变。
+
+首阶段支持 scalar 参数和不带存储的普通 Tensor，可携带仅描述 layout 的 TensorView
+（包括 NZ 权重）。stride、valid_shape 元数据、分布式存储、未支持的表达式及
+Group 单元仍要求精确的签名符号身份。新增证明将参数数、返回数及不同形状表达式
+节点数分别限制为 256；更大的签名保留原路径。任一调用证明失败，保留整个候选，
+不会只删除部分调用所引用的定义。
+
 绑定验证与闭合性检查覆盖 type、shape、view 和 attrs。自由捕获、未确定的值类型、
 显式存储或通信资源、external/builtin kernel、runtime binding、未支持的 helper 图
 保守跳过。普通内存副作用允许存在，因为每次执行及实参都保留。若未知 payload
@@ -46,7 +55,7 @@ alpha 等价也不合并；共享相同符号的 kernel 仍可合并。仅保留
   每次调用仍独立创建 context。
 
 准入检查覆盖表达式的每条入边（包括共享 DAG 节点）以及嵌套类型。
-这些例外不放宽结构等价或签名符号身份检查。
+这些例外不放宽结构等价或适用的签名证明。
 
 ## 重写与复杂度
 
@@ -60,6 +69,9 @@ predicate 和 early-resolve。Group 单元原子重写，最后检查不存在�
 
 要求并保持 `SSAForm`、`SplitIncoreOrch`、`ClusterOutlined`、
 `NormalizedStmtStructure`，不新增“所有函数唯一”的 property。
+
+调用形状证明另受全局预算约束，预算等于 Program 的 inspection weight；每个调用点
+最多执行 65,536 个匹配步骤，并缓存共享表达式对。预算耗尽时保留候选定义。
 
 ## 代码与注册身份
 

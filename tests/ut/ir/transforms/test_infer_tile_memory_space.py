@@ -4911,5 +4911,42 @@ class TestRewrittenTileLayout:
         ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Before)
 
 
+@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
+def test_packed_fp4_inferred_mat_load_retargets_carrier_shape(dtype):
+    backend.set_backend_type(BackendType.Ascend950)
+
+    # Matrix input constraints drive Mat staging; tile.move itself places no
+    # demand on its input. This tests inference only, before native MX codegen.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[32, 64], dtype],
+            y: pl.Tensor[[64, 32], dtype, pl.TensorView(stride=[1, 64], layout=pl.TensorLayout.DN)],
+        ):
+            loaded = pl.tile.load(x, [0, 0], [32, 64], valid_shape=[16, 32])
+            rhs_tile = pl.tile.load(y, [0, 0], [64, 32], valid_shape=[32, 16])
+            _product = pl.tile.matmul(loaded, rhs_tile)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[32, 64], dtype],
+            y: pl.Tensor[[64, 32], dtype, pl.TensorView(stride=[1, 64], layout=pl.TensorLayout.DN)],
+        ):
+            loaded = pl.tile.load(x, [0, 0], [32, 64], valid_shape=[16, 32], target_memory=pl.Mem.Mat)
+            rhs_tile = pl.tile.load(y, [0, 0], [64, 32], valid_shape=[32, 16], target_memory=pl.Mem.Mat)
+            loaded_Left = pl.tile.move(loaded, target_memory=pl.Mem.Left)
+            rhs_tile_Right = pl.tile.move(rhs_tile, target_memory=pl.Mem.Right)
+            _product = pl.tile.matmul(loaded_Left, rhs_tile_Right)
+
+    after = passes.infer_tile_memory_space()(Before)
+    ir.assert_structural_equal(after, Expected)
+    ir.assert_structural_equal(pl.parse_program(ir.python_print(after)), after)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

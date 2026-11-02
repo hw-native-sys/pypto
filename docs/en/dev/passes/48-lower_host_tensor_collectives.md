@@ -217,3 +217,8 @@ shape.
 - Source: [src/ir/transforms/lower_host_tensor_collectives_pass.cpp](../../../../src/ir/transforms/lower_host_tensor_collectives_pass.cpp)
 - Header: [include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
 - Tests: [tests/ut/ir/transforms/test_lower_host_tensor_collectives.py](../../../../tests/ut/ir/transforms/test_lower_host_tensor_collectives.py)
+
+## Indexed A5 URMA exchange
+
+`pld.tensor.indexed_all_to_all_v` supports L2 orchestration only. Calls directly
+from a HOST orchestrator are rejected before window resolution.

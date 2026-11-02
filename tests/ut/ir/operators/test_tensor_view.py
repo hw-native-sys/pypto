@@ -80,11 +80,17 @@ def test_bare_nd_to_dn_flips_trailing_dims():
     assert _values_of(view.stride) == [1, 4]
 
 
-def test_fp4e2m1x2_rejects_layout_conversion():
-    """Packed FP4E2M1X2 is ND-only; explicit layout flips are hard-rejected."""
-    src = _tensor_var([8, 16], dtype=DataType.FP4E2M1X2)
-    with pytest.raises(ValueError, match=r"FP4E2M1X2 supports ND layout only"):
-        ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_layout_view_preserves_byte_carriers(dtype):
+    src = _tensor_var([8, 16], dtype=dtype)
+    call = ir.op.tensor.view(src, layout=ir.TensorLayout.DN)
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == dtype
+    assert _values_of(call.type.shape) == [16, 8]
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.DN
+    assert _values_of(view.stride) == [1, 16]
 
 
 def test_dn_packed_to_nd_flips_back():

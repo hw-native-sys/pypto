@@ -123,6 +123,8 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   // Extract shapes
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_shape.size(), rhs_shape.size(),
+                      args[0]->span_, "tensor.matmul");
 
   CHECK(lhs_shape.size() >= 1) << "tensor.matmul requires lhs to have at least 1 dimension";
   CHECK(rhs_shape.size() >= 1) << "tensor.matmul requires rhs to have at least 1 dimension";
@@ -275,8 +277,15 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(group_axis == 0 || group_axis == 1, span)
       << kOpName << " group_axis must be 0 or 1, but got " << group_axis;
   const DataType dtype = GetKwarg<DataType>(kwargs, "dtype", DataType::FP8E4M3FN);
-  CHECK_SPAN(dtype == DataType::FP8E4M3FN, span)
-      << kOpName << " supports only dtype FP8E4M3FN (MXFP8), but got " << dtype.ToString();
+  CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP4E2M1X2, span)
+      << kOpName << " supports dtype FP8E4M3FN or FP4E2M1X2, but got " << dtype.ToString();
+  CHECK_SPAN(dtype != DataType::FP4E2M1X2 || src->dtype_ != DataType::FP32, span)
+      << kOpName << " requires FP16 or BF16 source for MXFP4_E2M1";
+  const std::string algorithm = GetKwarg<std::string>(kwargs, "quant_scale_alg", "ocp");
+  CHECK_SPAN(algorithm == "ocp" || algorithm == "nv", span)
+      << kOpName << " requires quant_scale_alg 'ocp' or 'nv', but got " << algorithm;
+  CHECK_SPAN(algorithm != "nv" || group_axis != 1 || src->dtype_ == DataType::FP32, span)
+      << kOpName << " does not support axis1 FP16/BF16 NV quantization in PTOAS";
 
   auto dim0 = As<ConstInt>(src->shape_[0]);
   auto k = As<ConstInt>(src->shape_[1]);
@@ -288,6 +297,8 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(dim0->value_ % outer_alignment == 0, span)
       << kOpName << " with group_axis=" << group_axis << " requires " << outer_name << " divisible by "
       << outer_alignment << ", but got " << dim0->value_;
+  CHECK_SPAN(dtype != DataType::FP4E2M1X2 || group_axis != 0 || dim0->value_ % 64 == 0, span)
+      << kOpName << " requires N divisible by 64 for MXFP4 carrier row alignment";
 
   const auto group_count = std::make_shared<ConstInt>(k->value_ / 32, DataType::INDEX, span);
   std::vector<ExprPtr> data_shape = src->shape_;
@@ -300,6 +311,10 @@ TypePtr DeduceTensorQuantMxType(const std::vector<ExprPtr>& args,
     data_shape = {src->shape_[1], src->shape_[0]};
     scale_shape = {group_count, src->shape_[0]};
     scale_layout = TensorLayout::MX_B_NN;
+  }
+  if (dtype == DataType::FP4E2M1X2) {
+    const int64_t packed_cols = (group_axis == 0 ? dim0->value_ : k->value_) / 2;
+    data_shape[1] = std::make_shared<ConstInt>(packed_cols, DataType::INDEX, span);
   }
   TypePtr data = std::make_shared<TensorType>(std::move(data_shape), dtype);
   TypePtr scale = std::make_shared<TensorType>(std::move(scale_shape), DataType::FP8E8M0, std::nullopt,
@@ -327,6 +342,10 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
                  rhs_scale->shape_.size() == 2,
              span)
       << kOpName << " requires oriented 2D data and scale tensors";
+  CHECK_SPAN(!lhs->dtype_.IsPackedFp4() && !rhs->dtype_.IsPackedFp4(), span)
+      << kOpName
+      << " native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
+         "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions";
   CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
       << kOpName << " requires FP8E4M3FN data tensors";
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)
@@ -376,6 +395,7 @@ REGISTER_OP("tensor.matmul")
     .set_attr<bool>("a_trans")
     .set_attr<bool>("b_trans")
     .set_attr<bool>("c_matrix_nz")
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorMatMulType(args, kwargs);
@@ -383,10 +403,11 @@ REGISTER_OP("tensor.matmul")
 
 REGISTER_OP("tensor.quant_mx")
     .set_op_category("TensorOp")
-    .set_description("MXFP8 quantization of a 2D GM tensor into data and MX scale tensors")
+    .set_description("MXFP8/MXFP4 quantization of a 2D GM tensor into data and MX scale tensors")
     .add_argument("src", "FP16/BF16/FP32 source tensor")
     .set_attr<int>("group_axis")
     .set_attr<DataType>("dtype")
+    .set_attr<std::string>("quant_scale_alg")
     .set_output_arity(2)
     .no_arg_writes()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -439,6 +460,15 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   const auto& acc_shape = acc_type->shape_;
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
+  CheckMatmulTf32Mode(kwargs, lhs_type->dtype_, rhs_type->dtype_, lhs_shape.size(), rhs_shape.size(),
+                      args[0]->span_, "tensor.matmul_acc");
+
+  for (const auto& [key, value] : kwargs) {
+    if (key == "tf32_mode") {
+      CHECK_SPAN(acc_shape.size() == 2, args[0]->span_)
+          << "tensor.matmul_acc tf32_mode currently requires a 2D accumulator";
+    }
+  }
 
   CHECK(acc_shape.size() >= 2) << "tensor.matmul_acc requires acc to be at least 2D, but got "
                                << acc_shape.size() << "D";
@@ -526,6 +556,7 @@ REGISTER_OP("tensor.matmul_acc")
                   "lhs @ rhs instead of accumulated into (the split-K `k == 0` step)")
     .set_attr<bool>("a_trans")
     .set_attr<bool>("b_trans")
+    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorMatMulAccType(args, kwargs);

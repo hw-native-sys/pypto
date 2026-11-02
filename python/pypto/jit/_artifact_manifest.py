@@ -18,7 +18,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from pypto._artifact_contract import ExecutionCapabilities
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import IDENTITY_SCHEMA, ToolchainIdentity, _file_digest, digest_record
 
 ARTIFACT_SCHEMA = 2
@@ -56,8 +56,11 @@ class ArtifactKey:
     environment: ToolchainIdentity
     source_digest: str
     specialization_digest: str
+    contract: ArtifactExecutionMode = ArtifactExecutionMode.PROGRAM
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not ArtifactExecutionMode:
+            raise ValueError(f"Invalid compilation contract {self.contract!r}")
         if (
             not self.environment.usable
             or type(self.environment.schema) is not int
@@ -79,6 +82,7 @@ class ArtifactKey:
             "environment": environment,
             "source": self.source_digest,
             "specialization": self.specialization_digest,
+            "contract": self.contract.value,
         }
 
     @property

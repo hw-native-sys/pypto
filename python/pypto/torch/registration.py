@@ -22,7 +22,15 @@ from typing import Any, cast
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
-from pypto.ir.param_info import _DATATYPE_TO_CTYPE, ParamInfo, _to_torch_dtype, bind_complete_args
+from pypto.ir.param_info import (
+    _DATATYPE_TO_CTYPE,
+    ParamInfo,
+    _matches_torch_dtype,
+    _to_torch_dtype,
+    bind_complete_args,
+    validate_parameter_names,
+    validate_return_aliases,
+)
 from pypto.pypto_core.ir import ParamDirection
 
 from .interop import _scalar_value
@@ -82,21 +90,14 @@ class RegistrationSignature:
     """
 
     def __init__(self, params: Sequence[ParamInfo], *, return_aliases: Sequence[int] = ()) -> None:
-        """Copy the signature and reject contracts the helper cannot express."""
-        self._params = tuple(
-            ParamInfo(p.name, p.direction, list(p.shape) if p.shape is not None else None, p.dtype)
-            for p in params
-        )
+        """Retain immutable parameters and reject contracts the helper cannot express."""
+        self._params = tuple(params)
         self._return_aliases = tuple(return_aliases)
-        names: set[str] = set()
+        validate_parameter_names(self._params)
+        validate_return_aliases(self._params, self._return_aliases)
         tensor_count = 0
         for info in self._params:
             _check_name(info.name)
-            if info.name in names:
-                raise ValueError(f"Duplicate parameter name {info.name!r}")
-            names.add(info.name)
-            if info.direction not in (ParamDirection.In, ParamDirection.Out, ParamDirection.InOut):
-                raise ValueError(f"Parameter {info.name!r} has unsupported direction {info.direction}")
             if info.shape is None:
                 if info.direction != ParamDirection.In:
                     raise ValueError(f"Scalar parameter {info.name!r} must have direction In")
@@ -105,17 +106,9 @@ class RegistrationSignature:
                 tensor_count += 1
                 if _to_torch_dtype(info.dtype) is None:
                     raise TypeError(f"Parameter {info.name!r} has unsupported tensor dtype {info.dtype}")
-                if any(type(dim) is not int or dim < -1 for dim in info.shape):
-                    raise ValueError(f"Parameter {info.name!r} requires nonnegative dimensions or -1")
         if not tensor_count:
             raise ValueError("Dispatcher metadata registration requires at least one tensor parameter")
         for index in self._return_aliases:
-            if (
-                type(index) is not int
-                or not 0 <= index < len(self._params)
-                or self._params[index].shape is None
-            ):
-                raise ValueError(f"Return alias must reference a tensor parameter, got {index!r}")
             if self._params[index].direction == ParamDirection.In:
                 raise ValueError(
                     "Return aliases require Out/InOut tensors; read-only identity returns are unsupported"
@@ -155,7 +148,7 @@ class RegistrationSignature:
                 raise ValueError(f"Parameter {info.name!r} has device {arg.device}, expected {device}")
             device = arg.device
             dtype = _to_torch_dtype(info.dtype)
-            if arg.dtype != dtype:
+            if not _matches_torch_dtype(info.dtype, arg.dtype):
                 raise TypeError(f"Parameter {info.name!r} expects dtype {dtype}, got {arg.dtype}")
             if arg.layout != torch.strided or not arg.is_contiguous():
                 raise ValueError(f"Parameter {info.name!r} requires a contiguous strided tensor")

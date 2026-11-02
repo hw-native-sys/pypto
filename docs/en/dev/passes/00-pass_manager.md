@@ -503,7 +503,7 @@ The PTO-oriented tile stage of `Default` is:
 15. [`StampTfreeSplit`](28-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
 16. `NormalizeReturnOrder`
 17. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
-18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) (rotates an eligible `pl.pipeline` body through the slots of one allocation instead of replicating it; self-gated on `memory_planner=PTOAS`, and every loop it declines is left for `LowerPipelineLoops`)
+18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) (opt-in fixed-address single-level Vec software pipelining under PyPTO, or same-iteration rotation under PTOAS; declined loops retain unroll)
 19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
 20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
 21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6

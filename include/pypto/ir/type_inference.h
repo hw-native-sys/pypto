@@ -320,6 +320,11 @@ void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const s
  */
 DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs);
 
+/// Validate opt-in HF32 rounding: two rank-2 FP32 operands and a supported mode.
+void CheckMatmulTf32Mode(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType lhs,
+                         DataType rhs, size_t lhs_rank, size_t rhs_rank, const Span& span,
+                         const std::string& op_name);
+
 /**
  * @brief Can the Cube writeback turn @p accumulator into @p out without a scale?
  *
@@ -935,6 +940,17 @@ inline bool ValidExtentsEqual(const std::vector<ExprPtr>& lhs, const std::vector
 }
 
 /**
+ * @brief Whether element-indexed tile inputs have compatible valid regions under broadcasting.
+ *
+ * Axes align from the right, as in BroadcastShapes. A physical singleton may
+ * broadcast only if its element is valid; other aligned axes must have provably
+ * equal valid extents. Physical broadcast compatibility is checked separately
+ * by the operator's type deduction. Packed predicate carriers and insertion
+ * windows have different read contracts and must not use this comparison.
+ */
+bool BroadcastValidRegionsAgree(const TileType& lhs, const TileType& rhs);
+
+/**
  * @brief Whether `cond_type` is the packed predicate mask for a `mask_model`.
  *
  * `tile.select` accepts exactly one condition form: the `tile.cmp` / `tile.cmps`
@@ -983,40 +999,44 @@ inline TypePtr MakeFreshTensorType(std::vector<ExprPtr> shape, DataType dtype,
                                       std::make_optional(std::move(view)));
 }
 
-/// Packed FP4E2M1X2 ↔ a wider element type is a 2:1 last-axis conversion.
-/// Logical FP4 (pre-pack) keeps a 1:1 geometry.
+/// Packed FP4 ↔ a wider element type is a 2:1 last-axis conversion.
 inline bool IsFp4PackedCastGeometryChange(DataType src, DataType dst) {
-  return (src.IsPackedFp4() && !dst.IsFp4Family()) || (!src.IsFp4Family() && dst.IsPackedFp4());
+  return (src.IsPackedFp4() && !dst.IsPackedFp4()) || (!src.IsPackedFp4() && dst.IsPackedFp4());
 }
 
-/// Reject FP4 ↔ FP4E2M1X2 family-internal casts (geometry would disagree with Assign).
-inline void RejectFp4FamilyInternalCast(DataType src, DataType dst, const Span& span) {
-  CHECK_SPAN(!(src.IsFp4Family() && dst.IsFp4Family()), span)
-      << "cast between FP4 and FP4E2M1X2 is not supported; cast via a wider type (e.g. BF16) "
-         "or rewrite shapes to the target packing explicitly (see docs/en/dev/fp4.md)";
+/// The A5 FP4 narrowing instruction implements the five ordinary rounding modes.
+/// ODD has no FP4 encoding; the ISA fallback would silently round to nearest-even.
+inline void ValidatePackedFp4CastMode(DataType target_dtype, int mode, const Span& span) {
+  constexpr int kCastModeOdd = 6;
+  CHECK_SPAN(!target_dtype.IsPackedFp4() || mode != kCastModeOdd, span)
+      << "cast to packed FP4 does not support mode=odd; use rint, round, floor, ceil, or trunc";
 }
 
-/// Scale last-axis extents for post-PackFp4 casts between packed FP4E2M1X2 and a
-/// wider element type. Logical FP4 (pre-pack) keeps a 1:1 shape.
-/// Wider → packed requires a static positive even last dim (dynamic rejected).
-inline std::vector<ExprPtr> AdjustFp4E2M1x2CastLastDim(std::vector<ExprPtr> dims, DataType src, DataType dst,
+/// Scale last-axis extents for casts between either packed FP4 carrier format and a
+/// wider element type.
+/// Packing requires complete pairs: static positive even extents or a symbolic
+/// extent whose divisibility by two is provable (for example 2 * valid_cols).
+inline std::vector<ExprPtr> AdjustPackedFp4CastLastDim(std::vector<ExprPtr> dims, DataType src, DataType dst,
                                                        const Span& span) {
-  RejectFp4FamilyInternalCast(src, dst, span);
   if (dims.empty()) return dims;
-  if (src.IsPackedFp4() && !dst.IsFp4Family()) {
+  if (src.IsPackedFp4() && !dst.IsPackedFp4()) {
     if (auto extent = As<ConstInt>(dims.back())) {
       dims.back() = std::make_shared<ConstInt>(extent->value_ * 2, DataType::INDEX, span);
     } else {
       dims.back() = MakeMul(dims.back(), std::make_shared<ConstInt>(2, DataType::INDEX, span), span);
     }
-  } else if (!src.IsFp4Family() && dst.IsPackedFp4()) {
+  } else if (!src.IsPackedFp4() && dst.IsPackedFp4()) {
     if (auto extent = As<ConstInt>(dims.back())) {
       CHECK_SPAN(extent->value_ > 0 && extent->value_ % 2 == 0, span)
-          << "cast to FP4E2M1X2 requires a positive even last dimension, got " << extent->value_;
+          << "cast to packed FP4 requires a positive even last dimension, got " << extent->value_;
       dims.back() = std::make_shared<ConstInt>(extent->value_ / 2, DataType::INDEX, span);
     } else {
-      CHECK_SPAN(false, span) << "cast to FP4E2M1X2 requires a static positive even last dimension "
-                                 "(dynamic last axes are not supported; see docs/en/dev/fp4.md)";
+      const auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+      const auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+      CHECK_SPAN(DimensionsEqual(MakeFloorMod(dims.back(), two, span), zero), span)
+          << "cast to packed FP4 requires a static positive even last dimension or a provably even "
+             "dynamic extent; express complete pairs as 2 * carrier_count";
+      dims.back() = MakeFloorDiv(dims.back(), two, span);
     }
   }
   return dims;
@@ -1040,14 +1060,16 @@ inline std::vector<ExprPtr> RowMajorStridesFromShape(const std::vector<ExprPtr>&
   return strides;
 }
 
-/// Packed FP4E2M1X2 ↔ wider-type casts allocate a fresh dense result. Rebuild
+/// Packed FP4 ↔ wider-type casts allocate a fresh dense result. Rebuild
 /// contiguous row-major strides from @p dst_shape; never scale source strides
 /// (a non-contiguous source would otherwise produce a wrong pitch, e.g. [64,1]
 /// unpacking to [128,1] instead of [64,1]).
-inline std::vector<ExprPtr> AdjustFp4E2M1x2CastStrides(std::vector<ExprPtr> src_strides,
+inline std::vector<ExprPtr> AdjustPackedFp4CastStrides(std::vector<ExprPtr> src_strides,
                                                        const std::vector<ExprPtr>& dst_shape, DataType src,
                                                        DataType dst, const Span& span) {
-  if (!IsFp4PackedCastGeometryChange(src, dst)) return src_strides;
+  if (!IsFp4PackedCastGeometryChange(src, dst) && !(src.IsPackedFp4() && dst.IsPackedFp4())) {
+    return src_strides;
+  }
   return RowMajorStridesFromShape(dst_shape, span);
 }
 
@@ -1071,11 +1093,14 @@ std::unordered_map<const Var*, ExprPtr> DeduceCallTypeBindings(const std::vector
  * @param callee_params  Callee function parameter variables
  * @param args           Actual call argument expressions
  * @param return_types   Callee's declared return types
+ * @param is_inline      Whether the call will be expanded before lowering.
+ *                       Conflicting generic Tile physical dimensions stay
+ *                       provisional until expansion recovers each actual type.
  * @return Substituted return types (unchanged if no dynamic vars found)
  */
 std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_params,
                                           const std::vector<ExprPtr>& args,
-                                          const std::vector<TypePtr>& return_types);
+                                          const std::vector<TypePtr>& return_types, bool is_inline = false);
 
 /**
  * @brief Parse and validate the optional ``drop_dims`` operand of a slice op.

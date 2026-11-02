@@ -12,28 +12,36 @@
 import ast
 import math
 import textwrap
+import types
 import warnings
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import Any
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.backend import BackendType
+from pypto.jit._specialize_body import BodyTransformer
+from pypto.jit._specialize_values import layout_str, render_free_value
 from pypto.jit.specializer import (
     DynDim,
     SpecializeContext,
     Specializer,
     TensorMeta,
-    _BodyTransformer,
     _build_tensor_annotation,
     _classify_params,
     _collect_annotation_dynamic_dims,
     _collect_dynamic_dims,
     _collect_dynvar_names,
     _infer_return_type,
-    _layout_str,
-    _render_free_value,
+    _unwrap_direction_annotation,
+    build_specialize_context,
     specialize,
+    tile_annotation_fingerprints,
 )
 from pypto.pypto_core import DataType, ir
+from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -352,7 +360,7 @@ class TestClassifyParams:
 
 
 # ---------------------------------------------------------------------------
-# _BodyTransformer
+# BodyTransformer
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +371,7 @@ class TestBodyTransformer:
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
         # DynDim info now lives inside tensor_meta.shape — tests inject it there
         # directly when needed (see test_shape_unpack_expanded_dynamic / etc.).
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=tensor_meta,
             dep_names=dep_names or set(),
         )
@@ -483,7 +491,7 @@ class TestBodyTransformer:
         src = textwrap.dedent(src)
         tree = ast.parse(src)
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=tensor_meta,
             dep_names=set(),
             py_globals=py_globals,
@@ -606,7 +614,7 @@ class TestBodyTransformer:
 
 
 class TestRenderFreeValue:
-    """``_render_free_value`` — the single answer to "can this value be written as source?"."""
+    """``render_free_value`` — the single answer to "can this value be written as source?"."""
 
     @pytest.mark.parametrize(
         "value, expected",
@@ -633,7 +641,7 @@ class TestRenderFreeValue:
         ],
     )
     def test_renders_to_evaluable_source(self, value, expected):
-        rendered = _render_free_value(value)
+        rendered = render_free_value(value)
         assert rendered is not None
         assert ast.unparse(rendered) == expected
 
@@ -650,7 +658,7 @@ class TestRenderFreeValue:
     )
     def test_rendered_source_evaluates_back_to_the_value(self, value, expected):
         """The rendered text is only useful if ``pl`` can evaluate it back."""
-        rendered = _render_free_value(value)
+        rendered = render_free_value(value)
         assert rendered is not None
         assert eval(ast.unparse(rendered), {"pl": pl}) == expected  # noqa: S307
 
@@ -661,14 +669,14 @@ class TestRenderFreeValue:
     )
     def test_declines_values_with_no_source_form(self, value):
         """Declining is the safe answer: the name survives and the parser reports it."""
-        assert _render_free_value(value) is None
+        assert render_free_value(value) is None
 
     @pytest.mark.parametrize("enum_type", [pld.ReduceOp, pld.NotifyOp, pld.WaitCmp, pld.AtomicType])
     def test_distributed_enum_members_round_trip(self, enum_type):
         # AtomicType is shared with pl; its existing canonical spelling stays stable.
         prefix = "pl" if enum_type is pld.AtomicType else "pld"
         for member in enum_type:
-            rendered = _render_free_value(member)
+            rendered = render_free_value(member)
             assert rendered is not None
             source = ast.unparse(rendered)
             assert source == f"{prefix}.{enum_type.__name__}.{member.name}"
@@ -676,7 +684,7 @@ class TestRenderFreeValue:
 
     def test_nan_renders_as_a_nan_producing_expression(self):
         """NaN has no literal, but ast.unparse still writes something evaluable."""
-        rendered = _render_free_value(float("nan"))
+        rendered = render_free_value(float("nan"))
         assert rendered is not None
         assert math.isnan(eval(ast.unparse(rendered), {"__builtins__": {}}))  # noqa: S307
 
@@ -1276,7 +1284,7 @@ class TestSpecializerIntegration:
 
 
 class TestVariableRebinding:
-    """Tests for alpha-renaming of variable rebindings in _BodyTransformer."""
+    """Tests for alpha-renaming of variable rebindings in BodyTransformer."""
 
     def _transform(self, src: str, tensor_meta: dict | None = None) -> str:
         src = textwrap.dedent(src)
@@ -1288,7 +1296,7 @@ class TestVariableRebinding:
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
-        transformer = _BodyTransformer(
+        transformer = BodyTransformer(
             tensor_meta=tensor_meta or {},
             dep_names=set(),
             param_names=param_names,
@@ -1323,6 +1331,37 @@ class TestVariableRebinding:
         out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
         assert "x =" in out
         assert "x_v1" not in out
+
+    def test_chained_assignment_keeps_rhs_snapshot(self):
+        """Chains evaluate once and do not read stale inlined or renamed targets."""
+        src = """
+            def f(a):
+                total = 32
+                total = half = total = observe(total // 2)
+                saved = total + half
+                total = total + 1
+                total = half = observe(a.shape[1])
+                width = a.shape[1]
+                with scope():
+                    width = other = observe(width // 2)
+                return saved, total, half, width, other
+        """
+        transformed = self._transform(src, tensor_meta={"a": TensorMeta((1, 128), DataType.FP32)})
+        calls = []
+
+        def observe(value):
+            calls.append(value)
+            return value
+
+        namespace: dict = {"observe": observe, "scope": nullcontext}
+        exec(transformed, namespace)
+        assert namespace["f"](None) == (32, 128, 128, 64, 64)
+        assert calls == [16, 128, 64]
+        assert all(
+            len(node.targets) == 1
+            for node in ast.walk(ast.parse(transformed))
+            if isinstance(node, ast.Assign)
+        )
 
     def test_rebind_generates_fresh_name(self):
         src = """
@@ -1402,6 +1441,60 @@ class TestVariableRebinding:
         # x is a param, so re-assignment generates x_v1; reads of x after rebinding → x_v1
         assert "x_v1 = some_call(x)" in out
         assert "y = x_v1" in out
+
+    def test_rebound_tensor_shape_reads_current_value(self):
+        """Dimension arithmetic after a parameter rebind uses its new tensor."""
+        src = """
+            def f(src, other):
+                before = src.shape[1]
+                saved = src
+                with scope():
+                    src = identity(src)
+                    src = saved
+                    restored = src.shape
+                with scope():
+                    src = other
+                    nested = src.shape[1]
+                src = other
+                width = src.shape[1]
+                half = width // 2
+                rows, cols, tail = src.shape
+                whole = src.shape
+                dtype = src.dtype
+                src: object = src
+                annotated = src.shape
+                total = src.shape[0] * width
+                return before, nested, width, half, total, rows, cols, tail, whole, dtype, annotated, restored
+        """
+        transformed = self._transform(
+            src,
+            tensor_meta={
+                "src": TensorMeta((1, 128), DataType.FP32),
+                "other": TensorMeta((4, 64, 2), DataType.FP16),
+            },
+        )
+        namespace = {
+            "pl": SimpleNamespace(
+                tensor=SimpleNamespace(dim=lambda tensor, axis: tensor[axis]), FP16=DataType.FP16
+            ),
+            "scope": nullcontext,
+            "identity": lambda tensor: tensor,
+        }
+        exec(transformed, namespace)
+        assert namespace["f"]((1, 128), (4, 64, 2)) == (
+            128,
+            64,
+            64,
+            32,
+            256,
+            4,
+            64,
+            2,
+            (4, 64, 2),
+            DataType.FP16,
+            (4, 64, 2),
+            (1, 128),
+        )
 
     def test_alias_skips_collision(self):
         """Generated alias skips names already defined by the user."""
@@ -2064,6 +2157,33 @@ class TestArrayParamAnnotation:
         assert "buf: pl.Array[4, pl.BF16]" in out
         assert "BFLOAT16" not in out
 
+    @pytest.mark.parametrize("shadowed", [False, True])
+    def test_array_with_module_alias_and_dtype_constant(self, shadowed):
+        """Original aliases work whether canonical ``pl`` is absent or shadowed."""
+        src = """
+            def kernel(buf: p.Array[4, DTYPE]):
+                return buf
+        """
+        namespace: dict[str, Any] = {"p": pl, "DTYPE": pl.BF16}
+        if shadowed:
+            namespace["pl"] = object()
+        out = self._specialize_with_globals(src, ["buf"], {}, py_globals=namespace)
+        assert "buf: pl.Array[4, pl.BF16]" in out
+
+    def test_annotation_evaluation_respects_original_pl_binding(self):
+        """Canonical rendering must not make an invalid original annotation valid."""
+        src = """
+            def kernel(buf: pl.Array[4, DTYPE]):
+                return buf
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["buf"],
+            {},
+            py_globals={"p": pl, "pl": object(), "DTYPE": pl.BF16},
+        )
+        assert "def kernel(self, buf):" in out
+
     def test_generated_source_is_parseable(self):
         """The generated source is syntactically valid Python and carries no
         bare (unannotated) parameter — the concrete regression guard."""
@@ -2127,6 +2247,857 @@ class TestArrayParamAnnotation:
         assert "x: pl.Array" not in out
 
 
+def _annotation_function(
+    func: Any, annotations: dict[str, Any], annotation_globals: dict[str, Any] | None = None
+) -> types.FunctionType:
+    """Clone annotation bindings without mutating the defining module's globals."""
+    clone = types.FunctionType(
+        func.__code__, {**func.__globals__, **(annotation_globals or {})}, func.__name__
+    )
+    clone.__annotations__ = annotations
+    return clone
+
+
+def _inline_context(
+    func: Any,
+    *,
+    tensor_meta: dict[str, TensorMeta] | None = None,
+    constexpr_values: dict[str, str] | None = None,
+) -> SpecializeContext:
+    """Build an inline annotation context without unrelated caller metadata."""
+    return build_specialize_context(
+        func,
+        func.__name__,
+        "inline",
+        None,
+        tensor_meta or {},
+        {},
+        [],
+        auto_scope=False,
+        constexpr_values=constexpr_values,
+    )
+
+
+def _specialized_function(ctx: SpecializeContext, source: str | None = None) -> ir.Function:
+    """Parse generated annotation source and retrieve its typed function."""
+    program = pl.parse(source if source is not None else specialize("_TestClass", [ctx]))
+    assert isinstance(program, ir.Program)
+    func = program.get_function(ctx.func_name)
+    assert func is not None
+    return func
+
+
+class TestInlineTileParamAnnotations:
+    """Explicit Tile parameters must survive JIT signature specialization."""
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "pl",
+            "pld",
+            "class",
+            "for",
+            "__debug__",
+            "\uff50\uff4c",
+            "\U0001d699\U0001d695",
+            "\uff50\uff4c\uff44",
+            "\uff43\uff4c\uff41\uff53\uff53",
+            "\uff2d",
+            "\U0001d474",
+        ],
+    )
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_unsafe_dynamic_labels_rejected_before_source_emission(self, label, postponed):
+        """Canonical Tile symbols cannot overwrite DSL imports or invalidate Python syntax."""
+        dimension = pl.dynamic(label)
+
+        def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
+            return tile
+
+        helper = keep_tile
+        if postponed:
+            helper = _annotation_function(
+                keep_tile, {"tile": "pl.Tile[[dimension, 64], pl.FP32]"}, {"dimension": dimension}
+            )
+        with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+            ctx = _inline_context(helper)
+            specialize("_TestClass", [ctx])
+
+    @pytest.mark.parametrize("label", ["class", "for", "__debug__"])
+    @pytest.mark.parametrize("metadata", [False, True], ids=["shape", "metadata"])
+    def test_parameterized_annotation_fingerprint_rejects_keyword_label(self, label, metadata):
+        """Cache rendering diagnoses an invalid free label before parsing canonical source."""
+        dimension = pl.dynamic(label)
+
+        def keep_tile(tile, ROWS):
+            return tile
+
+        component = (
+            "[[ROWS, 64], pl.FP32, pl.TileView(valid_shape=[dimension, 64])]"
+            if metadata
+            else "[[ROWS, dimension], pl.FP32]"
+        )
+        helper = _annotation_function(
+            keep_tile, {"tile": f"pl.Tile{component}", "ROWS": "pl.constexpr"}, {"dimension": dimension}
+        )
+        with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+            tile_annotation_fingerprints(helper)
+
+    @pytest.mark.parametrize(
+        "label",
+        ["match", "case", "type", "_pypto_tile_param_0", "__name__", "__builtins__", "\u884c", "\u03b1"],
+    )
+    def test_safe_dynamic_labels_still_parse(self, label):
+        """Soft keywords and internal-looking user symbols remain legal declarations."""
+        dimension = pl.dynamic(label)
+
+        def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
+            return tile
+
+        ctx = _inline_context(keep_tile)
+        source = specialize("_TestClass", [ctx])
+        assert f'{label} = pl.dynamic("{label}")' in source
+        helper = _specialized_function(ctx, source)
+        tile_type = helper.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert isinstance(tile_type.shape[0], ir.Var)
+        assert tile_type.shape[0].name_hint == label
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "pl",
+            "pld",
+            "class",
+            "__debug__",
+            "\uff50\uff4c",
+            "\uff43\uff4c\uff41\uff53\uff53",
+            "match",
+            "\u884c",
+        ],
+    )
+    def test_dynamic_label_validation_through_jit_compile(self, label):
+        """The public compile path rejects unsafe labels and compiles a legal soft keyword."""
+        dimension = pl.dynamic(label)
+
+        def compile_entry():
+            @pl.jit.inline(auto_scope=False)
+            def keep_tile(tile: pl.Tile[[dimension, 64], pl.FP32]):
+                return tile
+
+            @pl.jit.incore
+            def copy_incore(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+                tile = pl.load(src, [0, 0], [8, 64])
+                kept = keep_tile(tile)
+                return pl.store(kept, [0, 0], dst)
+
+            @pl.jit
+            def entry(src: pl.Tensor[[8, 64], pl.FP32], dst: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+                return copy_incore(src, dst)
+
+            return entry.compile(
+                config=RunConfig(
+                    backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+                )
+            )
+
+        if label not in {"match", "\u884c"}:
+            with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+                compile_entry()
+            return
+        assert compile_entry() is not None
+
+    @pytest.mark.parametrize("label", ["not-valid", "bad label"])
+    def test_invalid_native_annotation_symbol_has_clear_diagnostic(self, label):
+        """Prebuilt IR metadata cannot bypass the generated-identifier validation."""
+        dimension = pl.Scalar(expr=ir.Var(label, ir.ScalarType(pl.INDEX), ir.Span.unknown()))
+
+        def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.TileView(valid_shape=[dimension, 64])]):
+            return tile
+
+        with pytest.raises(ValueError, match=rf"dynamic symbol.*'{label}'.*different"):
+            _inline_context(keep_tile)
+
+    @pytest.mark.parametrize("literal", ["pl", "__debug__"])
+    def test_tensor_alias_with_reserved_literal_keeps_its_safe_binding(self, literal):
+        """A safe emitted Tensor alias is distinct from the DynVar's internal literal."""
+        ctx = _make_ctx(
+            "entry",
+            "def entry(src: pl.Tensor):\n    return src",
+            param_names=["src"],
+            tensor_meta={"src": TensorMeta((DynDim("ROWS", literal, 8), 64), DataType.FP32)},
+            auto_scope=False,
+        )
+        source = specialize("_TestClass", [ctx])
+        assert f'ROWS = pl.dynamic("{literal}")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    @pytest.mark.parametrize("symbol_name", ["tile", "anchor"])
+    def test_generic_tile_symbol_can_match_nonscalar_parameter(self, postponed, symbol_name):
+        """Shape globals remain needed even when an earlier parameter has the same name."""
+        ROWS = pl.dynamic(symbol_name)
+
+        def keep_tile(
+            anchor: pl.Tensor[[8, 64], pl.FP32],
+            tile: pl.Tile[[ROWS, 64], pl.FP32],
+            other: pl.Tile[[ROWS, 64], pl.FP32],
+        ):
+            return tile
+
+        helper = keep_tile
+        if postponed:
+            helper = _annotation_function(
+                keep_tile,
+                {
+                    "anchor": "pl.Tensor[[8, 64], pl.FP32]",
+                    "tile": "pl.Tile[[ROWS, 64], pl.FP32]",
+                    "other": "pl.Tile[[ROWS, 64], pl.FP32]",
+                },
+                {"ROWS": ROWS},
+            )
+        ctx = _inline_context(helper, tensor_meta={"anchor": TensorMeta((8, 64), DataType.FP32)})
+        source = specialize("_TestClass", [ctx])
+        assert f'{symbol_name} = pl.dynamic("{symbol_name}")' in source
+        func = _specialized_function(ctx, source)
+        for param in func.params[1:]:
+            tile_type = param.type
+            assert isinstance(tile_type, ir.TileType)
+            assert isinstance(tile_type.shape[0], ir.Var)
+            assert isinstance(tile_type.shape[0].type, ir.ScalarType)
+            assert tile_type.shape[0].name_hint == symbol_name
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_scalar_dimension_matching_parameter_stays_local(self, postponed):
+        """A real Scalar supplies the dimension and must not be shadowed by a new global."""
+        tile = pl.dynamic("tile")
+
+        def keep_tile(tile: pl.Scalar[pl.INDEX], value: pl.Tile[[tile, 64], pl.FP32]):
+            return value
+
+        helper = keep_tile
+        if postponed:
+            helper = _annotation_function(
+                keep_tile,
+                {"tile": "pl.Scalar[pl.INDEX]", "value": "pl.Tile[[tile, 64], pl.FP32]"},
+                {"tile": tile},
+            )
+        ctx = _inline_context(helper)
+        source = specialize("_TestClass", [ctx])
+        assert 'tile = pl.dynamic("tile")' not in source
+        func = _specialized_function(ctx, source)
+        tile_type = func.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert ir.structural_equal(tile_type.shape[0], func.params[0])
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    @pytest.mark.parametrize("mixed_axes", [False, True])
+    def test_free_dynvar_name_is_not_a_constexpr_reference(self, rows, mixed_axes):
+        """Canonical free-symbol spelling must not turn into a helper parameter use."""
+        M = pl.dynamic("ROWS")
+        ROWS = 99
+        if mixed_axes:
+
+            def keep_tile(tile: pl.Tile[[M, ROWS], pl.FP32], ROWS: pl.constexpr):
+                return tile
+
+        else:
+
+            def keep_tile(tile: pl.Tile[[M, 64], pl.FP32], ROWS: pl.constexpr):
+                return tile
+
+        ctx = _inline_context(keep_tile, constexpr_values={"ROWS": str(rows)})
+        func = _specialized_function(ctx)
+        tile_type = func.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert isinstance(tile_type.shape[0], ir.Var)
+        assert tile_type.shape[0].name_hint == "ROWS"
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert tile_type.shape[1].value == (rows if mixed_axes else 64)
+
+    def test_parameter_marker_avoids_folded_free_symbol_names(self):
+        """A free alias may use the marker prefix even when eager math folds it away."""
+        M = pl.dynamic("_pypto_tile_param_0")
+        ROWS = 0
+
+        def keep_tile(tile: pl.Tile[[ROWS * M, 64], pl.FP32], ROWS: pl.constexpr):
+            return tile
+
+        # This hygiene case requires a source-evaluable free operand. A
+        # factory-only operand erased inside a product is diagnosed separately.
+        helper = _annotation_function(keep_tile, keep_tile.__annotations__, {"M": M})
+        ctx = _inline_context(helper, constexpr_values={"ROWS": "8"})
+        func = _specialized_function(ctx)
+        span = ir.Span.unknown()
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType(
+                [ir.ConstInt(8, DataType.INDEX, span) * M.unwrap(), ir.ConstInt(64, DataType.INDEX, span)],
+                DataType.FP32,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_distinct_free_symbol_matching_scalar_name_is_diagnosed(self, postponed):
+        """Separate free and local dimensions cannot silently share one emitted name."""
+        M = pl.dynamic("tile")
+        tile = 99
+
+        def keep_tile(tile: pl.Scalar[pl.INDEX], value: pl.Tile[[M, tile], pl.FP32]):
+            return value
+
+        helper = keep_tile
+        if postponed:
+            helper = _annotation_function(
+                keep_tile, {"tile": "pl.Scalar[pl.INDEX]", "value": "pl.Tile[[M, tile], pl.FP32]"}, {"M": M}
+            )
+        with pytest.raises(ValueError, match="Free dynamic symbol 'tile'.*Scalar parameter"):
+            ctx = _inline_context(helper)
+            specialize("_TestClass", [ctx])
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_scalar_metadata_override_keeps_true_local_binding(self, postponed):
+        """A raw ambient view is replaced before checking the genuine Scalar dimension."""
+        count = pl.dynamic("count")
+
+        def keep_tile(
+            count: pl.Scalar[pl.INDEX],
+            tile: pl.Tile[
+                [8, 64], pl.FP32, pl.TileView(valid_shape=[count, 64], start_offset=count.unwrap())
+            ],
+        ):
+            return tile
+
+        helper = keep_tile
+        if postponed:
+            helper = _annotation_function(
+                keep_tile,
+                {
+                    "count": "pl.Scalar[pl.INDEX]",
+                    "tile": "pl.Tile[[8, 64], pl.FP32, "
+                    "pl.TileView(valid_shape=[count, 64], start_offset=count.unwrap())]",
+                },
+            )
+        ctx = _inline_context(helper)
+        source = specialize("_TestClass", [ctx])
+        assert 'count = pl.dynamic("count")' not in source
+        func = _specialized_function(ctx, source)
+        tile_type = func.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert ir.structural_equal(tile_type.tile_view.valid_shape[0], func.params[0])
+        assert tile_type.tile_view.start_offset is not None
+        assert ir.structural_equal(tile_type.tile_view.start_offset, func.params[0])
+
+    def test_direction_wrapper_unwrap_uses_object_identity(self):
+        source = "Direction[pl.Tile[[8, 64], pl.FP32]]"
+        for wrapper in (pl.Out, pl.InOut):
+            node = _unwrap_direction_annotation(ast.parse(source, mode="eval").body, {"Direction": wrapper})
+            assert ast.unparse(node) == "pl.Tile[[8, 64], pl.FP32]"
+        # An unrelated object named InOut has no DSL passthrough contract.
+        source = "InOut[pl.Tile[[8, 64], pl.FP32]]"
+        node = _unwrap_direction_annotation(ast.parse(source, mode="eval").body, {"InOut": object()})
+        assert ast.unparse(node) == source
+
+    @pytest.mark.parametrize("dtype", ["FP32", "BF16"])
+    @pytest.mark.parametrize("func_type", ["inline", "incore"])
+    def test_explicit_tile_annotation_preserved(self, dtype, func_type):
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: pl.Tile[[8, 64], pl.{dtype}, pl.MemorySpace.Vec]) -> pl.Tile:
+                    return tile
+            """,
+            func_type=func_type,
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+
+        func = _specialized_function(ctx)
+        assert func.func_type == (ir.FunctionType.Inline if func_type == "inline" else ir.FunctionType.InCore)
+        assert len(func.params) == 1
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([8, 64], getattr(DataType, dtype), memory_space=ir.MemorySpace.Vec),
+        )
+
+    @pytest.mark.parametrize(
+        "tile_name,view_name,memref_name,space_name",
+        [
+            ("p.Tile", "p.TileView", "p.MemRef", "p.Mem.Vec"),
+            ("Tile", "View", "Ref", "MS.Vec"),
+        ],
+    )
+    def test_aliases_render_canonically_without_losing_metadata(
+        self, tile_name, view_name, memref_name, space_name
+    ):
+        """Aliases disappear from generated source while the full Tile contract remains."""
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: {tile_name}[[8, 64], DTYPE,
+                              {memref_name}("tile_buffer", 64, 2048), {space_name},
+                              {view_name}(valid_shape=[3, 64], stride=[64, 1], start_offset=0,
+                                          pad=p.PadValue.zero, compact=p.CompactMode.normal)]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {
+            "p": pl,
+            "pl": object(),
+            "Tile": pl.Tile,
+            "View": pl.TileView,
+            "Ref": pl.MemRef,
+            "MS": pl.Mem,
+            "DTYPE": pl.BF16,
+        }
+
+        source = specialize("_TestClass", [ctx])
+        assert "tile: pl.Tile[[8, 64], pl.BF16," in source
+        assert "pl.TileView(" in source and "pl.MemRef(" in source
+        func = _specialized_function(ctx, source)
+        expected_type = ir.TileType(
+            [8, 64],
+            DataType.BF16,
+            memref=ir.MemRef("tile_buffer", 64, 2048),
+            tile_view=ir.TileView(
+                valid_shape=[3, 64],
+                stride=[64, 1],
+                start_offset=ir.ConstInt(0, DataType.INDEX, ir.Span.unknown()),
+                pad=ir.PadValue.zero,
+                compact=ir.CompactMode.normal,
+            ),
+            memory_space=ir.MemorySpace.Vec,
+        )
+        ir.assert_structural_equal(func.params[0].type, expected_type, enable_auto_mapping=True)
+
+    @pytest.mark.parametrize("shadowed", [False, True])
+    def test_eager_factory_annotation_keeps_original_local_value(self, monkeypatch, shadowed):
+        """An annotation-only local cannot be recovered from globals or closure cells."""
+
+        def factory(tile_rows):
+            dtype = pl.BF16
+            allocation = pl.MemRef("tile_buffer", 64, 2048)
+            view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
+
+            def keep_tile(tile: pl.Tile[[tile_rows, 64], dtype, allocation, pl.Mem.Vec, view]):
+                return tile
+
+            return keep_tile
+
+        helper = factory(8)
+        assert not helper.__code__.co_freevars
+        if shadowed:
+            # A same-named module global must not replace the local value that
+            # Python already used when it evaluated the eager annotation.
+            monkeypatch.setitem(helper.__globals__, "tile_rows", 99)
+        ctx = _inline_context(helper)
+        func = _specialized_function(ctx)
+        original = helper.__annotations__["tile"]
+        expected = ir.TileType(
+            original.shape,
+            original.dtype,
+            memref=original.memref,
+            tile_view=original.tile_view,
+            memory_space=original.memory_space,
+        )
+        ir.assert_structural_equal(func.params[0].type, expected, enable_auto_mapping=True)
+
+    def test_eager_generic_tile_normalizes_static_axes(self):
+        """An evaluated [M, 64] mixes a DynVar and an int before IR normalization."""
+        M = pl.dynamic("M")
+
+        def keep_tile(tile: pl.Tile[[M, 64], pl.FP32, pl.Mem.Vec]):
+            return tile
+
+        def entry(src: pl.Tensor[[M, 64], pl.FP32]):
+            return src
+
+        helper_ctx = _inline_context(keep_tile)
+        entry_ctx = build_specialize_context(
+            entry,
+            "entry",
+            "orchestration",
+            None,
+            {"src": TensorMeta((DynDim("M", "M", 8), 64), DataType.FP32)},
+            {},
+            [],
+        )
+        source = specialize("_TestClass", [helper_ctx, entry_ctx])
+        assert 'M = pl.dynamic("M")' in source
+        helper = _specialized_function(helper_ctx, source)
+        tile_type = helper.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert isinstance(tile_type.shape[0], ir.Var)
+        assert tile_type.shape[0].name_hint == "M"
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert tile_type.shape[1].value == 64
+
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            "pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec]",
+            "pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec, "
+            "pl.TileView(valid_shape=[ROWS, 64], stride=[ROWS * 64, 1], start_offset=0)]",
+        ],
+        ids=["physical-shape", "tile-view"],
+    )
+    def test_source_tile_only_dynvars_use_canonical_names(self, annotation):
+        """Tile-only symbols need declarations and may use a different Python alias."""
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: {annotation}):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl, "ROWS": pl.dynamic("TILE_ROWS")}
+
+        source = specialize("_TestClass", [ctx])
+        assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
+        helper = _specialized_function(ctx, source)
+        tile_type = helper.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert "TILE_ROWS" in ir.python_print_type(tile_type)
+
+    def test_eager_factory_tile_view_declares_its_symbols(self):
+        """Dynamic eager metadata retains its factory-only symbol and canonical name."""
+
+        def factory():
+            rows = pl.dynamic("TILE_VALID_ROWS")
+            view = pl.TileView(valid_shape=[rows, 64], stride=[rows * 64, 1], start_offset=rows.unwrap())
+
+            def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec, view]):
+                return tile
+
+            return keep_tile
+
+        helper = factory()
+        assert not helper.__code__.co_freevars
+        ctx = _inline_context(helper)
+        source = specialize("_TestClass", [ctx])
+        assert 'TILE_VALID_ROWS = pl.dynamic("TILE_VALID_ROWS")' in source
+        func = _specialized_function(ctx, source)
+        assert "TILE_VALID_ROWS" in ir.python_print_type(func.params[0].type)
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_source_tile_aggregate_and_metadata_constants_are_canonical(self, dynamic):
+        """Evaluated generic shapes and metadata cannot remain undefined aliases."""
+        dimension = pl.dynamic("TILE_ROWS") if dynamic else 8
+        allocation = pl.MemRef("tile_buffer", 64, 4096)
+        view = pl.TileView(valid_shape=[3, 64], stride=[64, 1], start_offset=0, pad=pl.PadValue.zero)
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(tile: pl.Tile[SHAPE, DTYPE, ALLOCATION, SPACE, VIEW]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {
+            "pl": pl,
+            "SHAPE": [dimension, 64],
+            "DTYPE": pl.BF16,
+            "ALLOCATION": allocation,
+            "SPACE": pl.Mem.Vec,
+            "VIEW": view,
+        }
+
+        source = specialize("_TestClass", [ctx])
+        if dynamic:
+            assert 'TILE_ROWS = pl.dynamic("TILE_ROWS")' in source
+        assert not any(name in source for name in ("SHAPE", "DTYPE", "SPACE", "ALLOCATION", "VIEW"))
+        helper = _specialized_function(ctx, source)
+        shape = (
+            [dimension.unwrap(), ir.ConstInt(64, DataType.INDEX, ir.Span.unknown())]
+            if isinstance(dimension, pl.Scalar)
+            else [dimension, 64]
+        )
+        ir.assert_structural_equal(
+            helper.params[0].type,
+            ir.TileType(
+                shape,
+                DataType.BF16,
+                memref=allocation,
+                tile_view=view,
+                memory_space=ir.MemorySpace.Vec,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    @pytest.mark.parametrize("ambient", [False, True])
+    def test_scalar_tile_dimension_stays_in_function_scope(self, ambient):
+        """A runtime Scalar dimension is a formal, not a frozen or module-level symbol."""
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(ROWS: pl.Scalar[pl.INDEX], tile: pl.Tile[[ROWS, 64], pl.FP32]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["ROWS", "tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+        if ambient:
+            ctx.py_globals["ROWS"] = 8
+
+        source = specialize("_TestClass", [ctx])
+        assert 'ROWS = pl.dynamic("ROWS")' not in source
+        assert "tile: pl.Tile[[ROWS, 64], pl.FP32]" in source
+        helper = _specialized_function(ctx, source)
+        tile_type = helper.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert ir.structural_equal(tile_type.shape[0], helper.params[0])
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    def test_eager_annotation_does_not_freeze_helper_constexpr(self, rows):
+        """Eager evaluation happens before calls and cannot select a constexpr variant."""
+        ROWS = 99
+
+        def keep_tile(tile: pl.Tile[[ROWS, 64], pl.FP32, pl.Mem.Vec], ROWS: pl.constexpr):
+            return tile
+
+        ctx = _inline_context(keep_tile, constexpr_values={"ROWS": str(rows)})
+        func = _specialized_function(ctx)
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([rows, 64], DataType.FP32, memory_space=ir.MemorySpace.Vec),
+        )
+
+    @pytest.mark.parametrize("rows", [8, 16])
+    @pytest.mark.parametrize("valid_rows", [3, 8])
+    @pytest.mark.parametrize("direction", ["bare", "Out", "InOut"])
+    def test_eager_factory_constants_coexist_with_constexpr_axes(self, rows, valid_rows, direction):
+        """An erased factory column and metadata survive a per-call row binding."""
+        ROWS = 8
+
+        def factory(cols):
+            dtype = pl.BF16
+            allocation = pl.MemRef("tile_buffer", 64, 2048)
+            # A full ambient view must retain eight valid rows when the
+            # per-call physical shape later grows to sixteen.
+            view = pl.TileView(valid_shape=[valid_rows, cols], stride=[cols, 1], start_offset=0)
+
+            if direction == "Out":
+
+                def keep_tile(
+                    tile: pl.Out[pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view]],
+                    ROWS: pl.constexpr,
+                ):
+                    return tile
+
+            elif direction == "InOut":
+
+                def keep_tile(
+                    tile: pl.InOut[pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view]],
+                    ROWS: pl.constexpr,
+                ):
+                    return tile
+
+            else:
+
+                def keep_tile(
+                    tile: pl.Tile[[ROWS, cols], dtype, allocation, pl.Mem.Vec, view], ROWS: pl.constexpr
+                ):
+                    return tile
+
+            return keep_tile
+
+        helper = factory(64)
+        assert not helper.__code__.co_freevars
+        ctx = _inline_context(helper, constexpr_values={"ROWS": str(rows)})
+        func = _specialized_function(ctx)
+        original = helper.__annotations__["tile"]
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType(
+                [rows, 64],
+                DataType.BF16,
+                memref=original.memref,
+                tile_view=original.tile_view,
+                memory_space=original.memory_space,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    @pytest.mark.parametrize("space", [pl.Mem.Vec, pl.Mem.Mat])
+    @pytest.mark.parametrize("position", ["first", "last"])
+    def test_eager_factory_shape_keeps_constexpr_memory_space(self, space, position):
+        """Metadata source order cannot lose an erased factory shape or duplicate SPACE."""
+        SPACE = pl.Mem.Vec
+
+        def factory(rows):
+            allocation = pl.MemRef("buffer", 0, 4096)
+            view = pl.TileView(valid_shape=[3, 64])
+            if position == "first":
+
+                def keep_tile(
+                    tile: pl.Tile[[rows, 64], pl.FP32, SPACE, allocation, view],
+                    SPACE: pl.constexpr,
+                ):
+                    return tile
+
+            else:
+
+                def keep_tile(
+                    tile: pl.Tile[[rows, 64], pl.FP32, view, allocation, SPACE],
+                    SPACE: pl.constexpr,
+                ):
+                    return tile
+
+            return keep_tile
+
+        helper = factory(8)
+        assert not helper.__code__.co_freevars
+        ctx = _inline_context(helper, constexpr_values={"SPACE": f"pl.Mem.{space.name}"})
+        func = _specialized_function(ctx)
+        original = helper.__annotations__["tile"]
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType(
+                [8, 64],
+                DataType.FP32,
+                memref=original.memref,
+                tile_view=original.tile_view,
+                memory_space=space,
+            ),
+            enable_auto_mapping=True,
+        )
+
+    @pytest.mark.parametrize("symbol_name", ["NEW_VALID_COLS", "tile"])
+    def test_metadata_override_declares_rebound_dynvar_alias(self, symbol_name):
+        """The active override can contain symbols absent from the original eager value."""
+        VALID = 3
+        dimension = pl.dynamic("OLD_VALID_COLS")
+
+        def keep_tile(
+            tile: pl.Tile[[8, 64], pl.FP32, pl.TileView(valid_shape=[VALID, dimension])], VALID: pl.constexpr
+        ):
+            return tile
+
+        raw = _annotation_function(keep_tile, keep_tile.__annotations__, {"dimension": dimension})
+        raw.__globals__["dimension"] = pl.dynamic(symbol_name)
+        ctx = _inline_context(raw, constexpr_values={"VALID": "4"})
+        source = specialize("_TestClass", [ctx])
+        assert f'{symbol_name} = pl.dynamic("{symbol_name}")' in source
+        func = _specialized_function(ctx, source)
+        tile_type = func.params[0].type
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert isinstance(tile_type.tile_view.valid_shape[0], ir.ConstInt)
+        assert tile_type.tile_view.valid_shape[0].value == 4
+        assert isinstance(tile_type.tile_view.valid_shape[1], ir.Var)
+        assert tile_type.tile_view.valid_shape[1].name_hint == symbol_name
+
+    def test_metadata_override_rejects_kind_change(self):
+        """A different kind cannot leave the original eager metadata silently attached."""
+        USE_VIEW = False
+
+        def factory(rows):
+            def keep_tile(
+                tile: pl.Tile[
+                    [rows, 64], pl.FP32, pl.TileView(valid_shape=[3, 64]) if USE_VIEW else pl.Mem.Vec
+                ],
+                USE_VIEW: pl.constexpr,
+            ):
+                return tile
+
+            return keep_tile
+
+        ctx = _inline_context(factory(8), constexpr_values={"USE_VIEW": "True"})
+        with pytest.raises(ValueError, match="must retain its original MemorySpace kind, got TileView"):
+            specialize("_TestClass", [ctx])
+
+    @pytest.mark.parametrize("metadata_name_collision", [False, True])
+    def test_eager_mixed_axis_rejects_unrecoverable_factory_operand(self, metadata_name_collision):
+        """The eager sum cannot reveal a lost operand after ROWS is rebound."""
+        ROWS = 99
+
+        def factory(padding):
+            # An unrelated metadata DynVar with the erased operand's name
+            # cannot stand in for that numeric factory value.
+            valid_rows = pl.dynamic("padding") if metadata_name_collision else 3
+            view = pl.TileView(valid_shape=[valid_rows, 64])
+
+            def keep_tile(tile: pl.Tile[[ROWS + padding, 64], pl.FP32, view], ROWS: pl.constexpr):
+                return tile
+
+            return keep_tile
+
+        helper = factory(3)
+        assert not helper.__code__.co_freevars
+        with pytest.raises(ValueError, match="Cannot recover.*padding.*ROWS \\+ padding"):
+            _inline_context(helper, constexpr_values={"ROWS": "8"})
+
+    def test_eager_factory_axis_keeps_runtime_scalar_in_local_scope(self):
+        """Replacing an ambient generic axis must not declare its obsolete symbol."""
+        ROWS = pl.dynamic("AMBIENT_ROWS")
+
+        def factory(cols):
+            def keep_tile(ROWS: pl.Scalar[pl.INDEX], tile: pl.Tile[[ROWS, cols], pl.FP32]):
+                return tile
+
+            return keep_tile
+
+        helper = factory(64)
+        assert not helper.__code__.co_freevars
+        ctx = _inline_context(helper)
+        source = specialize("_TestClass", [ctx])
+        assert "AMBIENT_ROWS" not in source
+        assert 'ROWS = pl.dynamic("ROWS")' not in source
+        func = _specialized_function(ctx, source)
+        tile_type = func.params[1].type
+        assert isinstance(tile_type, ir.TileType)
+        assert ir.structural_equal(tile_type.shape[0], func.params[0])
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert tile_type.shape[1].value == 64
+
+    @pytest.mark.parametrize(
+        "rows,alias,shadowed",
+        [(4, "pl", False), (4, "pl", True), (8, "pl", False), (8, "pl", True), (4, "p", True)],
+    )
+    def test_constexpr_folded_before_annotation_evaluation(self, rows, alias, shadowed):
+        """Call bindings override ambient values and decode separately from original DSL aliases."""
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: {alias}.Tile[[ROWS * 2, 64], DTYPE, SPACE],
+                              ROWS: {alias}.constexpr, DTYPE: {alias}.constexpr, SPACE: {alias}.constexpr):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile", "ROWS", "DTYPE", "SPACE"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {alias: pl}
+        if shadowed:
+            ctx.py_globals.update(ROWS=99, DTYPE=pl.FP32, SPACE=pl.Mem.Acc)
+        if alias == "p":
+            ctx.py_globals["pl"] = object()
+        ctx.constexpr_values = {"ROWS": str(rows), "DTYPE": "pl.BF16", "SPACE": "pl.Mem.Vec"}
+
+        source = specialize("_TestClass", [ctx])
+        func = _specialized_function(ctx, source)
+        assert len(func.params) == 1
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([rows * 2, 64], DataType.BF16, memory_space=ir.MemorySpace.Vec),
+        )
+        assert "ROWS" not in source and "DTYPE" not in source and "SPACE" not in source
+
+
 class TestTensorLayoutAnnotation:
     """The annotation's layout slot must survive specialization.
 
@@ -2136,12 +3107,12 @@ class TestTensorLayoutAnnotation:
     """
 
     def test_layout_str_renders_dsl_constant(self):
-        assert _layout_str(ir.TensorLayout.NZ) == "pl.NZ"
-        assert _layout_str(ir.TensorLayout.MX_A_ZZ) == "pl.MX_A_ZZ"
+        assert layout_str(ir.TensorLayout.NZ) == "pl.NZ"
+        assert layout_str(ir.TensorLayout.MX_A_ZZ) == "pl.MX_A_ZZ"
 
     def test_layout_str_omits_nd(self):
         """ND is what an absent slot already means — emitting it is noise."""
-        assert _layout_str(ir.TensorLayout.ND) is None
+        assert layout_str(ir.TensorLayout.ND) is None
 
     def test_annotation_carries_layout(self):
         meta = TensorMeta((64, 128), DataType.FP16, layout=ir.TensorLayout.NZ)
@@ -2237,6 +3208,195 @@ class TestRenamedGeneratedFunction:
         )
         with pytest.warns(DeprecationWarning, match="helper' uses pl.Out"):
             specialize("_T", [ctx])
+
+
+class TestInlineTupleTileAnnotations:
+    def test_tensor_leaf_keeps_explicit_full_view_after_constexpr_shape_changes(self):
+        ROWS = 8
+        view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[8, 64])
+
+        def keep(
+            pair: pl.Tuple[pl.Tensor[[ROWS, 64], pl.FP32, view], pl.Tile[[8, 64], pl.FP32]],
+            ROWS: pl.constexpr,
+        ):
+            return pair[1]
+
+        ctx = _inline_context(keep, constexpr_values={"ROWS": "16"})
+        function = _specialized_function(ctx)
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        tensor = pair.types[0]
+        assert isinstance(tensor, ir.TensorType)
+        assert isinstance(tensor.shape[0], ir.ConstInt) and tensor.shape[0].value == 16
+        assert tensor.tensor_view is not None
+        valid = tensor.tensor_view.valid_shape[0]
+        assert isinstance(valid, ir.ConstInt) and valid.value == 8
+
+    @pytest.mark.parametrize("spelling", ["dtype", "subscript", "constructor"])
+    def test_mixed_scalar_leaf_obeys_its_own_constexpr_dtype(self, spelling):
+        DTYPE = pl.FP32
+
+        if spelling == "subscript":
+
+            def keep(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], pl.Scalar[DTYPE]], DTYPE: pl.constexpr):
+                return pair[0]
+
+        elif spelling == "dtype":
+
+            def keep(
+                pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], DTYPE],  # pyright: ignore[reportInvalidTypeForm]
+                DTYPE: pl.constexpr,
+            ):
+                return pair[0]
+
+        else:
+
+            def keep(
+                pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], pl.Scalar(DTYPE)],  # pyright: ignore[reportInvalidTypeForm]
+                DTYPE: pl.constexpr,
+            ):
+                return pair[0]
+
+        ctx = _inline_context(keep, constexpr_values={"DTYPE": "pl.INDEX"})
+        function = _specialized_function(ctx)
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        scalar = pair.types[1]
+        assert isinstance(scalar, ir.ScalarType) and scalar.dtype == pl.INDEX
+
+    def test_parameterized_postponed_tuple_fingerprint_tracks_nested_view(self):
+        def keep(pair, ROWS):
+            return pair[1]
+
+        helper = _annotation_function(
+            keep,
+            {
+                "pair": "pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[ROWS, 64], pl.FP32, VIEW]]",
+                "ROWS": "pl.constexpr",
+            },
+            {"VIEW": pl.TileView(valid_shape=[3, 64])},
+        )
+        before = tile_annotation_fingerprints(helper)
+        helper.__globals__["VIEW"] = pl.TileView(valid_shape=[2, 64])
+        assert tile_annotation_fingerprints(helper) != before
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_nested_tuple_preserves_mixed_types_and_dynamic_metadata(self, postponed):
+        rows = pl.dynamic("TUPLE_TILE_ROWS")
+        valid = pl.dynamic("TUPLE_VALID_ROWS")
+        view = pl.TileView(valid_shape=[valid, 64], stride=[64, 1], start_offset=valid.unwrap())
+
+        def keep(
+            pair: pl.Tuple[
+                pl.Scalar[pl.INDEX],
+                pl.Tuple[pl.Tensor[[8, 64], pl.FP32], pl.Tile[[rows, 64], pl.FP32, pl.Mem.Vec, view]],
+            ],
+        ):
+            return pair[1][1]
+
+        helper = keep
+        if postponed:
+            helper = _annotation_function(
+                keep,
+                {
+                    "pair": "TupleAlias[pl.Scalar[pl.INDEX], TupleAlias[pl.Tensor[[8, 64], pl.FP32], "
+                    "pl.Tile[[rows, 64], pl.FP32, pl.Mem.Vec, view]]]"
+                },
+                {"rows": rows, "view": view, "TupleAlias": pl.Tuple},
+            )
+        ctx = _inline_context(helper)
+        source = specialize("_TestClass", [ctx])
+        assert 'TUPLE_TILE_ROWS = pl.dynamic("TUPLE_TILE_ROWS")' in source
+        assert 'TUPLE_VALID_ROWS = pl.dynamic("TUPLE_VALID_ROWS")' in source
+        function = _specialized_function(ctx, source)
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        assert isinstance(pair.types[0], ir.ScalarType)
+        nested = pair.types[1]
+        assert isinstance(nested, ir.TupleType)
+        assert isinstance(nested.types[0], ir.TensorType)
+        tile = nested.types[1]
+        assert isinstance(tile, ir.TileType)
+        assert tile.tile_view is not None
+        assert isinstance(tile.tile_view.valid_shape[0], ir.Var)
+        assert tile.tile_view.valid_shape[0].name_hint == "TUPLE_VALID_ROWS"
+
+    def test_eager_tuple_factory_keeps_independent_values_and_distinct_formals(self):
+        FIRST, SECOND = 8, 16
+        SPACE = pl.Mem.Vec
+
+        def factory(cols):
+            view = pl.TileView(valid_shape=[3, cols], stride=[cols, 1], start_offset=0)
+
+            def keep(
+                pair: pl.Tuple[
+                    pl.Tile[[FIRST, cols], pl.FP32, SPACE, view],
+                    pl.Tuple[pl.Tile[[SECOND, cols], pl.FP32, view, SPACE], pl.Scalar[pl.INDEX]],
+                ],
+                FIRST: pl.constexpr,
+                SECOND: pl.constexpr,
+                SPACE: pl.constexpr,
+            ):
+                return pair[1][0]
+
+            return keep
+
+        helper = factory(64)
+        ctx = _inline_context(helper, constexpr_values={"FIRST": "16", "SECOND": "8", "SPACE": "pl.Mem.Vec"})
+        function = _specialized_function(ctx)
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        nested = pair.types[1]
+        assert isinstance(nested, ir.TupleType)
+        for tile, rows in ((pair.types[0], 16), (nested.types[0], 8)):
+            assert isinstance(tile, ir.TileType)
+            assert isinstance(tile.shape[0], ir.ConstInt) and tile.shape[0].value == rows
+            assert isinstance(tile.shape[1], ir.ConstInt) and tile.shape[1].value == 64
+            assert tile.tile_view is not None
+            valid = tile.tile_view.valid_shape[0]
+            assert isinstance(valid, ir.ConstInt) and valid.value == 3
+            assert tile.memory_space == ir.MemorySpace.Vec
+        assert tile_annotation_fingerprints(helper) != tile_annotation_fingerprints(factory(128))
+
+    def test_postponed_tuple_alias_fingerprint_tracks_nested_contract_rebinding(self):
+        def keep(pair):
+            return pair[1]
+
+        helper = _annotation_function(
+            keep,
+            {"pair": "CONTRACT"},
+            {"CONTRACT": pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[8, 64], pl.FP32]]},
+        )
+        before = tile_annotation_fingerprints(helper)
+        helper.__globals__["CONTRACT"] = pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[16, 64], pl.FP32]]
+        assert tile_annotation_fingerprints(helper) != before
+
+    def test_incomplete_tuple_tile_leaf_has_clear_error(self):
+        def keep(pair: pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile]):
+            return pair[1]
+
+        with pytest.raises(ValueError, match="Tuple annotation.*incomplete"):
+            _inline_context(keep)
+
+    def test_unsupported_tensor_subclass_in_tuple_is_not_rendered_as_plain_tensor(self):
+        def keep(pair: pl.Tuple[pld.DistributedTensor[[8, 64], pl.FP32], pl.Tile[[8, 64], pl.FP32]]):
+            return pair[1]
+
+        with pytest.raises(ValueError, match="Tuple annotation.*unsupported type.*path \\(0,\\)"):
+            _inline_context(keep)
+
+    def test_tuple_tile_annotation_is_preserved_for_non_inline_function(self):
+        ctx = _make_ctx(
+            "keep",
+            "def keep(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32]]):\n    return pair[0]",
+            func_type="incore",
+            param_names=["pair"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+        func = _specialized_function(ctx)
+        assert func.func_type == ir.FunctionType.InCore
+        ir.assert_structural_equal(func.params[0].type, ir.TupleType([ir.TileType([8, 64], DataType.FP32)]))
 
 
 if __name__ == "__main__":

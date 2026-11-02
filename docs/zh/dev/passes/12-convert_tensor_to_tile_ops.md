@@ -1,12 +1,24 @@
 # ConvertTensorToTileOps Pass
 
-将 InCore 函数中的 tensor 操作（张量操作）转换为 tile 操作（块操作），并更新编排函数的调用点。
+将 InCore、AIC 和 AIV 函数中的 tensor 操作（张量操作）转换为 tile 操作（块操作），并更新编排函数的调用点。
 
 ## 概述
 
 `OutlineIncoreScopes` 将 InCore 作用域提取为独立函数后，这些函数仍使用 `TensorType` 变量和 `tensor.*` 操作。本 pass 将其降级为直接映射到 PTO-ISA 指令的 `TileType` 变量和 `tile.*` 操作。
 
-本 pass 还会更新编排/不透明函数中的调用点：为 InCore 函数新增的每个输出参数，在调用点插入 `tensor.create`。
+本 pass 先记录每个逻辑返回值，再解析其存储来源。新计算的 Tensor 结果会新增显式
+`Out` 形参和 `tile.store`；完整返回的局部 GM 分配则移到调用者。同一结果的重复别名
+共用存储，已有参数的写回保留原绑定。转换后保留原有 InCore/AIC/AIV 函数类型。
+没有返回类型注解时，使用原始返回表达式的类型。新增 `Out` 前会拒绝引用函数体局部
+尺寸变量的类型；这类尺寸应作为标量形参传入，或由调用者显式提供 `Out` Tensor。
+
+需要 Tensor 层暂存的分配保留局部 Tile 存储，在出口统一 store。这样既能暂存
+Tensor 源的 assemble，也能保留局部标量更新，避免引入不支持的 GM 操作或混用
+不同的写回通道。只有显式 GM 内存操作所需且完整返回的分配才在降级前提升。
+已经处于 Buffer IR 阶段的函数保持不变。
+
+新增输出形参经 Group/Spmd 包装函数逐层转发，由外层编排/不透明调用者通过
+`tensor.create` 分配。Group 内部输出不必属于 Group 的逻辑返回 tuple。
 
 **前置条件**：
 
@@ -16,10 +28,25 @@
 
 **使用时机**：在 `OutlineClusterScopes` 之后、`OptimizeOrchTensors` 之前运行。
 
+`tensor.cmp` 通过打包谓词（packed predicate）和 `tile.sel` 生成数值 0/1 结果。
+对于左操作数已具有结果形状的二维比较，选择前生成的全 1/全 0 Tile
+使用左操作数的逻辑有效形状（valid shape），
+保留部分有效或动态的行列范围，不会将谓词的打包字节宽度当作元素数量。
+
 `tensor.col_sum` 默认转换为单输入的顺序归约 Tile 形式。设置
 `is_binary=True` 时，转换器创建与输入类型相同的 Vec 临时缓冲区；静态二维输入使用 `[ceil(M/2), N]`，其他形状保守使用输入大小，
 并生成 `tile.col_sum(input, scratch)`。Tensor 层的策略属性在这里消费，
 codegen 根据额外的 Tile 参数选择 `isBinary=true`。
+
+对于支持的 physical shape 签名，每个调用在分配输出或传播返回类型前，同时绑定显式
+scalar 和 tensor 类型中的隐式维度。替换是同时进行的：`[N, M] -> [M, 128]` 的
+第一个结果仍为 M，不能把调用者表达式继续按 callee 符号递归替换。
+绑定使用新增输出形参之前的原始签名。Tensor 参数也映射到对应实参，确保包装函数从
+更复杂的子函数签名获得的私有输出可以正确使用 `tensor.dim(x, 0)` 等表达式。每个输出
+完成存储分配后，将该形参绑定到新存储，再实例化后续输出和返回类型；这也覆盖原始 Out
+参数被省略的情况，同时不会递归替换调用者表达式内部的符号。不需要输出存储的调用保留原实参和调用者坐标下的
+返回类型；Submit 由运行时分配的输出仍保持省略。Spmd/Group 每一层转发分别使用当前调用者的符号坐标。更复杂的签名保留原有 lowering
+路径及去重身份保护。
 
 ## API
 
@@ -147,31 +174,24 @@ pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy
 
 ### 阶段二a：通过 Spmd/Group 包装函数转发新增 Out 参数
 
-`OutlineClusterScopes` 产生的 Spmd/Group 包装函数是对其参数到单个内部 InCore
-调用的透明 1:1 转发器。当阶段一为该 InCore 被调用者新增 `Out` 参数时，
-包装函数必须在自身签名上镜像这些新增参数并通过内部调用转发给被调用者 ——
-否则编排层代码生成的 `BuildWrapperReorderedParams` 不变式（每个内部调用的
-`Var` 实参都能解析到某个包装函数参数）会被破坏。
+包装函数按调用图后序处理，嵌套 Spmd/Group 可以看到被调函数更新后的签名，
+不依赖函数名顺序。`OutputParameterRewriter` 处理每个 `Call` 和 `Submit`，
+为各调用点所需的存储新增私有 `Out` 形参并转发。不同调用使用独立存储。
+包装函数内部不会插入 `tensor.create`，内部输出也不会增加逻辑返回 tuple 的长度。
 
-对每个 `FunctionType::Spmd` / `FunctionType::Group` 函数：
-
-1. `ForwardedCallFinder` 查找第一个调用转换后 InCore（阶段一新增了至少一个
-   `Out` 参数）的调用点。
-2. 若找到，则在包装函数签名末尾追加与 InCore 新增参数类型相同（复用
-   `name_hint_`）的 `Out` 参数，并由 `WrapperForwardMutator` 重写该内部调用：
-   将新变量追加到实参列表、更新调用返回类型为被调用者新的返回类型。包装
-   函数体内部**不会**合成 `tensor.create` —— 分配职责保留在调用者侧。
-3. 若未找到转发到转换后 InCore 的调用，则包装函数保持不变。
+对于 `Submit`，先补齐原有省略的 Out 区间，再插入新增输出；即使被调函数没有新增
+输出，也会处理该省略区间。新增输出位于尾部通信 context 之前，同时调整实参位置
+属性，保留 Submit 的 TaskId 返回位置。
 
 ### 阶段二b：更新编排函数调用点
 
-对每个调用了转换后 InCore 函数或阶段二a 吸收了新增 Out 参数的包装函数的
+对每个调用了转换后 InCore/AIC/AIV 函数或阶段二a 吸收了新增 Out 参数的包装函数的
 编排 / 不透明函数：
 
 1. 为每个新增的输出参数插入 `tensor.create`
-2. 将创建的张量作为额外参数追加到调用中
+2. 将创建的张量作为额外参数传入，放在尾部通信 context 之前
 
-InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 / 二a 中被改写。
+InCore、AIC、AIV、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 / 二a 中被改写。
 
 ## 桥接 load 落在哪个空间
 
@@ -663,7 +683,21 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现**：`src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp`
+**Pass 入口**：`src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` 保留
+程序级阶段顺序、方向传播、携带值修复及 `IncoreTileOps` 验证器。
+私有实现位于 `src/ir/transforms/tensor_to_tile/`：
+
+| 文件 | 职责 |
+| ---- | ---- |
+| `incore_conversion.cpp` | 消费端/值流分析、操作数加载和桥接、算子转换及返回值存储物化 |
+| `gm_access.cpp` | 标量更新规范化、GM 别名/访问分析、混合存储诊断及参数方向升级 |
+| `output_propagation.cpp` | 包装函数输出传播和调用方存储分配，包括 Call/Submit 形状替换 |
+| `type_propagation.cpp` | 赋值、循环及分支共用的 SSA 类型传播 |
+| `internal.h`, `type_propagation.h` | 私有阶段接口及共享 mutator 声明 |
+
+每次内核转换统一拥有其分析器和 mutator 状态。共享 mutator 在自身生命周期内
+保留被映射的原始变量；将方法移至类外定义不改变这一所有权。
+Pass API 和转换注册表保持不变。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
@@ -687,16 +721,14 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 | `ConsumerSpaceCollector` | IRVisitor — 依据 `input_reqs` 收集每个变量被消费端要求的 memory space |
 | `TypePropagatingMutator` | 基类 IRMutator — 通过控制流传播类型变更 |
 | `TensorToTileMutator` | IRMutator — 通过 OpConversionRegistry 将 tensor op 转换为 tile op |
-| `ForwardedCallFinder` | IRVisitor — 定位包装函数对转换后 InCore 的调用（阶段二a） |
-| `WrapperForwardMutator` | IRMutator — 将新增 Out 参数追加到包装函数的内部调用（阶段二a） |
-| `CallSiteUpdateMutator` | IRMutator — 在编排函数调用点插入 tensor.create（阶段二b） |
-| `IncoreTileOpsVerifier` | IRVisitor — 验证 InCore 函数中不再包含 TensorType 操作 |
+| `OutputParameterRewriter` | 在包装函数中转发输出形参，或在编排调用点分配输出（阶段二） |
+| `IncoreTileOpsVerifier` | IRVisitor — 检查 Functional InCore/AIC/AIV 函数体，与转换阶段一致地排除外部和 runtime-bound 函数 |
 
 ## 作用范围
 
 | 函数类型 | 操作 |
 | -------- | ---- |
-| InCore | 转换（tensor ops → tile ops）；阶段一可能新增 `Out` 参数 |
-| Spmd / Group（转发到转换后 InCore） | 签名镜像 InCore 新增的 `Out` 参数，内部调用转发这些参数（阶段二a） |
-| Spmd / Group（未转发到转换后 InCore） | 不变 |
+| Functional InCore / AIC / AIV | 转换（tensor ops → tile ops）；阶段一可能新增 `Out` 参数；保留 core 类型 |
+| 任意 Buffer 阶段函数 | 保持不变；显式存储及 data/metadata 效果已经完成降级 |
+| Spmd / Group | 将各内部调用所需的存储提升为私有 `Out` 形参（阶段二a） |
 | Orchestration / Opaque | 更新调用点 —— 为每个新增 `Out` 参数插入 `tensor.create`（阶段二b） |

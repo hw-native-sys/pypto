@@ -50,8 +50,8 @@ DT_UINT8: DataType = DataType.UINT8
 DT_UINT16: DataType = DataType.UINT16
 DT_UINT32: DataType = DataType.UINT32
 DT_UINT64: DataType = DataType.UINT64
-DT_FP4: DataType = DataType.FP4
 DT_FP4E2M1X2: DataType = DataType.FP4E2M1X2
+DT_FP4E1M2X2: DataType = DataType.FP4E1M2X2
 DT_FP8E4M3FN: DataType = DataType.FP8E4M3FN
 DT_FP8E5M2: DataType = DataType.FP8E5M2
 DT_FP8E8M0: DataType = DataType.FP8E8M0
@@ -104,8 +104,8 @@ __all__ = [
     "DT_UINT16",
     "DT_UINT32",
     "DT_UINT64",
-    "DT_FP4",
     "DT_FP4E2M1X2",
+    "DT_FP4E1M2X2",
     "DT_FP8E4M3FN",
     "DT_FP8E5M2",
     "DT_FP8E8M0",

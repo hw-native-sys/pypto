@@ -976,7 +976,7 @@ def reinterpret_view(
 ) -> Tensor | Tile:
     """Reinterpret the same bytes with a different dtype.
 
-    FP4E2M1X2 <-> UINT8/INT8 preserves the carrier shape. On A5, InCore
+    Either packed FP4 format <-> UINT8/INT8 preserves the carrier shape. On A5, InCore
     tensor and tile aliases require dense address-backed 2D row-major Vec
     storage, a static UB offset, and PYPTO or DSA_RP memory planning.
     Reshape the byte view separately; orchestration tensor aliases are unsupported.
@@ -1149,15 +1149,19 @@ def fillpad_expand(
 
 
 @overload
-def quant_mx(src: Tensor, *, group_axis: int, dtype: DataType = ...) -> tuple[Tensor, Tensor]: ...
+def quant_mx(
+    src: Tensor, *, group_axis: int, dtype: DataType = ..., quant_scale_alg: str = ...
+) -> tuple[Tensor, Tensor]: ...
 @overload
-def quant_mx(src: Tile, *, group_axis: int, dtype: DataType = ...) -> tuple[Tile, Tile]: ...
+def quant_mx(
+    src: Tile, *, group_axis: int, dtype: DataType = ..., quant_scale_alg: str = ...
+) -> tuple[Tile, Tile]: ...
 
 
 def quant_mx(
-    src: object, group_axis: int, dtype: DataType = DataType.FP8E4M3FN
+    src: object, group_axis: int, dtype: DataType = DataType.FP8E4M3FN, quant_scale_alg: str = "ocp"
 ) -> tuple[Tensor, Tensor] | tuple[Tile, Tile]:
-    """MXFP8 quantization, dispatched for GM tensors and tiles.
+    """MXFP8/MXFP4 quantization, dispatched for GM tensors and tiles.
 
     Tensor calls materialize data and correctly laid-out scale tensors in GM;
     tile calls retain the existing on-chip behavior. Both forms use
@@ -1165,9 +1169,9 @@ def quant_mx(
     input.
     """
     if isinstance(src, Tensor):
-        return _tensor.quant_mx(src, group_axis=group_axis, dtype=dtype)
+        return _tensor.quant_mx(src, group_axis=group_axis, dtype=dtype, quant_scale_alg=quant_scale_alg)
     if isinstance(src, Tile):
-        return _tile.quant_mx(src, group_axis=group_axis, dtype=dtype)
+        return _tile.quant_mx(src, group_axis=group_axis, dtype=dtype, quant_scale_alg=quant_scale_alg)
     _raise_type_dispatch_error("quant_mx", src)
 
 
@@ -1204,6 +1208,8 @@ def matmul(
     a_trans: bool = ...,
     b_trans: bool = ...,
     c_matrix_nz: bool = ...,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor: ...
 @overload
 def matmul(
@@ -1213,6 +1219,8 @@ def matmul(
     a_trans: Literal[False] = ...,
     b_trans: Literal[False] = ...,
     c_matrix_nz: Literal[False] = ...,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tile: ...
 
 
@@ -1223,8 +1231,14 @@ def matmul(
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor | Tile:
     """Matrix multiplication, dispatched by input type.
+
+    ``tf32_mode`` opts rank-2 FP32 operands into HF32 input rounding on Ascend950:
+    ``"round_even"`` rounds ties to even and ``"round_away"`` rounds ties away
+    from zero. Accumulation stays FP32. ``None`` preserves ordinary FP32 matmul.
 
     ``a_trans`` / ``b_trans`` / ``c_matrix_nz`` are Tensor-only: a tensor value
     carries no layout, so a flag is the only place the information can live. At
@@ -1276,7 +1290,7 @@ def matmul(
     exempt: it names the same bytes, so it folds back to the parent.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
-        return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)
+        return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz, tf32_mode=tf32_mode)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         _reject_unsupported(
             "matmul",
@@ -1285,7 +1299,7 @@ def matmul(
             b_trans=(b_trans, _TILE_TRANSPOSE_REMEDY),
             c_matrix_nz=(c_matrix_nz, _TILE_C_MATRIX_NZ_REMEDY),
         )
-        result = _tile.matmul(lhs, rhs)
+        result = _tile.matmul(lhs, rhs, tf32_mode=tf32_mode)
         _check_tile_matmul_out_dtype(result, out_dtype)
         return result
     _raise_type_dispatch_error("matmul", lhs, rhs)
@@ -1317,6 +1331,8 @@ def matmul_acc(
     a_trans: bool = ...,
     b_trans: bool = ...,
     init_cond: BoolLike | None = ...,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor: ...
 @overload
 def matmul_acc(
@@ -1326,6 +1342,8 @@ def matmul_acc(
     a_trans: Literal[False] = ...,
     b_trans: Literal[False] = ...,
     init_cond: BoolLike | None = ...,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tile: ...
 
 
@@ -1336,8 +1354,13 @@ def matmul_acc(
     a_trans: bool = False,
     b_trans: bool = False,
     init_cond: BoolLike | None = None,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor | Tile:
     """Matrix multiplication with accumulation, dispatched by input type.
+
+    ``tf32_mode="round_even"`` or ``"round_away"`` selects HF32 input rounding
+    for 2D FP32 operands on Ascend950 (PTOAS 0.70+). ``None`` keeps ordinary FP32.
 
     ``a_trans`` / ``b_trans`` are Tensor-only for the same reason as in
     [`matmul`][pypto.language.matmul] — at tile level transposition is a type property, not an op
@@ -1355,7 +1378,7 @@ def matmul_acc(
     per-batch ``tile.matmul_acc`` by ``FlattenTileNdTo2D``.
     """
     if isinstance(acc, Tensor) and isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
-        return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans, init_cond)
+        return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans, init_cond, tf32_mode=tf32_mode)
     if isinstance(acc, Tile) and isinstance(lhs, Tile) and isinstance(rhs, Tile):
         _reject_unsupported(
             "matmul_acc",
@@ -1363,7 +1386,7 @@ def matmul_acc(
             a_trans=(a_trans, _TILE_TRANSPOSE_REMEDY),
             b_trans=(b_trans, _TILE_TRANSPOSE_REMEDY),
         )
-        return _tile.matmul_acc(acc, lhs, rhs, init_cond)
+        return _tile.matmul_acc(acc, lhs, rhs, init_cond, tf32_mode=tf32_mode)
     _raise_type_dispatch_error("matmul_acc", acc, lhs, rhs)
 
 

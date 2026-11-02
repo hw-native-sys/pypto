@@ -29,7 +29,6 @@
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -105,6 +104,9 @@ class DeepCloneMutator : public IRMutator {
     // A use of an enclosing loop's carry is external to this subtree, just
     // like an external Var. Cloning it here would create an unbound identity.
     // Local carries are registered at their loop's DefField before any uses.
+    if (!expr_map_.count(op.get()) && pending_iter_args_.count(op.get())) {
+      CloneIterArg(op);
+    }
     return VisitExpr_(std::static_pointer_cast<const Var>(op));
   }
 
@@ -148,6 +150,7 @@ class DeepCloneMutator : public IRMutator {
     if (it != expr_map_.end()) {
       return it->second;
     }
+    if (unchanged_windows_.count(op.get())) return op;
     // Mirror MemRef: remap base_ through the mutator so substitutions on the
     // alloc Ptr Var propagate; remap size_ similarly so symbolic sizes pick up
     // any var substitutions.
@@ -159,6 +162,14 @@ class DeepCloneMutator : public IRMutator {
       }
     }
     auto new_size = op->size_ ? IRMutator::VisitExpr(op->size_) : op->size_;
+    // A view may capture a slot owned by an enclosing domain. Preserve that
+    // identity unless cloning/substitution actually changes its base or size.
+    // Definition and Call/Submit types use RemapTypeViaVisitor, so all links
+    // share this cache when the storage itself does need a replacement.
+    if (new_base == op->base_ && new_size == op->size_) {
+      unchanged_windows_.insert(op.get());
+      return op;
+    }
     auto fresh = std::make_shared<WindowBuffer>(std::move(new_base), std::move(new_size), op->load_from_host_,
                                                 op->store_to_host_, op->span_);
     expr_map_[op.get()] = fresh;
@@ -178,10 +189,22 @@ class DeepCloneMutator : public IRMutator {
     if (op->GetKind() == ObjectKind::MemRef || op->GetKind() == ObjectKind::WindowBuffer) {
       return;
     }
-    auto new_type = RemapType(op->GetType());
+    auto new_type = RemapTypeViaVisitor(op->GetType());
     auto name = fresh_name_ ? fresh_name_(op->name_hint_) : op->name_hint_;
     auto fresh = std::make_shared<Var>(std::move(name), std::move(new_type), op->span_);
     expr_map_[op.get()] = fresh;
+  }
+
+  /// Discover all loop-owned carries before cloning any of them. A carry's
+  /// type may reference a sibling later in the list; resolve that definition
+  /// lazily without mistaking external captures for locally owned variables.
+  void CloneIterArgs(const std::vector<IterArgPtr>& iter_args) {
+    for (const auto& op : iter_args) {
+      if (op && !expr_map_.count(op.get())) pending_iter_args_.insert(op.get());
+    }
+    for (const auto& op : iter_args) {
+      if (op) CloneIterArg(op);
+    }
   }
 
   /// Clone a carry only at its definition, remapping its seed and type in the
@@ -191,45 +214,10 @@ class DeepCloneMutator : public IRMutator {
     if (expr_map_.count(op.get())) return;
     INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
     auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto new_type = RemapType(op->GetType());
+    auto new_type = RemapTypeViaVisitor(op->GetType());
     expr_map_[op.get()] =
         std::make_shared<IterArg>(op->name_hint_, std::move(new_type), std::move(new_init), op->span_);
-  }
-
-  /// Remap expressions inside a TypePtr (shape, TileView/TensorView fields, MemRef).
-  /// Recurses into TupleType element types so nested shaped types pick up
-  /// substitutions too. Returns the original pointer unchanged if nothing
-  /// inside references a remapped var.
-  TypePtr RemapType(const TypePtr& type) {
-    if (!type) return type;
-    // TupleType element types may themselves embed remappable expressions.
-    if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
-      std::vector<TypePtr> new_types;
-      new_types.reserve(tuple_type->types_.size());
-      bool changed = false;
-      for (const auto& elem : tuple_type->types_) {
-        auto new_elem = RemapType(elem);
-        if (new_elem.get() != elem.get()) {
-          changed = true;
-        }
-        new_types.push_back(std::move(new_elem));
-      }
-      if (!changed) return type;
-      return std::make_shared<TupleType>(std::move(new_types));
-    }
-    // Remap the embedded MemRef (if any) so its byte_offset_ expression picks up
-    // substitutions. Dispatches through VisitExpr_(const MemRefPtr&), which creates
-    // a fresh MemRef with the mutated offset and caches it in expr_map_.
-    auto original_memref_opt = GetTypeMemRef(type);
-    std::optional<MemRefPtr> new_memref_opt = original_memref_opt;
-    if (original_memref_opt.has_value()) {
-      auto remapped = IRMutator::VisitExpr(*original_memref_opt);
-      if (auto as_memref = std::dynamic_pointer_cast<const MemRef>(remapped)) {
-        new_memref_opt = as_memref;
-      }
-    }
-    return CloneTypeWithMemRefAndRemapExprs(type, new_memref_opt,
-                                            [this](const ExprPtr& e) { return IRMutator::VisitExpr(e); });
+    pending_iter_args_.erase(op.get());
   }
 
   /// Use GetFieldDescriptors to find DefField VarPtr, vector<VarPtr>, and
@@ -255,13 +243,15 @@ class DeepCloneMutator : public IRMutator {
         if (var) CloneVar(var);
       }
     } else if constexpr (std::is_same_v<FieldType, std::vector<IterArgPtr>>) {
-      for (const auto& arg : desc.Get(stmt)) {
-        if (arg) CloneIterArg(arg);
-      }
+      CloneIterArgs(desc.Get(stmt));
     }
   }
 
   std::unordered_map<const Var*, ExprPtr> expr_map_;
+  /// Cache external slots separately so GetVarMap excludes unchanged identities.
+  std::unordered_set<const WindowBuffer*> unchanged_windows_;
+  /// Discovered loop definitions not yet cloned; never includes external uses.
+  std::unordered_set<const IterArg*> pending_iter_args_;
   /// Keys present in the caller-supplied seed map; filtered out of GetVarMap()
   /// so only entries created by the clone traversal are returned.
   std::unordered_set<const Var*> seed_keys_;

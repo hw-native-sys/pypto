@@ -133,6 +133,7 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import AtomicType, CachePolicy, Expr, MemorySpace, PadValue, TensorLayout
 
 from ..typing import BoolLike, IntLike, Ptr, Scalar, Tensor, Tile, predicate_to_expr
+from ._utils import _normalize_intlike
 
 # Bound TypeVar lets slice / assemble propagate the caller's concrete tensor
 # class (Tensor or its DistributedTensor subclass) through to the return type.
@@ -157,11 +158,6 @@ def _unwrap_rhs(rhs: "_RhsT | Tensor | Scalar") -> "_RhsT | Expr":
     if isinstance(rhs, (Tensor, Scalar)):
         return rhs.unwrap()
     return rhs
-
-
-def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
-    """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
-    return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
 def create(
@@ -728,6 +724,8 @@ def matmul(
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor:
     """Matrix multiplication with optional transpose.
 
@@ -747,13 +745,17 @@ def matmul(
         a_trans: Whether to transpose lhs (requires a 2D+ lhs)
         b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul operation
     """
     lhs_expr = lhs.unwrap()
     rhs_expr = rhs.unwrap()
-    call_expr = _ir_ops.matmul(lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz)
+    call_expr = _ir_ops.matmul(
+        lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz, tf32_mode=tf32_mode
+    )
     return Tensor(expr=call_expr)
 
 
@@ -762,8 +764,9 @@ def quant_mx(
     *,
     group_axis: int,
     dtype: DataType = DataType.FP8E4M3FN,
+    quant_scale_alg: str = "ocp",
 ) -> tuple[Tensor, Tensor]:
-    """Quantize a 2D tensor to MXFP8 data and its packed FP8E8M0 scale.
+    """Quantize a 2D tensor to MXFP8/MXFP4 data and its packed FP8E8M0 scale.
 
     ``group_axis=1`` produces A-oriented ``[M, K]`` data and an
     ``MX_A_ZZ`` scale tensor ``[M, K/32]``. ``group_axis=0`` accepts B input
@@ -775,6 +778,8 @@ def quant_mx(
         group_axis: Quantization group axis. Use ``1`` for A/LHS data and ``0``
             for B/RHS data.
         dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``.
+            ``FP4E2M1X2`` requires FP16/BF16 input and halves the output's last dimension.
+        quant_scale_alg: ``"ocp"`` (default) or ``"nv"``. FP16/BF16 NV requires axis 0.
 
     Returns:
         A pair ``(data, scale)``. ``data`` is the quantized MX tensor and
@@ -788,7 +793,9 @@ def quant_mx(
             ``group_axis`` is not supported, or ``dtype`` is not a supported MX
             data dtype.
     """
-    call_expr = _ir_ops.quant_mx(src.unwrap(), group_axis=group_axis, dtype=dtype)
+    call_expr = _ir_ops.quant_mx(
+        src.unwrap(), group_axis=group_axis, dtype=dtype, quant_scale_alg=quant_scale_alg
+    )
     span = call_expr.span
     return (
         Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
@@ -830,6 +837,8 @@ def matmul_acc(
     a_trans: bool = False,
     b_trans: bool = False,
     init_cond: BoolLike | None = None,
+    *,
+    tf32_mode: str | None = None,
 ) -> Tensor:
     """Matrix multiplication with accumulation: acc += lhs @ rhs.
 
@@ -853,6 +862,8 @@ def matmul_acc(
         a_trans: Whether to transpose lhs
         b_trans: Whether to transpose rhs
         init_cond: Optional predicate selecting overwrite over accumulate
+        tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
 
     Returns:
         Tensor wrapping the matmul_acc operation
@@ -864,6 +875,7 @@ def matmul_acc(
         a_trans,
         b_trans,
         init_cond=predicate_to_expr(init_cond),
+        tf32_mode=tf32_mode,
     )
     return Tensor(expr=call_expr)
 

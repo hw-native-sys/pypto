@@ -23,6 +23,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -60,6 +61,32 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
   // Last stmt in the region that defined each Var (tracked by raw pointer).
   std::unordered_map<const Var*, const Stmt*> last_def;
 
+  // A register region can read or mutate storage also named by older Tile
+  // SSA values or overlapping views. Until general memory SSA exists, preserve
+  // the entire region's source order whenever it contains register operations.
+  // This covers ordinary Tile accesses, unknown aliases, nested loops and WAW,
+  // without a quadratic pairwise alias scan. Def-use-only graphs are otherwise
+  // unchanged. The extra chain has at most N-1 edges.
+  class RegisterPresence final : public IRVisitor {
+   public:
+    bool found = false;
+
+   protected:
+    void VisitStmt_(const RegScopeStmtPtr& op) override {
+      found = true;
+      IRVisitor::VisitStmt_(op);
+    }
+    void VisitExpr_(const CallPtr& call) override {
+      auto& registry = OpRegistry::GetInstance();
+      if (registry.IsRegistered(call->op_->name_) && registry.GetEntry(call->op_->name_).GetRegSpec()) {
+        found = true;
+      }
+      IRVisitor::VisitExpr_(call);
+    }
+  } registers;
+  registers.VisitStmt(region);
+  const Stmt* previous = nullptr;
+
   for (const auto& stmt : graph.stmts) {
     var_collectors::VarDefUseCollector collector;
     collector.VisitStmt(stmt);
@@ -80,6 +107,9 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
     for (const Var* v : collector.var_defs) {
       last_def[v] = raw_stmt;
     }
+
+    if (registers.found && previous) graph.predecessors[raw_stmt].insert(previous);
+    previous = raw_stmt;
   }
 
   return graph;

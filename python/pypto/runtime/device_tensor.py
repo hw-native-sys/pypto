@@ -45,21 +45,27 @@ class DeviceTensor:
     """Handle to a buffer already resident on a Worker.
 
     Attributes:
-        data_ptr: Device pointer in the owning Worker's address space.
+        data_ptr: Device pointer of the first element this handle addresses.
+            For a borrowed view this is ``buffer.base + byte_offset``, not the
+            allocation base.
         shape: Logical tensor shape (all dimensions positive).
         dtype: Element ``torch.dtype``.
+        byte_offset: Distance in bytes from the owning allocation's base to
+            ``data_ptr``. Zero for a whole allocation, nonzero for a view
+            created by :meth:`Worker.view_tensor`; must be aligned to ``dtype``.
         buffer: Optional simpler ``Buffer`` retained for address-free wire
-            dispatch. It is populated by :meth:`Worker.alloc_tensor`; a
-            manually constructed raw-pointer tensor can be used only with
-            low-level direct-chip compatibility helpers. All public
-            ``Worker.run`` paths require :meth:`Worker.alloc_tensor` and its
-            retained owner ``Buffer``.
+            dispatch. It is populated by :meth:`Worker.alloc_tensor` and
+            inherited by :meth:`Worker.view_tensor`; a manually constructed
+            raw-pointer tensor can be used only with low-level direct-chip
+            compatibility helpers. All public ``Worker.run`` paths require
+            :meth:`Worker.alloc_tensor` and its retained owner ``Buffer``.
     """
 
     data_ptr: int
     shape: tuple[int, ...]
     dtype: torch.dtype
     buffer: Any | None = field(default=None, repr=False, compare=False, hash=False)
+    byte_offset: int = 0
 
     def __init__(
         self,
@@ -68,6 +74,7 @@ class DeviceTensor:
         dtype: torch.dtype,
         *,
         buffer: Any | None = None,
+        byte_offset: int = 0,
     ) -> None:
         # bool is an int subclass — an exact-type check excludes it so True/False
         # can't pose as a pointer or dim.
@@ -84,21 +91,34 @@ class DeviceTensor:
         shape_t = raw_shape
         if type(dtype) is not torch.dtype:
             raise TypeError(f"DeviceTensor.dtype must be torch.dtype, got {type(dtype).__name__}")
+        if type(byte_offset) is not int or byte_offset < 0:
+            raise ValueError(f"DeviceTensor.byte_offset must be a nonnegative int, got {byte_offset!r}")
+        element_size = torch.empty((), dtype=dtype).element_size()
+        if byte_offset % element_size:
+            raise ValueError("DeviceTensor.byte_offset must be aligned to its dtype")
         if buffer is not None:
             try:
                 buffer_base = int(buffer.base)
             except (AttributeError, TypeError, ValueError) as e:
                 raise TypeError("DeviceTensor.buffer must be a simpler Buffer with an integer base") from e
-            if buffer_base != data_ptr:
+            if buffer_base + byte_offset != data_ptr:
                 raise ValueError(
-                    f"DeviceTensor.buffer.base (0x{buffer_base:x}) does not match data_ptr (0x{data_ptr:x})"
+                    f"DeviceTensor.buffer.base (0x{buffer_base:x}) plus byte_offset "
+                    f"does not match data_ptr (0x{data_ptr:x})"
                 )
             if not callable(getattr(buffer, "tensor", None)):
                 raise TypeError("DeviceTensor.buffer must provide buffer.tensor(shapes, dtype)")
+            if hasattr(buffer, "nbytes"):
+                count = 1
+                for dim in shape_t:
+                    count *= dim
+                if byte_offset + count * element_size > buffer.nbytes:
+                    raise ValueError("DeviceTensor view exceeds its owning buffer")
         object.__setattr__(self, "data_ptr", data_ptr)
         object.__setattr__(self, "shape", shape_t)
         object.__setattr__(self, "dtype", dtype)
         object.__setattr__(self, "buffer", buffer)
+        object.__setattr__(self, "byte_offset", byte_offset)
 
     @property
     def nbytes(self) -> int:

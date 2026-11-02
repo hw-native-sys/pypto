@@ -21,7 +21,7 @@ detector, so every case below asserts on the rule name and the message.
 
 import pypto.language as pl
 import pytest
-from pypto.pypto_core import passes
+from pypto.pypto_core import ir, passes
 
 GRAPH_BODY = (
     "        with pl.at(level=pl.Level.CORE_GROUP):\n"
@@ -93,7 +93,7 @@ def test_graph_without_tensor_parameters_is_rejected():
     assert any("launches no tasks" in m for m in messages), messages
 
 
-def test_runtime_allocated_output_is_rejected():
+def test_caller_supplied_write_only_output_is_accepted():
     src = (
         "@pl.program\n"
         "class P:\n"
@@ -107,8 +107,8 @@ def test_runtime_allocated_output_is_rejected():
         "        self.layer(a, c)\n"
         "        return c\n"
     )
-    diags = _graph_diags(pl.parse_program(src))
-    assert any("the runtime allocates it" in d.message for d in diags)
+    # A supplied Out is existing storage, not a runtime allocation request.
+    assert _graph_diags(pl.parse_program(src)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +369,63 @@ def test_a_boundary_view_offset_by_a_boundary_scalar_is_reported():
     )
     messages = [d.message for d in _graph_diags(pl.parse_program(src))]
     assert any("window can differ between calls" in m for m in messages), messages
+
+
+def _graph_with_out_call(*, submit: bool, omit_output: bool = False):
+    args = "a" if omit_output else "a, c"
+    launch = (
+        f"        with pl.manual_scope():\n            result, tid = pl.submit(self.layer, {args})\n"
+        if submit
+        else f"        result = self.layer({args})\n"
+    )
+    return pl.parse_program(
+        "@pl.program\nclass P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        f"{GRAPH_BODY}"
+        "    @pl.function\n"
+        "    def main(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        f"{launch}        return result\n"
+    )
+
+
+@pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+def test_runtime_allocated_graph_argument_is_rejected(submit):
+    """A supplied Out is legal; an explicit runtime Output direction is not."""
+
+    class RuntimeOutput(ir.IRMutator):
+        def visit_call(self, op):
+            if op.op.name != "layer":
+                return super().visit_call(op)
+            attrs = {**op.attrs, "arg_directions": [ir.ArgDirection.Input, ir.ArgDirection.Output]}
+            return ir.Call(op.op, op.args, op.kwargs, attrs, op.type, op.span)
+
+        def visit_submit(self, op):
+            if op.op.name != "layer":
+                return super().visit_submit(op)
+            attrs = {**op.attrs, "arg_directions": [ir.ArgDirection.Input, ir.ArgDirection.Output]}
+            return ir.Submit(op.op, op.args, op.deps, op.kwargs, attrs, op.type, op.span)
+
+    program = RuntimeOutput().visit_program(_graph_with_out_call(submit=submit))
+    messages = [d.message for d in _graph_diags(program)]
+    assert any("runtime-allocated Output argument" in message for message in messages), messages
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+        with pytest.raises(ValueError, match="runtime-allocated Output argument"):
+            passes.legalize_graph_boundary()(outlined)
+
+
+def test_graph_submit_cannot_omit_out_storage():
+    """Allowing an Out signature must not enable an unallocated boundary tail."""
+    program = _graph_with_out_call(submit=True, omit_output=True)
+    messages = [d.message for d in _graph_diags(program)]
+    assert any("every parameter" in message for message in messages), messages
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+        with pytest.raises(ValueError, match="every parameter must be passed"):
+            passes.legalize_graph_boundary()(outlined)
 
 
 if __name__ == "__main__":

@@ -98,6 +98,17 @@ def test_empty_meta_slice_preserves_offset(column_start):
     assert value.storage_offset() == 6 + column_start
 
 
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_meta_accepts_byte_carriers(dtype):
+    signature = registration.RegistrationSignature(
+        [_param(dtype=dtype, direction=ParamDirection.InOut)], return_aliases=(0,)
+    )
+    value = torch.empty((2, 3), device="meta", dtype=torch.uint8)
+    assert signature.fake(value) is value
+    with pytest.raises(TypeError, match="expects dtype"):
+        signature.fake(torch.empty((2, 3), device="meta", dtype=torch.float16))
+
+
 def test_symbolic_shapes_remain_symbolic():
     mode = FakeTensorMode(shape_env=ShapeEnv())
     value = mode.from_tensor(torch.empty(4, 3), static_shapes=False)
@@ -193,8 +204,6 @@ def test_unsupported_contracts():
         registration.RegistrationSignature([_param(), _param("n", None, DataType.UINT64)])
     with pytest.raises(ValueError, match="direction In"):
         registration.RegistrationSignature([_param(), _param("n", None, DataType.INT32, ParamDirection.Out)])
-    with pytest.raises(ValueError, match="dimensions"):
-        registration.RegistrationSignature([_param(shape=(-2, 3))])
     with pytest.raises(ValueError, match="Return alias"):
         registration.RegistrationSignature([_param(), _param("n", None, DataType.INT32)], return_aliases=(1,))
 
@@ -217,11 +226,10 @@ def test_invalid_scalar_metadata(dtype, value, error):
 
 
 def test_signature_owns_copied_metadata():
-    param = _param(direction=ParamDirection.InOut)
+    shape = [-1, 3]
+    param = ParamInfo("x", ParamDirection.InOut, shape, DataType.FP32)
     signature = registration.RegistrationSignature([param], return_aliases=(0,))
-    assert param.shape is not None
-    param.shape[1] = 8
-    param.name = "changed"
+    shape[1] = 8
     assert " x)" in signature.schema("op")
     value = torch.empty((2, 3), device="meta")
     assert signature.fake(value) is value

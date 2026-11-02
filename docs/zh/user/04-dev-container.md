@@ -2,6 +2,11 @@
 
 拉取一个已经装好 CANN、PyPTO 和运行时的镜像，不用自己拼工具链，直接在真实昇腾卡上跑内核。
 
+本指南开头的命令和镜像信息描述旧版 ARM A2/A3 `a3-dist` 镜像（CANN 9.0.0）。
+CANN 9.2 的 ARM A2/A3、ARM A5 和 x86 A5 镜像，请使用
+[在 CI 中维护发布镜像](#在-ci-中维护发布镜像)中的标签、驱动和验证用例。
+这些标签在首次成功发布后才可拉取。
+
 ## 概念
 
 [安装](01-installation.md)从源码构建 PyPTO，得到的是**编译器前端** —— 足够写内核、读它降级出的
@@ -78,7 +83,8 @@ built     2026-09-14T09:19:43Z
 | `pypto-build` | 用原生 CMake 重建 `$PYPTO_SRC` 下的源码，然后安装 `./runtime`（`simpler`） |
 | `pypto-activate.sh` | 环境本身 —— 既作为 shell 的 rcfile 也作为 `BASH_ENV`，因此 `docker exec … bash -c '…'` 看到的环境与登录 shell 一致 |
 
-第四个脚本 `pypto-update.sh` 不在 `PATH` 上，而是放在源码树里 ——
+仓库现在维护更新器、安装器及这些辅助脚本。重新构建的镜像把它们安装到 `PATH` 上；
+上面已验证的旧镜像仍可能只在源码树中提供更新器。
 见[更新源码并重建](#更新源码并重建)。
 
 镜像还内置了与所 pin 运行时匹配的 `pto-isa` checkout，首次运行不会联网克隆。
@@ -130,7 +136,12 @@ warn  npu-smi: npu get board type failed. ret is -9005 — expected under --runt
 ```
 
 驱动的 `version.info` 只在宿主机上读得到，容器里读不到；`npu-smi` 失败是因为它要枚举整机所有板卡，
-而容器里只有你暴露的那几张。判断卡能不能用，以 `device access: aclrtSetDevice(0) ok` 那行为准。
+而容器里只有你暴露的那几张。`device access: aclrtSetDevice(0) ok` 确认设备访问正常，
+但不能证明驱动兼容 AICPU 初始化。缺少 CANN 解释器或 ACL 探测无法执行时，doctor 会报告阻塞性失败。
+如果可以读取 `version.info`，doctor 会校验运行时支持的组合：CANN `9.0.0` 配驱动 `26.0.rc1`，
+或 CANN `9.1.T500` 配驱动 `25.6.rc1.b108`。CANN 9.2 还接受下文 CI 镜像表中按架构区分的
+部署配置，但仍须通过上板验证。未知组合无法通过校验。
+可以用 `ASCEND_DRIVER_ROOT` 覆盖默认驱动目录 `/usr/local/Ascend/driver`。
 
 然后在卡上跑一个内核：
 
@@ -164,8 +175,9 @@ OK
 | Ascend Docker Runtime | 输出中含 `ascend` | `docker info --format '{{json .Runtimes}}'` |
 | 空闲磁盘 | ≥ 30 GB，用于镜像层、容器和构建缓存 | `df -h /var/lib/docker` |
 
-`version.info` 里 `Version=` 是驱动版本，`compatible_version=` 是它接受的 CANN 版本范围。所有版本
-争议都以这两行为准。
+`version.info` 里 `Version=` 是公开驱动版本，`compatible_version=` 列出
+`V100R001C10` 等内部版本标识，并非公开的 CANN 版本号。
+受支持的公开驱动/CANN 组合以 `runtime/docs/install.md` 为准。
 
 缺什么按下面的顺序装 —— 每一步都依赖前一步：
 
@@ -320,100 +332,305 @@ docker run --rm -it \
 挂载的是*包含* `pypto/` 和 `pypto-lib/` 的那一层，而不是它的上一层 —— 容器内必须直接存在
 `/workspace/pypto` 和 `/workspace/pypto-lib`。绑定挂载会隐藏镜像原有的 `/workspace`，所以你挂进去
 的源码就是唯一的源码，而它几乎肯定不是 `simpler` 当初构建时用的那份。先跑 `pypto-build`，再做别的。
+启动提示始终引导你检查当前 checkout；镜像的 `dist-manifest` 仅记录交付时的版本，
+不能证明绑定挂载的源码已经构建完成。
+
+模型示例通过 `PYPTO_PLATFORM` 选择平台：启动器在 `run a3` 时设置 `a2a3`，
+在 `run a5` 时设置 `a5`；直接运行镜像时则根据镜像的 CANN 标签推导。
+自定义环境应显式设置 `PYPTO_PLATFORM=a2a3` 或 `PYPTO_PLATFORM=a5`。
+无法识别标签时，启动提示会要求设置平台，不会猜测模型的编译目标。
 
 ### 更新源码并重建
 
-拉取最新的 main、改了卷里的 C++、或挂了另一份 checkout 进来 —— 三种情形最后都要重建。镜像里带了
-一个脚本，把整套流程一次做完：
+维护中的辅助脚本位于 [`docker/scripts/`](../../../docker/scripts/)。用该 Dockerfile
+重新构建的镜像会把脚本安装到 `/opt/pypto/bin`，绑定挂载覆盖 `/workspace` 后仍然可用。
+已发布的旧镜像可能仍只在自带 checkout 中提供旧更新器；这时使用下面的仓库版本。
+
+如果已有容器的 checkout 仍将辅助脚本直接放在 `.github/docker/` 或 `docker/`，先执行
+`git -C "$PYPTO_SRC" pull --ff-only`，再运行下面的命令。旧版已安装更新器拉取目录迁移后
+若提示找不到辅助脚本，也可这样恢复。仓库中的更新器会刷新 `/opt/pypto/bin`，使其适配新目录。
+
+对于已经设置跟踪分支且没有本地改动的 checkout：
 
 ```bash
-/workspace/pypto/.github/docker/pypto-update.sh
+bash "$PYPTO_SRC/docker/scripts/pypto-update.sh"
 ```
 
-它会拉取 pypto（含子模块）和 pypto-lib，在 `toolchain/versions.env` 变动时重装 ptoas，跑
-`pypto-build`，最后以 `pypto-doctor` 收尾。和前面三个命令不同，它**不在** `PATH` 上 —— 用上面的
-全路径调用。
+它在各个已有仓库的当前跟踪分支上做快进更新，更新所 pin 的子模块，按
+`toolchain/versions.env` 安装所需的 PTOAS，然后重建 PyPTO 和 simpler，最后运行
+`pypto-doctor`。它不会切换分支或 reset 提交。分离 HEAD、分支分叉或本地改动需要先自行处理，
+也可以使用 `--no-pull`。
+拉取完成后（使用 `--no-pull` 时则直接），更新器会使用 `$PYPTO_SRC/docker/scripts` 中的辅助脚本，
+从 `/opt/pypto/bin` 启动时也一样。所选 checkout 必须包含这些脚本；缺少时直接报错，不回退到镜像中的旧副本。
+每次更新都会原子替换已安装的辅助脚本和工具链配置，不带 `--reinstall-deps` 时也一样。
+当前 shell 需执行 `source "$PYPTO_HOME/bin/pypto-activate.sh"` 或重新进入，以加载新的激活逻辑。
+`pypto-setup.sh --helpers-only` 只刷新这些文件，不安装依赖。
+
+修改绑定挂载的 checkout 后，保留源码并重建：
+
+```bash
+bash "$PYPTO_SRC/docker/scripts/pypto-update.sh" --no-pull --jobs 2
+```
 
 | 参数 | 作用 |
 | ---- | ---- |
-| `--no-pull` | 只重建，保留本地改动 |
-| `--reinstall-deps` | 连 pip 依赖一起重装（torch、numpy、clang-tidy…） |
-| `--proxy http://host:port` | git 拉取和 ptoas 下载走的代理 |
-| `--remote-submodules` | 子模块追各自远程最新，而不是跟随所 pin 的提交 |
-| `--jobs N` | 构建并行度 |
-| `--skip-doctor` | 跳过收尾的 `pypto-doctor` |
+| `--no-pull` | 不改变源码和子模块；对齐 PTOAS 并重建 |
+| `--reinstall-deps` | 使用共享 setup 脚本刷新 Python 依赖 |
+| `--proxy http://host:port` | 为本次运行设置 HTTP 和 HTTPS 代理 |
+| `--remote-submodules` | 支持反复跟踪子模块远程；允许提交偏离 pin，但拒绝本地文件改动 |
+| `--jobs N` | 正整数构建并行度，受机器限制约束；否则使用仓库资源限制加载器 |
+| `--skip-doctor` | 没有暴露设备时跳过收尾检查 |
 
-> **它会丢弃本地工作，已提交的也算。** 拉取用的是 `git reset --hard origin/main`，它移动的是分支
-> 本身 —— 先 commit 救不了你，那个提交只是不再被分支引用而已。要么用 `--no-pull`，要么在跑之前
-> 留一个引用：
->
-> ```bash
-> git -C /workspace/pypto branch backup/before-update
-> ```
->
-> 未跟踪的文件不受影响，这也是它不会把自己删掉的原因：它在那份 checkout 里本身就是未跟踪的。
-
-**三种情形里只有两种跑得了它。** 这个脚本住在镜像自带的源码树里，既不在仓库中也不在 `PATH` 上，
-所以一旦用绑定挂载盖住 `/workspace`，它会和镜像在那儿的其他东西一起被藏起来。命名卷没问题 ——
-空卷会从镜像预填充，脚本一并被复制进去。用绑定挂载的 checkout 时，手工重建：
+只修复过旧的 PTOAS，不更新源码或重建：
 
 ```bash
-git -C /workspace/pypto pull
-git -C /workspace/pypto submodule update --init --recursive
-git -C /workspace/pypto-lib pull
-pypto-build
-pypto-doctor
+bash "$PYPTO_SRC/docker/scripts/pypto-install-ptoas.sh"
+source "$PYPTO_SRC/docker/scripts/pypto-activate.sh"
+"$PTOAS_ROOT/bin/ptoas" --version
 ```
 
-这几步是**部分**替代，不是等价物。脚本做而这里没做的有两件：`toolchain/versions.env` 的 pin 变动时
-重装 ptoas，以及把代理和并行度设置一路传给两者。pin 变动之后手工比对汇编器：
+安装器读取 checkout 中的版本及架构对应的 SHA256，在改变安装前校验 release wheel，
+安装到 `${PTOAS_ROOT:-/opt/pypto/ptoas}`。`--force` 可重装同一版本。
+两个专用环境都必须包含可运行的 CPython 3.10、`pyvenv.cfg` 和 `bin/activate`。
+PTOAS 环境不兼容或不完整时，安装器会先验证下载 wheel 的校验和，再重建该环境。
+激活后 PyPTO venv 在 PATH 中优先，固定版本的 PTOAS 则优先于 CANN 自带的汇编器；
+runtime 包始终显式安装到 `$PYPTO_HOME/venv`。
+使用旧镜像时，每个新 shell 使用 PTOAS 前都要 source checkout 中的激活脚本；只选择可执行文件
+仍可能加载 CANN 的 Python 包，覆盖固定版本的 wheel。安装器会自动隔离自身版本探测的导入路径。
+环境需要已有 uv 和 CPython 3.10，已发布镜像满足这个条件。在其他 CANN 容器中配置环境时，
+从完整 checkout 运行 `pypto-setup.sh`；它安装同一份辅助脚本，并通过
+`build-constraints.txt` 约束构建工具。
+Setup 的专用 `$PYPTO_HOME/venv` 必须使用 CPython 3.10，并包含可读取的
+`Python.h`、`pyconfig.h` 和 Python 库以支持原生构建。不兼容或不完整的环境会在安装依赖前
+使用 uv 管理的 Python 重建；已有完整构建环境会保留。PTOAS 的独立运行时环境不要求开发文件。
+Setup 完成后（包括 `--helpers-only`），将输出的激活命令复制到当前 shell 执行。
+该命令会先导出选定的安装目录和 checkout 路径，再 source 激活脚本，
+支持通过 `--pypto-home` 和 `--pypto-src` 指定的路径。更新器输出的重新加载命令也会保留这些路径。
+Setup 将发现的 uv 可执行文件复制到 `$PYPTO_HOME/bin`，使 checkout 所有者执行的构建
+也能使用它，即使原始文件位于 root 的私有主目录下。
+如需固定 uv 版本，传入 `--uv-version TAG` 或设置 `UV_VERSION=TAG`；指定具体发布标签时，
+即使已经安装 uv，也会下载指定版本。命令行选项优先于环境变量。默认的 `latest` 设置
+会复用已有 uv，仅在未安装 uv 时下载最新版本。
+
+`pypto-build` 使用原生 CMake，安装与 checkout 匹配的 simpler，并遵循其中的 PTO-ISA pin。
+每次运行都会重新构建并安装 runtime wheel，包括未提交的源码改动；
+原生构建和 ccache 仍可复用编译结果。
+它刻意避免 `pip install -e .`：scikit-build 配置过的 `build/` 可能把扩展放到源码导入路径之外。
+并行度通过 `.claude/skills/testing/load-env.sh` 加载，未分类的机器默认使用两个任务。
+显式指定的任务数量可以降低这个上限，不能提高它。
+已有原生构建保留其 CMake generator，新构建使用 Ninja。
+如果路径、环境或工具链不同，会同时丢弃缓存和目标文件，包括挂载到相同路径的宿主机构建缓存。
+辅助脚本在每次成功构建后记录构建状态；状态不变时继续增量构建，
+未记录的构建或在辅助脚本之外修改过的产物会重新构建。记录不包含容器主机名、路径列表顺序、
+所有权和文件系统 change time，因此重建等价容器时仍可复用增量构建。
+`pypto-doctor` 检查已安装 simpler 的构建版本是否与挂载的 `runtime/` 匹配。
+如果 `runtime/` 有未提交改动，会给出警告，因为版本一致无法证明已安装 binding 包含这些改动。
+即使设置了 `PYPTO_SKIP_RUNTIME_PIN_CHECK=1`，已知版本不匹配或使用引入版本标记之前的旧 binding
+仍会导致检查失败。构建版本标记为空或无法读取 checkout 版本时，会明确报告无法验证，而不会声称版本匹配。
+
+### 构建开发镜像
+
+在目标架构机器上，从仓库根目录构建。`deps` 提供环境，`sim` 增加 GCC/G++ 15，
+`dist` 还会克隆并构建 PyPTO 和 pypto-lib：
 
 ```bash
-grep '^PTOAS_VERSION=' /workspace/pypto/toolchain/versions.env
-/opt/pypto/ptoas/bin/ptoas --version
+docker buildx build --load --target dist \
+  --file docker/pypto_dev.Dockerfile \
+  --build-arg DIST_BUILD_JOBS=2 \
+  --build-arg PYPTO_REF=<pypto-commit> \
+  --build-arg PYPTO_LIB_REF=<pypto-lib-commit> \
+  --tag pypto-dev:a3-dist .
 ```
 
-`pypto-build` 用原生 CMake 重建 PyPTO，安装与当前 `runtime/` 源码匹配的 `simpler`，并解析该源码指定
-的 `pto-isa` pin。它刻意不用 `pip install -e .`：被 scikit-build 配置过的 `build/` 会把扩展放进
-`build/python/bindings/` 而不是 `python/pypto/`，此后每次构建都"成功"，而 Python 一直导入过期的
-`.so` —— C++ 改动看起来完全没生效。
+默认的 `main` 引用保留跟踪分支，因此 `pypto-update.sh` 可以拉取更新。
+标签和提交引用使用分离 HEAD；这类固定版本构建应使用 `--no-pull`。
+选定的 PyPTO ref 必须包含开发容器辅助脚本、`toolchain/versions.env` 和
+`build-constraints.txt`。`dist` 阶段执行该 checkout 的 setup 和 build 脚本，
+根据其中的 pin 和约束刷新依赖，并安装该版本的辅助脚本供后续会话使用。
+如果选定 ref 缺少这些文件，构建会失败，不会回退到 Docker 构建上下文中的辅助脚本。
 
-`pypto-build` **不做**的事情是更新 ptoas —— 这一步只有 `pypto-update.sh` 会做。
+构建 AMD64 镜像时，使用 x86_64 宿主机及支持 `linux/amd64` 的 CANN 基础镜像标签；
+构建前先确认该标签支持目标架构。先发布独立架构标签，在对应 NPU 宿主机上通过
+`pypto-doctor` 和模型验证后，再组合多架构 manifest。无 NPU 时构建成功只验证镜像构建过程。
+
+本地环境镜像可以用 `docker/scripts/pypto-dev.sh build a3` 构建，
+用 `docker/scripts/pypto-dev.sh run a3 0` 创建或重新进入容器。
+启动器支持 CANN 标签、镜像、缓存卷和代理覆盖，具体见源码。
+代理值通过环境传递，不在命令跟踪中打印凭据，也不作为命令参数传入。重新进入容器时保留容器原有环境。
+复用容器前，启动器会检查 checkout 路径、镜像（包括同一标签重新构建的情况）、缓存卷和设备配置。
+配置不匹配或旧容器缺少配置元数据时，启动器会停止并提示重建方法；
+显式删除容器前，请先保存仅存在于容器内的改动。
+使用 Ascend Docker Runtime 时，选中的物理卡在容器内对应逻辑设备 `0`，因此启动器导出
+`PYPTO_DEVICE=0`。privileged 模式保留物理卡编号；`pypto-doctor` 探测同一个选定设备。
+挂载关联工作树（linked worktree）时，启动器保留 checkout 和共享 Git 元数据的原始路径，
+相应设置 `PYPTO_SRC`/`PYPTO_LIB_SRC`，并从 `PYPTO_SRC` 启动容器；
+这样无需改写宿主机元数据，就能保持子模块的相对 gitdir 路径和工作树反向引用有效。
+普通 checkout 仍使用 `/workspace/pypto` 和 `/workspace/pypto-lib`。
+启动器为挂载的 checkout 及其已初始化的子模块（包括嵌套子模块）传递限定路径的 Git
+`safe.directory` 配置，使容器 root 可以访问宿主机用户拥有的工作树。
+新增已初始化的子模块会改变容器配置，需要重建容器。
+Git 更新使用各 checkout 所有者的数字 UID/GID；原生编译和 runtime wheel 构建使用 PyPTO
+checkout 的所有者身份，使新源码、Git 元数据和构建产物在宿主机上仍可写。
+rootful 容器需要 util-linux 提供的 `setpriv`，无需在 `/etc/passwd` 中创建同名账户。
+写入源码的命令使用独立的 `$PYPTO_HOME/users/<uid>` HOME 和
+`$PYPTO_HOME/cache/ccache/<uid>` 缓存目录。私有仓库认证需在该 HOME 配置，或使用 SSH
+agent；不会复制 root 的凭据。完成的 wheel 由调用者以原权限安装，保持已有 Python 环境的
+所有权不变。脚本不会递归修改已有宿主机文件或共享 worktree 元数据的所有权。
+交互 shell 和设备诊断保持原有权限，checkout 诊断使用源码所有者身份；激活脚本禁用 Python
+字节码写入，以及只读 Git 检查时可选的索引刷新。
+如果 PyPTO 主 checkout 包含 `.claude/skills/testing/testing.env`，启动器也会将该文件
+只读挂载到原始路径，以保留机器的构建并行度限制。
+
+### 在 CI 中维护发布镜像
+
+[`docker/images.json`](../../../docker/images.json) 是镜像维护入口。
+`Maintain Development Images` workflow 每天在 UTC 19:37（北京时间 03:37）运行；
+`main` 上的 `docker/`、工具链版本、构建约束或该 workflow 变化时也会触发，
+还可通过 **Run workflow** 手动运行。修改上述路径的 PR 在 GitHub 托管 runner 上运行配置检查和
+离线脚本测试。仅当 PR 来源仓库为 `hw-native-sys/pypto` 或明确认可的可信 fork `luohuan19/pypto` 时，
+才在指定 NPU runner 上构建镜像，执行 doctor、单卡 decode 和双卡分布式用例验证；其他 fork 跳过该 job。
+允许名单位于 workflow 的 `image.if` 条件中；新增仓库意味着允许其代码在持久化宿主机上执行，
+必须由维护者审核其可信性。
+PR 可以修改 workflow YAML，因此该名单本身不是安全边界。启用共享 runner 的 PR 构建前，
+管理员必须在 **Settings → Actions → General** 中设置 **Require approval for all external contributors**，
+并确保维护者只批准可信来源和经过审查的代码，包括 workflow 修改。这是仓库级策略，会影响所有外部 PR workflow；
+等待批准时，配置检查也不会运行。该设置不会隔离已经批准执行的代码。
+参见 [GitHub fork workflow 审批设置](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories)。
+定时任务在 workflow 合并到默认分支 `main` 后生效。匹配路径的改动合并到 `main` 时，
+也会立即触发构建发布；请在合并前配置 SWR Secrets。
+PR 不发布镜像，也不获取 SWR 凭据。
+硬件构建只在 `hw-native-sys/pypto` 仓库中执行。手动运行默认仅验证；发布还要求分支为 `main`。
+
+当前启用三个原生镜像，均使用 CANN 9.2.0：
+
+| 镜像 | Runner 标签 | 宿主机驱动（`Version=`） | 发布标签 |
+| ---- | ----------- | ------------------------ | -------- |
+| `arm-a2a3` | `self-hosted`、`linux`、`ARM64`、`npu-xp` | `26.0.rc1` | `arm-a2a3-cann9.2-dist` |
+| `arm-a5` | `self-hosted`、`Linux`、`ARM64`、`npu-a5` | `25.6.rc2.b023` | `arm-a5-cann9.2-dist` |
+| `x86-a5` | `self-hosted`、`Linux`、`npu-a5`、`X64`、`pr` | `25.7.rc1.12` | `x86-a5-cann9.2-dist` |
+
+A5 基础镜像为 `9.2.0-950-ubuntu22.04-py3.11-devel`，分别固定到 ARM64 和 AMD64 manifest。
+架构标签确保 A5 任务调度到匹配的原生 runner。doctor 将 CANN 9.2 A5 的驱动组合限定到对应宿主机架构。
+`pr` 标签用于选择 x86 runner，不限制 workflow 的触发事件类型。
+原计划中尚缺 `x86-a2a3`：需要原生 X64 A2/A3 runner、AMD64 CANN 基础镜像 digest、
+经过验证的驱动组合及单卡、双卡验证。
+A2/A3 预检还要求 runner 名称为 `227-npu-a2a3-XP-1`；若该标签池扩大，
+应为宿主机分配专用标签并更新 `runners`。
+每个 runner 需要提供 Python 3.10 的 `pypto-toolchain` 工具链包、Git、Docker、
+Ascend Docker Runtime，以及支持 `--find`/`--kill` 的 `task-submit`；不使用宿主机的 PyPTO 安装。
+宿主机维护命令会显式进入该工具链环境，不依赖可能较旧的系统 `python3`。
+工具链检查打印的是宿主机 CANN 版本；镜像版本由 `cann_tag`/`cann_digest` 指定，
+并由容器内的 strict doctor 核实。
+workflow 在独立 Docker 配置中安装 Buildx v0.35.0，使用宿主机的默认 Docker builder，保留共享构建缓存。
+
+首次发布前，在仓库设置中配置：
+
+| 类型 | 名称 | 内容 |
+| ---- | ---- | ---- |
+| Secret | `SWR_USERNAME` | SWR 长期登录指令中的用户名 |
+| Secret | `SWR_PASSWORD` | 该指令中的密码 |
+
+凭据仅提供给发布步骤，通过 `--password-stdin` 登录。每次执行使用独立的临时 Docker 配置目录，
+由 `always()` 步骤删除。不要提交临时登录 token。
+workflow 设置 `PYPTO_DOCKER_PROXY=http://127.0.0.1:7892`，使用 CI runner 上的本地代理，
+无需配置 GitHub Actions 代理 Variable。代理传给 Git 和 Docker build arguments，不写入最终镜像环境。
+Buildx 安装和 GitHub artifact 上传也使用该代理。
+手动调用脚本时，将 `PYPTO_DOCKER_PROXY` 环境变量设置为当前机器可访问的代理。
+首期配置设置了 `proxy_required: true`，缺少该环境变量时预检直接失败。
+`--network=host` 作用于构建步骤；拉取基础镜像仍依赖 Docker daemon 的网络和代理。
+SWR 认证与 manifest 操作直接连接，不使用代理。登录和推送子进程也会清除代理变量；
+如果 Docker daemon 自身配置了代理，其 `NO_PROXY` 必须包含 SWR 主机名。
+
+首次构建前，确认配置中的 CANN 基础镜像可访问。默认 `cann_repository` 为 `quay.io/ascend/cann`；
+若 daemon 无法访问，将对应架构的准确镜像同步到允许匿名读取的 SWR 仓库，再修改该字段。
+每种架构均固定镜像 digest；切换仓库时，应将验证过的镜像仓库 digest 填入 `cann_digest`。
+值为 null 时，每次拉取指定 tag 并解析 digest。
+两种模式都会使用解析后的 digest 构建并记录到产物中；旧缓存不能掩盖拉取失败。
+升级 CANN 时，应一起修改 tag、digest、驱动要求和发布标签。
+
+每次构建前冻结 PyPTO 和 pypto-lib 的提交。PyPTO 的 `ref: main` 使用 workflow checkout 的提交，
+保证 Docker 配方与辅助脚本属于同一次事件快照。PR 使用准确的 head 提交，从 PR 来源仓库
+（包括 fork）克隆，不使用临时合并提交。显式指定的 PyPTO ref 仍使用配置中的来源仓库。
+其他 ref 和 pypto-lib ref 解析为完整提交 SHA。
+runtime 始终跟随 PyPTO 的 gitlink；PTO-ISA 跟随该 runtime 的 `pto_isa.pin`；
+PTOAS 跟随所选 PyPTO 的工具链版本。使用这些 SHA 使源码构建缓存失效，而不是传入可变的 `main`。
+编译并发同时受 `build_jobs` 和资源限制加载器约束。
+CI 选择 simpler 的 `build_package_<validation_platform>` 和 `build_package_sim` 目标：
+每个镜像预编译自身平台的上板 runtime 和两种 CPU 模拟器。
+`DIST_RUNTIME_TARGETS` 将该选择保存为 `PYPTO_RUNTIME_BUILD_TARGETS`，供后续 `pypto-build`
+继续使用；空值使用 simpler 的默认目标。该选项只影响 runtime wheel 的构建。
+所选 PyPTO ref 必须提供 `pypto-doctor --strict`；验证会拒绝那些静默忽略严格选项的旧辅助脚本。
+
+`cann92-a2a3-aicpu-class-memaccess` 和 `cann92-a5-aicpu-class-memaccess` 补丁
+只增加对应平台在 CANN 9.2 GNU 编译器下所需的 onboard AICPU 警告豁免，每个镜像应用自身平台的补丁。
+编译前应用补丁；若相同修改已经进入上游则跳过；上下文变化导致无法应用时直接失败。
+成功构建后，`/opt/pypto/dist-state.json` 记录 runtime SHA、差异哈希、补丁哈希及安装的扩展哈希。
+`pypto-doctor --strict` 仅接受该记录对应的补丁；其他修改、缺少编译版本标记或无法验证的绑定都会失败。
+表中的驱动组合属于部署验证配置，发布仍须通过 strict doctor 和两个上板测试，
+不代表对其他宿主机的通用兼容保证。
+
+验证使用全新容器，不挂载源码或缓存卷，并设置 `PYPTO_BENCH=0` 执行正确性检查。
+登录和构建成功后的提示会为 `a5` 选择 DeepSeek SWA，为 `a2a3` 选择 Qwen3 decode。
+每个镜像配置通过 `decode` 选择单卡脚本，通过 `distributed` 选择双卡脚本；
+可选的 `distributed_args` 列表按独立参数传入。A2/A3 使用 Qwen3-14B decode 和 pypto-lib 的 all-reduce 示例。
+A5 使用 `models/deepseek_v4_1_flash/decode_swa.py` 验证 SWA、KV cache 和 MXFP8，
+使用 `models/deepseek_v4_1_flash/decode_moe.py --ep 2` 验证专家计算和跨卡分发、合并。
+两个 A5 用例自行生成输入，并与各自的 golden 参考结果比较。
+一次单卡 `task-submit` 借卡先运行严格 doctor，再运行 decode；另一次借卡运行双卡用例。
+物理卡来自 `TASK_DEVICE`，模型参数使用容器内编号 `0` 或 `0,1`。
+宿主机驱动元数据以只读方式挂载。ARM A5 容器还传入 `/dev/ummu` 和 `/dev/uburma`，用于 URMA 通信。
+两个模型都必须退出码为零且输出 `[RUN] PASS`；
+缺少 PASS、超时或测试失败都禁止发布。`task_timeout_seconds` 限制排队加执行的总等待时间，
+`task_max_seconds` 单独限制设备执行时间。总超时必须大于执行上限；首期每个用例允许总计 3600 秒，
+其中设备执行最多 1800 秒。清理步骤约束孤儿任务，
+只删除本次运行的容器和任务，不清理共享构建缓存。
+
+上传前及切换正式标签前，发布步骤都会确认构建配方提交仍为上游最新 `main`。
+旧运行重跑或无法查询上游时直接失败，不修改最新与前一个标签。
+检查使用配方提交，因此仍支持显式固定 PyPTO 源码版本。
+重试应构建最新 `main`；回滚需要单独显式执行。
+
+验证通过后，先将测试过的准确 image ID 推送到临时标签
+`arm-a2a3-cann9.2-dist-<run_id>-<attempt>`，核对 manifest 和 config digest 与测试镜像一致后才发布。
+先将现有 `arm-a2a3-cann9.2-dist` 移到 `arm-a2a3-cann9.2-dist-previous`，再更新为新镜像。
+对相同 digest 重试不会覆盖前一个版本。首次发布仅创建最新标签；第二次不同镜像发布才创建前一个标签。
+临时标签按名称删除，绝不删除共用 digest。成功发布后，每个配置的镜像只保留这两个标签。
+配置检查会跨镜像预留最新标签及生成的 `-previous` 标签，在调度原生 job 前拒绝名称冲突。
+
+workflow 不会更新或删除 `a3-dist`、`a3-dist-20260918` 等旧标签。
+等两个新构建均通过上板验证、完成上传，且最新与前一个标签均可用后，再单独清理旧标签。
+未核实内容前，不要把旧镜像改名为 CANN 9.2。
+
+Actions Summary 和保留 14 天的 artifacts 包含提交版本、digest、构建与验证日志，以及发布前的 manifest，
+供失败恢复使用。将最新标签重新指向前一个 digest 即可回滚，无需重建。
+发布跨越多个仓库请求：若中途失败，重试前应检查两个标签及保存的 manifest。
+临时标签删除失败会使 job 失败，可能需要手动删除该次运行的具体标签；不得删除其 digest 或共享层。
+
+镜像内的源码是 detached 快照，`pypto-update.sh` 不会直接拉取更新，受管补丁也会使 runtime 工作树变脏。
+获取新快照时，拉取新镜像并创建新容器或源码卷。已有 named volume 会保留原来的源码。
+希望跟踪分支的开发者，需要显式处理 checkout 和本地补丁，然后再使用更新脚本。
+
+后续添加 `x86-a2a3` 或其他 CANN 版本的镜像时，新增配置项并指定匹配的原生 runner、CANN 基础镜像、
+驱动和硬件验证路径；环境准备好前保持禁用。各组合独立发布标签；Docker 架构 manifest 无法按宿主机 NPU 选择镜像。
 
 ### 不装 Ascend Docker Runtime
 
-装不了 Runtime（没有 root、不能重启 Docker、维护窗口未到）时，自己把设备节点和驱动传进去：
+未注册 Ascend runtime 时，启动器默认的 `auto` 模式会选择 `privileged`。
+这种回退需要运行 privileged Docker 容器的权限，并会暴露宿主机的所有设备和 NPU 卡。
+启动器会在创建或重新进入容器之前说明这一行为。允许这类访问时，可以显式选择：
 
 ```bash
-docker run --rm -it \
-  --device /dev/davinci1 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  --shm-size=16g \
-  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-  -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-  "$PYPTO_IMAGE"
+PYPTO_DEVICE_ACCESS=privileged docker/scripts/pypto-dev.sh run a3 1
 ```
 
-`davinci1` 是你要用的卡；另外三个是驱动管理节点，必须和它一起传入。`driver` 挂载提供驱动库。
-`dcmi`、`npu-smi`、`ascend_install.info` 三个挂载只决定容器内 `npu-smi` 能不能用，可以省略。
+启动器挂载宿主机驱动目录和管理工具，并设置 `PYPTO_DEVICE=1`，将物理卡 1 作为默认计算设备。
+这个设置不会限制容器访问其他卡或宿主机设备。
+A5 请在适配的宿主机上使用 `run a5`；启动器还会传入所需的 URMA 设备。
 
-**这种方式下卡号不重映射。** 容器内看到的仍是 `/dev/davinci1`，但 ACL 只枚举到这一张卡，所以 PyPTO
-参数仍是 `-d 0`；传入 `davinci2`、`davinci3` 时对应 `-d 0,1`。若希望在多卡可见时按物理卡号选择，用
-CANN 自己的变量，逻辑编号按列出顺序从 0 开始：
-
-```bash
--e ASCEND_RT_VISIBLE_DEVICES=2,3
-```
-
-该方案已在 `driver 26.0.rc1` 配本镜像上验证：`pypto-doctor` 全项通过，单卡和双卡用例均通过。它不需要
-`--privileged`，而且 `--privileged` 不是等价替代 —— 那会把整机所有卡都交给容器。只有在上面的做法仍然
-报 `507899` 时，才把它当最后手段。
-
-`--runtime=ascend` 依然是推荐方式：它自动注入驱动与设备节点、重新编号卡、并且只暴露你指定的那几张。
+只传入四个设备节点和驱动挂载并不是可移植的替代方案：设备枚举可能报
+`drvGetDevNum`/`507899`，包括在驱动 `26.0.rc1` 上。因此，本指南不再声称这种受限方式
+可以在该驱动上工作。需要设备隔离时，应使用已注册的 `--runtime=ascend` 路径；
+它会注入驱动，并只暴露指定的卡。如果不允许 privileged 容器，请联系宿主机管理员配置该 runtime。
 
 ## 边界情况
 
@@ -422,14 +639,14 @@ CANN 自己的变量，逻辑编号按列出顺序从 0 开始：
 
 | 症状 | 可能原因 | 处理 |
 | ---- | -------- | ---- |
-| `unknown or invalid runtime name: ascend` | Ascend Docker Runtime 未安装、未注册，或安装后没重启 Docker | `sudo systemctl daemon-reload && sudo systemctl restart docker`，再查 `docker info --format '{{json .Runtimes}}'`；或改用 [`--device` 回退方案](#不装-ascend-docker-runtime) |
+| `unknown or invalid runtime name: ascend` | Ascend Docker Runtime 未安装、未注册，或安装后没重启 Docker | `sudo systemctl daemon-reload && sudo systemctl restart docker`，再查 `docker info --format '{{json .Runtimes}}'`；或改用 [privileged 回退方案](#不装-ascend-docker-runtime) |
 | `exec format error` | 在 x86_64 宿主机上跑 ARM64 镜像 | 换到 `aarch64` 宿主机 —— 没有绕过办法 |
 | `aclrtSetDevice` 返回 `507899` 或 `Resource_Busy` | 同一张物理卡被另一个容器或进程占用 | 用 `npu-smi info` 和 `docker ps` 找到并停掉它，或换一张卡。之后 ACL 上下文可能已进入 sticky error 状态 —— 重建容器再测 |
 | `simpler_init failed with code 507018` | 几乎总是驱动 / CANN 不匹配 | 见[排查 `507018`](#排查-507018) |
 | `npu-smi` 报 `-9005`，或 `DrvMngGetConsoleLogLevel failed (ret=4)` | 只暴露了部分卡，而 `npu-smi` 试图枚举整机 | 无害。以 `pypto-doctor` 的 `device access: aclrtSetDevice(0) ok` 为准 |
 | `/workspace/pypto` 不存在 | 绑定挂载高了一层 | 挂载包含 `pypto/` 的那一层：用 `-v "$PWD/workspace:/workspace"`，而不是 `-v "$PWD:/workspace"` |
 | `pypto-doctor` 报 simpler binding 与源码不匹配 | 挂进来的源码与镜像构建时用的不是同一份 | `pypto-build && pypto-doctor` |
-| codegen 报 `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | 源码 pin 的 ptoas 比镜像自带的（0.61）新 —— 拉取了更新，或把当前 checkout 挂载到 `/workspace` | 跑 `/workspace/pypto/.github/docker/pypto-update.sh` —— 只有它会重装 ptoas。绑定挂载会把它遮住，而[更新源码并重建](#更新源码并重建)里的手动重建不会重装 ptoas；此时按 [FAQ](appendix/01-faq.md#编译) 安装 `toolchain/versions.env` 中的版本，并把 `PTOAS_ROOT` 指向它 |
+| codegen 报 `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | PTOAS 低于 checkout 要求的版本 | 按[更新源码并重建](#更新源码并重建)运行仓库中的安装器；绑定挂载和旧镜像也适用 |
 | `pto-isa` 试图联网克隆 | 挂载的源码 bump 了 `runtime/pto_isa.pin`，或 managed checkout 被改动过 | pin 变了之后属于预期行为。若 GitHub HTTP/2 不稳定，执行 `git config --global http.version HTTP/1.1` —— resolver 会重试 GitHub，失败后回退到 GitCode 镜像 |
 
 ### 排查 `507018`
@@ -458,8 +675,10 @@ RuntimeError: simpler_init failed with code 507018
 cat /usr/local/Ascend/driver/version.info
 ```
 
-`Version=` 必须是 `26.0.rc1`，`compatible_version=` 必须包含镜像内的 CANN 9.0.0。其他组合都属于未支持
-的环境（运行时在 `runtime/docs/install.md` 里列出了它支持什么）；先把驱动和固件升级到配套版本再复测。
+对于 A3 镜像的 CANN 9.0.0，`Version=` 必须是 `26.0.rc1`。
+`compatible_version=` 使用内部标识，不应在其中搜索 `9.0.0`。
+其他公开版本组合不在该镜像的支持范围内（运行时在 `runtime/docs/install.md` 中列出了支持的组合）；
+先把驱动和固件升级到配套版本再复测。
 
 **第二，确认芯片系列与 `-p` 一致。** 用错 arch 同样会以 `507018` 的形式出现，而且看起来非常像编译器
 bug。`a2a3` 覆盖 `Ascend910*`（A2）和 `Ascend910_93*`（A3），`a5` 覆盖 `Ascend950*`：

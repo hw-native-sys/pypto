@@ -36,6 +36,14 @@
 namespace pypto {
 namespace ir {
 
+RegType::RegType(int64_t shape, DataType dtype, RegKind kind) : shape_(shape), dtype_(dtype), kind_(kind) {
+  CHECK(shape > 0) << "RegType shape must be a positive integer";
+  CHECK(DataTypeToString(dtype) != "UnknownType") << "RegType requires a known dtype";
+  CHECK(kind == RegKind::VecReg || kind == RegKind::MaskReg) << "Unknown RegKind";
+  CHECK(kind != RegKind::MaskReg || dtype == DataType::BOOL) << "MaskReg requires BOOL dtype";
+  CHECK(kind != RegKind::VecReg || dtype != DataType::BOOL) << "VecReg forbids BOOL dtype";
+}
+
 void detail::CheckValueType(const TypePtr& type, const Span& span, const char* context) {
   CHECK_SPAN(!type || type->GetKind() != ObjectKind::VoidType, span)
       << context << " cannot use VoidType: it represents no value; execute a void call with EvalStmt";
@@ -54,16 +62,6 @@ std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optiona
   CHECK(memory_space.has_value()) << "TileType with MemRef must have explicit memory_space";
 
   return memory_space;
-}
-
-void ValidatePackedFp4Shape(const DataType& dtype, const std::vector<ExprPtr>& shape) {
-  if (dtype != DataType::FP4) return;
-  CHECK(!shape.empty()) << "Packed FP4 shaped types must have rank >= 1";
-  auto packed_extent = As<ConstInt>(shape.back());
-  if (!packed_extent) return;
-  CHECK(packed_extent->value_ > 0 && packed_extent->value_ % 2 == 0)
-      << "Packed FP4 shaped types require a positive even logical last dimension, but got "
-      << packed_extent->value_;
 }
 
 std::vector<ExprPtr> MakeShapeExprs(const std::vector<int64_t>& shape) {
@@ -271,6 +269,14 @@ CompactMode StringToCompactMode(const std::string& str) {
   throw TypeError("Unknown CompactMode string: " + str);
 }
 
+std::optional<PadValue> TryStringToPadValue(const std::string& str) {
+  if (str == "null") return PadValue::null;
+  if (str == "zero") return PadValue::zero;
+  if (str == "max") return PadValue::max;
+  if (str == "min") return PadValue::min;
+  return std::nullopt;
+}
+
 BufferType::BufferType(std::vector<int64_t> shape, DataType dtype, MemorySpace memory_space,
                        std::vector<int64_t> valid_shape, TileLayout blayout, TileLayout slayout,
                        uint64_t fractal, PadValue pad, CompactMode compact)
@@ -391,7 +397,6 @@ ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr mem
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {
   detail::CheckValueOperands(shape_, Span::unknown(), "ShapedType dimension");
-  ValidatePackedFp4Shape(dtype_, shape_);
 }
 
 TensorType::TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,

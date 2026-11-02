@@ -36,12 +36,14 @@ class Ascend910BHandler : public BackendHandler {
   static const Ascend910BHandler& Instance();
 
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a2a3"; }
+  [[nodiscard]] const sync::ResourceCatalog& GetSyncResourceCatalog() const override;
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_block_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a2a3sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a3"}; }
   [[nodiscard]] bool HonorsHighPrecisionAlgorithm() const override { return false; }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
+  [[nodiscard]] bool SupportsRuntimeBoundLocalSoftwarePipeline() const override { return true; }
   [[nodiscard]] bool SupportsLocalPipeDepth() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
 
@@ -60,11 +62,14 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return true; }
   // A2/A3 has no packed fp4 load/store ABI; reject the whole FP4 family.
   [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
-    return dtype.GetBit() != 4 && !dtype.IsFp4Family();
+    return dtype.GetBit() != 4 && !dtype.IsPackedFp4();
   }
 
   // A2/A3 store pipe supports bf16 atomic-add (pto-isa set_atomic_bf16).
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return true; }
+
+  // TStoreAccNz2nz uses a 12-bit nSize field and channel split for FP32 C0=8.
+  [[nodiscard]] int GetAccToNzGmStoreMaxCols() const override { return (1 << 12) - 1; }
 
   // A2/A3 fix-pipe Acc->GM destination whitelist (pto-isa a2a3 CheckAcc2gm,
   // non-quant branch; ptoas rejects anything else at pto.tstore verification).

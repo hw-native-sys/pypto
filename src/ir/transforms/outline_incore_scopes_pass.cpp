@@ -285,7 +285,12 @@ Pass OutlineIncoreScopes() {
       // symbol placeholder is not the caller's and may be reached with a
       // statically-shaped actual.
       StmtPtr source_body = func->body_;
-      if (func->func_type_ == FunctionType::Opaque) {
+      if (func->func_type_ == FunctionType::Orchestration) {
+        // InlineFunctions can introduce these reads after the authoring parser
+        // established orchestration form. Canonicalize them before capture,
+        // or an outlined Tensor type can retain a caller-local shape alias.
+        source_body = FoldParamDimReads(func->params_, source_body);
+      } else if (func->func_type_ == FunctionType::Opaque) {
         HasInCoreScope probe;
         probe.VisitStmt(source_body);
         if (probe.found_) source_body = FoldParamDimReads(func->params_, source_body);
@@ -294,16 +299,15 @@ Pass OutlineIncoreScopes() {
       // Build symbol table for this function
       outline_utils::VarCollector type_collector;
       for (const auto& var : func->params_) {
-        type_collector.var_types[var.get()] = var->GetType();
-        type_collector.var_objects[var.get()] = var;
-        type_collector.known_names.insert(var->name_hint_);
+        type_collector.CollectParameter(var);
       }
       type_collector.VisitStmt(source_body);
 
       // Outline InCore scopes in this function
-      outline_utils::ScopeOutliner outliner(
-          func->name_, type_collector.var_types, type_collector.var_objects, type_collector.known_names,
-          ScopeKind::InCore, FunctionType::InCore, "_incore_", /*program=*/nullptr, reserved_func_names);
+      outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
+                                            type_collector.known_names, type_collector.runtime_bindings,
+                                            ScopeKind::InCore, FunctionType::InCore, "_incore_",
+                                            /*program=*/nullptr, reserved_func_names);
       auto new_body = outliner.VisitStmt(source_body);
 
       // Create new function with transformed body.

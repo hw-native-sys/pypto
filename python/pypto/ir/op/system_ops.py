@@ -12,7 +12,7 @@
 System operations handle hardware synchronization and cross-core communication:
 - sync_src / sync_dst: Set/Wait flag-based synchronization between pipes
 - set_ffts / sync_set / sync_wait: Explicit Cube/Vector cross-core event synchronization
-- bar_v / bar_m / bar_all: Barrier synchronization for vector, matrix, or all units
+- barrier: Barrier synchronization for vector, matrix, or all pipelines on one core
 - tpush_to_aiv / tpush_to_aic: Push tile data across cores
 - tpop_from_aic / tpop_from_aiv: Pop tile data from cross-core pipe
 - aic_initialize_pipe / aiv_initialize_pipe: Initialize cross-core pipes
@@ -384,19 +384,31 @@ def sync_wait(
     )
 
 
-def bar_v(*, span: Span | None = None) -> Call:
-    """Vector unit barrier."""
-    return _create_barrier_op("system.bar_v", span=span)
+def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
+    """Order work across a vector, matrix, or all-pipeline barrier on one core.
 
+    Args:
+        pipe: ``PipeType.V``, ``PipeType.M``, or ``PipeType.ALL``. A single-pipe
+            barrier orders that pipeline's preceding and following work; ALL
+            waits for preceding work across all pipelines on the current core.
+        span: Optional source span for debugging (auto-captured if not provided).
 
-def bar_m(*, span: Span | None = None) -> Call:
-    """Matrix unit barrier."""
-    return _create_barrier_op("system.bar_m", span=span)
+    Returns:
+        Barrier call expression with no result value.
 
-
-def bar_all(*, span: Span | None = None) -> Call:
-    """Global barrier synchronization."""
-    return _create_barrier_op("system.bar_all", span=span)
+    Raises:
+        TypeError: If pipe is not a PipeType member.
+        ValueError: If pipe is not V, M, or ALL.
+    """
+    # Preserve the established IR and native PTO barrier lowering. Barriers
+    # have no event ID and must not allocate or consume pipeline event slots.
+    op_names = {
+        PipeType.V: "system.bar_v",
+        PipeType.M: "system.bar_m",
+        PipeType.ALL: "system.bar_all",
+    }
+    _check_enum(pipe, PipeType, "pipe", "system.barrier", allowed=tuple(op_names))
+    return _create_barrier_op(op_names[pipe], span=span)
 
 
 def fence(*, span: Span | None = None) -> Call:

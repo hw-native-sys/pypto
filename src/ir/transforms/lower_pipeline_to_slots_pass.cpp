@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
+#include "pypto/ir/transforms/utils/software_pipeline.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -345,21 +346,73 @@ class SlotBindingMutator : public IRMutator {
     return result;
   }
 
-  /// Can the loop's induction variable index the slots directly as `iv % factor`?
+  /// Can the loop's induction variable index the slots?
   ///
-  /// ptoas matches the *affine form* of the slot index to decide which accesses
-  /// share a slot, and that match is what earns the rotation its per-slot dynamic
-  /// event ids. A general `((iv - start) / step) % factor` would have to be
-  /// materialized as an intermediate SSA value, which risks losing exactly the
-  /// analysis this transform exists to trigger — so any loop whose slot index is
-  /// not literally `iv % factor` is left to `LowerPipelineLoops`.
+  /// Three accepted shapes, all `((iv - start) / step) % factor` with the
+  /// identity parts dropped, and they exist for the same reason: the slot operand
+  /// has to stay an expression ptoas can reason about, never a byte offset.
+  ///
+  /// * `step == 1` with an aligned `start` means the induction variable **is**
+  ///   the rotation counter, so the slot is literally `iv % factor`. That is the
+  ///   form the affine analysis matches by construction, and it is still emitted
+  ///   for exactly these loops, unchanged.
+  /// * `step == 1` with an unaligned `start` counts from `start`, so the slot is
+  ///   `(iv - start) % factor`: the division by one is dropped, and ptoas sees
+  ///   `(symbol + constant) mod N`, the affine form its slot matcher peels.
+  /// * A constant `step > 1` counts iterations, not induction values, so the
+  ///   rotation counter is `(iv - start) / step` and the slot is
+  ///   `((iv - start) / step) % factor`. The division is exact by construction
+  ///   (`iv` only ever takes `start + j*step`), so this is still a remainder over
+  ///   a single SSA value — not a folded byte offset — and ptoas' slot accounting
+  ///   keys on that value rather than on its shape.
+  ///
+  /// The stepped shape is what admits a compiler-generated K-loop
+  /// (`pl.pipeline(0, 512, k, stage=2)`, `step == k`), which is the dominant
+  /// kernel shape in the stack and previously fell through to replication.
+  ///
+  /// A runtime `step` or `start` is still declined: the slot would then depend on
+  /// a value the analysis cannot bound. A stepped loop (`step > 1`) additionally
+  /// needs a constant `stop` that leaves room for the final `iv + step` update.
+  ///
+  /// **`start` must also be non-negative**, and that is not a formality — every
+  /// emitted shape needs the induction variable to be non-negative for the slot
+  /// to land in `[0, factor)`:
+  ///
+  /// * `iv % factor` is a *signed* remainder, so a negative `iv` yields a
+  ///   negative slot (`(-1) % 2 == -1`) and addresses before the region.
+  /// * both counter forms subtract `start`, and `iv - start` is not representable
+  ///   for a sufficiently negative `start`. `pl.pipeline(INT64_MIN, 1, 1 << 61,
+  ///   stage=3)` runs five iterations and reaches `iv = 0`, where
+  ///   `0 - INT64_MIN` overflows; the wrapped quotient then makes `remsi` select
+  ///   slot `-1` of a three-slot allocation.
+  ///
+  /// The first bullet is pre-existing — `start = -2, step = 1, factor = 2`
+  /// satisfies `start % factor == 0` and emits a negative slot today — so this
+  /// requirement closes both. A loop that starts negative is better served by
+  /// replication, which handles arbitrary bounds.
   static bool LoopShapeAllowsSlots(const ForStmtPtr& op, int64_t factor) {
     if (factor < kMinSlots || factor > kMaxSlots) return false;
     auto step = As<ConstInt>(op->step_);
-    if (!step || step->value_ != 1) return false;
+    if (!step || step->value_ <= 0) return false;
     auto start = As<ConstInt>(op->start_);
-    if (!start || start->value_ % factor != 0) return false;
-    return true;
+    if (!start || start->value_ < 0) return false;
+    // `step == 1` cannot overshoot `stop` (`iv + 1 <= stop`), and `iv - start` is
+    // non-negative and bounded by the loop's span, so every constant start >= 0
+    // is eligible. Whether the start is aligned only decides which form is
+    // emitted (see BuildSlotIndex), not whether the loop can take slots.
+    if (step->value_ == 1) return true;
+    // `((iv - start) / step) % factor` is well-formed: `iv >= start >= 0` keeps
+    // the subtraction non-negative and bounded by the loop's own span.
+    //
+    // The retained `scf.for` also computes `iv + step` after the last iteration,
+    // and with `step > 1` that can overshoot `stop` by up to `step - 1`. So `stop`
+    // must be a constant no larger than `INT64_MAX - (step - 1)`; otherwise the
+    // final update overflows the signed index. A runtime `stop` cannot be bounded,
+    // so it declines too, like a runtime `step` or `start`. (`step == 1` cannot
+    // overshoot: `iv + 1 <= stop`.)
+    auto stop = As<ConstInt>(op->stop_);
+    if (!stop) return false;
+    return stop->value_ <= std::numeric_limits<int64_t>::max() - (step->value_ - 1);
   }
 
   /// The loop body's top-level loads that each want a private per-stage buffer,
@@ -500,8 +553,7 @@ class SlotBindingMutator : public IRMutator {
     // identity, so a fresh Var per candidate keeps the regions apart without a
     // name-uniqueness scheme.
     auto base = std::make_shared<Var>("pipe_" + candidate.var->name_hint_, GetPtrType(), span);
-    ExprPtr slot_index =
-        MakeFloorMod(op->loop_var_, std::make_shared<ConstInt>(factor, DataType::INDEX, span), span);
+    ExprPtr slot_index = BuildSlotIndex(op, factor, span);
     auto memref = std::make_shared<MemRef>(std::static_pointer_cast<const Var>(base), int64_t{0}, uint64_t{0},
                                            span, /*is_pinned=*/true, static_cast<uint64_t>(factor),
                                            std::make_optional(slot_index));
@@ -509,8 +561,41 @@ class SlotBindingMutator : public IRMutator {
     TypePtr new_type = CloneTypeWithMemRef(candidate.var->GetType(), std::optional<MemRefPtr>(memref));
     var_map_[candidate.var] = std::make_shared<Var>(candidate.var->name_hint_, new_type, span);
 
-    LOG_DEBUG << "LowerPipelineToSlots: '" << candidate.var->name_hint_ << "' -> slot ("
-              << op->loop_var_->name_hint_ << " % " << factor << ") of a " << factor << "-slot allocation";
+    LOG_DEBUG << "LowerPipelineToSlots: '" << candidate.var->name_hint_ << "' -> rotating slot of a "
+              << factor << "-slot allocation, indexed by the iteration counter of loop '"
+              << op->loop_var_->name_hint_ << "'";
+  }
+
+  /// The slot operand for `op`: `iv % factor` when the induction variable is
+  /// already the rotation counter, `(iv - start) % factor` for a unit step from
+  /// an unaligned start, else `((iv - start) / step) % factor`.
+  ///
+  /// All three are a remainder over one SSA value, which is the property the ptoas
+  /// slot accounting keys on: `findMultiTileSlotExpr` returns whatever
+  /// `pto.multi_tile_get` carries, and only the identity of that value — not its
+  /// arithmetic shape — decides whether two accesses are provably the same slot.
+  ///
+  /// Aligned `step == 1` loops keep the literal `iv % factor` they have always
+  /// had, so their emitted IR is untouched; the subtraction appears only when
+  /// `start` is not a multiple of `factor`.
+  static ExprPtr BuildSlotIndex(const ForStmtPtr& op, int64_t factor, const Span& span) {
+    auto factor_expr = std::make_shared<ConstInt>(factor, DataType::INDEX, span);
+    auto step = As<ConstInt>(op->step_);
+    INTERNAL_CHECK(step) << "LowerPipelineToSlots: slot index requested for a loop with a non-constant step";
+    auto start = As<ConstInt>(op->start_);
+    INTERNAL_CHECK(start)
+        << "LowerPipelineToSlots: slot index requested for a loop with a non-constant start";
+    if (step->value_ == 1 && start->value_ % factor == 0) {
+      return MakeFloorMod(op->loop_var_, factor_expr, span);
+    }
+    auto offset =
+        MakeSub(op->loop_var_, std::make_shared<ConstInt>(start->value_, DataType::INDEX, span), span);
+    if (step->value_ == 1) {
+      return MakeFloorMod(offset, factor_expr, span);
+    }
+    auto counter =
+        MakeFloorDiv(offset, std::make_shared<ConstInt>(step->value_, DataType::INDEX, span), span);
+    return MakeFloorMod(counter, factor_expr, span);
   }
 
   /// Old tile Var -> the same tile bound to a slot. Registered before the body is
@@ -533,21 +618,14 @@ FunctionPtr TransformLowerPipelineToSlots(const FunctionPtr& func) {
   if (!func->body_) return func;
   pipeline_loop::CheckExplicitFlagsOutsidePipeline(func->body_);
 
-  // Only ptoas' memory planner emits a multi-buffer region today: PTO codegen's
-  // `PlanMultiBufferRegions` bails under the PyPTO planner, so a rotation
-  // synthesized here would resolve to a runtime address on an ordinary
-  // `alloc_tile` and buy nothing. Every loop then stays untouched and
-  // `LowerPipelineLoops` replicates it, keeping the default pipeline
-  // byte-identical.
-  //
-  // This is a property of the current codegen gate, NOT of ptoas: given
-  // `alloc_multi_tile addr = <constant base>`, ptoas 0.55 derives the same
-  // per-slot dynamic-event synchronization at `--pto-level=level3` as it does at
-  // level2 (measured: identical sync-op sequence). Widening the gate needs the
-  // PyPTO address allocator to reserve `slot_count * slot_size` for the region
-  // base and codegen to emit that address, so it is left to a follow-up.
   auto* ctx = PassContext::Current();
-  if (ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS) return func;
+  if (ctx == nullptr) return func;
+  if (ctx->GetMemoryPlanner() == MemoryPlanner::PyPTO && ctx->GetEnableSoftwarePipeline()) {
+    return LowerSoftwarePipeline(func);
+  }
+  // The opt-in fixed-address software pipeline and the existing PTOAS slot
+  // rotation are separate paths. The default PyPTO planner still unrolls.
+  if (ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS) return func;
 
   SlotBindingMutator mutator;
   PinnedAllocCollector pinned(ctx->GetBackendHandler());

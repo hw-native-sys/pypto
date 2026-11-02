@@ -144,6 +144,9 @@ class LoopUnrollMutator : public IRMutator {
     if (op->kind_ != ForKind::Unroll) {
       return IRMutator::VisitStmt_(op);
     }
+    CHECK_SPAN(op->hardware_loop_policy_ == HardwareLoopPolicy::Auto, op->span_)
+        << "UnrollLoops cannot erase HardwareLoopPolicy.Require; hardware loop qualification is not "
+           "supported yet";
     return UnrollForStmt(op);
   }
 };

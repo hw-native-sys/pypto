@@ -34,6 +34,42 @@ members to that Group signature and rewrites both inner `Call` or `Submit` nodes
 to forward the complete list. Unused parameters remain valid wrapper arguments;
 each cloned body still references only the values from its original call.
 
+Normalization also binds dynamic dimensions in each member's parameter types
+to the rewritten Group arguments, using the same type-binding rules as inline
+expansion. The bindings apply to local aliases, loop-carried values, expression
+types, and declared return types. For example, a member workspace `Tensor[[8, N]]`
+passed a Group workspace `Tensor[[8, t + 32]]` retains `t + 32` throughout its
+cloned body; an unbound member-local `N` must not survive in a type. Replacements
+are applied once so caller-owned extent expressions keep their original meaning.
+The widened `Call`/`Submit` results and their receiving aliases use the normalized
+member return types, including Submit's trailing TaskId.
+
+The pass first records every producer return position, its callee-scoped SSA
+expression, type, and optional output-parameter binding. `GroupOutputBindings`
+then follows the consumer's SSA aliases and tuple projections to a particular
+producer call and return position. Only after identifying that output does it
+resolve the actual storage passed at the call site and bind it to the shared
+Group parameter list. Producer-local SSA variables are never copied into a
+consumer body.
+
+Computed Tensor results have already been materialized by
+[`ConvertTensorToTileOps`](12-convert_tensor_to_tile_ops.md) as explicit `Out`
+parameters and stores. That pass exposes internal output storage through Group
+parameters and allocates it in the outer caller, even when the Group does not
+return it. Existing complete-parameter writebacks reuse their original storage.
+This also covers reordered `Call`/`Submit` tuple results, direct `pair[i]`
+arguments, and projections through local tuple aliases or nested tuples.
+`pl.no_dep` uses the same mapping. Submit's omitted-output gap and trailing
+communication contexts are respected. Callee summaries are shared for one
+normalization run and then discarded. Views and slices are not treated as
+complete-parameter aliases; a result with no caller-visible carrier is diagnosed
+instead of producing a free variable. Device-computed scalar returns require an
+explicit Tensor output under the existing kernel-return contract.
+
+This binding does not insert a cross-core handshake. Hand-written Group members
+run concurrently; their existing synchronization protocol must order a producer
+store before a consumer load.
+
 When both member kernels are exclusive to the Group, their names are preserved.
 If either kernel has another call site, the pass creates a Group-private adapter
 pair and rewrites `import_peer_buffer(peer_func=...)` to the adapter peer names,
@@ -45,6 +81,9 @@ This normalization happens before `InjectGMPipeBuffer`, so a backend-injected
 `__gm_pipe_buffer` parameter is appended to the already-identical member
 signatures. It does not require `sync_start`: AIC and AIV are subslots of one
 mixed task, while `sync_start` controls multi-block SPMD launch admission.
+When the Group is called through an enclosing `Spmd` wrapper, orchestration
+codegen traces complete-buffer alias chains back to the wrapper parameters
+before ordering the shared argument payload.
 
 ## Unsplittable transpose: checked earlier, not here
 
@@ -372,6 +411,9 @@ Phase 2 — Expand each InCore function F:
        rotation) stays alive
      - Pull back missing init-value definitions for surviving iter_args
      - Rewrite dangling yields to identity yields when a branch-local value was stripped
+     - Seed branch-result cleanup with function parameters and pending remap keys,
+       preserving live if/yield results that directly reference a parameter or
+       an expression such as `n - 1` on either lane
      - Remap dangling tile.store result vars (SSA versions stripped by AIC-side splitting) to the corresponding output parameter
   7. Run dead code elimination on both bodies (recursive into loops)
   8. Normalize loop-carried state again, because DCE may remove a SHARED-only
@@ -596,11 +638,14 @@ result variables. Branch-local bindings never become visible to sibling branches
 
 **Header**: `include/pypto/ir/transforms/passes.h`
 
-**Implementation**: `src/ir/transforms/expand_mixed_kernel_pass.cpp`
+**Implementation**:
+
+- `src/ir/transforms/expand_mixed_kernel_pass.cpp`: mixed-kernel expansion, cross-core transport, and pass orchestration.
+- `src/ir/transforms/expand_mixed_kernel/group_abi.cpp`: hand-written Group ABI normalization, output binding analysis, and member adapter construction. The private `group_abi.h` declares its result and entry point.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_expand_mixed_kernel.py`
+**Tests**: `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`, `test_expand_mixed_kernel_a5.py`, `test_expand_mixed_kernel_split_aiv.py`, and `test_group_output_bindings.py`.
 
 ## Pass Properties
 

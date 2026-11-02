@@ -32,6 +32,32 @@ active lane 共用同一份 `CoreTaskArgs` payload。因此，两个已编译 ke
 或 `Submit`，使其转发完整参数列表。未使用的参数仍是合法的 wrapper 参数；克隆后的
 函数体依旧只引用原调用实际使用的值。
 
+归一化还会使用与内联展开相同的类型绑定规则，将成员形参类型中的动态维度绑定到
+改写后的 Group 实参。绑定同时应用于局部别名、循环携带值、表达式类型和声明的返回
+类型。例如，成员的工作区 `Tensor[[8, N]]` 接收 Group 的工作区
+`Tensor[[8, t + 32]]` 时，克隆后的函数体必须始终使用 `t + 32`，不能在类型中残留
+未绑定的成员局部符号 `N`。替换只应用一次，以保留调用者尺寸表达式的原始含义。
+扩展参数后的 `Call`/`Submit` 结果及接收结果的别名也使用归一化后的成员返回类型，
+并保留 Submit 末尾的 TaskId。
+
+本 Pass 首先保存 producer 每个返回位置及其所属函数中的 SSA 表达式、类型和可选
+输出形参绑定。`GroupOutputBindings` 沿 consumer 实参的 SSA 别名和 tuple 投影，
+确定它对应哪个 producer 调用的哪个输出，再解析调用点实际传入的存储，将其绑定到
+统一的 Group 形参。producer 局部的 SSA 变量不会直接复制到 consumer 函数体。
+
+新计算的 Tensor 结果已由
+[`ConvertTensorToTileOps`](12-convert_tensor_to_tile_ops.md) 转为显式 `Out` 形参
+和 store。该 Pass 将内部输出存储提升为 Group 形参，由外层调用者分配，即使 Group
+不返回它也可以传递。已有完整参数的写回复用原存储。这同样覆盖 `Call`/`Submit`
+的乱序 tuple 返回、直接传入的 `pair[i]`，以及局部 tuple 别名或嵌套 tuple 投影。
+`pl.no_dep` 使用相同映射，同时考虑 Submit 的省略输出区间和尾部通信 context。
+被调函数的摘要只在一次归一化过程中共享，结束后释放。view 和 slice 不作为完整参数
+别名；没有调用者可见输出载体的结果会明确报错，避免生成自由变量（free variable）。
+按现有 kernel 返回约定，设备计算的标量结果需要显式 Tensor 输出。
+
+该绑定过程不会插入跨核握手。手写 Group 成员并发执行，仍需由原有同步协议保证
+producer 的 store 先于 consumer 的 load。
+
 当两个成员 kernel 都只属于该 Group 时，保留其原函数名。如果任一 kernel 还有其他
 调用点，Pass 会生成一对 Group 私有 adapter，并把
 `import_peer_buffer(peer_func=...)` 改写为 adapter 的 peer 名称，从而为其他调用者保留
@@ -41,6 +67,8 @@ Pass 会拒绝该 Group，并要求两个声明使用相同签名。
 归一化发生在 `InjectGMPipeBuffer` 之前，因此后端注入的 `__gm_pipe_buffer` 会追加到
 已经一致的两个成员签名末尾。该过程不需要 `sync_start`：AIC 与 AIV 是同一个 mixed
 task 的 subslot，而 `sync_start` 控制的是多 block SPMD 启动准入。
+当 Group 经由外层 `Spmd` wrapper 调用时，编排代码生成会沿完整缓冲区别名链追溯到
+wrapper 形参，再排列共享参数 payload。
 
 ## 不可切分的转置：已前移，不在本 pass
 
@@ -323,6 +351,8 @@ program_expanded = expand_pass(program)
        因此仅被用于喂给另一个存活槽位的 carry（多级 FIFO 轮转）会被保留
      - 为保留下来的 iter_args 补回缺失的 init value 定义
      - 当分支局部值被裁剪后，将悬空 yield 改写为 identity yield
+     - 将函数参数和待重映射变量加入分支结果清理的初始作用域，
+       在两侧保留仍被使用、直接引用参数或 `n - 1` 等表达式的 if/yield 结果
      - 将悬空的 tile.store 结果变量（被 AIC 侧拆分裁剪的 SSA 版本）重映射到对应的输出参数
   7. 对两个函数体运行死代码消除（递归进入循环）
   8. 再次归一化循环携带状态，因为 DCE 可能移除仅用于过渡的 SHARED 后续引用，
@@ -527,11 +557,14 @@ class After:
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
-**实现文件**：`src/ir/transforms/expand_mixed_kernel_pass.cpp`
+**实现文件**：
+
+- `src/ir/transforms/expand_mixed_kernel_pass.cpp`：混合核展开、跨核传输与 pass 流程。
+- `src/ir/transforms/expand_mixed_kernel/group_abi.cpp`：手写 Group 的 ABI 规范化、输出绑定分析与成员适配器（adapter）构造；私有头文件 `group_abi.h` 声明结果类型与入口函数。
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
-**测试**：`tests/ut/ir/transforms/test_expand_mixed_kernel.py`
+**测试**：`tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`、`test_expand_mixed_kernel_a5.py`、`test_expand_mixed_kernel_split_aiv.py` 与 `test_group_output_bindings.py`。
 
 ## Pass 属性
 

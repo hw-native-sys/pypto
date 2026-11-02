@@ -264,4 +264,17 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     )
 
 
-__all__ = ["ScopeMode", "manual_scope", "scope", "submit", "spmd_submit"]
+class reg_scope:
+    """Implicitly capture inputs for a non-nested A5 register region.
+
+    Register and local scalar values cannot escape; store results can.
+    """
+
+    def __enter__(self) -> None:
+        raise RuntimeError("pl.reg_scope() is only valid inside a parsed PyPTO function")
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+
+__all__ = ["ScopeMode", "manual_scope", "reg_scope", "scope", "submit", "spmd_submit"]

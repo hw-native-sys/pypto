@@ -260,7 +260,10 @@ class MemRefUpdateMutator : public IRMutator {
     }
 
     if (args_changed || kwargs_changed) {
-      return std::make_shared<Call>(op->op_, std::move(new_args), std::move(new_kwargs), op->GetType(),
+      // reg.store returns an alias of its destination, including its resolved
+      // MemRef. Keeping the old result type loses the newly assigned address.
+      auto result_type = IsOp(op, "reg.store") ? new_args[0]->GetType() : op->GetType();
+      return std::make_shared<Call>(op->op_, std::move(new_args), std::move(new_kwargs), result_type,
                                     op->span_);
     }
     return op;
@@ -317,9 +320,9 @@ class PinnedAllocCollector : public IRVisitor {
 
 /// Scalar Vars assigned exactly once, and to a constant, anywhere in a body.
 ///
-/// Simplify substitutes such a constant only at function-body top level, so one bound
-/// inside an `if`, loop, or `pl.spmd` body is still a Var when InitMemRef builds a
-/// view's offset from it (`r0 * 4`).
+/// InitMemRef normalizes constant origins before creating new MemRefs. Explicitly
+/// initialized or imported IR may still carry named constants in view offsets
+/// (`r0 * 4`), so address assignment also folds those relative offsets defensively.
 class ConstantScalarCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, ExprPtr> constants;
@@ -340,13 +343,11 @@ class ConstantScalarCollector : public IRVisitor {
 
 /// Every MemRef's offset relative to its buffer, with the body's scalar constants folded in.
 ///
-/// Folding is required, not an optimization. A symbolic address names SSA Vars, and no
-/// later pass remaps a MemRef's offset: once a `pl.spmd` body is outlined into its own
-/// kernel, the final Simplify sees `r0 = 0` at top level, substitutes it into the
-/// statements, and deletes the binding — leaving `base + r0 * 4` naming a Var nothing
-/// defines, which PTO codegen cannot materialize. A folded constant address has no such
-/// dependency. An offset that still names a runtime value (a loop variable, a scalar
-/// parameter) stays symbolic.
+/// Resolve compile-time address dependencies even for explicitly initialized or
+/// imported IR that did not pass through InitMemRef's constant normalization.
+/// The lookup table preserves MemRef identity while turning a named constant
+/// offset into a concrete address. An offset that still names a runtime value
+/// (a loop variable or scalar parameter) stays symbolic.
 RelativeMemRefOffsets FoldRelativeMemRefOffsets(const std::vector<MemRefWithSpace>& memrefs,
                                                 const StmtPtr& body) {
   ConstantScalarCollector collector;
@@ -374,16 +375,16 @@ RelativeMemRefOffsets FoldRelativeMemRefOffsets(const std::vector<MemRefWithSpac
  * its parent allocation, so they should share one address slot rather than
  * each consuming size_ bytes of fresh L1.
  *
- * ``pinned_alloc_sizes`` maps each author-declared allocation's base to the bytes
- * its alloc statement reserves. Those are the only bases whose buffer can be
- * larger than their largest member (a multi-slot declaration).
+ * ``reserved_alloc_sizes`` retains the full capacity of author-declared and
+ * compiler-created multi-slot allocations. Individual member MemRefs only name
+ * one window; retaining capacity does not pin a compiler-created allocation.
  *
  * ``relative_offsets`` holds each MemRef's offset within its buffer; see
  * FoldRelativeMemRefOffsets.
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReserveBufferResolution& reserve_resolution,
-    const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& pinned_alloc_sizes,
+    const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& reserved_alloc_sizes,
     const RelativeMemRefOffsets& relative_offsets, const std::string& func_name) {
   const ReservedEndBySpace& reserved_end_by_space = reserve_resolution.reserved_end_by_space;
   // Group MemRefs by memory space
@@ -433,12 +434,11 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
             << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
         slot_size = std::max(slot_size, static_cast<uint64_t>(ref->size_));
       }
-      // A declared allocation reserves what its alloc statement says, which for a
-      // multi-slot declaration exceeds any single member. Everything else is sized
-      // by its largest member, as before.
+      // Preserve the full multi-slot capacity even for reusable compiler pools.
+      // Ordinary single-slot allocations retain their existing sizing behavior.
       uint64_t buffer_size = slot_size;
-      auto declared_size = pinned_alloc_sizes.find(base_key);
-      if (declared_size != pinned_alloc_sizes.end()) {
+      auto declared_size = reserved_alloc_sizes.find(base_key);
+      if (declared_size != reserved_alloc_sizes.end()) {
         buffer_size = std::max(buffer_size, declared_size->second);
       }
       // Reserve this base-group's physical buffer; base_addr is where its members land.
@@ -615,11 +615,19 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
     memref_pairs =
         PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs, relative_offsets);
   } else {
-    // Declared allocations are the only ones whose buffer can exceed their
-    // largest member (a multi-slot declaration).
+    // Multi-slot compiler pools also reserve more than a single member window;
+    // their full capacity survives reuse without acquiring pinned ownership.
     PinnedAllocCollector pinned_collector;
     pinned_collector.VisitStmt(func->body_);
-    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, pinned_collector.alloc_sizes,
+    auto reserved_sizes = std::move(pinned_collector.alloc_sizes);
+    const auto allocation_sizes = memref_collectors::CollectAllocSizes(func->body_);
+    for (const auto& entry : memrefs) {
+      const auto& memory = entry.first;
+      if (memory->slot_count_ <= 1) continue;
+      const auto capacity = allocation_sizes.find(memory->base_.get());
+      if (capacity != allocation_sizes.end()) reserved_sizes[memory->base_.get()] = capacity->second;
+    }
+    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, reserved_sizes,
                                            relative_offsets, func->name_);
   }
 

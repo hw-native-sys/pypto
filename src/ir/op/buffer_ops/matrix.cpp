@@ -55,7 +55,8 @@ bool StaticLessEqual(int64_t lhs, int64_t rhs) { return lhs < 0 || rhs < 0 || lh
 // it. A wider accumulator is written through a product-shaped view of the same
 // storage. The cube writes whole fractal boxes: boxes outside the product keep
 // their data, while the rest of a partially covered box does not.
-TypePtr DeduceBufferMatmul(const std::vector<ExprPtr>& args, bool accumulate) {
+TypePtr DeduceBufferMatmul(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs, bool accumulate) {
   const std::string op_name = accumulate ? "buffer.matmul_acc" : "buffer.matmul";
   CHECK(args.size() == 3) << op_name << " requires lhs, rhs and destination buffers, got " << args.size()
                           << " operands";
@@ -64,6 +65,8 @@ TypePtr DeduceBufferMatmul(const std::vector<ExprPtr>& args, bool accumulate) {
   auto destination = MatrixOperand(args, 2, MemorySpace::Acc, op_name);
   CHECK(lhs->dtype_ == rhs->dtype_) << op_name << " requires identical lhs and rhs element types, got "
                                     << lhs->dtype_.ToString() << " and " << rhs->dtype_.ToString();
+  CheckMatmulTf32Mode(kwargs, lhs->dtype_, rhs->dtype_, lhs->shape_.size(), rhs->shape_.size(),
+                      args[0]->span_, op_name);
   const auto accumulator = MatmulAccumulatorDataType(lhs->dtype_, rhs->dtype_);
   CHECK(destination->dtype_ == accumulator)
       << op_name << " requires a " << accumulator.ToString() << " accumulator for " << lhs->dtype_.ToString()
@@ -154,14 +157,15 @@ REGISTER_OP("buffer.matmul")
     .add_argument("lhs", "Left operand buffer [M, K]")
     .add_argument("rhs", "Right operand buffer [K, N]")
     .add_argument("dst", "Acc destination buffer [M, N]")
+    .set_attr<std::string>("tf32_mode")
     .set_output_arity(0)
     .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
     .set_buffer_arg_effect(1, BufferAccess::Read, BufferAccess::Read)
     .set_buffer_arg_effect(2, BufferAccess::Write, BufferAccess::Read)
     .set_buffer_result_behavior(BufferResultBehavior::None)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>&) {
-      return DeduceBufferMatmul(args, false);
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBufferMatmul(args, kwargs, false);
     });
 
 REGISTER_OP("buffer.matmul_acc")
@@ -172,14 +176,15 @@ REGISTER_OP("buffer.matmul_acc")
     .add_argument("lhs", "Left operand buffer [M, K]")
     .add_argument("rhs", "Right operand buffer [K, N]")
     .add_argument("dst", "Acc buffer read as the running sum and overwritten with the new sum")
+    .set_attr<std::string>("tf32_mode")
     .set_output_arity(0)
     .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
     .set_buffer_arg_effect(1, BufferAccess::Read, BufferAccess::Read)
     .set_buffer_arg_effect(2, BufferAccess::ReadWrite, BufferAccess::Read)
     .set_buffer_result_behavior(BufferResultBehavior::None)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>&) {
-      return DeduceBufferMatmul(args, true);
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBufferMatmul(args, kwargs, true);
     });
 
 REGISTER_OP("buffer.extract")

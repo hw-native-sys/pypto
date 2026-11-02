@@ -195,6 +195,12 @@ class Worker(ABC):
         Workers, freed handles, and pointer-reuse (ABA) cases before a stale
         wire descriptor can enter simpler ``Worker.run``.
 
+        A borrowed view (:meth:`view_tensor`) keeps its source's Buffer and a
+        nonzero ``byte_offset``. ``_device_buffers`` is keyed by the allocation
+        base, so the lookup subtracts ``byte_offset`` first; the view is
+        accepted only while that owning allocation is still live, and
+        :meth:`free_tensor` refuses to free the view itself.
+
         When the caller does not name the placement, the retained Buffer
         usually does: simpler stamps ``owner_worker_id`` on every allocation it
         hands out, making the owning key derivable rather than searched.  That
@@ -227,12 +233,13 @@ class Worker(ABC):
                 worker_id = int(tensor.buffer.owner_worker_id)
             except (AttributeError, TypeError, ValueError):
                 worker_id = None  # Placeless handle — fall back to the scan.
+        base_ptr = tensor.data_ptr - tensor.byte_offset
         if worker_id is None:
             owned = any(
-                ptr == tensor.data_ptr and buffer is tensor.buffer for (_wid, ptr), buffer in buffers.items()
+                ptr == base_ptr and buffer is tensor.buffer for (_wid, ptr), buffer in buffers.items()
             )
         else:
-            owned = buffers.get((worker_id, tensor.data_ptr)) is tensor.buffer
+            owned = buffers.get((worker_id, base_ptr)) is tensor.buffer
         if not owned:
             placement = "" if worker_id is None else f" on worker_id={worker_id}"
             raise ValueError(
@@ -287,6 +294,29 @@ class Worker(ABC):
         self._owned_tensors[(worker_id, t.data_ptr)] = t
         return t
 
+    def view_tensor(
+        self,
+        source: DeviceTensor,
+        shape: Sequence[int],
+        *,
+        byte_offset: int = 0,
+        worker_id: int = 0,
+    ) -> DeviceTensor:
+        """Borrow a contiguous subview without transferring or owning the backing."""
+        self._require_owned_resident_tensor(source, "view_tensor source", worker_id=worker_id)
+        if type(byte_offset) is not int or byte_offset < 0:
+            raise ValueError("view_tensor byte_offset must be a nonnegative int")
+        view = DeviceTensor(
+            source.data_ptr + byte_offset,
+            shape,
+            source.dtype,
+            buffer=source.buffer,
+            byte_offset=source.byte_offset + byte_offset,
+        )
+        if byte_offset + view.nbytes > source.nbytes:
+            raise ValueError("view_tensor range exceeds its source")
+        return view
+
     def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
         """Release a buffer previously returned by :meth:`alloc_tensor`.
 
@@ -302,11 +332,15 @@ class Worker(ABC):
         cleanup races with auto-free.
 
         Raises:
-            ValueError: if ``t.data_ptr`` is still tracked but under a different
-                ``worker_id`` — silently no-oping there would leak the buffer
-                until ``close()`` — or if the address is now owned by a newer
-                allocation, so a stale handle cannot free the replacement.
+            ValueError: if *t* is a borrowed view (``t.byte_offset != 0``) —
+                free the owning allocation instead; if ``t.data_ptr`` is still
+                tracked but under a different ``worker_id`` — silently no-oping
+                there would leak the buffer until ``close()``; or if the address
+                is now owned by a newer allocation, so a stale handle cannot
+                free the replacement.
         """
+        if t.byte_offset:
+            raise ValueError("free_tensor requires the owning allocation, not a view")
         key = (worker_id, t.data_ptr)
         if key not in self._owned_tensors:
             # A missing exact key is only idempotent if this ptr is no longer

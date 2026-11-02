@@ -71,7 +71,7 @@ function added to the program:
 | Parameters | `input, target, signal, send_counts, recv_counts` — canonical types, **not** the call site's: `input` / `send_counts` are declared plain `Tensor`, the other three `DistributedTensor` |
 | Directions | `In, InOut, InOut, In, InOut` |
 | Body | `return target` — one `ReturnStmt`, never compiled |
-| Attrs | `builtin_template_dir`, `builtin_template_vars` |
+| Attrs | `builtin_template_dir`, `builtin_template_vars`, `require_contiguous_operands` |
 
 One function is synthesized per variant and shared by every call site of that
 variant.
@@ -182,7 +182,7 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 - **A runtime `core_num`.** Only a compile-time `core_num` is accepted. A runtime value would need `B`
   computed in the emitted orchestration and a runtime `S >= B` check, and orchestration has no surface for
   raising that fatal today. The HOST rail accepts a runtime value because its entry runs on the host.
-- **Operand validation is static, and aliasing is only partly covered.** The
+- **Operand validation is static apart from contiguity, and aliasing is only partly covered.** The
   `pld.tensor.all_to_all_v` type deducer rejects what the operand types alone
   prove: a non-ND layout, a stride vector that is not the packed one, a
   `valid_shape` narrower than the shape, and `input` being the *same
@@ -195,10 +195,37 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   within the same `host_orch` body and runs `CheckPairwiseDistinctWindows` over
   all five. This rail — like the InCore composite rail — sees the operands as
   enclosing-pipeline parameters and has no such provenance, so pairwise-distinct
-  windows are the caller's obligation here. There is also no runtime re-check
-  before the AIV task is submitted; the check that would need one (signal
-  stride `>= B`) is enforced statically at lowering instead, where both `S`
-  and the folded `B` are compile-time values.
+  windows are the caller's obligation here. **Contiguity is decided at compile
+  time here, with a runtime backstop.** The type deducer cannot see a slice's
+  strides (a sliced type carries none), and a runtime verdict would be per rank:
+  suppressing one rank's submit while its peers launch leaves them in the
+  kernel's `ExchangeBarrier`, a hang rather than a rejection. So this pass
+  traces every operand of the call as written through every value that can
+  reach it (AssignStmt, loop-carried and `if`/`for`/`while` results — a loop
+  result also traces its initializer, which a zero-trip loop returns) as an
+  **allow-list**: params, windows, `tensor.create` and an Out a `pl.submit`
+  leaves to the runtime to allocate are row-major roots; `reshape`, `view`,
+  `set_validshape`, `assemble` (its target), a collective's result (its target),
+  a kernel's or `pl.submit`'s result or tuple element (the argument it returns)
+  and a slice that narrows only the leading dimension of a statically shaped
+  tensor are followed to their source; anything else, including
+  `tensor.transpose` and any other slice, is rejected, as is any value on the
+  chain with a non-ND layout or an explicit stride other than the packed one
+  (the steps assume a packed source and a slice drops its parent's stride: a
+  leading-dimension slice of a DN or padded tensor is not contiguous, and an ND
+  `view` of a DN tensor lowers to a runtime transpose). Some
+  safe programs are rejected too — a `tensor.write` result, a `[1, N]` slice of
+  a `[1, W]` tensor, a slice whose offsets are not a literal tuple, a result its
+  callee's ReturnStmt does not name as a parameter — since a missed acceptance
+  is safe and a wrong one is not. The synthesized kernel also carries
+  `require_contiguous_operands`, and orchestration codegen emits one
+  `is_contiguous` check per tensor operand ahead of the submit, latching
+  `SIMPLER_ERROR_INVALID_ARGS` on the first violation, as a backstop for
+  caller-supplied operands: argument packing rejects a non-contiguous host torch
+  tensor, but a prebuilt runtime `Tensor` is checked only there. The other check
+  that would need a runtime form (signal stride `>= B`) is still enforced
+  statically at lowering, where both `S` and the folded `B` are compile-time
+  values.
 - **Rank count.** The kernel reads `CommContext::rankNum`, so an explicit device
   subset smaller than the context's rank count would be handled differently from
   the HOST rail, which passes the comm domain's `domain_size`.
@@ -236,3 +263,18 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   wire golden; and the structural assertions that no builtin chip dispatch is
   emitted, that the builtin kernel is rendered into the pipeline's own
   sub-build, and that the HOST rail renders a byte-identical kernel source.
+
+## Indexed A5 URMA variant
+
+`pld.tensor.indexed_all_to_all_v(input, target, signal, send_counts,
+recv_counts, index, core_num=L)` uses the managed L2 task pipeline and its own
+kernel template. Six tensor operands precede CommContext at slot 6. Input,
+index and recv_counts may be local tensors; send_counts must be a window.
+All six operands, `index` included, get the same contiguity check and backstop
+as the plain op (see [Current limitations](#current-limitations)).
+`L` is a positive compile-time exact launch width. All AIVs share local copies
+between remote submission and CQ waits; AIVs beyond P only help local copies.
+Only A5 URMA PER_PEER transport is supported, with one writer per destination.
+Callers must order exchanges sharing queues; reusing the same InOut signal
+creates that dependency even when payload windows differ. HOST and InCore
+calls are unsupported. See the [user contract](../../user/distributed/20-all_to_all.md#indexed-alltoallv-on-a5-urma).

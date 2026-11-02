@@ -208,10 +208,11 @@ simpler 手写的 `examples/a2a3/host_build_graph/qwen3_14b_decode` 场景就是
 做的，理由也写在它的 README 里 —— "This keeps the temporary live set flat in layer
 count and fits the default ring configuration."
 
-形参是 `InOut`，绝不能是 `In`：区域会**写**这块 buffer；声明成 `In` 时 codegen 发射
-`add_input`，这次 launch 永远不会被登记为该 buffer 的写者，调用方若把分配提出自己的
-循环，前后两次 launch 之间就没有任何定序。`Out` 也不可用 —— 在 Graph 边界上它表示
-"由 runtime 分配"，而 `rt_graph_args_cacheable` 会直接拒绝。
+外提分配新增的形参保留 `InOut`：区域会**写**这块 buffer；声明成 `In` 时 codegen 发射
+`add_input`，这次 launch 不会被登记为该 buffer 的写者。外提发生在方向和依赖推导之后，
+因此新增的分配形参保守保留 `InOut` 定序，避免调用方重复使用缓冲区时丢失顺序。
+已有只写边界形参仍可声明为 `Out`；`DeriveCallDirections` 对已有缓冲区的首次写入选择
+`OutputExisting`，在需要保序时升级为 `InOut`。
 
 被外提的分配**就是**边界张量，所以对它取的视图同样要走上面 Step B 的规则，而不是原
 地放过。这不是可选的整理：`GraphBoundaryLegalized` verifier 把每个张量形参都当作
@@ -232,7 +233,7 @@ verifier 都拒绝的 IR。
 
 ### 前置条件：Graph 的返回值必须直接指名形参
 
-Step B 和 Step C 都会**追加** `InOut` 形参，而这正是自动化这次外提为什么是一次改造、
+Step B 和 Step C 都可能**追加**可写的 `Out`/`InOut` 形参，而这正是自动化这次外提为什么是一次改造、
 而不是接根线的原因。orchestration codegen 通过
 `return_lineage::ExplicitReturnedParamIndices`（对被调方 `ReturnStmt` 的指针同一性读
 取）把调用结果映射到被调方的某个 `Out`/`InOut` 形参上，只有当该映射给不出结果时，才
@@ -273,7 +274,7 @@ runtime 中都能直接按类型解码数值。
 | 至少 1 个张量形参 | 空边界的 graph 回放时无处可 patch，runtime 拒绝缓存 |
 | 至多 128 个张量形参 | `GRAPH_MAX_TENSOR_ARGS` —— 边界是定长的 `GraphTaskArgs` |
 | 至多 64 个标量形参 | `GRAPH_MAX_SCALAR_ARGS`。在 Step A 之后检查：Step A 会**新增**标量形参，所以上提前放得下的签名，上提后可能放不下 |
-| 不允许 `Out` 张量形参 | `Out` 意味着 runtime 分配该 buffer；被录制的 graph 其边界张量必须已存在，回放才能 patch 地址 |
+| 不允许 runtime 分配边界输出 | `Out` 描述只写访问，调用方提供存储时合法。调用方向（call-site direction）支持 `OutputExisting` 和 `InOut`；拒绝请求新分配的 `ArgDirection::Output` |
 | 标量形参必须是 `In` | 边界标量按值传入、由调用点回放 |
 | 只能返回自己的形参 | `rt_submit_graph` 只在缓存**命中**时才返回有效 task id，所以任何东西都不能依赖 graph 调用的结果。`return c`（`c` 为 `InOut` 形参）是原地写的写法，可以；返回计算出的新值不行 |
 | 被拉起的任务数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点，按**上界**计——通过这项检查即意味着 runtime 会接受该 Graph。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述。与本表其他检查不同，这一项在外提步骤**之后**才计数：Step C 会*移除*分配节点，按外提前的函数体计会拒掉本来放得下的 Graph，也会与 verifier 不一致——后者是从改写后的 IR 重新推导同一个计数的 |
@@ -335,6 +336,11 @@ CPU 张量参数。生成的参数元数据为这些参数选择 `HOST/NONE` 传
 请使用不同参数分别传递 host 控制数据和设备数据。Host 写入不会上传到设备存储。
 构图期间不能读取 runtime 分配的张量或本次图中设备任务产生的数据。
 为 host 控制参数传入 `DeviceTensor` 时，会在派发前报错。
+
+分布式派发也接受以 HOST 存储为后端的现成 `simpler.Tensor` 作为主机控制参数。
+该无地址描述符以 `TensorTransfer.NONE` 复用，不建立隐式 Torch 描述符缓存。
+调用完成前必须保留其 Buffer 和可能的 fork 继承存储。wire Tensor 保存视图元数据的快照，
+形状、stride 或存储改变后，需要重新构造视图。
 
 分布式芯片派发同样保留主机控制张量的传输元数据。调度器谓词（Scheduler Predicate）的
 操作数仍属于设备张量，使用普通设备传输路径，不作为主机读取处理。

@@ -56,6 +56,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -409,6 +410,16 @@ void BindIR(nb::module_& m) {
   void_type_class.def(nb::init<>(), "Create a void type");
   void_type_class.def_static("get", &GetVoidType, "Get the singleton VoidType instance");
   BindFields<VoidType>(void_type_class);
+
+  nb::enum_<RegKind>(ir, "RegKind", "Register descriptor kind")
+      .value("VecReg", RegKind::VecReg, "Vector register holding non-BOOL lanes")
+      .value("MaskReg", RegKind::MaskReg, "Predicate register holding BOOL lanes");
+  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
+  // The lane count must be an integer, not text coerced by older nanobind releases.
+  reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape").noconvert(), nb::arg("dtype"),
+                     nb::arg("kind"), "Create a register descriptor with a positive logical lane count");
+  BindFields<RegType>(reg_type_class);
+  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes, "Logical lane count (alias of shape)");
 
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
@@ -843,6 +854,34 @@ void BindIR(nb::module_& m) {
   comm_layout_mod.attr("WINDOWS_OUT_OFFSET") = pypto::codegen::distributed::comm_layout::kWindowsOutOffset;
   comm_layout_mod.attr("WINDOW_SLOT_STRIDE") = pypto::codegen::distributed::comm_layout::kWindowSlotStride;
   comm_layout_mod.attr("COMM_CTX_SIZE") = pypto::codegen::distributed::comm_layout::kCommCtxSize;
+
+  ir.def(
+      "get_reg_memory_effect",
+      [](const CallPtr& call) {
+        const auto effect = GetRegMemoryEffect(call);
+        nb::dict result;
+        result["target"] = nb::cast(effect.target);
+        result["root"] = nb::cast(effect.root);
+        result["access"] = nb::cast(effect.access);
+        result["begin"] = nb::cast(effect.begin);
+        result["end"] = nb::cast(effect.end);
+        result["mask"] = nb::cast(effect.mask);
+        return result;
+      },
+      nb::arg("call"), "Get the schema memory interval in root element coordinates");
+  ir.def(
+      "get_reg_op_spec",
+      [](const std::string& name) {
+        const auto& spec = OpRegistry::GetInstance().GetEntry(name).GetRegSpec();
+        CHECK(spec.has_value()) << "Expected a register schema";
+        nb::dict result;
+        result["emitter"] = spec->emitter;
+        result["requires_reg_scope"] = spec->requires_reg_scope;
+        result["output_reuses_input_arg"] =
+            nb::cast(OpRegistry::GetInstance().GetEntry(name).GetOutputReusesInputArg());
+        return result;
+      },
+      nb::arg("op_name"), "Get register scope and emitter metadata");
 
   // OpRegistry
   nb::enum_<OpIRStage>(ir, "OpIRStage", "Representation consumed and produced by an operator")
@@ -1675,6 +1714,10 @@ void BindIR(nb::module_& m) {
              "Software-pipelined loop (pre-lowering user marker + transient post-lowering marker)")
       .export_values();
 
+  nb::enum_<HardwareLoopPolicy>(ir, "HardwareLoopPolicy", "Hardware loop intent")
+      .value("Auto", HardwareLoopPolicy::Auto, "Use the default hardware-loop lowering policy")
+      .value("Require", HardwareLoopPolicy::Require, "Require hardware-loop lowering");
+
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
@@ -1683,14 +1726,15 @@ void BindIR(nb::module_& m) {
       [](ForStmt* self, const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
          const ExprPtr& step, const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
          const std::vector<VarPtr>& return_vars, const Span& span, ForKind kind,
-         const nb::object& attrs_or_none) {
+         const nb::object& attrs_or_none, HardwareLoopPolicy hardware_loop_policy) {
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
-        new (self)
-            ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind, std::move(attrs));
+        new (self) ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
+                           std::move(attrs), {}, hardware_loop_policy);
       },
       nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
       nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
-      nb::arg("attrs") = nb::none(), "Create a for loop statement");
+      nb::arg("attrs") = nb::none(), nb::arg("hardware_loop_policy") = HardwareLoopPolicy::Auto,
+      "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
   // Custom attrs property: convert vector<pair<string, any>> to Python dict
   for_stmt_class.def_prop_ro(
@@ -1725,6 +1769,7 @@ void BindIR(nb::module_& m) {
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
       .value("Graph", ScopeKind::Graph, "Recordable orchestration region (pl.graph)")
+      .value("Reg", ScopeKind::Reg, "Register lexical region")
       .export_values();
 
   // SplitMode enum
@@ -1820,6 +1865,23 @@ void BindIR(nb::module_& m) {
       [kwargs_to_pydict](const std::shared_ptr<const ClusterScopeStmt>& self) {
         return kwargs_to_pydict(self->attrs_);
       },
+      scope_attrs_doc);
+
+  auto reg_scope_stmt_class =
+      nb::class_<RegScopeStmt, ScopeStmt>(ir, "RegScopeStmt", "Register lexical scope");
+  reg_scope_stmt_class.def(
+      "__init__",
+      [](RegScopeStmt* self, std::string name_hint, const StmtPtr& body, const Span& span,
+         std::vector<std::string> leading_comments, const nb::object& attrs) {
+        new (self) RegScopeStmt(std::move(name_hint), body, span, std::move(leading_comments),
+                                ConvertAttrsFromPython(attrs));
+      },
+      nb::arg("name_hint"), nb::arg("body"), nb::arg("span"),
+      nb::arg("leading_comments") = std::vector<std::string>{}, nb::arg("attrs") = nb::none(),
+      "Create a register lexical scope statement");
+  BindFields<RegScopeStmt>(reg_scope_stmt_class);
+  reg_scope_stmt_class.def_prop_ro(
+      "attrs", [kwargs_to_pydict](const RegScopeStmtPtr& self) { return kwargs_to_pydict(self->attrs_); },
       scope_attrs_doc);
 
   // GraphScopeStmt
@@ -2470,9 +2532,12 @@ void BindIR(nb::module_& m) {
       "the traversal. Seeded entries from var_map are NOT included — use the\n"
       "caller's own substitution map for those.");
 
+  ir.def("returned_param_indices", &return_lineage::ReturnedParamIndices, nb::arg("func"), nb::arg("program"),
+         "Trace each return to its external parameter.");
+
   // Cross-function call return type deduction
   ir.def("deduce_call_return_type", &DeduceCallReturnType, nb::arg("callee_params"), nb::arg("args"),
-         nb::arg("return_types"),
+         nb::arg("return_types"), nb::arg("is_inline") = false,
          "Deduce return types for a cross-function call by substituting "
          "dynamic shape variables from callee params with actual arg shapes.");
 }

@@ -120,8 +120,9 @@ def test_compile_pto_module_enables_per_unit_pass_dump(tmp_path, monkeypatch) ->
     handler = SimpleNamespace(get_extra_ptoas_flags=lambda: ["--pto-arch", "a3"])
     monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
 
+    code = "module {}"
     result = pto_backend._compile_pto_module(
-        "module {}",
+        code,
         "vector_kernel",
         str(tmp_path),
         dump_ptoas_passes=True,
@@ -138,6 +139,38 @@ def test_compile_pto_module_enables_per_unit_pass_dump(tmp_path, monkeypatch) ->
         f"--mlir-print-ir-tree-dir={dump_dir}",
         "--pto-arch",
         "a3",
+    ]
+
+
+def test_compile_vpto_module_preserves_binary_output(tmp_path, monkeypatch) -> None:
+    # A VPTO object can contain arbitrary non-UTF8 bytes. Reading it as C++
+    # (the historical unconditional path) must never happen.
+    binary = b"\x7fELF\x00\xff"
+
+    def fake_run_ptoas(pto_path, output_path, ptoas_flags=None):
+        assert Path(output_path).suffix == ".o"
+        assert "--pto-backend=emitc" not in (ptoas_flags or [])
+        Path(output_path).write_bytes(binary)
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", fake_run_ptoas)
+    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
+    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
+    result = pto_backend._compile_pto_module(
+        'module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {}',
+        "register_kernel",
+        str(tmp_path),
+    )
+    assert result == ""
+    assert (tmp_path / "ptoas/register_kernel.o").read_bytes() == binary
+
+
+def test_rebuild_preserves_fixed_multi_buffer_addresses() -> None:
+    code = """module {
+      %ring = pto.alloc_multi_tile addr = %base : !pto.multi_tile_buf<vec, 16x16xf32, count=3>
+    }"""
+    assert pto_rebuild._ptoas_flags(code) == [
+        "--enable-insert-sync",
+        "--pto-level=level3",
     ]
 
 

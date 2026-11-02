@@ -194,7 +194,12 @@ additional allocation identities. A second traversal replaces each Tile use
 with its Buffer handle and rewrites supported calls. The maps remain private to
 the pass; the output IR contains no conversion side table.
 
-Existing storage definitions determine allocation placement. Conversion adds
+Existing storage definitions determine allocation placement. For addressless
+PTOAS accumulators referenced entirely within one region, conversion places the
+descriptor declarations at the first reference, preserving the producer's local
+lifetime instead of extending it across loop backedges. Storage shared across
+regions or carried by a loop retains its original dominating declaration.
+Conversion adds
 no scratch allocation, address assignment, or implicit transfer. An exact
 self-copy is removed. Tensor return aliases are normalized to existing GM
 parameters while parameter directions and the orchestration ABI are preserved.

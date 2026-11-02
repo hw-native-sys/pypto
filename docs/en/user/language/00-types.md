@@ -32,6 +32,18 @@ graph rather than a compile error.
 Shapes are static by default and checked at parse time. `pl.dynamic()` opts a dimension
 out of that, at the cost of everything the compiler could have concluded from knowing it.
 
+## Register annotations (IR infrastructure)
+
+`pl.Reg[L, dtype]` describes a register value with a static positive logical lane
+count `L`. The optional third parameter is `pl.RegKind.VecReg` (the default) or
+`pl.RegKind.MaskReg`. MaskReg requires `pl.BOOL`; VecReg forbids it. For example,
+`pl.Reg[64, pl.FP32]` and `pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]` are valid
+annotations. `pl.reg` provides P0 register operations inside `pl.reg_scope()`;
+inputs are captured implicitly and Reg/local Scalar values cannot escape.
+IR construction, validation, binary serialization and DSL text roundtrips are
+supported. VF backend compilation remains unavailable until PR3.
+See [register operations](../../dev/language/06-register-operations.md).
+
 ## Quickstart: reading a signature
 
 <!-- doctest: setup -->
@@ -108,8 +120,8 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.FP16` | 16 | IEEE half |
 | `pl.BF16` | 16 | Brain float |
 | `pl.FP32` | 32 | IEEE single |
-| `pl.FP4` | 4 | Frontend logical MXFP4 E2M1 nibble (incomplete without automatic pack; prefer `FP4E2M1X2`) |
-| `pl.FP4E2M1X2` | 8 | Packed carrier (two nibbles); physical last dim matches `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2` |
+| `pl.fp4e2m1x2` / `pl.FP4E2M1X2` | 8 | Packed pair of E2M1 values; shapes count byte carriers |
+| `pl.fp4e1m2x2` / `pl.FP4E1M2X2` | 8 | Packed pair of E1M2 values; shapes count byte carriers |
 | `pl.FP8E4M3FN` / `pl.FP8E5M2` | 8 | MXFP8 data formats |
 | `pl.FP8E8M0` | 8 | MX block-scale exponent |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | Hisilicon float formats |
@@ -126,19 +138,34 @@ packs every semantic 4-bit dtype two logical elements per byte, so the physical 
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
 
-Frontend `pl.FP4` is a logical nibble type (`GetBit()==4`, even last dim). Prefer
-hand-written `pl.FP4E2M1X2` for the packed carrier (`GetBit()==8`, last dim already
-in x2 units). Resolving the short `FP4` name emits a `UserWarning` until automatic
-pack lands. At the Torch/runtime boundary, `torch.float4_e2m1fn_x2` maps to
-`FP4E2M1X2` without expanding the last dim; logical `FP4` call metadata still
-contracts/expands by two where that dtype remains.
+`pl.fp4e2m1x2` and `pl.fp4e1m2x2` are distinct packed floating-point formats,
+with uppercase aliases `pl.FP4E2M1X2` and `pl.FP4E1M2X2`. Each element occupies
+one byte and contains two FP4 values. Shapes, `valid_shape`, strides, and
+offsets count these carriers throughout IR, JIT specialization, runtime calls,
+and serialized argument metadata; there is no implicit dimension scaling.
+The old `pl.FP4`, `DataType.FP4`, and `DT_FP4` names are removed.
 
-End-to-end 4-bit execution is backend-gated. Ascend950 in-core accepts packed
-`pl.FP4E2M1X2`; logical `pl.FP4` / `INT4` / `UINT4` / `HF4` are rejected by
-in-core codegen. Ascend910/A2A3 rejects every FP4-family in-core dtype because
-its isolated FP16↔INT4 conversion has no matching packed load/store carrier ABI.
-See [FP4](../../dev/fp4.md) for cast samples (`FP4E2M1X2`→BF16 / FP8), units, and
-`#2754`-class stride guidance.
+Explicit packed annotations accept `torch.uint8`. E2M1 also accepts
+`torch.float4_e2m1fn_x2` with its physical shape unchanged; E1M2 uses UINT8
+because Torch has no matching native dtype. Unannotated UINT8 remains UINT8.
+Within PyPTO, calls and submits require matching argument and parameter dtypes
+whenever either is packed FP4. Pass an explicit `reinterpret_view` for supported
+UINT8/INT8 byte aliases; a callee annotation cannot create an implicit alias.
+
+On Ascend950, both row-major packed formats convert to/from BF16: `[4,32]`
+carriers decode to `[4,64]` values. E2M1↔E1M2 conversion uses BF16 and keeps
+the carrier shape. Packing requires an even source extent, including a
+provably even dynamic `valid_shape` such as `2 * n`. Supported modes are
+`rint`, `round`, `floor`, `ceil`, and `trunc`; `odd` is rejected. Implicit
+encoding chains must preserve values through BF16; write an explicit BF16
+cast when intermediate rounding is intended.
+
+ND/DN carrier transfers and ND padding are supported. DN casts require full
+static dense 2D BF16/packed endpoints and PYPTO/DSA_RP static addresses.
+`pl.quant_mx(..., dtype=pl.fp4e2m1x2)` supports FP16/BF16 input; E1M2
+quantization and native packed FP4 matrix multiplication remain unsupported.
+Ascend910/A2A3 execution remains unsupported for both formats. See
+[FP4](../../dev/fp4.md) for layout, alias, and memory-planner constraints.
 
 ### Annotating a scalar binding
 
@@ -228,15 +255,32 @@ cannot trace back to a host parameter through such slices — a reshape, a newly
 is rejected too. The trace stays within the dispatching function, so a window passed into a
 helper function arrives there as a parameter and is not followed back to its caller.
 
-`pl.ND` is the default row-major layout and never needs writing. `pl.NZ` asserts that the
-tensor's bytes in global memory are *already* stored in PTO-native NZ fractal order, so a
-matmul weight load can skip the online ND→NZ conversion. It is an assertion about existing
-bytes, not a request to convert: the shape and slicing you write stay logical, and the
-compiler derives the blocked physical descriptor. It currently requires a statically shaped,
-fractal-aligned tensor with a whole-byte dtype (`shape[-2] % 16 == 0`,
-`shape[-1] % (256 / dtype bits) == 0`) of **logical rank 2 or 3** — `[R, C]` or `[B, R, C]`,
-since the underlying NZ descriptor has exactly one batch slot — read
-into a matmul operand; anything else is rejected with a diagnostic.
+`pl.ND` is the default row-major layout and never needs writing. `pl.NZ` declares PTO-native
+NZ fractal byte order in global memory. A matmul operand load expects already packed bytes
+and can skip online ND→NZ conversion; a supported Acc store produces NZ bytes directly.
+The annotation itself does not convert existing bytes: shape and slicing remain logical,
+and the compiler derives the blocked physical descriptor. The tensor needs a static,
+fractal-aligned trailing plane with a whole-byte dtype (`shape[-2] % 16 == 0`,
+`shape[-1] % (256 / dtype bits) == 0`) and logical rank at least 2. Leading axes fold into
+the descriptor's single batch slot.
+
+On A2/A3, `pl.store(acc, offsets, out)` also supports a fully valid, static 2-D FP32 Acc
+tile and an FP32 `pl.NZ` destination. Rows and columns must be multiples of 16; the tile
+must cover the destination's entire row axis at row offset 0. Each store writes one panel,
+with non-negative, provably aligned column and batch offsets. Stack independent panels as
+`[PANELS, R, C]` and write them separately. FP32 NZ uses C0=8; it does not change the tile's
+mathematical values. Supported matmul-to-store chains are automatically tiled along N
+while keeping the complete M axis; ordinary K reduction tiling remains available.
+The logical output can exceed L0C or a store instruction's column limit. Each emitted
+Acc tile must fit the backend's L0C capacity (currently 128 KiB on A2/A3) and have at most
+4095 columns. The GM destination may be larger. If no legal full-M plan exists, the
+automatic tiler reports a compile-time diagnostic. Producer/use patterns outside the
+supported rewrite retain the allocation and final store checks. Explicit column tiling
+is also supported, with each chunk spanning the destination's full row axis.
+Atomic stores, FIXPIPE epilogue options (`pre_quant`, `pre_relu`),
+dtype conversion, A5, Vec/Mat sources, and dynamic or partially valid tiles are rejected.
+The full scope and the underlying row-window restriction are documented in
+[BlockNzTensorViews](../../dev/passes/16-block_nz_tensor_views.md#accumulator-stores).
 
 When a tensor's rows are not contiguous — a window into a larger buffer, a strided slice
 handed in from outside — describe it with `pl.TensorView`, which makes the strides explicit
@@ -262,19 +306,24 @@ rejected. Exception: FP8E8M0 `pl.tensor.view` may alias packed ND
 backing to `MX_A_ZZ` / `MX_B_NN` as a logical rank-2 view (`layout=mx_*`; PTOAS v0.60 packs
 physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
 `_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
-the op must be `FP8E4M3FN`. The supported FP4-input form is a left FP4 operand multiplied by a
-right FP8 operand: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
-legalization pass expands that request to FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
-reverse FP8×FP4 form are not supported. Standalone `pl.quant_mx` (MXFP8-only in this release, with
-`group_axis` matching PTOAS `grpAxis`) is available. On Ascend950 it can share one InCore mixed
-task with `matmul_mx`; the generated data and scale cross directly over V2C, with a generated
-Vec-to-Mat-to-scale-memory path for the scale.
-`pl.quant_mx(tensor, group_axis=1)` returns GM A data `[M,K]` plus an
-`MX_A_ZZ[M,K/32]` scale tensor. `group_axis=0` accepts `[N,K]` and returns
-Cube-oriented data `[K,N]` plus `MX_B_NN[K/32,N]`. Those two tensor pairs are
-the required inputs to tensor `pl.matmul_mx`, which is 2-D-only and returns
-FP32; tensor MX accumulation, bias, transpose flags, batches, dynamic shapes,
-and FP4 are intentionally not part of this interface.
+the op must be `FP8E4M3FN`. Either packed FP4 format may supply the left operand
+after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
+legalization pass expands that request to packed FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
+reverse FP8×FP4 form are not supported. `pl.quant_mx` supports MXFP8 and native
+E2M1 MXFP4, with `group_axis` matching PTOAS `grpAxis`. FP8 results can feed `matmul_mx` in one mixed InCore task
+through V2C, including the generated Vec-to-Mat-to-scale-memory path.
+
+With the default FP8 dtype, tensor quantization returns `[M,K]` data and
+`MX_A_ZZ[M,K/32]` scales on axis1, or `[K,N]` data and `MX_B_NN[K/32,N]`
+scales for axis0 input `[N,K]`. Selecting `dtype=pl.fp4e2m1x2` halves the
+payload's final extent; scales are unchanged. FP4 requires FP16/BF16 input,
+full validity, `K%64==0`, axis1 `M%16==0`, and axis0 `N%64==0`.
+OCP is the default; NV FP16/BF16 is limited to axis0. E1M2 quantization is
+unsupported. PYPTO/DSA_RP static allocation is required for packed output.
+`pl.tile.quant_mx_raw` exposes raw UINT8 exponents and explicit workspaces.
+Only FP8 data/scale pairs feed tensor `pl.matmul_mx`, which is 2-D-only and
+returns FP32; tensor MX accumulation, bias, transpose flags, batches, dynamic
+shapes, and native packed FP4 matrix operands remain unsupported.
 
 ### Dynamic shapes
 

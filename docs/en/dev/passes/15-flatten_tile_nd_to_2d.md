@@ -62,6 +62,41 @@ Per-statement handling:
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
 
+Generic Calls substitute their arguments, cached result types, and expression-valued
+attributes together. A change in any of these rebuilds both the Call and its defining
+Var, and records that Var for downstream uses. This also covers metadata-only
+changes: shape, stride, and `valid_shape` must reference the rewritten scalar
+bindings even when the operands are unchanged. GM operations such as `tensor.view`
+and `tensor.write` retain their logical tensor shapes and view metadata; there is
+no operator whitelist. If a generic `tile.*` Call has changed operands, its result
+type is re-deduced from those operands to propagate rank flattening, while keeping
+the substituted attributes. Specialized rewrites also retain the original Call's
+attributes and remap their expression references using the shared `MapAttrExprs`
+visitor rules, without an attribute-name whitelist. When an operation is expanded
+into pages, its attributes follow the corresponding per-page operations (loads,
+transposes, matmuls, or stores), rather than unrelated scratch allocations.
+Re-deduced `EvalStmt` Calls retain the already substituted attributes as well.
+Every rebuilt definition carries any missing allocation
+metadata (MemRef and tile memory space) from its original left-hand Var, even
+when only the result type or attributes changed and the RHS has no MemRef.
+Tile memory space is part of the value type and is also restored on the rebuilt
+Call, so LHS/RHS types remain equal; MemRef may remain LHS-only.
+Runtime expressions in carried allocation metadata are remapped before recording
+the new definition, including a pinned MemRef's `slot_index_`. A change confined
+to LHS metadata also rebuilds the definition, even if the RHS is unchanged. The
+load, allocation, reshape, assemble, and transpose rewrite paths use the same
+type-reference remapping rule. ND transpose applies it to its output allocation;
+its scratch allocations remain independent. Synthesized assemble results carry
+no explicit binding: `InitMemRef` inherits the target allocation for each writeback.
+Constant slots retain the original MemRef.
+A definition is retained only when both its RHS and LHS type references are unchanged.
+Rebuilt assignments retain their `leading_comments_` once on the first emitted
+replacement statement, including auxiliary statements introduced by lowering.
+An unchanged assignment keeps its existing comments without duplication. Fused
+batch-matmul stores retain the consumed store's comments on the first page store,
+separately from the matmul's comments. Comment preservation shallow-copies only
+the annotated assignment, leaving the input IR and variable identities unchanged.
+
 For N-D transpose scratch, round A to 32 elements for 8-bit types or 16 for 16/32-bit types. Reserve at least one 32-byte column block, or two full-height 16-column strips for 16-bit vtranspose. Round the resulting workspace capacity up to whole rows of B elements to obtain `scratch_page_rows`; both the pool allocation and each page offset use this padded size. Thus an FP32 `[24, 8]` page has a 1024-byte workspace while its scratch view retains shape `[24, 8]`. Page dimensions must be positive and element storage must be 1, 2, or 4 bytes. Workspace rounding, pool dimensions, and the total pool byte size must fit in `int64_t`; unsupported types and oversized workspaces are rejected before batch expansion.
 
 **Unified operand handling — whole-fit slice vs. per-batch load.** Every
@@ -282,8 +317,8 @@ shapes; FP32/INT32 elements; 16-aligned window height and parent width; and a
 packed allocation that fits L0C after the target's physical row alignment.
 Runtime alignment proofs currently cover power-of-two window heights. Each
 assemble must write a `matmul_acc` result back to the same window it read.
-Explicit MemRefs and consumers requiring the whole logical accumulator in a
-different layout are rejected with a diagnostic rather than silently repacked.
+Explicit MemRefs on existing row windows and consumers requiring the whole logical
+accumulator in a different layout are rejected with a diagnostic rather than silently repacked.
 
 ## Example
 
@@ -421,6 +456,19 @@ A carry is left exactly as it is when the two readings of its buffer cannot disa
 single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
 rows — or when the narrowed extent is only computed inside the loop body, where the
 re-declared seed could not name it.
+
+Result bindings follow storage ownership through one-to-many rewrites. A single-page
+batched matmul carries its binding on the actual matmul; a multi-page result carries
+it on the full output allocation. Explicit Vec placement requires staging, while a
+bound multi-page Acc result uses the accumulator packing analysis. Scratch pages
+remain independent, and writebacks inherit the destination storage in `InitMemRef`.
+The same owning-result helper covers loads, allocations, and transposes; generic
+operations retain the shared type-reference remapping path.
+
+Direct-store fusion and operand peeling require exclusive use across the whole
+function, including expression-valued attributes and type metadata. A bound result
+is always materialized. An attribute that still needs the full result therefore
+prevents fusion rather than referring to an eliminated definition.
 
 ## Implementation
 

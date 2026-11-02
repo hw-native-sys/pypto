@@ -72,13 +72,34 @@ def wrap_fork_inherited(
     access: AccessMode = ...,
     backend_kind: BackendKind = ...,
 ) -> Buffer: ...
+def create_host_shared_buffer(
+    nbytes: int,
+    owner_instance_id: bytes,
+    buffer_id: int,
+    owner_worker_path: str = ...,
+    generation: int = ...,
+    access: AccessMode = ...,
+) -> Buffer: ...
+def wrap_device_malloc(
+    device_ptr: int,
+    nbytes: int,
+    owner_instance_id: bytes,
+    buffer_id: int,
+    owner_worker_path: str = ...,
+    generation: int = ...,
+    access: AccessMode = ...,
+    owner_worker_id: int = ...,
+) -> Buffer: ...
 
 __all__ = [
     "AccessMode",
+    "AddressSpace",
     "BackendKind",
     "Buffer",
     "Tensor",
     "TensorTransfer",
+    "create_host_shared_buffer",
     "mint_owner_instance_id",
+    "wrap_device_malloc",
     "wrap_fork_inherited",
 ]

@@ -38,6 +38,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -283,24 +284,41 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
       return "";
     }
   }
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  const auto tf32_attr =
+      (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias"))
+          ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
+          : "";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + tf32_attr);
   return "";
 }
 
-static std::string GemvAccPhaseAttr(const CallPtr& op) {
+static std::string AccPhaseAttr(const CallPtr& op) {
   const int acc_phase = op->GetKwarg<int>("acc_phase", static_cast<int>(ir::AccPhase::kUnspecified));
   INTERNAL_CHECK_SPAN(ir::IsValidAccPhase(acc_phase), op->span_)
-      << "GEMV acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got " << acc_phase;
+      << op->op_->name_ << " acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got "
+      << acc_phase;
   if (acc_phase == static_cast<int>(ir::AccPhase::kUnspecified)) return "";
   return " {accPhase = #pto<acc_phase " + ir::AccPhaseToPTOString(static_cast<ir::AccPhase>(acc_phase)) +
          ">}";
 }
 
-static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
-                                      codegen::CodegenBase& codegen_base) {
+static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) {
+  auto attrs = (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_acc"))
+                   ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
+                   : "";
+  auto phase = AccPhaseAttr(op);
+  if (attrs.empty()) return phase;
+  if (phase.empty()) return attrs;
+  // Both formatters return one attribute dictionary; combine their entries.
+  attrs.pop_back();
+  return attrs + ", " + phase.substr(2);
+}
+
+static std::string MakePhasedMatmulCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
+                                              codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + GemvAccPhaseAttr(op));
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
   return "";
 }
 
@@ -416,7 +434,8 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   if (high_precision) {
     code += " {precisionType = #pto<";
     code += attr_kind;
-    code += " high_precision>}";
+    // PTOAS 0.70 names the former division HighPrecision selector DiffCompensation.
+    code += ir::IsOp(op, "tile.div") ? " diff_compensation>}" : " high_precision>}";
     codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
   }
   codegen.Emit(code);
@@ -923,9 +942,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
-    {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
     {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
+    // tile.matmul has phase-aware custom codegen.
     // tile.matmul_acc / tile.gemv_acc / tile.matmul_mx_acc have custom codegen
     // (in-place accumulation: ptoas requires ins(acc) == outs).
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
@@ -955,7 +974,7 @@ static const SimpleOpEntry kSimpleOps[] = {
 void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register simple N-ary ops
   for (const auto& entry : kSimpleOps) {
-    if (exclude_ops.count(entry.op_name) > 0) continue;
+    if (!ShouldRegister(exclude_ops, entry.op_name)) continue;
     std::string pto_op = entry.pto_op_name;
     size_t arity = entry.arity;
     std::optional<size_t> i32_operand_idx = entry.i32_operand_idx;
@@ -984,7 +1003,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       {"tile.fmods", "pto.tfmods", 2, nullptr},
   };
   for (const auto& entry : kRemainderOps) {
-    if (exclude_ops.count(entry.op_name) > 0) continue;
+    if (!ShouldRegister(exclude_ops, entry.op_name)) continue;
     auto reg_entry = backend.RegisterOp(entry.op_name);
     reg_entry.f_codegen([entry](const CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeRemainderCodegenPTO(entry.pto_op_name, entry.arity, entry.precision_attr_kind, op, codegen);
@@ -995,7 +1014,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     reg_entry.set_output_layout(ir::TileLayout::row_major);
   }
 
-  if (exclude_ops.count("tile.prelu") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.prelu")) {
     auto entry = backend.RegisterOp("tile.prelu");
     entry.f_codegen(MakePreluCodegenPTO);
     for (size_t i = 0; i < 3; ++i) {
@@ -1006,7 +1025,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
-    if (exclude_ops.count(op_name) > 0) return;
+    if (!ShouldRegister(exclude_ops, op_name)) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
@@ -1041,7 +1060,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   auto register_precision_op = [&](const char* op_name, const char* pto_op_name, size_t arity,
                                    const char* attr_kind) {
-    if (exclude_ops.count(op_name) > 0) return;
+    if (!ShouldRegister(exclude_ops, op_name)) return;
     auto reg_entry = backend.RegisterOp(op_name);
     reg_entry.f_codegen([pto_op = std::string(pto_op_name), arity, attr_kind = std::string(attr_kind)](
                             const CallPtr& op, codegen::CodegenBase& codegen) {
@@ -1059,7 +1078,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // tile.row_expand_add follows the PTOAS overloads with and without tmp.
   // Its row-sensitive layout contract is validated by the IR op: the generic
   // backend layout repair may reshape [M, 1] to [1, M], which changes semantics.
-  if (exclude_ops.count("tile.row_expand_add") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.row_expand_add")) {
     auto reg_entry = backend.RegisterOp("tile.row_expand_add");
     reg_entry.f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       const size_t arity = op->args_.size();
@@ -1143,7 +1162,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // as for its scalar sibling tile.cmps below. Both walk their operands as one
   // flat run of elements, so a col_major operand is read at the wrong addresses
   // and silently yields a wrong mask.
-  if (exclude_ops.count("tile.cmp") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.cmp")) {
     backend.RegisterOp("tile.cmp")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeCmpCodegenPTO("pto.tcmp", op, codegen);
@@ -1156,7 +1175,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // tile.rsqrt accepts 1 arg (basic) or 2 args (high-precision with tmp workspace).
   // Both forms emit pto.trsqrt with the appropriate ins() arity. Per ISA, both
   // inputs (when present) and the output must be row_major.
-  if (exclude_ops.count("tile.rsqrt") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.rsqrt")) {
     backend.RegisterOp("tile.rsqrt")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           size_t arity = op->args_.size();
@@ -1171,7 +1190,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   // tile.col_sum (TCOLSUM): accepts 1 arg (sequential) or 2 args (tile + tmp for binary-tree).
   // PTOAS pairs tmp operand with isBinary attribute; both present or both absent.
-  if (exclude_ops.count("tile.col_sum") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.col_sum")) {
     backend.RegisterOp("tile.col_sum")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
           auto& codegen = AsPto(codegen_base);
@@ -1204,7 +1223,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   }
 
   // tile.full (TEXPANDS): output is row_major per ISA
-  if (exclude_ops.count("tile.full") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.full")) {
     backend.RegisterOp("tile.full")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeFullCodegenPTO("pto.texpands", op, codegen);
@@ -1213,7 +1232,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   }
 
   // tile.cmps (TCMPS): tile input and output must be row_major per ISA
-  if (exclude_ops.count("tile.cmps") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.cmps")) {
     backend.RegisterOp("tile.cmps")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeCmpCodegenPTO("pto.tcmps", op, codegen);
@@ -1225,7 +1244,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   reg("tile.assign", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeAssignCodegenPTO("pto.tassign", op, codegen);
   });
-  if (exclude_ops.count("tile.gatherb") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.gatherb")) {
     backend.RegisterOp("tile.gatherb")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeGatherbCodegenPTO(op, codegen);
@@ -1239,7 +1258,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return MakeCiCodegenPTO("pto.tci", op, codegen);
   });
 
-  if (exclude_ops.count("tile.tri") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.tri")) {
     backend.RegisterOp("tile.tri")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeTriCodegenPTO(op, codegen);
@@ -1248,7 +1267,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   }
 
   // tile.random (TRANDOM): output must be row_major per ISA
-  if (exclude_ops.count("tile.random") == 0) {
+  if (ShouldRegister(exclude_ops, "tile.random")) {
     backend.RegisterOp("tile.random")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeRandomCodegenPTO("pto.trandom", op, codegen);
@@ -1287,7 +1306,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
-      const std::string acc_phase = GemvAccPhaseAttr(op);
+      const std::string attrs = MatmulAttrs(op, codegen);
 
       // ins() carries the accumulator only on the accumulating form; the
       // initializing form reads lhs/rhs alone and writes dst from scratch.
@@ -1323,7 +1342,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
         }
         inst << ") outs(" << dst;
         if (!dst_type.empty()) inst << " : " << dst_type;
-        inst << ")" << acc_phase;
+        inst << ")" << attrs;
         return inst.str();
       };
 
@@ -1333,11 +1352,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
 
       // A literal predicate picks one arm outright; only a runtime one branches.
-      // Both spellings reach here: a DSL `init_cond=True/False` arrives as a
-      // BOOL-typed ConstInt, while a predicate the arithmetic simplifier folded
-      // (e.g. `ko == 0` after LowerPipelineLoops replicates the K-loop) arrives
-      // as a ConstBool.  Missing either one leaves an `scf.if` on a compile-time
-      // constant, doubling the emitted MADs.
+      // A DSL `init_cond=True/False` and a predicate Simplify decided (e.g. a
+      // replica's `ko + k*step == 0` after LowerPipelineLoops) both arrive as a
+      // ConstBool; a BOOL-typed ConstInt is still accepted for IR built directly
+      // through the bindings.  Missing either one leaves an `scf.if` on a
+      // compile-time constant, doubling the emitted MADs.
       if (auto init_const = As<ir::ConstInt>(op->args_[3])) {
         codegen.Emit(build(/*initializing=*/init_const->value_ != 0));
         return "";
@@ -1408,14 +1427,17 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     };
   };
 
+  reg("tile.matmul", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePhasedMatmulCodegenPTO("pto.tmatmul", 2, op, codegen);
+  });
   reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc", "pto.tmatmul"));
   reg("tile.gemv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeGemvCodegenPTO("pto.tgemv", 2, op, codegen);
+    return MakePhasedMatmulCodegenPTO("pto.tgemv", 2, op, codegen);
   });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeGemvCodegenPTO("pto.tgemv.bias", 3, op, codegen);
+    return MakePhasedMatmulCodegenPTO("pto.tgemv.bias", 3, op, codegen);
   });
 }
 }  // namespace backend

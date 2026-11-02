@@ -4,12 +4,13 @@
 
 ## 概述
 
-此 Pass 执行四项任务：
+此 Pass 执行五项任务：
 
-1. **规范化语句 (Statement) 结构**（内部调用 NormalizeStmtStructure）
-2. **物化编译器负责的 level3 scratch**：处理 A2/A3 ABI 的 `tile.ci`、窄化 `tile.cast`，以及 A2/A3 与 A5 上需要 scratch 的 `tile.sort32`；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
-3. **为 TileType 和 TensorType 变量初始化 MemRef**
-4. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
+1. **规范化标量常量**，以仅常量模式（constant-only mode）使用共享的 [Simplify](05-simplify.md) 辅助函数
+2. **规范化语句 (Statement) 结构**（内部调用 NormalizeStmtStructure）
+3. **物化编译器负责的 level3 scratch**：处理 A2/A3 ABI 的 `tile.ci`、窄化 `tile.cast`，以及 A2/A3 与 A5 上需要 scratch 的 `tile.sort32`；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
+4. **为 TileType 和 TensorType 变量初始化 MemRef**
+5. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
 
 内存空间从 `TileType::memory_space_` 读取（由 InferTileMemorySpace 设置）。无 `memory_space` 的变量默认为 DDR。
 
@@ -44,18 +45,34 @@ program_with_memrefs = init_pass(program)
 
 ## 算法
 
-1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **物化 level3 scratch**：在 PyPTO 或 DSA-RP 规划模式下，为缺失的编译器 scratch 插入普通 Vec `tile.create`。`tile.ci` 与窄化 `tile.cast` 仍仅适用于 A2/A3，必要的 `tile.sort32` scratch 则同时适用于 A2/A3 和 A5。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留。窄化 `tile.cast` **仅在**显式携带 `saturation_mode=0` 时才分配 scratch：该缓冲区是为 PTOAS 的非饱和实现准备的，而饱和形式（即默认值，也是 Pass 合成 cast 的形状）走原生转换，从不读取它（参见 [LegalizeTileCast](18-legalize_tile_cast.md)）。PTOAS 规划器保持不变，由其 level-2 `PlanMemory` 管理隐式 scratch。
-3. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
-4. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+1. **规范化常量**：以仅常量模式调用共享的 `transform_utils::SimplifyFunction` 辅助函数，在构建地址之前将可证明的标量常量传播到表达式与类型元数据中。共享的绑定与类型遍历适用于所有算子，而非针对 slice 的专用重写。该模式删除死标量赋值，但保留控制流、phi 和循环携带结构；它跳过恒等 `tensor.view` 折叠、非常量代数重写和死 yield 槽位裁剪。
+2. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
+3. **物化 level3 scratch**：在 PyPTO 或 DSA-RP 规划模式下，为缺失的编译器 scratch 插入普通 Vec `tile.create`。`tile.ci` 与窄化 `tile.cast` 仍仅适用于 A2/A3，必要的 `tile.sort32` scratch 则同时适用于 A2/A3 和 A5。`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留。窄化 `tile.cast` **仅在**显式携带 `saturation_mode=0` 时才分配 scratch：该缓冲区是为 PTOAS 的非饱和实现准备的，而饱和形式（即默认值，也是 Pass 合成 cast 的形状）走原生转换，从不读取它（参见 [LegalizeTileCast](18-legalize_tile_cast.md)）。PTOAS 规划器保持不变，由其 level-2 `PlanMemory` 管理隐式 scratch。
+4. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
+5. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
-5. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
-6. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
-7. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+6. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
+7. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
+8. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+
+### 构建地址前化简常量输入
+
+命名标量即使在循环内赋值，也可能表示一个常量：`base = 32; fixed_row = base * 2`
+与直接使用字面量 `64` 表示同一个切片起点。入口化简会先将该值写回 slice 参数，随后布局
+选择与字节偏移计算都使用相同的参数。对于每行 16 列的行主序 FP32 pool，
+`[fixed_row, 0]` 因此产生 `ConstInt(4096)`，而不再是符号表达式
+`fixed_row * 16 * 4`。后续从原始参数重建视图的 Pass 也能看到相同常量，重叠分析便能识别
+这段固定的存储区间。
+
+同一套规范化还覆盖其他算子的普通参数，以及类型中嵌入的表达式，包括声明式分配的槽位
+下标。因此，常量槽位下标会产生常量槽位字节偏移。绑定限定在定义所在的区域内，运行时
+输入、循环携带值和未确定的分支结果仍保持动态。该仅常量规范化由 `InitMemRef` 内部执行，
+所以直接调用和自定义流水线均能获得相同行为，无需提前单独调度 `Simplify` Pass。
+保留控制流与携带结构，可以避免改变内存 Pass 即将分析的存储关系。
 
 ## 声明式分配
 
@@ -256,6 +273,7 @@ Pass InitMemRef();
 
 **实现文件**：`src/ir/transforms/init_memref.cpp`
 
+- `transform_utils::SimplifyFunction` 在构建地址之前执行共享的常量规范化逻辑，保留控制流与携带结构
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
 - `MaterializePtoLevel3ScratchMutator` 在所有 tile shape/cast 重写之后、MemRef 收集之前，仅插入缺失的编译器可选 scratch（`tile.ci`、窄化 `tile.cast`、必要的 `tile.sort32`）；`tile.sel` / `tile.sels` / `tile.prelu` 的 caller tmp 原样保留
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
@@ -275,6 +293,7 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - 测试所有 MemRef 的 addr=-1
 - 测试为非 DDR MemRef 创建 tile.alloc 语句
 - 测试规范化后的 `SeqStmts` 结构
+- 测试命名常量切片起点与声明式槽位下标，包括嵌套区域，并确认动态坐标保持动态
 - 测试按 planner/target 门控的 `tile.ci`、窄化 `tile.cast` 与 `tile.sort32` scratch 物化
 - 测试 tile.store 结果与输出参数共享 MemRef
 - 测试累加操作（matmul_acc）与累加器输入共享 MemRef

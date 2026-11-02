@@ -39,15 +39,17 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 
 1. 按算子配对 data/scale 操作数下标（`matmul_mx` / `_bias` 为 `(0,1)/(2,3)`；`_acc` 为 `(1,2)/(3,4)`）。
 2. 要求操作数为 Var-like（`Var` 或 `IterArg`），且 memory space 已构成合法的 LeftScale↔Left 或 RightScale↔Right 配对。
-3. 在 matmul 前插入 `tile.tget_scale_addr(scale, data)`，并把 matmul 改写为使用绑定后的 scale SSA。
+3. 只有两个 SSA 操作数均未变化、且中间没有使绑定失效的操作时，才复用该侧最近的绑定；否则在 matmul 前插入 `tile.tget_scale_addr(scale, data)`。把 matmul 改写为使用绑定后的 scale SSA。
 
 `NormalizedStmtStructure` 可能 unwrap 单语句 `SeqStmts`，使 `if` / `for` / `while`（或函数）body 成为裸 `AssignStmt`。插入绑定时，pass 会把该 body 包成 `SeqStmts`，处理方式与 `InsertCommFence` 的裸 body 逻辑一致。
 
-### 禁止跨消费者复用
+### 保守的绑定复用
 
-`tget_scale_addr` 会原地修改物理 scale buffer 地址（`dst_addr = src_addr >> SHIFT_MX_ADDR`）。普通 SSA alias、view alias 与 bound result 都可能共享该 buffer，因此 SSA 身份无法证明缓存绑定仍然有效。pass 会为每个 MX matmul 消费者生成新的绑定。
+`tget_scale_addr` 会原地修改物理 scale buffer 地址（`dst_addr = src_addr >> SHIFT_MX_ADDR`）。在 scale 消费者之后重复相同绑定，会使 PTOAS 尝试跨越该消费者，将绑定前移到最初的 Mat→Scale 填充之前；PTOAS 0.70 会拒绝这种前移。因此，pass 仅在直线代码中分别保留 Left 和 Right 侧最近的 scale/data 绑定。
 
-即使 scale 操作数已经是更早一次 `tget_scale_addr` 的 bound result，也必须遵循此规则：该 result 仍与同一个可变 buffer alias，无法证明其地址未被其他 alias 改写。因此重复执行 pass 会保守地再增加一层绑定；标准 lowering pipeline 只运行该 pass 一次。
+由于别名（alias）可能共享可变 buffer，仅比较 SSA 身份还不够。不同的配对会替换该侧状态；任何接收或产生 Left/LeftScale 或 Right/RightScale tile 的非 MX 操作都会使对应侧失效。未知调用和控制流边界会清空两侧状态。Mat 加载和 Acc 存储不会使这些绑定失效。状态只占常量空间，遍历仍为线性复杂度。
+
+已有的显式 `tget_scale_addr` 也会使状态失效。因此重复执行 pass 会保守地再增加一层绑定；标准 lowering pipeline 只运行该 pass 一次。
 
 ## 相关
 

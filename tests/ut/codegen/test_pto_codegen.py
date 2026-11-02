@@ -493,6 +493,42 @@ def test_pto_codegen_matmul_acc_accepts_acc_valid_shape_containment():
     assert "pto.tmatmul.acc" in mlir_code
 
 
+@pytest.mark.parametrize("phase", [pl.AccPhase.Unspecified, pl.AccPhase.Partial, pl.AccPhase.Final])
+@pytest.mark.parametrize("tf32_mode", [None, "round_even", "round_away"])
+def test_pto_codegen_matmul_unit_flag_phase(phase, tf32_mode):
+    """Exercise the default pipeline, including the matching final FIX drain."""
+    if tf32_mode is not None:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+    store_phase = pl.STPhase.Final if phase == pl.AccPhase.Final else pl.STPhase.Unspecified
+
+    @pl.program
+    class MatmulPhaseProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            lhs = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            result = pl.tile.matmul(lhs, rhs, tf32_mode=tf32_mode, acc_phase=phase)
+            return pl.store(result, [0, 0], out, st_phase=store_phase)
+
+    mlir_code = _generate_default_mlir(MatmulPhaseProgram)
+    matmul_lines = [line for line in mlir_code.splitlines() if "pto.tmatmul " in line]
+    assert len(matmul_lines) == 1, mlir_code
+    if phase == pl.AccPhase.Unspecified:
+        assert "accPhase" not in matmul_lines[0]
+    else:
+        assert f"#pto<acc_phase {phase.name.lower()}>" in matmul_lines[0]
+    if tf32_mode is not None:
+        assert f"tf32_mode = #pto<tf32_mode {tf32_mode}>" in matmul_lines[0]
+        assert matmul_lines[0].count("{") == 1
+    assert ("#pto<st_phase final>" in mlir_code) == (phase == pl.AccPhase.Final)
+
+
 def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
     """GEMV base/acc/bias must retain their canonical PTO ops and row-vector layout."""
 
@@ -1104,6 +1140,115 @@ def test_signed_floor_mod_emits_sign_correction(dtype):
     assert "arith.select" in mlir
 
 
+def test_loop_start_literal_is_validated_at_its_own_width():
+    """A start literal is judged at the dtype it is emitted at, not the variable's.
+
+    `EmitArithOperand` narrows the start into its own type before the loop
+    header is formed, so an INT32 literal 4294967295 opens the loop at -1 while
+    its stored value is positive. Checking the fit against the *induction
+    variable's* dtype is not enough — a 64-bit INDEX variable admits that
+    literal — so the recorded lower bound would claim a sign the hardware never
+    has, and `FloorMod(i, 3)` would return -1 instead of 2.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("narrow_start_literal", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        # An INT32 start literal under an INDEX induction variable.
+        with ib.for_loop(i_var, ir.ConstInt(4294967295, DataType.INT32, span), 1, 1):
+            value = ib.let(
+                "m", ir.FloorMod(i_var, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+            )
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NarrowStartLiteral", span))
+    assert "arith.select" in mlir, f"a start literal that changes sign needs the correction:\n{mlir}"
+
+
+def test_narrowed_loop_variable_does_not_skip_the_sign_correction():
+    """A loop variable's lower bound only proves a sign at the width it is emitted at.
+
+    `EmitArithOperand` coerces an operand into the operation's dtype, so over an
+    INDEX loop starting at 2147483648 the `i` reaching an INT32 `FloorMod` is
+    -2147483648. The recorded lower bound is positive and says nothing about
+    that, so a bare `remsi` would return -2 where floor-modulo gives 1. The
+    shortcut therefore requires the variable to reach the operation unnarrowed.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("narrowed_loop_var", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(i_var, 2147483648, 2147483649, 1):
+            narrowed = ir.FloorMod(i_var, ir.ConstInt(3, DataType.INT32, span), DataType.INT32, span)
+            value = ib.let("m", narrowed)
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NarrowedLoopVar", span))
+    assert "arith.select" in mlir, f"a narrowed loop variable still needs the correction:\n{mlir}"
+
+
+def test_nested_narrowed_operation_does_not_skip_the_sign_correction():
+    """A sign proof must be carried out at the width each nested operation runs at.
+
+    The dividend of an INDEX `FloorMod` is here an INT32 `FloorDiv`. Proving the
+    whole subtree at the enclosing INDEX width accepts the induction variable and
+    never sees the narrowing: emission coerces `i` to INT32 as -2147483648, takes
+    the quotient -1073741824, and widens that *negative* value back to INDEX, so a
+    bare `remsi` returns -1 where floor-modulo gives 2. Each nested operation must
+    therefore execute at the dtype the proof is being made at.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("nested_narrowed_op", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(i_var, 2147483648, 2147483649, 1):
+            quotient = ir.FloorDiv(i_var, ir.ConstInt(2, DataType.INT32, span), DataType.INT32, span)
+            nested = ir.FloorMod(quotient, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+            value = ib.let("m", nested)
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NestedNarrowedOp", span))
+    assert "arith.select" in mlir, f"a nested narrowed operation still needs the correction:\n{mlir}"
+
+
+def test_overflowing_product_does_not_skip_the_sign_correction():
+    """A non-negative dividend is not enough: the arithmetic must also not wrap.
+
+    Over an INDEX loop `0, 1, 2`, `i * 4611686018427387904` is non-negative term
+    by term, but wraps to INT64_MIN at `i == 2`, where a bare `remsi` yields -2
+    instead of the floor-modulo result 1. The shortcut that skips the correction
+    therefore does not recognise sums or products at all.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("overflowing_product", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        # A real loop variable, so the dividend has a known non-negative start.
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(i_var, 0, 3, 1):
+            scaled = ir.Mul(
+                i_var, ir.ConstInt(4611686018427387904, DataType.INDEX, span), DataType.INDEX, span
+            )
+            value = ib.let(
+                "m", ir.FloorMod(scaled, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+            )
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "OverflowingProduct", span))
+    assert "arith.select" in mlir, f"the correction must survive an overflowing dividend:\n{mlir}"
+
+
 def test_float_floor_mod_keeps_float_remainder():
     """The signed integer correction must not change floating-point remainder."""
     mlir = _scalar_floor_mod_mlir(DataType.FP32)
@@ -1115,7 +1260,7 @@ def test_float_floor_mod_keeps_float_remainder():
 def _run_scalar_ptoas_on_cpu(
     tmp_path, mlir: str, function_name: str, output_count: int, cases: list[tuple[int, int]]
 ) -> list[list[int]]:
-    """Run untouched PTOAS arithmetic with device synchronization stubbed on CPU.
+    """Run untouched PTOAS arithmetic with device setup and synchronization stubbed on CPU.
 
     UBSan traps without its runtime library, including undefined arithmetic in
     a speculatively evaluated correction branch.
@@ -1133,6 +1278,8 @@ def _run_scalar_ptoas_on_cpu(
 #include <iostream>
 #define __aicore__
 #define __gm__
+// Execute the vector kernel body emitted by the default compilation pipeline.
+#define __DAV_VEC__
 constexpr int PIPE_ALL = 0, PIPE_MTE3 = 1, PIPE_S = 2, EVENT_ID0 = 0;
 enum class cache_line_t {{ SINGLE_CACHE_LINE, ENTIRE_DATA_CACHE }};
 enum class mem_dsb_t {{ ALL }};
@@ -1141,6 +1288,8 @@ void set_flag(int, int, int) {{}}
 void wait_flag(int, int, int) {{}}
 void dcci(void*, cache_line_t) {{}}
 void dsb(mem_dsb_t) {{}}
+void set_mask_norm() {{}}
+void set_vector_mask(uint64_t, uint64_t) {{}}
 {cpp}
 int main() {{
     int64_t dividend, divisor;
@@ -1185,6 +1334,88 @@ int main() {{
     )
     assert executed.returncode == 0, executed.stderr
     return [list(map(int, line.split())) for line in executed.stdout.splitlines()]
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        DataType.INT8,
+        DataType.INT16,
+        DataType.INT32,
+        DataType.INT64,
+        DataType.UINT8,
+        DataType.UINT16,
+        DataType.UINT32,
+        DataType.UINT64,
+        DataType.INDEX,
+        DataType.FP32,
+        DataType.BOOL,
+    ],
+    ids=str,
+)
+def test_scalar_bool_cast_ptoas_matches_python_without_device(tmp_path, dtype):
+    """Literal and runtime BOOL casts must agree on 0/1, including after PTOAS folding."""
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([5], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("scalar_bool_cast", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        signed = f.param("signed", ir.ScalarType(DataType.INT8))
+        flag = f.param("flag", ir.ScalarType(DataType.BOOL))
+        f.return_type(output_type)
+        condition = ir.gt(signed, ir.ConstInt(0, DataType.INT8, span))
+        for offset, operand in enumerate(
+            (ir.ConstBool(False, span), ir.ConstBool(True, span), flag, condition)
+        ):
+            value = ib.let(f"cast_{offset}", ir.Cast(operand, dtype, span))
+            if dtype.is_unsigned_int():
+                # Preserve 0/1 while bridging the unsigned result to a same-width
+                # signed carrier; general unsigned widening is a separate recipe.
+                signed_dtype = {
+                    DataType.UINT8: DataType.INT8,
+                    DataType.UINT16: DataType.INT16,
+                    DataType.UINT32: DataType.INT32,
+                    DataType.UINT64: DataType.INT64,
+                }[dtype]
+                value = ib.let(f"signed_{offset}", ir.Cast(value, signed_dtype, span))
+            ib.let(
+                f"store_{offset}", tensor_ops.write(output, [offset], ir.Cast(value, DataType.INT64, span))
+            )
+        # BOOL needs zero extension, but ordinary negative integers still need
+        # sign extension. Keep that control in the same generated function.
+        ib.let("signed_control", tensor_ops.write(output, [4], ir.Cast(signed, DataType.INT64, span)))
+        ib.return_stmt(output)
+
+    mlir = _generate_mlir(ir.Program([f.get_result()], "ScalarBoolCast", span))
+    assert not re.search(r"arith\.(extsi|sitofp|index_cast) [^\n]*: i1 to", mlir), mlir
+    cases = [(-1, 0), (0, 1), (1, 0), (1, 1)]
+    actual = _run_scalar_ptoas_on_cpu(tmp_path, mlir, "scalar_bool_cast", 5, cases)
+    assert actual == [[0, 1, flag, int(signed > 0), signed] for signed, flag in cases]
+
+
+def test_scalar_bool_cast_dsl_matches_python_without_device(tmp_path):
+    """The public pl.cast surface retains the same semantics through the default pipeline."""
+
+    @pl.program
+    class BoolCasts:
+        @pl.function(type=pl.FunctionType.InCore)
+        def scalar_bool_cast_dsl(
+            self,
+            output: pl.Out[pl.Tensor[[5], pl.INT64]],
+            signed: pl.Scalar[pl.INT8],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[5], pl.INT64]:
+            output = pl.write(output, [0], pl.cast(pl.const(False, pl.BOOL), pl.INT64))
+            output = pl.write(output, [1], pl.cast(pl.const(True, pl.BOOL), pl.INT64))
+            output = pl.write(output, [2], pl.cast(flag, pl.INT64))
+            output = pl.write(output, [3], pl.cast(signed > pl.const(0, pl.INT8), pl.INT64))
+            output = pl.write(output, [4], pl.cast(signed, pl.INT64))
+            return output
+
+    mlir = _generate_default_mlir(BoolCasts)
+    cases = [(-1, 0), (0, 1), (1, 0), (1, 1)]
+    actual = _run_scalar_ptoas_on_cpu(tmp_path, mlir, "scalar_bool_cast_dsl", 5, cases)
+    assert actual == [[0, 1, flag, int(signed > 0), signed] for signed, flag in cases]
 
 
 def _signed_floor_divmod_cases(
@@ -1831,17 +2062,18 @@ class TestGenerateArgUnpacking:
         # dynamic dims appended after tensor params
         assert names == ["a__ssa_v0", "b__ssa_v0", "output__ssa_v0", "TH", "TW"]
 
-    def test_dynamic_fp4_last_dim_expands_runtime_x2_carrier(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_dynamic_fp4_last_dim_preserves_runtime_carriers(self, dtype):
         span = ir.Span.unknown()
-        logical_k = ir.Var("LOGICAL_K", ir.ScalarType(DataType.INDEX), span)
+        carrier_k = ir.Var("CARRIER_K", ir.ScalarType(DataType.INDEX), span)
         rows = ir.ConstInt(16, DataType.INDEX, span)
         ib = IRBuilder()
         with ib.function("fp4_dynamic", type=ir.FunctionType.InCore) as f:
-            f.param("x", ir.TensorType([rows, logical_k], DataType.FP4))
+            f.param("x", ir.TensorType([rows, carrier_k], dtype))
 
         code, names = _generate_arg_unpacking(f.get_result())
-        assert "int64_t LOGICAL_K = (static_cast<int64_t>(x_tensor->shapes[1]) * 2);" in code
-        assert names == ["x", "LOGICAL_K"]
+        assert "int64_t CARRIER_K = static_cast<int64_t>(x_tensor->shapes[1]);" in code
+        assert names == ["x", "CARRIER_K"]
 
     def test_dynamic_tensor_deduplicates_vars(self):
         # TH and TW each appear in a__ssa_v0, b__ssa_v0, and output__ssa_v0 but should be extracted only once
@@ -1938,7 +2170,7 @@ class TestGenerateArgUnpacking:
         assert names == ["a", "b", "out", "BATCH"]
 
     def test_dynamic_tensor_affine_ops_extract(self):
-        """Shape dims var+const, var-const, var*const, var//const all invert back to var."""
+        """Injective affine dims can be inverted; floor division needs an explicit scalar."""
         span = ir.Span.unknown()
         idx = DataType.INDEX
         v_add = ir.Var("V_ADD", ir.ScalarType(idx), span)
@@ -1966,12 +2198,19 @@ class TestGenerateArgUnpacking:
             ib.return_stmt(ret)
         func = f.get_result()
 
+        # V_DIV=10 and V_DIV=11 both produce a descriptor extent of 2.
+        # Recovering V_DIV as extent*5 silently changed the kernel's semantics.
+        with pytest.raises(ValueError, match="V_DIV.*non-invertible"):
+            _generate_arg_unpacking(func)
+        func = ir.Function(
+            func.name, [v_div, *func.params], func.return_types, func.body, span, func.func_type
+        )
         code, names = _generate_arg_unpacking(func)
         assert "int64_t V_ADD = (static_cast<int64_t>(a_tensor->shapes[0]) - 2);" in code
         assert "int64_t V_SUB = (static_cast<int64_t>(b_tensor->shapes[0]) + 3);" in code
         assert "int64_t V_MUL = (static_cast<int64_t>(c_tensor->shapes[0]) / 4);" in code
-        assert "int64_t V_DIV = (static_cast<int64_t>(d_tensor->shapes[0]) * 5);" in code
-        assert names == ["a", "b", "c", "d", "out", "V_ADD", "V_SUB", "V_MUL", "V_DIV"]
+        assert "V_DIV_conv.u64 = args[5]" in code
+        assert names == ["a", "b", "c", "d", "out", "V_DIV", "V_ADD", "V_SUB", "V_MUL"]
 
     def test_dynamic_tensor_no_invertible_source_raises(self):
         """Regression: if a Var only appears in non-invertible shape expressions
@@ -3261,57 +3500,6 @@ def test_pto_codegen_if_stmt_tile_phi_preserves_dynamic_valid_shape():
     assert "v_col=?" in phi_alloc_line, f"Expected dynamic v_col in tile phi alloc, got: {phi_alloc_line}"
 
 
-def test_pto_codegen_if_stmt_tile_no_redundant_tmov():
-    """IfStmt emit_branch must not generate a codegen-level tmov for tile return_vars.
-
-    MemoryReuse's YieldFixupMutator inserts an IR-level tile.move in the else-branch
-    to unify its yield MemRef with the then-branch's canonical MemRef. The codegen
-    should emit exactly one pto.tmov (from that IR tile.move), not a second redundant
-    one from emit_branch (which would copy addr B → addr B, a no-op).
-    """
-
-    @pl.program
-    class IfTileNoRedundantTmovProgram:
-        @pl.function(type=pl.FunctionType.InCore)
-        def repro(
-            self,
-            flag: pl.Scalar[pl.INDEX],
-            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            seed: pl.Tile[[64, 64], pl.FP32] = pl.tile.create(
-                [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-            )
-            then_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(seed, 2.0)
-            else_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(seed, 3.0)
-            if flag == 0:
-                result = then_tile
-            else:
-                result = else_tile
-            final: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], out)
-            return final
-
-    mlir_code = _generate_default_mlir(IfTileNoRedundantTmovProgram)
-    lines = _get_mlir_lines(mlir_code)
-
-    tmov_lines = _find_lines(lines, "pto.tmov")
-    # After the fix: exactly one tmov — the IR-level tile.move (else branch only).
-    # The then-branch has no tmov; the codegen-level tmov from emit_branch is removed.
-    assert len(tmov_lines) == 1, (
-        f"Expected exactly 1 pto.tmov (from IR tile.move), got {len(tmov_lines)}: {tmov_lines}"
-    )
-
-    # The single tmov copies from the else computation result to the canonical tile_buf.
-    tmov = tmov_lines[0]
-    assert "pto.tmov" in tmov, f"Expected a pto.tmov line, got: {tmov}"
-    # Verify the tmov targets are at different addresses (it's a real copy, not a no-op).
-    ins_match = re.search(r"ins\((%[\w\d_]+)", tmov)
-    outs_match = re.search(r"outs\((%[\w\d_]+)", tmov)
-    assert ins_match and outs_match, f"Expected ins/outs operands in tmov: {tmov}"
-    assert ins_match.group(1) != outs_match.group(1), (
-        f"tmov src and dst must differ (not a self-copy): {tmov}"
-    )
-
-
 def test_pto_codegen_if_stmt_scalar_result_preserves_integer_dtype():
     """IfStmt scalar results should use their real scalar dtype in scf.if results."""
 
@@ -3865,7 +4053,11 @@ def test_pto_codegen_tensor_dim_in_parameter_shape(extent_kind, axis):
 def test_tensor_dim_unsigned_constant_extent_ptoas(tmp_path, dtype):
     """Unsigned constant extents must become INDEX without an invalid cast."""
     span = ir.Span.unknown()
-    tensor_type = ir.TensorType([ir.ConstInt(8, dtype, span), 16], DataType.FP32)
+    # The Expr overload requires every dimension to be an Expr, including the
+    # fixed trailing dimension; mixing a Python int selects neither overload.
+    tensor_type = ir.TensorType(
+        [ir.ConstInt(8, dtype, span), ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32
+    )
     ib = IRBuilder()
     with ib.function("unsigned_dim", type=ir.FunctionType.InCore) as f:
         source = f.param("source", tensor_type)
@@ -4096,6 +4288,73 @@ def test_pto_codegen_tensor_view_default_pipeline_variants():
         assert any(f"pto.partition_view {view_ssa}" in line for line in _get_mlir_lines(body))
 
 
+def test_pto_codegen_tensor_view_with_tile_scalar_shape_default_pipeline():
+    """A runtime GM view keeps its definition through the default pipeline (#3046)."""
+
+    @pl.program
+    class RuntimeTensorView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def core(
+            self,
+            x: pl.Tensor[[4, 512], pl.BF16],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            out: pl.Tensor[[2, 512], pl.BF16],
+        ) -> pl.Tensor[[2, 512], pl.BF16]:
+            ids = pl.tile.load(indices, [0, 0], [1, 16])
+            pitch = pl.cast(pl.tile.read(ids, [0, 0]), pl.INDEX)
+            if pitch == 1024:
+                alias = pl.tensor.view(x, shape=[2, pitch])
+                value = pl.tile.load(alias, [0, 0], [2, 512])
+                out = pl.tile.store(value, [0, 0], out)
+            return out
+
+    lines = _get_mlir_lines(_generate_default_mlir(RuntimeTensorView))
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0, shape = [%c2_index,")
+    shape_stride = re.search(r"shape = \[%c2_index, (%\w+)\], strides = \[(%\w+), %c1_index\]", view_line)
+    assert shape_stride, f"Expected a dynamic 2D GM view, got: {view_line}"
+    pitch_ssa, row_stride = shape_stride.groups()
+    assert pitch_ssa == row_stride
+    assert any(line.startswith(f"{pitch_ssa} = arith.index_cast") for line in lines)
+    view_ssa = view_line.split(" = ", 1)[0].strip()
+    assert any(f"pto.partition_view {view_ssa}," in line for line in lines)
+
+
+def test_pto_codegen_tensor_write_dynamic_view_default_pipeline():
+    """A GM write propagates dynamic view metadata through the default pipeline."""
+
+    @pl.program
+    class RuntimeTensorView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def core(
+            self,
+            x: pl.Tensor[[4, 512], pl.FP32],
+            indices: pl.Tensor[[1, 16], pl.INT32],
+            out: pl.Tensor[[2, 512], pl.FP32],
+        ) -> pl.Tensor[[2, 512], pl.FP32]:
+            ids = pl.tile.load(indices, [0, 0], [1, 16])
+            pitch = pl.cast(pl.tile.read(ids, [0, 0]), pl.INDEX)
+            if pitch == 1024:
+                alias = pl.tensor.view(x, shape=[2, pitch])
+                updated: pl.Tensor[[2, pitch], pl.FP32] = pl.tensor.write(
+                    alias, [0, 0], pl.const(1.0, pl.FP32)
+                )
+                value = pl.tile.load(updated, [0, 0], [2, 512])
+                out = pl.tile.store(value, [0, 0], out)
+            return out
+
+    lines = _get_mlir_lines(_generate_default_mlir(RuntimeTensorView))
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0, shape = [%c2_index,")
+    shape_stride = re.search(r"shape = \[%c2_index, (%\w+)\], strides = \[(%\w+), %c1_index\]", view_line)
+    assert shape_stride, f"Expected a dynamic 2D GM view, got: {view_line}"
+    pitch_ssa, row_stride = shape_stride.groups()
+    assert pitch_ssa == row_stride
+    assert any(line.startswith(f"{pitch_ssa} = arith.index_cast") for line in lines)
+    assert any("pto.store " in line for line in lines)
+    assert any("%updated__tile_pview = pto.partition_view " in line for line in lines)
+    assert any("pto.tload ins(%updated__tile_pview " in line for line in lines)
+    assert not any("__FREE_VAR" in line for line in lines)
+
+
 def test_pto_codegen_tensor_view_shape_and_layout():
     """In-core tensor.view emits the deduced shape and layout strides."""
     span = ir.Span.unknown()
@@ -4239,6 +4498,202 @@ class Program:
     operand = store.split()[1].rstrip(",")
     definitions = {line.split(" = ", 1)[0]: line for line in lines if " = " in line}
     assert definitions[operand].split(" loc(")[0].endswith(": index to i32")
+
+
+@pytest.mark.parametrize("compound", [False, True])
+def test_explicit_shape_scalar_is_forwarded_once(compound):
+    """A scalar used in both shape and body is one ABI slot, even for lossy shapes."""
+    span = ir.Span.unknown()
+    b = ir.Var("b", ir.ScalarType(DataType.INDEX), span)
+    extent = ir.floordiv(b, ir.ConstInt(5, DataType.INDEX, span), span) if compound else b
+    ty = ir.TensorType([extent, ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32)
+    work = ir.Var("work", ty, span)
+    read = tile.load(work, [0, 0], [1, 16], target_memory=ir.MemorySpace.Vec)
+    value = ir.Var("value", read.type, span)
+    result = ir.Var("result", ty, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(value, read, span),
+            ir.AssignStmt(result, tile.store(value, [0, b - b], work), span),
+            ir.ReturnStmt([result], span),
+        ],
+        span,
+    )
+    func = ir.Function("shape_scalar", [b, work], [ty], body, span, ir.FunctionType.InCore)
+    mlir = _generate_mlir(ir.Program([func], "ExplicitShapeScalar", span))
+    signature = _single_line(_get_mlir_lines(mlir), "func.func @shape_scalar")
+    assert signature.count("%arg") == 2, signature
+    unpacking, names = _generate_arg_unpacking(func)
+    assert names == ["work", "b"]
+    assert "b_conv.u64 = args[1]" in unpacking
+    assert "Extract dynamic dim" not in unpacking
+    assert "arith.subi %arg1, %arg1" in mlir
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+def test_compound_internal_tensor_scope_compiles(tmp_path, platform):
+    """#3137: B/T must cross the boundary although only work's type uses them."""
+    backend.reset_for_testing()
+    B = pl.dynamic("COMPOUND_B")
+    T = pl.dynamic("COMPOUND_T")
+
+    @pl.program
+    class Repro:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(self, src: pl.Tensor[[B, T], pl.FP32], out: pl.Out[pl.Tensor[[1, 16], pl.FP32]]):
+            b = pl.tensor.dim(src, 0)
+            t = pl.tensor.dim(src, 1)
+            work = pl.create_tensor([(b + 15) // 16 * 16 + t * 4, 16], dtype=pl.FP32)
+            with pl.spmd(1):
+                worker = pl.tile.get_block_idx()
+                value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+                pl.store(value, [worker, 0], work)
+                copied = pl.load(work, [worker, 0], [1, 16])
+                pl.store(copied, [worker, 0], out)
+
+    ir.compile(
+        Repro,
+        output_dir=str(tmp_path),
+        platform=platform,
+        dump_passes=True,
+        skip_ptoas=find_ptoas_binary() is None,
+    )
+    kernels = list((tmp_path / "kernels").rglob("*.cpp"))
+    if find_ptoas_binary() is not None:
+        assert kernels
+        wrapper = "\n".join(path.read_text() for path in kernels)
+        assert "COMPOUND_B_conv.u64 = args[2]" in wrapper
+        assert "COMPOUND_T_conv.u64 = args[3]" in wrapper
+        assert "Extract dynamic dim: COMPOUND_" not in wrapper
+    orch = (tmp_path / "orchestration" / "main.cpp").read_text()
+    assert ".add_scalar(COMPOUND_B)" in orch
+    assert ".add_scalar(COMPOUND_T)" in orch
+
+
+@pytest.mark.parametrize("kind,limit", [("tensor", 32), ("scalar", 16)])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_wrapper_diagnoses_runtime_payload_capacity(kind, limit, overflow):
+    """Additional captured symbols must fail compilation instead of overrunning dispatch storage."""
+    span = ir.Span.unknown()
+    ty = ir.TensorType([1, 16], DataType.FP32) if kind == "tensor" else ir.ScalarType(DataType.INDEX)
+    params = [ir.Var(f"arg{i}", ty, span) for i in range(limit + int(overflow))]
+    func = ir.Function("capacity", params, [], ir.ReturnStmt([], span), span, ir.FunctionType.InCore)
+    if overflow:
+        with pytest.raises(ValueError, match=f"{kind} arguments.*at most {limit}"):
+            _generate_arg_unpacking(func)
+    else:
+        _, names = _generate_arg_unpacking(func)
+        assert len(names) == limit
+
+
+@pytest.mark.parametrize("extent", ["B * 2", "2 * B", "B + 2", "2 + B", "B - 2", "32 - B"])
+@pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
+def test_outline_preserves_shape_only_affine_extraction(tmp_path, extent, scope):
+    """Shape-only B has no orch scalar binding; the wrapper must recover it."""
+    backend.reset_for_testing()
+    program = pl.parse(f"""import pypto.language as pl
+B = pl.dynamic("B")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        x: pl.Tensor[[{extent}, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        with {scope}:
+            worker = pl.tile.get_block_idx()
+            value = pl.load(x, [worker, 0], [1, 16])
+            out = pl.store(value, [worker, 0], out)
+        return out
+""")
+    assert isinstance(program, ir.Program)
+    compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    assert compiled is not None
+    orch = (tmp_path / "orchestration" / "main.cpp").read_text()
+    assert ".add_scalar(B)" not in orch
+    # Check the ABI extractor independently of assembler availability.
+    lowered = _run_default_passes(program)
+    kernels = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
+    assert len(kernels) == 1
+    unpacking, names = _generate_arg_unpacking(kernels[0])
+    assert "Extract dynamic dim: B" in unpacking
+    assert names[-1] == "B"
+
+
+@pytest.mark.parametrize("extent", ["B // 5", "B * B", "(B + 15) // 16 * 16 + T * 4"])
+@pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
+def test_outline_rejects_unbound_noninvertible_shape(tmp_path, extent, scope):
+    """A type-only symbol must not become an undeclared orchestration scalar."""
+    backend.reset_for_testing()
+    program = pl.parse(f"""import pypto.language as pl
+B = pl.dynamic("B")
+T = pl.dynamic("T")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(self, x: pl.Tensor[[{extent}, 16], pl.FP32]):
+        with {scope}:
+            worker = pl.tile.get_block_idx()
+            value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+            x = pl.store(value, [worker, 0], x)
+        return x
+""")
+    assert isinstance(program, ir.Program)
+    with pytest.raises(ValueError, match="B.*no caller-side runtime binding"):
+        ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+
+
+@pytest.mark.parametrize("binding", ["B: pl.Scalar[pl.INDEX]", "source: pl.Tensor[[B, 16], pl.FP32]"])
+@pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
+def test_outline_captures_noninvertible_shape_with_runtime_binding(tmp_path, binding, scope):
+    """A scalar parameter or unused bare-dimension parameter supplies the value."""
+    backend.reset_for_testing()
+    program = pl.parse(f"""import pypto.language as pl
+B = pl.dynamic("B")
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(self, {binding}, x: pl.Tensor[[B // 5, 16], pl.FP32]):
+        with {scope}:
+            worker = pl.tile.get_block_idx()
+            value = pl.tile.full([1, 16], dtype=pl.FP32, value=0.0)
+            x = pl.store(value, [worker, 0], x)
+        return x
+""")
+    assert isinstance(program, ir.Program)
+    ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    orch = (tmp_path / "orchestration" / "main.cpp").read_text()
+    assert ".add_scalar(B)" in orch
+    assert "int64_t B =" in orch
+
+
+def test_embedded_helper_forward_declaration_matches_definition():
+    source = "AICORE void helper(int32_t);\nAICORE void helper(int32_t n) {}"
+    result = _preprocess_ptoas_output(source)
+    assert result.count("static __aicore__ void helper") == 2
+
+
+def test_external_vpto_declaration_keeps_linkage():
+    source = (
+        'extern "C" AICORE void run_vf(__ubuf__ float*, int32_t);\n'
+        'extern "C" __global__ AICORE void kernel(float* p) { run_vf(nullptr, 0); }'
+    )
+    result = _preprocess_ptoas_output(source)
+    assert 'extern "C" __aicore__ void run_vf(__ubuf__ float*, int32_t);' in result
+    assert "static __aicore__ void kernel(float* p) {" in result
+    assert "static __aicore__ void run_vf" not in result
+
+
+def test_tile_adapter_existing_static_qualifier_is_preserved_once():
+    source = (
+        'extern "C" AICORE void run_vf(__ubuf__ float*, int32_t);\n'
+        "static AICORE void adapter(Tile tile, int32_t n) { run_vf(tile.data(), n); }"
+    )
+    result = _preprocess_ptoas_output(source)
+    assert "static static" not in result
+    assert "static __aicore__ void adapter(" in result
+    assert 'extern "C" __aicore__ void run_vf(' in result
 
 
 if __name__ == "__main__":

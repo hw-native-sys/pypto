@@ -201,6 +201,13 @@ _MB_M, _MB_K, _MB_N = 64, 64, 256
 _MB_TN = 64
 _MB_NT = _MB_N // _MB_TN
 
+# Stepped pipeline: pl.pipeline(64, 320, 64, stage=2), a non-zero start.
+_ST_START, _ST_STOP, _ST_STEP = 64, 320, 64
+_ST_ROWS = _ST_STOP
+# Unaligned unit step: pl.pipeline(1, 8, 1, stage=3), 7 trips over 3 slots.
+_UA_START, _UA_STOP = 1, 8
+_UA_ROWS = _UA_STOP * _MB_TR
+
 MULTI_BUF_COLIVE = pl.MemRef(slots=2)
 MULTI_BUF_ACC = pl.MemRef(slots=2)
 MULTI_BUF_CONST = pl.MemRef(slots=2)
@@ -366,6 +373,74 @@ class MultiBufferAccProgram:
         out: pl.Out[pl.Tensor[[_MB_M, _MB_N], pl.FP32]],
     ) -> pl.Tensor[[_MB_M, _MB_N], pl.FP32]:
         out = self.kernel(a, b, out)
+        return out
+
+
+@pl.program
+class SteppedPipelineProgram:
+    """``pl.pipeline(64, 320, 64, stage=2)``: slotted under PTOAS, replicated otherwise.
+
+    Slots and replication are two lowerings of the same loop, so every planner
+    must produce the same numbers; this compares them against one golden.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[_ST_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        seed: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.load(
+            a, [0, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+        )
+        for i, (acc,) in pl.pipeline(_ST_START, _ST_STOP, _ST_STEP, stage=2, init_values=(seed,)):
+            t: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.load(
+                a, [i, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+            )
+            nxt: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.add(acc, t)
+            r = pl.yield_(nxt)
+        out = pl.store(r, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[_ST_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        out = self.kernel(a, out)
+        return out
+
+
+@pl.program
+class UnalignedPipelineProgram:
+    """``pl.pipeline(1, 8, 1, stage=3)``: an unaligned start, 7 trips over 3 slots."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[_UA_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        seed: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.load(
+            a, [0, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+        )
+        for i, (acc,) in pl.pipeline(_UA_START, _UA_STOP, 1, stage=3, init_values=(seed,)):
+            t: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.load(
+                a, [i * _MB_TR, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+            )
+            nxt: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.add(acc, t)
+            r = pl.yield_(nxt)
+        out = pl.store(r, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[_UA_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        out = self.kernel(a, out)
         return out
 
 
@@ -579,6 +654,60 @@ class MultiBufferAccCase(PTOTestCase):
         tensors["out"][:] = tensors["a"] @ tensors["b"]
 
 
+class SteppedPipelineCase(PTOTestCase):
+    """The stepped A/B shape under the given memory planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+
+    def get_name(self) -> str:
+        return f"memplan_stepped_pipeline_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [_ST_ROWS, _MB_TC], DataType.FP32, init_value=_ramp(_ST_ROWS, _MB_TC, 1.0, 0.0)),
+            TensorSpec("out", [_MB_TR, _MB_TC], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SteppedPipelineProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        a = tensors["a"]
+        acc = a[0:_MB_TR, :].clone()
+        for i in range(_ST_START, _ST_STOP, _ST_STEP):
+            acc += a[i : i + _MB_TR, :]
+        tensors["out"][:] = acc
+
+
+class UnalignedPipelineCase(PTOTestCase):
+    """The unaligned unit-step shape under the given memory planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+
+    def get_name(self) -> str:
+        return f"memplan_unaligned_pipeline_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [_UA_ROWS, _MB_TC], DataType.FP32, init_value=_ramp(_UA_ROWS, _MB_TC, 1.0, 0.0)),
+            TensorSpec("out", [_MB_TR, _MB_TC], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return UnalignedPipelineProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        a = tensors["a"]
+        acc = a[0:_MB_TR, :].clone()
+        for i in range(_UA_START, _UA_STOP):
+            acc += a[i * _MB_TR : (i + 1) * _MB_TR, :]
+        tensors["out"][:] = acc
+
+
 # ---------------------------------------------------------------------------
 # pytest wrappers
 # ---------------------------------------------------------------------------
@@ -652,6 +781,20 @@ class TestMemoryPlannerPtoas:
         # The Acc (L0C) space of a region: MAD writes the slot, FIXPIPE drains it.
         result = test_runner.run(MultiBufferAccCase(planner))
         assert result.passed, f"multi-buffer acc ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_stepped_pipeline(self, test_runner, planner):
+        # PTOAS slots this loop with the counter form; PyPTO and DSA_RP replicate
+        # it. All three must match one golden.
+        result = test_runner.run(SteppedPipelineCase(planner))
+        assert result.passed, f"stepped pipeline ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_unaligned_pipeline(self, test_runner, planner):
+        # An unaligned unit-step start over three slots and seven trips: the slot
+        # is (i - 1) % 3, so the last trip reuses slot 0 while the others drain.
+        result = test_runner.run(UnalignedPipelineCase(planner))
+        assert result.passed, f"unaligned pipeline ({_planner_tag(planner)}) failed: {result.error}"
 
 
 if __name__ == "__main__":

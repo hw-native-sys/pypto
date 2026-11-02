@@ -396,6 +396,12 @@ def test_kernel_metadata_is_setup_failure_before_assembly(tmp_path, stub_compile
             {
                 "schema": _COMPILED_META_SCHEMA,
                 "supported_execution_modes": ["kernel"],
+                "params": [],
+                "lowered_params": [],
+                "return_aliases": [],
+                "num_return_types": 0,
+                "platform": "a2a3",
+                "backend_type": "Ascend910",
             }
         )
     )

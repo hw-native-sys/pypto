@@ -90,7 +90,7 @@ class DataType(Enum):
     FP16 = "fp16"
     FP8E4M3FN = "fp8e4m3fn"
     FP8E8M0 = "fp8e8m0"
-    FP4 = "fp4"
+    FP4E2M1X2 = "fp4e2m1x2"
     INT32 = "int32"
     UINT32 = "uint32"
     INT16 = "int16"
@@ -122,7 +122,7 @@ class DataType(Enum):
         optional_name = {
             DataType.FP8E4M3FN: "float8_e4m3fn",
             DataType.FP8E8M0: "float8_e8m0fnu",
-            DataType.FP4: "float4_e2m1fn_x2",
+            DataType.FP4E2M1X2: "float4_e2m1fn_x2",
         }[self]
         optional_dtype = getattr(torch, optional_name, None)
         if not isinstance(optional_dtype, torch.dtype):

@@ -160,7 +160,8 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
               whose retained ``Buffer`` yields an address-free wire ``Tensor``
               (memory is caller-managed). The descriptor is built once per
               handle and reused.
-            - simpler ``Tensor``: returned as-is (already device-side).
+            - simpler ``Tensor``: returned as-is, preserving its HOST or DEVICE
+              address space. The caller retains its backing through completion.
 
     Returns:
         A simpler ``Tensor`` ready to add to ``TaskArgs``.
@@ -187,7 +188,11 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
             dtype = task_interface.torch_dtype_to_datatype(arg.dtype)
         except KeyError as e:
             raise ValueError(f"Unsupported DeviceTensor dtype: {arg.dtype}") from e
-        wire = arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+        wire = (
+            arg.buffer.tensor(shapes=arg.shape, dtype=dtype, byte_offset=arg.byte_offset)
+            if arg.byte_offset
+            else arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+        )
         object.__setattr__(arg, _WIRE_TENSOR_ATTR, wire)
         return wire
     return torch_interop.make_tensor_arg(worker, arg)

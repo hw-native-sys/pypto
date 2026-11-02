@@ -49,6 +49,8 @@ def _tensor_from_continuous(arg: Any) -> torch.Tensor:
         "INT32": torch.int32,
         "INT64": torch.int64,
         "UINT8": torch.uint8,
+        # Simpler FP4 descriptors count packed x2 byte carriers.
+        "FP4E2M1": torch.uint8,
     }
     if dtype_name not in dtypes:
         raise TypeError(f"Unsupported simpler Tensor dtype: {arg.dtype!r}; known dtypes: {sorted(dtypes)}")
@@ -64,7 +66,12 @@ def _tensor_from_continuous(arg: Any) -> torch.Tensor:
         )
     count = math.prod(shapes)
     size = count * torch.tensor([], dtype=dtype).element_size()
-    backing = (ctypes.c_ubyte * size).from_address(arg.data)
+    # Legacy callers supply either integer addresses or ctypes pointers;
+    # normalize both forms before from_address, which accepts integers only.
+    address = ctypes.cast(arg.data, ctypes.c_void_p).value
+    if address is None:
+        raise TypeError("Legacy tensor .data must contain a non-null pointer")
+    backing = (ctypes.c_ubyte * size).from_address(address)
     return torch.frombuffer(backing, dtype=dtype, count=count).reshape(shapes)
 
 
@@ -82,7 +89,7 @@ class _ChipCallables(dict[str, Any]):
 
 def make_tensor_arg(worker: Any, tensor: Any) -> Any:
     """Keep received descriptors intact; convert only local prefork tensors."""
-    from simpler.task_interface import Tensor  # noqa: PLC0415
+    from simpler.buffer import Tensor  # noqa: PLC0415
 
     if isinstance(tensor, Tensor):
         return tensor
@@ -114,14 +121,15 @@ def add_chip_tensor_arg(
             # Inspect the descriptor's address space; never replace it with a
             # fabricated fork-inherited backing or treat DEVICE as host memory.
             try:
-                from simpler.buffer import AddressSpace  # noqa: PLC0415
-                from simpler.task_interface import Tensor  # noqa: PLC0415
+                from simpler.buffer import AddressSpace, Tensor  # noqa: PLC0415
             except ImportError:
                 is_host = False
             else:
                 is_host = isinstance(tensor, Tensor) and tensor.buffer.address_space == AddressSpace.HOST
         if not is_host:
-            raise ValueError(f"Chip {name!r} host control tensor slot {index} requires a CPU tensor")
+            raise ValueError(
+                f"Chip {name!r} host control tensor slot {index} requires a CPU tensor or a HOST Tensor"
+            )
         args.add_tensor(convert(worker, tensor), tag, transfer=TensorTransfer.NONE)
     else:
         args.add_tensor(convert(worker, tensor), tag)
@@ -322,7 +330,7 @@ class _EmbeddedFrame:
     def window_tensor(self, domain: Any, worker: int, logical_name: str, **view: Any) -> Any:
         """Translate a slot identity, then use the actual runtime Buffer object."""
         physical = logical_name
-        if hasattr(domain, "domain_id"):
+        if _ordering_domain_key(domain)[0] == "global":
             physical = self.window_slots.get(
                 (domain.domain_id, domain.generation, logical_name), logical_name
             )
@@ -358,13 +366,16 @@ class _EmbeddedFrame:
 
 
 def _ordering_domain_key(domain: Any) -> tuple[Any, ...]:
+    # Owning local handles also carry domain IDs in the unified runtime API.
+    if hasattr(domain, "allocation_id"):
+        return ("local", domain.allocation_id)
     if hasattr(domain, "domain_id"):
         return ("global", domain.domain_id, domain.generation)
     return ("local", domain.allocation_id)
 
 
 def _domain_context(domain: Any, worker: int) -> Any:
-    if hasattr(domain, "domain_id") and not domain.committed:
+    if _ordering_domain_key(domain)[0] == "global" and not domain.committed:
         raise ValueError(f"Global domain {domain.domain_id} is not committed")
     try:
         context = domain[worker]
@@ -544,7 +555,7 @@ def _slice_tensor(
         return value[
             tuple(o if i in drop_dims else slice(o, o + s) for i, (o, s) in enumerate(zip(offsets, shape)))
         ]
-    from simpler.task_interface import Tensor  # noqa: PLC0415
+    from simpler.buffer import Tensor  # noqa: PLC0415
 
     if not isinstance(value, Tensor):
         raise ValueError("Embedded descriptor slice requires a native Tensor or CPU Torch tensor")
@@ -578,7 +589,7 @@ def _reshape_tensor(value: Any, shape: tuple[int, ...]) -> Any:
         expected *= extent
     if is_torch:
         return value.view(shape)
-    from simpler.task_interface import Tensor  # noqa: PLC0415
+    from simpler.buffer import Tensor  # noqa: PLC0415
 
     if not isinstance(value, Tensor):
         raise ValueError("Embedded descriptor shape view requires a native Tensor or CPU Torch tensor")
@@ -624,7 +635,8 @@ def _validate_formal_shapes(layout: Mapping[str, Any], tensors: Mapping[str, Any
                 raise ValueError(f"Embedded formal {name!r} requires CPU {dtype} tensor geometry")
             actual_shape = tuple(value.shape)
         else:
-            from simpler.task_interface import DataType, Tensor  # noqa: PLC0415
+            from simpler.buffer import Tensor  # noqa: PLC0415
+            from simpler.task_interface import DataType  # noqa: PLC0415
 
             enum = {"fp16": "FLOAT16", "bf16": "BFLOAT16", "fp32": "FLOAT32"}.get(dtype, dtype.upper())
             if not isinstance(value, Tensor) or _tensor_dtype_code(value.dtype) != getattr(
@@ -747,8 +759,8 @@ def _validate_prepared_tensor(value: Any, name: str, dtype: str, shape: tuple[in
                 f"Prepared tensor {name!r} requires shared CPU {dtype} storage with shape {shape}"
             )
         return
-    from simpler.buffer import AddressSpace  # noqa: PLC0415
-    from simpler.task_interface import DataType, Tensor  # noqa: PLC0415
+    from simpler.buffer import AddressSpace, Tensor  # noqa: PLC0415
+    from simpler.task_interface import DataType  # noqa: PLC0415
 
     enum = {"fp16": "FLOAT16", "bf16": "BFLOAT16", "fp32": "FLOAT32"}.get(dtype, dtype.upper())
     if (

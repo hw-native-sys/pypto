@@ -47,8 +47,9 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from pypto._artifact_contract import ArtifactExecutionMode
 from pypto._target import _parse_platform
-from pypto.ir.compiled_program import _COMPILED_META_FILENAME, _COMPILED_META_SCHEMA, _load_meta
+from pypto.ir._artifact_metadata import _COMPILED_META_FILENAME, ArtifactMetadata
 from pypto.runtime.runner import (
     _SWIMLANE_CLI_HELP,
     _SWIMLANE_FULL_LEVEL,
@@ -139,7 +140,7 @@ def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str, bool
             DistributedCompiledProgram.from_dir(work_dir)._require_supported_execution()
         meta_path = work_dir / _COMPILED_META_FILENAME
         if meta_path.exists():
-            _load_meta(meta_path, filename=_COMPILED_META_FILENAME, schema=_COMPILED_META_SCHEMA)
+            ArtifactMetadata.read(work_dir).execution_capabilities.require(ArtifactExecutionMode.PROGRAM)
         from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
 
         chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)

@@ -1009,23 +1009,27 @@ jobs:
     # forced the root/ci-runner umask split on the shared ccache. Now it runs
     # host-native as ci-runner through the same setup-ci-job as the device jobs,
     # with needs-device:false (no NPU, no CANN) and install-toolchain:false (no
-    # ptoas / pto-isa / simpler — codegen-only needs none). Checkout / install
+    # pto-isa / simpler). install-ptoas:true exercises the cached ptoas install;
+    # --codegen-only still skips assembly. Checkout / install
     # land under ./codegen-checkout so they don't collide with other jobs' trees
     # on the shared self-hosted host.
     #
     # Lint gate (see the pre-commit job) — shares the self-hosted cpu pool with
     # clang-tidy, so it must not start until that pool's lint job is green.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, pre-commit, clang-tidy]
+    needs: [changes, pre-commit, clang-tidy, toolchain]
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
         working-directory: codegen-checkout
     env:
-      # No PTOAS_ROOT: install-toolchain:false means setup-ci-job never
-      # assembles, so codegen-only needs no ptoas. pto-isa is resolved by
-      # simpler from runtime/pto_isa.pin, which this job never installs.
+      # Exercise the cached PTOAS installation; the raw-codegen test step
+      # overrides PTOAS_ROOT to stay independent of available assemblers.
+      PTOAS_ROOT: ${{ github.workspace }}/codegen-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -1049,9 +1053,10 @@ jobs:
           checkout-path: codegen-checkout
           needs-device: 'false'
           install-toolchain: 'false'
+          install-ptoas: 'true'
           pip-cache-name: pip-codegen
           # The cpu runners carry the bundle too. This job is the cheapest way
-          # to cover that runner class: no device, no ptoas, no simpler.
+          # to cover that runner class: no device, no simpler.
           toolchain: bundle
 
       - name: Test codegen (codegen-only, no device)
@@ -1065,6 +1070,9 @@ jobs:
         # under the base interpreter, which cannot see the venv-installed pypto.
         run: |
           source activate.sh
+          # Keep raw codegen independent of runner-local assemblers.
+          PTOAS_ROOT="$(mktemp -d "$RUNNER_TEMP/pypto-codegen-no-ptoas.XXXXXX")"
+          export PTOAS_ROOT
           python -m pytest tests/st/codegen -v --codegen-only \
             --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
@@ -1556,12 +1564,11 @@ jobs:
           unset-ring: 'true'
 
       - name: Test distributed system tests
-        # The step clock includes both task-submit queueing and the device run.
-        # Keep enough headroom for a typical ~10-minute suite after waiting for
-        # a two-card slot; --max-time below still caps device execution at 30m,
-        # so leave the step budget above that or the runner kills the task
-        # before task-submit can report the cap cleanly.
-        timeout-minutes: 45
+        # task-submit --timeout is the total wait for queueing plus execution;
+        # allow 90 minutes while --max-time still caps device execution at 30m.
+        # Give the Actions step another five minutes so the client can report
+        # its timeout and clean up before the runner cancels the step.
+        timeout-minutes: 95
         # Mechanism B (multi-card): borrow 4 NPUs via `task-submit --device auto
         # --device-num 4` for the whole pytest run; $TASK_DEVICE is the lent set
         # (comma-separated), passed to --device. The job no longer pins an
@@ -1591,7 +1598,7 @@ jobs:
         # two and three ways.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 3600 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 5400 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v -n 6 --device-group-size 2 --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Test multi-card cases outside tests/st/distributed
@@ -1671,6 +1678,7 @@ jobs:
           git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git build/pypto-lib
 
       - name: Compile every formal library entry
+        id: compile
         env:
           LIB_PLATFORM: ${{ matrix.platform }}
         run: |
@@ -1680,7 +1688,8 @@ jobs:
             --output build/lib-compile-results
 
       - name: Upload compilation logs and manifest
-        if: always()
+        # Keep diagnostics for compile failures without uploading after successful runs.
+        if: failure() && steps.compile.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: pypto-lib-compile-${{ matrix.platform }}
@@ -2138,9 +2147,10 @@ jobs:
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Two steps share one checkout / install:
+    # npu-a5 card. Three steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
     #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2264,7 +2274,10 @@ jobs:
           toolchain: bundle
 
       - name: mixed-kernel-tests-a5
-        timeout-minutes: 60
+        # The client waits up to 120m total for queueing plus execution, while
+        # --max-time independently caps device execution at 60m. Leave another
+        # five minutes for the client to report a timeout and clean up.
+        timeout-minutes: 125
         # Mechanism B: one task-submit card session wrapping a single pytest run
         # (no precompile pipeline), executed in-process on the borrowed card. The
         # suite is parametrized over the platform ids, so --platform=a5 selects
@@ -2275,14 +2288,16 @@ jobs:
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
-        timeout-minutes: 60
+        # Match the 120m total client wait, 60m device execution cap, and five
+        # extra minutes for reporting and cleanup used by mixed-kernel-tests-a5.
+        timeout-minutes: 125
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
@@ -2290,12 +2305,41 @@ jobs:
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: vf-tests-a5
+        id: vf-tests
+        shell: bash
+        timeout-minutes: 125
+        # Each acceptance test already isolates its Worker in a bounded child
+        # process. Keep pytest serial and use the card reserved by task-submit.
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          mkdir -p build
+          output=$(mktemp -d "$PWD/build/vpto-ci.XXXXXX")
+          echo "artifacts=$output" >> "$GITHUB_OUTPUT"
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID=\$TASK_DEVICE \
+                PYPTO_VPTO_TIMEOUT=900 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 \
+                PYPTO_VPTO_RUNTIME_OUTPUT='$output' && \
+              python -m pytest tests/st/runtime/vpto --platform=a5 -k persistent -v \
+                --junitxml='$output/junit.xml'" 2>&1 | tee "$output/task-submit.log"
+
+      - name: Upload VF A5 results
+        if: always() && steps.vf-tests.outputs.artifacts != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: vf-a5-results
+          path: ${{ steps.vf-tests.outputs.artifacts }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -2425,6 +2469,14 @@ jobs:
             pip install -v ./runtime
           fi
           python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
+
+      - name: Test CPU simulator target admission
+        # The unit-test job lacks Simpler. Require both optional prerequisites
+        # here so all four architecture/core cases run instead of skipping.
+        run: |
+          python -c "import simpler_setup"
+          g++-15 --version
+          python -m pytest tests/ut/runtime/test_cpu_sim_target.py -v
 
       - name: Test fillpad_inplace numerical correctness with PTOAS
         # The default ST planner is PYPTO. Select PTOAS explicitly to exercise

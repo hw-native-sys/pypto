@@ -12,6 +12,7 @@
 import ctypes
 from types import SimpleNamespace
 
+import pytest
 import torch
 from pypto.runtime.distributed_runner import _tensor_from_continuous
 
@@ -44,13 +45,41 @@ def test_mapped_arg_strides_are_preserved():
     torch.testing.assert_close(tensor, torch.tensor([[0.0, 1.0], [3.0, 4.0]]))
 
 
-def test_legacy_data_pointer_remains_supported():
+def test_packed_fp4_mapped_arg_preserves_carrier_units_and_aliases():
+    backing = bytearray([0x10, 0x32, 0xFF, 0x54, 0x76])
+    arg = SimpleNamespace(buffer=memoryview(backing), shapes=(2, 2), strides=(3, 1), dtype="DataType.FP4E2M1")
+    tensor = _tensor_from_continuous(arg)
+    assert tensor.dtype == torch.uint8
+    assert tensor.shape == (2, 2)
+    assert tensor.stride() == (3, 1)
+    assert torch.equal(tensor, torch.tensor([[0x10, 0x32], [0x54, 0x76]], dtype=torch.uint8))
+    tensor[1, 1] = 0x98
+    assert backing[4] == 0x98
+
+
+@pytest.mark.parametrize("pointer_kind", ["integer", "c_void_p", "typed"])
+def test_legacy_data_pointer_remains_supported(pointer_kind):
     backing = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
-    arg = SimpleNamespace(data=ctypes.addressof(backing), shapes=(2, 2), dtype=_Float32())
+    address = ctypes.addressof(backing)
+    pointers = {
+        "integer": address,
+        "c_void_p": ctypes.c_void_p(address),
+        "typed": ctypes.cast(backing, ctypes.POINTER(ctypes.c_float)),
+    }
+    arg = SimpleNamespace(data=pointers[pointer_kind], shapes=(2, 2), dtype=_Float32())
 
     tensor = _tensor_from_continuous(arg)
 
     torch.testing.assert_close(tensor, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    tensor[1, 1] = 99
+    assert backing[3] == 99
+
+
+@pytest.mark.parametrize("pointer", [0, ctypes.c_void_p(), ctypes.POINTER(ctypes.c_float)()])
+def test_legacy_null_data_pointer_is_rejected(pointer):
+    arg = SimpleNamespace(data=pointer, shapes=(2, 2), dtype=_Float32())
+    with pytest.raises(TypeError, match="Legacy tensor.*non-null pointer"):
+        _tensor_from_continuous(arg)
 
 
 def test_unrecognized_arg_shape_fails_explicitly():

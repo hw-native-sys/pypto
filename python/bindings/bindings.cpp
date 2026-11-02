@@ -60,7 +60,10 @@ NB_MODULE(pypto_core, m) {
   // Register code generation bindings
   pypto::python::BindCodegen(m);
 
-  // Register backend bindings
+  // Resource descriptions depend on IR enums and appear in the backend query interface.
+  pypto::python::BindSync(m);
+
+  // Register backend bindings after the resource result types.
   pypto::python::BindBackend(m);
 
   // Register arithmetic simplification utilities

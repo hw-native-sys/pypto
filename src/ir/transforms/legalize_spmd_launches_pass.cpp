@@ -265,6 +265,17 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
     return result;
   }
 
+  /// Guard a potentially non-positive SPMD launch with an If on the core count.
+  ///
+  /// A count that range analysis proves positive is left alone. Otherwise the
+  /// launch is emitted inside `if (count > 0)`, and the empty path must produce
+  /// the same SSA values as the non-empty one: tensor results alias the
+  /// caller's preallocated Out/InOut buffers, while a TaskId result becomes a
+  /// dummy task carrying the launch's dependencies. A launch that is provably
+  /// empty is emitted as its empty path only.
+  ///
+  /// Returns nullptr when the expression is not a launch of a known callee or
+  /// carries no core count.
   StmtPtr Guard(const ExprPtr& expr, const VarPtr& lhs, const std::vector<std::string>& comments) {
     auto call = As<Call>(expr);
     auto submit = As<Submit>(expr);
@@ -292,7 +303,8 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
         << "Internal error: invalid SPMD argument coverage";
     // Match the parser's optional Out/InOut binding: reserve arguments for
     // every remaining required input, including a trailing CommCtx suffix.
-    // An omitted output need not be a trailing parameter.
+    // An omitted output need not be a trailing parameter — but the empty path
+    // must still name a preallocated buffer for every output.
     std::vector<ExprPtr> arguments(params.size());
     size_t arg_index = 0;
     size_t remaining_required = info.required_params;
@@ -318,6 +330,8 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
         << "' may have a non-positive core_num; output tensors" << missing.str()
         << " are not preallocated. Allocate and pass every Out/InOut tensor before this launch.";
 
+    // Pin a compound count expression so the If condition and the launch read
+    // one SSA value.
     std::vector<StmtPtr> prefix;
     if (!AsVarLike(count) && !As<ConstInt>(count)) {
       auto count_var = std::make_shared<Var>("spmd_core_num", count->GetType(), count->span_);
@@ -342,6 +356,8 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
       launch = copy;
     }
 
+    // Move compiler GM-pipe allocations next to the launch; the empty path
+    // must not allocate a zero-sized workspace.
     std::vector<StmtPtr> then_stmts, else_stmts;
     for (const auto& arg : args) {
       auto var = AsVarLike(arg);
@@ -356,6 +372,8 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
       then_stmts.push_back(MutableCopy(create->second));
       scratch_cleanup.moved.insert(create->second.get());
     }
+    // One then/else value per declared return; this is where both paths are
+    // forced to agree on SSA types.
     std::vector<ExprPtr> then_values, else_values;
     std::vector<VarPtr> results;
     if (lhs) {
@@ -390,6 +408,9 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
       }
       auto local = std::make_shared<Var>(lhs->name_hint_ + "_nonempty", result_type, lhs->span_);
       then_stmts.push_back(std::make_shared<AssignStmt>(local, launch, expr->span_));
+      // One then/else pair per declared result: the non-empty path defines
+      // fresh SSA names from the launch; the empty path reuses the caller's
+      // buffer (tensors) or a dependency-carrying dummy task (TaskIds).
       for (size_t i = 0; i < types.size(); ++i) {
         VarPtr true_value = local;
         VarPtr result = lhs;
@@ -447,6 +468,8 @@ class LaunchLegalizer : public arith::IRMutatorWithAnalyzer {
       }
       return SeqStmts::Flatten(prefix, expr->span_);
     }
+    // Emit the guard: the non-empty branch runs the launch, the empty branch
+    // yields the preallocated outputs.
     else_stmts.push_back(std::make_shared<YieldStmt>(else_values, expr->span_));
     auto condition =
         MakeGt(count, std::make_shared<ConstInt>(0, As<ScalarType>(count->GetType())->dtype_, expr->span_),

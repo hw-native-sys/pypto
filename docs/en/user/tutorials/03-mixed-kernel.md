@@ -4,15 +4,16 @@
 > compatibility. They emit `DeprecationWarning`; new code should use
 > `backend_type` and `execution_mode`. See the [target mapping](../../dev/08-entry-points.md#legacy-platform-examples).
 
-Cube and vector working at the same time, inside one scope.
+Cube and vector work inside one scope, with compiler-managed transfers.
 
 > **Prerequisites:** [Tiled matmul](02-matmul.md).
 > **Companion file:** `examples/advanced/03_mixed_kernel.py`.
 
 ## What you are building
 
-`a @ b + bias` — a cube operation followed by a vector one — written so the two units
-overlap instead of taking turns.
+`a @ b + bias` — a cube operation followed by a vector one — written as one mixed
+dispatch instead of two separate scopes. This example demonstrates the dataflow;
+it does not establish a performance improvement.
 
 ## Why bother
 
@@ -49,7 +50,7 @@ def mixed(
 ):
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
@@ -90,29 +91,36 @@ cube feeds the vector units:
 
 | Quantity | Value |
 | -------- | ----- |
-| Tile crossing the boundary | `[128, 128]` FP32 = 64 KB |
+| Tile crossing the boundary | `[128, 128]` FP32 = 64 KiB |
 | Default ring depth | 2 slots |
-| Ring size | 2 × 64 KB = **128 KB** |
-| Vector budget | **184 KB** |
+| Ring depth explicitly chosen by this example | 1 slot = **64 KiB** |
+| Bias and output per vector lane | 32 KiB each = **64 KiB** |
+| Total with one slot | **128 KiB** |
+| Safe vector budget | **184 KiB** |
 
 The ring is a queue of whole tiles, so its size scales with the tile that crosses, not with
 the work. The default of 2 is the shallowest depth that still double-buffers: the cube can
 fill one slot while the vector drains the other.
 
-`pl.cross_core_slot(slot_num=N)` retunes it. Deeper rings buy more overlap — the producer
-runs further ahead before it blocks — so raise it when the two units are poorly balanced.
-But the budget is tight: at `slot_num=4` this kernel already fails to allocate.
+`pl.cross_core_slot(slot_num=N)` retunes it. On Ascend910, the load/TPOP safety
+constraint requires the loaded bias and addition output to occupy separate buffers.
+The default two-slot ring would therefore need 128 + 32 + 32 = **192 KiB**, above
+the safe budget. This example explicitly chooses one slot; it demonstrates mixed
+dataflow, not double-buffered producer/consumer overlap. Deeper rings can allow more
+producer run-ahead when smaller tiles leave enough space, but do not guarantee a speedup.
+
+Changing this example back to two slots fails during allocation:
 
 ```python
 with pl.at(
     level=pl.Level.CORE_GROUP,
-    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=4)],
+    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
     name_hint="mixed",
 ):
 ```
 
 ```text
-Vec buffer usage (294912 bytes) exceeds platform limit (188416 bytes). The first 262144
+Vec buffer usage (196608 bytes) exceeds platform limit (188416 bytes). The first 131072
 bytes of that space are reserved by system.reserve_buffer, so tiles are allocated above
 them — this is the cross-core pipe ring. Lower its depth with
 optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the

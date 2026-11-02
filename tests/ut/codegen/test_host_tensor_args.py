@@ -148,3 +148,47 @@ def test_scheduler_predicate_is_not_a_host_read(program):
 def test_predicate_and_host_read_of_same_storage_is_rejected():
     with pytest.raises(ValueError, match="separate tensor arguments"):
         host_tensor_indices(_main(MixedPredicateControl))
+
+
+def test_nested_loop_host_control_alias():
+    @pl.program
+    class NestedLoopControl:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, control: pl.Tensor[[8], pl.INT32]):
+            for outer in pl.range(2):
+                for inner, (carry,) in pl.range(2, init_values=(control,)):
+                    pl.tensor.read(carry, [0])
+                    _result = pl.yield_(carry)
+
+    assert host_tensor_indices(_main(NestedLoopControl)) == [0]
+
+
+@pytest.mark.parametrize("kind", ["if", "while"])
+def test_nested_yields_use_the_nearest_control_statement(kind):
+    # Different yield arities expose accidental association with the outer
+    # callback. Reuse the ordinary host-read/write body and its parameter roles.
+    template = _main(HostControl)
+    span = template.span
+    control = template.params[2]
+    result = ir.Var("inner_result", control.type, span)
+    statements = list(template.body.stmts) if isinstance(template.body, ir.SeqStmts) else [template.body]
+    statements = [stmt for stmt in statements if not isinstance(stmt, ir.ReturnStmt)]
+    condition = ir.ConstBool(False, span)
+    if kind == "if":
+        body = ir.SeqStmts([*statements, ir.YieldStmt([control], span)], span)
+        inner = ir.IfStmt(condition, body, ir.YieldStmt([control], span), [result], span)
+        outer = ir.IfStmt(condition, ir.SeqStmts([inner, ir.YieldStmt([], span)], span), None, [], span)
+    else:
+        carry = ir.IterArg("carry", control.type, control, span)
+        body = ir.SeqStmts([*statements, ir.YieldStmt([carry], span)], span)
+        inner = ir.WhileStmt(condition, [carry], body, [result], span)
+        outer = ir.WhileStmt(condition, [], ir.SeqStmts([inner, ir.YieldStmt([], span)], span), [], span)
+    function = ir.Function(
+        "main",
+        list(zip(template.params, template.param_directions, strict=True)),
+        [],
+        outer,
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    assert host_tensor_indices(function) == [1]

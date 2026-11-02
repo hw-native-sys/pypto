@@ -18,6 +18,7 @@ Orchestrates the full PTO backend output pipeline:
 Entry point: ``generate(program, output_dir) -> dict[str, str]``
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -56,7 +57,6 @@ from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_vers
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
 from pypto.compile_profiling import CompileProfiler, StageRecord
-from pypto.pypto_core import DataType
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -432,20 +432,17 @@ def _invert_var_plus_minus_const(
     return None
 
 
-def _invert_var_mul_or_floordiv_const(
-    dim_expr: _ir_core.BinaryExpr, target_var: _ir_core.Var, shape_expr: str, *, floordiv: bool
+def _invert_var_mul_const(
+    dim_expr: _ir_core.BinaryExpr, target_var: _ir_core.Var, shape_expr: str
 ) -> str | None:
     # ``Mul`` is commutative: both ``(var, c)`` and ``(c, var)`` invert to ``shape / c``.
-    # ``FloorDiv`` is non-commutative: only ``(var, c)`` inverts (to ``shape * c``);
-    # ``(c, var)`` is rejected because ``c // var`` is not uniquely invertible
-    # against the runtime shape (e.g. ``10 // var = 2`` admits var = 4 or 5).
     left, right = dim_expr.left, dim_expr.right
     if isinstance(left, _ir_core.Var) and left.same_as(target_var):
         c = _const_int_from_shape_expr(right)
         if c is None or c == 0:
             return None
-        return f"({shape_expr} * {c})" if floordiv else f"({shape_expr} / {c})"
-    if not floordiv and isinstance(right, _ir_core.Var) and right.same_as(target_var):
+        return f"({shape_expr} / {c})"
+    if isinstance(right, _ir_core.Var) and right.same_as(target_var):
         c = _const_int_from_shape_expr(left)
         if c is None or c == 0:
             return None
@@ -458,12 +455,9 @@ def _invert_shape_dim_for_var(
     target_var: _ir_core.Var,
     tensor_name: str,
     dim_idx: int,
-    logical_scale: int = 1,
 ) -> str | None:
     """Return a C expression recovering target_var from shapes[dim_idx], or None if non-invertible."""
     shape_expr = f"static_cast<int64_t>({tensor_name}_tensor->shapes[{dim_idx}])"
-    if logical_scale != 1:
-        shape_expr = f"({shape_expr} * {logical_scale})"
     if isinstance(dim_expr, _ir_core.Var) and dim_expr.same_as(target_var):
         return shape_expr
     if isinstance(dim_expr, _ir_core.Add):
@@ -471,9 +465,9 @@ def _invert_shape_dim_for_var(
     if isinstance(dim_expr, _ir_core.Sub):
         return _invert_var_plus_minus_const(dim_expr, target_var, shape_expr, subtract=True)
     if isinstance(dim_expr, _ir_core.Mul):
-        return _invert_var_mul_or_floordiv_const(dim_expr, target_var, shape_expr, floordiv=False)
-    if isinstance(dim_expr, _ir_core.FloorDiv):
-        return _invert_var_mul_or_floordiv_const(dim_expr, target_var, shape_expr, floordiv=True)
+        return _invert_var_mul_const(dim_expr, target_var, shape_expr)
+    # FloorDiv loses the remainder. Without a divisibility proof, shape * c
+    # is not the original symbol (e.g. 11 // 5 == 2 but 2 * 5 != 11).
     return None
 
 
@@ -487,6 +481,7 @@ def _is_invertible_shape_dim_for_var(dim_expr: object, target_var: _ir_core.Var)
 
 
 def _append_dynamic_dim_unpacking(
+    func: _ir_core.Function,
     tensor_params: list[_ir_core.Var],
     used_c_names: set[str],
     lines: list[str],
@@ -503,38 +498,36 @@ def _append_dynamic_dim_unpacking(
     Python binding wrappers can differ for the same underlying C++ Var; the
     per-call dedup inside ``collect_vars_from_shape_expr`` uses raw ``Var*``.
     """
-    dyn_var_order: list[_ir_core.Var] = []
-    dyn_var_best: dict[int, tuple[_ir_core.Var, str, int, object]] = {}
+    # Use the exact same signature analysis as PTO codegen. A symbol explicitly
+    # passed as a scalar must never be reconstructed from a descriptor as well.
+    dyn_var_order = _codegen_core.collect_tensor_shape_dyn_vars(func)
+    required = {var.unique_id for var in dyn_var_order}
+    dyn_var_best: dict[int, tuple[_ir_core.Var, int, object]] = {}
     for param in tensor_params:
         assert isinstance(param.type, _ir_core.TensorType)
         for dim_idx, dim in enumerate(param.type.shape):
             for dyn_var in _codegen_core.collect_vars_from_shape_expr(dim):
                 key = dyn_var.unique_id
-                if key not in dyn_var_best:
-                    dyn_var_order.append(dyn_var)
-                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                if key not in required:
                     continue
-                _, _, _, src_expr = dyn_var_best[key]
+                if key not in dyn_var_best:
+                    dyn_var_best[key] = (param, dim_idx, dim)
+                    continue
+                _, _, src_expr = dyn_var_best[key]
                 # Upgrade source if the previous one was non-invertible and this one is.
                 if not _is_invertible_shape_dim_for_var(
                     src_expr, dyn_var
                 ) and _is_invertible_shape_dim_for_var(dim, dyn_var):
-                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                    dyn_var_best[key] = (param, dim_idx, dim)
 
     for dyn_var in dyn_var_order:
-        var_ref, source_tensor, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
-        source_param = next(param for param in tensor_params if param.name_hint == source_tensor)
-        source_type = source_param.type
-        assert isinstance(source_type, _ir_core.TensorType)
-        logical_scale = (
-            2 if source_type.dtype == DataType.FP4 and source_dim_idx == len(source_type.shape) - 1 else 1
-        )
+        source_param, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
+        source_tensor = source_param.name_hint
         value_expr = _invert_shape_dim_for_var(
             source_expr,
-            var_ref,
+            dyn_var,
             source_tensor,
             source_dim_idx,
-            logical_scale=logical_scale,
         )
         if value_expr is None:
             raise ValueError(
@@ -542,8 +535,8 @@ def _append_dynamic_dim_unpacking(
                 f"codegen: it only appears inside non-invertible shape expressions "
                 f"(seen as {source_tensor}.shapes[{source_dim_idx}] = {source_expr}). "
                 f"Wrapper extraction supports 'var' and single-var affine forms "
-                f"(var +/-/*// const_int) shape expressions; "
-                f"at least one tensor parameter must expose the variable in one of these "
+                f"(var +/-/* const_int) shape expressions; pass the variable as an explicit "
+                f"scalar parameter, or expose it in at least one tensor parameter in one of these "
                 f"forms so the runtime shape can be inverted back into the variable's value."
             )
         var_name = dyn_var.name_hint
@@ -591,6 +584,16 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
             f"Unsupported parameter type(s) for wrapper generation in function {func.name}: "
             + ", ".join(f"{p.name_hint}: {type(p.type).__name__}" for p in other_params)
         )
+
+    # CoreTaskArgs has fixed payload capacities (task_interface/arg_direction.h).
+    # Shape captures consume scalar slots; descriptor-derived dimensions and
+    # runtime-owned hidden arguments do not. Diagnose overflow before dispatch.
+    for kind, count, limit in (("tensor", len(tensor_params), 32), ("scalar", len(scalar_params), 16)):
+        if count > limit:
+            raise ValueError(
+                f"Kernel '{func.name}' requires {count} {kind} arguments; "
+                f"the runtime payload supports at most {limit}"
+            )
 
     scalar_start_idx = len(tensor_params)
 
@@ -662,7 +665,7 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
     used_c_names.update(
         f"{p.name_hint}_conv" for p in scalar_params if isinstance(p.type, _ir_core.ScalarType)
     )
-    _append_dynamic_dim_unpacking(tensor_params, used_c_names, lines, var_names)
+    _append_dynamic_dim_unpacking(func, tensor_params, used_c_names, lines, var_names)
 
     return "\n".join(lines), var_names
 
@@ -1208,6 +1211,7 @@ def _generate_config_file(
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     host_tensor_indices: list[int] | None = None,
     unshared_code_names: set[str] | None = None,
+    func_name_to_vpto_sources: dict[str, list[str]] | None = None,
 ) -> str:
     """Generate kernel_config.py content.
 
@@ -1307,6 +1311,10 @@ def _generate_config_file(
                 entry += ', "builtin": True'
             else:
                 entry += f', "code_name": "{name}"'
+        helpers = (func_name_to_vpto_sources or {}).get(name, [])
+        if helpers:
+            paths = ", ".join(f"str(_ROOT_DIR / {path!r})" for path in helpers)
+            entry += f', "vpto_sources": [{paths}]'
         signature = registration.signature
         if signature:
             entry += f', "signature": [{_format_signature(signature)}]'
@@ -1528,7 +1536,7 @@ def _compile_pto_module(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
 ) -> str:
-    """Run ptoas for one MLIR module and return the generated C++."""
+    """Run PTOAS and return EmitC text; VPTO writes its object beside the PTO."""
     ptoas_dir = os.path.join(output_dir, "ptoas")
     os.makedirs(ptoas_dir, exist_ok=True)
 
@@ -1541,15 +1549,40 @@ def _compile_pto_module(
         passes_dump_dir = os.path.join(output_dir, "ptoas_passes", unit_name)
         os.makedirs(passes_dump_dir, exist_ok=True)
 
-    cpp_path = os.path.join(ptoas_dir, f"{unit_name}.cpp")
+    # PTOCodegen stamps the top-level module attribute from structured IR.
+    # Do not scan operation spellings: comments and source locations can contain
+    # vecscope too. VPTO emits a host-linkable fat object, never C++ source.
+    is_vpto = 'pto.backend = "vpto"' in pto_code.partition("\n")[0]
+    suffix = "o" if is_vpto else "cpp"
+    compiled_path = os.path.join(ptoas_dir, f"{unit_name}.{suffix}")
     _run_ptoas(
         pto_path,
-        cpp_path,
+        compiled_path,
         ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir),
     )
 
-    with open(cpp_path) as f:
+    if is_vpto:
+        # Binary output is persisted directly; the text-file API returns a marker.
+        return ""
+    with open(compiled_path) as f:
         return f.read()
+
+
+def _emit_vpto_object(result_files: dict[str, str], object_rel: str, content: bytes, output_dir: str) -> None:
+    """Persist binary objects separately from the existing text-file map.
+
+    The manifest records the artifact kind without changing every text consumer
+    to accept bytes. As with the PTOAS intermediates, object bytes are written
+    directly under output_dir and travel with the compiled artifact directory.
+    """
+    object_path = os.path.join(output_dir, object_rel)
+    os.makedirs(os.path.dirname(object_path), exist_ok=True)
+    with open(object_path, "wb") as output:
+        output.write(content)
+    result_files[object_rel + ".json"] = json.dumps(
+        {"backend": "vpto", "artifact_kind": "fatobj", "object": object_rel, "runtime_supported": False},
+        indent=2,
+    )
 
 
 def _emit_single_function_output(
@@ -1578,7 +1611,13 @@ def _emit_single_function_output(
         )
     else:
         ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner)
-    result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
+    if 'pto.backend = "vpto"' in pto_code.partition("\n")[0]:
+        object_path = os.path.join(output_dir, "ptoas", f"{func.name}.o")
+        with open(object_path, "rb") as object_file:
+            object_bytes = object_file.read()
+        _emit_vpto_object(result_files, _get_kernel_output_path(func, "o"), object_bytes, output_dir)
+    else:
+        result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
 def _emit_group_output(
@@ -1606,6 +1645,12 @@ def _emit_group_output(
         )
     else:
         ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner)
+    if 'pto.backend = "vpto"' in pto_code.partition("\n")[0]:
+        object_path = os.path.join(output_dir, "ptoas", f"{group_name}.o")
+        with open(object_path, "rb") as object_file:
+            object_bytes = object_file.read()
+        _emit_vpto_object(result_files, os.path.join("kernels", f"{group_name}.o"), object_bytes, output_dir)
+        return
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
@@ -1654,6 +1699,7 @@ class _CodegenUnit:
     funcs: list[_ir_core.Function]
     is_group: bool
     stage_record: StageRecord  # profiling record (started in Phase 1)
+    helpers: tuple[_codegen_core.VFHelper, ...] = ()
 
 
 @dataclass
@@ -1679,8 +1725,46 @@ def _emit_unit(
     PTOCodegen has already run; ``unit.pto_code`` contains the MLIR.
     """
     local_files: dict[str, str] = {}
+    # Each helper is self-contained. ABI data is retained beside the sources for
+    # review, while source contents participate in the runtime binary cache key.
+    for helper in unit.helpers:
+        local_files[f"vpto/{unit.name}/{helper.symbol}.pto"] = helper.source
+    if unit.helpers:
+        local_files[f"vpto/{unit.name}/manifest.json"] = (
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "target": "a5",
+                    "core_type": "aiv",
+                    "bridge": False,
+                    "synchronization": "ptoas-insert-sync",
+                    "effect_scope": "whole-tile",
+                    "helpers": [
+                        {
+                            "symbol": h.symbol,
+                            "adapter_symbol": h.adapter_symbol,
+                            "parameter_types": h.parameter_types,
+                            "caller_parameter_types": h.caller_parameter_types,
+                            "parameter_effects": h.parameter_effects,
+                            "parameter_indices": h.parameter_indices,
+                            "capture_byte_offsets": h.capture_byte_offsets,
+                            "source": f"{h.symbol}.pto",
+                            "source_sha256": hashlib.sha256(h.source.encode()).hexdigest(),
+                        }
+                        for h in unit.helpers
+                    ],
+                },
+                indent=2,
+            )
+            + "\n"
+        )
     ptoas_record = StageRecord(name="ptoas", start=time.perf_counter())
     try:
+        if unit.helpers and not skip_ptoas:
+            ptoas_bin = _find_ptoas_binary()
+            if ptoas_bin is None:
+                raise RuntimeError("VF Tile adapter compilation requires PTOAS; set PTOAS_ROOT.")
+            _check_ptoas_version(ptoas_bin)
         if unit.is_group:
             _emit_group_output(
                 local_files,
@@ -2253,6 +2337,30 @@ def _generate_multi_chip(
     return result_files
 
 
+def _generate_pto_bundle(
+    program: _ir_core.Program,
+    *,
+    skip_ptoas: bool,
+    memory_planner: _passes.MemoryPlanner,
+    emit_source_loc: bool,
+    is_group: bool = False,
+) -> tuple[str, tuple[_codegen_core.VFHelper, ...]]:
+    """Retain combined diagnostic output; execution consumes structured artifacts."""
+    generator = _codegen_core.PTOCodegen()
+    emit_tile_addr = memory_planner != _passes.MemoryPlanner.PTOAS
+    if skip_ptoas:
+        return generator.generate(program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc), ()
+    bundle = generator.generate_bundle(
+        program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+    )
+    if bundle.helpers:
+        if is_group:
+            raise ValueError("VF execution does not yet support grouped functions")
+        if memory_planner != _passes.MemoryPlanner.PYPTO:
+            raise ValueError("VF execution requires the PyPTO Tile memory planner")
+    return bundle.caller_source, tuple(bundle.helpers)
+
+
 def _generate_single_chip(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -2317,7 +2425,6 @@ def _generate_single_chip(
     # generation) and runs sequentially so that we don't contend on the GIL.
     # When ptoas owns memory planning, omit the physical `pto.alloc_tile addr`
     # so ptoas runs at --pto-level=level2 (which rejects any addr operand).
-    emit_tile_addr = memory_planner != _passes.MemoryPlanner.PTOAS
     # Source locations let ptoas name the user's .py line instead of a line in
     # the generated artifact (which, under @pl.jit, the user never sees).
     units: list[_CodegenUnit] = []
@@ -2341,8 +2448,12 @@ def _generate_single_chip(
             grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code = _codegen_core.PTOCodegen().generate(
-                grouped_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+            pto_code, _ = _generate_pto_bundle(
+                grouped_program,
+                skip_ptoas=skip_ptoas,
+                memory_planner=memory_planner,
+                emit_source_loc=emit_source_loc,
+                is_group=True,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
@@ -2368,12 +2479,17 @@ def _generate_single_chip(
             single_program = _ir_core.Program([*peer_funcs, func], func.name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code = _codegen_core.PTOCodegen().generate(
-                single_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+            pto_code, helpers = _generate_pto_bundle(
+                single_program,
+                skip_ptoas=skip_ptoas,
+                memory_planner=memory_planner,
+                emit_source_loc=emit_source_loc,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
-            units.append(_CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage))
+            units.append(
+                _CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage, helpers=helpers)
+            )
         except Exception as e:
             logger.error("Failed to compile function '%s': %s", func.name, e)
             errors.append((func.name, e))
@@ -2396,6 +2512,14 @@ def _generate_single_chip(
     # Orchestration + config
     if orch_func is not None:
         try:
+            if not skip_ptoas and any(
+                'pto.backend = "vpto"' in unit.pto_code.partition("\n")[0] for unit in units
+            ):
+                raise NotImplementedError(
+                    "VPTO object compilation succeeded, but PTOAS does not yet expose the "
+                    "device direct-call ABI required by PyPTO runtime wrappers. "
+                    "The compiled .o files are retained; runtime execution is unsupported."
+                )
             with _profiling_stage(prof, "orchestration_codegen"):
                 orch_result = _codegen_core.generate_orchestration(transformed_program, orch_func)
             result_files[f"orchestration/{orch_func.name}.cpp"] = (
@@ -2426,6 +2550,11 @@ def _generate_single_chip(
                     runtime=runtime,
                     host_tensor_indices=host_indices,
                     unshared_code_names=codegen_free_kernels,
+                    func_name_to_vpto_sources={
+                        unit.name: [f"vpto/{unit.name}/{h.symbol}.pto" for h in unit.helpers]
+                        for unit in units
+                        if unit.helpers
+                    },
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

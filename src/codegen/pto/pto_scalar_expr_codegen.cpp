@@ -12,11 +12,13 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -192,17 +194,129 @@ void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 void PTOCodegen::VisitExpr_(const ir::AddPtr& op) { VisitBinaryArithExpr(op, "arith.addi", "arith.addf"); }
 void PTOCodegen::VisitExpr_(const ir::SubPtr& op) { VisitBinaryArithExpr(op, "arith.subi", "arith.subf"); }
 void PTOCodegen::VisitExpr_(const ir::MulPtr& op) { VisitBinaryArithExpr(op, "arith.muli", "arith.mulf"); }
+namespace {
+/// A literal's value when it is positive *at the width it is emitted at*.
+///
+/// The stored value is not the one the hardware sees: `EmitArithOperand`
+/// narrows an operand into the operation's dtype, so an INDEX literal
+/// 4294967293 emitted at INT32 is -3. Judging the sign before that conversion
+/// would skip the floor correction for a divisor that is actually negative --
+/// precisely when it is needed. Requiring the literal to fit `dtype` makes the
+/// stored sign the emitted sign.
+///
+/// Only a positive divisor lets the truncating and flooring operations agree on
+/// a non-negative dividend: for a negative one they differ in exactly the cases
+/// the correction below exists to handle.
+std::optional<int64_t> PositiveConstLiteral(const ir::ExprPtr& expr, DataType dtype) {
+  auto literal = As<ir::ConstInt>(expr);
+  if (!literal || literal->value_ <= 0) return std::nullopt;
+  if (!ir::arith::detail::ConstIntFitsDtype(literal->value_, dtype)) return std::nullopt;
+  return literal->value_;
+}
+}  // namespace
+
+bool PTOCodegen::IsProvablyNonNegative(const ir::ExprPtr& expr, DataType dtype) const {
+  if (!expr) return false;
+  if (auto literal = As<ir::ConstInt>(expr)) {
+    // Same narrowing caveat as above: a literal outside `dtype` is re-read at
+    // the emitted width and can come back negative.
+    return literal->value_ >= 0 && ir::arith::detail::ConstIntFitsDtype(literal->value_, dtype);
+  }
+
+  // An induction variable is at least its own loop's start -- but only once the
+  // variable reaches the operation *unnarrowed*. `EmitArithOperand` coerces an
+  // operand into the operation's dtype, and a truncated value has no relation
+  // to the original's sign: over an INDEX loop from 2147483648, `i` emitted at
+  // INT32 is -2147483648, so a recorded lower bound of 2147483648 proves
+  // nothing about what the hardware sees. Requiring the widths to match is
+  // stricter than checking the bound alone, because only the loop's *start* is
+  // recorded -- a variable whose start fits the target can still run past it.
+  if (auto var = AsVarLike(expr)) {
+    if (ir::GetScalarDtype(var) != dtype) return false;
+    auto it = fs_.loop_var_lower_bound.find(var.get());
+    return it != fs_.loop_var_lower_bound.end() && it->second >= 0;
+  }
+
+  // Everything below is an operation node, and `VisitBinaryArithExpr` emits it
+  // at the node's *own* dtype -- not the dtype of whatever encloses it. Proving
+  // a nested operation at the enclosing width would ignore the narrowing and
+  // the widening that bracket it: in an INDEX loop from 2147483648, an INT32
+  // `FloorDiv(i, 2)` nested inside an INDEX `FloorMod(..., 3)` emits `i` at
+  // INT32 as -2147483648, divides to -1073741824, then widens that negative
+  // quotient back to INDEX. Checked at INDEX throughout, the induction variable
+  // looks non-negative and the outer shortcut emits a bare `remsi`, which
+  // returns -1 where FloorMod must return 2.
+  //
+  // Requiring each nested operation to execute at the dtype being proved makes
+  // every conversion on the path a no-op, so the stored sign is the emitted
+  // sign at every level -- the same rule the induction variable above is held
+  // to, applied to the operations between it and the division.
+  if (ir::GetScalarDtype(expr) != dtype) return false;
+
+  // `iv - start`: the offset of this trip from the first. The subtrahend must
+  // itself be non-negative and no greater than the start, which pins the
+  // difference inside [0, iv] so it cannot overflow. Subtracting a negative
+  // literal is an addition in disguise and is not admitted. The variable is
+  // subject to the same no-narrowing rule as above.
+  if (auto sub = As<ir::Sub>(expr)) {
+    auto var = AsVarLike(sub->left_);
+    if (!var || ir::GetScalarDtype(var) != dtype) return false;
+    auto subtrahend = As<ir::ConstInt>(sub->right_);
+    if (!subtrahend || subtrahend->value_ < 0) return false;
+    if (!ir::arith::detail::ConstIntFitsDtype(subtrahend->value_, dtype)) return false;
+    auto it = fs_.loop_var_lower_bound.find(var.get());
+    return it != fs_.loop_var_lower_bound.end() && it->second >= subtrahend->value_;
+  }
+
+  // A quotient or remainder by a positive literal cannot exceed its dividend in
+  // magnitude, so proving the dividend proves these too, with no room to
+  // overflow. Sums and products are deliberately absent -- see the header.
+  if (auto div = As<ir::FloorDiv>(expr)) {
+    return PositiveConstLiteral(div->right_, dtype).has_value() && IsProvablyNonNegative(div->left_, dtype);
+  }
+  if (auto mod = As<ir::FloorMod>(expr)) {
+    return PositiveConstLiteral(mod->right_, dtype).has_value() && IsProvablyNonNegative(mod->left_, dtype);
+  }
+  return false;
+}
+
 void PTOCodegen::VisitExpr_(const ir::FloorDivPtr& op) {
   // Match FloorMod's floor semantics so q * divisor + remainder reconstructs
   // the dividend even when either operand is negative. PTOAS expands the native
   // floor operation into truncating division plus a conditional correction.
   const auto dtype = ir::GetScalarDtype(op);
   const bool signed_integer = dtype == DataType::INDEX || dtype.IsSignedInt();
-  VisitBinaryArithExpr(op, signed_integer ? "arith.floordivsi" : "arith.divsi", "arith.divf");
+  // Flooring and truncating division agree whenever the quotient cannot be
+  // negative, so skip that expansion and let PTOAS see a plain division. Not
+  // only cheaper: an index expression that stays a division over a subtraction
+  // is a shape the assembler's addressing matcher can still peel, which a
+  // conditional correction is not.
+  const bool truncation_is_exact = signed_integer && PositiveConstLiteral(op->right_, dtype).has_value() &&
+                                   IsProvablyNonNegative(op->left_, dtype);
+  VisitBinaryArithExpr(op, (signed_integer && !truncation_is_exact) ? "arith.floordivsi" : "arith.divsi",
+                       "arith.divf");
 }
 void PTOCodegen::VisitExpr_(const ir::FloorModPtr& op) {
+  // CanonicalSlotCollector proves these INDEX operands nonnegative. Preserve
+  // the unsigned remainder PTOAS uses for slot synchronization, while ordinary
+  // FloorMod expressions keep the signed floor correction below.
+  if (fs_.unsigned_slot_remainders.count(op.get())) {
+    VisitBinaryArithExpr(op, "arith.remui", "arith.remf");
+    return;
+  }
   const auto dtype = ir::GetScalarDtype(op);
   if (dtype != DataType::INDEX && !dtype.IsSignedInt()) {
+    VisitBinaryArithExpr(op, "arith.remsi", "arith.remf");
+    return;
+  }
+
+  // The correction below exists because remsi follows the dividend's sign while
+  // FloorMod follows the divisor's. With a non-negative dividend and a positive
+  // divisor the remainder is already non-negative, the two agree, and the
+  // correction is dead code -- emit the bare remainder instead. Besides saving
+  // three ops, it keeps `(symbol + constant) mod N` recognisable to PTOAS' slot
+  // matcher, which a rem/cmp/add/select chain is not.
+  if (PositiveConstLiteral(op->right_, dtype).has_value() && IsProvablyNonNegative(op->left_, dtype)) {
     VisitBinaryArithExpr(op, "arith.remsi", "arith.remf");
     return;
   }
@@ -278,6 +392,30 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   if (src_dtype == dst_dtype) {
     fs_.current_expr_value = src;
     return;
+  } else if (src_dtype == DataType::BOOL && (dst_dtype.IsInt() || dst_is_index || dst_is_float)) {
+    // A logical BOOL is 0/1, whereas interpreting its i1 representation as
+    // signed would make true equal -1. Normalize before numeric conversion.
+    if (dst_is_index) {
+      mlir_op = "arith.index_castui";
+    } else if (dst_is_float) {
+      // PTOAS can lower a direct i1-to-float cast to (float)bool, which A3
+      // rejects. An i32 carrier preserves 0/1 and avoids that device cast.
+      src = EmitCastToI32(op->operand_, src);
+      src_type = "i32";
+      mlir_op = "arith.sitofp";
+    } else if (dst_is_uint) {
+      // Arithmetic extensions require signless result types. Bridge to uiN
+      // only after zero-extending the logical value to the matching iN.
+      const std::string signless_dst = dst_type.substr(1);
+      const std::string extended = NewTemp();
+      Emit(extended + " = arith.extui " + src + " : i1 to " + signless_dst);
+      Emit(result + " = builtin.unrealized_conversion_cast " + extended + " : " + signless_dst + " to " +
+           dst_type);
+      fs_.current_expr_value = result;
+      return;
+    } else {
+      mlir_op = "arith.extui";
+    }
   } else if (src_is_index || dst_is_index) {
     CHECK(!src_is_float && !dst_is_float) << "Cast between float and index types is not supported";
     // arith.index_cast requires signless integer types. For unsigned source/destination,
@@ -387,7 +525,8 @@ std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string
       } else if (scalar_type->dtype_.GetBit() > 32) {
         mlir_op = "arith.trunci";
       } else {
-        mlir_op = is_unsigned ? "arith.extui" : "arith.extsi";
+        // BOOL is not an unsigned integer dtype, but still represents 0/1.
+        mlir_op = (is_unsigned || scalar_type->dtype_ == DataType::BOOL) ? "arith.extui" : "arith.extsi";
       }
       Emit(i32_name + " = " + mlir_op + " " + source_name + " : " + src_type + " to i32");
       return i32_name;

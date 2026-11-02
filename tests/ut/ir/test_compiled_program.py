@@ -17,6 +17,7 @@ import pathlib
 import sys
 import types
 import warnings
+from dataclasses import FrozenInstanceError
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -25,11 +26,16 @@ import torch
 from pypto import DataType, backend, ir
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
+from pypto.ir import param_info
+from pypto.ir._artifact_metadata import ArtifactMetadata
+from pypto.ir.compiled_artifact import CompiledArtifact
 from pypto.ir.compiled_program import (
     _COMPILED_META_FILENAME,
     _COMPILED_META_SCHEMA,
     CompiledProgram,
     _build_full_args,
+    _coerce_args,
+    _extract_func_param_infos,
     _extract_param_infos,
     _param_info_from_dict,
     _param_info_to_dict,
@@ -192,16 +198,16 @@ def _make_program_with_scalar() -> ir.Program:
     return ir.Program([orch], "ScalarProgram", span)
 
 
-def _make_fp4_output_program() -> ir.Program:
+def _make_packed_fp4_output_program() -> ir.Program:
     span = ir.Span.unknown()
-    logical_type = ir.TensorType([8, 16], DataType.FP4)
-    src = ir.Var("src", logical_type, span)
-    out = ir.Var("out", logical_type, span)
+    packed_type = ir.TensorType([8, 16], DataType.FP4E2M1X2)
+    src = ir.Var("src", packed_type, span)
+    out = ir.Var("out", packed_type, span)
     params = [(src, ir.ParamDirection.In), (out, ir.ParamDirection.Out)]
     orch = ir.Function(
         "orchestrator",
         params,
-        [logical_type],
+        [packed_type],
         ir.SeqStmts([], span),
         span,
         ir.FunctionType.Orchestration,
@@ -269,13 +275,13 @@ class TestExtractParamInfos:
     def test_shape_extraction(self):
         prog = _make_program_with_orchestration()
         infos, _, _ = _extract_param_infos(prog)
-        assert infos[0].shape == [128, 128]
+        assert infos[0].shape == (128, 128)
         assert infos[0].dtype == DataType.FP32
 
-    def test_fp4_metadata_uses_torch_x2_carrier_shape(self):
-        infos, out_idx, _ = _extract_param_infos(_make_fp4_output_program())
-        assert [info.shape for info in infos] == [[8, 8], [8, 8]]
-        assert all(info.dtype == DataType.FP4 for info in infos)
+    def test_packed_fp4_metadata_preserves_carrier_shape(self):
+        infos, out_idx, _ = _extract_param_infos(_make_packed_fp4_output_program())
+        assert [info.shape for info in infos] == [(8, 16), (8, 16)]
+        assert all(info.dtype == DataType.FP4E2M1X2 for info in infos)
         assert out_idx == [1]
 
     def test_return_types(self):
@@ -437,13 +443,13 @@ class TestBuildFullArgs:
         not hasattr(torch, "float4_e2m1fn_x2"),
         reason="torch.float4_e2m1fn_x2 required",
     )
-    def test_allocates_fp4_output_with_physical_x2_shape(self):
-        infos, output_indices, _ = _extract_param_infos(_make_fp4_output_program())
-        src = torch.zeros((8, 8), dtype=torch.float4_e2m1fn_x2)
+    def test_allocates_packed_fp4_output_with_carrier_shape(self):
+        infos, output_indices, _ = _extract_param_infos(_make_packed_fp4_output_program())
+        src = torch.zeros((8, 16), dtype=torch.float4_e2m1fn_x2)
         full_args = _build_full_args((src,), infos, output_indices)
         out = full_args[1]
         assert isinstance(out, torch.Tensor)
-        assert out.shape == (8, 8)
+        assert out.shape == (8, 16)
         assert out.dtype == torch.float4_e2m1fn_x2
 
 
@@ -1145,6 +1151,29 @@ class TestCompiledMetaAndFromDir:
         assert reloaded.backend_type == BackendType.Ascend910
         assert reloaded.has_return is live.has_return
 
+    def test_wrappers_read_shared_metadata_without_retaining_mutable_views(self, tmp_path):
+        """Caller mutation of runner lists must not change either wrapper's signature."""
+        program = _make_multi_orch_program()
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        parent = CompiledProgram(program, str(tmp_path))
+        for name in parent.orchestration_names:
+            child = parent[name]
+            restored = CompiledProgram.from_dir(child.output_dir)
+            for wrapper in (child, restored):
+                params, outputs, returns = wrapper._get_metadata()
+                expected = (list(params), list(outputs), list(returns))
+                params.clear()
+                outputs.clear()
+                returns.clear()
+                assert wrapper._get_metadata() == expected
+                assert wrapper.output_indices == expected[1]
+                assert wrapper.has_return == bool(expected[2])
+                assert (
+                    not {"_param_infos", "_output_indices", "_return_types", "_backend_type"}
+                    & vars(wrapper).keys()
+                )
+
     def test_from_dir_output_indices_match_out_params(self, tmp_path):
         """output_indices are rederived from the persisted directions (c is the lone Out)."""
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
@@ -1245,20 +1274,15 @@ class TestCompiledMetaAndFromDir:
         assert persisted.backend_type == BackendType.Ascend910
 
     def test_from_dir_keeps_the_fp4_x2_carrier_shape(self, tmp_path):
-        """Packed FP4 shapes are persisted already converted, so the reload must not re-halve.
-
-        ``_extract_func_param_infos`` stores the runtime x2 carrier shape
-        (logical ``[8, 16]`` -> ``[8, 8]``); applying ``_to_runtime_shape`` again
-        on load would silently halve it a second time.
-        """
-        live = CompiledProgram(_make_fp4_output_program(), str(tmp_path))
+        """IR, persisted metadata, and reloaded runtime all use the same carrier shape."""
+        live = CompiledProgram(_make_packed_fp4_output_program(), str(tmp_path))
         reloaded = CompiledProgram.from_dir(tmp_path)
 
         def _shapes(cp):
             infos, _, _ = cp._get_metadata()
             return [p.shape for p in infos]
 
-        assert _shapes(live) == [[8, 8], [8, 8]]
+        assert _shapes(live) == [(8, 16), (8, 16)]
         assert _shapes(reloaded) == _shapes(live)
 
     def test_from_dir_missing_meta_raises(self, tmp_path):
@@ -1334,6 +1358,8 @@ class TestCompiledMetaAndFromDir:
             # bool is an int subclass; JSON ``true`` is never a dimension.
             "shape holds a bool": _param(shape=[128, True]),
             "bad dtype": _param(dtype="fp99"),
+            "removed logical fp4 dtype": _param(dtype="fp4"),
+            "removed logical FP4 dtype": _param(dtype="FP4"),
             "non-string dtype": _param(dtype=["fp32"]),
             "negative return count": json.dumps({**good, "num_return_types": -1}),
             "non-int return count": json.dumps({**good, "num_return_types": "two"}),
@@ -1659,15 +1685,17 @@ def test_from_dir_rejects_invalid_or_incompatible_capabilities(tmp_path, modes):
     assemble.assert_not_called()
 
 
-def test_from_dir_rejects_legacy_metadata_instead_of_guessing_capabilities(tmp_path):
+def test_from_dir_restores_legacy_metadata_as_program_only(tmp_path):
     CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
     path = tmp_path / _COMPILED_META_FILENAME
     meta = json.loads(path.read_text())
     meta["schema"] = 1
     del meta["supported_execution_modes"]
     path.write_text(json.dumps(meta))
-    with pytest.raises(ValueError, match="Incompatible.*schema.*recompile"):
-        CompiledProgram.from_dir(tmp_path)
+    restored = CompiledProgram.from_dir(tmp_path)
+    assert restored.execution_capabilities == ExecutionCapabilities()
+    assert restored._artifact.metadata is not None
+    assert restored._artifact.metadata.return_aliases is None
 
 
 def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_path):
@@ -1741,6 +1769,64 @@ def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path):
         infos, _, _ = cp._get_metadata()
         assert infos[0].layout == "NZ"
         assert _validate_device_tensor(DeviceTensor(0x1000, (2, 4, 256, 512), torch.int8), infos[0]) is None
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_raw_carrier_metadata_round_trip(dtype, tmp_path):
+    info = _ParamInfo("packed", ir.ParamDirection.In, [4, 32], dtype)
+    restored = _param_info_from_dict(_param_info_to_dict(info))
+    assert restored.dtype == dtype
+    assert restored.shape == (4, 32)
+    assert _validate_device_tensor(DeviceTensor(0x1000, (4, 32), torch.uint8), restored) is None
+    with pytest.raises(TypeError, match="expects dtype"):
+        _validate_device_tensor(DeviceTensor(0x1000, (4, 32), torch.float16), restored)
+
+    metadata = ArtifactMetadata(
+        parameters=(info,),
+        lowered_parameters=(info,),
+        num_return_types=1,
+        platform="a5",
+        backend_type=BackendType.Ascend950,
+        return_aliases=(0,),
+        execution_capabilities=ExecutionCapabilities(
+            (ArtifactExecutionMode.PROGRAM, ArtifactExecutionMode.KERNEL)
+        ),
+    )
+    metadata.write(tmp_path)
+    artifact = CompiledArtifact.from_dir(tmp_path)
+    assert artifact.metadata is not None
+    assert artifact.metadata.parameters == artifact.metadata.lowered_parameters == (restored,)
+    assert artifact.metadata.return_aliases == (0,)
+    artifact.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
+
+
+def test_fp4e1m2_return_allocation_uses_raw_carrier_bytes():
+    info = _ParamInfo("out", ir.ParamDirection.Out, [4, 32], DataType.FP4E1M2X2)
+    (output,) = _build_full_args((), [info], [0])
+    assert isinstance(output, torch.Tensor)
+    assert output.shape == (4, 32)
+    assert output.dtype == torch.uint8
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_compiled_host_args_validate_carrier_shape_and_dtype(dtype):
+    info = _ParamInfo("packed", ir.ParamDirection.In, [-1, 32], dtype)
+
+    def bind(value):
+        return _coerce_args((value,), [info], [], [], caller_name="packed artifact")
+
+    value = torch.empty((4, 32), dtype=torch.uint8)
+    args, return_style = bind(value)
+    assert args[0] is value
+    assert not return_style
+    for shape in ((4, 64), (32,), (1, 4, 32)):
+        with pytest.raises(TypeError, match="expects shape"):
+            bind(torch.empty(shape, dtype=torch.uint8))
+    with pytest.raises(TypeError, match="expects dtype"):
+        bind(torch.empty((4, 32), dtype=torch.float16))
+    if dtype == DataType.FP4E1M2X2 and hasattr(torch, "float4_e2m1fn_x2"):
+        with pytest.raises(TypeError, match="expects dtype"):
+            bind(torch.empty((4, 32), dtype=torch.float4_e2m1fn_x2))
 
 
 def test_legacy_parameter_metadata_keeps_nd_shape_validation():
@@ -1826,6 +1912,72 @@ def test_reload_platform_warns_but_explicit_mode_and_metadata_are_silent(tmp_pat
         assert explicit.platform == legacy.platform == "a5"
         assert persisted.execution_mode is ExecutionMode.SIM
     assert (tmp_path / _COMPILED_META_FILENAME).read_bytes() == metadata
+
+
+def test_param_info_owns_immutable_shape_and_serializes_json_arrays():
+    shape = [-1, 2**32 - 1]
+    param = _ParamInfo("x", ir.ParamDirection.In, shape, DataType.FP32)
+    shape[0] = 7
+    assert param.shape == (-1, 2**32 - 1)
+    with pytest.raises(FrozenInstanceError):
+        setattr(param, "name", "changed")
+    assert isinstance(param.shape, tuple)
+    record = _param_info_to_dict(param)
+    assert record["shape"] == [-1, 2**32 - 1]
+    record["shape"][0] = 8
+    assert param.shape[0] == -1
+    assert _param_info_from_dict(_param_info_to_dict(param)) == param
+
+
+@pytest.mark.parametrize("layout", [None, "ND", "DN", "NZ", "MX_A_ZZ", "MX_B_NN"])
+def test_param_info_layout_does_not_require_lowered_rank_five(layout):
+    param = _ParamInfo("x", ir.ParamDirection.In, [16, 32], DataType.FP8E8M0, layout)
+    assert _param_info_from_dict(_param_info_to_dict(param)) == param
+
+
+def test_param_info_tensor_dtype_independent_of_torch_version(monkeypatch):
+    monkeypatch.setattr(param_info, "_DATATYPE_TO_TORCH", {})
+    param = _ParamInfo("x", ir.ParamDirection.In, [8], DataType.FP8E8M0)
+    assert _param_info_from_dict(_param_info_to_dict(param)) == param
+
+
+@pytest.mark.parametrize("shape", [(2, 40, 8, 128, 1, 512), (2, 2, 4, 128, 4, 4096)])
+def test_l3_parameter_extraction_preserves_rank_six(shape):
+    """L3 caches and segmented inputs shed outer axes before chip submission."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType(list(shape), DataType.FP32)
+    value = ir.Var("distributed_input", tensor_type, span)
+    func = ir.Function(
+        "host_orch",
+        [(value, ir.ParamDirection.In)],
+        [],
+        ir.SeqStmts([], span),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    infos, _, _ = _extract_func_param_infos(func)
+    assert infos[0].shape == shape
+    record = json.loads(json.dumps(_param_info_to_dict(infos[0])))
+    assert _param_info_from_dict(record).shape == shape
+
+
+def test_shared_artifact_load_failure_is_retryable_and_concurrent_loads_publish_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    compiled = CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+    sentinel = object()
+    with _fake_compile_and_assemble((sentinel, "host_build_graph", {})) as assemble:
+        assemble.side_effect = RuntimeError("assembly failed")
+        with pytest.raises(RuntimeError, match="assembly failed"):
+            compiled.load()
+        assert compiled._artifact._chip_callable is None
+        assert compiled._artifact._runtime_config is None
+        assemble.side_effect = None
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: compiled.chip_callable, range(8)))
+        assert all(cc is sentinel for cc in results)
+        assert assemble.call_count == 2
+        assert compiled._artifact.chip_callable is compiled.chip_callable
 
 
 if __name__ == "__main__":

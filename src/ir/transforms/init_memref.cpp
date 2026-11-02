@@ -57,6 +57,8 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/reg_memory_analysis.h"
+#include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -911,6 +913,24 @@ class InitMemRefMutator : public IRMutator {
     return new_for;
   }
 
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    auto result = IRMutator::VisitStmt_(op);
+    auto loop = As<WhileStmt>(result);
+    if (!loop || loop->return_vars_.empty()) return result;
+    // Match the ForStmt invariant: the result is the carried storage even if
+    // the loop executes zero times. A fresh return MemRef would lose both
+    // alias identity and initialization established before the loop.
+    auto get_iter_arg_var = [&](size_t i) -> VarPtr {
+      return i < loop->iter_args_.size() ? loop->iter_args_[i] : nullptr;
+    };
+    auto [patched, changed] =
+        PatchReturnVarsFromYield(loop->return_vars_, op->return_vars_, get_iter_arg_var);
+    if (!changed) return result;
+    auto patched_loop = MutableCopy(loop);
+    patched_loop->return_vars_ = std::move(patched);
+    return patched_loop;
+  }
+
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto result = IRMutator::VisitStmt_(op);
     auto new_if = As<IfStmt>(result);
@@ -936,7 +956,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
  private:
-  // Shared logic for ForStmt/IfStmt: patch each return_var to share its yield value's MemRef.
+  // Share return storage with loop carries (For/While) or branch yield values (If).
   // get_yield_var(i) resolves the yield variable for the i-th return_var.
   using YieldVarResolver = std::function<VarPtr(size_t)>;
   std::pair<std::vector<VarPtr>, bool> PatchReturnVarsFromYield(const std::vector<VarPtr>& new_return_vars,
@@ -977,7 +997,7 @@ class InitMemRefMutator : public IRMutator {
  * @brief Initialize MemRef for all variables in a function
  *
  * This transformation:
- * 1. Normalizes statement structure (ensures SeqStmts)
+ * 1. Simplifies scalar constants and normalizes statement structure
  * 2. Materializes compiler-owned PTO scratch required by level3
  * 3. Initializes the MemRef field for all Var nodes
  * 4. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
@@ -986,8 +1006,11 @@ class InitMemRefMutator : public IRMutator {
  * Variables without memory_space default to DDR.
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
-  // Step 1: Normalize statement structure to ensure SeqStmts
-  auto normalized_func = NormalizeStmtStructure(func);
+  // Lowering may introduce constant SSA aliases after the early Simplify pass.
+  // Normalize them with the shared transformation before building addresses,
+  // including when InitMemRef is invoked outside the default pipeline.
+  auto normalized_func =
+      NormalizeStmtStructure(transform_utils::SimplifyFunction(func, /*constants_only=*/true));
 
   const auto* ctx = PassContext::Current();
   const backend::Backend* target = nullptr;
@@ -1051,6 +1074,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto result_func = MutableCopy(normalized_func);
   result_func->params_ = new_params;
   result_func->body_ = new_body;
+  VerifyRegMemoryInitialization(result_func);
 
   // Step 4: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
   memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);

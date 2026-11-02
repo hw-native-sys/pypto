@@ -42,6 +42,18 @@
 namespace pypto {
 namespace backend {
 
+/// Whether a registration site should register @p op_name.
+///
+/// @p exclude_ops is the caller's opt-out set (``RegisterPTOOps`` forwards it to
+/// every category). Every site must consult it, and the polarity — *registered*
+/// means *not excluded* — is easy to invert in a hand-written
+/// ``count(...) == 0``. Naming the question keeps a new site from silently
+/// registering an op the caller asked it to skip.
+[[nodiscard]] inline bool ShouldRegister(const std::unordered_set<std::string>& exclude_ops,
+                                         std::string_view op_name) {
+  return exclude_ops.find(std::string(op_name)) == exclude_ops.end();
+}
+
 // Per-category registration entry points. Each mirrors the RegisterPTOOps
 // signature and registers one op category to the backend (skipping exclude_ops).
 void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops);

@@ -306,3 +306,9 @@ See `tests/ut/ir/test_builder.py` and `tests/ut/ir/test_flash_attention_builder.
 | **FunctionBuilder** | Python function helper |
 | **ForLoopBuilder** | Python loop helper |
 | **IfStmtBuilder** | Python if helper |
+
+## Register regions
+
+`IRBuilder.reg_scope()`, `emit_reg()` and `emit_reg_store()` share the DSL schemas.
+See [register operations](../language/06-register-operations.md#builder) for the
+C++ equivalents and validation boundaries.

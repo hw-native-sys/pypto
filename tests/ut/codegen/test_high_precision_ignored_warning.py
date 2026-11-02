@@ -351,7 +351,10 @@ def test_both_emitters_report_the_same_dropped_request(enable_buffer_ir, capfd):
     mlir = _incore_mlir(BufferIrPrecisionOps, BackendType.Ascend910, enable_buffer_ir=enable_buffer_ir)
     warnings = _warnings(capfd)
 
-    assert mlir.count("high_precision>") == 3, f"expected three attributes:\n{mlir}"
+    # PTOAS v0.70 names high-precision division diff_compensation; log/recip
+    # retain high_precision. Both emitters must use the operation's selector.
+    for kind, mode in (("div", "diff_compensation"), ("log", "high_precision"), ("recip", "high_precision")):
+        assert mlir.count(f"#pto<{kind}_precision {mode}>") == 1, mlir
     assert _warned_ops(warnings) == {"tile.div", "tile.log", "tile.recip"}, warnings
     assert len(warnings) == 3, f"expected one warning per op, got {warnings}"
 
@@ -380,7 +383,8 @@ def test_attribute_is_emitted_on_both_backends(backend_type, arch):
     mlir = _incore_mlir(HighPrecisionDiv, backend_type)
 
     assert f'pto.target_arch = "{arch}"' in mlir, mlir
-    assert "precisionType = #pto<div_precision high_precision>" in mlir, mlir
+    # The PTOAS v0.70 division selector is diff_compensation on both targets.
+    assert "precisionType = #pto<div_precision diff_compensation>" in mlir, mlir
 
 
 if __name__ == "__main__":

@@ -12,7 +12,8 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -57,7 +58,7 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         alloc = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line and "f4E2M1x2" in line)
         set_valid = next(line for line in mlir.splitlines() if "pto.set_validshape" in line)
-        # Carrier extents are emitted as-is (no /2); logical FP4 would still /2 on Vec.
+        # Carrier extents are emitted without unit conversion.
         assert "valid_row = %c16_index valid_col = %c32_index" in alloc
         assert "v_row=?, v_col=?" in alloc
         assert ", %c8_index, %c32_index :" in set_valid
@@ -339,7 +340,7 @@ class TestMxMatmulCodegen:
         assert "pto.tmatmul.mx" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
 
-    @pytest.mark.parametrize("dtype", [pl.FP4, pl.INT4, pl.UINT4, pl.HF4])
+    @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])
     def test_a2a3_rejects_all_four_bit_incore_abis(self, dtype):
         @pl.program
         class Program:
@@ -369,7 +370,10 @@ class TestMxMatmulCodegen:
         with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a5.*packed FP4E2M1X2"):
             _emit_incore_mlir(Program)
 
-    def test_matmul_mx_acc_ins_equals_outs(self):
+    @pytest.mark.parametrize(
+        "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
+    )
+    def test_matmul_mx_acc_ins_equals_outs(self, tmp_path, compile_with_ptoas):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -400,13 +404,23 @@ class TestMxMatmulCodegen:
                 pl.store(result, [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
-        # Each consumer needs fresh LeftScale and RightScale bindings because
-        # tget_scale_addr mutates a physical buffer shared by SSA aliases.
-        assert mlir.count("pto.tget_scale_addr") == 4
+        # Reuse unchanged bindings: a second bind would hoist across the first
+        # MX consumer and is rejected by PTOAS v0.70 (PTOAS #1691).
+        assert mlir.count("pto.tget_scale_addr") == 2
         acc_line = next(line for line in mlir.splitlines() if "pto.tmatmul.mx.acc" in line)
         ins_acc = acc_line.split("ins(", 1)[1].split(",", 1)[0].strip()
         outs_acc = acc_line.split("outs(", 1)[1].split(":", 1)[0].strip()
         assert ins_acc == outs_acc
+
+        if compile_with_ptoas:
+            # PTOAS #1691: v0.70 rejects the second binding after the first MX
+            # consumer. Compile with the installed release so a toolchain bump
+            # cannot pass solely on textual IR checks or an unreleased repair.
+            if find_ptoas_binary() is None:
+                pytest.skip("PTOAS is not available")
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            # Base and accumulating forms use two overloads of TMATMUL_MX.
+            assert cpp.count("TMATMUL_MX(") == 2
 
     def test_mx_rank5_view_maps_aligned_logical_offsets(self):
         @pl.program

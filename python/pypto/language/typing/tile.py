@@ -57,22 +57,26 @@ class TileMeta(type):
         memref = None
         memory_space = None
         tile_view = None
+        extra_kinds: list[str] = []
 
         for extra in extras:
             if isinstance(extra, MemRef):
                 if memref is not None:
                     raise TypeError("Tile annotation can contain at most one MemRef")
                 memref = extra
+                extra_kinds.append("MemRef")
                 continue
             if isinstance(extra, MemorySpace):
                 if memory_space is not None:
                     raise TypeError("Tile annotation can contain at most one memory space")
                 memory_space = extra
+                extra_kinds.append("MemorySpace")
                 continue
             if isinstance(extra, TileView):
                 if tile_view is not None:
                     raise TypeError("Tile annotation can contain at most one TileView")
                 tile_view = extra
+                extra_kinds.append("TileView")
                 continue
             raise TypeError(
                 "Tile trailing arguments must be MemRef, MemorySpace, or TileView, "
@@ -82,7 +86,7 @@ class TileMeta(type):
         if memref is not None and memory_space is None:
             raise TypeError("Tile annotation with MemRef must also specify an explicit MemorySpace")
 
-        return tile_cls(
+        annotation = tile_cls(
             shape,
             dtype,
             memref=memref,
@@ -90,6 +94,11 @@ class TileMeta(type):
             tile_view=tile_view,
             _annotation_only=True,
         )
+        # Eager annotations can outlive factory-only names. Retain the
+        # validated source order so JIT can replace parameter-dependent
+        # metadata by kind without guessing which erased alias supplied it.
+        annotation._annotation_extra_kinds = tuple(extra_kinds)
+        return annotation
 
     def __call__(
         cls,
@@ -174,6 +183,7 @@ class Tile(metaclass=TileMeta):
             memref: Optional memory reference
             _annotation_only: Whether this is annotation-only mode
         """
+        self._annotation_extra_kinds: tuple[str, ...] | None = None
         if _annotation_only:
             self.shape = shape
             self.dtype = dtype

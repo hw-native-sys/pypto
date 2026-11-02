@@ -65,6 +65,30 @@ def _op_name(stmt: ir.Stmt) -> str:
     return ""
 
 
+def _swap_aic_aiv_members(program: ir.Program) -> ir.Program:
+    """Reverse a literal-typed fixture's core members while retaining its bodies and ABI."""
+    functions = []
+    for func in program.functions.values():
+        if func.func_type not in (ir.FunctionType.AIC, ir.FunctionType.AIV):
+            functions.append(func)
+            continue
+        swapped_type = ir.FunctionType.AIV if func.func_type == ir.FunctionType.AIC else ir.FunctionType.AIC
+        functions.append(
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions, strict=True)),
+                func.return_types,
+                func.body,
+                func.span,
+                type=swapped_type,
+                attrs=func.attrs,
+                requires_runtime_binding=func.requires_runtime_binding,
+                ir_stage=func.ir_stage,
+            )
+        )
+    return ir.Program(functions, program.name, program.span)
+
+
 def test_automatic_mx_scale_v2c_requires_a5_backend():
     """A2A3 rejects the A5-only MX byte-preserving V2C transport."""
 
@@ -519,6 +543,916 @@ def test_hand_written_group_submit_remaps_no_dep_override():
     assert list(vec_submit.args) == list(group.params)
     assert vec_submit.attrs["arg_direction_overrides"] == [1]
     assert list(vec_submit.arg_directions) == []
+
+
+@pytest.mark.parametrize("reuse_members", [False, True])
+def test_hand_written_group_rebinds_shared_inout_results(reuse_members):
+    """Member writebacks bind to the canonical ABI, including private adapters (#3014)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return sink, out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            sink = self.cube_side(sink)
+            sink, out = self.vec_side(sink, out)
+            return sink, out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            sink = self.cube_side(sink)
+            return self.mixed(out, sink)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return sink, out
+
+    before = Before
+    if not reuse_members:
+        before = ir.Program(
+            [func for func in Before.functions.values() if func.name != "main"], Before.name, Before.span
+        )
+    after = _run_pipeline(before)
+    group = after.get_function("mixed")
+    assert group is not None
+    member_names = ("mixed_aic_adapter", "mixed_aiv_adapter") if reuse_members else ("cube_side", "vec_side")
+    for actual_name, expected_name in zip(member_names, ("cube_side", "vec_side"), strict=True):
+        member = after.get_function(actual_name)
+        expected = Expected.get_function(expected_name)
+        assert member is not None and expected is not None
+        ir.assert_structural_equal(member, expected)
+        assert "FREE_VAR" not in member.as_python()
+
+    calls = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    ]
+    assert [call.op.name for call in calls] == list(member_names)
+    assert all(list(call.args) == list(group.params) for call in calls)
+    if reuse_members:
+        for name in ("cube_side", "vec_side"):
+            original = Before.get_function(name)
+            retained = after.get_function(name)
+            assert original is not None and retained is not None
+            ir.assert_structural_equal(retained, original)
+
+
+@pytest.mark.parametrize("reuse_members", [False, True])
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_hand_written_group_rebinds_dynamic_member_types(reuse_members, use_submit):
+    """The widened ABI must specialize aliases, both loop kinds, and returns (#3138)."""
+    member_cols = pl.dynamic("MEMBER_COLS")
+    group_cols = pl.dynamic("GROUP_COLS")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(self, marker: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return marker
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self, work: pl.InOut[pl.Tensor[[8, member_cols], pl.FP32]]
+        ) -> pl.Tensor[[8, member_cols], pl.FP32]:
+            saved = work
+            for _part, (carry,) in pl.range(2, init_values=(saved,)):
+                updated = carry
+                for_result = pl.yield_(updated)
+            for carry, count in pl.while_(init_values=(for_result, 0)):
+                pl.cond(count < 2)
+                updated = carry
+                while_result, _count = pl.yield_(updated, count + 1)
+            return while_result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, group_cols + 32], pl.FP32]],
+        ) -> pl.Tensor[[8, group_cols + 32], pl.FP32]:
+            _marker = self.cube_side(marker)
+            work = self.vec_side(work)
+            return work
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, group_cols + 32], pl.FP32]],
+        ) -> pl.Tensor[[8, group_cols + 32], pl.FP32]:
+            _marker, _cube_tid = pl.submit(self.cube_side, marker)
+            work, _vec_tid = pl.submit(self.vec_side, work)
+            return work
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, member_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, member_cols], pl.FP32]:
+            _marker = self.cube_side(marker)
+            return self.vec_side(work)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, group_cols + 32], pl.FP32]],
+        ) -> pl.Tensor[[8, group_cols + 32], pl.FP32]:
+            saved = work
+            for _part, (carry,) in pl.range(2, init_values=(saved,)):
+                updated = carry
+                for_result = pl.yield_(updated)
+            for carry, count in pl.while_(init_values=(for_result, 0)):
+                pl.cond(count < 2)
+                updated = carry
+                while_result, _count = pl.yield_(updated, count + 1)
+            return while_result
+
+    group_name = "mixed_submit" if use_submit else "mixed_call"
+    retained_names = {"cube_side", "vec_side", group_name}
+    if reuse_members:
+        retained_names.add("main")
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in retained_names], Before.name, Before.span
+    )
+    prepared = passes.infer_tile_memory_space()(passes.convert_to_ssa()(before))
+    expected = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected)).get_function("vec_side")
+    after = passes.expand_mixed_kernel()(prepared)
+    adapter_name = f"{group_name}_aiv_adapter" if reuse_members else "vec_side"
+    adapter = after.get_function(adapter_name)
+    assert adapter is not None and expected is not None
+    ir.assert_structural_equal(adapter, expected)
+
+    group = after.get_function(group_name)
+    assert group is not None
+    launches = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, (ir.Call, ir.Submit))
+    ]
+    assert len(launches) == 2
+    assert all(isinstance(launch, ir.Submit if use_submit else ir.Call) for launch in launches)
+    assert all(list(launch.args) == list(group.params) for launch in launches)
+    if reuse_members:
+        # Specializing this Group must not change separately dispatched members.
+        for name in ("cube_side", "vec_side"):
+            retained = after.get_function(name)
+            original = prepared.get_function(name)
+            assert retained is not None and original is not None
+            ir.assert_structural_equal(retained, original)
+
+
+@pytest.mark.parametrize("use_submit", [False, True])
+@pytest.mark.parametrize("shared_symbol", [False, True], ids=["static-extent", "caller-owned-symbol"])
+def test_hand_written_group_substitutes_member_extents_once(shared_symbol, use_submit):
+    """Caller-owned expressions stay intact when they contain the formal symbol."""
+    member_cols = pl.dynamic("MEMBER_COLS")
+    actual_cols = member_cols + 32 if shared_symbol else 64
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(self, marker: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return marker
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self, work: pl.InOut[pl.Tensor[[8, member_cols], pl.FP32]]
+        ) -> pl.Tensor[[8, member_cols], pl.FP32]:
+            saved = work
+            return saved
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, actual_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, actual_cols], pl.FP32]:
+            _marker = self.cube_side(marker)
+            result = self.vec_side(work)
+            alias = result
+            return alias
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, actual_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, actual_cols], pl.FP32]:
+            _marker, _cube_tid = pl.submit(self.cube_side, marker)
+            result, _vec_tid = pl.submit(self.vec_side, work)
+            alias = result
+            return alias
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, actual_cols], pl.FP32]],
+        ) -> pl.Tensor[[8, actual_cols], pl.FP32]:
+            saved = work
+            return saved
+
+    group_name = "mixed_submit" if use_submit else "mixed_call"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in {"cube_side", "vec_side", group_name}],
+        Before.name,
+        Before.span,
+    )
+    after = _run_pipeline(before)
+    expected = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    member = after.get_function("vec_side")
+    expected_member = expected.get_function("vec_side")
+    assert member is not None and expected_member is not None
+    ir.assert_structural_equal(member, expected_member)
+    # The Group's receiver, Submit projections, and aliases must agree with
+    # the corrected adapter return type, not retain a recursively expanded size.
+    group = after.get_function(group_name)
+    assert group is not None
+    statements = ir.flatten_to_stmts(group.body)
+    for statement in statements:
+        if isinstance(statement, ir.AssignStmt):
+            ir.assert_structural_equal(statement.var.type, statement.value.type)
+    assert isinstance(statements[-1], ir.ReturnStmt)
+    ir.assert_structural_equal(statements[-1].value[0].type, expected_member.return_types[0])
+
+
+def test_hand_written_group_rebinds_scalar_parameter_used_as_extent():
+    """A scalar used in type fields and values must name one canonical parameter."""
+    cols = pl.dynamic("cols")
+    width = pl.dynamic("width")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(self, marker: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return marker
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            cols: pl.Scalar[pl.INDEX],
+            work: pl.InOut[pl.Tensor[[8, cols], pl.FP32]],
+        ):
+            saved = work
+            _next_col = cols + 1
+            return saved
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            width: pl.Scalar[pl.INDEX],
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, width], pl.FP32]],
+        ):
+            _marker = self.cube_side(marker)
+            work = self.vec_side(width, work)
+            return work
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            width: pl.Scalar[pl.INDEX],
+            marker: pl.Tensor[[16, 16], pl.FP32],
+            work: pl.InOut[pl.Tensor[[8, width], pl.FP32]],
+        ):
+            saved = work
+            _next_col = width + 1
+            return saved
+
+    after = _run_pipeline(Before)
+    expected = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    member = after.get_function("vec_side")
+    expected_member = expected.get_function("vec_side")
+    assert member is not None and expected_member is not None
+    ir.assert_structural_equal(member, expected_member)
+    # Structural equality alone also permits renamed binders. Pin this exact
+    # identity because codegen looks up the scalar by its parameter Var.
+    work_type = member.params[2].type
+    saved = ir.flatten_to_stmts(member.body)[0]
+    assert isinstance(saved, ir.AssignStmt)
+    saved_type = saved.var.type
+    assert isinstance(work_type, ir.TensorType) and isinstance(saved_type, ir.TensorType)
+    assert work_type.shape[1] is member.params[0]
+    assert saved_type.shape[1] is member.params[0]
+
+
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_hand_written_group_rebinds_tuple_writeback_no_dep(use_submit):
+    """Swapped tuple writebacks retain buffer identity and no_dep's canonical position (#3014)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            second, first = self.cube_side(first, second)
+            second = self.vec_side(pl.no_dep(second))
+            return second
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            (second, first), _cube_tid = pl.submit(self.cube_side, first, second)
+            second, _vec_tid = pl.submit(self.vec_side, pl.no_dep(second))
+            return second
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return second
+
+    group_name = "mixed_submit" if use_submit else "mixed_call"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in ("cube_side", "vec_side", group_name)],
+        Before.name,
+        Before.span,
+    )
+    after = _run_pipeline(before)
+    group = after.get_function(group_name)
+    assert group is not None
+    for name in ("cube_side", "vec_side"):
+        member = after.get_function(name)
+        expected = Expected.get_function(name)
+        assert member is not None and expected is not None
+        ir.assert_structural_equal(member, expected)
+        assert "FREE_VAR" not in member.as_python()
+
+    launch_type = ir.Submit if use_submit else ir.Call
+    launches = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, launch_type)
+    ]
+    assert [launch.op.name for launch in launches] == ["cube_side", "vec_side"]
+    assert all(list(launch.args) == list(group.params) for launch in launches)
+    assert launches[1].attrs["arg_direction_overrides"] == [1]
+
+
+def test_hand_written_groups_share_callee_lineage_without_leaking_program_state():
+    """Shared return maps stay callee-relative and expire before the next Program.
+
+    All Groups share a producer that delegates to ``choose``. Alternating
+    call-site permutations must still yield different canonical bindings. Reuse
+    the exact producer node with a different ``choose`` body on the next pass
+    invocation so a cache escaping the normalization scope would be observable.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([16, 16], ir.DataType.FP32)
+    first = ir.Var("first", tensor_type, span)
+    second = ir.Var("second", tensor_type, span)
+    selected = ir.Var("selected", tensor_type, span)
+    producer = ir.Function(
+        "producer",
+        [(first, ir.ParamDirection.InOut), (second, ir.ParamDirection.InOut)],
+        [tensor_type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    selected, ir.Call(ir.GlobalVar("choose"), [first, second], tensor_type, span), span
+                ),
+                ir.ReturnStmt([selected], span),
+            ],
+            span,
+        ),
+        span,
+        ir.FunctionType.AIC,
+    )
+    sink = ir.Var("sink", tensor_type, span)
+    consumer = ir.Function(
+        "consumer",
+        [(sink, ir.ParamDirection.InOut)],
+        [tensor_type],
+        ir.ReturnStmt([sink], span),
+        span,
+        ir.FunctionType.AIV,
+    )
+    groups: list[ir.Function] = []
+    for i in range(16):
+        params = [ir.Var("first", tensor_type, span), ir.Var("second", tensor_type, span)]
+        value = ir.Var("value", tensor_type, span)
+        result = ir.Var("result", tensor_type, span)
+        args = params if i % 2 == 0 else params[::-1]
+        groups.append(
+            ir.Function(
+                f"mixed_{i}",
+                [(param, ir.ParamDirection.InOut) for param in params],
+                [tensor_type],
+                ir.SeqStmts(
+                    [
+                        ir.AssignStmt(
+                            value, ir.Call(ir.GlobalVar("producer"), args, tensor_type, span), span
+                        ),
+                        ir.AssignStmt(
+                            result,
+                            ir.Call(
+                                ir.GlobalVar("consumer"),
+                                [value],
+                                {},
+                                {"arg_direction_overrides": [0]},
+                                tensor_type,
+                                span,
+                            ),
+                            span,
+                        ),
+                        ir.ReturnStmt([result], span),
+                    ],
+                    span,
+                ),
+                span,
+                ir.FunctionType.Group,
+            )
+        )
+
+    for selected_index in (0, 1):
+        choose_params = [ir.Var("first", tensor_type, span), ir.Var("second", tensor_type, span)]
+        choose = ir.Function(
+            "choose",
+            [(param, ir.ParamDirection.InOut) for param in choose_params],
+            [tensor_type],
+            ir.ReturnStmt([choose_params[selected_index]], span),
+            span,
+            ir.FunctionType.AIC,
+        )
+        before = ir.Program([choose, producer, consumer, *groups], "shared_members", span)
+        after = passes.expand_mixed_kernel()(before)
+        for i in range(len(groups)):
+            group = after.get_function(f"mixed_{i}")
+            adapter = after.get_function(f"mixed_{i}_aiv_adapter")
+            assert group is not None and adapter is not None
+            expected_index = selected_index if i % 2 == 0 else 1 - selected_index
+            ir.assert_structural_equal(adapter.body, ir.ReturnStmt([adapter.params[expected_index]], span))
+            assert "FREE_VAR" not in adapter.as_python()
+            launches = [
+                stmt.value
+                for stmt in ir.flatten_to_stmts(group.body)
+                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+            ]
+            assert all(list(call.args) == list(group.params) for call in launches)
+            assert launches[1].attrs["arg_direction_overrides"] == [expected_index]
+
+
+@pytest.mark.parametrize("producer_type", [pl.FunctionType.AIC, pl.FunctionType.AIV])
+@pytest.mark.parametrize("projection_index", [0, 1])
+@pytest.mark.parametrize("use_submit", [False, True])
+@pytest.mark.parametrize("no_dep", [False, True])
+def test_hand_written_group_rebinds_direct_tuple_projection(
+    producer_type, projection_index, use_submit, no_dep
+):
+    """Direct tuple arguments retain their selected buffer in either core's adapter (#3014)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pair[0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pair[1])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pair[0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pair[1])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_no_dep_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pl.no_dep(pair[0]))
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_no_dep_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pl.no_dep(pair[1]))
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_no_dep_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pl.no_dep(pair[0]))
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_no_dep_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pl.no_dep(pair[1]))
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer_first(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer_second(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return second
+
+    launch_kind = "submit" if use_submit else "call"
+    override = "_no_dep" if no_dep else ""
+    group_name = f"mixed_{launch_kind}{override}_{projection_index}"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in ("producer", "consumer", group_name)],
+        Before.name,
+        Before.span,
+    )
+    expected = Expected
+    if producer_type == pl.FunctionType.AIV:
+        before = _swap_aic_aiv_members(before)
+        expected = _swap_aic_aiv_members(expected)
+    after = _run_pipeline(before)
+    producer = after.get_function("producer")
+    original_producer = before.get_function("producer")
+    consumer = after.get_function("consumer")
+    expected_name = "consumer_second" if projection_index == 0 else "consumer_first"
+    expected_consumer = expected.get_function(expected_name)
+    group = after.get_function(group_name)
+    assert producer is not None and original_producer is not None
+    assert consumer is not None and expected_consumer is not None and group is not None
+    ir.assert_structural_equal(producer, original_producer)
+    ir.assert_structural_equal(consumer, expected_consumer)
+    assert "FREE_VAR" not in consumer.as_python()
+
+    launches = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, (ir.Call, ir.Submit))
+    ]
+    assert [launch.op.name for launch in launches] == ["producer", "consumer"]
+    assert all(isinstance(launch, ir.Submit if use_submit else ir.Call) for launch in launches)
+    assert all(list(launch.args) == list(group.params) for launch in launches)
+    if no_dep:
+        assert launches[1].attrs["arg_direction_overrides"] == [1 - projection_index]
+
+
+@pytest.mark.parametrize("producer_type", [pl.FunctionType.AIC, pl.FunctionType.AIV])
+@pytest.mark.parametrize("tuple_form", ["alias", "nested"])
+def test_hand_written_group_rebinds_aliased_tuple_projection(producer_type, tuple_form):
+    """Tuple aliases and nested tuple construction preserve the selected writeback."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_alias(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            alias = pair
+            result = self.consumer(alias[0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_nested(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            nested = ((pair[1], pair[0]), pair)
+            result = self.consumer(pl.no_dep(nested[0][1]))
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return second
+
+    group_name = f"mixed_{tuple_form}"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in ("producer", "consumer", group_name)],
+        Before.name,
+        Before.span,
+    )
+    expected = Expected
+    if producer_type == pl.FunctionType.AIV:
+        before = _swap_aic_aiv_members(before)
+        expected = _swap_aic_aiv_members(expected)
+    after = _run_pipeline(before)
+    consumer = after.get_function("consumer")
+    expected_consumer = expected.get_function("consumer")
+    group = after.get_function(group_name)
+    assert consumer is not None and expected_consumer is not None and group is not None
+    ir.assert_structural_equal(consumer, expected_consumer)
+    assert "FREE_VAR" not in consumer.as_python()
+    calls = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    ]
+    assert [call.op.name for call in calls] == ["producer", "consumer"]
+    assert all(list(call.args) == list(group.params) for call in calls)
+    if tuple_form == "nested":
+        assert calls[1].attrs["arg_direction_overrides"] == [1]
+
+
+@pytest.mark.parametrize("boundary_kind", ["view", "fresh"])
+def test_hand_written_group_no_dep_rejects_projected_non_writeback_results(boundary_kind):
+    """Projecting a non-writeback tuple element must not turn it into a Group parameter."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 32], pl.FP32]]:
+            viewed = pl.tensor.view(source, [16, 16])
+            return viewed, source
+
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            fresh = pl.tensor.create([16, 16], dtype=pl.FP32)
+            return fresh, source
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer_view(source)
+            return self.consumer(pl.no_dep(pair[0]))
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer_fresh(source)
+            return self.consumer(pl.no_dep(pair[0]))
+
+    before = ir.Program(
+        [
+            func
+            for func in Before.functions.values()
+            if func.name in (f"producer_{boundary_kind}", "consumer", f"mixed_{boundary_kind}")
+        ],
+        Before.name,
+        Before.span,
+    )
+    # Deliberately skip tensor-to-tile conversion to exercise ExpandMixedKernel's
+    # rejection of non-writeback results, before its tile-only precondition holds.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(
+            ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"
+        ):
+            _run_pipeline(before)
+
+
+@pytest.mark.parametrize("boundary_kind", ["slice", "view", "fresh"])
+def test_hand_written_group_no_dep_rejects_non_writeback_results(boundary_kind):
+    """A member's slice, view or fresh result cannot stand in for a complete Group parameter."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_slice(
+            self,
+            source: pl.InOut[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result = pl.tensor.slice(source, [16, 16], [16, 0])
+            return result
+
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result = pl.tensor.view(source, [16, 16])
+            return result
+
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result = pl.tensor.create([16, 16], dtype=pl.FP32)
+            return result
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_slice(
+            self,
+            source: pl.InOut[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            local = self.cube_slice(source)
+            return self.vec_side(pl.no_dep(local))
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            local = self.cube_view(source)
+            return self.vec_side(pl.no_dep(local))
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            local = self.cube_fresh(source)
+            return self.vec_side(pl.no_dep(local))
+
+    before = ir.Program(
+        [
+            func
+            for func in Before.functions.values()
+            if func.name in (f"cube_{boundary_kind}", "vec_side", f"mixed_{boundary_kind}")
+        ],
+        Before.name,
+        Before.span,
+    )
+    # Deliberately skip tensor-to-tile conversion to exercise ExpandMixedKernel's
+    # rejection of non-writeback results, before its tile-only precondition holds.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(
+            ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"
+        ):
+            _run_pipeline(before)
 
 
 def test_explicit_sync_core_type_routes_each_event_to_one_lane():
@@ -1940,6 +2874,87 @@ def test_nested_yield_of_an_enclosing_scope_value_is_not_rewritten():
     assert yielded.unique_id not in carry_ids, (
         f"the enclosing-scope value was rewritten into a self-carry on '{yielded.name_hint}'"
     )
+
+
+def test_scalar_parameter_branch_results_survive_on_both_lanes():
+    """Both lanes must retain live if results yielding a parameter or its expression.
+
+    Parameters have no defining statement in the body. Omitting them from the
+    branch cleanup scope used to erase both result slots but keep their uses.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def parameter_branch(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vec_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            if n > 1:
+                selected, limit = pl.yield_(n - 1, n)
+            else:
+                selected, limit = pl.yield_(0, 1)
+            if selected < limit:
+                a = pl.load(x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a, target_memory=pl.MemorySpace.Left)
+                a_right = pl.move(a, target_memory=pl.MemorySpace.Right)
+                product = pl.matmul(a_left, a_right)
+                pl.store(product, [0, 0], out)
+                zero = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                pl.store(zero, [0, 0], vec_out)
+            return out, vec_out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def parameter_branch_aic(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vec_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ):
+            if n > 1:
+                selected, limit = pl.yield_(n - 1, n)
+            else:
+                selected, limit = pl.yield_(0, 1)
+            if selected < limit:
+                a = pl.load(x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a, target_memory=pl.MemorySpace.Left)
+                a_right = pl.move(a, target_memory=pl.MemorySpace.Right)
+                product = pl.matmul(a_left, a_right)
+                pl.store(product, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def parameter_branch_aiv(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vec_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            pl.func_attr({"dual_aiv_dispatch": True})
+            if n > 1:
+                selected, limit = pl.yield_(n - 1, n)
+            else:
+                selected, limit = pl.yield_(0, 1)
+            if selected < limit:
+                zero = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                pl.store(zero, [0, 0], vec_out)
+            return out, vec_out
+
+    After = _expand_no_verify(Before)
+    ExpectedSSA = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    _assert_no_free_var(After)
+    for lane in ("aic", "aiv"):
+        name = f"parameter_branch_{lane}"
+        actual = After.get_function(name)
+        expected = ExpectedSSA.get_function(name)
+        assert actual is not None and expected is not None
+        ir.assert_structural_equal(actual, expected)
 
 
 def test_nested_yield_of_a_function_parameter_is_not_rewritten():

@@ -142,6 +142,9 @@ void BindCodegen(nanobind::module_& m);
  */
 void BindBackend(nanobind::module_& m);
 
+/// Register typed hardware synchronization resource queries and immutable built-in catalogs.
+void BindSync(nanobind::module_& m);
+
 /**
  * @brief Register arithmetic simplification utilities
  *

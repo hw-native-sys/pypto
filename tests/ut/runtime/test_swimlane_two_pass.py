@@ -20,13 +20,47 @@ host-register mappings between DFX runs. These tests drive
 import ctypes
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pypto.runtime.runner as _runner
 import pytest
 import torch
-from pypto.runtime import _dep_gen_capture
+from pypto.runtime import _dep_gen_capture, _execution_mode
 from pypto.runtime.device_tensor import DeviceTensor
 from pypto.runtime.runner import DfxOptions, _build_args_spec, _execute_dfx_passes, _generate_swimlane
+
+
+@pytest.fixture(autouse=True)
+def isolated_mode_gate(monkeypatch):
+    monkeypatch.setattr(_execution_mode, "_gate", _execution_mode._ModeGate())
+
+
+@pytest.mark.parametrize("swimlane", [False, True])
+def test_kernel_mode_blocks_program_before_capture_or_worker(tmp_path, monkeypatch, device_runner, swimlane):
+    from pypto.runtime.worker import ChipWorker  # noqa: PLC0415
+
+    # Keep the real runner and device-dispatch path, stubbing only compilation
+    # and native/process boundaries. Previously swimlane spawned a child with
+    # independent mode state before the timing pass rejected the parent call.
+    monkeypatch.setattr(
+        device_runner, "_compile_and_assemble", lambda *a: (object(), "tensormap_and_ringbuffer", {})
+    )
+    subprocess_run = MagicMock()
+    worker = MagicMock()
+    monkeypatch.setattr(_runner.subprocess, "run", subprocess_run)
+    monkeypatch.setattr(device_runner, "Worker", worker)
+    monkeypatch.setattr(device_runner, "CallConfig", MagicMock())
+    monkeypatch.setattr(ChipWorker, "current", lambda **kw: None)
+    _execution_mode.claim_kernel_mode()
+
+    with pytest.raises(RuntimeError, match="already claimed kernel"):
+        _runner._execute_compiled(
+            tmp_path, [], platform="a2a3", device_id=0, dfx=DfxOptions(enable_chip_swimlane=swimlane)
+        )
+
+    subprocess_run.assert_not_called()
+    worker.assert_not_called()
+    worker.return_value.init.assert_not_called()
 
 
 def _drive(dfx: DfxOptions, platform: str) -> tuple[list[DfxOptions], int]:

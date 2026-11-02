@@ -119,9 +119,10 @@ def orch(self, a, out):
 ```
 
 A trailing return-var `yield` stays inside the scope; the printer recurses
-through the AUTO scope so the `var = pl.yield_(...)` assignment LHS is preserved,
+through AUTO and MANUAL scopes so the `var = pl.yield_(...)` assignment LHS is preserved,
 and the parser treats the yield inside `pl.scope()` as the enclosing for/if's
-return-var.
+return-var. This also applies when other statements precede the trailing scope.
+An empty scope body prints as `pass`, retaining its mode and name.
 
 ## Verification
 

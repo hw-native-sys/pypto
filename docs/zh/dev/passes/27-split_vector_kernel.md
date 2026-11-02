@@ -107,7 +107,8 @@ per-lane 形态（由上游 `LowerAutoVectorSplit` + `ExpandMixedKernel` 达成�
      - 别名：继承替换值的类型，并传播到后续使用处。
      - 其他产生 TileType 的调用：经 RebuildLane1CallWithZeroValidShape 重写——
        tile.load 变为 valid_shape=[0, 0] 的 tile.create；tile.slice / tile.transpose /
-       tile.fmods / tile.rems 也变为空 tile.create，因为它们无法安全处理零有效范围。
+       tile.fmods / tile.rems / tile.row_max / tile.row_min / tile.row_sum /
+       tile.row_prod 也变为空 tile.create，因为它们无法安全处理零有效范围。
        tile.set_validshape 的 valid_shape 置零；其余清空结果 valid_shape。
      - 跨核 tile.tpush_* / tile.tpop_* / system.tfree_* 保留，使 AIC↔AIV 握手对称。
      - For/While/If 以分叉的 replacements 映射递归。

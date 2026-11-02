@@ -17,20 +17,24 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/ir_mutator_with_analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -43,7 +47,9 @@
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -62,17 +68,54 @@ namespace {
 /// SSA form every Var is single-assigned, so nothing is collected.
 class MultiAssignCollector : public IRVisitor {
  public:
+  explicit MultiAssignCollector(const std::vector<VarPtr>& params) {
+    // Parameters already have a definition on entry. A body assignment to one
+    // is a pre-SSA rebind, including when it occurs only in one branch.
+    // Match AssignTypeSymmetry's counting so retyping cannot replace the
+    // parameter identity used by a sibling branch.
+    for (const auto& param : params) seen_.insert(param.get());
+  }
+
   std::unordered_set<const Var*> multi_assigned;
+  /// Vars with more than one definition site of any kind (parameter, AssignStmt,
+  /// For/If/While binders). FoldProvableComparison never trusts such a loop
+  /// variable to stay within its header range.
+  std::unordered_set<const Var*> redefined;
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!seen_.insert(op->var_.get()).second) {
       multi_assigned.insert(op->var_.get());
     }
+    Define(op->var_.get());
     IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    Define(op->loop_var_.get());
+    for (const auto& v : op->iter_args_) Define(v.get());
+    for (const auto& v : op->return_vars_) Define(v.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    for (const auto& v : op->return_vars_) Define(v.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& v : op->iter_args_) Define(v.get());
+    for (const auto& v : op->return_vars_) Define(v.get());
+    IRVisitor::VisitStmt_(op);
+  }
+
+  /// Also called for each function parameter before the body is visited.
+  void Define(const Var* var) {
+    if (!defined_.insert(var).second) redefined.insert(var);
   }
 
  private:
   std::unordered_set<const Var*> seen_;
+  std::unordered_set<const Var*> defined_;
 };
 
 /// Answers, for each control-flow statement Fold A / Fold B may collapse,
@@ -249,9 +292,7 @@ class ReturnVarEscapeIndex : public IRVisitor {
 /// `out`. The substituted form lets subsequent SimplifyMutator visits
 /// (including the function's ReturnStmt) read the yielded value directly.
 ///
-/// Recurses through trailing SeqStmts to find the yield, mirroring
-/// `transform_utils::GetLastYieldStmt` — a well-formed control-flow body
-/// can place its terminating YieldStmt inside a nested SeqStmts wrapper.
+/// Follows the shared trailing-yield spine, preserving runtime/split wrappers.
 ///
 /// Pre: @p body is a well-formed control-flow body with `return_vars`
 /// non-empty — its (possibly nested) tail is a YieldStmt with
@@ -262,34 +303,274 @@ struct StrippedYield {
 };
 
 StrippedYield StripTrailingYield(const StmtPtr& body, size_t return_var_count) {
-  if (auto seq = As<SeqStmts>(body)) {
-    INTERNAL_CHECK_SPAN(!seq->stmts_.empty(), seq->span_)
-        << "Internal error: control-flow body must end with YieldStmt "
-           "when return_vars is non-empty";
-    auto stripped = seq->stmts_;
-    auto inner = StripTrailingYield(stripped.back(), return_var_count);
-    if (inner.body) {
-      stripped.back() = inner.body;
-    } else {
-      stripped.pop_back();
-    }
-    return {loop_repair::MakeBody(stripped, seq->span_), std::move(inner.yielded_values)};
-  }
-  auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body);
+  auto yield_stmt = transform_utils::GetLastYieldStmt(body);
   INTERNAL_CHECK_SPAN(yield_stmt, body->span_)
       << "Internal error: control-flow body tail must be YieldStmt when "
          "return_vars is non-empty";
   INTERNAL_CHECK_SPAN(yield_stmt->value_.size() == return_var_count, yield_stmt->span_)
       << "Internal error: yielded value count " << yield_stmt->value_.size()
       << " does not match return_vars count " << return_var_count;
-  return {/*body=*/nullptr, yield_stmt->value_};
+  auto stripped = transform_utils::RewriteLastYieldStmt(body, [](const YieldStmtPtr&) { return nullptr; });
+  return {std::move(stripped), yield_stmt->value_};
 }
+
+/// Folding substitutes yielded expressions at their users. Calls must instead
+/// remain at their evaluation site (including inside a MANUAL scope), so retain
+/// the control flow until FlattenCallExpr has materialized their results.
+bool HasEffectfulYield(const StmtPtr& body) {
+  auto yield = body ? transform_utils::GetLastYieldStmt(body) : nullptr;
+  return yield &&
+         std::any_of(yield->value_.begin(), yield->value_.end(), transform_utils::ExprContainsCallLike);
+}
+
+/// Rebind storage expressions without folding values or revisiting a mapped
+/// variable's type/initValue. A rebuilt IterArg is still a runtime value.
+class StorageVarRemapper : public IRMutator {
+ public:
+  explicit StorageVarRemapper(const std::unordered_map<const Expr*, ExprPtr>& remap) : remap_(remap) {}
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto it = remap_.find(op.get());
+    return it != remap_.end() ? it->second : op;
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    return VisitExpr_(std::static_pointer_cast<const Var>(op));
+  }
+
+ private:
+  const std::unordered_map<const Expr*, ExprPtr>& remap_;
+};
+
+/// Preserve assignment type symmetry when a rewrite changes a previously
+/// matching RHS type. Keep pre-existing mismatches visible to the verifier.
+VarPtr MatchRewrittenValueType(const VarPtr& original_var, const TypePtr& original_value_type,
+                               const ExprPtr& new_value, const VarPtr& new_var) {
+  const auto& value_type = new_value->GetType();
+  if (structural_equal(new_var->GetType(), value_type)) return new_var;
+  if (!structural_equal(original_var->GetType(), original_value_type)) return new_var;
+  return std::make_shared<Var>(new_var->name_hint_, value_type, new_var->span_);
+}
+
+/// Retained dead bodies still need enclosing binder substitutions and dependent
+/// type rebuilds. Use the plain mutator so no arithmetic is evaluated, and treat
+/// enclosing replacements as finalized leaves (especially rebuilt IterArgs).
+class UnreachableBodyRemapper : public IRMutator {
+ public:
+  UnreachableBodyRemapper(const std::unordered_map<const Expr*, ExprPtr>& remap,
+                          const std::unordered_set<const Var*>& multi_assigned)
+      : enclosing_remap_(remap), multi_assigned_(multi_assigned) {}
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto local = var_remap_.find(op.get());
+    if (local != var_remap_.end()) return local->second;
+    auto it = enclosing_remap_.find(op.get());
+    if (it != enclosing_remap_.end()) return it->second;
+    auto identity = definition_identities_.find(op.get());
+    return identity != definition_identities_.end() ? identity->second : IRMutator::VisitExpr_(op);
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto local = var_remap_.find(op.get());
+    if (local != var_remap_.end()) return local->second;
+    auto it = enclosing_remap_.find(op.get());
+    if (it != enclosing_remap_.end()) return it->second;
+    auto identity = definition_identities_.find(op.get());
+    return identity != definition_identities_.end() ? identity->second : IRMutator::VisitExpr_(op);
+  }
+
+  ExprPtr VisitExpr_(const WindowBufferPtr& op) override {
+    auto it = enclosing_remap_.find(op.get());
+    return it != enclosing_remap_.end() ? it->second : IRMutator::VisitExpr_(op);
+  }
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto new_value = VisitExpr(op->value_);
+    auto new_var = RewriteDefinition(op->var_);
+    // An enclosing identity-view fold may change the RHS type without changing
+    // any expression embedded in the LHS type. Propagate that type to the local
+    // binder and its later uses, just as the evaluating Simplify visitor does.
+    // Pre-SSA variables with other assignments must keep their shared type.
+    if (multi_assigned_.count(op->var_.get()) == 0) {
+      auto retyped = MatchRewrittenValueType(op->var_, op->value_->GetType(), new_value, new_var);
+      new_var = std::move(retyped);
+    }
+    var_remap_[op->var_.get()] = new_var;
+    // Rebuilt binder identities are canonical, not branch-local value facts.
+    // Keep them for legal pre-SSA uses after a result-free control-flow scope.
+    if (new_var != op->var_) definition_identities_[op->var_.get()] = new_var;
+    if (new_value == op->value_ && new_var == op->var_) return op;
+    auto result = MutableCopy(op);
+    result->value_ = std::move(new_value);
+    result->var_ = std::move(new_var);
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto condition = VisitExpr(op->condition_);
+    auto then_body = VisitScopedBody(op->then_body_);
+    auto else_body = op->else_body_;
+    if (else_body) else_body = VisitScopedBody(*else_body);
+    auto return_vars = RewriteDefinitions(op->return_vars_);
+    if (condition == op->condition_ && then_body == op->then_body_ && else_body == op->else_body_ &&
+        return_vars == op->return_vars_) {
+      return op;
+    }
+    auto result = MutableCopy(op);
+    result->condition_ = std::move(condition);
+    result->then_body_ = std::move(then_body);
+    result->else_body_ = std::move(else_body);
+    result->return_vars_ = std::move(return_vars);
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    auto start = VisitExpr(op->start_);
+    auto stop = VisitExpr(op->stop_);
+    auto step = VisitExpr(op->step_);
+    auto mark = definition_log_.size();
+    auto loop_var = RewriteDefinition(op->loop_var_);
+    auto iter_args = RewriteDefinitions(op->iter_args_);
+    auto body_mark = definition_log_.size();
+    auto body = VisitStmt(op->body_);
+    LeaveLoopScope(mark, body_mark, op->return_vars_.empty());
+    auto return_vars = RewriteDefinitions(op->return_vars_);
+    if (start == op->start_ && stop == op->stop_ && step == op->step_ && loop_var == op->loop_var_ &&
+        iter_args == op->iter_args_ && body == op->body_ && return_vars == op->return_vars_) {
+      return op;
+    }
+    auto result = MutableCopy(op);
+    result->start_ = std::move(start);
+    result->stop_ = std::move(stop);
+    result->step_ = std::move(step);
+    result->loop_var_ = std::move(loop_var);
+    result->iter_args_ = std::move(iter_args);
+    result->body_ = std::move(body);
+    result->return_vars_ = std::move(return_vars);
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    auto mark = definition_log_.size();
+    auto iter_args = RewriteDefinitions(op->iter_args_);
+    auto condition = VisitExpr(op->condition_);
+    auto body_mark = definition_log_.size();
+    auto body = VisitStmt(op->body_);
+    LeaveLoopScope(mark, body_mark, op->return_vars_.empty());
+    auto return_vars = RewriteDefinitions(op->return_vars_);
+    if (iter_args == op->iter_args_ && condition == op->condition_ && body == op->body_ &&
+        return_vars == op->return_vars_) {
+      return op;
+    }
+    auto result = MutableCopy(op);
+    result->iter_args_ = std::move(iter_args);
+    result->condition_ = std::move(condition);
+    result->body_ = std::move(body);
+    result->return_vars_ = std::move(return_vars);
+    return result;
+  }
+
+ private:
+  template <typename Node>
+  std::shared_ptr<const Node> RewriteDefinition(const std::shared_ptr<const Node>& var) {
+    auto previous = var_remap_.find(var.get());
+    ExprPtr old_mapping = previous != var_remap_.end() ? previous->second : nullptr;
+    // Definitions shadow enclosing value aliases, but their dependent types
+    // still follow the current scope's substitutions.
+    auto identity = definition_identities_.find(var.get());
+    ExprPtr definition;
+    if (previous == var_remap_.end() && identity != definition_identities_.end()) {
+      definition = identity->second;
+    } else {
+      definition = IRMutator::VisitExpr_(var);
+    }
+    auto rewritten = std::dynamic_pointer_cast<const Node>(definition);
+    INTERNAL_CHECK_SPAN(rewritten, var->span_) << "Simplify: definition changed node kind";
+    definition_log_.emplace_back(var.get(), std::move(old_mapping));
+    var_remap_[var.get()] = rewritten;
+    // Result binders can escape result-free parent scopes too. IterArgs keep
+    // their scope-specific seeds and are deliberately excluded from this cache.
+    if constexpr (std::is_same_v<Node, Var>) {
+      if (rewritten != var) definition_identities_[var.get()] = rewritten;
+    }
+    return rewritten;
+  }
+
+  template <typename Ptr>
+  std::vector<Ptr> RewriteDefinitions(const std::vector<Ptr>& vars) {
+    std::vector<Ptr> result;
+    result.reserve(vars.size());
+    for (const auto& var : vars) result.push_back(RewriteDefinition(var));
+    return result;
+  }
+
+  void RestoreDefinition(const Expr* key, const ExprPtr& previous) {
+    if (previous) {
+      var_remap_[key] = previous;
+    } else {
+      var_remap_.erase(key);
+    }
+  }
+
+  void LeaveLoopScope(size_t mark, size_t body_mark, bool leaks_body) {
+    if (!leaks_body) {
+      RestoreDefinitions(mark);
+      return;
+    }
+    // Match pre-SSA leak mode: body definitions escape a loop with no result
+    // variables, but the induction variable and carries remain loop-local.
+    for (size_t i = body_mark; i > mark; --i) {
+      const auto& [key, previous] = definition_log_[i - 1];
+      RestoreDefinition(key, previous);
+    }
+  }
+
+  StmtPtr VisitScopedBody(const StmtPtr& body) {
+    auto mark = definition_log_.size();
+    auto result = VisitStmt(body);
+    RestoreDefinitions(mark);
+    return result;
+  }
+
+  void RestoreDefinitions(size_t mark) {
+    // Undo only definitions introduced here. Each entry is pushed and popped
+    // once, avoiding a full remap-table copy for every nested branch or loop.
+    while (definition_log_.size() > mark) {
+      const auto& [key, previous] = definition_log_.back();
+      RestoreDefinition(key, previous);
+      definition_log_.pop_back();
+    }
+  }
+
+  // Scoped shadows take precedence over this identity cache, and enclosing
+  // value aliases still win in sibling scopes where the definition is absent.
+  std::unordered_map<const Expr*, ExprPtr> definition_identities_;
+  std::vector<std::pair<const Expr*, ExprPtr>> definition_log_;
+  const std::unordered_map<const Expr*, ExprPtr>& enclosing_remap_;
+  const std::unordered_set<const Var*>& multi_assigned_;
+};
 
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
   SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned,
-                  ReturnVarEscapeIndex* escapes)
-      : IRMutatorWithAnalyzer(analyzer), multi_assigned_(std::move(multi_assigned)), escapes_(escapes) {}
+                  std::unordered_set<const Var*> redefined, ReturnVarEscapeIndex* escapes,
+                  bool constants_only)
+      : IRMutatorWithAnalyzer(analyzer),
+        multi_assigned_(std::move(multi_assigned)),
+        redefined_(std::move(redefined)),
+        escapes_(escapes),
+        constants_only_(constants_only) {}
+
+  /// Reconcile all domain links once, after their sizes have been resolved.
+  /// A single function-wide non-evaluating sweep avoids repeatedly walking
+  /// nested domains and never simplifies arithmetic in retained dead bodies.
+  StmtPtr RemapFinalizedWindows(const StmtPtr& body) {
+    if (finalized_windows_.empty()) return body;
+    UnreachableBodyRemapper remapper(finalized_windows_, multi_assigned_);
+    return remapper.VisitStmt(body);
+  }
 
   /// Fold scalar constant bindings at every Var leaf. Reached via the base
   /// IRMutator's qualified ExprFunctor::VisitExpr dispatch when walking Call
@@ -298,7 +579,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = var_remap_.find(op.get());
     ExprPtr remapped = (it != var_remap_.end()) ? it->second : op;
-    return analyzer_->Simplify(remapped);
+    return SimplifyValue(remapped);
   }
 
   ExprPtr VisitExpr_(const IterArgPtr& op) override {
@@ -307,6 +588,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // could mint an undeclared clone when folding a MemRef offset in a branch.
     return VisitExpr_(std::static_pointer_cast<const Var>(op));
   }
+
+  ExprPtr VisitExpr_(const MemRefPtr& op) override { return RebindAllocatedMemRef(op); }
 
   /// Refresh the Call's result type_ so the in-memory IR matches what a
   /// fresh parse would produce (needed for roundtrip structural equality).
@@ -323,7 +606,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = std::dynamic_pointer_cast<const Call>(base);
-    if (IsOp(call, "tensor.view")) {
+    if (!constants_only_ && IsOp(call, "tensor.view")) {
       base = SimplifyTensorView(call);
     }
     auto new_type = SimplifyType(base->GetType());
@@ -340,11 +623,86 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// (Call, MakeTuple), so an Add buried inside a shape arg would otherwise
   /// reach downstream with patterns like `K + 0` un-folded.
   ExprPtr VisitBinaryExpr_(const BinaryExprPtr& op) override {
-    return analyzer_->Simplify(IRMutator::VisitBinaryExpr_(op));
+    return FoldProvableComparison(SimplifyValue(IRMutator::VisitBinaryExpr_(op)));
+  }
+
+  /// Replace `loop_var OP constant` with a literal when the loop's static range
+  /// decides it. IfStmt conditions already fold through Fold A, but a predicate
+  /// passed as a call argument (e.g. the `tile.matmul_acc` init_cond that
+  /// pipeline replication produces, `ko + 128 == 0`, which the rewriter turns
+  /// into `ko == -128`) only got expression rewriting.
+  ///
+  /// Deliberately limited to the static-bound case, because the analyzer's bounds
+  /// are unsound at the int64 edges and under narrow-dtype wrap, and a missed fold
+  /// is always safe while a wrong literal is a miscompile:
+  ///   - the operand is a loop variable in static_loop_ranges_ (INDEX, constant
+  ///     INDEX bounds, no other definition), compared against an INDEX constant
+  ///     (a narrower literal can hold an out-of-range value that wraps);
+  ///   - the decision compares the header range [start, stop - 1], which holds
+  ///     every value the variable takes, with the constant -- never the analyzer's
+  ///     bound, which an enclosing `if` can tighten from a wrapping operand.
+  ExprPtr FoldProvableComparison(const ExprPtr& expr) {
+    if (constants_only_) return expr;
+    auto cmp = As<BinaryExpr>(expr);
+    // A comparison built through the bindings may carry a non-BOOL dtype; a
+    // ConstBool would not type-check where such a value is used.
+    if (!cmp || GetScalarDtype(expr) != DataType::BOOL) return expr;
+    // Normalize to `var OP constant`; a constant on the left mirrors the order.
+    VarPtr var = AsVarLike(cmp->left_);
+    auto constant = As<ConstInt>(cmp->right_);
+    bool mirrored = false;
+    if (!var || !constant) {
+      var = AsVarLike(cmp->right_);
+      constant = As<ConstInt>(cmp->left_);
+      mirrored = true;
+    }
+    if (!var || !constant || constant->dtype() != DataType::INDEX) return expr;
+    auto range = static_loop_ranges_.find(var.get());
+    if (range == static_loop_ranges_.end()) return expr;
+
+    const int64_t lo = range->second.first;
+    const int64_t hi = range->second.second;
+    const int64_t c = constant->value_;
+
+    // With the constant on the left, `c < v` is `v > c`: swap the ordering kinds.
+    bool lt = As<Lt>(expr) != nullptr;
+    bool le = As<Le>(expr) != nullptr;
+    bool gt = As<Gt>(expr) != nullptr;
+    bool ge = As<Ge>(expr) != nullptr;
+    if (mirrored) {
+      std::swap(lt, gt);
+      std::swap(le, ge);
+    }
+    // `always`: every value in [lo, hi] satisfies `var OP c`; `never`: none does.
+    // Neither means the range admits both outcomes, and the comparison stays.
+    bool always = false;
+    bool never = false;
+    if (As<Eq>(expr)) {
+      always = lo == c && hi == c;
+      never = c < lo || c > hi;
+    } else if (As<Ne>(expr)) {
+      always = c < lo || c > hi;
+      never = lo == c && hi == c;
+    } else if (lt) {
+      always = hi < c;
+      never = lo >= c;
+    } else if (le) {
+      always = hi <= c;
+      never = lo > c;
+    } else if (gt) {
+      always = lo > c;
+      never = hi <= c;
+    } else if (ge) {
+      always = lo >= c;
+      never = hi < c;
+    }
+    if (always) return std::make_shared<ConstBool>(true, expr->span_);
+    if (never) return std::make_shared<ConstBool>(false, expr->span_);
+    return expr;
   }
 
   ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op) override {
-    return analyzer_->Simplify(IRMutator::VisitUnaryExpr_(op));
+    return SimplifyValue(IRMutator::VisitUnaryExpr_(op));
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -355,16 +713,15 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // Register scalar assignments with the analyzer so downstream expressions
     // can be folded or proven. Two binding strengths:
     //
-    //   * Full bind (BindScalar) — the literal is substituted into later uses.
-    //     Restricted to constant RHS at function-body top level: this is the
-    //     established constant-propagation behavior. Substituting a literal
-    //     into a Call arg inside a loop body would both churn downstream IR
-    //     and surface a printer roundtrip gap (a bare integer literal loses
-    //     its dtype on reparse), so it is intentionally not done there.
+    //   * Full bind (BindScalar) — a proven constant is substituted into later
+    //     uses in its region, including Call arguments and type metadata.
+    //     Nested constants have the same value on every execution of their
+    //     definition; the binding is scoped to that region, not to a loop's
+    //     IterArg initial value or a branch's merged result.
     //   * Bound-only (BindScalarBound) — only a ConstIntBound is registered,
     //     no substitution. Applied to symbolic RHS (e.g. a loop-derived
-    //     `ob_idx * 256 + 256`) and to constants inside nested scopes. Enough
-    //     to prove dead branch guards like `if expr == 0` without inlining the
+    //     `ob_idx * 256 + 256`). Enough to prove dead branch guards like
+    //     `if expr == 0` without inlining the
     //     scalar into every use site.
     //
     // Both kinds are logged in scalar_binding_log_ so the For/If/While/Spmd
@@ -374,7 +731,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // Skip a Var that MultiAssignCollector flagged as assigned more than once:
     // a later assignment would invalidate the value bound here.
     if (As<ScalarType>(new_type) && multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
-      if (IsConstScalar(new_value) && scope_depth_ == 0) {
+      if (IsConstScalar(new_value)) {
         BindScalar(new_var, new_value);
       } else {
         BindScalarBound(new_var, new_value);
@@ -393,11 +750,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_stop = SimplifyExpr(op->stop_);
     auto new_step = SimplifyExpr(op->step_);
 
-    // Rebuild iter_args before visiting the body so body references pick up
-    // the remapped IterArg identity.
+    // Seed the whole header before rebuilding its types: storage metadata on
+    // an earlier tensor carry may reference a later scalar carry.
     bool iter_args_changed = false;
-    auto new_iter_args = RebuildVec(
-        op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
+    auto new_iter_args = RebuildIterArgs(op->iter_args_, &iter_args_changed);
 
     auto start_ci = As<ConstInt>(new_start);
     auto stop_ci = As<ConstInt>(new_stop);
@@ -418,7 +774,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // captured trip counts like `for k in pl.range(C, C + 1)` collapse the
     // same way `pl.range(0, 1)` does.
     const bool is_pure_for = op->attrs_.empty() && op->kind_ == ForKind::Sequential;
-    if (is_pure_for && analyzer_->CanProveGreaterEqual(new_step, 1)) {
+    if (!constants_only_ && is_pure_for && analyzer_->CanProveGreaterEqual(new_step, 1)) {
       const Span& sp = op->span_;
       int trips = -1;
       if (analyzer_->CanProve(MakeLe(new_stop, new_start, sp))) {
@@ -443,7 +799,17 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       // The depth cap keeps a chain of nested single-trip loops from cloning
       // the remaining nest once per level (see kMaxNestedSingleTripFolds); past
       // it the loop falls through to the general path and stays a ForStmt.
-      if (trips == 1 && fold_b_depth_ < kMaxNestedSingleTripFolds) {
+      // Empty Require loops need no hardware evidence. Nonempty ones must
+      // survive for qualification, even when ordinary folding could unfold them.
+      if (trips == 1 && op->hardware_loop_policy_ == HardwareLoopPolicy::Auto &&
+          fold_b_depth_ < kMaxNestedSingleTripFolds && !HasEffectfulYield(op->body_) &&
+          std::none_of(
+              new_iter_args.begin(), new_iter_args.end(),
+              [](const IterArgPtr& arg) {
+                // Substituting an effectful init could introduce a call into an
+                // otherwise harmless yield (or duplicate it at other carry uses).
+                return transform_utils::ExprContainsCallLike(arg->initValue_);
+              })) {
         // Exactly one iteration: substitute loop_var → start and each
         // iter_arg → its init value via DeepClone (matches the substitution
         // pattern used by LoopUnrollMutator in unroll_loops_pass.cpp), then
@@ -469,6 +835,18 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         // and lets the re-visit below bind the body's scalars on identities
         // distinct from anything in the surrounding scope.
         auto cloned = DeepClone(op->body_, sub_map, /*clone_def_vars=*/true);
+        // The pre-pass indexes original Var identities. Carry its exclusion to
+        // fresh definitions so cloning cannot make a reassigned scalar bindable.
+        std::vector<const Var*> cloned_multi_assigned;
+        std::vector<const Var*> cloned_redefined;
+        for (const auto& [original, fresh] : cloned.var_map) {
+          if (multi_assigned_.count(original) && multi_assigned_.insert(fresh.get()).second) {
+            cloned_multi_assigned.push_back(fresh.get());
+          }
+          if (redefined_.count(original) && redefined_.insert(fresh.get()).second) {
+            cloned_redefined.push_back(fresh.get());
+          }
+        }
 
         // Snapshot var_remap_ around the cloned-body visit. MaybeRebuildVar
         // inserts entries keyed by the cloned-body's defining-Var raw pointers
@@ -496,6 +874,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
           FoldBDepthGuard fold_guard(fold_b_depth_);
           unrolled_body = VisitStmt(cloned.cloned_body);
         }
+        for (const auto* var : cloned_multi_assigned) multi_assigned_.erase(var);
+        for (const auto* var : cloned_redefined) redefined_.erase(var);
 
         var_remap_ = std::move(baseline_remap);
         return LiftBodyToReturnVars(unrolled_body, op->return_vars_, op.get());
@@ -503,6 +883,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     }
 
     bool bound = start_ci && stop_ci && stop_ci->value_ > start_ci->value_;
+    // See FoldProvableComparison for why each condition is required.
+    const bool static_loop_var =
+        bound && start_ci->dtype() == DataType::INDEX && stop_ci->dtype() == DataType::INDEX &&
+        GetScalarDtype(op->loop_var_) == DataType::INDEX && redefined_.count(op->loop_var_.get()) == 0 &&
+        static_loop_ranges_
+            .emplace(op->loop_var_.get(), std::make_pair(start_ci->value_, stop_ci->value_ - 1))
+            .second;
     if (bound) {
       analyzer_->Bind(op->loop_var_, start_ci->value_, stop_ci->value_);
     }
@@ -511,7 +898,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // (Fold A on a nested IfStmt or Fold B on a nested single-trip ForStmt)
     // record remaps from outer Vars to body-internal values; leaking those to
     // siblings of this ForStmt or to the parent scope produces dangling
-    // references. The MaybeRebuildIterArg additions made above stay in
+    // references. The RebuildIterArgs additions made above stay in
     // baseline_remap (they're valid in body and after).
     auto baseline_remap = var_remap_;
 
@@ -523,6 +910,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     if (bound) {
       analyzer_->Unbind(op->loop_var_);
     }
+    if (static_loop_var) static_loop_ranges_.erase(op->loop_var_.get());
 
     // Discard body-internal remaps — the For is being rebuilt, so the body's
     // SSA scope is preserved and outside code shouldn't see its private vars.
@@ -555,16 +943,63 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // arithmetic (e.g. `core_num=MAX // TILE` where both operands are closure
     // ints) may still need one simplify pass after SSA conversion.
     auto new_core_num = SimplifyExpr(op->core_num_);
+    // Before outlining, task dependencies and dispatch predicates live in
+    // scope attrs. Rewrite them under the enclosing carry mappings just like
+    // Submit operands, before visiting definitions local to the scope body.
+    auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
     auto new_body = VisitScopedBody(op->body_);
-    if (new_core_num.get() == op->core_num_.get() && new_body.get() == op->body_.get()) return op;
+    if (new_core_num.get() == op->core_num_.get() && new_body.get() == op->body_.get() && !attrs_changed) {
+      return op;
+    }
     auto result = MutableCopy(op);
     result->core_num_ = new_core_num;
     result->body_ = new_body;
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+    // Keep one identity while visiting the body: branch-local constraints must
+    // not specialize a domain-wide allocation. Its size may depend on scalars
+    // defined inside this body, so folding it before the body is too early.
+    for (const auto& slot : op->slots_) var_remap_[slot.get()] = slot;
+    auto new_body = VisitStmt(op->body_);
+    std::vector<WindowBufferPtr> new_slots;
+    new_slots.reserve(op->slots_.size());
+    bool slots_changed = false;
+    for (const auto& slot : op->slots_) {
+      var_remap_.erase(slot.get());
+      auto new_slot = As<WindowBuffer>(VisitExpr(slot));
+      INTERNAL_CHECK_SPAN(new_slot, op->span_)
+          << "Simplify: communication-domain slot mutated to non-WindowBuffer";
+      var_remap_[slot.get()] = new_slot;
+      var_remap_[new_slot.get()] = new_slot;
+      if (new_slot != slot) {
+        slots_changed = true;
+        finalized_windows_[slot.get()] = new_slot;
+        finalized_windows_[new_slot.get()] = new_slot;
+      }
+      new_slots.push_back(std::move(new_slot));
+    }
+    auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+    if (new_body == op->body_ && !slots_changed && !attrs_changed) return op;
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    result->slots_ = std::move(new_slots);
+    result->attrs_ = std::move(new_attrs);
     return result;
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto new_condition = SimplifyExpr(op->condition_);
+
+    // Prove reachability before visiting either body: folding an unreachable
+    // expression (e.g. x // 0 after inlining) can raise before Fold A drops it.
+    // Query outside either branch's constraint context so the proof uses only
+    // facts valid at entry. Preserve the constants-only mode's control flow.
+    const bool always_true = !constants_only_ && analyzer_->CanProve(new_condition);
+    const bool always_false =
+        !constants_only_ && !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
 
     // Snapshot var_remap_ so each branch's internal remap additions stay
     // scoped to that branch. Without this, a remap recorded inside the
@@ -587,10 +1022,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto scalar_mark = scalar_binding_log_.size();
 
     // Enter constraint scope for then branch (condition is known true).
-    StmtPtr new_then;
-    {
+    // Defer the unreachable body until we know whether the IfStmt survives.
+    StmtPtr new_then = op->then_body_;
+    if (!always_false) {
       auto ctx = analyzer_->GetConstraintContext(new_condition);
-      ScopeDepthGuard depth_guard(scope_depth_);
       new_then = VisitStmt(op->then_body_);
     }
     auto then_remap = std::move(var_remap_);
@@ -598,10 +1033,9 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     UnbindScalarsSince(scalar_mark);
 
     // Enter constraint scope for else branch (condition is known false → Not(condition)).
-    std::optional<StmtPtr> new_else;
-    if (op->else_body_.has_value()) {
+    std::optional<StmtPtr> new_else = op->else_body_;
+    if (!always_true && op->else_body_.has_value()) {
       auto ctx = analyzer_->GetConstraintContext(MakeNot(new_condition, new_condition->span_));
-      ScopeDepthGuard depth_guard(scope_depth_);
       new_else = VisitStmt(*op->else_body_);
     }
     auto else_remap = std::move(var_remap_);
@@ -612,18 +1046,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // True  → keep then_body_; drop else.
     // False → keep else_body_ if present, else replace with empty body
     //         (which is only valid when return_vars_ is empty per IR contract).
-    // When return_vars_ is non-empty, the kept branch's trailing YieldStmt is
-    // rewritten into AssignStmt(return_vars[i], yielded_value[i]) so SSA
-    // references after the IfStmt remain well-defined.
-    //
-    // CanProve is used instead of an `As<ConstBool>` check because the
-    // analyzer's constraint stack (loop-var bounds, scalar bindings, outer
-    // if-branch constraints) often establishes the polarity even when
-    // SimplifyExpr leaves the condition symbolic.
-    const bool always_true = analyzer_->CanProve(new_condition);
-    const bool always_false =
-        !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
-    if (always_true || always_false) {
+    // LiftBodyToReturnVars strips the kept branch's trailing YieldStmt and
+    // remaps or materializes its return_vars so later uses remain well-defined.
+    const auto selected_body = always_true ? new_then : new_else.value_or(nullptr);
+    if ((always_true || always_false) && !HasEffectfulYield(selected_body)) {
       StmtPtr kept;
       if (always_true) {
         kept = new_then;
@@ -639,15 +1065,49 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       return LiftBodyToReturnVars(kept, op->return_vars_, op.get());
     }
 
+    // An effectful yield can retain a proven IfStmt. Its dead body must still
+    // refer to the enclosing rebuilt binders, including references in types,
+    // but must not run through the analyzer or fold invalid arithmetic.
+    if (always_false || (always_true && new_else.has_value())) {
+      UnreachableBodyRemapper remapper(baseline_remap, multi_assigned_);
+      if (always_false) {
+        new_then = remapper.VisitStmt(op->then_body_);
+      } else {
+        new_else = remapper.VisitStmt(*op->else_body_);
+      }
+    }
+
+    // Branch-local mappings were discarded, but the merged result's own type
+    // must still follow enclosing binder rebuilds (for example an allocated
+    // offset naming a rebuilt loop carry). Rebuild under the common baseline,
+    // as ForStmt/WhileStmt do, so later leaf uses resolve to the same new binder.
+    // These are new definitions even when pre-SSA input reuses an old Var.
+    // Drop earlier value facts before rebuilding all result types, then bind
+    // every later use to the retained IfStmt's result rather than its old alias.
+    for (const auto& var : op->return_vars_) {
+      var_remap_.erase(var.get());
+      analyzer_->Unbind(var);
+    }
+    bool return_vars_changed = false;
+    auto new_return_vars = RebuildVec(
+        op->return_vars_,
+        [this](const auto& var) {
+          auto result = MaybeRebuildVar(var);
+          var_remap_[var.get()] = result;
+          return result;
+        },
+        &return_vars_changed);
+
     bool changed = (new_condition.get() != op->condition_.get()) ||
                    (new_then.get() != op->then_body_.get()) ||
                    (new_else.has_value() != op->else_body_.has_value()) ||
-                   (new_else.has_value() && new_else->get() != op->else_body_->get());
+                   (new_else.has_value() && new_else->get() != op->else_body_->get()) || return_vars_changed;
     if (!changed) return op;
     auto result = MutableCopy(op);
     result->condition_ = new_condition;
     result->then_body_ = new_then;
     result->else_body_ = new_else;
+    result->return_vars_ = std::move(new_return_vars);
     return result;
   }
 
@@ -661,8 +1121,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // the header kept the stale IterArg while all uses pointed at an
     // undefined clone (UseAfterDef).
     bool iter_args_changed = false;
-    auto new_iter_args = RebuildVec(
-        op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
+    auto new_iter_args = RebuildIterArgs(op->iter_args_, &iter_args_changed);
 
     auto new_condition = SimplifyExpr(op->condition_);
 
@@ -671,7 +1130,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // an IfStmt, Fold B on a single-trip ForStmt) records `outer_var -> body-local
     // value`. Leaking that past the loop rewrites post-loop uses of a leak-mode
     // body var into a value from one iteration's interior -- silently wrong, since
-    // the var is still in scope so no verifier flags it. The MaybeRebuildIterArg
+    // the var is still in scope so no verifier flags it. The RebuildIterArgs
     // additions above are captured in the baseline (they stay valid after the loop).
     auto baseline_remap = var_remap_;
     auto new_body = VisitScopedBody(op->body_);
@@ -774,7 +1233,56 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// ignores our Var rebuilds, so remap must run first.
   ExprPtr SimplifyExpr(const ExprPtr& e) {
     if (!e) return e;
-    return analyzer_->Simplify(VisitExpr(e));
+    return SimplifyValue(VisitExpr(e));
+  }
+
+  ExprPtr SimplifyValue(const ExprPtr& expr) {
+    auto folded = analyzer_->Simplify(expr);
+    return !constants_only_ || IsConstScalar(folded) ? folded : expr;
+  }
+
+  MemRefPtr RebindAllocatedMemRef(const MemRefPtr& memref) {
+    if (memref->is_pinned_ || var_remap_.empty()) return memref;
+    StorageVarRemapper remapper(var_remap_);
+    auto new_base = As<Var>(remapper.VisitExpr(memref->base_));
+    INTERNAL_CHECK_SPAN(new_base, memref->span_) << "Simplify: allocated MemRef base must remain a Var";
+    auto new_offset = memref->byte_offset_ ? remapper.VisitExpr(memref->byte_offset_) : nullptr;
+    auto new_index = memref->slot_index_;
+    if (new_index.has_value() && *new_index) new_index = remapper.VisitExpr(*new_index);
+    if (new_base == memref->base_ && new_offset == memref->byte_offset_ && new_index == memref->slot_index_) {
+      return memref;
+    }
+
+    // Recompute under the current var_remap_: loop headers add mappings and
+    // branch/loop exits restore them. Reuse a cached result only when its actual
+    // address expressions still match, with strict free-variable identities.
+    // This also lets Var and Call result types share one rebuilt MemRef even
+    // though rebinding an arithmetic address creates fresh expression nodes.
+    auto same_expr = [](const ExprPtr& lhs, const ExprPtr& rhs) {
+      return lhs == rhs || (lhs && rhs && structural_equal(lhs, rhs));
+    };
+    auto cached = rebound_memrefs_.find(memref);
+    if (cached != rebound_memrefs_.end()) {
+      const auto& previous = cached->second;
+      const bool same_index = new_index.has_value() == previous->slot_index_.has_value() &&
+                              (!new_index.has_value() || same_expr(*new_index, *previous->slot_index_));
+      if (new_base == previous->base_ && same_expr(new_offset, previous->byte_offset_) && same_index) {
+        return previous;
+      }
+    }
+    auto result = std::make_shared<MemRef>(memref->name_hint_, std::move(new_base), std::move(new_offset),
+                                           memref->size_, memref->span_, memref->is_pinned_,
+                                           memref->slot_count_, std::move(new_index));
+    rebound_memrefs_[memref] = result;
+    return result;
+  }
+
+  std::optional<MemRefPtr> SimplifyTypeMemRef(const std::optional<MemRefPtr>& memref, bool& changed) {
+    if (!memref.has_value()) return memref;
+    std::optional<MemRefPtr> rebound = RebindAllocatedMemRef(*memref);
+    changed = changed || rebound != memref;
+    return RemapPinnedMemRefExprs(
+        rebound, [this](const ExprPtr& expr) { return SimplifyExpr(expr); }, changed);
   }
 
   std::vector<ExprPtr> SimplifyExprVec(const std::vector<ExprPtr>& vec, bool* changed) {
@@ -795,8 +1303,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return out;
   }
 
-  /// Rebuild a TensorType or TileType with every embedded ExprPtr (shape,
-  /// stride, valid_shape, start_offset) passed through `SimplifyExpr`.
+  /// Rebuild a TensorType or TileType with its shape, stride, valid_shape,
+  /// start_offset and declared slot index passed through `SimplifyExpr`.
+  /// Resolved MemRefs retain their identity unless a binder is rebuilt; shared
+  /// address rebinding then keeps their types coherent without folding runtime
+  /// offsets. Their remaining symbolic address uses must stay live for DCE.
   ///
   /// Nothing is assumed about the variables inside them. Being a shape or a
   /// valid_shape makes the *field* an extent; it does not make every free
@@ -807,6 +1318,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     if (!type) return type;
     if (auto t = AsTensorTypeLike(type)) {
       bool changed = false;
+      auto new_memref = SimplifyTypeMemRef(t->memref_, changed);
       auto new_shape = SimplifyExprVec(t->shape_, &changed);
       std::optional<TensorView> new_tv = t->tensor_view_;
       if (t->tensor_view_.has_value()) {
@@ -841,13 +1353,14 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       }
       if (!changed) return type;
       if (auto distributed = As<DistributedTensorType>(type)) {
-        return std::make_shared<DistributedTensorType>(std::move(new_shape), t->dtype_, t->memref_,
+        return std::make_shared<DistributedTensorType>(std::move(new_shape), t->dtype_, new_memref,
                                                        std::move(new_tv), std::move(new_wb));
       }
-      return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv));
+      return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, new_memref, std::move(new_tv));
     }
     if (auto t = As<TileType>(type)) {
       bool changed = false;
+      auto new_memref = SimplifyTypeMemRef(t->memref_, changed);
       auto new_shape = SimplifyExprVec(t->shape_, &changed);
       std::optional<TileView> new_tv = t->tile_view_;
       if (t->tile_view_.has_value()) {
@@ -867,7 +1380,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         }
       }
       if (!changed) return type;
-      return std::make_shared<TileType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv),
+      return std::make_shared<TileType>(std::move(new_shape), t->dtype_, new_memref, std::move(new_tv),
                                         t->memory_space_);
     }
     if (auto t = As<TupleType>(type)) {
@@ -888,16 +1401,6 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   static bool IsConstScalar(const ExprPtr& e) {
     return e && (As<ConstInt>(e) || As<ConstFloat>(e) || As<ConstBool>(e));
   }
-
-  /// RAII increment of scope_depth_ for the lifetime of the guard. Wrapped
-  /// around loop / if-branch / while / spmd body visits.
-  struct ScopeDepthGuard {
-    int& depth;
-    explicit ScopeDepthGuard(int& d) : depth(d) { ++depth; }
-    ~ScopeDepthGuard() { --depth; }
-    ScopeDepthGuard(const ScopeDepthGuard&) = delete;
-    ScopeDepthGuard& operator=(const ScopeDepthGuard&) = delete;
-  };
 
   /// RAII increment of fold_b_depth_ for the lifetime of the guard. Wrapped
   /// around the re-visit of a Fold B clone. See kMaxNestedSingleTripFolds.
@@ -950,18 +1453,14 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     scalar_binding_log_.resize(mark);
   }
 
-  /// Visit a structural region's body with scope_depth_ incremented, then
-  /// unbind any scalars the body bound so their values do not leak to siblings
+  /// Visit a structural region's body, then unbind any scalars the body bound
+  /// so their values do not leak to siblings
   /// or to code after the region (pre-SSA soundness). Used for loop / while /
   /// spmd bodies; IfStmt branches manage the mark manually because both
   /// branches share one mark and interleave var_remap_ snapshots.
   StmtPtr VisitScopedBody(const StmtPtr& body) {
     auto scalar_mark = scalar_binding_log_.size();
-    StmtPtr new_body;
-    {
-      ScopeDepthGuard depth_guard(scope_depth_);
-      new_body = VisitStmt(body);
-    }
+    auto new_body = VisitStmt(body);
     UnbindScalarsSince(scalar_mark);
     return new_body;
   }
@@ -991,11 +1490,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// simplification (@p original_value_type) but are not any more.
   VarPtr AdoptValueType(const VarPtr& original_var, const TypePtr& original_value_type,
                         const ExprPtr& new_value, const VarPtr& new_var) {
-    const auto& value_type = new_value->GetType();
-    if (structural_equal(new_var->GetType(), value_type)) return new_var;
-    if (!structural_equal(original_var->GetType(), original_value_type)) return new_var;
-    auto retyped = std::make_shared<Var>(new_var->name_hint_, value_type, new_var->span_);
-    var_remap_[original_var.get()] = retyped;
+    auto retyped = MatchRewrittenValueType(original_var, original_value_type, new_value, new_var);
+    if (retyped != new_var) var_remap_[original_var.get()] = retyped;
     return retyped;
   }
 
@@ -1014,14 +1510,58 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return new_var;
   }
 
-  IterArgPtr MaybeRebuildIterArg(const IterArgPtr& ia) {
-    if (!ia) return ia;
-    auto new_type = SimplifyType(ia->GetType());
-    auto new_init = SimplifyExpr(ia->initValue_);
-    if (new_type.get() == ia->GetType().get() && new_init.get() == ia->initValue_.get()) return ia;
-    auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
-    var_remap_[ia.get()] = new_ia;
-    return new_ia;
+  std::vector<IterArgPtr> RebuildIterArgs(const std::vector<IterArgPtr>& iter_args, bool* changed) {
+    // Seeds belong to the enclosing scope, not the loop's carry scope. Fold
+    // all of them before installing this header's binder remaps.
+    std::vector<ExprPtr> new_inits;
+    new_inits.reserve(iter_args.size());
+    for (const auto& ia : iter_args) {
+      auto new_init = SimplifyExpr(ia->initValue_);
+      if (new_init != ia->initValue_) *changed = true;
+      new_inits.push_back(std::move(new_init));
+    }
+
+    // A discovery pass preserves every original identity for a no-op header.
+    // Once anything changes, clone the entire group: changing one binder can
+    // require another carry's type to change, independently of header order.
+    if (!*changed) {
+      for (const auto& ia : iter_args) {
+        if (SimplifyType(ia->GetType()) != ia->GetType()) {
+          *changed = true;
+          break;
+        }
+      }
+    }
+    if (!*changed) return iter_args;
+
+    // Only these unpublished construction shells are mutable. A real IterArg
+    // constructor gives each binder a fresh unique identity; MutableCopy is
+    // unsuitable for identity-bearing nodes. Rewrite visitors treat mapped
+    // carries as leaves; all types are finalized before visiting the body.
+    class HeaderIterArg final : public IterArg {
+     public:
+      using IterArg::IterArg;
+      void FinalizeType(TypePtr type) { type_ = std::move(type); }
+    };
+    std::vector<std::shared_ptr<HeaderIterArg>> fresh;
+    std::vector<IterArgPtr> result;
+    fresh.reserve(iter_args.size());
+    result.reserve(iter_args.size());
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      const auto& ia = iter_args[i];
+      auto new_ia =
+          std::make_shared<HeaderIterArg>(ia->name_hint_, ia->GetType(), std::move(new_inits[i]), ia->span_);
+      var_remap_[ia.get()] = new_ia;
+      fresh.push_back(new_ia);
+      result.push_back(std::move(new_ia));
+    }
+    // Every old -> fresh entry must exist before the first final type visit.
+    // In particular, allocated byte offsets and retained slot indices must
+    // refer to the declared fresh scalar even when its carry follows theirs.
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      fresh[i]->FinalizeType(SimplifyType(iter_args[i]->GetType()));
+    }
+    return result;
   }
 
   VarPtr LookupVarRemap(const Var* key) {
@@ -1076,25 +1616,36 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   std::unordered_set<const Var*> multi_assigned_;
+  /// See MultiAssignCollector::redefined.
+  std::unordered_set<const Var*> redefined_;
+  /// Trusted enclosing loop variables mapped to their header range [start, stop - 1]
+  /// (a step > 1 only skips values inside it). See FoldProvableComparison.
+  std::unordered_map<const Var*, std::pair<int64_t, int64_t>> static_loop_ranges_;
+
+  // Owning keys keep source MemRefs alive across type rewrites and temporary
+  // control-flow clones; a recycled raw pointer must never hit this cache.
+  std::unordered_map<MemRefPtr, MemRefPtr> rebound_memrefs_;
 
   /// Escape analysis for the return vars of foldable control-flow statements.
   /// Owned by TransformSimplify, valid for this mutator's lifetime.
   ReturnVarEscapeIndex* escapes_;
 
+  /// InitMemRef shares constant propagation without changing the control-flow
+  /// and carry structure used by the memory planner or unrelated symbolic math.
+  bool constants_only_;
+
   /// Scalar Vars bound via BindScalar / BindScalarBound, in bind order. Used
   /// by UnbindScalarsSince to scope bindings to the region they were made in.
   std::vector<VarPtr> scalar_binding_log_;
-
-  /// Structural nesting depth: 0 at function-body top level, incremented for
-  /// each enclosing loop / if-branch / while / spmd body. Gates full constant
-  /// substitution in VisitStmt_(AssignStmtPtr).
-  int scope_depth_ = 0;
 
   /// How many Fold B clones are on the stack above the statement being
   /// visited. 0 in the original function body; incremented for each enclosing
   /// re-visit of a Fold B clone. Gates further single-trip collapses, bounding
   /// the pass's cloning cost — see kMaxNestedSingleTripFolds.
   int fold_b_depth_ = 0;
+
+  /// Old domain slots and finalized replacements retained until the final sweep.
+  std::unordered_map<const Expr*, ExprPtr> finalized_windows_;
 
   /// Cap on Fold B's substitution depth: how many levels of *nested* single-trip
   /// loops one Simplify run collapses.
@@ -1117,16 +1668,18 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   static constexpr int kMaxNestedSingleTripFolds = 16;
 };
 
-FunctionPtr TransformSimplify(const FunctionPtr& func) {
-  MultiAssignCollector collector;
+FunctionPtr TransformSimplify(const FunctionPtr& func, bool constants_only) {
+  MultiAssignCollector collector(func->params_);
+  for (const auto& param : func->params_) collector.Define(param.get());
   collector.VisitStmt(func->body_);
 
   ReturnVarEscapeIndex escapes;
-  escapes.Index(func->body_);
+  if (!constants_only) escapes.Index(func->body_);
 
   auto analyzer = std::make_shared<arith::Analyzer>();
-  SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned), &escapes);
-  auto new_body = mutator.VisitStmt(func->body_);
+  SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned), std::move(collector.redefined),
+                          &escapes, constants_only);
+  auto new_body = mutator.RemapFinalizedWindows(mutator.VisitStmt(func->body_));
 
   // Final step: drop every dead yielded slot — IfStmt phi return_vars and
   // loop-carried iter_arg / return_var pairs — plus the matching yield slots,
@@ -1146,7 +1699,7 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   // the Call's Expr-valued attrs, so it is an ordinary use.
   auto flat = transform_utils::FlattenToStmts(new_body);
   auto pre_pruned = dce::EliminateDeadScalarAssignments(flat);
-  auto slot_pruned = dce::EliminateDeadYieldSlots(pre_pruned);
+  auto slot_pruned = constants_only ? pre_pruned : dce::EliminateDeadYieldSlots(pre_pruned);
   auto pruned = dce::EliminateDeadScalarAssignments(slot_pruned);
   bool dce_changed = pruned.size() != flat.size() ||
                      !std::equal(pruned.begin(), pruned.end(), flat.begin(),
@@ -1166,7 +1719,7 @@ ProgramPtr TransformSimplifyProgram(const ProgramPtr& program) {
   bool changed = false;
   for (auto& [gvar, func] : new_functions) {
     if (!func) continue;
-    auto transformed = TransformSimplify(func);
+    auto transformed = TransformSimplify(func, /*constants_only=*/false);
     if (transformed.get() != func.get()) {
       func = transformed;
       changed = true;
@@ -1177,6 +1730,14 @@ ProgramPtr TransformSimplifyProgram(const ProgramPtr& program) {
 }
 
 }  // namespace
+
+namespace transform_utils {
+
+FunctionPtr SimplifyFunction(const FunctionPtr& func, bool constants_only) {
+  return TransformSimplify(func, constants_only);
+}
+
+}  // namespace transform_utils
 
 namespace pass {
 

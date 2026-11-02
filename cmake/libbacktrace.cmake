@@ -36,6 +36,34 @@ set(LIBBACKTRACE_BUILD_DIR "${CMAKE_BINARY_DIR}/3rdparty/libbacktrace/build")
 file(MAKE_DIRECTORY ${LIBBACKTRACE_INSTALL_DIR}/include)
 file(MAKE_DIRECTORY ${LIBBACKTRACE_INSTALL_DIR}/lib)
 
+# Makefile generators use ExternalProject's default $(MAKE) commands for both
+# build and install, sharing the outer jobserver rather than resetting it with -j.
+# Ninja cannot lend its job slots to Make: give the dependency a finite local
+# budget instead. Resolve environment defaults on each configure, without caching
+# them, so a later configure can pick up a changed machine budget.
+set(_libbacktrace_build_options)
+if(NOT CMAKE_GENERATOR MATCHES "Makefiles")
+    set(_libbacktrace_build_jobs "1")
+    set(_libbacktrace_budget_source "PYPTO_EXTERNAL_BUILD_JOBS")
+    if(DEFINED PYPTO_EXTERNAL_BUILD_JOBS)
+        set(_libbacktrace_build_jobs "${PYPTO_EXTERNAL_BUILD_JOBS}")
+    elseif(NOT "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" STREQUAL "")
+        set(_libbacktrace_build_jobs "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
+        set(_libbacktrace_budget_source "CMAKE_BUILD_PARALLEL_LEVEL")
+    endif()
+
+    # In particular, an explicitly empty override must never become bare make -j.
+    if(NOT "${_libbacktrace_build_jobs}" MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR
+            "${_libbacktrace_budget_source} must be a positive integer, got "
+            "'${_libbacktrace_build_jobs}'")
+    endif()
+    set(_libbacktrace_build_options
+        BUILD_COMMAND make "-j${_libbacktrace_build_jobs}"
+        INSTALL_COMMAND make "-j${_libbacktrace_build_jobs}" install
+    )
+endif()
+
 ExternalProject_Add(project_libbacktrace
     PREFIX ${LIBBACKTRACE_BUILD_DIR}
     SOURCE_DIR ${LIBBACKTRACE_SOURCE_DIR}
@@ -43,8 +71,7 @@ ExternalProject_Add(project_libbacktrace
     CONFIGURE_COMMAND ${LIBBACKTRACE_SOURCE_DIR}/configure
     "--prefix=${LIBBACKTRACE_INSTALL_DIR}"
     --with-pic
-    BUILD_COMMAND make -j${CMAKE_BUILD_PARALLEL_LEVEL}
-    INSTALL_COMMAND make install
+    ${_libbacktrace_build_options}
     BUILD_BYPRODUCTS "${LIBBACKTRACE_INSTALL_DIR}/lib/libbacktrace.a"
     "${LIBBACKTRACE_INSTALL_DIR}/include/backtrace.h"
 )

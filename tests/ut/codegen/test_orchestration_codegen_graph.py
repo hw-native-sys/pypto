@@ -491,7 +491,7 @@ class _RegionAllocs:
         return c
 
 
-def _compile_orch(program) -> str:
+def _compile_orch(program, *, platform: str = "a2a3") -> str:
     """Compile one program for host_build_graph and return orchestration/main.cpp."""
     out_dir = tempfile.mkdtemp()
     with (
@@ -501,7 +501,7 @@ def _compile_orch(program) -> str:
         ),
         passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
     ):
-        ir_compile(program, skip_ptoas=False, platform="a2a3", output_dir=out_dir, dump_passes=False)
+        ir_compile(program, skip_ptoas=False, platform=platform, output_dir=out_dir, dump_passes=False)
     return (Path(out_dir) / "orchestration" / "main.cpp").read_text()
 
 
@@ -957,6 +957,122 @@ def test_a_boundary_writeback_never_becomes_a_block_scoped_rename():
     # No alias is minted at all: writer and post-block reader name the parameter.
     assert not re.search(r"const Tensor&\s+c__\w+\s*=", body), body
     assert body.count("add_inout(c);") == 3, body
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("scope", [False, True], ids=["explicit", "scope"])
+@pytest.mark.parametrize("context", ["external", "local", "prior", "sequential", "inout"])
+def test_graph_existing_output_keeps_call_site_dependency_semantics(tmp_path, platform, scope, context):
+    """Write-only Graph signatures must not force every call to InOut.
+
+    Both authoring forms must reach the existing direction rules: fresh outputs
+    use add_output(Tensor), while prior writers, sequential reuse and explicit
+    caller InOut preserve ordering. Compile against each platform's runtime ABI.
+    """
+    output_type = "pl.InOut" if context == "inout" else "pl.Out"
+    output_param = "" if context == "local" else f", out: {output_type}[pl.Tensor[[128, 128], pl.FP32]]"
+    prefix = "        out = pl.create_tensor([128, 128], dtype=pl.FP32)\n" if context == "local" else ""
+    if context == "prior":
+        prefix += "        out = self.copy(a, out)\n"
+    if scope:
+        launch = '        with pl.graph("layer"):\n            result = self.copy(a, out)\n'
+    else:
+        launch = "        result = self.layer(a, out)\n"
+    if context == "sequential":
+        launch = "        for i in pl.range(2):\n" + "".join(f"    {line}\n" for line in launch.splitlines())
+        launch += "            out = result\n"
+    returned = "out" if context == "sequential" else "result"
+    graph = (
+        ""
+        if scope
+        else """
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        result = self.copy(a, out)
+        return result
+"""
+    )
+    program = pl.parse_program(f"""@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def copy(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        x = pl.load(a, [0, 0], [128, 128])
+        return pl.store(x, [0, 0], out)
+{graph}
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[128, 128], pl.FP32]{output_param}) -> pl.Tensor[[128, 128], pl.FP32]:
+{prefix}{launch}        return {returned}
+""")
+    orch = _compile_orch(program, platform=platform)
+    entry = _entry_body(orch)
+    launch_args = re.search(r"GraphTaskArgs (\w+);(.*?)rt_submit_graph", entry, re.S)
+    assert launch_args is not None, entry
+    methods = re.findall(rf"{launch_args.group(1)}\.add_(input|output|inout)\(", launch_args.group(2))
+    expected = "output" if context in {"external", "local"} else "inout"
+    assert methods == ["input", expected], entry
+    assert "TensorCreateInfo" not in launch_args.group(2), entry
+    main_cpp = tmp_path / "main.cpp"
+    main_cpp.write_text(orch)
+    _assert_orchestration_compiles(main_cpp, arch=platform)
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("inout", [False, True])
+def test_graph_hoisted_write_only_view_remains_an_existing_output(tmp_path, platform, inout):
+    """A late-hoisted Out view must publish a writer, never become add_input.
+
+    Any dependency promotion on the original root remains present alongside
+    the added view. Changing the caller contract must not change view ownership.
+    """
+    output_type = "pl.InOut" if inout else "pl.Out"
+    program = pl.parse_program(f"""@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def copy(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        x = pl.load(a, [0, 0], [128, 128])
+        return pl.store(x, [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+        row: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[256, 128], pl.FP32]:
+        view = pl.slice(out, [128, 128], [row, 0])
+        result = self.copy(a, view)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        out: {output_type}[pl.Tensor[[256, 128], pl.FP32]],
+    ) -> pl.Tensor[[256, 128], pl.FP32]:
+        result = self.layer(a, out, 128)
+        return result
+""")
+    orch = _compile_orch(program, platform=platform)
+    entry = _entry_body(orch)
+    launch_args = re.search(r"GraphTaskArgs (\w+);(.*?)rt_submit_graph", entry, re.S)
+    assert launch_args is not None, entry
+    methods = re.findall(rf"{launch_args.group(1)}\.add_(input|output|inout)\(", launch_args.group(2))
+    assert methods == ["input", "inout" if inout else "output", "output"], entry
+    main_cpp = tmp_path / "main.cpp"
+    main_cpp.write_text(orch)
+    _assert_orchestration_compiles(main_cpp, arch=platform)
 
 
 if __name__ == "__main__":

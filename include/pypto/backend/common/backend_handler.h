@@ -22,6 +22,11 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
+
+namespace sync {
+class ResourceCatalog;
+}  // namespace sync
+
 namespace backend {
 
 class Backend;
@@ -144,6 +149,19 @@ class BackendHandler {
    */
   [[nodiscard]] virtual std::string GetPtoTargetArch() const = 0;
 
+  /// Logical VMI register capability. This is an IR/emitter capability, not
+  /// evidence that a particular installed assembler supports its lowering.
+  [[nodiscard]] virtual bool SupportsRegType(const ir::RegType& /*type*/) const { return false; }
+
+  /**
+   * @brief Borrow this backend's immutable synchronization resource catalog.
+   *
+   * Concrete backends define pool capacities and reservation policy. The catalog
+   * lives for the process lifetime; querying it neither changes the active
+   * backend nor allocates IDs or reads an installed toolchain.
+   */
+  [[nodiscard]] virtual const sync::ResourceCatalog& GetSyncResourceCatalog() const = 0;
+
   /**
    * @brief Method name used on `launch_spec` to set the per-task logical block count.
    *
@@ -210,6 +228,15 @@ class BackendHandler {
    * Ascend950 uses on-chip cross-core hardware and does not need it.
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
+
+  /**
+   * @brief Whether this backend enables local Vec software-pipeline lowering
+   *        for loops with runtime trip counts.
+   *
+   * False preserves the existing loop fallback; it does not describe hardware
+   * event capabilities or cross-core transport.
+   */
+  [[nodiscard]] virtual bool SupportsRuntimeBoundLocalSoftwarePipeline() const { return false; }
 
   /// Whether frontend pipes can size local consumer storage independently of
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.
@@ -336,6 +363,11 @@ class BackendHandler {
    * Ascend910: true. Ascend950: false.
    */
   [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
+
+  /// Maximum logical columns in one FP32 Acc -> FP32 NZ GM store; zero means
+  /// unsupported. Tiling and final emission must use the same instruction bound.
+  /// Source dtype, layout and full-parent-row legality are checked separately.
+  [[nodiscard]] virtual int GetAccToNzGmStoreMaxCols() const { return 0; }
 
   /**
    * @brief Whether the cube fix-pipe may store an Acc-resident tile straight

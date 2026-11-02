@@ -75,7 +75,7 @@ std::optional<size_t> WindowSourceArg(const CallPtr& call) {
       !call->args_.empty())
     return 0;
   if ((IsOp(call, "pld.tensor.all_to_all") || IsOp(call, "pld.tensor.allgather") ||
-       IsOp(call, "pld.tensor.all_to_all_v")) &&
+       IsOp(call, "pld.tensor.all_to_all_v") || IsOp(call, "pld.tensor.indexed_all_to_all_v")) &&
       call->args_.size() > 1)
     return 1;
   return std::nullopt;
@@ -899,6 +899,8 @@ class DispatchAnalyzer : public IRVisitor {
 
   void AnalyzeCollective(const CallPtr& op) {
     if (!op || !op->op_) return;
+    CHECK_SPAN(!IsOp(op, "pld.tensor.indexed_all_to_all_v"), op->span_)
+        << "indexed_all_to_all_v supports only L2 orchestration on A5 URMA; HOST is unsupported";
 
     if (IsOp(op, "pld.tensor.allreduce") || IsOp(op, "pld.tensor.broadcast") ||
         IsOp(op, "pld.tensor.reduce_scatter")) {

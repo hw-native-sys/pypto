@@ -305,5 +305,81 @@ def test_host_tensor_delegates_to_simpler():
     assert result is sentinel
 
 
+@pytest.mark.parametrize("backend", ["fork", "posix"])
+def test_host_control_accepts_existing_host_wire_tensor(backend):
+    from pypto.runtime.distributed_runner import _ChipCallables, add_chip_tensor_arg  # noqa: PLC0415
+    from simpler.buffer import (  # noqa: PLC0415
+        AccessMode,
+        BackendKind,
+        create_host_shared_buffer,
+        mint_owner_instance_id,
+        wrap_fork_inherited,
+    )
+    from simpler.task_interface import (  # noqa: PLC0415
+        DataType,
+        TaskArgs,
+        TensorArgType,
+        TensorTransfer,
+    )
+
+    source = torch.zeros(16, dtype=torch.float32).share_memory_()
+    if backend == "fork":
+        backing = wrap_fork_inherited(
+            source.data_ptr(),
+            source.numel() * source.element_size(),
+            mint_owner_instance_id(),
+            1,
+            access=AccessMode.READ,
+            backend_kind=BackendKind.FORK_SHM,
+        )
+    else:
+        backing = create_host_shared_buffer(64, mint_owner_instance_id(), 1, access=AccessMode.READ)
+    try:
+        wire = backing.tensor(shapes=(4,), dtype=DataType.FLOAT32, byte_offset=16)
+        callables = _ChipCallables()
+        callables.add("chip", object(), {"host_tensor_indices": [0]})
+        args = TaskArgs()
+        with patch("simpler_setup.torch_interop.make_tensor_arg", side_effect=AssertionError("wire rebuilt")):
+            add_chip_tensor_arg(args, _worker(3), wire, TensorArgType.INPUT, callables, "chip", 0)
+        assert args.tensor_count() == 1
+        assert args.tensor(0) == wire
+        assert args.transfer(0) == TensorTransfer.NONE
+    finally:
+        backing.close()
+
+
+def test_host_control_rejects_existing_device_wire_tensor():
+    from pypto.runtime.distributed_runner import _ChipCallables, add_chip_tensor_arg  # noqa: PLC0415
+    from simpler.buffer import mint_owner_instance_id, wrap_device_malloc  # noqa: PLC0415
+    from simpler.task_interface import DataType, TaskArgs, TensorArgType  # noqa: PLC0415
+
+    backing = wrap_device_malloc(0x1000, 16, mint_owner_instance_id(), 1)
+    wire = backing.tensor(shapes=(4,), dtype=DataType.FLOAT32)
+    callables = _ChipCallables()
+    callables.add("chip", object(), {"host_tensor_indices": [0]})
+    args = TaskArgs()
+    with pytest.raises(ValueError, match="host control tensor slot 0 requires a CPU tensor"):
+        add_chip_tensor_arg(args, _worker(3), wire, TensorArgType.INPUT, callables, "chip", 0)
+    assert args.tensor_count() == 0
+
+
+def test_existing_host_wire_keeps_default_transfer_outside_control_slot():
+    from pypto.runtime.distributed_runner import _ChipCallables, add_chip_tensor_arg  # noqa: PLC0415
+    from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id  # noqa: PLC0415
+    from simpler.task_interface import DataType, TaskArgs, TensorArgType, TensorTransfer  # noqa: PLC0415
+
+    backing = create_host_shared_buffer(16, mint_owner_instance_id(), 1)
+    try:
+        wire = backing.tensor(shapes=(4,), dtype=DataType.FLOAT32)
+        callables = _ChipCallables()
+        callables.add("chip", object(), {"host_tensor_indices": [1]})
+        args = TaskArgs()
+        add_chip_tensor_arg(args, _worker(3), wire, TensorArgType.INPUT, callables, "chip", 0)
+        assert args.tensor(0) == wire
+        assert args.transfer(0) == TensorTransfer.H2D
+    finally:
+        backing.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

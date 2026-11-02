@@ -58,7 +58,7 @@ std::optional<size_t> ResultAliasedArgIndex(const CallPtr& call) {
   // allgather / all_to_all / all_to_all_v take a read-only local operand first,
   // so their result window is argument 1; the rest reduce argument 0 in place.
   if (IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.all_to_all") ||
-      IsOp(call, "pld.tensor.all_to_all_v")) {
+      (IsOp(call, "pld.tensor.all_to_all_v") || IsOp(call, "pld.tensor.indexed_all_to_all_v"))) {
     return aliased(1);
   }
   if (IsOp(call, "pld.tensor.allreduce") || IsOp(call, "pld.tensor.reduce_scatter") ||

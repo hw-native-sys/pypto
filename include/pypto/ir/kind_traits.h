@@ -101,6 +101,7 @@ DEFINE_KIND_TRAIT(SplitAivScopeStmt, ObjectKind::SplitAivScopeStmt)
 DEFINE_KIND_TRAIT(RuntimeScopeStmt, ObjectKind::RuntimeScopeStmt)
 DEFINE_KIND_TRAIT(CommDomainScopeStmt, ObjectKind::CommDomainScopeStmt)
 DEFINE_KIND_TRAIT(GraphScopeStmt, ObjectKind::GraphScopeStmt)
+DEFINE_KIND_TRAIT(RegScopeStmt, ObjectKind::RegScopeStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
 DEFINE_KIND_TRAIT(BreakStmt, ObjectKind::BreakStmt)
@@ -113,6 +114,7 @@ DEFINE_KIND_TRAIT(VoidType, ObjectKind::VoidType)
 DEFINE_KIND_TRAIT(BufferType, ObjectKind::BufferType)
 DEFINE_KIND_TRAIT(MultiBufferType, ObjectKind::MultiBufferType)
 DEFINE_KIND_TRAIT(ScalarType, ObjectKind::ScalarType)
+DEFINE_KIND_TRAIT(RegType, ObjectKind::RegType)
 // ShapedType is both a concrete type and a base class - handled separately below
 // TensorType: precise-match (DistributedTensorType is a subclass with its own
 // ObjectKind, so As<TensorType>(dt) returns nullptr by design — see
@@ -161,6 +163,7 @@ struct KindTrait<Stmt> {
                                          ObjectKind::RuntimeScopeStmt,
                                          ObjectKind::CommDomainScopeStmt,
                                          ObjectKind::GraphScopeStmt,
+                                         ObjectKind::RegScopeStmt,
                                          ObjectKind::SeqStmts,
                                          ObjectKind::EvalStmt,
                                          ObjectKind::BreakStmt,
@@ -169,13 +172,13 @@ struct KindTrait<Stmt> {
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
-// ScopeStmt base class - matches any scope kind (8 derived classes)
+// ScopeStmt base class - matches any scope kind (9 derived classes)
 template <>
 struct KindTrait<ScopeStmt> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::InCoreScopeStmt,     ObjectKind::ClusterScopeStmt,
-                                         ObjectKind::HierarchyScopeStmt,  ObjectKind::SpmdScopeStmt,
-                                         ObjectKind::SplitAivScopeStmt,   ObjectKind::RuntimeScopeStmt,
-                                         ObjectKind::CommDomainScopeStmt, ObjectKind::GraphScopeStmt};
+  static constexpr ObjectKind kinds[] = {
+      ObjectKind::InCoreScopeStmt,     ObjectKind::ClusterScopeStmt,  ObjectKind::HierarchyScopeStmt,
+      ObjectKind::SpmdScopeStmt,       ObjectKind::SplitAivScopeStmt, ObjectKind::RuntimeScopeStmt,
+      ObjectKind::CommDomainScopeStmt, ObjectKind::GraphScopeStmt,    ObjectKind::RegScopeStmt};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
@@ -224,15 +227,25 @@ struct KindTrait<UnaryExpr> {
 // Type base class - matches any type kind
 template <>
 struct KindTrait<Type> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::UnknownType,    ObjectKind::VoidType,
-                                         ObjectKind::BufferType,     ObjectKind::MultiBufferType,
-                                         ObjectKind::MemRefType,     ObjectKind::PtrType,
-                                         ObjectKind::ScalarType,     ObjectKind::ShapedType,
-                                         ObjectKind::TensorType,     ObjectKind::DistributedTensorType,
-                                         ObjectKind::TileType,       ObjectKind::ArrayType,
-                                         ObjectKind::TupleType,      ObjectKind::WindowBufferType,
-                                         ObjectKind::CommCtxType,    ObjectKind::PrefetchAsyncContextType,
-                                         ObjectKind::AsyncEventType, ObjectKind::AsyncSessionType};
+  static constexpr ObjectKind kinds[] = {ObjectKind::UnknownType,
+                                         ObjectKind::VoidType,
+                                         ObjectKind::BufferType,
+                                         ObjectKind::MultiBufferType,
+                                         ObjectKind::MemRefType,
+                                         ObjectKind::PtrType,
+                                         ObjectKind::ScalarType,
+                                         ObjectKind::RegType,
+                                         ObjectKind::ShapedType,
+                                         ObjectKind::TensorType,
+                                         ObjectKind::DistributedTensorType,
+                                         ObjectKind::TileType,
+                                         ObjectKind::ArrayType,
+                                         ObjectKind::TupleType,
+                                         ObjectKind::WindowBufferType,
+                                         ObjectKind::CommCtxType,
+                                         ObjectKind::PrefetchAsyncContextType,
+                                         ObjectKind::AsyncEventType,
+                                         ObjectKind::AsyncSessionType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

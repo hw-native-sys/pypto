@@ -1281,11 +1281,15 @@ void OpConversionRegistry::RegisterMatmulOps() {
       "tensor.matmul",
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
-        (void)kwargs;
+        std::vector<std::pair<std::string, std::any>> tile_kwargs;
+        for (const auto& kwarg : kwargs) {
+          if (kwarg.first == "tf32_mode") tile_kwargs.push_back(kwarg);
+        }
         INTERNAL_CHECK_SPAN(args.size() == 2, span) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2;
         const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
-        return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
+        return ConversionResult{
+            OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, tile_kwargs, span)};
       },
       // Both targets of the rank dispatch above are named: an ND operand makes
       // this a tile.batch_matmul, so deriving from tile.matmul alone would read
@@ -1341,7 +1345,10 @@ void OpConversionRegistry::RegisterMatmulOps() {
       "tensor.matmul_acc",
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
-        (void)kwargs;
+        std::vector<std::pair<std::string, std::any>> tile_kwargs;
+        for (const auto& kwarg : kwargs) {
+          if (kwarg.first == "tf32_mode") tile_kwargs.push_back(kwarg);
+        }
         INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
             << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs) or 4 with init_cond";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
@@ -1354,7 +1361,7 @@ void OpConversionRegistry::RegisterMatmulOps() {
         // later, in FlattenTileNdTo2D, for a reason unrelated to init_cond — the
         // per-batch accumulator is a strided L0C row window the MAD cannot address.)
         if (args.size() == 4) out_args.push_back(args[3]);
-        return ConversionResult{OpRegistry::GetInstance().Create(out_op, out_args, span)};
+        return ConversionResult{OpRegistry::GetInstance().Create(out_op, out_args, tile_kwargs, span)};
       },
       // Same M boxing as tensor.matmul, on *both* cube tiles the M axis runs
       // through. tile.matmul_acc requires the accumulator and the product to
@@ -2707,6 +2714,21 @@ void OpConversionRegistry::RegisterCmpOps() {
       auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
       auto var = std::make_shared<Var>(name, call->GetType(), span);
       prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+      // The packed predicate inherits the lhs valid region. Full 0/1 tiles
+      // would ask TSEL to read mask bits outside that region on a tail tile.
+      // Keep the logical element extents here, not the mask's packed byte width.
+      // set_validshape is 2D-only. Do not turn an expanded lhs broadcast
+      // into a partial result; that path still needs broadcast-aware masks.
+      const auto valid_shape = GetValidShape(lhs_tile);
+      if (result_shape.size() == 2 && ValidExtentsEqual(lhs_tile->shape_, result_shape) &&
+          !ValidExtentsEqual(valid_shape, result_shape)) {
+        std::vector<ExprPtr> valid_args = {var};
+        valid_args.insert(valid_args.end(), valid_shape.begin(), valid_shape.end());
+        auto valid_call = op_reg.Create("tile.set_validshape", valid_args, span);
+        auto valid_var = std::make_shared<Var>(name + "_valid", valid_call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(valid_var, valid_call, span));
+        return valid_var;
+      }
       return var;
     };
     auto one_var = make_full(1.0, "cmp_one");

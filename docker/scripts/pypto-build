@@ -1,0 +1,208 @@
+#!/bin/bash
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+#
+# Build the bind-mounted PyPTO checkout (and simpler) inside the dev image.
+#
+#   pypto-build                 build pypto, then install ./runtime (simpler)
+#   pypto-build --pypto-only    skip simpler — enough for UT / codegen work
+#   pypto-build --clean         drop the CMake cache first
+#
+# Native CMake, deliberately, not `pip install -e .`: python/bindings/CMakeLists.txt
+# branches on SKBUILD_MODE, and a scikit-build-configured build/ puts the
+# extension in build/python/bindings/ instead of python/pypto/. With that cache
+# in place every later `cmake --build build` succeeds while Python keeps
+# importing a stale python/pypto/pypto_core.*.so — C++ edits appear to do
+# nothing at all.
+set -euo pipefail
+
+pypto_only=false
+clean=false
+for arg in "$@"; do
+    case "$arg" in
+        --pypto-only) pypto_only=true ;;
+        --clean) clean=true ;;
+        -h|--help) echo 'Usage: pypto-build [--pypto-only] [--clean]'; exit 0 ;;
+        *) echo "pypto-build: unknown argument '$arg'" >&2; exit 2 ;;
+    esac
+done
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYPTO_HOME="${PYPTO_HOME:-/opt/pypto}" PYPTO_SRC="${PYPTO_SRC:-/workspace/pypto}"
+source "$here/pypto-owner.sh"
+source "$here/pypto-activate.sh"
+
+if [ ! -f "$PYPTO_SRC/CMakeLists.txt" ]; then
+    echo "pypto-build: no PyPTO checkout at $PYPTO_SRC" >&2
+    echo "  Mount one:  docker run -v /path/to/pypto:/workspace/pypto ..." >&2
+    echo "  Or point PYPTO_SRC at where it is mounted." >&2
+    exit 1
+fi
+# Only source-writing work drops privileges. Keep the image's Python environment
+# owned by its original user: chowning it would copy large image layers and alter
+# the ownership of bundled Git caches. Build a wheel as the source owner, then
+# install that completed artifact with the caller's original privileges.
+source_uid="$(stat -c %u "$PYPTO_SRC")"
+if [ "$(id -u)" = 0 ] && [ "$source_uid" != 0 ]; then
+    source_gid="$(stat -c %g "$PYPTO_SRC")"
+    wheel_dir="$(mktemp -d)"
+    trap 'rm -rf "$wheel_dir"' EXIT
+    install -d -o "$source_uid" -g "$source_gid" "$wheel_dir" \
+        "$PYPTO_HOME/cache/ccache/$source_uid"
+    pypto_as_checkout_owner "$PYPTO_SRC" env PYPTO_RUNTIME_WHEEL_DIR="$wheel_dir" \
+        bash "$here/pypto-build" "$@"
+    if ! $pypto_only; then
+        wheels=("$wheel_dir"/*.whl)
+        [ "${#wheels[@]}" = 1 ] && [ -f "${wheels[0]}" ] || {
+            echo 'pypto-build: expected exactly one completed runtime wheel' >&2; exit 1;
+        }
+        uv pip install --python "$PYPTO_HOME/venv/bin/python" --no-cache \
+            --reinstall-package simpler "${wheels[0]}"
+        python -c 'import simpler.task_interface; print("simpler ok")'
+    fi
+    exit 0
+fi
+cd "$PYPTO_SRC"
+
+# Load the machine cap independently of the caller's request, including the
+# conservative default when the checkout has no machine profile.
+requested_jobs="${PYPTO_BUILD_JOBS:-}"
+if [ -n "$requested_jobs" ]; then
+    [[ "$requested_jobs" =~ ^[1-9][0-9]*$ ]] || {
+        echo 'PYPTO_BUILD_JOBS must be a positive integer' >&2; exit 2;
+    }
+fi
+unset PYPTO_BUILD_JOBS
+source .claude/skills/testing/load-env.sh
+jobs="$PYPTO_BUILD_JOBS"
+if [ -n "$requested_jobs" ]; then
+    if [ "$requested_jobs" -lt "$jobs" ]; then jobs="$requested_jobs"; fi
+fi
+export PYPTO_BUILD_JOBS="$jobs" CMAKE_BUILD_PARALLEL_LEVEL="$jobs" MAX_JOBS="$jobs"
+export MAKEFLAGS="-j$jobs"
+
+# ---------------------------------------------------------------------------
+# ccache, when the image has it (the `sim` layer installs it; the lean
+# on-device image does not, because it needs apt).
+#
+# Split by what actually decides an object's ABI. simpler links pto-isa, so its
+# objects must be isolated by the pinned pto-isa commit: reusing objects built
+# against an older pin produces a non-deterministic segfault inside
+# simpler_setup/kernel_compiler.py — a cache-poisoning signature that reads as a
+# code bug. Upstream CI scopes this with CCACHE_NAMESPACE, which needs
+# ccache >= 4.8; jammy ships 4.5.1 and drops the variable silently, so the pin
+# goes in the cache *path* instead, which every ccache understands. pypto's own
+# objects never see pto-isa, so they keep one cache across pin bumps.
+#
+# Nothing depends on this: without ccache, ninja's incremental build in the
+# mounted build/ dir still makes repeat builds cheap.
+# ---------------------------------------------------------------------------
+cache_root="${PYPTO_HOME}/cache/ccache/$(id -u)"
+pin="$(cat runtime/pto_isa.pin 2>/dev/null || echo unpinned)"
+export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-20G}"
+mkdir -p "$cache_root/pypto" "$cache_root/simpler-$pin" 2>/dev/null || true
+
+if $clean; then
+    rm -rf build
+fi
+if [ -f build/CMakeCache.txt ] && grep -q '^SKBUILD' build/CMakeCache.txt; then
+    echo "==> build/ was configured by scikit-build (pip); reconfiguring natively"
+    rm -rf build
+fi
+
+echo "==> building pypto ($jobs jobs, $CXX)"
+export CCACHE_DIR="$cache_root/pypto"
+# Cache paths alone cannot identify a host build: linked worktrees keep their
+# original paths in the container. Record the environment and actual cached
+# compiler binaries after a successful build. Record file metadata too, so a
+# subsequent host build cannot silently replace objects while leaving the cache
+# unchanged. Hostnames, PATH ordering, ownership and ctime are deliberately
+# excluded: they change across equivalent containers/image layers. Reset objects
+# as well as CMake state on a mismatch.
+build_fingerprint() {
+    {
+        printf '%s\0' pypto-build-v2 "$(pwd -P)" \
+            "$CC" "$CXX" "${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+            "${CFLAGS:-}" "${CXXFLAGS:-}" "${CPPFLAGS:-}" "${LDFLAGS:-}" \
+            "${CMAKE_TOOLCHAIN_FILE:-}" "${CMAKE_C_COMPILER_LAUNCHER:-}" \
+            "${CMAKE_CXX_COMPILER_LAUNCHER:-}"
+        sha256sum build/CMakeCache.txt /etc/os-release || return 1
+        local language compiler
+        for language in C CXX; do
+            compiler="$(sed -n "s/^CMAKE_${language}_COMPILER:[^=]*=//p" build/CMakeCache.txt)"
+            if [ -n "$compiler" ]; then sha256sum "$compiler" || return 1; fi
+        done
+        find build -type f ! -name .pypto-build-fingerprint -printf '%p %s %T@\0' | sort -z || return 1
+        if [ -d python/pypto ]; then
+            find python/pypto -maxdepth 1 -name 'pypto_core*.so' -printf '%p %s %T@\0' | sort -z || return 1
+        fi
+        if [ -n "${CMAKE_TOOLCHAIN_FILE:-}" ]; then
+            sha256sum "$CMAKE_TOOLCHAIN_FILE" || return 1
+        fi
+        cmake --version
+    } | sha256sum
+}
+
+generator=Ninja
+if [ -f build/CMakeCache.txt ]; then
+    generator="$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' build/CMakeCache.txt)"
+    generator="${generator:-Ninja}"
+    cached_source="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' build/CMakeCache.txt)"
+    cached_build="$(sed -n 's/^CMAKE_CACHEFILE_DIR:INTERNAL=//p' build/CMakeCache.txt)"
+    source_dir="$(pwd -P)"
+    if [ "$cached_source" != "$source_dir" ] || [ "$cached_build" != "$source_dir/build" ] \
+        || [ ! -f build/.pypto-build-fingerprint ] \
+        || ! fingerprint="$(build_fingerprint)" \
+        || [ "$(cat build/.pypto-build-fingerprint)" != "$fingerprint" ]; then
+        echo "==> build/ has an unknown or changed toolchain/build state; rebuilding"
+        rm -rf build
+    fi
+fi
+cmake -B build -G "$generator" \
+    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+    -Dnanobind_DIR="$(python -c 'import nanobind; print(nanobind.cmake_dir())')"
+cmake --build build --parallel "$jobs"
+build_fingerprint > build/.pypto-build-fingerprint
+
+python -c 'import pypto.language as pl; print(f"pypto ok — {len(pl.__all__)} exports")'
+
+if ! $pypto_only; then
+    if [ ! -f runtime/pyproject.toml ]; then
+        echo "pypto-build: runtime/ is empty — run 'git submodule update --init --recursive'" >&2
+        exit 1
+    fi
+    echo "==> installing simpler (pto-isa pin ${pin:0:12})"
+    # uv, not pip: this venv was created by `uv venv` and has no pip in it.
+    # --no-build-isolation because the backend (scikit-build-core, nanobind) is
+    # already installed here, and an isolated build env would have to reach a
+    # package index that is not always reachable from behind a corporate proxy.
+    #
+    # The first run also clones the pinned pto-isa into runtime/build/pto-isa
+    # (HTTPS, GitHub with a GitCode fallback); it is reused untouched afterwards.
+    export CCACHE_DIR="$cache_root/simpler-$pin"
+    # Source edits and submodule advances need not change pyproject.toml, which
+    # uv uses to invalidate directory wheels. Always rebuild/reinstall simpler;
+    # its native CMake build and ccache still provide incremental compilation.
+    # Scope target selection to simpler; other packages retain their defaults.
+    runtime_options=()
+    if [ -n "${PYPTO_RUNTIME_BUILD_TARGETS:-}" ]; then
+        runtime_options=(--config-setting "build.targets=$PYPTO_RUNTIME_BUILD_TARGETS")
+    fi
+    if [ -n "${PYPTO_RUNTIME_WHEEL_DIR:-}" ]; then
+        uv build --wheel --python "$PYPTO_HOME/venv/bin/python" --no-build-isolation \
+            --no-cache --out-dir "$PYPTO_RUNTIME_WHEEL_DIR" "${runtime_options[@]}" ./runtime
+    else
+        uv pip install --python "$PYPTO_HOME/venv/bin/python" --no-build-isolation \
+            --no-cache --reinstall-package simpler "${runtime_options[@]}" ./runtime
+        python -c 'import simpler.task_interface; print("simpler ok")'
+    fi
+fi
+
+echo "==> done. Next: pypto-doctor, or run a model:"
+_pypto_model_command

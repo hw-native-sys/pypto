@@ -14,8 +14,10 @@ import os
 import tempfile
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._target import (
     ExecutionMode,
     _platform_string,
@@ -34,8 +36,10 @@ from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from .compiled_artifact import CompiledArtifact
     from .compiled_program import CompiledProgram
     from .distributed_compiled_program import ClusterConfig, DistributedCompiledProgram
+    from .param_info import ParamInfo
 
 
 def _highest_orchestration_level(program: _ir_core.Program) -> _ir_core.Level | None:
@@ -172,6 +176,24 @@ class _PassPipelineResult(NamedTuple):
     runtime: _passes.RuntimeKind
 
 
+class _CompilationResult(NamedTuple):
+    """Transient compiler output, before choosing a consumer wrapper."""
+
+    lowered_program: _ir_core.Program
+    output_dir: str
+    platform: str
+    backend_type: BackendType
+    logical_parameters: "list[ParamInfo] | None"
+    return_aliases: tuple[int, ...] | None
+
+
+def _is_distributed(program: _ir_core.Program) -> bool:
+    return any(
+        f.level is not None and _ir_core.level_to_linqu_level(f.level) >= 3
+        for f in program.functions.values()
+    )
+
+
 def _select_backend(*, backend_type: BackendType, platform: str | None) -> BackendType:
     """Select and configure the backend before compilation creates artifacts."""
     effective_backend_type = _backend_type_for_platform(platform, backend_type)
@@ -186,6 +208,7 @@ def _validate_pass_context_conflicts(
     diagnostic_phase: _passes.DiagnosticPhase | None,
     memory_planner: _passes.MemoryPlanner | None,
     runtime: _passes.RuntimeKind | None = None,
+    enable_software_pipeline: bool | None = None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -209,6 +232,11 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with runtime while a PassContext is already active. "
             "Set the runtime on the existing PassContext instead."
         )
+    if enable_software_pipeline is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with enable_software_pipeline while a PassContext is already active. "
+            "Set enable_software_pipeline on the existing PassContext instead."
+        )
     return outer
 
 
@@ -224,6 +252,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
@@ -239,6 +268,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -265,6 +295,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         )
         rt = runtime if runtime is not None else outer.get_runtime()
         buffer_ir = outer.get_enable_buffer_ir()
+        software_pipeline = outer.get_enable_software_pipeline()
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -275,8 +306,13 @@ def _run_pass_pipeline(  # noqa: PLR0913
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-        buffer_ir = True
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir)
+        software_pipeline = enable_software_pipeline if enable_software_pipeline is not None else False
+        # Software pipelining currently lowers Tile IR; leave the default Buffer
+        # IR selection enabled for compilations that do not request this opt-in.
+        buffer_ir = not software_pipeline
+    ctx = _passes.PassContext(
+        instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir, software_pipeline
+    )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -344,6 +380,7 @@ def compile(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
@@ -415,11 +452,16 @@ def compile(  # noqa: PLR0913
             semantics-required aliasing (loop-carried accumulators, in-place ops)
             is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
             buffer.
-        enable_pypto_l0c_double_buffer: Opt the legacy ``PYPTO`` planner in to
-            chooser-emitted dbC=2 (L0C double-buffering; experimental, default
-            off). ``None`` inherits the setting from an active outer
-            ``PassContext`` (else ``False``). It has no effect under ``DSA_RP``
-            or ``PTOAS``, which enable chooser dbC=2 automatically.
+        enable_pypto_l0c_double_buffer: Legacy compatibility flag. ``None``
+            inherits the stored setting from an outer ``PassContext`` (else
+            ``False``). Automatic dbC is disabled for PYPTO and DSA_RP;
+            PTOAS retains its existing selection independently of this flag.
+            Explicit buffering is preserved.
+        enable_software_pipeline: Lower eligible pipeline loops with explicit
+            prefetch and rotating slots instead of unrolling. ``None`` inherits
+            the active ``PassContext`` setting, or defaults to ``False``. Requires
+            ``MemoryPlanner.PYPTO`` and cannot be combined with Buffer IR. Set
+            this on the context when a ``PassContext`` is already active.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Deprecated; use backend_type and execution_mode.
@@ -434,10 +476,6 @@ def compile(  # noqa: PLR0913
             distributed programs.  When ``None`` (default), auto-detected
             from the program: if L3+ functions are found, a default
             ``DistributedConfig()`` is used.
-        cluster_config: Optional :class:`ClusterConfig` for POD/CLUSTER_0
-            orchestration. Cannot be combined with ``distributed_config`` or
-            supplied for HOST/CHIP programs. CLUSTER_0 compilation creates
-            recursive artifacts; execution remains gated until runner integration.
         analyze_auto_scopes_for_deps: If True, let
             ``AutoDeriveTaskDependencies`` analyze AUTO runtime scopes. The
             default is False to preserve the existing TensorMap-fallback
@@ -467,8 +505,12 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
-    # Reject unsupported full programs before backend discovery or output
-    # creation. Low-level codegen keeps its legacy POD alias behavior.
+    from ._artifact_metadata import ArtifactMetadata  # noqa: PLC0415
+    from ._compile_contract import entry_function, external_parameter_names, return_aliases  # noqa: PLC0415
+    from .compiled_artifact import CompiledArtifact  # noqa: PLC0415
+    from .compiled_program import CompiledProgram  # noqa: PLC0415
+    from .param_info import _extract_func_param_infos  # noqa: PLC0415
+
     highest_level = _highest_orchestration_level(program)
     if cluster_config is not None:
         if distributed_config is not None:
@@ -476,8 +518,160 @@ def compile(  # noqa: PLR0913
         if highest_level is None or _ir_core.level_to_linqu_level(highest_level) < 4:
             raise ValueError("cluster_config requires POD/CLUSTER_0 (L4) or higher orchestration")
     _check_supported_orchestration_level(highest_level)
+
     if platform is not None:
         _warn_deprecated_platform("ir.compile")
+    result = _compile_to_files(
+        program,
+        contract=ArtifactExecutionMode.PROGRAM,
+        output_dir=output_dir,
+        strategy=strategy,
+        dump_passes=dump_passes,
+        backend_type=backend_type,
+        skip_ptoas=skip_ptoas,
+        verification_level=verification_level,
+        diagnostic_phase=diagnostic_phase,
+        disabled_diagnostics=disabled_diagnostics,
+        memory_planner=memory_planner,
+        enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        enable_software_pipeline=enable_software_pipeline,
+        profiling=profiling,
+        platform=platform,
+        execution_mode=execution_mode,
+        analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        emit_source_loc=emit_source_loc,
+        dump_ptoas_passes=dump_ptoas_passes,
+        runtime=runtime,
+    )
+    lowered_program = result.lowered_program
+    # Entry selection and execution wrappers belong to the public program API.
+    # Inspect lowered IR because outlining can introduce HOST functions.
+    if _is_distributed(lowered_program):
+        from .distributed_compiled_program import (  # noqa: PLC0415
+            DistributedCompiledProgram,
+            DistributedConfig,
+        )
+
+        highest_postpass = _highest_orchestration_level(lowered_program)
+        is_cluster = highest_postpass is not None and _ir_core.level_to_linqu_level(highest_postpass) >= 4
+        if not is_cluster and distributed_config is None:
+            distributed_config = DistributedConfig()
+        return DistributedCompiledProgram(
+            lowered_program,
+            result.output_dir,
+            backend_type=result.backend_type,
+            platform=result.platform,
+            distributed_config=distributed_config,
+            cluster_config=cluster_config,
+        )
+
+    names = multi_chip_orch_names(lowered_program)
+    if names:
+        children: dict[str, CompiledArtifact] = {}
+        for name in names:
+            original = program.get_function(name)
+            lowered_entry = lowered_program.get_function(name)
+            assert original is not None and lowered_entry is not None
+            child_logical, _, _ = _extract_func_param_infos(original)
+            child_lowered, _, returns = _extract_func_param_infos(lowered_entry)
+            child_lowered = external_parameter_names(child_logical, child_lowered)
+            metadata = ArtifactMetadata(
+                tuple(child_logical),
+                tuple(child_lowered),
+                len(returns),
+                result.platform,
+                result.backend_type,
+                return_aliases(program, original),
+            )
+            child_dir = Path(result.output_dir) / "next_levels" / name
+            metadata.write(child_dir)
+            children[name] = CompiledArtifact(child_dir, result.platform, metadata)
+        return CompiledProgram(
+            program,
+            result.output_dir,
+            backend_type=result.backend_type,
+            platform=result.platform,
+            _sub_chip_names=names,
+            _sub_artifacts=children,
+        )
+
+    try:
+        lowered, _, returns = _extract_func_param_infos(entry_function(lowered_program))
+    except (ValueError, TypeError):
+        # Standalone mixed kernels may lower to several core functions without
+        # a canonical entry. Only the public program API retains this legacy
+        # best-effort wrapper; single-chip artifact compilation fails explicitly.
+        artifact = None
+    else:
+        artifact = _make_single_chip_artifact(result, lowered, len(returns), ArtifactExecutionMode.PROGRAM)
+    return CompiledProgram(
+        program,
+        result.output_dir,
+        backend_type=result.backend_type,
+        platform=result.platform,
+        _sub_chip_names=[],
+        _artifact=artifact,
+    )
+
+
+def _compile_artifact(  # pyright: ignore[reportUnusedFunction]
+    program: _ir_core.Program,
+    *,
+    contract: ArtifactExecutionMode = ArtifactExecutionMode.PROGRAM,
+    **compile_kwargs: Any,
+) -> "CompiledArtifact":
+    """Compile one single-chip entry; always return the shared artifact.
+
+    Program container selection and legacy signature fallbacks belong to
+    :func:`compile`. Options are forwarded to the common passes/codegen path.
+    """
+    from ._compile_contract import entry_function  # noqa: PLC0415
+    from .param_info import _extract_func_param_infos  # noqa: PLC0415
+
+    if _is_distributed(program):
+        raise ValueError("Artifact compilation requires a single chip")
+    entry_function(program)
+    result = _compile_to_files(program, contract=contract, **compile_kwargs)
+    if _is_distributed(result.lowered_program):
+        raise ValueError("Artifact compilation requires a single chip after lowering")
+    lowered, _, returns = _extract_func_param_infos(entry_function(result.lowered_program))
+    return _make_single_chip_artifact(result, lowered, len(returns), contract)
+
+
+def _compile_to_files(  # noqa: PLR0913
+    program: _ir_core.Program,
+    *,
+    contract: ArtifactExecutionMode = ArtifactExecutionMode.PROGRAM,
+    output_dir: str | None = None,
+    strategy: OptimizationStrategy = OptimizationStrategy.Default,
+    dump_passes: bool | PassDumpLevel = True,
+    backend_type: BackendType = BackendType.Ascend910,
+    skip_ptoas: bool = False,
+    verification_level: _passes.VerificationLevel | None = None,
+    diagnostic_phase: _passes.DiagnosticPhase | None = None,
+    disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
+    memory_planner: _passes.MemoryPlanner | None = None,
+    enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
+    profiling: bool = False,
+    platform: str | None = None,
+    execution_mode: ExecutionMode | None = None,
+    analyze_auto_scopes_for_deps: bool = False,
+    emit_source_loc: bool | None = None,
+    dump_ptoas_passes: bool = False,
+    runtime: _passes.RuntimeKind | None = None,
+) -> _CompilationResult:
+    """Run shared contract analysis, passes and codegen without execution wrappers."""
+    from ._compile_contract import (  # noqa: PLC0415
+        analyze_contract,
+        entry_function,
+        external_parameter_names,
+        validate_kernel_host_access,
+        validate_lowered_signature,
+    )
+    from .param_info import _extract_func_param_infos  # noqa: PLC0415
+
+    logical, aliases = analyze_contract(program, contract)
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
     platform = _platform_string(backend_type, mode)
     _select_backend(backend_type=backend_type, platform=platform)
@@ -493,6 +687,7 @@ def compile(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
     # --- Compile profiling ---------------------------------------------------
@@ -524,6 +719,7 @@ def compile(  # noqa: PLR0913
             disabled_diagnostics=disabled_diagnostics,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            enable_software_pipeline=enable_software_pipeline,
             runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),
@@ -534,6 +730,14 @@ def compile(  # noqa: PLR0913
         mplan = pipeline.memory_planner
         effective_backend_type = pipeline.backend_type
         effective_runtime = pipeline.runtime
+
+        if contract is ArtifactExecutionMode.KERNEL:
+            lowered, _, _ = _extract_func_param_infos(entry_function(transformed_program))
+            assert logical is not None
+            lowered = external_parameter_names(logical, lowered)
+            validate_lowered_signature(logical, lowered)
+            if effective_runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH:
+                validate_kernel_host_access(transformed_program)
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.
@@ -558,40 +762,38 @@ def compile(  # noqa: PLR0913
             prof.__exit__(None, None, None)
             prof.write_report(report_dir)
 
-    from .compiled_program import CompiledProgram  # noqa: PLC0415
-
-    # Detect distributed programs: any function with level >= HOST (Linqu level 3).
-    # Use the post-pass program so functions promoted to HOST by outlining
-    # (e.g. via ``with pl.at(level=pl.Level.HOST, ...)``) are still detected.
-    highest_postpass = _highest_orchestration_level(transformed_program)
-    is_distributed = highest_postpass is not None and _ir_core.level_to_linqu_level(highest_postpass) >= 3
-
-    if is_distributed:
-        from .distributed_compiled_program import (  # noqa: PLC0415
-            DistributedCompiledProgram,
-            DistributedConfig,
-        )
-
-        is_cluster = highest_postpass is not None and _ir_core.level_to_linqu_level(highest_postpass) >= 4
-        if not is_cluster and distributed_config is None:
-            distributed_config = DistributedConfig()
-        return DistributedCompiledProgram(
-            transformed_program,
-            output_dir,
-            backend_type=effective_backend_type,
-            platform=platform,
-            distributed_config=distributed_config,
-            cluster_config=cluster_config,
-        )
-
-    # Hand over the layout codegen just produced instead of letting
-    # CompiledProgram re-derive it from the directory: a reused ``output_dir``
-    # may still hold a ``next_levels/`` from an earlier multi-orch compile, and
-    # a disk scan would mistake this build for that one.
-    return CompiledProgram(
-        program,
-        output_dir,
-        backend_type=effective_backend_type,
-        platform=platform,
-        _sub_chip_names=multi_chip_orch_names(transformed_program),
+    return _CompilationResult(
+        transformed_program, output_dir, platform, effective_backend_type, logical, aliases
     )
+
+
+def _make_single_chip_artifact(
+    result: _CompilationResult,
+    lowered: "list[ParamInfo]",
+    num_return_types: int,
+    contract: ArtifactExecutionMode,
+) -> "CompiledArtifact":
+    """Persist one signature and create its artifact without program adaptation."""
+    from ._artifact_metadata import (  # noqa: PLC0415
+        _COMPILED_META_FILENAME,
+        ArtifactMetadata,
+        _drop_foreign_build_markers,
+    )
+    from ._compile_contract import external_parameter_names  # noqa: PLC0415
+    from .compiled_artifact import CompiledArtifact  # noqa: PLC0415
+
+    logical = lowered if result.logical_parameters is None else result.logical_parameters
+    lowered = external_parameter_names(logical, lowered)
+    metadata = ArtifactMetadata(
+        tuple(logical),
+        tuple(lowered),
+        num_return_types,
+        result.platform,
+        result.backend_type,
+        result.return_aliases,
+        ExecutionCapabilities((contract,)),
+    )
+    directory = Path(result.output_dir)
+    _drop_foreign_build_markers(directory, keep=(_COMPILED_META_FILENAME, "kernel_config.py"))
+    metadata.write(directory)
+    return CompiledArtifact(directory, result.platform, metadata)

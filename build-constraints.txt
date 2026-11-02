@@ -1,4 +1,4 @@
-# Build inputs, pinned.
+# Build and CI test inputs, pinned.
 #
 # `[build-system] requires` in pyproject.toml states what pypto is *compatible*
 # with. This file states what it is actually *built* against, so the same commit
@@ -16,9 +16,14 @@
 # To bump one: change the version here, in its own commit, and let CI say whether
 # it holds. A green run is then a statement about a known set of inputs.
 #
-# Versions below are what CI validated on main at a5113628.
+# Build versions below are what CI validated on main at a5113628.
 
 cmake==4.4.2
 nanobind==2.15.0
 ninja==1.13.0
 scikit-build-core==1.0.3
+
+# Verified compatible pair for --forked tests (#3204). pytest 9.2 report IDs
+# cannot be serialized by pytest-forked 1.7.5, causing child exit status 3.
+pytest==9.1.1
+pytest-forked==1.7.5

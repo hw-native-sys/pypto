@@ -23,7 +23,13 @@ assert isinstance(my_func, ir.Function)
 ## Module Structure
 
 - `decorator.py` - `@pl.function` and `@pl.program` decorator implementations
-- `ast_parser.py` - AST parsing and IR generation (~1000 lines)
+- `ast_parser.py` - Function parsing, statement/expression dispatch and variable binding
+- `control_flow_parser.py`, `scope_parser.py` - Control flow and scope/SPMD/split-AIV parsing
+- `call_parser.py`, `op_parser.py`, `subscript_parser.py` - Calls, operators and indexing
+- `attr_parser.py`, `dispatch_semantics.py` - Attributes, TaskId dependencies and predicates
+- `parser_state.py`, `region_context.py` - Explicit shared state and recursive callback contracts
+- `source_comments.py` - Comment ownership and attachment
+- `syntax_helpers.py`, `type_semantics.py` - Shared syntax and type/shape helpers
 - `span_tracker.py` - Source location tracking
 - `scope_manager.py` - SSA verification and scope isolation
 - `type_resolver.py` - Type annotation resolution
@@ -84,16 +90,8 @@ Run parser tests:
 pytest tests/ut/language/parser/ -v
 ```
 
-Test coverage: **81 unit tests** covering:
-
-- Type resolution (9 tests)
-- Scope management (12 tests)
-- Span tracking (7 tests)
-- Decorator functionality (12 tests)
-- Control flow (11 tests)
-- Flash attention integration (11 tests)
-- Error handling (11 tests)
-- Edge cases (8 tests)
+Tests cover type resolution, scope management, source locations, decorators, control flow,
+inline expansion, diagnostics and parser component integration.
 
 ## Documentation
 

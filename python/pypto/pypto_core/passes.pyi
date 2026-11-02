@@ -70,6 +70,7 @@ class IRProperty(Enum):
     BufferIR = ...
     TileStorageLegalized = ...
     TileStorageAllocated = ...
+    RegScopeValid = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -299,13 +300,14 @@ class PassContext:
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir: bool = True,
+        enable_software_pipeline: bool = False,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
-        ``enable_pypto_l0c_double_buffer`` opts the legacy ``PYPTO`` planner in
-        to chooser-emitted L0C double-buffering (dbC=2; experimental, default
-        off). It has no effect under ``DSA_RP`` or ``PTOAS``, which enable
-        chooser dbC=2 automatically.
+        ``enable_pypto_l0c_double_buffer`` remains a stored compatibility
+        flag. Automatic dbC is disabled for PYPTO and DSA_RP; PTOAS retains
+        its existing selection independently of this flag. Explicit buffering
+        declarations are preserved.
 
         ``runtime`` selects the target Simpler runtime ABI; its wire name is
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
@@ -314,6 +316,10 @@ class PassContext:
 
         ``enable_buffer_ir`` defaults to true and selects supported whole kernels
         for Buffer IR. Unsupported kernels retain Tile; false selects Tile for all.
+
+        ``enable_software_pipeline`` uses explicit prefetch and rotating slots for
+        eligible pipeline loops. It requires ``PYPTO`` memory planning and cannot
+        be combined with ``enable_buffer_ir``. The default keeps unroll lowering.
         """
         ...
 
@@ -352,8 +358,12 @@ class PassContext:
         """Whether supported whole kernels use Buffer IR."""
         ...
 
+    def get_enable_software_pipeline(self) -> bool:
+        """Get whether eligible pipeline loops use explicit software pipelining."""
+        ...
+
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
-        """Whether chooser-emitted dbC=2 is enabled under legacy PYPTO."""
+        """Return the legacy flag; it does not override the planner's dbC policy."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -464,23 +474,17 @@ def skew_cross_core_pipeline() -> Pass:
 def lower_pipeline_to_slots() -> Pass:
     """Create a pass that multi-buffers ``pl.pipeline`` loops via MemRef slots.
 
-    Runs immediately before ``lower_pipeline_loops``. Instead of replicating the
-    body ``F`` times, keeps one body and rebinds every top-level ``tile.load`` /
-    ``tile.read`` whose arguments read the induction variable onto
-    ``pl.MemRef(name, slots=F)[iv % F]``, then demotes the loop to
-    ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Bounds, step and
-    ``iter_args`` are untouched, so no remainder dispatch is needed.
+    Runs immediately before ``lower_pipeline_loops``. With ``PYPTO`` memory
+    planning and ``enable_software_pipeline=True``, emits explicit preload,
+    steady-state and drain phases using existing loops, MemRef slots and tile
+    ops. The prefetch distance is ``stage - 1``; no new IR nodes are introduced.
 
-    Self-gated on ``memory_planner=PTOAS``: only that planner's codegen path emits
-    a ptoas multi-buffer region today, so under the default PyPTO planner the pass
-    returns every function untouched. The gate tracks that codegen limitation, not
-    a ptoas one — an addressed region synchronizes identically at level3, and
-    widening the gate is follow-up work in the address allocator. Loops it
-    declines — an unsupported
-    slot count, a step other than 1, a start not a multiple of ``F``, no eligible
-    load, an unsupported memory space or runtime valid shape, a tile carried out as
-    a phi or consumed by a view op, or nesting under a declined pipeline loop — are
-    left intact for ``lower_pipeline_loops`` to replicate.
+    With ``PTOAS`` memory planning, preserves the existing same-iteration slot
+    rotation: eligible top-level loads are rebound onto
+    ``pl.MemRef(name, slots=F)[iv % F]`` without explicit prefetch. Accepted loops
+    become ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Declined
+    loops remain intact for ``lower_pipeline_loops`` to replicate. The default
+    ``PYPTO`` path remains unchanged when the software pipeline flag is off.
 
     Returns:
         Function-level pass
@@ -594,8 +598,9 @@ def auto_tile_matmul_l0() -> Pass:
     on-chip Mat scratch for chained matmul consumers; compatible
     f32-to-bf16/f16 ``rint`` casts fold into the FIXPIPE writeback.
 
-    Full-K grids support output-, A-, and B-stationary schedules. dbC=2 is
-    enabled automatically under DSA_RP and PTOAS and available as a legacy-PYPTO opt-in. Eligible calls
+    Full-K grids support output-, A-, and B-stationary schedules. Automatic
+    dbC is excluded before selection for PYPTO and DSA_RP; PTOAS retains its
+    existing selection independently of the legacy flag. Eligible calls
     require static 2D operands with B in Mat and A in Mat or Vec. When the
     chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is needed,
     although a chained result may still be remapped to Mat by the compatible
@@ -609,10 +614,8 @@ def auto_tile_matmul_l0() -> Pass:
     for those Mat-backed windows. An already-Bias-resident source remains one
     external full-N slot and is never N-tiled.
 
-    Under the PyPTO planner, a canonical static already-L0 pipeline containing
-    one stationary-panel ``tile.matmul`` and one direct store or assemble drain
-    may automatically use two L0C slots when its conservative post-lowering
-    Acc footprint fits.
+    Already-L0 pipelines are not automatically marked for accumulator double
+    buffering. Explicit buffering attributes are preserved.
     """
 
 def canonicalize_tile_slice() -> Pass:
@@ -809,6 +812,10 @@ def lower_l2_tensor_collectives() -> Pass:
 
     Runs before :func:`derive_call_directions` so the emitted call
     gets its argument directions and task edges derived like any kernel call.
+    ``pld.tensor.indexed_all_to_all_v`` also lowers on this rail (A5 URMA only),
+    with six tensor operands and a positive compile-time core_num. All AIVs
+    share local copies between remote submission and CQ waits without sharing
+    remote queues.
     ``pld.tensor.all_to_all_v`` accepts a compile-time ``core_num``: the admitted
     block count ``B = CalAllToAllVBlocks(P, L)`` is folded and ``B`` blocks are
     launched; a runtime ``core_num`` is rejected.
@@ -1011,11 +1018,21 @@ class l0_tile_chooser:
         used under one level of a full-K output-grid pipeline, while
         ``max_n_nested_pipelined`` covers two nested pipeline levels. A value
         of zero leaves the corresponding bound disabled.
+
+        ``reduction_iterations`` counts source K blocks before one drain (zero
+        means unknown, costed as a one-block lower bound without dbC).
+        ``reduction_pipeline_stages`` describes enclosing operand storage
+        replication, independently of that arithmetic count.
+        ``independent_output_tiles`` reloads both operands per output reduction
+        and excludes held-panel and dbC schedules not implemented by that route.
         """
 
         M: int
         N: int
         K: int
+        reduction_iterations: int
+        reduction_pipeline_stages: int
+        independent_output_tiles: bool
         l0a_bytes: int
         l0b_bytes: int
         l0c_bytes: int

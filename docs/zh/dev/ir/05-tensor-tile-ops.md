@@ -65,7 +65,7 @@ Flat tile 可以携带显式步长（stride），但必须与完整物理 shape 
 Ascend950 上的 FP4E2M1X2 ↔ UINT8/INT8 alias 保持 carrier shape 和字节数不变。
 InCore tensor 和 tile 均下降为连续、带地址的二维 row-major Vec 存储，要求静态
 UB offset，使用 PYPTO 或 DSA_RP 内存规划器。PTOAS 规划器和编排层 tensor alias
-暂不支持；需要变形时先单独 reshape 字节视图，再转换回 packed alias。契约与用法示例见 [FP4 UB 解码](../fp4.md#通过-ub-alias-解码-uint8-carrierascend950)。
+暂不支持；需要变形时先单独 reshape 字节视图，再转换回 packed alias。契约与用法示例见 [FP4 UB 解码](../fp4.md#通过-ub-别名解码-uint8-载体ascend950)。
 
 **示例：**
 
@@ -90,6 +90,26 @@ with ib.function("tensor_example") as f:
 
 **设计**：使用 `TileType`（而非单独的 `BlockType`）以保持一致性。命名空间 `tile.*` + `TileType` 清楚地表示硬件优化的 Tile 操作。
 
+### Python 实现布局
+
+公开入口仍为 `pypto.ir.op.tile` 和 `pypto.language.tile`。
+两层的 `tile_ops.py` 模块直接重新导出函数，保留调用签名，并避免给源码位置捕获
+增加调用栈层级。两层 Python 实现采用相同的私有模块分类：
+
+| 模块 | 职责 |
+| ---- | ---- |
+| `_tile_memory.py` | 分配、load/store、初始化及形状/视图操作 |
+| `_tile_elementwise.py` | 逐元素算术、比较及标量分派 |
+| `_tile_linalg.py` | 矩阵乘积及 MX 量化 |
+| `_tile_reduction.py` | 行列归约与广播 |
+| `_tile_indexing.py` | 索引 gather/scatter、排序及归并排序 |
+| `_tile_cross_core.py` | Block 查询及 AIV/AIC 数据交换 |
+
+DSL 的 `_tile_common.py` 保存 `store` 和 `mscatter` 共用的张量类型参数。
+实现模块不得导入自身所属层的 `tile_ops.py` 入口模块；共享辅助逻辑位于入口模块
+下层，以避免循环导入。新增算子时，在两层对应的实现模块中添加定义，并通过
+原有公开模块重新导出。
+
 ### 操作列表
 
 | 分类 | 操作 | 描述 |
@@ -101,7 +121,7 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
-| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 13](../passes/14-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。在 mixed task 内，结果可直接经 V2C 供 `matmul_mx` 使用。MXFP4 quant 暂缓。 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | Ascend950 block-32 量化，返回 `{quant, FP8E8M0 scale}`。`dtype` 为 FP8E4M3FN 或 FP4E2M1X2（后者输入仅 FP16/BF16）。axis1 将 `[M,K]` 转为 FP4 `[M,K/2]`；axis0 将 `[N,K]` 转为 `[K,N/2]`。scale 仍为 `[M,K/32]` / `[K/32,N]`。要求完整有效区域、`K % 64 == 0`、axis1 `M % 16 == 0`、axis0 `N % 32 == 0`；FP4 axis0 因 ISA carrier 行跨度还要求 `N % 64 == 0`。默认 `quant_scale_alg="ocp"`；FP16/BF16 的 NV 仅支持 axis0。Packed FP4 使用 PYPTO 或 DSA_RP 内存规划器。[Pass 13](../passes/14-lower_composite_ops.md) 生成 TQUANT 和指数 X-to-ZZ TMOV。仅 FP8 结果可供 `matmul_mx` 使用。 `pl.tile.quant_mx_raw` 暴露原生 TQUANT 和 UINT8 指数，无上述 scale 分块对齐限制：axis1 允许任意正 M 和 K%32（原生 FP4 K%64）；支持静态部分有效区域（axis1 物理列须等于有效列）。 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |

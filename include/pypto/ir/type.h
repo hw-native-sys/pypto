@@ -160,6 +160,48 @@ class ScalarType : public Type {
 
 using ScalarTypePtr = std::shared_ptr<const ScalarType>;
 
+/// Logical vector values and boolean predicate values share one descriptor.
+enum class RegKind : uint8_t { VecReg = 0, MaskReg = 1 };
+
+/**
+ * @brief Register value descriptor, independent of addressable tile storage.
+ *
+ * shape_ counts logical lanes, not physical vector registers. There is exactly
+ * one static dimension; lanes is an alias rather than duplicated state.
+ */
+class RegType : public Type {
+ public:
+  RegType(int64_t shape, DataType dtype, RegKind kind);
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::RegType; }
+  [[nodiscard]] std::string TypeName() const override { return "RegType"; }
+  [[nodiscard]] int64_t GetShape() const { return shape_; }
+  [[nodiscard]] int64_t GetLanes() const { return shape_; }
+  [[nodiscard]] DataType GetDType() const { return dtype_; }
+  [[nodiscard]] RegKind GetRegKind() const { return kind_; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Type::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&RegType::shape_, "shape"),
+                                          reflection::UsualField(&RegType::dtype_, "dtype"),
+                                          reflection::UsualField(&RegType::kind_, "kind")));
+  }
+
+  int64_t shape_;  ///< Positive logical lane count.
+  DataType dtype_;
+  RegKind kind_;
+};
+
+using RegTypePtr = std::shared_ptr<const RegType>;
+
+inline bool IsVecRegType(const TypePtr& type) {
+  return type && type->GetKind() == ObjectKind::RegType &&
+         std::static_pointer_cast<const RegType>(type)->kind_ == RegKind::VecReg;
+}
+inline bool IsMaskRegType(const TypePtr& type) {
+  return type && type->GetKind() == ObjectKind::RegType &&
+         std::static_pointer_cast<const RegType>(type)->kind_ == RegKind::MaskReg;
+}
+
 /**
  * @brief Tensor layout enumeration
  *
@@ -313,6 +355,14 @@ std::string CompactModeToString(CompactMode mode);
  * @brief Convert string to CompactMode enum
  */
 CompactMode StringToCompactMode(const std::string& str);
+
+/**
+ * @brief Convert a serialized PadValue spelling to its enum value.
+ *
+ * Returns nullopt for an unknown spelling so each deserializer can keep its
+ * own error message and exception class.
+ */
+std::optional<PadValue> TryStringToPadValue(const std::string& str);
 
 /**
  * @brief Physical descriptor of an explicit on-chip buffer reference

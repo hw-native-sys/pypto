@@ -1575,6 +1575,36 @@ def test_composite_shape_dim_roundtrips(dim_factory):
     assert python_print(reparsed, format=False) == printed
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_unallocated_tensor_dim_binding_roundtrips(nested):
+    """Inlining may retain a dim call that the authoring parser normally folds."""
+    span = ir.Span.unknown()
+    extent = ir.Var("T", ir.ScalarType(DataType.INDEX), span)
+    x = ir.Var("x", ir.TensorType([extent, ir.ConstInt(32, DataType.INDEX, span)], DataType.FP32), span)
+    size = ir.Var("size", ir.ScalarType(DataType.INDEX), span)
+    dim = ir.Call(
+        ir.get_op("tensor.dim"),
+        [x, ir.ConstInt(0, DataType.INDEX, span)],
+        {},
+        {},
+        size.type,
+        span,
+    )
+    value = ir.Add(dim, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span) if nested else dim
+    function = ir.Function(
+        "main",
+        [x],
+        [size.type],
+        ir.SeqStmts([ir.AssignStmt(size, value, span), ir.ReturnStmt([size], span)], span),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    original = ir.Program([function], "DimBinding", span)
+    restored = pl.parse(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+
+
 @pytest.mark.parametrize("prefix", ["pl", "custom"])
 @pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.INT64])
 @pytest.mark.parametrize("composite", [False, True])
@@ -1962,6 +1992,39 @@ def test_acc_init_cond_print_parse_roundtrip():
     assert "pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0)" in printed
     assert "pl.tile.gemv_acc(acc, lhs, rhs, init_cond=k0 == 0, acc_phase=pl.AccPhase.Unspecified)" in printed
 
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+
+@pytest.mark.parametrize("phase", ["Partial", "Final"])
+def test_matmul_acc_phase_print_parse_roundtrip(phase):
+    """Explicit tile printing preserves phase without widening the tensor API."""
+    source = textwrap.dedent(f"""\
+        @pl.program
+        class PhasedMatmul:
+            @pl.function(type=pl.FunctionType.InCore)
+            def base(
+                self,
+                lhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+                rhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                return pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.{phase})
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def acc(
+                self,
+                acc: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc],
+                lhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+                rhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+                k0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                return pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0, acc_phase=pl.AccPhase.{phase})
+    """)
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+    assert f"pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.{phase})" in printed
+    assert f"pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0, acc_phase=pl.AccPhase.{phase})" in printed
     reparsed = pl.parse_program(printed)
     ir.assert_structural_equal(program, reparsed)
     assert python_print(reparsed, format=False) == printed

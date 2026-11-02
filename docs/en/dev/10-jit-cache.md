@@ -67,6 +67,12 @@ metadata from the installed Simpler SDK without inheriting its compiler or
 calling its build methods. This works with the existing runtime pin; it does
 not introduce kernel execution or change program call semantics.
 
+CPU simulation consumes the complete SDK incore flag metadata, including the
+requested A2/A3 or A5 target family and the exported admission marker. Generic
+host compiler flags alone do not select a simulator architecture. When no
+explicit PTO ISA root is supplied, compilation resolves the SDK's pinned root
+so its forced target header uses the same instruction definitions as the runtime.
+
 | Previous inherited responsibility | Current owner |
 | --------------------------------- | ------------- |
 | SDK root, tool selection, target flags, runtime headers and helper sources | Simpler metadata queries, consumed by PyPTO |
@@ -296,7 +302,7 @@ are finite JSON numbers or booleans; they complete the binding but no longer
 select an artifact, since a scalar parameter is a runtime value. Omit them
 unless the request also names sample tensors, which makes the binding positional.
 
-Serializable `run_config` fields are `platform`, `strategy`, `memory_planner`,
+Serializable `run_config` fields are `platform`, `strategy`, `memory_planner`, `enable_software_pipeline`,
 `distributed_config`, `dump_passes`, `dump_ptoas_passes`, `save_kernels`, and
 `save_kernels_dir`; enums use their Python member names. Distributed settings
 accept `device_ids`, `num_sub_workers`, `runtime`, and `aicpu_thread_num`.

@@ -46,10 +46,6 @@ namespace ir {
 
 constexpr int64_t kPackedPredicateBitsPerByte = 8;
 
-static ExprPtr MakeIndexConst(int64_t value, const Span& span = Span::unknown()) {
-  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
-}
-
 static ExprPtr MakeCeilDivIndex(const ExprPtr& value, int64_t divisor) {
   if (auto const_value = As<ConstInt>(value)) {
     return MakeIndexConst((const_value->value_ + divisor - 1) / divisor, value->span_);
@@ -131,6 +127,22 @@ static std::shared_ptr<TileType> MakePackedPredicateTileType(
       MakeCeilDivIndex(logical_valid_shape[col_axis], kPackedPredicateBitsPerByte);
   InheritTileViewLayout(tile_view, source_tile_type);
   return std::make_shared<TileType>(mask_shape, DataType::UINT8, std::nullopt, tile_view);
+}
+
+/// Build the result of a broadcast tile-binary operation.
+///
+/// The physical shape comes from `BroadcastShapes`; valid_shape and layout are
+/// inherited from the left operand.
+///
+/// TODO(YunjiQin): this assumes both operands carry the same valid_shape. A
+/// broadcast whose operands have different valid extents (e.g. after
+/// broadcasting) is not modelled yet.
+static TypePtr MakeBroadcastTileType(const std::vector<ExprPtr>& shape, DataType dtype,
+                                     const TileTypePtr& prototype) {
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(prototype);
+  InheritTileViewLayout(tile_view, prototype);
+  return std::make_shared<TileType>(shape, dtype, std::nullopt, tile_view);
 }
 
 // Forward declarations: trem/trems reuse the tmp-carrying deducers defined
@@ -217,12 +229,7 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 // Tile-tile shift ops (shl, shr): RHS is the shift amount, result type equals LHS tile type,
@@ -248,12 +255,7 @@ TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, tile_type1->dtype_, tile_type1);
 }
 
 TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
@@ -572,6 +574,7 @@ REGISTER_OP("tile.mul")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.mul");
@@ -586,6 +589,7 @@ REGISTER_OP("tile.add")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.add");
@@ -601,6 +605,7 @@ REGISTER_OP("tile.div")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       auto result_type = DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.div", false, true);
@@ -620,6 +625,7 @@ REGISTER_OP("tile.sub")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.sub");
@@ -634,6 +640,7 @@ REGISTER_OP("tile.maximum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.maximum");
@@ -648,6 +655,7 @@ REGISTER_OP("tile.minimum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.minimum");
@@ -666,6 +674,7 @@ REGISTER_OP("tile.rem")
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .set_lane_invariant_arg(2)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRemainderType(args, kwargs, "tile.rem", true);
@@ -675,6 +684,8 @@ REGISTER_OP("tile.rem")
 // only one source is valid at an element the result copies that source. Shape
 // is identical to a plain elementwise binary op; the "partial" behaviour is a
 // runtime valid-region effect, so type deduction is the standard binary one.
+// The source valid regions need not agree, so these ops do not register an
+// element-wise equality group.
 REGISTER_OP("tile.part_add")
     .set_op_category("TileOp")
     .set_description("Partial element-wise add of two tiles (copies the only valid input)")
@@ -741,6 +752,7 @@ REGISTER_OP("tile.fmod")
     // still needs the original src0 for the final subtraction, so dst must not
     // alias any input buffer.
     .not_inplace_safe()
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRemainderType(args, kwargs, "tile.fmod", false);
@@ -839,6 +851,7 @@ REGISTER_OP("tile.shl")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpShiftBinaryType(args, kwargs, "tile.shl");
@@ -866,6 +879,7 @@ REGISTER_OP("tile.shr")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpShiftBinaryType(args, kwargs, "tile.shr");
@@ -919,6 +933,7 @@ REGISTER_OP("tile.and")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpBitwiseBinaryType(args, kwargs, "tile.and");
@@ -947,6 +962,7 @@ REGISTER_OP("tile.or")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpBitwiseBinaryType(args, kwargs, "tile.or");
@@ -998,12 +1014,7 @@ TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 static void CheckCarryTileMatches(const std::shared_ptr<const TileType>& reference,
@@ -1092,12 +1103,7 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs tiles have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 // TADDSC/TSUBSC use one exact dtype for src0, scalar, carry, and dst.
@@ -1145,6 +1151,7 @@ REGISTER_OP("tile.xor")
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpBitwiseBinaryType(args, kwargs, "tile.xor", true);
@@ -1241,6 +1248,7 @@ REGISTER_OP("tile.prelu")
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .set_lane_invariant_arg(2)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTilePreluType(args, kwargs, "tile.prelu");
@@ -1260,6 +1268,7 @@ REGISTER_OP("tile.addc")
     // PTOAS lowers TADDC as TADD followed by TADD. The second step still
     // reads carry, so dst may reuse src0 but must not overwrite carry.
     .forbid_output_alias(2)
+    .set_pointwise_validity_args({0, 1, 2})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTriTileType(args, kwargs, "tile.addc");
@@ -1279,6 +1288,7 @@ REGISTER_OP("tile.subc")
     // PTOAS lowers TSUBC as TSUB followed by TADD. The second step still
     // reads carry, so dst may reuse src0 but must not overwrite carry.
     .forbid_output_alias(2)
+    .set_pointwise_validity_args({0, 1, 2})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTriTileType(args, kwargs, "tile.subc");
@@ -1297,6 +1307,7 @@ REGISTER_OP("tile.addsc")
     // PTOAS lowers TADDSC as TADDS followed by TADD. The second step still
     // reads carry, so dst may reuse src0 but must not overwrite carry.
     .forbid_output_alias(2)
+    .set_pointwise_validity_args({0, 2})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpCarryScalarType(args, kwargs, "tile.addsc");
@@ -1315,6 +1326,7 @@ REGISTER_OP("tile.subsc")
     // PTOAS lowers TSUBSC as TSUBS followed by TADD. The second step still
     // reads carry, so dst may reuse src0 but must not overwrite carry.
     .forbid_output_alias(2)
+    .set_pointwise_validity_args({0, 2})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpCarryScalarType(args, kwargs, "tile.subsc");
@@ -1333,6 +1345,33 @@ REGISTER_OP("tile.lrelu")
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.lrelu");
     });
 
+// Predicate carrier extents count bytes on the last axis, and data elements on
+// the outer axes. Coverage is independent of the output's allocation and works
+// before ND tiles are flattened, as well as for the rank-2 hardware form.
+static void CheckPackedPredicateCoverage(const TileTypePtr& mask_type,
+                                         const std::vector<ExprPtr>& src_valid_shape, const Span& span,
+                                         const std::string& op_name) {
+  const auto mask_valid_shape = GetValidShape(mask_type);
+  CHECK_SPAN(!src_valid_shape.empty() && mask_valid_shape.size() == src_valid_shape.size(), span)
+      << "The operator " << op_name << " requires mask and source to have the same nonzero rank";
+  for (size_t d = 0; d + 1 < src_valid_shape.size(); ++d) {
+    CHECK_SPAN(ProveValidExtentLessEqual(src_valid_shape[d], mask_valid_shape[d]) == ProofResult::kTrue, span)
+        << "The operator " << op_name
+        << " requires mask carrier rows/batches to cover src valid rows/batches on axis " << d
+        << ", but got mask valid_shape " << FormatShape(mask_valid_shape) << " and src valid_shape "
+        << FormatShape(src_valid_shape);
+  }
+  const auto required_mask_bytes = MakeCeilDivIndex(src_valid_shape.back(), kPackedPredicateBitsPerByte);
+  const auto mask_row_bytes = MakeMul(
+      mask_valid_shape.back(), MakeIndexConst(static_cast<int64_t>(mask_type->dtype_.GetByte()), span), span);
+  CHECK_SPAN(ProveValidExtentLessEqual(required_mask_bytes, mask_row_bytes) == ProofResult::kTrue, span)
+      << "The operator " << op_name
+      << " requires each mask carrier row to hold at least ceil(src valid columns / 8) packed bytes, "
+         "but got mask valid_shape "
+      << FormatShape(mask_valid_shape) << " with dtype " << mask_type->dtype_.ToString()
+      << " and src valid_shape " << FormatShape(src_valid_shape);
+}
+
 // Type deduction for tile.sel (MaskTile x Tile x Tile x TmpTile -> Tile)
 // The mask tile encodes per-element predicates in a target-defined layout; its dtype/shape
 // do not influence the output type.  Output type is derived from lhs and rhs only.
@@ -1342,9 +1381,10 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 4) << "The operator " << op_name << " requires exactly 4 arguments, but got "
                           << args.size();
 
-  CHECK(As<TileType>(args[0]->GetType()))
-      << "The operator " << op_name << " requires first argument (mask) to be a TileType, but got "
-      << args[0]->GetType()->TypeName();
+  auto mask_type = As<TileType>(args[0]->GetType());
+  CHECK(mask_type) << "The operator " << op_name
+                   << " requires first argument (mask) to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
 
   auto tile_type1 = As<TileType>(args[1]->GetType());
   auto tile_type2 = As<TileType>(args[2]->GetType());
@@ -1367,12 +1407,8 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+  CheckPackedPredicateCoverage(mask_type, GetValidShape(tile_type1), args[0]->span_, op_name);
+  return MakeBroadcastTileType(broadcast_result.shape, *result_dtype, tile_type1);
 }
 
 REGISTER_OP("tile.sel")
@@ -1391,10 +1427,11 @@ REGISTER_OP("tile.sel")
     .set_output_memory(MemorySpace::Vec)
     // TSEL reads the predicate mask (arg 0) and tmp scratch (arg 3) while
     // writing dst. Dead lhs/rhs value operands may be reused when lifetimes
-    // allow; mask/tmp stay forbidden via registry (see 35-memory_reuse.md).
+    // allow; mask/tmp stay forbidden via registry (see 37-memory_reuse.md).
     .forbid_output_alias(0)
     .forbid_output_alias(3)
     .set_lane_invariant_arg(3)
+    .set_pointwise_validity_args({1, 2})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelType(args, kwargs, "tile.sel");
@@ -1446,24 +1483,8 @@ TypePtr DeduceTileSelsType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires scalar dtype " << expected_scalar_dtype.ToString()
       << " for src dtype " << src_type->dtype_.ToString() << ", but got " << scalar_type->dtype_.ToString();
 
-  const auto mask_valid_shape = GetValidShape(mask_type);
   const auto src_valid_shape = GetValidShape(src_type);
-  CHECK_SPAN(ProveValidExtentLessEqual(src_valid_shape[0], mask_valid_shape[0]) == ProofResult::kTrue,
-             args[0]->span_)
-      << "The operator " << op_name
-      << " requires mask carrier rows to cover src valid rows, but got mask valid_shape "
-      << FormatShape(mask_valid_shape) << " and src valid_shape " << FormatShape(src_valid_shape);
-  const auto required_mask_bytes = MakeCeilDivIndex(src_valid_shape[1], kPackedPredicateBitsPerByte);
-  const auto mask_row_bytes = MakeMul(
-      mask_valid_shape[1], MakeIndexConst(static_cast<int64_t>(mask_type->dtype_.GetByte()), args[0]->span_),
-      args[0]->span_);
-  CHECK_SPAN(ProveValidExtentLessEqual(required_mask_bytes, mask_row_bytes) == ProofResult::kTrue,
-             args[0]->span_)
-      << "The operator " << op_name
-      << " requires each mask carrier row to hold at least ceil(src valid columns / 8) packed bytes, "
-         "but got mask valid_shape "
-      << FormatShape(mask_valid_shape) << " with dtype " << mask_type->dtype_.ToString()
-      << " and src valid_shape " << FormatShape(src_valid_shape);
+  CheckPackedPredicateCoverage(mask_type, src_valid_shape, args[0]->span_, op_name);
 
   TileView tile_view;
   tile_view.valid_shape = src_valid_shape;
@@ -1553,6 +1574,7 @@ REGISTER_OP("tile.cmp")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_pointwise_validity_args({0, 1})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCmpType(args, kwargs, "tile.cmp", false);
@@ -1706,6 +1728,7 @@ REGISTER_OP("tile.select")
     // Mirrors tile.sel: the lowered TSEL/TSELS reads the predicate while writing
     // dst, so the condition may never alias the output.
     .forbid_output_alias(0)
+    .set_pointwise_validity_args({1, 2})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelectType(args, kwargs, "tile.select");

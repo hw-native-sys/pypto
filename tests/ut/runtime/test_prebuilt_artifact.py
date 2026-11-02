@@ -26,6 +26,7 @@ import pytest
 from pypto import CacheConfig, cache_stats, ir, passes
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import ToolchainIdentity, digest_record
+from pypto.ir.compiled_artifact import CompiledArtifact
 from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
 from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
 from pypto.jit import _artifact_manifest
@@ -38,6 +39,7 @@ from pypto.runtime._artifact_sources import (
     UnsupportedArtifactInput,
     package_generated_sources,
     read_kernel_config,
+    validate_generated_sources,
 )
 from pypto.runtime.distributed_runner import (
     _assemble_chip_callables,
@@ -95,6 +97,8 @@ def _generated(root: Path, kind: BuildKind) -> None:
         schema=_COMPILED_META_SCHEMA,
         supported_execution_modes=["program"],
         params=[],
+        lowered_params=[],
+        return_aliases=[],
         num_return_types=0,
         platform="a2a3sim",
         backend_type="Ascend910",
@@ -743,9 +747,10 @@ def test_ready_attachment_hashes_each_payload_once(tmp_path, fake_runtime, kind,
     handle = runtime.handle
     cls = CompiledProgram if kind is BuildKind.SINGLE_CHIP else DistributedCompiledProgram
     compiled = cls.from_dir(handle.directory) if attach == "bind" else None
+    metadata_cls = CompiledArtifact if kind is BuildKind.SINGLE_CHIP else DistributedCompiledProgram
     with (
         patch.object(_artifact_manifest, "_file_digest", wraps=_artifact_manifest._file_digest) as digest,
-        patch.object(cls, "from_dir", wraps=cls.from_dir) as from_dir,
+        patch.object(metadata_cls, "from_dir", wraps=metadata_cls.from_dir) as from_dir,
         patch.object(_prebuilt.hashlib, "sha256", wraps=_prebuilt.hashlib.sha256) as sha,
     ):
         if attach == "restore":
@@ -1405,7 +1410,7 @@ def test_generated_hit_checks_capabilities_of_ready_payload(tmp_path, fake_runti
         _artifact_manifest.encode_manifest(marker)
     )
     with patch("pypto.runtime._artifact_runtime.load_prebuilt") as load:
-        with pytest.raises(ValueError, match="requires 'program'"):
+        with pytest.raises(ValueError, match="capabilities do not match"):
             ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "next-run").load()
     load.assert_not_called()
 
@@ -1518,6 +1523,69 @@ def test_hashed_sidecar_pruning_preserves_configured_and_unrelated_inputs(tmp_pa
     outputs = _prebuilt._build_outputs(config)
     assert output in outputs
     assert not {source, configured, unrelated, external, external_binary}.intersection(outputs)
+
+
+def test_kernel_artifact_uses_existing_cache_promotion_and_loading(tmp_path, fake_runtime):
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+    from dataclasses import replace  # noqa: PLC0415
+
+    from pypto.ir.compiled_artifact import CompiledArtifact  # noqa: PLC0415
+
+    capabilities = ExecutionCapabilities((ArtifactExecutionMode.KERNEL,))
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    key = replace(_key(), contract=ArtifactExecutionMode.KERNEL)
+    spec = replace(_spec(), execution_capabilities=capabilities)
+
+    def build(root):
+        _generated(root, BuildKind.SINGLE_CHIP)
+        path = root / "compiled_meta.json"
+        record = json.loads(path.read_text())
+        record["supported_execution_modes"] = ["kernel"]
+        path.write_text(json.dumps(record))
+
+    handle = store.get_or_build(key, spec, build).handle
+    assert handle is not None
+    with pytest.raises(ValueError, match="requires 'program'"):
+        restore_artifact(store, handle, tmp_path / "invalid-consumer")
+    artifact = restore_artifact(store, handle, tmp_path / "run", consumer=ArtifactExecutionMode.KERNEL)
+    assert isinstance(artifact, CompiledArtifact)
+    assert artifact._chip_callable is None
+    source_path = artifact.output_dir
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        callables = list(pool.map(lambda _: artifact.chip_callable, range(8)))
+    assert all(cc is callables[0] for cc in callables)
+    assert artifact.output_dir == source_path
+    assert artifact._artifact_runtime is not None
+    assert artifact._artifact_runtime.handle.spec.state is ArtifactState.BINARY_READY
+    ready = artifact._artifact_runtime.handle
+    restored = restore_artifact(store, ready, tmp_path / "second-run", consumer=ArtifactExecutionMode.KERNEL)
+    assert isinstance(restored, CompiledArtifact)
+    restored.load()
+    assert restored._chip_callable is not None
+    assert restored.execution_capabilities == capabilities
+
+
+def test_vpto_sources_survive_artifact_relocation(tmp_path, fake_runtime):
+    root = tmp_path / "generated"
+    _generated(root, BuildKind.SINGLE_CHIP)
+    helper = tmp_path / "helper.pto"
+    helper.write_text("module {}")
+    with (root / "kernel_config.py").open("a") as stream:
+        stream.write(f"\nKERNELS[0]['vpto_sources'] = [{str(helper)!r}]\n")
+    package_generated_sources(root, BuildKind.SINGLE_CHIP)
+    relocated = tmp_path / "relocated"
+    shutil.copytree(root, relocated)
+    shutil.rmtree(root)
+    helper.unlink()
+    validate_generated_sources(relocated, BuildKind.SINGLE_CHIP)
+    config = read_kernel_config(relocated / "kernel_config.py")
+    sources = config.KERNELS[0]["vpto_sources"]
+    assert len(sources) == 1
+    assert Path(sources[0]).read_text() == "module {}"
+    assert Path(sources[0]).is_relative_to(relocated)
+    assert json.loads((relocated / "kernel_config.json").read_text())["kernels"][0]["vpto_sources"] == [
+        "vpto/0/0/helper.pto"
+    ]
 
 
 if __name__ == "__main__":

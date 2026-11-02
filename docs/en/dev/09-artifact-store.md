@@ -53,14 +53,12 @@ subsequent private requests build again. This is not a private-object cache.
 
 ## Execution capabilities and complete argument binding
 
-Current compilers emit `supported_execution_modes: ["program"]` in
-`compiled_meta.json` (schema 2) and `distributed_meta.json` (schema 3).
-`ExecutionCapabilities` in `pypto._artifact_contract` is immutable and validated;
-`CompiledProgram`, its orchestration children, and `DistributedCompiledProgram`
-retain it across `from_dir()` without loading binaries or starting workers.
-A program consumer rejects a kernel-only capability list. The `kernel` name is
-reserved for a future producer; declaring it does not implement a kernel ABI.
-There is no new user mode selector, and normal JIT/program calls are unchanged.
+Public program compilation emits `["program"]`; internal kernel-contract
+compilation emits `["kernel"]`. Single-chip `compiled_meta.json` schema 3 stores
+logical and lowered signatures plus ordered external return aliases. Distributed
+metadata remains schema 3 and program-only. `CompiledProgram` composes the shared
+`CompiledArtifact`; metadata restoration does not load binaries or start workers.
+Consumers require their declared capability. No public JIT calling mode changes.
 
 `ArtifactSpec.execution_capabilities` records the same declaration in the
 schema-2 artifact manifest and participates in the spec digest. Different
@@ -69,13 +67,13 @@ preserves them, and program attachment rejects a mismatch between the manifest
 and compiled metadata. Capabilities are separate from generated/ready state:
 permission to use a program executor does not establish binary readiness.
 
-Older sidecar schemas are rejected with a recompilation instruction; missing,
-empty, duplicate, unknown, or incompatible capability declarations are not
-inferred. Artifact schema 2 also changes the compilation-key namespace, so
-old persistent entries miss cleanly and remain untouched. Runtime scalar values,
-tensor addresses and streams are still excluded from specialization identity.
-`execute_artifact` validates a present single-chip sidecar before assembly;
-legacy directories without a sidecar retain their existing program-only path.
+Legacy single-chip schema 1/2 sidecars load as PROGRAM only, without inventing
+return aliases or kernel capability. Missing kernel fields and malformed
+capabilities require recompilation. `ArtifactKey.contract` includes the requested
+compilation contract in the shared identity; SDK/toolchain identity stays in
+`ToolchainIdentity`. Runtime scalars, tensor addresses and streams remain excluded.
+`execute_artifact` validates a present sidecar before assembly; directories with
+no sidecar retain the existing program-only compatibility path.
 
 `pypto.ir.param_info.bind_complete_args` is an internal shared binding facility:
 it requires all positional parameters, including Out/InOut, and returns the

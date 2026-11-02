@@ -20,6 +20,8 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.ir.builder import IRBuilder
+from pypto.pypto_core import ir as _ir_core
 
 dep_analysis = passes.stmt_dependency_analysis
 
@@ -164,6 +166,36 @@ class TestStmtDependencyGraph:
         # Neither assign has a predecessor in the region — both only read external x.
         assert graph.get_predecessors(stmts[0]) == []
         assert graph.get_predecessors(stmts[1]) == []
+
+    def test_reg_stores_keep_program_order_when_value_ssa_is_independent(self):
+        """Two stores of the old Tile version still form a WAW effect edge."""
+        span = ir.Span.unknown()
+        builder = IRBuilder()
+        with builder.function("vf", span=span, type=ir.FunctionType.AIV) as function:
+            tile = function.param(
+                "tile", ir.TileType([128], ir.DataType.FP32, memory_space=ir.MemorySpace.Vec)
+            )
+            with builder.reg_scope(span):
+                value = builder.emit_reg(
+                    "value", "reg.load", [tile, ir.ConstInt(0, ir.DataType.INDEX, span)], {"lanes": 64}
+                )
+                first = builder.emit_reg_store("first", tile, value, 0)
+                builder.emit_reg_store("second", tile, value, 0)
+            builder.return_stmt(first)
+        program = ir.Program([function.get_result()], "RegEffects", span)
+        body = _seq_body(program, "vf")
+        scope = next(stmt for stmt in body.stmts if isinstance(stmt, ir.RegScopeStmt))
+        assert isinstance(scope.body, ir.SeqStmts)
+        graph = dep_analysis.build_stmt_dependency_graph(scope.body)
+        stores = [
+            stmt
+            for stmt in scope.body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _ir_core.get_op("reg.store").name
+        ]
+        assert len(stores) == 2
+        assert stores[0] in graph.get_predecessors(stores[1])
 
 
 # =============================================================================

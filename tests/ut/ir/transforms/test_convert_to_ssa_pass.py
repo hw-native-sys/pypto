@@ -2535,5 +2535,66 @@ class TestArbitraryAttrKeyRemap:
             assert id(var) in bound, f"Call attr references unbound Var {var.name_hint}"
 
 
+class TestRegisterScopes:
+    """A VF boundary preserves Tile versions and ordinary loop SSA carries."""
+
+    @staticmethod
+    def program(loop_stop=None, chain=False):
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        src, dst = ir.Var("src", tile_type, span), ir.Var("dst", tile_type, span)
+        x = ir.Var("x", ir.RegType(64, DataType.FP32, ir.RegKind.VecReg), span)
+        load = ir.AssignStmt(
+            x,
+            ir.create_op_call("reg.load", [src, ir.ConstInt(0, DataType.INDEX, span)], {"lanes": 64}, span),
+            span,
+        )
+        store = ir.AssignStmt(
+            dst,
+            ir.create_op_call("reg.store", [dst, ir.ConstInt(0, DataType.INDEX, span), x], span=span),
+            span,
+        )
+        if chain:
+            # The verifier intentionally accepts only store-return Tile inputs
+            # from outside the region in this fixture; exercise chained stores
+            # through the same destination to test SSA ordering independently.
+            first = ir.Var("first", tile_type, span)
+            store = ir.AssignStmt(
+                first,
+                ir.create_op_call("reg.store", [dst, ir.ConstInt(0, DataType.INDEX, span), x], span=span),
+                span,
+            )
+        if loop_stop is not None:
+            store = ir.ForStmt(
+                ir.Var("i", ir.ScalarType(DataType.INDEX), span),
+                ir.ConstInt(0, DataType.INDEX, span),
+                ir.ConstInt(loop_stop, DataType.INDEX, span),
+                ir.ConstInt(1, DataType.INDEX, span),
+                [],
+                store,
+                [],
+                span,
+            )
+        scope = ir.RegScopeStmt("", ir.SeqStmts([load, store], span), span)
+        body = ir.SeqStmts([scope, ir.ReturnStmt([dst], span)], span)
+        function = ir.Function("kernel", [src, dst], [tile_type], body, span, type=ir.FunctionType.AIV)
+        return ir.Program([function], "RegisterSSA", span)
+
+    def test_same_name_store_version_is_visible_after_scope(self):
+        after = passes.convert_to_ssa()(self.program())
+        function = next(iter(after.functions.values()))
+        assert isinstance(function.body, ir.SeqStmts)
+        scope, returned = function.body.stmts
+        assert isinstance(scope, ir.RegScopeStmt)
+        assert isinstance(scope.body, ir.SeqStmts)
+        assert isinstance(returned, ir.ReturnStmt)
+        store = scope.body.stmts[1]
+        assert isinstance(store, ir.AssignStmt)
+        assert isinstance(store.value, ir.Call)
+        assert returned.value[0] is store.var
+        assert store.var is not function.params[1]
+        assert store.value.args[0] is function.params[1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

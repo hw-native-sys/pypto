@@ -11,14 +11,21 @@
 
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
+#include <functional>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 
 namespace pypto::ir::transform_utils {
 
@@ -36,7 +43,59 @@ class SubstituteMutator : public IRMutator {
   }
 };
 
+class CallLikeFinder : public IRVisitor {
+ public:
+  bool found = false;
+
+ private:
+  // Finding the outer call is sufficient; its arguments cannot change the answer.
+  void VisitExpr_(const CallPtr&) override { found = true; }
+  void VisitExpr_(const SubmitPtr&) override { found = true; }
+};
+
 }  // namespace
+
+bool ExprContainsCallLike(const ExprPtr& expr) {
+  if (!expr) return false;
+  CallLikeFinder finder;
+  finder.VisitExpr(expr);
+  return finder.found;
+}
+
+StmtPtr RewriteLastYieldStmt(const StmtPtr& body,
+                             const std::function<StmtPtr(const YieldStmtPtr&)>& rewrite) {
+  if (auto yield = As<YieldStmt>(body)) return rewrite(yield);
+  if (auto seq = As<SeqStmts>(body)) {
+    if (seq->stmts_.empty()) return body;
+    auto tail = RewriteLastYieldStmt(seq->stmts_.back(), rewrite);
+    if (tail == seq->stmts_.back()) return body;
+    auto stmts = seq->stmts_;
+    if (tail) {
+      stmts.back() = std::move(tail);
+    } else {
+      stmts.pop_back();
+    }
+    if (stmts.empty()) return nullptr;
+    if (stmts.size() == 1) return stmts.front();
+    // Keep nested sequences nested: flattening the growing suffix at every
+    // ancestor would make a trailing sequence chain quadratic. Normalized
+    // input stays normalized; the dedicated normalization pass handles other IR.
+    auto result = MutableCopy(seq);
+    result->stmts_ = std::move(stmts);
+    return result;
+  }
+  auto rewrite_scope = [&](const auto& scope) -> StmtPtr {
+    auto inner = RewriteLastYieldStmt(scope->body_, rewrite);
+    if (inner == scope->body_) return scope;
+    auto result = MutableCopy(scope);
+    // A scope has scheduling semantics even when its only yield disappears.
+    result->body_ = inner ? inner : std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, scope->body_->span_);
+    return result;
+  };
+  if (auto scope = As<RuntimeScopeStmt>(body)) return rewrite_scope(scope);
+  if (auto scope = As<SplitAivScopeStmt>(body)) return rewrite_scope(scope);
+  return body;
+}
 
 // Var* → VarPtr
 ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
@@ -56,6 +115,28 @@ ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, Exp
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map) {
   SubstituteMutator<ExprPtr> mutator(var_map);
   return mutator.VisitStmt(body);
+}
+
+CallPtr RebuildRegisteredCall(const CallPtr& original, const std::vector<ExprPtr>& rewritten_args,
+                              const std::function<ExprPtr(const ExprPtr&)>& remap_expr) {
+  INTERNAL_CHECK(original) << "Internal error: rebuilding an operator requires an original Call";
+  auto& registry = OpRegistry::GetInstance();
+  INTERNAL_CHECK_SPAN(original->op_ && !As<GlobalVar>(original->op_) &&
+                          registry.IsRegistered(original->op_->name_) &&
+                          !registry.GetEntry(original->op_->name_).RequiresExplicitType() && remap_expr,
+                      original->span_)
+      << "Internal error: registered-call rebuilding requires a type-deducible operator and remapper";
+  auto remap_fields = [&](const auto& fields) {
+    auto updated = fields;
+    for (auto& [key, value] : updated) {
+      if (auto mapped = MapAttrExprs(value, remap_expr)) value = std::move(*mapped);
+    }
+    return updated;
+  };
+  auto kwargs = remap_fields(original->kwargs_);
+  auto attrs = remap_fields(original->attrs_);
+  auto deduced = registry.Create(original->op_->name_, rewritten_args, kwargs, original->span_);
+  return PreserveCallAttrs(attrs, deduced);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +183,7 @@ void CollectDefVars(const StmtPtr& stmt, std::vector<VarPtr>& result) {
     case ObjectKind::HierarchyScopeStmt:
     case ObjectKind::SpmdScopeStmt:
     case ObjectKind::SplitAivScopeStmt:
+    case ObjectKind::RegScopeStmt:
     case ObjectKind::GraphScopeStmt: {
       auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
       CollectDefVars(scope->body_, result);

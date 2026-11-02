@@ -153,7 +153,7 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
 ///    not hold the same way, since a produce clone's accumulator is drained to
 ///    the peer core while the next clone's MAD runs — the same overlap LPL
 ///    carves out for dbC=2. Separating the stages' buffers is this pass's whole
-///    purpose (see `docs/en/dev/passes/28-skew_cross_core_pipeline.md`), and
+///    purpose (see `docs/en/dev/passes/30-skew_cross_core_pipeline.md`), and
 ///    since #1949 `MemoryReuse`'s capacity-gated path honours membership in
 ///    every space including `Acc`, so adopting LPL's skip here would drop these
 ///    accumulators out of the gate entirely. No skew test covers a matmul body
@@ -236,6 +236,8 @@ class SkewCrossCoreMutator : public IRMutator {
     if (op->kind_ != ForKind::Pipeline || !op->HasAttr(kPipelineStagesAttr)) {
       return IRMutator::VisitStmt_(op);
     }
+    CHECK_SPAN(op->hardware_loop_policy_ == HardwareLoopPolicy::Auto, op->span_)
+        << "Pipeline expansion of HardwareLoopPolicy.Require is not supported yet";
     int64_t factor = static_cast<int64_t>(op->GetAttr<int>(kPipelineStagesAttr, 0));
     INTERNAL_CHECK_SPAN(factor >= 1, op->span_)
         << "SkewCrossCorePipeline: pipeline_stages must be >= 1, got " << factor;

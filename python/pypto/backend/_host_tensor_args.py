@@ -15,13 +15,15 @@ from pypto.pypto_core import ir
 class _HostAccess(ir.IRVisitor):
     """Conservative alias components, in O(N log N) using union by size."""
 
-    def __init__(self) -> None:
+    def __init__(self, func: ir.Function) -> None:
         super().__init__()
         self.parents: dict[int, int] = {}
         self.sizes: dict[int, int] = {}
         self.host: set[ir.Var] = set()
         self.device: set[ir.Var] = set()
-        self.yields: list[list[ir.Var]] = []
+        self.statement_parents = ir.ParentStmtAnalysis()
+        self.statement_parents.build_map(func)
+        self.yield_owners: dict[ir.Stmt, ir.IfStmt | ir.ForStmt | ir.WhileStmt | None] = {}
         self.predicate: ir.Expr | None = None
         self.in_predicate = False
 
@@ -94,30 +96,41 @@ class _HostAccess(ir.IRVisitor):
         finally:
             self.in_predicate = previous
 
-    def visit_if_stmt(self, op: ir.IfStmt) -> None:
-        self.yields.append(op.return_vars)
-        super().visit_if_stmt(op)
-        self.yields.pop()
-
     def loop(self, op: ir.ForStmt | ir.WhileStmt) -> None:
         for carry, result in zip(op.iter_args, op.return_vars, strict=True):
             self.alias(carry, carry.initValue)
             self.alias(carry, result)
-        self.yields.append(op.return_vars)
 
     def visit_for_stmt(self, op: ir.ForStmt) -> None:
         self.loop(op)
         super().visit_for_stmt(op)
-        self.yields.pop()
 
     def visit_while_stmt(self, op: ir.WhileStmt) -> None:
         self.loop(op)
         super().visit_while_stmt(op)
-        self.yields.pop()
+
+    def yield_owner(self, stmt: ir.Stmt) -> ir.IfStmt | ir.ForStmt | ir.WhileStmt | None:
+        # Reuse lexical parents rather than a recursive callback stack: nanobind
+        # can bypass an active Python handler for nested statements of its kind.
+        # Cache transparent ancestors so total parent walking stays linear.
+        path: list[ir.Stmt] = []
+        parent = self.statement_parents.get_parent(stmt)
+        while parent is not None and not isinstance(parent, (ir.IfStmt, ir.ForStmt, ir.WhileStmt)):
+            if parent in self.yield_owners:
+                parent = self.yield_owners[parent]
+                break
+            path.append(parent)
+            parent = self.statement_parents.get_parent(parent)
+        for ancestor in path:
+            self.yield_owners[ancestor] = parent
+        return parent
 
     def visit_yield_stmt(self, op: ir.YieldStmt) -> None:
-        if self.yields:
-            for result, value in zip(self.yields[-1], op.value, strict=True):
+        owner = self.yield_owner(op)
+        if owner is not None:
+            if isinstance(owner, (ir.ForStmt, ir.WhileStmt)):
+                self.loop(owner)
+            for result, value in zip(owner.return_vars, op.value, strict=True):
                 self.alias(result, value)
         super().visit_yield_stmt(op)
 
@@ -128,7 +141,7 @@ def host_tensor_indices(func: ir.Function) -> list[int]:
     Device tasks cannot consume these host views. Reject ambiguous mixed uses
     before dispatch, including aliases and branch/loop-carried descriptors.
     """
-    access = _HostAccess()
+    access = _HostAccess(func)
     access.visit_stmt(func.body)
     host = {access.root(var) for var in access.host}
     device = {access.root(var) for var in access.device}

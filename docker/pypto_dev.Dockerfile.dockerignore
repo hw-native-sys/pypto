@@ -1,0 +1,7 @@
+# Keep shared-host build trees and credentials out of the Docker context.
+**
+!docker/
+!docker/**
+!toolchain/
+!toolchain/versions.env
+!build-constraints.txt

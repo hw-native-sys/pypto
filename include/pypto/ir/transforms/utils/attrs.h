@@ -31,6 +31,11 @@ namespace ir {
 /// deliberately do not carry it.
 inline constexpr const char* kCompilerTensorToTileMatBridgeAttr = "__compiler_tensor_to_tile_mat_bridge";
 
+/// Compiler-owned software-pipeline provenance: loops carry the slot count;
+/// slot load/create Calls carry true through MemoryReuse to codegen, including
+/// schedules with no steady loop. This is not a private PTOAS scheduling contract.
+inline constexpr const char* kSoftwarePipelineSlotsAttr = "software_pipeline_slots";
+
 /// Attribute key for ``pl.pipeline(N, stage=F)`` — appears on ``ForStmt.attrs_``
 /// if and only if ``ForStmt.kind_ == ForKind::Pipeline`` (bidirectional invariant
 /// enforced by the structural verifier ``PipelineLoopValid``).
@@ -82,13 +87,12 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// overlaps tile i+1's MAD. Under ``memory_planner=PTOAS``, InitMemRef keeps the
 /// co-live buffers distinct and ptoas places them. Under the PyPTO planner,
 /// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
-/// preserves the pair. ``AutoTileMatmulL0`` sets the attr either when the chooser
-/// picked ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
-/// recognizes a user-authored pipeline containing one canonical directly drained
-/// L0 matmul whose path-specific trip-count/Acc-size gate is profitable and whose
-/// conservative whole-function Acc footprint still fits after adding the extra
-/// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
-/// separate conservative admission thresholds. Consumed (stripped) by
+/// preserves the pair. Automatic dbC selection is disabled for PyPTO/DSA-RP;
+/// PTOAS retains it. Existing-pipeline recognition stays disabled for every
+/// planner. This attribute remains available for
+/// explicit scheduling intent and is preserved by AutoTile. Its downstream
+/// lowering is unchanged; the separate slots alone do not establish profitable
+/// compute/drain overlap. Consumed (stripped) by
 /// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
 /// ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";
@@ -215,7 +219,7 @@ inline constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler
 //
 // The rebind attr is stamped for **every** iter_arg (even when false) so its
 // presence proves the pass ran; the array-size attr is stamped only when
-// positive. See ``docs/en/dev/passes/50-classify_iter_arg_carry.md``.
+// positive. See ``docs/en/dev/passes/52-classify_iter_arg_carry.md``.
 
 /// Prefix of the per-iter_arg ``bool`` "needs a materialised carry" attr.
 inline constexpr const char* kIterArgRebindAttrPrefix = "iter_arg_rebind_";

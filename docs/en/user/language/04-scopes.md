@@ -350,9 +350,16 @@ before the consumer. For example, an AIV load on MTE2 followed by vector work
 can use:
 
 ```python
+a = pl.tile.load(input_a, [0, 0], [16, 16])
 pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+b = pl.tile.load(input_b, [0, 0], [16, 16])  # Used later with its own synchronization
 pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+result = pl.tile.adds(a, 1.0)
 ```
+
+MTE2 signals after loading `a`. The wait gates V, so V can compute `result`
+while the unrelated load of `b` continues. Source order alone does not imply
+completion order between these pipelines.
 
 Both calls are side-effect statements. The three identifiers must match in a
 pair. Source and destination must be different concrete `pl.PipeType` values;
@@ -370,6 +377,27 @@ sync placement for the whole function.
 Keep explicit flags outside `pl.pipeline` loops. Pipeline scheduling cannot yet
 preserve their authored order, so PyPTO rejects either flag in such a loop.
 Use `pl.range` when manually synchronizing work inside a loop.
+
+For a pipeline barrier, use `pl.system.barrier(*, pipe)`. The required keyword
+accepts only `pl.PipeType.V`, `M`, or `ALL`. A `V` or `M` barrier orders
+preceding and following work on that pipeline. `ALL` waits for preceding work
+across all pipelines on the current core. For example, an `ALL` barrier after
+both loads above would wait for `b` as well as `a` before vector computation.
+Barriers neither allocate nor consume event slots; an outstanding `set_flag`
+still requires its matching `wait_flag`.
+
+Migrate removed APIs to the unified spelling:
+
+| Removed call | Unified call |
+| ------------ | ------------ |
+| `pl.system.bar_v()` | `pl.system.barrier(pipe=pl.PipeType.V)` |
+| `pl.system.bar_m()` | `pl.system.barrier(pipe=pl.PipeType.M)` |
+| `pl.system.bar_all()` | `pl.system.barrier(pipe=pl.PipeType.ALL)` |
+
+The old wrappers are no longer available. The Python IR printer emits the unified
+spelling for all three forms, with the same internal IR and native barriers.
+`ALL` does not synchronize different cores; cross-core arrival uses
+`pl.system.syncall(...)` as described below.
 
 AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
 is what the transfer is — but nothing orders a cube-lane write against a vector-lane read

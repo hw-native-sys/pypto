@@ -14,8 +14,11 @@
  * @brief Insert tile.tget_scale_addr bindings before MX matmul consumers.
  *
  * Runs after InferTileMemorySpace so Left/LeftScale and Right/RightScale pairs
- * are already resolved. Because tget_scale_addr mutates shared physical scale
- * buffers in place, bindings are never reused across MX matmul consumers.
+ * are already resolved. Reuse an unchanged binding within a straight-line region:
+ * repeating it after a consumer would make PTOAS hoist it across that consumer
+ * to the original scale fill. Track only the latest binding on each scale side,
+ * since aliases can share mutable physical buffers. Other tile uses and control
+ * flow invalidate the corresponding state conservatively.
  */
 
 #include <cstddef>
@@ -62,11 +65,20 @@ bool IsResolvedMxScaleDataPair(const VarPtr& scale, const VarPtr& data) {
 
 class MxScaleAddrInserter : public IRMutator {
  public:
+  StmtPtr VisitStmt(const StmtPtr& stmt) override {
+    const bool is_scope = As<ScopeStmt>(stmt) != nullptr;
+    if (is_scope) ClearBindings();
+    auto result = IRMutator::VisitStmt(stmt);
+    if (is_scope) ClearBindings();
+    return result;
+  }
+
   // Entry / control-flow body helper: NormalizedStmtStructure unwraps single-child
   // SeqStmts, so if/for/while (and even the function body) may be a bare AssignStmt.
   // SeqStmts bodies use VisitStmt_(SeqStmts); bare MX matmul assigns are wrapped
   // into a SeqStmts with the inserted bindings (same pattern as InsertCommFence).
   StmtPtr RewriteBody(const StmtPtr& body) {
+    ClearBindings();
     if (As<SeqStmts>(body)) return VisitStmt(body);
 
     auto visited = VisitStmt(body);
@@ -82,13 +94,28 @@ class MxScaleAddrInserter : public IRMutator {
   }
 
  protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    if (GetDataScalePairs(op).empty()) {
+      if (!LookupOpEntry(op->op_)) {
+        ClearBindings();
+      } else {
+        // Include reads and result tiles: this avoids depending on incomplete
+        // data/metadata effect contracts or assuming distinct SSA names cannot
+        // alias. Mat loads and Acc stores leave L0 data/scale bindings intact.
+        InvalidateBinding(op->GetType());
+        for (const auto& arg : op->args_) InvalidateBinding(arg->GetType());
+      }
+    }
+    return IRMutator::VisitExpr_(op);
+  }
+
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     bool changed = false;
     std::vector<StmtPtr> new_stmts;
     new_stmts.reserve(op->stmts_.size());
 
     for (const auto& stmt : op->stmts_) {
-      auto rewritten = IRMutator::VisitStmt(stmt);
+      auto rewritten = VisitStmt(stmt);
       if (rewritten.get() != stmt.get()) changed = true;
 
       auto assign = As<AssignStmt>(rewritten);
@@ -107,8 +134,10 @@ class MxScaleAddrInserter : public IRMutator {
     auto new_then = RewriteBody(op->then_body_);
     std::optional<StmtPtr> new_else = op->else_body_;
     if (op->else_body_.has_value()) new_else = RewriteBody(op->else_body_.value());
+    ClearBindings();
     const bool then_changed = new_then.get() != op->then_body_.get();
-    const bool else_changed = op->else_body_.has_value() && new_else->get() != op->else_body_->get();
+    const bool else_changed =
+        op->else_body_.has_value() && new_else.has_value() && new_else->get() != op->else_body_->get();
     if (!then_changed && !else_changed) return op;
     auto result = MutableCopy(op);
     result->then_body_ = std::move(new_then);
@@ -120,6 +149,28 @@ class MxScaleAddrInserter : public IRMutator {
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return VisitLoop(op, op->body_); }
 
  private:
+  struct Binding {
+    VarPtr scale;
+    VarPtr data;
+    VarPtr bound;
+  };
+
+  std::optional<Binding> left_binding_;
+  std::optional<Binding> right_binding_;
+
+  void ClearBindings() {
+    left_binding_.reset();
+    right_binding_.reset();
+  }
+
+  void InvalidateBinding(const TypePtr& type) {
+    auto tile = As<TileType>(type);
+    if (!tile) return;
+    const auto space = tile->GetMemorySpace();
+    if (space == MemorySpace::Left || space == MemorySpace::LeftScale) left_binding_.reset();
+    if (space == MemorySpace::Right || space == MemorySpace::RightScale) right_binding_.reset();
+  }
+
   static std::vector<std::pair<size_t, size_t>> GetDataScalePairs(const CallPtr& call) {
     if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias")) {
       return {{0, 1}, {2, 3}};
@@ -133,6 +184,7 @@ class MxScaleAddrInserter : public IRMutator {
   template <typename LoopPtr>
   StmtPtr VisitLoop(const LoopPtr& op, const StmtPtr& body) {
     auto new_body = RewriteBody(body);
+    ClearBindings();
     if (new_body.get() == body.get()) return op;
     auto result = MutableCopy(op);
     result->body_ = std::move(new_body);
@@ -170,11 +222,17 @@ class MxScaleAddrInserter : public IRMutator {
              "RightScale↔Right pairing before inserting tile.tget_scale_addr (run "
              "InferTileMemorySpace first)";
 
-      auto binding_call = registry.Create("tile.tget_scale_addr", {scale, data}, {}, call->span_);
-      auto bound_scale =
-          std::make_shared<Var>(scale->name_hint_ + "_bound", binding_call->GetType(), call->span_);
-      new_stmts.push_back(std::make_shared<AssignStmt>(bound_scale, binding_call, call->span_));
-      new_args[scale_index] = bound_scale;
+      auto& binding = As<TileType>(scale->GetType())->GetMemorySpace() == MemorySpace::LeftScale
+                          ? left_binding_
+                          : right_binding_;
+      if (!binding || binding->scale.get() != scale.get() || binding->data.get() != data.get()) {
+        auto binding_call = registry.Create("tile.tget_scale_addr", {scale, data}, {}, call->span_);
+        auto bound_scale =
+            std::make_shared<Var>(scale->name_hint_ + "_bound", binding_call->GetType(), call->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(bound_scale, binding_call, call->span_));
+        binding = Binding{scale, data, bound_scale};
+      }
+      new_args[scale_index] = binding->bound;
       call_changed = true;
       changed = true;
     }

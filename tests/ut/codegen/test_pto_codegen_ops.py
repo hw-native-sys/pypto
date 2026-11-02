@@ -23,7 +23,8 @@ import pypto.language as pl
 import pytest
 from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 # ============================================================================
@@ -852,9 +853,43 @@ class TestB01PrecisionAndRowExpandAddCodegen:
         default_line = self._op_line(self._generate_mlir(DefaultProg), "pto.tdiv")
         high_precision_line = self._op_line(self._generate_mlir(HighPrecisionProg), "pto.tdiv")
         assert "precisionType" not in default_line
-        assert strip_loc(high_precision_line).endswith("{precisionType = #pto<div_precision high_precision>}")
+        # PTOAS v0.70 maps high-precision division to diff_compensation.
+        assert strip_loc(high_precision_line).endswith(
+            "{precisionType = #pto<div_precision diff_compensation>}"
+        )
         assert ") outs(" in high_precision_line
         assert high_precision_line.index("outs(") < high_precision_line.index("precisionType")
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True])
+    @pytest.mark.parametrize("dtype", [pl.FP16, pl.FP32])
+    def test_high_precision_division_compiles_with_current_ptoas(self, tmp_path, dtype, enable_buffer_ir):
+        """Keep both division emitters compatible with the pinned PTOAS release."""
+
+        @pl.program
+        class PreciseDivision:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 32], dtype],
+                rhs: pl.Tensor[[16, 32], dtype],
+                out: pl.Out[pl.Tensor[[16, 32], dtype]],
+            ) -> pl.Tensor[[16, 32], dtype]:
+                a = pl.load(lhs, [0, 0], [16, 32])
+                b = pl.load(rhs, [0, 0], [16, 32])
+                return pl.store(pl.tile.div(a, b, high_precision=True), [0, 0], out)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        with passes.PassContext([], enable_buffer_ir=enable_buffer_ir):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PreciseDivision)
+        mlir = codegen.PTOCodegen().generate(optimized)
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TDIV<pto::DivAlgorithm::HIGH_PRECISION>" in cpp
+        # PTOAS v0.70 renamed the MLIR selector for high-precision division.
+        assert "#pto<div_precision diff_compensation>" in mlir
 
     def test_tlog_emits_exact_high_precision_attr(self):
         @pl.program
@@ -2962,14 +2997,7 @@ class TestTileSliceCodegen:
 
 
 class TestTileAssembleCodegen:
-    """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).
-
-    tile.assemble lowers to:
-      1. (optional) pto.tmov target → dst when buffer reuse did not merge them.
-      2. %dst_view = pto.subview %dst[row, col] sizes [...] : ... -> ...
-      3. pto.tmov ins(%src) outs(%dst_view)
-    The historical pto.tinsert copy op is no longer emitted.
-    """
+    """Tests for destination preservation and target-specific tile insertion."""
 
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
@@ -2985,7 +3013,7 @@ class TestTileAssembleCodegen:
         return codegen_instance.generate(single)
 
     def test_tile_assemble_codegen(self):
-        """tile.assemble lowers to pto.subview + pto.tmov, never pto.tinsert."""
+        """ND Vec insertion keeps the destination pitch through pto.tinsert."""
 
         @pl.program
         class Prog:
@@ -3002,26 +3030,87 @@ class TestTileAssembleCodegen:
                 return pl.store(result, [0, 0], out)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.tinsert" not in mlir, f"tile.assemble no longer emits pto.tinsert, got:\n{mlir}"
-        # Exactly one pto.subview should carve out the destination window.
-        subview_lines = [line.strip() for line in mlir.splitlines() if "pto.subview" in line]
-        assert len(subview_lines) == 1, (
-            f"Expected one pto.subview for tile.assemble, got {len(subview_lines)}:\n"
-            + "\n".join(subview_lines)
-        )
-        sv = subview_lines[0]
-        assert "sizes [16, 64]" in sv, f"subview sizes must equal source shape: {sv}"
-        assert "valid [" in sv, f"subview must carry explicit valid operands: {sv}"
-        valid_clause = sv.split("valid [", 1)[1].split("]", 1)[0]
-        assert "%" in valid_clause, f"subview valid operands must be SSA/index values, got: {sv}"
-        assert "v_row=16" in sv and "v_col=64" in sv, (
-            f"subview result type must preserve the source tile valid_shape: {sv}"
-        )
-        # The actual data write is a pto.tmov from src into the subview SSA.
-        view_ssa = sv.split(" = ", 1)[0].strip()
-        assert any("pto.tmov" in line and f"outs({view_ssa}" in line for line in mlir.splitlines()), (
-            f"tile.assemble should pto.tmov into the subview SSA {view_ssa!r}, got:\n{mlir}"
-        )
+        insert_lines = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(insert_lines) == 1, mlir
+        source, destination = insert_lines[0].split("outs(")
+        assert "rows=16, cols=64" in source
+        assert "rows=16, cols=128" in destination
+        assert "pto.subview" not in mlir
+
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("dtype", [pl.FP32, pl.FP16, pl.BF16])
+    @pytest.mark.parametrize(
+        ("rows", "cols", "row_offset", "col_offset", "valid_rows", "valid_cols"),
+        [
+            (16, 512, 0, 128, 16, 128),
+            (16, 512, 0, 0, 16, 128),
+            (32, 512, 16, 128, 8, 96),
+            (16, 128, 0, 0, 16, 128),
+            (16, 512, 0, 1, 16, 128),
+        ],
+        ids=["columns", "zero_offset", "narrow_valid", "whole_tile", "unaligned_offset"],
+    )
+    def test_vec_assemble_ptoas(
+        self, tmp_path, backend_type, dtype, rows, cols, row_offset, col_offset, valid_rows, valid_cols
+    ):
+        """Issue #2717: a destination window must retain its parent's row pitch."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 128], dtype],
+                initial: pl.Tensor[[rows, cols], dtype],
+                out: pl.Out[pl.Tensor[[rows, cols], dtype]],
+            ) -> pl.Tensor[[rows, cols], dtype]:
+                source = pl.load(x, [0, 0], [16, 128], valid_shape=[valid_rows, valid_cols])
+                target = pl.load(initial, [0, 0], [rows, cols])
+                result = pl.assemble(target, source, [row_offset, col_offset])
+                return pl.store(result, [0, 0], out)
+
+        backend.set_backend_type(backend_type)
+        # Exercise the tile emitter even when a whole-tile copy is eligible for
+        # Buffer IR; runtime tests separately cover the default pipeline.
+        with passes.PassContext([], enable_buffer_ir=False):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+        if backend_type == BackendType.Ascend910B and col_offset == 1:
+            # A5 supports unaligned insertion; A2/A3 would assert on device.
+            with pytest.raises(ValueError, match="32-byte-aligned column offset"):
+                codegen.PTOCodegen().generate(optimized)
+            return
+        mlir = codegen.PTOCodegen().generate(optimized)
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        # Checking only the logical subview types missed the failure: PTOAS
+        # restores the destination's physical dimensions before verifying TMOV.
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TINSERT(" in cpp
+
+    @pytest.mark.parametrize("dtype", [pl.INT8, pl.UINT8, pl.INT16, pl.INT32])
+    def test_integer_whole_tile_assemble_retains_tmov(self, tmp_path, dtype):
+        """Integer TMOVs must not inherit the narrower TINSERT type contract."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 128], dtype],
+                initial: pl.Tensor[[16, 128], dtype],
+                out: pl.Out[pl.Tensor[[16, 128], dtype]],
+            ) -> pl.Tensor[[16, 128], dtype]:
+                source = pl.load(x, [0, 0], [16, 128])
+                target = pl.load(initial, [0, 0], [16, 128])
+                result = pl.assemble(target, source, [0, 0])
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tinsert" not in mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert "TMOV(" in cpp
 
     def _generate_mlir_all_incore(self, program_cls) -> str:
         """Like ``_generate_mlir`` but concatenates PTOCodegen output for every
@@ -5495,7 +5584,7 @@ class TestFenceCodegen:
 
 
 class TestPipeBarrierCodegen:
-    """Tests that pl.system.bar_* lower to pto.barrier on the expected pipe."""
+    """The parameterized API emits native PTO barriers without event slots."""
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -5510,7 +5599,7 @@ class TestPipeBarrierCodegen:
         return codegen_instance.generate(single)
 
     def test_bar_all_emits_pipe_all_barrier(self):
-        """pl.system.bar_all() emits pto.barrier <PIPE_ALL>."""
+        """The ALL form emits pto.barrier <PIPE_ALL>."""
 
         @pl.program
         class Prog:
@@ -5521,7 +5610,7 @@ class TestPipeBarrierCodegen:
                 out: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
-                pl.system.bar_all()
+                pl.system.barrier(pipe=pl.PipeType.ALL)
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 return updated
 
@@ -5529,7 +5618,7 @@ class TestPipeBarrierCodegen:
         assert "pto.barrier <PIPE_ALL>" in mlir, f"pto.barrier <PIPE_ALL> not found in MLIR:\n{mlir}"
 
     def test_bar_v_emits_pipe_v_barrier(self):
-        """pl.system.bar_v() emits pto.barrier <PIPE_V>."""
+        """The V form emits pto.barrier <PIPE_V>."""
 
         @pl.program
         class Prog:
@@ -5540,7 +5629,7 @@ class TestPipeBarrierCodegen:
                 out: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
-                pl.system.bar_v()
+                pl.system.barrier(pipe=pl.PipeType.V)
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 return updated
 
@@ -5548,7 +5637,7 @@ class TestPipeBarrierCodegen:
         assert "pto.barrier <PIPE_V>" in mlir, f"pto.barrier <PIPE_V> not found in MLIR:\n{mlir}"
 
     def test_bar_m_emits_pipe_m_barrier(self):
-        """pl.system.bar_m() emits pto.barrier <PIPE_M>."""
+        """The M form emits pto.barrier <PIPE_M>."""
 
         @pl.program
         class Prog:
@@ -5559,12 +5648,39 @@ class TestPipeBarrierCodegen:
                 out: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
-                pl.system.bar_m()
+                pl.system.barrier(pipe=pl.PipeType.M)
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 return updated
 
         mlir = self._generate_mlir(Prog)
         assert "pto.barrier <PIPE_M>" in mlir, f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
+
+    @pytest.mark.parametrize("pipe", ["V", "M", "ALL"])
+    def test_barriers_do_not_emit_flags(self, pipe):
+        source = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+        BARRIER_CALL
+        return pl.store(tile, [0, 0], out)
+"""
+        unified = pl.parse_program(
+            source.replace("BARRIER_CALL", f"pl.system.barrier(pipe=pl.PipeType.{pipe})")
+        )
+
+        unified_mlir = self._generate_mlir(unified)
+
+        assert f"pto.barrier <PIPE_{pipe}>" in unified_mlir
+        assert "pto.set_flag" not in unified_mlir
+        assert "pto.wait_flag" not in unified_mlir
 
 
 def _cmo_cacheinvalid_line(mlir: str) -> str:

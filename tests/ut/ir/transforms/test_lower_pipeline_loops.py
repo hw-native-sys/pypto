@@ -22,6 +22,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.pypto_core import DataType
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
@@ -37,6 +38,65 @@ def _run_pass(program: ir.Program) -> ir.Program:
 
 class TestLowerPipelineMechanics:
     """Before/Expected pairs verifying the cloning + outer-stride rewriting logic."""
+
+    def test_outer_iter_arg_survives_main_and_tail_clones(self):
+        """Both replicated stages and the remainder capture the enclosing state (#3130)."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.pipeline(3, stage=2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                    _result = pl.yield_(old + 16)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.range(0, 2, 2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                        _value_1: pl.Scalar[pl.INDEX] = old + (chunk + 1)
+                    _value_2: pl.Scalar[pl.INDEX] = old + 2
+                    _result = pl.yield_(old + 16)
+                return x
+
+        after = _run_pass(Before)
+        ir.assert_structural_equal(after, Expected)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        assert not passes.PropertyVerifierRegistry.verify(props, after)
+
+    def test_outer_iter_arg_survives_dynamic_pipeline(self):
+        """Runtime trip counts also clone captures into the conditional tail."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, n: pl.Scalar[pl.INDEX]):
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    for chunk in pl.pipeline(n, stage=2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                    _result = pl.yield_(old + 16)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n: pl.Scalar[pl.INDEX]):
+                for step, (old,) in pl.range(3, init_values=(0,)):
+                    main_end: pl.Scalar[pl.INDEX] = 0 + (n - 0) // 2 * 2
+                    for chunk in pl.range(0, main_end, 2):
+                        _value: pl.Scalar[pl.INDEX] = old + chunk
+                        _value_1: pl.Scalar[pl.INDEX] = old + (chunk + 1)
+                    rem: pl.Scalar[pl.INDEX] = n - main_end
+                    if rem == 1:
+                        _value_2: pl.Scalar[pl.INDEX] = old + main_end
+                    _result = pl.yield_(old + 16)
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
 
     def test_clean_divide_produces_replicated_outer_loop(self):
         """trip=8, factor=4 → outer range(0, 8, 4) with 4 clones, no remainder."""
@@ -651,6 +711,116 @@ class TestAccumulatorMembership:
         assert stages == ["0:0", "0:0", "0:1", "0:1"], (
             f"pipelined operands must carry distinct-stage membership, got {stages}"
         )
+
+
+_MATMUL_ACC_OPS = frozenset({ir.get_op("tensor.matmul_acc").name, ir.get_op("tile.matmul_acc").name})
+
+
+class _CollectMatmulAccPredicates(ir.IRVisitor):
+    """Collect every `matmul_acc` `init_cond` in traversal order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.predicates: list[ir.Expr] = []
+
+    def visit_call(self, op: ir.Call) -> None:
+        if op.op.name in _MATMUL_ACC_OPS:
+            self.predicates.append(op.args[3])
+        super().visit_call(op)
+
+
+class _ReplaceMatmulAccPredicates(ir.IRMutator):
+    """Replace every `matmul_acc` `init_cond` with the next entry of `predicates`."""
+
+    def __init__(self, predicates: list[ir.Expr]) -> None:
+        super().__init__()
+        self._predicates = predicates
+        self.index = 0
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        new = super().visit_call(op)
+        assert isinstance(new, ir.Call)
+        if new.op.name in _MATMUL_ACC_OPS:
+            args = list(new.args)
+            args[3] = self._predicates[self.index]
+            self.index += 1
+            return ir.Call(new.op, args, new.kwargs, new.type, new.span)
+        return new
+
+
+def _seed_predicates_after_simplify(start: int, stop: int, step: int):
+    """Lower a stage=2 `pl.pipeline` whose body seeds an accumulator with `init_cond=(i == 0)`,
+    then run `Simplify`; return `(lowered, after)`.
+
+    The accumulator is carried through `init_values=` / `pl.yield_` because the input must
+    already be SSA, and the operands are sliced outside the loop so the loop variable
+    appears only in the predicate.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(strict_ssa=True)
+        def main(
+            self,
+            x: pl.Tensor[[16, 64], pl.BF16],
+            w: pl.Tensor[[2, 64, 64], pl.BF16],
+            out: pl.Out[pl.Tensor[[1, 16, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+            seed = pl.tensor.create([1, 16, 64], pl.FP32)
+            a_fixed = pl.tensor.slice(x, [16, 64], [0, 0])
+            w_fixed = pl.tensor.slice(w, [1, 64, 64], [0, 0, 0])
+            for i, (acc,) in pl.pipeline(start, stop, step, stage=2, init_values=(seed,)):
+                nxt = pl.matmul_acc(acc, a_fixed, w_fixed, b_trans=True, init_cond=(i == 0))
+                r = pl.yield_(nxt)
+            return pl.tensor.assemble(out, r, [0, 0, 0])
+
+    lowered = passes.lower_pipeline_loops()(Before)
+    return lowered, passes.simplify()(lowered)
+
+
+def _assert_replica_one_predicate(lowered, after, expected_replica_one: ir.Expr) -> None:
+    """Assert the complete IR: Simplify may change replica 1's predicate and nothing else."""
+    collector = _CollectMatmulAccPredicates()
+    collector.visit_program(lowered)
+    assert len(collector.predicates) == 2, (
+        f"stage=2 must replicate the seed site twice, got {len(collector.predicates)}"
+    )
+
+    mutator = _ReplaceMatmulAccPredicates([collector.predicates[0], expected_replica_one])
+    expected = mutator.visit_program(lowered)
+    assert mutator.index == 2, f"expected 2 matmul_acc calls, replaced {mutator.index}"
+    ir.assert_structural_equal(after, expected)
+
+
+class TestReplicaSeedPredicateFoldsInSimplify:
+    """Replication rewrites replica 1's seed test `i == 0` into `i + step == 0`. Simplify
+    must fold it to `False` when the loop range makes zero unreachable, and keep it when
+    zero is reachable. Replica 0 always keeps its runtime test: it seeds the accumulator.
+    """
+
+    def test_unreachable_zero_folds_the_replica_predicate(self):
+        # start=0, step=2: replica 1 indexes {2, 6, 10}, never zero.
+        lowered, after = _seed_predicates_after_simplify(0, 12, 2)
+        _assert_replica_one_predicate(lowered, after, ir.ConstBool(False, ir.Span.unknown()))
+
+    def test_reachable_zero_keeps_the_replica_predicate(self):
+        # start=-2, step=2: replica 1 indexes {0, 4}. Folding would make the first K
+        # block accumulate onto an uninitialised accumulator instead of overwriting it.
+        lowered, after = _seed_predicates_after_simplify(-2, 6, 2)
+
+        collector = _CollectMatmulAccPredicates()
+        collector.visit_program(lowered)
+        rewritten = collector.predicates[1]
+        assert isinstance(rewritten, ir.Eq), rewritten
+        shifted = rewritten.left
+        assert isinstance(shifted, ir.Add), shifted
+        expected = ir.Eq(
+            shifted.left,
+            ir.ConstInt(-2, DataType.INDEX, rewritten.span),
+            DataType.BOOL,
+            rewritten.span,
+        )
+        _assert_replica_one_predicate(lowered, after, expected)
 
 
 if __name__ == "__main__":

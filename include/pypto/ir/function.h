@@ -521,6 +521,24 @@ inline constexpr const char* kAttrBuiltinTemplateDir = "builtin_template_dir";
 inline constexpr const char* kAttrBuiltinTemplateVars = "builtin_template_vars";
 
 /**
+ * @brief Reserved Function attr key requiring every tensor argument of a
+ * dispatch to this kernel to be a contiguous row-major view at runtime.
+ *
+ * Value type: ``bool``; absent means false. Written by
+ * ``LowerL2TensorCollectives`` on the AIV function it synthesizes for a managed
+ * CHIP/L2 collective, whose hand-written kernel addresses every operand as
+ * ``buffer.addr + start_offset`` followed by dense row-major indexing. Read by
+ * orchestration codegen, which emits a check on each tensor argument's runtime
+ * ``Tensor::is_contiguous`` flag ahead of that kernel's submit and latches
+ * ``SIMPLER_ERROR_INVALID_ARGS`` on the first violation. The pass already
+ * proves every operand built in the orchestration row-major at compile time, so
+ * this is a backstop for operands the caller supplies: argument packing
+ * rejects a non-contiguous host torch tensor, but a prebuilt runtime ``Tensor``
+ * is checked only here.
+ */
+inline constexpr const char* kAttrRequireContiguousOperands = "require_contiguous_operands";
+
+/**
  * @brief Reserved Function attr key opting a function out of automatic
  * ``RuntimeScopeStmt`` materialization.
  *

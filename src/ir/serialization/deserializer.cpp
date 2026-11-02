@@ -16,9 +16,11 @@
 #include <initializer_list>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -45,9 +47,25 @@ namespace pypto {
 namespace ir {
 namespace serialization {
 
+DataType detail::DataTypeFromSerializedCode(uint8_t code) {
+  CHECK(code != 0x30) << "Serialized logical FP4 dtype code 0x30 is no longer supported; use FP4E2M1X2 or "
+                         "FP4E1M2X2 with byte-carrier shapes, strides, and offsets";
+  return DataType(code);
+}
+
 namespace {
 
 using TypeFields = std::unordered_map<std::string, msgpack::object>;
+
+// Reuse enum conversion while preserving TileView's field-specific ValueError
+// contract; generic enum-valued kwargs deliberately report TypeError instead.
+TileLayout ReadTileViewLayout(const std::string& value, const char* field) {
+  try {
+    return StringToTileLayout(value);
+  } catch (const TypeError&) {
+    throw ValueError("Unknown TileLayout for " + std::string(field) + ": " + value);
+  }
+}
 
 TypeFields ReadRequiredTypeFields(const msgpack::object& obj, const std::string& type_kind,
                                   std::initializer_list<const char*> required_fields) {
@@ -61,14 +79,27 @@ TypeFields ReadRequiredTypeFields(const msgpack::object& obj, const std::string&
     CHECK(fields.count(key) != 0) << type_kind << " is missing required field '" << key << "'";
   }
   CHECK(fields.size() == required_fields.size())
-      << type_kind << " has unexpected fields; buffer types cannot contain storage identities or addresses";
+      << type_kind << " has unexpected fields in its type descriptor";
   return fields;
 }
 
 template <typename Integer>
 Integer ReadTypeInteger(const msgpack::object& obj, const std::string& field) {
   CHECK(obj.type == msgpack::type::POSITIVE_INTEGER || obj.type == msgpack::type::NEGATIVE_INTEGER)
-      << "Buffer type field '" << field << "' must be an integer";
+      << "Type field '" << field << "' must be an integer";
+  // Check the wire value before conversion: narrowing enums/dtypes can turn
+  // corrupt large integers into valid-looking descriptor values.
+  if (obj.type == msgpack::type::POSITIVE_INTEGER) {
+    CHECK(obj.via.u64 <= static_cast<uint64_t>(std::numeric_limits<Integer>::max()))
+        << "Type field '" << field << "' is out of range";
+  } else {
+    if constexpr (std::is_signed_v<Integer>) {
+      CHECK(obj.via.i64 >= std::numeric_limits<Integer>::min())
+          << "Type field '" << field << "' is out of range";
+    } else {
+      CHECK(false) << "Type field '" << field << "' is out of range";
+    }
+  }
   return obj.as<Integer>();
 }
 
@@ -299,43 +330,19 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "blayout") {
         std::string blayout_str;
         p->val.convert(blayout_str);
-        if (blayout_str == "none_box") {
-          tile_view.blayout = TileLayout::none_box;
-        } else if (blayout_str == "row_major") {
-          tile_view.blayout = TileLayout::row_major;
-        } else if (blayout_str == "col_major") {
-          tile_view.blayout = TileLayout::col_major;
-        } else {
-          CHECK(false) << "Unknown TileLayout for blayout: " << blayout_str;
-        }
+        tile_view.blayout = ReadTileViewLayout(blayout_str, "blayout");
       } else if (key == "slayout") {
         std::string slayout_str;
         p->val.convert(slayout_str);
-        if (slayout_str == "none_box") {
-          tile_view.slayout = TileLayout::none_box;
-        } else if (slayout_str == "row_major") {
-          tile_view.slayout = TileLayout::row_major;
-        } else if (slayout_str == "col_major") {
-          tile_view.slayout = TileLayout::col_major;
-        } else {
-          CHECK(false) << "Unknown TileLayout for slayout: " << slayout_str;
-        }
+        tile_view.slayout = ReadTileViewLayout(slayout_str, "slayout");
       } else if (key == "fractal") {
         p->val.convert(tile_view.fractal);
       } else if (key == "pad") {
         std::string pad_str;
         p->val.convert(pad_str);
-        if (pad_str == "null") {
-          tile_view.pad = PadValue::null;
-        } else if (pad_str == "zero") {
-          tile_view.pad = PadValue::zero;
-        } else if (pad_str == "max") {
-          tile_view.pad = PadValue::max;
-        } else if (pad_str == "min") {
-          tile_view.pad = PadValue::min;
-        } else {
-          CHECK(false) << "Unknown PadValue: " << pad_str;
-        }
+        auto pad = TryStringToPadValue(pad_str);
+        CHECK(pad.has_value()) << "Unknown PadValue: " << pad_str;
+        tile_view.pad = *pad;
       } else if (key == "compact") {
         std::string compact_str;
         p->val.convert(compact_str);
@@ -393,17 +400,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "pad") {
         std::string pad_str;
         p->val.convert(pad_str);
-        if (pad_str == "null") {
-          tensor_view.pad = PadValue::null;
-        } else if (pad_str == "zero") {
-          tensor_view.pad = PadValue::zero;
-        } else if (pad_str == "max") {
-          tensor_view.pad = PadValue::max;
-        } else if (pad_str == "min") {
-          tensor_view.pad = PadValue::min;
-        } else {
-          CHECK(false) << "Unknown PadValue: " << pad_str;
-        }
+        auto pad = TryStringToPadValue(pad_str);
+        CHECK(pad.has_value()) << "Unknown PadValue: " << pad_str;
+        tensor_view.pad = *pad;
       }
       // Older serialized IR may omit "valid_shape" or "pad"; defaults stay
       // fully valid and PadValue::null, respectively.
@@ -428,6 +427,13 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     // Decode final buffer descriptors before the legacy shape-expression path.
     // Every descriptor field is required; malformed blobs must not acquire
     // default dtypes, layouts, or storage identities during deserialization.
+    if (type_kind == "RegType") {
+      const auto fields = ReadRequiredTypeFields(obj, type_kind, {"type_kind", "shape", "dtype", "kind"});
+      return std::make_shared<RegType>(
+          ReadTypeInteger<int64_t>(fields.at("shape"), "shape"),
+          detail::DataTypeFromSerializedCode(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
+          static_cast<RegKind>(ReadTypeInteger<uint8_t>(fields.at("kind"), "kind")));
+    }
     if (type_kind == "VoidType") {
       ReadRequiredTypeFields(obj, type_kind, {"type_kind"});
       return GetVoidType();
@@ -439,7 +445,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
                                   "blayout", "slayout", "fractal", "pad", "compact"});
       return std::make_shared<BufferType>(
           ReadBufferShape(fields.at("physical_shape"), "physical_shape"),
-          DataType(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
+          detail::DataTypeFromSerializedCode(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
           static_cast<MemorySpace>(ReadTypeInteger<uint8_t>(fields.at("memory_space"), "memory_space")),
           ReadBufferShape(fields.at("valid_shape"), "valid_shape"),
           static_cast<TileLayout>(ReadTypeInteger<uint8_t>(fields.at("blayout"), "blayout")),
@@ -511,7 +517,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     }
 
     if (type_kind == "ScalarType") {
-      return std::make_shared<ScalarType>(DataType(dtype_code));
+      return std::make_shared<ScalarType>(detail::DataTypeFromSerializedCode(dtype_code));
     } else if (type_kind == "TensorType") {
       std::optional<MemRefPtr> memref;
       std::optional<TensorView> tensor_view;
@@ -523,7 +529,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         tensor_view = DeserializeTensorView(tensor_view_obj, zone);
       }
 
-      return std::make_shared<TensorType>(shape, DataType(dtype_code), memref, tensor_view);
+      return std::make_shared<TensorType>(shape, detail::DataTypeFromSerializedCode(dtype_code), memref,
+                                          tensor_view);
     } else if (type_kind == "DistributedTensorType") {
       std::optional<MemRefPtr> memref;
       std::optional<TensorView> tensor_view;
@@ -538,8 +545,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         window_buffer =
             std::static_pointer_cast<const WindowBuffer>(DeserializeNode(window_buffer_obj, zone));
       }
-      return std::make_shared<DistributedTensorType>(shape, DataType(dtype_code), memref, tensor_view,
-                                                     window_buffer);
+      return std::make_shared<DistributedTensorType>(shape, detail::DataTypeFromSerializedCode(dtype_code),
+                                                     memref, tensor_view, window_buffer);
     } else if (type_kind == "TileType") {
       std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;
@@ -555,10 +562,11 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         memory_space = static_cast<MemorySpace>(memory_space_code);
       }
 
-      return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view, memory_space);
+      return std::make_shared<TileType>(shape, detail::DataTypeFromSerializedCode(dtype_code), memref,
+                                        tile_view, memory_space);
     } else if (type_kind == "ArrayType") {
       CHECK(shape.size() == 1) << "ArrayType must have rank-1 shape, got " << shape.size();
-      return std::make_shared<ArrayType>(DataType(dtype_code), shape[0]);
+      return std::make_shared<ArrayType>(detail::DataTypeFromSerializedCode(dtype_code), shape[0]);
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "WindowBufferType") {

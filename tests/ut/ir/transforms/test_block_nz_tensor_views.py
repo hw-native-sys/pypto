@@ -28,8 +28,9 @@ from collections.abc import Sequence
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import codegen, passes
@@ -1100,36 +1101,27 @@ def test_rejects_vec_target():
         _run(VecLoad)
 
 
-def test_rejects_sub_byte_dtype():
-    """A 4-bit dtype has no NZ C0 line, and must not be blocked with a byte-derived c0.
-
-    `DataType.GetByte()` is `ceil(bits/8)`, so FP4 reports 1 byte and a
-    byte-based `c0` would come out as 32 instead of the 64 elements that fit in
-    a 32-byte C0 line. That is doubly wrong: the trailing dim would be `[.., 16,
-    32]`, and the alignment check would accept extents that are not multiples of
-    64 (`C = 544` passes `% 32`). pto-isa's `TLOAD` lists no 4-bit dtype for the
-    NZ path at all — 4-bit operands use the `HIF4_A_ZZ` / `HIF4_B_NN` layouts —
-    so the annotation is refused rather than silently mis-addressed.
-
-    The rejection fires in phase 1, while the *parameter* type is blocked, so a
-    plain load/store kernel is enough to reach it — no matmul needed (FP4
-    operands would trip the Cube accumulator's dtype rule at parse time first).
-    """
+@pytest.mark.parametrize(
+    ("dtype", "error"),
+    [(pl.INT4, "sub-byte dtype"), (pl.UINT4, "sub-byte dtype"), (pl.HF4, "sub-byte dtype")],
+)
+def test_rejects_sub_byte_dtype(dtype, error):
+    """Sub-byte dtypes cannot use the byte-based NZ C0 geometry."""
 
     @pl.program
-    class Fp4Nz:
+    class SubByteNz:
         @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
-            w: pl.Tensor[[256, 512], pl.FP4, pl.NZ],
-            out: pl.Tensor[[256, 512], pl.FP4],
+            w: pl.Tensor[[256, 512], dtype, pl.NZ],
+            out: pl.Tensor[[256, 512], dtype],
         ):
             wt = pl.load(w, [0, 0], [256, 512], target_memory=pl.Mem.Vec)
             pl.store(wt, [0, 0], out)
             return out
 
-    with pytest.raises(ValueError, match="sub-byte dtype"):
-        _run(Fp4Nz)
+    with pytest.raises(ValueError, match=error):
+        _run(SubByteNz)
 
 
 def test_c0_is_derived_from_bit_width():
@@ -1159,8 +1151,9 @@ def test_c0_is_derived_from_bit_width():
     assert _values(param_type.shape) == [1, 32, 16, 16, 16]
 
 
-def test_rejects_nz_store_destination():
-    """An NZ tensor cannot be written.
+@pytest.mark.usefixtures("ascend_backend")
+def test_rejects_vec_nz_store_destination():
+    """The Acc writeback extension must not admit an ordinary vector store.
 
     ``tile.store``'s destination is argument 2, not argument 0, so a guard that
     inspects only the first operand would let this through: phase 1 would block
@@ -1180,8 +1173,871 @@ def test_rejects_nz_store_destination():
             pl.store(t, [0, 0], out)
             return out
 
-    with pytest.raises(ValueError, match="NZ layout is read-only"):
+    with pytest.raises(ValueError, match="NZ"):
         _run(StoreToNz)
+
+
+def _nz_store_program(
+    *,
+    tile_shape=(64, 16),
+    valid_shape=None,
+    compact=ir.CompactMode.null,
+    source_dtype=DataType.FP32,
+    output_dtype=DataType.FP32,
+    memory_space=ir.MemorySpace.Acc,
+    output_shape=(64, 64),
+    offsets=(0, 16),
+    partition_shape=None,
+    kwargs=None,
+):
+    """Build a store at the blocking boundary, without running memory inference.
+
+    A Tile parameter lets the rejection tests vary the precise physical/valid
+    extent and resolved memory space. The real matmul/codegen test below covers
+    the public pipeline that produces this boundary IR.
+    """
+    span = ir.Span.unknown()
+    tile_view = None
+    if valid_shape is not None or compact != ir.CompactMode.null:
+        tile_view = ir.TileView(
+            valid_shape=valid_shape,
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+            compact=compact,
+        )
+    source = ir.Var(
+        "acc", ir.TileType(tile_shape, source_dtype, tile_view=tile_view, memory_space=memory_space), span
+    )
+    output_type = ir.TensorType(
+        output_shape, output_dtype, tensor_view=ir.TensorView(layout=ir.TensorLayout.NZ)
+    )
+    output = ir.Var("out", output_type, span)
+
+    def coordinates(values):
+        return ir.MakeTuple(
+            [
+                ir.ConstInt(value, DataType.INDEX, span) if isinstance(value, int) else value
+                for value in values
+            ],
+            span,
+        )
+
+    args = [source, coordinates(offsets), output]
+    if partition_shape is not None:
+        args.append(coordinates(partition_shape))
+    call = ir.Call(
+        ir.get_op("tile.store"), args, kwargs or {}, {"nz_store_test_tag": "preserve"}, output_type, span
+    )
+    result = ir.Var("stored", output_type, span)
+    body = ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([result], span)], span)
+    # Unknown offsets are legal scalar inputs. Keeping them bound ensures a
+    # rejection tests the NZ proof requirement rather than malformed SSA.
+    parameters = [source, output, *(value for value in offsets if isinstance(value, ir.Var))]
+    function = ir.Function("main", parameters, [output_type], body, span, ir.FunctionType.InCore)
+    return ir.Program([function], "NzStore", span)
+
+
+def _store(program: ir.Program) -> ir.AssignStmt:
+    """The sole store and its assignment, with the same traversal as NZ loads."""
+    store_name = ir.get_op("tile.store").name
+    found = [
+        stmt
+        for func in program.functions.values()
+        for stmt in _walk(func.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == store_name
+    ]
+    assert len(found) == 1
+    return found[0]
+
+
+def _store_call(program: ir.Program) -> ir.Call:
+    call = _store(program).value
+    assert isinstance(call, ir.Call)
+    return call
+
+
+def _shape_values(node: ir.Expr | ir.Type) -> list[int]:
+    node_type = node.type if isinstance(node, ir.Expr) else node
+    assert isinstance(node_type, (ir.TileType, ir.TensorType))
+    return _values(node_type.shape)
+
+
+@pytest.mark.parametrize(
+    ("output_shape", "offsets", "partition_shape", "blocked_shape", "blocked_offsets"),
+    [
+        ((64, 64), (0, 16), None, [1, 8, 4, 16, 8], [0, 2, 0, 0, 0]),
+        ((3, 64, 64), (2, 0, 16), (1, 64, 16), [3, 8, 4, 16, 8], [2, 2, 0, 0, 0]),
+    ],
+)
+@pytest.mark.usefixtures("ascend_backend")
+def test_blocks_acc_nz_store_and_preserves_its_alias(
+    output_shape, offsets, partition_shape, blocked_shape, blocked_offsets
+):
+    """GM coordinates become rank five while the source and returned alias stay intact.
+
+    The rank-three case models FlattenTileNdTo2D's explicit logical partition:
+    replacing that operand with a fresh 2-D window would lose its batch slot.
+    """
+    before = _nz_store_program(
+        output_shape=output_shape,
+        offsets=offsets,
+        partition_shape=partition_shape,
+        kwargs={"st_phase": int(pl.STPhase.Final)},
+    )
+    after = passes.block_nz_tensor_views()(before)
+    original = _store_call(before)
+    assignment = _store(after)
+    store = assignment.value
+    assert isinstance(store, ir.Call)
+    function = next(iter(after.functions.values()))
+    destination = function.params[1]
+    assert _shape_values(destination) == blocked_shape
+    assert store.args[0] is original.args[0]
+    assert _shape_values(store.args[0]) == [64, 16]
+    assert store.args[2] is destination
+    assert _values(_elements(store.args[1])) == blocked_offsets
+    assert _values(_elements(store.args[3])) == [1, 2, 4, 16, 8]
+    assert dict(store.kwargs) == dict(original.kwargs)
+    assert dict(store.attrs) == dict(original.attrs)
+    ir.assert_structural_equal(assignment.var.type, destination.type)
+    ir.assert_structural_equal(function.return_types[0], destination.type)
+    # The stamp must prevent a second invocation from treating the blocked
+    # trailing [16,8] as a new logical matrix and blocking it again.
+    ir.assert_structural_equal(passes.block_nz_tensor_views()(after), after)
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_remaps_expression_valued_attrs_with_the_destination():
+    """An attribute referencing the old output must follow the rewritten operand.
+
+    Copying the attribute dictionary unchanged would leave a logical-rank Var
+    attached to a blocked-rank store, even though the ordinary args are correct.
+    """
+
+    class AddOutputReference(ir.IRMutator):
+        def visit_call(self, op: ir.Call) -> ir.Expr:
+            call = op
+            if call.op.name != ir.get_op("tile.store").name:
+                return super().visit_call(call)
+            return ir.Call(
+                call.op,
+                call.args,
+                dict(call.kwargs),
+                {"nz_output_ref": call.args[2]},
+                call.type,
+                call.span,
+            )
+
+    before = AddOutputReference().visit_program(_nz_store_program())
+    old_output = _store_call(before).args[2]
+    # The synthetic compiler attribute is not a public store keyword.
+    with passes.PassContext([]):
+        after = passes.block_nz_tensor_views()(before)
+    store = _store_call(after)
+    assert store.args[2] is not old_output
+    assert store.attrs["nz_output_ref"] is store.args[2]
+    assert _shape_values(store.attrs["nz_output_ref"]) == [1, 8, 4, 16, 8]
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_accepts_compact_full_tiles():
+    """For a fully valid aligned tile, compact and physical row pitches coincide."""
+    before = _nz_store_program(compact=ir.CompactMode.normal)
+    after = passes.block_nz_tensor_views()(before)
+    store = _store_call(after)
+    source_type = store.args[0].type
+    assert isinstance(source_type, ir.TileType)
+    assert source_type.get_effective_tile_view().compact == ir.CompactMode.normal
+    assert _shape_values(source_type) == [64, 16]
+    assert _values(_elements(store.args[3])) == [1, 2, 4, 16, 8]
+
+
+@pytest.mark.parametrize(("destination_cols", "column_offset"), [(512, 0), (2048, 512)])
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_accepts_exact_l0c_capacity(destination_cols, column_offset):
+    """Capacity bounds the source Acc allocation, not the entire GM destination.
+
+    On A2/A3, 64*512*4 bytes exactly fills the 128 KiB L0C. The same tile
+    can write a column panel of a larger NZ tensor without a larger Acc.
+    """
+    before = _nz_store_program(
+        tile_shape=(64, 512), output_shape=(64, destination_cols), offsets=(0, column_offset)
+    )
+    store = _store_call(passes.block_nz_tensor_views()(before))
+    assert _shape_values(store.args[0]) == [64, 512]
+    assert _shape_values(store.args[2]) == [1, destination_cols // 8, 4, 16, 8]
+    assert _values(_elements(store.args[1])) == [0, column_offset // 8, 0, 0, 0]
+    assert _values(_elements(store.args[3])) == [1, 64, 4, 16, 8]
+
+
+@pytest.mark.parametrize(("source_cols", "required_bytes"), [(528, 135168), (2048, 524288)])
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_defers_capacity_until_the_physical_codegen_boundary(source_cols, required_bytes):
+    """Blocking accepts logical extents; an unretiled physical source is still refused.
+
+    This source is a Tile parameter, with no matmul producer for AutoTile to
+    split. The ordinary matmul tests below cover the supported producer path;
+    bypassing that tiler must not allow an oversized physical Acc to reach ISA.
+    """
+    before = _nz_store_program(tile_shape=(64, source_cols), output_shape=(64, source_cols), offsets=(0, 0))
+    blocked = passes.block_nz_tensor_views()(before)
+    assert _shape_values(_store_call(blocked).args[0]) == [64, source_cols]
+    with pytest.raises(ValueError, match="NZ tile.store") as error:
+        codegen.PTOCodegen().generate(blocked, emit_tile_addr=True)
+    message = str(error.value)
+    assert "L0C" in message
+    assert str(required_bytes) in message
+    assert "131072" in message
+    assert "pl.ND" in message
+
+
+def _wide_acc_nz_program(rows=64, cols=2048, column_offset=0, batch=None, split_k=False, layout=pl.NZ):
+    """A real producer lets the default pipeline legalize the oversized Acc."""
+    output_cols = cols + 32 if column_offset else cols
+    output_shape = [rows, output_cols] if batch is None else [3, rows, output_cols]
+    offsets = [0, column_offset] if batch is None else [batch, 0, column_offset]
+    reduction = 128 if split_k else 16
+
+    if split_k:
+
+        @pl.program
+        class SplitK:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[rows, reduction], pl.FP16],
+                w: pl.Tensor[[reduction, cols], pl.FP16],
+                out: pl.Tensor[output_shape, pl.FP32, layout],
+            ):
+                # Keep only one K-panel in L1; loading all 128x2048 weights at
+                # once would exceed L1 before the L0 tiler could help.
+                initial = pl.tile.create([rows, cols], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for ko, (carry,) in pl.pipeline(0, reduction, 32, init_values=(initial,), stage=2):
+                    lhs = pl.load(x, [0, ko], [rows, 32], target_memory=pl.Mem.Mat)
+                    rhs = pl.load(w, [ko, 0], [32, cols], target_memory=pl.Mem.Mat)
+                    current = pl.tile.matmul_acc(carry, lhs, rhs, ko == 0)
+                    acc = pl.yield_(current)
+                return pl.store(acc, offsets, out)
+
+        return SplitK
+
+    @pl.program
+    class FullK:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[rows, reduction], pl.FP16],
+            w: pl.Tensor[[reduction, cols], pl.FP16],
+            out: pl.Tensor[output_shape, pl.FP32, layout],
+        ):
+            lhs = pl.load(x, [0, 0], [rows, reduction], target_memory=pl.Mem.Mat)
+            rhs = pl.load(w, [0, 0], [reduction, cols], target_memory=pl.Mem.Mat)
+            return pl.store(pl.matmul(lhs, rhs, out_dtype=pl.FP32), offsets, out)
+
+    return FullK
+
+
+def _assert_nz_column_grid(program, rows, cols, column_offset=0, batch=0):
+    """Enumerate the generated static grid to check coverage without fixing its tile N.
+
+    These kernels have constant loop bounds. Evaluating only index arithmetic
+    and loop induction variables proves each C0 column is written once, even
+    when the chooser changes its tile width or uses a loop plus a boundary tail.
+    Numerical matmul and the physical byte layout are checked separately on NPU.
+    """
+    covered = [0] * (cols // 8)
+    bindings = {}
+    store_name = ir.get_op("tile.store").name
+
+    def value(expr):
+        if isinstance(expr, ir.ConstInt):
+            return expr.value
+        if isinstance(expr, ir.Var):
+            assert expr in bindings, f"unbound generated index {expr.name_hint}"
+            return bindings[expr]
+        if isinstance(expr, ir.Add):
+            return value(expr.left) + value(expr.right)
+        if isinstance(expr, ir.Sub):
+            return value(expr.left) - value(expr.right)
+        if isinstance(expr, ir.Mul):
+            return value(expr.left) * value(expr.right)
+        if isinstance(expr, ir.FloorDiv):
+            return value(expr.left) // value(expr.right)
+        raise AssertionError(f"unexpected generated index expression: {type(expr).__name__}")
+
+    def check_store(op):
+        assert len(op.args) == 4
+        source = op.args[0].type
+        assert isinstance(source, ir.TileType)
+        shape = _values(source.shape)
+        valid = _values(source.get_effective_tile_view().valid_shape)
+        assert shape == valid
+        assert shape[0] == rows and shape[1] % 16 == 0
+        assert shape[1] <= 4095 and shape[0] * shape[1] * 4 <= 131072
+        offsets = [value(expr) for expr in _elements(op.args[1])]
+        sizes = _values(_elements(op.args[3]))
+        assert offsets[0] == batch and offsets[2:] == [0, 0, 0]
+        assert sizes == [1, shape[1] // 8, rows // 16, 16, 8]
+        begin = offsets[1] - column_offset // 8
+        end = begin + sizes[1]
+        assert 0 <= begin < end <= len(covered)
+        for index in range(begin, end):
+            covered[index] += 1
+
+    def execute(op):
+        # Re-entering visit_stmt from a Python visit_for_stmt override leaves
+        # that nanobind trampoline active: a nested For falls back to the C++
+        # visitor, skips this evaluator's induction binding, and visits its
+        # body only once. Walk the statement structure directly so every loop
+        # is interpreted and index bindings retain their actual Var identity.
+        if isinstance(op, ir.SeqStmts):
+            for stmt in op.stmts:
+                execute(stmt)
+        elif isinstance(op, ir.ForStmt):
+            for index in range(value(op.start), value(op.stop), value(op.step)):
+                bindings[op.loop_var] = index
+                execute(op.body)
+            bindings.pop(op.loop_var, None)
+        elif isinstance(op, (ir.AssignStmt, ir.EvalStmt)):
+            expression = op.value if isinstance(op, ir.AssignStmt) else op.expr
+            if (
+                isinstance(op, ir.AssignStmt)
+                and isinstance(op.var.type, ir.ScalarType)
+                and op.var.type.dtype == DataType.INDEX
+            ):
+                bindings[op.var] = value(expression)
+            if isinstance(expression, ir.Call) and expression.op.name == store_name:
+                check_store(expression)
+        else:
+            assert isinstance(op, (ir.YieldStmt, ir.ReturnStmt)), type(op).__name__
+
+    for function in program.functions.values():
+        execute(function.body)
+    assert covered == [1] * len(covered), "the NZ output grid has a gap or overlapping writes"
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    passes.verify_properties(properties, program, "NZ automatic column tiling")
+
+
+@pytest.mark.parametrize(
+    ("cols", "column_offset", "batch"),
+    [(528, 0, None), (2048, 0, None), (4096, 0, None), (2048, 8, None), (2048, 8, 2)],
+    ids=["boundary-tail", "review-64x2048", "logical-4096-cols", "nonzero-col", "nonzero-batch-and-col"],
+)
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_automatically_tiles_only_columns(cols, column_offset, batch):
+    """Oversized logical Accs become legal full-row stores in blocked coordinates."""
+    before = _wide_acc_nz_program(cols=cols, column_offset=column_offset, batch=batch)
+    blocked = _run(before)
+    assert _shape_values(_store_call(blocked).args[0]) == [64, cols]
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
+    _assert_nz_column_grid(tiled, 64, cols, column_offset, 0 if batch is None else batch)
+    text = _emit_pto(before, BackendType.Ascend910B)
+    assert "#pto.layout<nz>" in text and "pto.tstore" in text
+    assert f"rows=64, cols={cols}," not in text, "the oversized physical Acc survived allocation"
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_automatically_tiles_canonical_split_k():
+    """The output grid encloses the complete K reduction, so partial sums never store."""
+    before = _wide_acc_nz_program(column_offset=8, split_k=True)
+    blocked = _run(before)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
+    _assert_nz_column_grid(tiled, 64, 2048, column_offset=8)
+    assert "pl.tile.matmul_acc(" in ir.python_print(tiled)
+    text = _emit_pto(before, BackendType.Ascend910B)
+    assert "#pto.layout<nz>" in text and "pto.tstore" in text
+    assert "rows=64, cols=2048," not in text
+
+
+@pytest.mark.parametrize("representation", ["logical-nz-3", "logical-nz-4", "blocked-nz-4", "nd-3"])
+@pytest.mark.usefixtures("ascend_backend")
+def test_auto_tiled_direct_store_preserves_expression_attrs(representation):
+    """All supported spellings remap metadata to each new source and output chain.
+
+    Production reaches AutoTile with blocked NZ coordinates; isolated-pass
+    callers can still supply logical NZ coordinates, with or without an
+    explicit window. ND uses type deduction to retain its valid-region union.
+    A shared Call rebuild must preserve those representations and update Expr
+    metadata rather than retain references to the eliminated wide accumulator.
+    """
+    is_nz = representation != "nd-3"
+    batch = 2 if representation in ("logical-nz-4", "blocked-nz-4") else None
+    before = _wide_acc_nz_program(column_offset=8, batch=batch, layout=pl.NZ if is_nz else pl.ND)
+    for factory in _PREFIX[:-1]:
+        before = factory()(before)
+    if representation == "blocked-nz-4":
+        before = passes.block_nz_tensor_views()(before)
+    expected_arity = 4 if representation.endswith("-4") else 3
+    assert len(_store_call(before).args) == expected_arity
+
+    class AttachStoreMetadata(ir.IRMutator):
+        def visit_call(self, op):
+            if op.op.name != ir.get_op("tile.store").name:
+                return super().visit_call(op)
+            return ir.Call(
+                op.op,
+                op.args,
+                {**op.kwargs, "st_phase": int(pl.STPhase.Unspecified)},
+                {
+                    **op.attrs,
+                    "source_ref": op.args[0],
+                    "out_ref": op.args[2],
+                    "dump_vars": [op.args[0], op.args[2]],
+                    "scalar_tag": 3036,
+                    "bool_tag": True,
+                    "string_tag": "store-metadata",
+                },
+                op.type,
+                op.span,
+            )
+
+    # These are synthetic compiler attributes, so skip printer round-tripping
+    # unknown metadata keys while retaining explicit SSA/UseAfterDef checks.
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        annotated = AttachStoreMetadata().visit_program(before)
+        original = _store_call(annotated)
+        tiled = passes.auto_tile_matmul_l0()(annotated)
+        stores = [
+            stmt.value
+            for function in tiled.functions.values()
+            for stmt in _walk(function.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.store").name
+        ]
+        assert stores
+        for call in stores:
+            assert len(call.args) == expected_arity
+            assert dict(call.kwargs) == dict(original.kwargs)
+            assert call.attrs["source_ref"].same_as(call.args[0])
+            assert call.attrs["out_ref"].same_as(call.args[2])
+            # dump_vars is stored as vector<VarPtr>, whereas the ordinary
+            # source/out fields are ExprPtr. Both must retain their payload
+            # kinds and follow the same terminal SSA replacements.
+            refs = call.attrs["dump_vars"]
+            assert len(refs) == 2
+            assert all(isinstance(ref, ir.Var) for ref in refs)
+            assert refs[0].same_as(call.args[0])
+            assert refs[1].same_as(call.args[2])
+            assert call.attrs["scalar_tag"] == 3036
+            assert call.attrs["bool_tag"] is True
+            assert call.attrs["string_tag"] == "store-metadata"
+            assert not call.args[0].same_as(original.args[0])
+            ir.assert_structural_equal(call.type, call.args[2].type)
+            if representation == "logical-nz-4":
+                shape = _shape_values(call.args[0])
+                assert _values(_elements(call.args[3])) == [1, shape[0], shape[1]]
+        if is_nz:
+            blocked = passes.block_nz_tensor_views()(tiled)
+            _assert_nz_column_grid(blocked, 64, 2048, column_offset=8, batch=0 if batch is None else batch)
+        else:
+            properties = passes.IRPropertySet()
+            properties.insert(passes.IRProperty.SSAForm)
+            properties.insert(passes.IRProperty.UseAfterDef)
+            passes.verify_properties(properties, tiled, "ND direct-store metadata remapping")
+
+
+@pytest.mark.parametrize("layout", [ir.TensorLayout.ND, ir.TensorLayout.NZ])
+@pytest.mark.parametrize("partition", [False, True])
+@pytest.mark.parametrize("explicit_layout", [False, True])
+@pytest.mark.usefixtures("ascend_backend")
+def test_store_layout_is_independent_of_arity_and_tile_configuration(layout, partition, explicit_layout):
+    """GM layout comes from the tensor; the source remains an NZ-boxed Acc.
+
+    A fourth store argument is a destination partition in either layout. It
+    never changes the source's physical shape or its implicit/explicit config.
+    """
+    span = ir.Span.unknown()
+    config = (
+        ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major, fractal=1024)
+        if explicit_layout
+        else None
+    )
+    source = ir.Var(
+        "acc", ir.TileType([64, 16], DataType.FP32, tile_view=config, memory_space=ir.MemorySpace.Acc), span
+    )
+    output_type = ir.TensorType([64, 64], DataType.FP32, tensor_view=ir.TensorView(layout=layout))
+    output = ir.Var("out", output_type, span)
+    # Exercise the registry's actual 3/4-argument type deduction in both layouts.
+    store = tile.store(source, [0, 16], output, [64, 16] if partition else None, span=span)
+    result = ir.Var("stored", store.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(result, store, span), ir.ReturnStmt([result], span)], span)
+    function = ir.Function("main", [source, output], [store.type], body, span, ir.FunctionType.InCore)
+    before = ir.Program([function], "StoreLayouts", span)
+    after = passes.block_nz_tensor_views()(before)
+    call = _store_call(after)
+    target = call.args[2].type
+    source = call.args[0].type
+    assert isinstance(target, ir.TensorType)
+    assert isinstance(source, ir.TileType)
+    assert (target.tensor_view.layout if target.tensor_view else ir.TensorLayout.ND) == layout
+    assert len(call.args) == (4 if layout == ir.TensorLayout.NZ or partition else 3)
+    assert _shape_values(call.args[0]) == [64, 16]
+    view = source.get_effective_tile_view()
+    assert (view.blayout, view.slayout, view.fractal) == (
+        ir.TileLayout.col_major,
+        ir.TileLayout.row_major,
+        1024,
+    )
+    assert _values(view.valid_shape) == [64, 16]
+    assert _shape_values(call.args[2]) == ([1, 8, 4, 16, 8] if layout == ir.TensorLayout.NZ else [64, 64])
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_registered_rebuild_remaps_operand_attrs_and_span():
+    """Rebuilt MAD metadata must follow clone and narrowing in the same SSA.
+
+    Matmul's kwargs declare its precision contract. Expression-valued metadata
+    lives in Call.attrs; PTOAS's canonical compatibility path must remap those
+    references when it rebuilds and narrows the MAD calls.
+    """
+    before = _run(_wide_acc_nz_program(column_offset=8, split_k=True))
+    seed = next(
+        stmt.var
+        for function in before.functions.values()
+        for stmt in _walk(function.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.create").name
+    )
+    source_span = ir.Span("registered_call_rebuild.py", 17, 4)
+
+    class AttachMadMetadata(ir.IRMutator):
+        def visit_call(self, op):
+            if op.op.name != ir.get_op("tile.matmul_acc").name:
+                return super().visit_call(op)
+            return ir.Call(
+                op.op,
+                op.args,
+                op.kwargs,
+                {
+                    **op.attrs,
+                    "lhs_ref": op.args[1],
+                    "rhs_ref": op.args[2],
+                },
+                op.type,
+                source_span,
+            )
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        tiled = passes.auto_tile_matmul_l0()(AttachMadMetadata().visit_program(before))
+    calls = [
+        stmt.value
+        for function in tiled.functions.values()
+        for stmt in _walk(function.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.matmul_acc").name
+    ]
+    assert calls
+    for call in calls:
+        for key, position in (("lhs_ref", 1), ("rhs_ref", 2)):
+            assert call.attrs[key].same_as(call.args[position])
+        carry = call.args[0]
+        assert isinstance(carry, ir.IterArg)
+        assert not carry.initValue.same_as(seed)
+        assert _shape_values(call) == [64, _shape_values(call.args[2])[1]]
+        assert _shape_values(call)[1] < 2048
+        assert call.span.filename == source_span.filename
+        assert call.span.begin_line == source_span.begin_line
+    _assert_nz_column_grid(tiled, 64, 2048, column_offset=8)
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_rejects_when_no_full_row_column_tile_fits():
+    """Even the minimum 16-column Acc exceeds L0C at 2064 complete rows."""
+    before = _wide_acc_nz_program(rows=2064, cols=16)
+    with pytest.raises(ValueError, match="NZ") as error:
+        _emit_pto(before, BackendType.Ascend910B)
+    message = str(error.value)
+    assert "row" in message.lower()
+    assert "pl.ND" in message
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_full_row_tiling_keeps_stationary_a_candidates():
+    """At M=2048 only stationary-A can keep full M while fitting a legal N tile."""
+    before = _wide_acc_nz_program(rows=2048, cols=32)
+    blocked = _run(before)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
+    _assert_nz_column_grid(tiled, 2048, 32)
+    assert "pto.tstore" in _emit_pto(before, BackendType.Ascend910B)
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_exact_l0c_capacity_codegen():
+    """The exact capacity boundary still compiles through the complete pipeline."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 16], pl.FP16],
+            w: pl.Tensor[[16, 512], pl.FP16],
+            out: pl.Tensor[[64, 512], pl.FP32, pl.NZ],
+        ):
+            lhs = pl.load(x, [0, 0], [64, 16], target_memory=pl.Mem.Mat)
+            rhs = pl.load(w, [0, 0], [16, 512], target_memory=pl.Mem.Mat)
+            return pl.store(pl.matmul(lhs, rhs, out_dtype=pl.FP32), [0, 0], out)
+
+    text = _emit_pto(Before, BackendType.Ascend910B)
+    tstore = next(line for line in text.splitlines() if "pto.tstore" in line)
+    assert "#pto.layout<nz>" in text
+    assert "loc=acc" in tstore
+    assert "rows=64, cols=512" in tstore
+    assert "!pto.partition_tensor_view<1x64x4x16x8xf32>" in tstore
+
+
+def _acc_nz_store_program():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP16],
+            w: pl.Tensor[[64, 16], pl.FP16],
+            out: pl.Tensor[[64, 32], pl.FP32, pl.NZ],
+        ):
+            lhs = pl.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+            rhs = pl.load(w, [0, 0], [64, 16], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(lhs, rhs, out_dtype=pl.FP32)
+            stored = pl.store(acc, [0, 16], out)
+            return stored
+
+    return Before
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_codegen_uses_nz_destination_and_2d_accumulator():
+    """A real matmul writes its FP32 Acc directly through a five-dimensional NZ view."""
+    before = _acc_nz_store_program()
+    after = _run(before)
+    store = _store_call(after)
+    assert _values(_elements(store.args[1])) == [0, 2, 0, 0, 0]
+    assert _values(_elements(store.args[3])) == [1, 2, 4, 16, 8]
+    assert _shape_values(store.args[0]) == [64, 16]
+    text = _emit_pto(before, BackendType.Ascend910B)
+    assert "#pto.layout<nz>" in text
+    tstore = next(line for line in text.splitlines() if "pto.tstore" in line)
+    assert "loc=acc" in tstore
+    assert "rows=64, cols=16" in tstore
+    assert "!pto.partition_tensor_view<1x2x4x16x8xf32>" in tstore
+    assert sum("pto.tload" in line for line in text.splitlines()) == 2
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_codegen_rejects_a_store_split_into_partial_parent_rows_after_blocking():
+    """A later row split must not bypass the full-parent-row FIXPIPE restriction.
+
+    Model the split after the complete legal pipeline: a half-height slice
+    aliases the original Acc allocation and the store window matches that
+    smaller source, but the NZ parent still has all 64 rows. Only the final
+    emission check can catch this new unsupported destination stride.
+    """
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_acc_nz_store_program())
+
+    class SplitStoreRows(ir.IRMutator):
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> ir.Stmt:
+            stmt = op
+            call = stmt.value
+            if not isinstance(call, ir.Call) or call.op.name != ir.get_op("tile.store").name:
+                return super().visit_assign_stmt(stmt)
+            sliced = ir.op.tile.slice(call.args[0], [32, 16], [0, 0])
+            half = ir.Var("half_acc", sliced.type, stmt.span)
+            sizes = ir.MakeTuple(
+                [ir.ConstInt(value, DataType.INDEX, stmt.span) for value in [1, 2, 2, 16, 8]],
+                stmt.span,
+            )
+            store = ir.Call(
+                call.op,
+                [half, call.args[1], call.args[2], sizes],
+                dict(call.kwargs),
+                dict(call.attrs),
+                call.type,
+                call.span,
+            )
+            return ir.SeqStmts(
+                [ir.AssignStmt(half, sliced, stmt.span), ir.AssignStmt(stmt.var, store, stmt.span)],
+                stmt.span,
+            )
+
+    split = SplitStoreRows().visit_program(optimized)
+    kernel = next(func for func in split.functions.values() if ir.is_incore_type(func.func_type))
+    with pytest.raises(ValueError, match="NZ tile.store must cover all rows"):
+        codegen.PTOCodegen().generate(ir.Program([kernel], "SplitNzStore", split.span), emit_tile_addr=True)
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_acc_nz_store_accepts_provably_aligned_loop_columns():
+    """Loop facts prove sign/alignment without specializing the column offset."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP16],
+            w: pl.Tensor[[64, 16], pl.FP16],
+            out: pl.Tensor[[64, 64], pl.FP32, pl.NZ],
+        ):
+            lhs = pl.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+            rhs = pl.load(w, [0, 0], [64, 16], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(lhs, rhs, out_dtype=pl.FP32)
+            for column in pl.range(0, 64, 16):
+                out = pl.store(acc, [0, column], out)
+            return out
+
+    after = _run(Before)
+    store = _store_call(after)
+    column = _elements(store.args[1])[1]
+    assert isinstance(column, ir.FloorDiv)
+    assert isinstance(column.left, ir.Var)
+    assert _const(column.right) == 8
+    assert _values(_elements(store.args[3])) == [1, 2, 4, 16, 8]
+    loop = next(
+        stmt for func in after.functions.values() for stmt in _walk(func.body) if isinstance(stmt, ir.ForStmt)
+    )
+    assert len(loop.iter_args) == len(loop.return_vars) == 1
+    carried = loop.iter_args[0]
+    assert store.args[2] is carried
+    for tensor in (carried, carried.initValue, loop.return_vars[0]):
+        assert _shape_values(tensor) == [1, 8, 4, 16, 8]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"memory_space": ir.MemorySpace.Vec},
+        {"source_dtype": DataType.INT32},
+        {"output_dtype": DataType.FP16},
+        {"valid_shape": (48, 16)},
+        {"tile_shape": (64, 32), "valid_shape": (64, 16)},
+        {"tile_shape": (64, 8)},  # C0=8 alone does not satisfy the ISA's N%16 contract.
+        {"tile_shape": (32, 16)},  # A row window has a FIXPIPE destination stride the ISA cannot express.
+        {"output_shape": (128, 64), "offsets": (64, 16)},
+        {"output_shape": (3, 64, 64), "offsets": (0, 0, 16), "partition_shape": (2, 64, 16)},
+        {"offsets": (0, 3)},
+        {"offsets": (0, -16)},
+        {"kwargs": {"atomic": int(pl.AtomicType.Add)}},
+        {"kwargs": {"pre_quant": 1.0}},
+        {"kwargs": {"pre_relu": True}},
+    ],
+    ids=[
+        "vec",
+        "int32-source",
+        "dtype-conversion",
+        "partial-valid",
+        "partial-valid-columns",
+        "eight-cols",
+        "partial-parent-rows",
+        "nonzero-row-offset",
+        "multiple-panels",
+        "unaligned-cols",
+        "negative-cols",
+        "atomic",
+        "pre-quant",
+        "pre-relu",
+    ],
+)
+@pytest.mark.usefixtures("ascend_backend")
+def test_rejects_unsupported_acc_nz_store(arguments):
+    """Aligned coordinates alone do not make an unsupported FIXPIPE mode safe."""
+    before = _nz_store_program(**arguments)
+    with pytest.raises(ValueError, match="NZ"):
+        passes.block_nz_tensor_views()(before)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_rejects_acc_nz_store_on_a5(ascend_backend):
+    with pytest.raises(ValueError, match="NZ"):
+        passes.block_nz_tensor_views()(_nz_store_program())
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_isolated_auto_tiling_rejects_unsupported_nz_store_backend(ascend_backend):
+    """The isolated logical-NZ entry must diagnose an unsupported backend too."""
+    before = _wide_acc_nz_program()
+    for factory in _PREFIX[:-1]:
+        before = factory()(before)
+    with pytest.raises(ValueError, match="NZ tile.store is supported only on A2/A3"):
+        passes.auto_tile_matmul_l0()(before)
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_rejects_acc_nz_store_with_unknown_column_offset():
+    """An arbitrary INDEX parameter is neither aligned nor provably non-negative."""
+    column = ir.Var("column", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    with pytest.raises(ValueError, match="NZ"):
+        passes.block_nz_tensor_views()(_nz_store_program(offsets=(0, column)))
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_rejects_acc_nz_store_with_dynamic_source_shape():
+    rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    with pytest.raises(ValueError, match="NZ"):
+        passes.block_nz_tensor_views()(_nz_store_program(tile_shape=(rows, 16)))
+
+
+@pytest.mark.parametrize("negative", [False, True], ids=["unknown", "negative"])
+@pytest.mark.usefixtures("ascend_backend")
+def test_rejects_acc_nz_store_with_unproven_batch_offset(negative):
+    """Partition clamping must not redirect a write to batch panel zero."""
+    batch = -1 if negative else ir.Var("batch", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    before = _nz_store_program(output_shape=(3, 64, 64), offsets=(batch, 0, 16), partition_shape=(1, 64, 16))
+    with pytest.raises(ValueError, match="NZ tile.store requires provably non-negative leading batch"):
+        passes.block_nz_tensor_views()(before)
+
+
+@pytest.mark.usefixtures("ascend_backend")
+def test_nz_submit_blocks_returned_alias_and_preserves_launch_fields():
+    """Forwarded NZ outputs keep their blocked type across a task submission."""
+    span = ir.Span.unknown()
+    nz_type = ir.TensorType([64, 64], DataType.FP32, tensor_view=ir.TensorView(layout=ir.TensorLayout.NZ))
+    output = ir.Var("out", nz_type, span)
+    dep = ir.Var("dep", ir.ScalarType(DataType.TASK_ID), span)
+    submit_type = ir.TupleType([nz_type, ir.ScalarType(DataType.TASK_ID)])
+    core_num = ir.ConstInt(4, DataType.INDEX, span)
+    submit = ir.Submit(
+        ir.GlobalVar("writer"),
+        [output],
+        [dep],
+        {"launch_tag": 3},
+        {"test_marker": 7},
+        submit_type,
+        span,
+        core_num=core_num,
+        sync_start=True,
+        allow_early_resolve=True,
+    )
+    result_var = ir.Var("result", submit_type, span)
+    caller = ir.Function("caller", [output, dep], [], ir.AssignStmt(result_var, submit, span), span)
+    # Opaque launch kwargs are intentional; they are metadata this pass must
+    # preserve, rather than public DSL keywords the printer can round-trip.
+    with passes.PassContext([]):
+        after = passes.block_nz_tensor_views()(ir.Program([caller], "NzSubmit", span))
+    statement = next(iter(after.functions.values())).body
+    assert isinstance(statement, ir.AssignStmt)
+    rewritten = statement.value
+    assert isinstance(rewritten, ir.Submit)
+    assert _shape_values(rewritten.args[0]) == [1, 8, 4, 16, 8]
+    assert isinstance(rewritten.type, ir.TupleType)
+    assert _shape_values(rewritten.type.types[0]) == [1, 8, 4, 16, 8]
+    assert dict(rewritten.kwargs) == dict(submit.kwargs)
+    assert dict(rewritten.attrs) == dict(submit.attrs)
+    assert rewritten.deps == submit.deps
+    assert rewritten.core_num is core_num
+    assert rewritten.sync_start is True
+    assert rewritten.allow_early_resolve is True
 
 
 def test_rejects_tensor_view_of_nz():

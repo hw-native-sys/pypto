@@ -807,5 +807,13 @@ def test_execution_capabilities_are_canonical_and_immutable():
     )
 
 
+def test_compile_contract_participates_in_shared_artifact_identity():
+    program = _key()
+    kernel = replace(program, contract=ArtifactExecutionMode.KERNEL)
+    assert kernel.digest != program.digest
+    assert kernel.environment == program.environment
+    assert kernel.record()["contract"] == "kernel"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

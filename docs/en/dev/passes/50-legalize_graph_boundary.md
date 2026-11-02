@@ -248,12 +248,14 @@ simpler's hand-written `examples/a2a3/host_build_graph/qwen3_14b_decode` scene
 does the same thing by hand, for the same stated reason — "This keeps the
 temporary live set flat in layer count and fits the default ring configuration."
 
-The parameter is `InOut`, never `In`: the region *writes* the buffer, and
+The hoisted allocation parameter remains `InOut`: the region *writes* the buffer, and
 declared `In` codegen would emit `add_input`, the launch would never register as
 a writer, and a caller that hoisted the allocation out of its own loop would get
-no ordering between successive launches over it. `Out` is not available — on a
-Graph boundary it means the runtime allocates, which `rt_graph_args_cacheable`
-refuses.
+no ordering between successive launches over it. Hoisting runs after direction and dependency derivation,
+so newly introduced allocation parameters retain conservative `InOut` ordering.
+This does not restrict existing write-only boundary parameters: their `Out`
+signature is preserved, and `DeriveCallDirections` selects `OutputExisting` for
+an existing first-write buffer or promotes it to `InOut` when ordering requires it.
 
 A hoisted allocation **is a boundary tensor**, so a view of it is held to the
 Step B rule above rather than left alone. That is not optional bookkeeping: the
@@ -277,7 +279,7 @@ compile-time-constant shape.
 
 ### Prerequisite: a Graph's returns name their parameters
 
-Step B and Step C both *append* an `InOut` parameter, and that is what made
+Step B and Step C can *append* writable (`Out`/`InOut`) parameters, and that is what made
 automating this hoist a rework rather than a wiring job. Orchestration codegen
 maps a call result onto one of the callee's `Out`/`InOut` params through
 `return_lineage::ExplicitReturnedParamIndices` — a pointer-identity read of the
@@ -326,7 +328,7 @@ which decodes values directly in both supported runtimes.
 | At least one tensor parameter | A graph with an empty boundary has nothing to patch on replay; the runtime refuses to cache it |
 | At most 128 tensor parameters | `GRAPH_MAX_TENSOR_ARGS` — the boundary is a fixed-size `GraphTaskArgs` |
 | At most 64 scalar parameters | `GRAPH_MAX_SCALAR_ARGS`. Checked after Step A, which *adds* scalar parameters, so a signature that fit before hoisting can stop fitting after |
-| No `Out` tensor parameter | `Out` means the runtime allocates the buffer; a recorded graph's boundary tensors must already exist so replay can patch their addresses |
+| No runtime-allocated boundary output | `Out` describes write-only access and is legal with caller-supplied storage. Call-site `OutputExisting` and `InOut` are supported; `ArgDirection::Output` is rejected because it requests a new allocation |
 | Scalar parameters are `In` | A boundary scalar is passed by value and replayed from the call site |
 | Returns only its own parameters | `rt_submit_graph` yields a valid task id only on a cache *hit*, so nothing can depend on a graph call's result. `return c` for an `InOut` parameter is the in-place spelling and is fine; a computed value is not |
 | Between 1 and 1024 launched tasks | `graph_execution_storage_layout` refuses a node count of zero as well as one over `GRAPH_MAX_NODES`. A launch in a loop counts once per iteration, not once per call site, and `system.task_dummy` counts too — it lowers to `rt_submit_dummy_task`, and `ExpandManualPhaseFence` inserts them automatically. Allocations record nodes too, counted as an *upper* bound so that passing this check means the runtime will accept the Graph. Codegen collects every eligible create in a statement list — an intervening launch does not close the batch — and packs them at most `kAllocTensorsArgs` (16) to an `alloc_tensors`. Two of its three ineligibility rules cannot fire here (a shape reading a local is already rejected as non-constant; an already-declared var cannot recur under SSA), so those creates are counted exactly. The third can — an injected GM pipe buffer leaves the shared batch when its `core_num` reads a body-local, which only the emitter's use-resolution knows — so each of those is charged its worst case of one node. The batch size and the GM-pipe predicate are shared with the emitter in `utils/alloc_batching.h` rather than restated here. Counted **after** the hoisting steps, unlike every other check in this table: Step C *removes* allocation nodes, so the pre-hoist body would reject a Graph that fits and disagree with the verifier, which re-derives the same count from the rewritten IR |
@@ -393,6 +395,12 @@ operate on ready CPU tensor arguments. Generated argument metadata selects
 normal upload behavior. This metadata is preserved by saved artifacts and worker
 reuse, including distributed chip dispatch. Scheduler predicate operands remain
 device tensors and use the normal device transfer path. Control tensors must stay alive until the call completes.
+
+Distributed dispatch also accepts an existing `simpler.Tensor` backed by HOST
+storage for a host control argument. The address-free descriptor is reused with
+`TensorTransfer.NONE`. Keep the owning Buffer and any fork-inherited storage alive until completion. A wire
+Tensor snapshots its view metadata, so construct another view when the shape,
+strides, or storage changes.
 
 A control tensor (including a view or loop-carried alias) cannot also be passed
 to a device kernel through the same argument. Pass host control data and device

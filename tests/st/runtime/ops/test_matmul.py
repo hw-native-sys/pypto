@@ -22,7 +22,7 @@ import pypto.language as pl
 import pytest
 import torch
 from examples.intermediate.matmul_acc import matmul_acc_64
-from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.core.harness import ALL_PLATFORM_IDS, PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType, pto_backend
@@ -92,6 +92,58 @@ def test_fp32_matmul_clears_inherited_hf32(test_config, monkeypatch, split_k):
     else:
         fp32_matmul(a, b, out, config=test_config)
         torch.testing.assert_close(out, a @ b, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+@pytest.mark.parametrize("split_k", [False, True], ids=["matmul", "matmul_acc"])
+def test_hf32_rounding_and_fp32_restoration(test_config, mode, split_k):
+    """Halfway inputs distinguish both rounding modes and detect leaked HF32 state."""
+
+    @pl.jit
+    def kernel(
+        a: pl.Tensor[[32, 64], pl.FP32],
+        b: pl.Tensor[[64, 32], pl.FP32],
+        hf: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        fp: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            if split_k:
+                acc = pl.create_tensor([32, 32], dtype=pl.FP32)
+                for k in pl.range(0, 64, 32):
+                    av = a[:, k : k + 32]
+                    bv = b[k : k + 32, :]
+                    acc = pl.matmul_acc(acc, av, bv, init_cond=(k == 0), tf32_mode=mode)
+            else:
+                acc = pl.matmul(a, b, tf32_mode=mode)
+            hf[:] = acc
+            fp[:] = pl.matmul_acc(acc, a, b)
+        return hf, fp
+
+    if test_config.codegen_only:
+        kernel.compile(config=test_config)
+        return
+
+    # Positive and negative halfway values, with both even and odd retained
+    # mantissas. Every output has exactly two nonzero products, so the golden
+    # is independent of the hardware's reduction order.
+    values = torch.tensor([1 + 2**-11, 1 + 3 * 2**-11, -1 - 2**-11, -1 - 3 * 2**-11])
+    rounded = torch.tensor([1.0, 1 + 2**-9, -1.0, -1 - 2**-9])
+    rhs_rounded = 1.0
+    if mode == "round_away":
+        rounded = torch.tensor([1 + 2**-10, 1 + 2**-9, -1 - 2**-10, -1 - 2**-9])
+        rhs_rounded = 1 + 2**-10
+    a = values.repeat(8).reshape(32, 1).expand(32, 64).contiguous()
+    b = torch.eye(32).repeat(2, 1) * (1 + 2**-11)
+    expected_hf = (2 * rounded.repeat(8) * rhs_rounded).reshape(32, 1).expand(32, 32)
+    expected_fp = (2 * values.repeat(8) * (1 + 2**-11)).reshape(32, 1).expand(32, 32)
+    expected_fp = expected_hf + expected_fp
+    hf = torch.empty(32, 32)
+    fp = torch.empty(32, 32)
+    for _ in range(2):
+        kernel(a, b, hf, fp, config=test_config)
+        torch.testing.assert_close(hf, expected_hf, rtol=0, atol=0)
+        torch.testing.assert_close(fp, expected_fp, rtol=0, atol=0)
 
 
 @pl.jit
@@ -173,6 +225,9 @@ def _choose_a2a3_l0(
     planner: MemoryPlanner,
     bytes_a: int,
     bytes_b: int,
+    reduction_iterations: int = 1,
+    reduction_pipeline_stages: int = 1,
+    independent_output_tiles: bool = False,
 ) -> _core_passes.l0_tile_chooser.L0TileResult:
     """Mirror AutoTileMatmulL0's calibrated 910B chooser configuration.
 
@@ -185,9 +240,12 @@ def _choose_a2a3_l0(
     cfg.l0a_bytes = cfg.l0b_bytes = 64 * 1024
     cfg.l0c_bytes = 128 * 1024
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
+    cfg.reduction_iterations = reduction_iterations
+    cfg.reduction_pipeline_stages = reduction_pipeline_stages
+    cfg.independent_output_tiles = independent_output_tiles
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
-    cfg.allow_double_buffer_c = planner != MemoryPlanner.PYPTO
+    cfg.allow_double_buffer_c = planner == MemoryPlanner.PTOAS
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
@@ -701,13 +759,11 @@ class TestMatmulAutoL0NonAlignedK(PTOTestCase):
 
 
 class TestMatmulAutoL0AStationary(PTOTestCase):
-    """BF16 matmul whose planner-specific shape selects A-stationary (k == K).
+    """Historical BF16 A-stationary workloads, now selected with single-C.
 
-    The held A panel is single-buffered in L0A while B streams double-buffered.
-    The emitted schedule is a sequential outer M loop and pipelined inner N
-    loop. Legacy PYPTO uses a single accumulator by default; DSA_RP and PTOAS
-    search dbC=2 design points automatically and therefore use a different
-    regression shape.
+    The calling test checks each shape's actual stationarity. A-stationary
+    holds A in L0A and pipelines B; historical shapes may instead select an
+    output-stationary plan when automatic dbC is excluded.
     """
 
     __test__ = False
@@ -876,13 +932,11 @@ class TestChainedMatmulMatScratch(PTOTestCase):
 
 
 class TestMatmulAutoL0BStationary(PTOTestCase):
-    """BF16 matmul whose planner-specific shape selects B-stationary.
+    """Historical BF16 B-stationary workloads, now selected with single-C.
 
-    The held B panel is single-buffered in L0B while A streams double-buffered.
-    The emitted schedule is a sequential outer N loop and pipelined inner M
-    loop. Legacy PYPTO uses a single accumulator by default; DSA_RP and PTOAS
-    search dbC=2 design points automatically and therefore use a different
-    regression shape.
+    The calling test checks each shape's actual stationarity. B-stationary
+    holds B in L0B and pipelines A; historical shapes may instead select an
+    output-stationary plan when automatic dbC is excluded.
     """
 
     __test__ = False
@@ -1386,10 +1440,8 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
 _MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
 _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
-# Every row is (M, K, N, chosen k). The current calibrated chooser returns
-# (M, N, chosen_k) under BOTH planners, so these are K-only splits rather than
-# already-fitting or full-K M/N grids. The assertion in test_matmul_autol0
-# locks that contract before the device golden runs.
+# Every row is (M, K, N, chosen k). These shapes remain K-only single-C plans
+# even when the PTOAS planner permits automatic accumulator double buffering.
 _AUTOL0_K_SPLIT_SHAPES = [
     (16, 128, 128, 64),
     (64, 192, 128, 64),
@@ -1679,11 +1731,9 @@ class TestMatmulOperations:
     @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)
     @pytest.mark.parametrize("m,k,n,l0_k", _AUTOL0_K_SPLIT_SHAPES)
     def test_matmul_autol0(self, test_runner, platform, planner, m, k, n, l0_k):
-        """910B FP32 operands — genuine K-only AutoTile split under every planner."""
+        """910B FP32 operands — calibrated K-split schedules under every planner."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=4, bytes_b=4)
-        assert (choice.m, choice.n, choice.k) == (m, n, l0_k), (
-            f"expected K-only tile {(m, n, l0_k)} under {planner}, got {(choice.m, choice.n, choice.k)}"
-        )
+        assert (choice.m, choice.n, choice.k) == (m, n, l0_k)
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
         assert not choice.double_buffer_c
         assert choice.k < k, "the system case must exercise a real K split"
@@ -1743,16 +1793,21 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 256, 128, 544, (256, 128, 128), id="pypto"),
-            pytest.param(MemoryPlanner.DSA_RP, 48, 352, 96, (48, 32, 352), id="dsa_rp"),
+            pytest.param(MemoryPlanner.DSA_RP, 48, 352, 96, (48, 96, 32), id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, 48, 352, 96, (48, 32, 352), id="ptoas"),
         ],
     )
     def test_matmul_autol0_a_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
-        """Planner-pinned A-stationary schedule; sequential outer M, pipelined inner N."""
+        """Keep the historical shapes with planner-specific accumulator policy."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
-        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.AStationary
-        assert choice.double_buffer_c == (planner != MemoryPlanner.PYPTO)
+        expected_stationarity = (
+            _core_passes.l0_tile_chooser.Stationarity.AStationary
+            if planner != MemoryPlanner.DSA_RP
+            else _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        )
+        assert choice.stationarity == expected_stationarity
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0AStationary(
@@ -1766,8 +1821,29 @@ class TestMatmulOperations:
         )
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)
+    @pytest.mark.parametrize(
+        "planner,platform",
+        [
+            pytest.param(
+                planner,
+                platform,
+                id=f"{_planner_tag(planner)}-{platform}",
+                # A false skipif also disables this harness's batch discovery.
+                # Attach a skip only to the diagnosed planner/target pair.
+                marks=pytest.mark.skip(
+                    reason=(
+                        "Pre-existing PTOAS A5 Left packing: the 64-KiB producer followed by two "
+                        "32-KiB consumer buffers requests 96 KiB against 64 KiB; native Tile/Buffer "
+                        "regressions track this exact overflow as a strict expected failure"
+                    ),
+                )
+                if planner == MemoryPlanner.PTOAS and platform in ("a5", "a5sim")
+                else (),
+            )
+            for planner in (MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS)
+            for platform in ALL_PLATFORM_IDS
+        ],
+    )
     def test_chained_matmul_mat_scratch(self, test_runner, platform, planner):
         """Chained (a@b)@e with the oversized intermediate kept on-chip in an L1/Mat
         scratch (per-sub-tile Acc->Mat assembles, bf16 downcast fused), consumed by
@@ -1788,11 +1864,11 @@ class TestMatmulOperations:
     @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_chained_matmul_mat_scratch_issue_1908_dsa_rp_dbc(self, test_runner, platform):
-        """DSA_RP combines dbC with the operand-stationary #1908 layout.
+        """DSA_RP retains the single-C operand-stationary #1908 layout.
 
         The producer's held 64 KiB L0B panel precedes the consumer's two
         smaller pipelined L0B buffers. DSA_RP must retain the chooser-selected
-        operand-stationary schedule, preserve dbC, and execute correctly.
+        operand-stationary schedule without automatic dbC and execute correctly.
         """
         planner = MemoryPlanner.DSA_RP
         case = TestChainedMatmulMatScratch(
@@ -1806,7 +1882,7 @@ class TestMatmulOperations:
         )
         printed = _printed_through_auto_tile(case.get_program(), planner)
         assert "pl.range(" in printed
-        assert "pipeline_double_buffer_c" in printed
+        assert "pipeline_double_buffer_c" not in printed
 
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
@@ -1817,16 +1893,21 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 192, 64, 512, (64, 512, 64), id="pypto"),
-            pytest.param(MemoryPlanner.DSA_RP, 64, 80, 256, (32, 256, 80), id="dsa_rp"),
+            pytest.param(MemoryPlanner.DSA_RP, 64, 80, 256, (64, 256, 16), id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, 64, 80, 256, (32, 256, 80), id="ptoas"),
         ],
     )
     def test_matmul_autol0_b_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
-        """Planner-pinned B-stationary schedule; sequential outer N, pipelined inner M."""
+        """Keep the historical shapes with planner-specific accumulator policy."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
-        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.BStationary
-        assert choice.double_buffer_c == (planner != MemoryPlanner.PYPTO)
+        expected_stationarity = (
+            _core_passes.l0_tile_chooser.Stationarity.BStationary
+            if planner != MemoryPlanner.DSA_RP
+            else _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        )
+        assert choice.stationarity == expected_stationarity
+        assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0BStationary(
@@ -1883,6 +1964,9 @@ class TestMatmulOperations:
             platform=platform,
             config=cfg,
         )
+        # PyPTO/DSA-RP choose the complete canonical reduction once. PTOAS
+        # retains ordinary per-call K tiling for backend-placement compatibility.
+        canonical_schedule = planner != MemoryPlanner.PTOAS
         choice = _choose_a2a3_l0(
             case.M,
             case.K_CHUNK,
@@ -1890,6 +1974,9 @@ class TestMatmulOperations:
             planner=planner,
             bytes_a=2,
             bytes_b=2,
+            reduction_iterations=case.NUM_CHUNKS if canonical_schedule else 1,
+            reduction_pipeline_stages=2 if canonical_schedule else 1,
+            independent_output_tiles=canonical_schedule,
         )
         assert not choice.double_buffer_c, "the nested-pipeline case must retain a K-only inner split"
         assert choice.k < case.K_CHUNK, "the inner per-chunk matmul must be K-tiled"

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "registry": "swr.cn-east-3.myhuaweicloud.com",
+  "repository": "cloud-pypto/pypto-dev",
+  "sources": {
+    "pypto": {"repository": "https://github.com/hw-native-sys/pypto.git", "ref": "main"},
+    "pypto_lib": {"repository": "https://github.com/hw-native-sys/pypto-lib.git", "ref": "main"}
+  },
+  "images": {
+    "arm-a2a3": {
+      "enabled": true,
+      "platform": "linux/arm64",
+      "runners": ["self-hosted", "linux", "ARM64", "npu-xp"],
+      "runner_name": "227-npu-a2a3-XP-1",
+      "cann_repository": "quay.io/ascend/cann",
+      "cann_tag": "9.2.0-a3-ubuntu22.04-py3.11-devel",
+      "cann_digest": "sha256:a8469218d483247b62bfa80f8c3ee0475fa373d26b35388446b11d87fa286487",
+      "driver_version": "26.0.rc1",
+      "build_jobs": 2,
+      "proxy_required": true,
+      "patch": "cann92-a2a3-aicpu-class-memaccess",
+      "validation_platform": "a2a3",
+      "task_timeout_seconds": 3600,
+      "task_max_seconds": 1800,
+      "decode": "/workspace/pypto-lib/models/qwen3_14b/decode_fwd.py",
+      "distributed": "/workspace/pypto-lib/examples/advanced/allreduce.py",
+      "tag": "arm-a2a3-cann9.2-dist"
+    },
+    "arm-a5": {
+      "enabled": true,
+      "platform": "linux/arm64",
+      "runners": ["self-hosted", "Linux", "ARM64", "npu-a5"],
+      "cann_repository": "quay.io/ascend/cann",
+      "cann_tag": "9.2.0-950-ubuntu22.04-py3.11-devel",
+      "cann_digest": "sha256:5eeb9a624fc8e0668b5fbcac658f9844fe6a7264b138da0aa1c7fa94dc080bf9",
+      "driver_version": "25.6.rc2.b023",
+      "build_jobs": 2,
+      "proxy_required": true,
+      "patch": "cann92-a5-aicpu-class-memaccess",
+      "validation_platform": "a5",
+      "task_timeout_seconds": 3600,
+      "task_max_seconds": 1800,
+      "decode": "/workspace/pypto-lib/models/deepseek_v4_1_flash/decode_swa.py",
+      "distributed": "/workspace/pypto-lib/models/deepseek_v4_1_flash/decode_moe.py",
+      "distributed_args": ["--ep", "2"],
+      "tag": "arm-a5-cann9.2-dist"
+    },
+    "x86-a5": {
+      "enabled": true,
+      "platform": "linux/amd64",
+      "runners": ["self-hosted", "Linux", "npu-a5", "X64", "pr"],
+      "cann_repository": "quay.io/ascend/cann",
+      "cann_tag": "9.2.0-950-ubuntu22.04-py3.11-devel",
+      "cann_digest": "sha256:abd1d4ed5e47835eb4ccef6e7b37fd2f31378a2a9ac16fe7ce139bddfd8d140e",
+      "driver_version": "25.7.rc1.12",
+      "build_jobs": 2,
+      "proxy_required": true,
+      "patch": "cann92-a5-aicpu-class-memaccess",
+      "validation_platform": "a5",
+      "task_timeout_seconds": 3600,
+      "task_max_seconds": 1800,
+      "decode": "/workspace/pypto-lib/models/deepseek_v4_1_flash/decode_swa.py",
+      "distributed": "/workspace/pypto-lib/models/deepseek_v4_1_flash/decode_moe.py",
+      "distributed_args": ["--ep", "2"],
+      "tag": "x86-a5-cann9.2-dist"
+    }
+  }
+}

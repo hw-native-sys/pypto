@@ -67,6 +67,20 @@ returns only tensors — so a `ScalarType` in an outlined function's
 to, which is why such a return used to reach the generated C++ as an undefined
 identifier and later as a silently wrong `= 0` (issue #631).
 
+A `tile.store` destination can be an ordinary `Var` or an existing loop-carried
+`IterArg`. Both produce a post-store return value from the outlined kernel;
+subsequent aliases and yields must use that result rather than the pre-call
+destination. This also applies to producers inside MANUAL parallel regions.
+When a conditional already yields results through a trailing runtime or split
+scope, store-target threading extends that yield in place, preserving the
+existing result slots and scope metadata.
+
+Already-Orchestration functions also canonicalize reads of declared parameter
+dimensions before capture: inlining may have introduced `n = tensor.dim(x, 0)`
+after parsing. When that extent is the signature symbol `T`, uses of `n`
+including Tensor shapes become `T`, so outlined signatures do not capture a
+caller-local alias. Genuine runtime dimension reads remain unchanged.
+
 Before any input/output analysis runs, `PlanScalarOutputHoist`
 (`utils/scalar_output_hoist.h`) moves the defining statements of every Scalar
 live-out into the caller, ahead of the call:

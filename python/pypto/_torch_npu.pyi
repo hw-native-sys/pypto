@@ -1,0 +1,19 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Optional native lifecycle and storage queries; imported only on demand."""
+
+from typing import Any
+
+def framework_alive() -> bool: ...
+def borrow_context(device_id: int) -> int: ...
+def bind_context(context: int) -> None: ...
+def retain_until_exit(owner: Any) -> None: ...
+def check_call(stream_id: int, device_id: int) -> bool: ...
+def storage_shape(tensor: Any) -> list[int]: ...

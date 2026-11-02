@@ -68,7 +68,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | `profiling` | `False` | 逐阶段编译计时写入 `report/pipeline_profile.{txt,json}` |
 | `distributed_config` | `None` | 按 rank 编译 HOST 级程序（[分布式](../distributed/index.md)） |
 | `analyze_auto_scopes_for_deps` | `False` | 对 AUTO 作用域做编译器推导依赖 |
-| `enable_pypto_l0c_double_buffer` | `None` | L0C double buffer |
+| `enable_pypto_l0c_double_buffer` | `None` | 旧版开关；PYPTO/DSA_RP 禁用自动 dbC，PTOAS 保留自动 dbC 且不受此开关影响 |
 | `emit_source_loc` | `None` | 把 DSL 源位置带进发出的 `.pto` |
 | `dump_ptoas_passes` | `False` | 同时 dump ptoas 自己的 pass IR |
 | `runtime` | `None` | 面向哪个 Simpler 运行时 ABI —— `TENSORMAP_AND_RINGBUFFER` 或 `HOST_BUILD_GRAPH`（`@pl.jit.graph` 需要它 —— [函数](../language/01-functions.md)）；`None` 继承当前 `PassContext`。派发它的 worker 必须与之匹配 |

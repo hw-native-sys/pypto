@@ -150,8 +150,8 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
              args[0]->span_)
       << "tensor.reshape does not support MX-layout tensors";
-  CHECK_SPAN(!tensor_type->dtype_.IsFp4Family(), args[0]->span_)
-      << "tensor.reshape is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
+  CHECK_SPAN(!tensor_type->dtype_.IsPackedFp4(), args[0]->span_)
+      << "tensor.reshape is not supported for FP4E2M1X2/FP4E1M2X2 (see docs/en/dev/fp4.md)";
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());
@@ -350,8 +350,8 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
 
   CHECK(axis1 != axis2) << "tensor.transpose: axis1 and axis2 must be different, but got axis1=" << axis1
                         << ", axis2=" << axis2;
-  CHECK_SPAN(!tensor_type->dtype_.IsFp4Family(), args[0]->span_)
-      << "tensor.transpose is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
+  CHECK_SPAN(!tensor_type->dtype_.IsPackedFp4(), args[0]->span_)
+      << "tensor.transpose is not supported for FP4E2M1X2/FP4E1M2X2 (see docs/en/dev/fp4.md)";
 
   // Create new shape by swapping the specified dimensions
   std::vector<ExprPtr> new_shape = input_shape;
@@ -489,11 +489,6 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   TensorLayout src_layout =
       src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
   TensorLayout new_layout = requested_layout.value_or(src_layout);
-  CHECK_SPAN(
-      !src_type->dtype_.IsPackedFp4() || (src_layout == TensorLayout::ND && new_layout == TensorLayout::ND),
-      args[0]->span_)
-      << "tensor.view: FP4E2M1X2 supports ND layout only; layout conversion is not supported "
-         "(see docs/en/dev/fp4.md)";
   const bool has_shape = args.size() >= 2;
   // FP8E8M0 scale buffers may alias between packed ND storage and the Cube
   // consumer layouts. MX_A_ZZ covers LeftScale boxes; MX_B_NN covers RightScale.
