@@ -11,6 +11,7 @@
 
 import re
 import subprocess
+from textwrap import indent
 
 import pypto.language as pl
 import pytest
@@ -134,6 +135,61 @@ def test_native_if_compiles_without_copies(
     source.write_text(text)
     compiled = subprocess.run(
         [binary, str(source), "-o", str(tmp_path / "kernel.cpp"), *_get_ptoas_flags(planner)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("placement", ["inside_for", "inside_while", "beside_for"])
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_native_if_with_loops_bypasses_global_buffer_ir(
+    placement, planner, tmp_path, ascend_backend, pass_verification_instruments
+):
+    """Tile selections remain native even when the same function also has a loop."""
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable")
+    selection = """if flag > 0:
+    selected = pl.yield_(a)
+else:
+    selected = pl.yield_(b)
+pl.store(selected, [0, 0], out)"""
+    if placement == "inside_for":
+        body = f"for i in pl.range(count):\n{indent(selection, '    ')}"
+    elif placement == "inside_while":
+        body = f"i = pl.const(0, pl.INDEX)\nwhile i < count:\n{indent(selection, '    ')}\n    i = i + 1"
+    else:
+        body = f"for i in pl.range(count):\n    pl.store(a, [0, 0], out)\n{selection}"
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[4, 8], pl.FP32]]) -> pl.Tensor[[4, 8], pl.FP32]:
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+{indent(body, "        ")}
+        return out
+""")
+    with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=True):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        function = lowered.get_function("kernel")
+        assert function is not None
+        assert function.ir_stage == ir.FunctionIRStage.Functional, lowered.as_python()
+        text = codegen.PTOCodegen().generate(
+            lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+        )
+    assert re.search(r"scf\.if .* -> \(.*!pto\.tile_buf", text), text
+    assert ("scf.while" if placement == "inside_while" else "scf.for") in text, text
+    source = tmp_path / "loop_selection.pto"
+    source.write_text(text)
+    compiled = subprocess.run(
+        [binary, str(source), "-o", str(tmp_path / "loop_selection.cpp"), *_get_ptoas_flags(planner)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -393,11 +449,135 @@ def test_shared_accumulator_declaration_dominates_if_arms(tmp_path, ascend_backe
     assert compiled.returncode == 0, compiled.stderr
 
 
+def _assert_private_carry_preserves_old_inputs(program, addressed, selected_initializer, saved_selection):
+    """Entry copies isolate fixed carries without rebinding observers of old roots."""
+    bindings = {}
+    originals = {}
+    entry_moves = {}
+    loops = []
+    stores = []
+
+    class Collector(ir.IRVisitor):
+        depth = 0
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.var.type, ir.TileType):
+                name = op.var.name_hint.split("__", 1)[0]
+                if name in {"a", "b"}:
+                    originals[name] = op.var
+                if isinstance(op.value, ir.Var):
+                    bindings[op.var.unique_id] = [op.value]
+                elif isinstance(op.value, ir.Call):
+                    if op.value.op.name == ir.get_op("tile.reshape").name:
+                        bindings[op.var.unique_id] = [op.value.args[0]]
+                    if self.depth == 0 and op.value.op.name == ir.get_op("tile.move").name:
+                        entry_moves[op.var.unique_id] = op
+            super().visit_assign_stmt(op)
+
+        def visit_if_stmt(self, op):
+            arms = [op.then_body] + ([op.else_body] if op.else_body is not None else [])
+            yields = [ir.get_last_yield_stmt(arm) for arm in arms]
+            for index, result in enumerate(op.return_vars):
+                if isinstance(result.type, ir.TileType):
+                    bindings[result.unique_id] = [value.value[index] for value in yields if value is not None]
+            super().visit_if_stmt(op)
+
+        def visit_for_stmt(self, op):
+            loops.append(op)
+            self.depth += 1
+            super().visit_for_stmt(op)
+            self.depth -= 1
+
+        def visit_while_stmt(self, op):
+            loops.append(op)
+            self.depth += 1
+            super().visit_while_stmt(op)
+            self.depth -= 1
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("tile.store").name:
+                stores.append(op)
+            super().visit_call(op)
+
+    Collector().visit_program(program)
+    assert set(originals) == {"a", "b"}
+    assert len(loops) == 1
+    loop = loops[0]
+    carried = [(i, arg) for i, arg in enumerate(loop.iter_args) if isinstance(arg.type, ir.TileType)]
+    assert len(carried) == 1
+    index, argument = carried[0]
+    initial = argument.initValue
+    assert isinstance(initial, ir.Var)
+    assert initial.unique_id in entry_moves, "the carry must initialize from an entry tile.move"
+    entry = entry_moves[initial.unique_id]
+
+    def roots(value):
+        assert isinstance(value, ir.Var)
+        pending = [value]
+        result = set()
+        while pending:
+            current = pending.pop()
+            if current.unique_id in bindings:
+                pending.extend(bindings[current.unique_id])
+            else:
+                result.add(current.unique_id)
+        return result
+
+    old_roots = {value.unique_id for value in originals.values()}
+    expected = old_roots if selected_initializer else {originals["a"].unique_id}
+    assert roots(entry.value.args[0]) == expected
+
+    def memory(value):
+        assert isinstance(value.type, ir.TileType) and value.type.memref is not None
+        return value.type.memref
+
+    private = memory(initial)
+    yield_stmt = ir.get_last_yield_stmt(loop.body)
+    assert yield_stmt is not None
+    for value in (argument, loop.return_vars[index], yield_stmt.value[index]):
+        carried_memory = memory(value)
+        assert carried_memory.base_.unique_id == private.base_.unique_id
+        assert ir.structural_equal(carried_memory.byte_offset_, private.byte_offset_)
+        assert carried_memory.size_ == private.size_
+    for original in originals.values():
+        old = memory(original)
+        assert not ir.MemRef.may_alias(private, old)
+        if addressed:
+            assert isinstance(private.byte_offset_, ir.ConstInt) and isinstance(old.byte_offset_, ir.ConstInt)
+            assert (
+                private.byte_offset_.value + private.size_ <= old.byte_offset_.value
+                or old.byte_offset_.value + old.size_ <= private.byte_offset_.value
+            )
+    stored_roots = [roots(store.args[0]) for store in stores]
+    if saved_selection:
+        assert old_roots in stored_roots, "saved_alias must still select the original a/b roots"
+    else:
+        assert all({value.unique_id} in stored_roots for value in originals.values())
+
+
+def _compile_native_loop(text, planner, tmp_path):
+    binary = find_ptoas_binary()
+    assert binary is not None, "PTOAS is required for native loop compilation"
+    source = tmp_path / "native_loop.pto"
+    source.write_text(text)
+    compiled = subprocess.run(
+        [binary, str(source), "-o", str(tmp_path / "native_loop.cpp"), *_get_ptoas_flags(planner)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+
+
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("loop", ["for", "while"])
 @pytest.mark.parametrize("boundary", ["initializer", "backedge"])
 @pytest.mark.parametrize("planner", _PLANNERS)
-def test_updating_loop_rejects_unresolved_tile_selection(loop, boundary, planner, ascend_backend):
-    """Both loop kinds must diagnose storage choices their fixed carry cannot hold."""
+def test_updating_loop_isolates_selected_or_observed_initializer(
+    loop, boundary, planner, tmp_path, ascend_backend
+):
+    """Both loop kinds copy selected or observed initializers into private carries."""
     select = """if flag > 0:
     selected = a
 else:
@@ -436,9 +616,15 @@ class Before:
         return pl.store(b, [8, 0], out)
 """)
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
-        with pytest.raises(ValueError, match="Tile selected by an if cannot cross"):
-            lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
-            codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        text = codegen.PTOCodegen().generate(
+            lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+        )
+    _assert_private_carry_preserves_old_inputs(
+        lowered, planner != passes.MemoryPlanner.PTOAS, boundary == "initializer", saved_selection=False
+    )
+    assert ("scf.for" if loop == "for" else "scf.while") in text, text
+    _compile_native_loop(text, planner, tmp_path)
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
@@ -769,11 +955,12 @@ class Before:
     assert "scf.for" in text, text
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("saved_then_a", [False, True])
 @pytest.mark.parametrize("alias", ["rename", "reshape"])
 def test_selected_observer_of_loop_initializer_cannot_be_clobbered(
-    planner, saved_then_a, alias, ascend_backend
+    planner, saved_then_a, alias, tmp_path, ascend_backend
 ):
     """An old selection can observe the initializer through either runtime arm."""
     saved_shape = "[2, 2048]" if alias == "reshape" else "[1, 4096]"
@@ -806,9 +993,16 @@ class Before:
         return pl.store(result, [0, 0], out)
 """)
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
-        with pytest.raises(ValueError, match="Tile selected by an if cannot cross"):
-            lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
-            codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        text = codegen.PTOCodegen().generate(
+            lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+        )
+    _assert_private_carry_preserves_old_inputs(
+        lowered, planner != passes.MemoryPlanner.PTOAS, selected_initializer=False, saved_selection=True
+    )
+    assert re.search(r"scf\.if .* -> \(.*!pto\.tile_buf", text), text
+    assert "scf.for" in text, text
+    _compile_native_loop(text, planner, tmp_path)
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)

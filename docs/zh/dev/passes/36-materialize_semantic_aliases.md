@@ -76,10 +76,12 @@ program = passes.materialize_semantic_aliases()(program)
    零次循环体规范化仅用于 Tile carry 边界；仅包含 Tensor/DistributedTensor 的循环
    保留描述符写回和循环体结构，由 tensor 边界规范化负责处理。
    Legacy Vec carry 也复用隔离分析来保护循环中重复读取的原始 seed：在入口复制到
-   私有存储，让 carry 更新时保留原 seed。通用的输入参数、循环后读取和重叠输入
-   隔离仍专用于 Buffer IR。若 legacy 所选 carry 的目标允许 Tile move 写入，初始值
-   仍可被独立观测，且重复读取隔离尚未提供私有存储，则明确拒绝：写回快照无法
-   保留另一句柄的旧初始值。Acc 没有可写入的 move，其临时选择仍交给必需的
+   私有存储，让 carry 更新时保留原 seed。包含 Tile If 结果的原生函数还会隔离
+   仍被独立观测的输入参数或循环后旧值，包括通过所选描述符发生的观测；整个函数
+   离开 Buffer IR 后仍须保留这些旧数据。这是语义上的输入保护，不是为了节省容量
+   而在 If 分支之间复制。通用的重叠输入隔离仍专用于 Buffer IR。无法执行合法隔离复制的
+   所选 carry 保留诊断：写回快照无法保留另一句柄的旧初始值。
+   Acc 没有可写入的 move，其临时选择仍交给必需的
    accumulator 合并处理，或由已有的 Acc 分歧诊断拒绝。
    同一存储空间中仍存活的 native 选择也保守视为可能观测该输入，涵盖非代表分支。
    不支持复制的存储空间保留重定向保护和已有显式复制报错。
@@ -200,10 +202,10 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 别名。延迟物化不能写入代表某一分支的分配；无法证明的选择窗口会被拒绝，除非
 此前的 pass 已将其物化到独立存储。
 
-`SelectBufferIRFunctions` 让不含循环且含 Tile 返回值 If 的函数保留在 Tile 路径上，
-包括启用 Buffer IR 的情况：当前 Buffer lowering 会移除 Tile 区域返回值，
-无法表达动态句柄选择。这样默认流水线中的纯分支 kernel 也使用原生选择。含 For/While 的 kernel 保留
-原有 Buffer 选择及 carry lowering，避免整函数切换路径连带改变循环语义。
+`SelectBufferIRFunctions` 将所有包含 Tile 返回值 If 的函数保留在原生 Tile 路径，
+不再根据函数是否含 For/While 区分；全局启用 Buffer IR 时也适用。
+Buffer lowering 当前会消除 Tile 区域返回值，无法表达这种动态句柄选择。
+原生路径负责对齐和修复固定 For/While carry；必要的 carry 写回与 If 描述符选择分开处理。
 
 ### 分阶段启用的 Buffer IR 流水线
 

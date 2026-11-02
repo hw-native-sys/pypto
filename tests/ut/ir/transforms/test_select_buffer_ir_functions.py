@@ -263,21 +263,104 @@ class ControlFlow:
 """)
 
 
+def _assert_fixed_tile_carry_storage(function, addressed):
+    """Native loop backedges must write the storage read by the next iteration."""
+    original_inputs = []
+
+    class InputLoads(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.load").name:
+                assert isinstance(op.var.type, ir.TileType)
+                assert op.var.type.memref is not None
+                original_inputs.append(op.var.type)
+            super().visit_assign_stmt(op)
+
+    InputLoads().visit_stmt(function.body)
+    assert len(original_inputs) == 2, "both original Tile inputs must be checked"
+
+    def assert_preserves_inputs(tile_type, message):
+        memref = tile_type.memref
+        assert memref is not None
+        for input_type in original_inputs:
+            source = input_type.memref
+            assert source is not None
+            assert not ir.MemRef.may_alias(memref, source), message
+            if addressed and tile_type.memory_space == input_type.memory_space:
+                # Address assignment can place distinct allocation identities at
+                # the same address, so also compare their actual byte ranges.
+                assert isinstance(memref.byte_offset_, ir.ConstInt)
+                assert isinstance(source.byte_offset_, ir.ConstInt)
+                start, input_start = memref.byte_offset_.value, source.byte_offset_.value
+                assert start + memref.size_ <= input_start or input_start + source.size_ <= start, message
+
+    checked = 0
+
+    class Checker(ir.IRVisitor):
+        def check_loop(self, op):
+            nonlocal checked
+            statements = op.body.stmts if isinstance(op.body, ir.SeqStmts) else [op.body]
+            assert statements and isinstance(statements[-1], ir.YieldStmt)
+            yielded = statements[-1].value
+            assert len(yielded) == len(op.iter_args) == len(op.return_vars)
+            for index, argument in enumerate(op.iter_args):
+                if not isinstance(argument.type, ir.TileType):
+                    continue
+                initial_type = argument.initValue.type
+                assert isinstance(initial_type, ir.TileType)
+                initial = initial_type.memref
+                assert initial is not None
+                # This program reads both lhs and rhs after the loop. Swapping
+                # the carries must not overwrite either still-live input.
+                assert_preserves_inputs(
+                    initial_type,
+                    f"{type(op).__name__} carry '{argument.name_hint}' initializer overlaps a live input",
+                )
+                for role, value in (
+                    ("iter_arg", argument),
+                    ("yield", yielded[index]),
+                    ("return_var", op.return_vars[index]),
+                ):
+                    tile_type = value.type
+                    assert isinstance(tile_type, ir.TileType)
+                    memref = tile_type.memref
+                    assert memref is not None
+                    message = f"{type(op).__name__} carry '{argument.name_hint}' {role} uses other storage"
+                    assert tile_type.memory_space == initial_type.memory_space, message
+                    assert ir.MemRef.same_allocation(memref, initial), message
+                    assert ir.structural_equal(memref.byte_offset_, initial.byte_offset_), message
+                    assert memref.size_ == initial.size_, message
+                    assert_preserves_inputs(
+                        tile_type,
+                        f"{type(op).__name__} carry '{argument.name_hint}' {role} overlaps a live input",
+                    )
+                checked += 1
+
+        def visit_for_stmt(self, op):
+            self.check_loop(op)
+            super().visit_for_stmt(op)
+
+        def visit_while_stmt(self, op):
+            self.check_loop(op)
+            super().visit_while_stmt(op)
+
+    Checker().visit_stmt(function.body)
+    assert checked == 2, "both swapped Tile carries must have fixed storage"
+
+
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("kind", ["for", "while"])
 @pytest.mark.parametrize("enabled", [None, True, False])
 def test_default_control_flow_preserves_swaps_live_inputs_and_gm_carries(planner, kind, enabled):
-    if enabled is False:
-        # Selection is disabled before planning. The legacy DSA-RP while path
-        # independently rejects this storage pattern; it is not a Buffer fallback.
-        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
-            selected = passes.select_buffer_ir_functions()(_control_flow_program(kind))
-        assert _kernel(selected).attrs["buffer_ir_selected"] is False
-        return
+    # A Tile-valued If keeps native selection even when its kernel contains a
+    # loop. All modes must preserve simultaneous swaps, the original input,
+    # zero-trip results and GM carry identity on that same Tile path.
     program = _lower(_control_flow_program(kind), planner, enabled)
-    assert _kernel(program).ir_stage == (
-        ir.FunctionIRStage.Functional if enabled is False else ir.FunctionIRStage.Buffer
-    )
+    assert _kernel(program).ir_stage == ir.FunctionIRStage.Functional
+    if enabled is not False:
+        assert _kernel(program).attrs["buffer_ir_selected"] is False
+    # Torch executes logical SSA values; it cannot detect a missing native
+    # writeback from a yielded Tile into the loop's fixed carry storage.
+    _assert_fixed_tile_carry_storage(_kernel(program), addressed=planner != passes.MemoryPlanner.PTOAS)
     namespace = {}
     exec(torch_codegen(program), namespace)  # noqa: S102
     a = torch.linspace(-1, 1, 512).reshape(16, 32)

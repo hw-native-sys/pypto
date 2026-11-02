@@ -930,7 +930,10 @@ class LoopInputIsolation : public IRVisitor {
     VisitExpr(branch->condition_);
     VisitStmt(branch->then_body_);
     if (branch->else_body_) VisitStmt(*branch->else_body_);
-    for (const auto& result : branch->return_vars_) definitions_[result.get()] = ++order_;
+    for (const auto& result : branch->return_vars_) {
+      definitions_[result.get()] = ++order_;
+      has_tile_if_ |= As<TileType>(result->GetType()) != nullptr;
+    }
   }
   void VisitStmt_(const ForStmtPtr& loop) override {
     VisitExpr(loop->start_);
@@ -959,6 +962,7 @@ class LoopInputIsolation : public IRVisitor {
 
  private:
   bool recurrence_only_ = false;
+  bool has_tile_if_ = false;
   std::set<const IterArg*> selected_carries_;
   std::set<const Var*> selected_values_;
   const Stmt* current_statement_ = nullptr;
@@ -1051,7 +1055,14 @@ class LoopInputIsolation : public IRVisitor {
               return (!memory || !entry.first || memory == entry.first) &&
                      entry.second.HasAfter(position + 1, order_, reverse_order_.at(loop.get()));
             });
-        const bool can_isolate = nested_observation && memory && IsTileMoveEverSupported(*memory, *memory);
+        // Every Tile-If function now uses native descriptors, including loops
+        // formerly legalized by Buffer IR. Fixed-carry writebacks must preserve
+        // inputs still observed after the loop, even via another selected handle.
+        // These entry copies preserve old values; they are not capacity-driven
+        // copies between alternative If outputs.
+        const bool needs_isolation =
+            nested_observation || (has_tile_if_ && (external_observation || selected_observation));
+        const bool can_isolate = needs_isolation && memory && IsTileMoveEverSupported(*memory, *memory);
         const bool unchanged =
             body_yield && i < body_yield->value_.size() && body_yield->value_[i] == loop->iter_args_[i];
         // A later snapshot only protects the current carry value during the

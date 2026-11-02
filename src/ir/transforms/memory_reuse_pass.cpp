@@ -9,14 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
-#include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -43,30 +40,6 @@ namespace pypto {
 namespace ir {
 namespace {
 
-struct ReusePlan {
-  LifetimeAnalysisResult analysis;
-  AllocationConstraintAnalysis constraints;
-  memory_reuse::ReuseMap placements;
-  std::vector<Diagnostic> hints;
-  std::set<MemorySpace> overflow_spaces;
-};
-
-// Keep the trial and committed plans independent: every retry must rebuild
-// provenance, operand restrictions and lifetimes from the rewritten IR.
-ReusePlan PlanReuse(const FunctionPtr& func, LifetimeAnalysisResult analysis,
-                    const std::map<MemorySpace, uint64_t>& reserved_end_by_space) {
-  ReusePlan plan;
-  plan.analysis = std::move(analysis);
-  plan.constraints = AnalyzeAllocationConstraints(func, plan.analysis, "MemoryReuse");
-  plan.placements = memory_reuse::IdentifyReuseOpportunities(
-      plan.analysis.lifetimes, plan.constraints.target_hazard_inputs, plan.constraints.forbid_alias,
-      plan.analysis.phi_family_ids, plan.analysis.var_sharing_groups, plan.analysis.var_liveness,
-      plan.analysis.pipeline_membership, plan.analysis.pipeline_load_tiles,
-      plan.analysis.subrange_unsafe_groups, reserved_end_by_space, plan.constraints.declared_allocation_bases,
-      func, &plan.hints, &plan.overflow_spaces);
-  return plan;
-}
-
 /**
  * @brief Transform a function by identifying and applying memory reuse
  *
@@ -89,8 +62,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   StmtPtr new_body = func->body_;
 
   // Step 1: Compute lifetimes by walking full IR tree
-  // Include on-chip parameters: a capacity retry must account for storage
-  // already live at function entry, not only AssignStmt-defined allocations.
+  // Include on-chip storage already live at function entry, not only
+  // AssignStmt-defined allocations.
   auto analysis_result = AnalyzeAllocationLifetimes(func);
 
   if (analysis_result.lifetimes.empty()) {
@@ -99,8 +72,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   }
 
   auto planned_func = func;
+  auto constraint_analysis = AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
   if (auto* context = PassContext::Current(); context && context->GetEnableSoftwarePipeline()) {
-    const auto constraint_analysis = AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
     new_body = memory_reuse::ReuseSoftwarePipelineInputs(new_body, analysis_result,
                                                          constraint_analysis.target_hazard_inputs,
                                                          constraint_analysis.declared_allocation_bases);
@@ -109,6 +82,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
       updated->body_ = new_body;
       planned_func = updated;
       analysis_result = AnalyzeAllocationLifetimes(planned_func);
+      constraint_analysis = AnalyzeAllocationConstraints(planned_func, analysis_result, "MemoryReuse");
     }
   }
 
@@ -135,36 +109,19 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  auto plan = PlanReuse(planned_func, std::move(analysis_result), reserved_end_by_space);
-  const auto* context = PassContext::Current();
-  if ((context == nullptr || !context->GetEnableBufferIR()) && plan.overflow_spaces.count(MemorySpace::Vec)) {
-    auto body = memory_reuse::MaterializeForwardedVecSelections(planned_func,
-                                                                plan.constraints.declared_allocation_bases);
-    if (body != new_body) {
-      auto trial = MutableCopy(planned_func);
-      trial->body_ = memory_reuse::RefreshStorageTypes(body);
-      auto candidate = PlanReuse(trial, AnalyzeAllocationLifetimes(trial), reserved_end_by_space);
-      // A bounded, single retry. Keep the original IR if explicit copies do
-      // not make Vec fit, or if another space would acquire a new overflow.
-      // Independent old-value uses and all original hazard/pinning rules still
-      // participate in this exact re-plan; none are waived for capacity.
-      if (!candidate.overflow_spaces.count(MemorySpace::Vec) &&
-          std::includes(plan.overflow_spaces.begin(), plan.overflow_spaces.end(),
-                        candidate.overflow_spaces.begin(), candidate.overflow_spaces.end())) {
-        new_body = trial->body_;
-        plan = std::move(candidate);
-        plan.hints.emplace_back(DiagnosticSeverity::PerfHint, "MemoryReuse", 0,
-                                "materialized forwarded Vec selections to fit on-chip capacity; "
-                                "unchanged branches now copy into independent output storage",
-                                func->span_);
-      }
-    }
-  }
-  analysis_result = std::move(plan.analysis);
-  const auto& reuse_map = plan.placements;
+  // Native selections retain every candidate until its final use. Reuse only
+  // dead storage under the normal lifetime, hazard and no-alias constraints;
+  // do not insert branch copies or retarget producers to force a capacity fit.
+  std::vector<Diagnostic> hints;
+  const auto reuse_map = memory_reuse::IdentifyReuseOpportunities(
+      analysis_result.lifetimes, constraint_analysis.target_hazard_inputs, constraint_analysis.forbid_alias,
+      analysis_result.phi_family_ids, analysis_result.var_sharing_groups, analysis_result.var_liveness,
+      analysis_result.pipeline_membership, analysis_result.pipeline_load_tiles,
+      analysis_result.subrange_unsafe_groups, reserved_end_by_space,
+      constraint_analysis.declared_allocation_bases, planned_func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
-  if (!plan.hints.empty()) EmitDiagnostics(plan.hints, "MemoryReuse");
+  if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");
 
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {

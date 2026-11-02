@@ -74,7 +74,6 @@ class BufferKernelSupport : public IRVisitor {
   bool has_load = false;
   bool has_fill = false;
   bool has_tile_if = false;
-  bool has_loop = false;
   bool has_store = false;
 
   static bool ConstantEquals(const ExprPtr& value, int64_t expected) {
@@ -308,7 +307,6 @@ class BufferKernelSupport : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& loop) override {
-    has_loop = true;
     supported &= GetScalarDtype(loop->loop_var_) == DataType::INDEX;
     for (const auto& bound : {loop->start_, loop->stop_, loop->step_}) {
       VisitExpr(bound);
@@ -320,10 +318,7 @@ class BufferKernelSupport : public IRVisitor {
     CheckLoop(loop);
   }
 
-  void VisitStmt_(const WhileStmtPtr& loop) override {
-    has_loop = true;
-    CheckLoop(loop);
-  }
+  void VisitStmt_(const WhileStmtPtr& loop) override { CheckLoop(loop); }
 
   void VisitExpr_(const SubmitPtr&) override { supported = false; }
   void VisitExpr_(const CallPtr& call) override {
@@ -724,10 +719,10 @@ FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper
   }
   support.VisitStmt(function->body_);
   // Buffer lowering erases Tile region results and requires fixed destinations.
-  // Use native Tile SSA selection for branch-only kernels. Keep the existing
-  // whole-kernel route for loops: their Buffer carry legalization is separate
-  // from this change, and switching it to the legacy path can change semantics.
-  if (support.has_tile_if && !support.has_loop) support.supported = false;
+  // Preserve native Tile SSA selection for every Tile-valued If. Loops in the
+  // same function do not change this route; their fixed carry storage is
+  // legalized separately on the Tile path.
+  if (support.has_tile_if) support.supported = false;
   if (support.supported) support.supported = BufferValidAnalysis(function->body_).supported();
   auto selected = std::make_shared<Function>(*function);
   selected->attrs_.emplace_back(kAttrBufferIrSelected, support.supported &&

@@ -99,12 +99,15 @@ its own fresh MemRef. This pass closes that gap:
    body structure, handled by tensor boundary normalization.
    Legacy Vec carries also use the shared isolation analysis for recurring
    independent seed reads: an entry copy lets the carry advance in private
-   storage while preserving the original seed. General incoming-parameter,
-   post-loop and overlapping-input isolation remains specific to Buffer IR.
-   Legacy selected carries in destinations that accept Tile moves are rejected
-   when their initializers remain independently observable, unless recurrence
-   isolation already provides private storage: a writeback snapshot cannot
-   preserve another handle's old initializer value. Acc has no incoming move;
+   storage while preserving the original seed. Native functions containing Tile
+   If results also isolate independently observed incoming or post-loop values,
+   including observations through selected descriptors: moving the whole function
+   off Buffer IR must preserve those old payloads. This is semantic input
+   protection, not capacity-driven copying between If branches. General
+   overlapping-input isolation remains specific to Buffer IR. Selected carries
+   that cannot receive a supported isolation copy retain their diagnostic: a
+   writeback snapshot cannot preserve another handle's old initializer value.
+   Acc has no incoming move;
    its provisional selections reach mandatory accumulator coalescing or the
    existing divergent-Acc diagnostic instead.
    A live native selection in the same memory space is conservatively treated
@@ -264,12 +267,12 @@ rejected unless an earlier pass has materialized independent storage.
 Unaddressed output, selections of views, and packed layouts retain the existing
 subview path and its PTOAS limitations.
 
-`SelectBufferIRFunctions` retains loop-free functions with Tile-valued If results
-on the Tile path, including when Buffer IR is enabled: Buffer lowering currently
-erases Tile region results and cannot represent this dynamic handle choice.
-This preserves native selection for branch-only kernels in the default pipeline.
-Kernels containing For/While retain their existing Buffer eligibility and carry
-lowering; changing their whole-kernel route would also change loop semantics.
+`SelectBufferIRFunctions` keeps every function with Tile-valued If results
+on the native Tile path, regardless of whether it also contains For/While loops
+and even when Buffer IR is globally enabled. Buffer lowering currently erases
+Tile region results and cannot represent this dynamic handle choice. Fixed
+For/While carries are aligned and repaired on the native path; their necessary
+writebacks are independent of the descriptor selected by an If.
 
 ### Staged Buffer IR pipeline
 

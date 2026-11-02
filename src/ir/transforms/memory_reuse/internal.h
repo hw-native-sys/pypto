@@ -40,10 +40,6 @@ bool LoopMayExecute(const StmtPtr& statement, bool after_first);
 FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func);
 StmtPtr RefreshStorageTypes(const StmtPtr& body);
 StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body);
-// Capacity fallback: materialize forwarded Vec results in an independent
-// branch-local output, without retargeting any producer onto its old input.
-StmtPtr MaterializeForwardedVecSelections(const FunctionPtr& func, const std::set<const Var*>& pinned_bases);
-
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
 
@@ -66,7 +62,7 @@ ReuseMap IdentifyReuseOpportunities(
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
-    const FunctionPtr& func, std::vector<Diagnostic>* out_hints, std::set<MemorySpace>* out_overflow_spaces);
+    const FunctionPtr& func, std::vector<Diagnostic>* out_hints);
 
 StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
                            const std::map<VarPtr, std::vector<VarPtr>>& var_sharing_groups);

@@ -31,16 +31,12 @@ its complete capacity; whole-allocation reuse never discards a live slot.
 
 ## Planner boundary
 
-On the legacy Tile path, a native If keeps all candidate allocations live.
-If Vec still overflows after normal packing, `MemoryReuse` tries one bounded
-fallback for static physical descriptors with matching valid extents: when one arm produces an independent
-Vec allocation and the other forwards an existing value, the forwarding arm
-copies into that output allocation. This cuts historical candidate chains
-without overwriting old inputs. The pass rebuilds lifetimes and constraints,
-and adopts the trial only if Vec fits without introducing another overflow.
-Programs that already fit keep their native, copy-free selections. Pinned
-destinations, mismatched validity, strided or offset views, and other memory planners are unchanged.
-Matching partial valid shapes and the same runtime valid-shape expressions are supported.
+On the legacy Tile path, a native If selects a yielded descriptor. All possible
+source allocations remain live through uses of that descriptor. Storage is
+eligible for ordinary reuse only after its lifetime ends, subject to existing
+no-alias, target-hazard, pinned-storage and reservation constraints. MemoryReuse
+does not insert branch copies or retarget producers merely to make Vec fit;
+genuine capacity overflow retains its normal diagnostic.
 
 `MemoryReuse` selects shared MemRef identities before address assignment.
 `DSA_RP` instead keeps those identities separate and jointly chooses their
