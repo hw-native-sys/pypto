@@ -174,13 +174,12 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 写回别名在后置归一化中移动时，还会同步刷新外层 native If 的提示，释放不再
 使用的提示分配。
 
-旧 Tile 路径中，会更新的循环携带值仍要求固定缓冲区。如果初始值或回边包含
-尚未消解的 native If 存储选择，编译会明确报错，避免把代表性 MemRef 当作
-实际目标地址。此限制同时覆盖 For 和 While；仅在本轮内部使用的 native If
-仍受支持。不更新或静态零次迭代的携带值直接返回实际初始值。描述符携带与
-轮转缓冲区尚不属于本 pass 的降低能力。
+原生 Tile carry 仍使用固定缓冲区。For 保留既有输入隔离、选中来源安全检查及
+必要写回；这些规则无法安全处理的选择才会诊断，并非所有选中 initializer 或
+回边都会拒绝。native While visitor 只递归访问，本 PR 不扩展其通用写回修复，
+相关 carry 用例留待后续独立 PR。描述符携带与轮转缓冲区尚不属于当前降低能力。
 
-插入多个 carry 写回前，yield fixup 会检查原始选择来源。有界来源摘要允许仅
+插入多个 For carry 写回前，既有 yield fixup 会检查原始选择来源。有界来源摘要允许仅
 读取自身目标或所有复制均不写入的存储。其他条件多副本边界会明确报错，避免
 新插入的 move 隐藏隐式交换。所选来源可能指向自身目标时，会在所有写回之前
 复制到独立快照，包括只有一个 carry 的情况，避免运行时的自复制。若证明所有
@@ -205,7 +204,9 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 `SelectBufferIRFunctions` 将所有包含 Tile 返回值 If 的函数保留在原生 Tile 路径，
 不再根据函数是否含 For/While 区分；全局启用 Buffer IR 时也适用。
 Buffer lowering 当前会消除 Tile 区域返回值，无法表达这种动态句柄选择。
-原生路径负责对齐和修复固定 For/While carry；必要的 carry 写回与 If 描述符选择分开处理。
+原生 Tile 路径保留既有 For carry 写回修复。native While visitor 只递归访问，
+本 PR 不将 For 的写回、快照和复制排序算法推广到 While；循环通用修复留待独立 PR。
+Buffer IR 保留原有 canonical 循环修复。这些边界不改变 Tile If 一律走原生路径的规则。
 
 ### 分阶段启用的 Buffer IR 流水线
 

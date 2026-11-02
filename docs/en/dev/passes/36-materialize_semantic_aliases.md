@@ -228,16 +228,16 @@ may reuse storage when lifetimes and allocation constraints permit it.
 Post-fixup alias normalization also refreshes enclosing native If hints when
 their yielded writeback aliases move, so abandoned hint allocations can be freed.
 
-Updating loop carries on the legacy Tile path still require one fixed buffer.
-If a carry's initializer or backedge retains an unresolved native If storage
-choice, compilation reports a diagnostic instead of treating the representative
-MemRef as the actual destination. This applies to both For and While; native
-Ifs used only within an iteration remain supported. An unchanged or statically
-zero-trip carry forwards its actual initializer. Descriptor-carry rotation is
-outside this pass's current lowering.
+Tile carries on the native path still use fixed buffers. For retains the
+existing input isolation, selected-source safety checks and necessary
+writebacks; choices that these rules cannot handle safely receive diagnostics.
+This does not reject every selected initializer or backedge. The native While
+visitor only recurses: general While writeback repair is not extended by this
+PR, and the affected carry cases belong in a follow-up PR. Descriptor-valued
+carry rotation remains outside the current lowering.
 
-Before inserting multiple carry writebacks, yield fixup checks the original
-selected sources. A bounded source summary permits choices that read only
+Before inserting multiple For-carry writebacks, the existing yield fixup checks
+the original selected sources. A bounded source summary permits choices that read only
 their own destination or storage untouched by every copy. Other conditional
 multi-copy boundaries are diagnosed; inserted moves must not hide an implicit
 swap from this check. A selected source that may name its own destination is
@@ -270,9 +270,12 @@ subview path and its PTOAS limitations.
 `SelectBufferIRFunctions` keeps every function with Tile-valued If results
 on the native Tile path, regardless of whether it also contains For/While loops
 and even when Buffer IR is globally enabled. Buffer lowering currently erases
-Tile region results and cannot represent this dynamic handle choice. Fixed
-For/While carries are aligned and repaired on the native path; their necessary
-writebacks are independent of the descriptor selected by an If.
+Tile region results and cannot represent this dynamic handle choice.
+The native Tile path keeps the existing For-carry writeback repair. Its native
+While visitor only recurses; this PR does not extend For's writeback, snapshot
+or copy-ordering algorithm to While. General loop repair belongs in a separate
+PR. Buffer IR retains its existing canonical loop fixups. These boundaries do
+not change the native Tile If routing rule.
 
 ### Staged Buffer IR pipeline
 

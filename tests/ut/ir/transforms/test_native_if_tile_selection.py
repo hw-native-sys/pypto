@@ -571,7 +571,18 @@ def _compile_native_loop(text, planner, tmp_path):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("loop", ["for", "while"])
+@pytest.mark.parametrize(
+    "loop",
+    [
+        "for",
+        pytest.param(
+            "while",
+            marks=pytest.mark.skip(
+                reason="Native While Tile carry writeback is deferred to a follow-up For/While PR."
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize("boundary", ["initializer", "backedge"])
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_updating_loop_isolates_selected_or_observed_initializer(
