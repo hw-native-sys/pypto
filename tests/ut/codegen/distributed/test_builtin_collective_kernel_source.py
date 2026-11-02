@@ -122,6 +122,50 @@ def _build_chip_rail_program(dtype_name: str = "fp32", core_num: int = 1, signal
     return ChipRail
 
 
+def _build_runtime_core_num_program(signal_stride: int = 8):
+    """CHIP rail with ``core_num`` as a runtime scalar rather than a literal.
+
+    Same five windows as ``_build_chip_rail_program``; the only difference is
+    that the block limit arrives at run time, which is what RFC #2521 O2 adds.
+    """
+    dtype = pl.FP32
+    payload_bytes = TOTAL * SIZE * dtype.get_byte()
+    i32_bytes = NR * pl.INT32.get_byte()
+    signal_bytes = NR * signal_stride * pl.INT32.get_byte()
+
+    @pl.program
+    class RuntimeCoreNum:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, signal_stride], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            core_num: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], dtype]:
+            return pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=core_num)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, core_num: pl.Scalar[pl.INDEX]):
+            stage_buf = pld.alloc_window_buffer(payload_bytes)
+            data_buf = pld.alloc_window_buffer(payload_bytes)
+            signal_buf = pld.alloc_window_buffer(signal_bytes)
+            counts_buf = pld.alloc_window_buffer(i32_bytes)
+            recv_buf = pld.alloc_window_buffer(i32_bytes)
+
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
+                data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
+                sig = pld.window(signal_buf, [NR, signal_stride], dtype=pl.INT32)
+                counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
+                self.chip_pipeline(stage, data, sig, counts, recv, core_num, device=r)
+
+    return RuntimeCoreNum
+
+
 def _build_host_rail_program(dtype_name: str = "fp32"):
     """HOST/L3 rail: the collective written in the host orchestrator.
 
@@ -251,6 +295,91 @@ def test_chip_rail_multi_block_request_emits_the_launch_spec(tmp_path):
     source = _chip_orchestration_sources(chip.output_dir)
     assert re.search(r"\.launch_spec\.\w+\(2\);", source), source
     assert ".launch_spec.set_require_sync_start(true);" in source, source
+
+
+def test_runtime_core_num_computes_the_width_from_the_comm_context(tmp_path):
+    """``B`` is emitted arithmetic over a rank count read off the CommCtx.
+
+    RFC #2521 frozen item #3 fixes ``B = CalAllToAllVBlocks(P, L)`` as a pure
+    function of ``(P, L)``. With ``L`` only known at run time the compiler
+    cannot fold it, so the same formula is emitted branch-free -- the
+    expression codegen has no ternary, and ``min``/``max`` alone cannot
+    express ``L < P ? L : (L / P) * P``.
+    """
+    chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime")
+    source = _chip_orchestration_sources(chip.output_dir)
+    rank_read = re.search(r"int32_t (\w+) = \*reinterpret_cast<const int32_t\*>\(\w+ \+ 20\);", source)
+    assert rank_read, source
+    assert re.search(r"= \(\w+ % \w+\);", source), source
+    assert re.search(r"= static_cast<int64_t>\(\(\w+ <= \w+\)\);", source), source
+    assert re.search(r"= \(\w+ - \(\w+ \* \w+\)\);", source), source
+
+
+def test_runtime_core_num_launch_width_is_the_admitted_width(tmp_path):
+    """The launch spec carries ``B`` itself, and LegalizeSpmdLaunches wraps it.
+
+    A runtime width is opaque to range analysis, so the launch is emitted inside
+    ``if (B > 0)`` with a preserved empty path. That wrapper is the correct
+    handling for a non-positive request; clamping the width to ``max(B, 1)``
+    would instead launch one block for a malformed call.
+    """
+    chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_width")
+    source = _chip_orchestration_sources(chip.output_dir)
+    launch = re.search(r"\.launch_spec\.set_block_num\((\w+)\);", source)
+    assert launch, source
+    blocks = launch.group(1)
+    assert not re.search(r"\.launch_spec\.set_block_num\(std::max", source), source
+    assert ".launch_spec.set_require_sync_start(true);" in source, source
+    # LegalizeSpmdLaunches owns the non-positive case; it emits the comparison
+    # with the constant on the left.
+    assert re.search(rf"if \(\(?0 < {re.escape(blocks)}\)", source), source
+    # The empty path preserves the result, which for this kernel is the
+    # preallocated InOut ``target`` the launch would have returned.
+    assert re.search(r"\} else \{\s*SIMPLER_SCOPE\(\) \{\s*\w+ = ext_data;\s*\}\s*\}", source), source
+    assert "rt_available_aiv_count" not in source, source
+
+
+def test_runtime_core_num_uses_a_floored_divisor(tmp_path):
+    """The width arithmetic stays total when the communicator reports ``P = 0``.
+
+    ``L % 0`` is undefined behaviour in the generated C++, so the divisor is
+    floored to 1. The resulting ``B`` is not validated: dynamic parameter
+    validity is the caller's responsibility.
+    """
+    chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_div")
+    source = _chip_orchestration_sources(chip.output_dir)
+    divisor = re.search(r"int64_t (\w+) = std::max<int64_t>\((\w+), 1\);", source)
+    assert divisor, source
+    floored, raw = divisor.group(1), divisor.group(2)
+    assert f"% {floored})" in source, source
+    assert f"% {raw})" not in source, source
+
+
+def test_literal_core_num_emits_no_runtime_prelude(tmp_path):
+    """A literal request folds ``B`` at compile time and reads no rank count."""
+    chip = _compile(_build_chip_rail_program(core_num=2, signal_stride=2), tmp_path, "chip_literal_prelude")
+    source = _chip_orchestration_sources(chip.output_dir)
+    assert "reinterpret_cast<const int32_t*>" not in source, source
+    assert "a2av_blocks_" not in source, source
+    assert "rt_available_aiv_count" not in source, source
+
+
+def test_runtime_core_num_still_renders_the_shared_kernel(tmp_path):
+    """One binary serves any runtime ``L`` (RFC #2521 §12.1).
+
+    The width lives in the launch spec, so the kernel is the same bytes the
+    literal rail renders -- which is also the tripwire for a change that tried
+    to pass the width as a kernel argument.
+    """
+    runtime = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_kernel")
+    literal = _compile(_build_chip_rail_program(core_num=2, signal_stride=2), tmp_path, "chip_literal_kernel")
+    runtime_kernel = (
+        runtime.output_dir / "next_levels" / "chip_pipeline" / "kernels" / "aiv" / _l2_kernel_of("fp32")
+    )
+    literal_kernel = (
+        literal.output_dir / "next_levels" / "chip_pipeline" / "kernels" / "aiv" / _l2_kernel_of("fp32")
+    )
+    assert runtime_kernel.read_text() == literal_kernel.read_text()
 
 
 def test_chip_rail_single_block_request_emits_no_launch_spec(tmp_path):

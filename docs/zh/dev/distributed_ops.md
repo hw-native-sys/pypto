@@ -483,9 +483,11 @@ block 会触发缓存行写回互相覆盖的缺陷类）。屏障、credit 与�
 完成面仍是 `AtomicAdd(-2)` 的自清零 credit 车道。
 
 InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直接拒绝，并在诊断
-信息中指明 CHIP 路径。下文的 CHIP/L2 路径接受编译期的 `core_num`：它在降级时折叠出
-同一个 `B = CalAllToAllVBlocks(P, L)`，并在 `B > 1` 时把它作为启动规格
-（`core_num=B`、`sync_start`）附加到调用上。该路径暂不支持运行期 `core_num`——见
+信息中指明 CHIP 路径。下文的 CHIP/L2 路径两种形式都接受。编译期 `core_num` 在降级时折叠出
+同样的 `B = CalAllToAllVBlocks(P, L)`，并在 `B > 1` 时把启动规格
+（`core_num=B`、`sync_start`）附加到调用上。运行期 `core_num` 则把该公式作为
+orchestration 算术发射出来，其中 rank 数从通信 context 读取，并附加计算出的 `B`；
+动态取值的有效性由调用方负责——见
 [`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md)。
 
 **CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP

@@ -86,9 +86,9 @@
 | 抽象 | 用途 | 章节小节 | 运行位置 | 教程步骤 |
 | ---- | ---- | -------- | -------- | -------- |
 | `pld.world_size()` | world 中的 rank 数量 | [02-primitives](02-primitives.md) §系统基座 | Host（编排器） | 01 |
-| `pld.get_comm_ctx(dt)` | 解析 `DistributedTensor` 所属的通信上下文 | [02-primitives](02-primitives.md) §系统基座 | Host / InCore | 04 |
+| `pld.get_comm_ctx(dt)` | 解析 `DistributedTensor` 所属的通信上下文 | [02-primitives](02-primitives.md) §系统基座 | Host / CHIP 编排 / InCore | 04 |
 | `pld.rank(ctx)` | 本 rank 在上下文中的索引 | [02-primitives](02-primitives.md) §系统基座 | InCore | 04 |
-| `pld.nranks(ctx)` | 上下文中的 rank 数量 | [02-primitives](02-primitives.md) §系统基座 | InCore | 04 |
+| `pld.nranks(ctx)` | 上下文中的 rank 数量 | [02-primitives](02-primitives.md) §系统基座 | CHIP 编排 / InCore | 04 |
 | `pl.dynamic("NR")` | 命名一个运行期解析的维度（如 rank 数量） | [00-getting_started](../00-getting_started.md) | — | 07 |
 
 ### 内存（Memory）
