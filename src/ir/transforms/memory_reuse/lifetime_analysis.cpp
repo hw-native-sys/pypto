@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -592,6 +593,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
     return {lifetimes, {}};
   }
 
+  const auto allocation_sizes = memref_collectors::CollectAllocSizes(func_body);
+
   // Step 2: Build MemRef sharing groups (keyed by base_ Ptr identity)
   std::map<const Var*, std::vector<VarPtr>> memref_groups;
   for (const auto& var : result.ordered_defs) {
@@ -642,6 +645,7 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
     // Compute MERGED lifetime for all variables in the sharing group
     int min_def_point = INT_MAX;
     int max_last_use = INT_MIN;
+    bool has_slots = false;
 
     for (const auto& group_var : sharing_group) {
       int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
@@ -651,6 +655,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
+      const auto tile = GetTileTypeWithMemRef(group_var->GetType());
+      has_slots |= tile && GetDefinedMemRef(tile)->slot_count_ > 1;
     }
 
     LifetimeInterval interval;
@@ -665,6 +671,12 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
     interval.size = GetDefinedMemRef(representative_tile_type)->size_;
+    // Reuse moves the complete allocation. Keep its capacity separate from
+    // each slot's window size and from the author's pinned ownership contract.
+    if (has_slots) {
+      const auto capacity = allocation_sizes.find(GetDefinedMemRef(representative_tile_type)->base_.get());
+      if (capacity != allocation_sizes.end()) interval.size = std::max(interval.size, capacity->second);
+    }
 
     // A direct dynamic tile.slice is lowered through pto.subview, which rebuilds
     // its runtime address from the source tile and slice operands. Every other

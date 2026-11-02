@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 def _storage(program):
@@ -448,6 +449,214 @@ def test_nested_selected_assemble_refreshes_hint_without_merging_candidates(asce
     assert storage["a"] is not storage["b"]
     assert storage["a"] is not storage["c"]
     assert storage["b"] is not storage["c"]
+
+
+@pytest.mark.parametrize("width", [64, 256])
+@pytest.mark.parametrize("keep_original", [False, True])
+@pytest.mark.parametrize("valid_rows", [64, 63, "dynamic"])
+def test_optional_updates_materialize_only_to_resolve_capacity(
+    width, keep_original, valid_rows, ascend_backend, pass_verification_instruments
+):
+    """Three 64-KiB updates need two buffers, unless the original stays live.
+
+    Reciprocal forbids output/input aliasing: the capacity repair must insert
+    real copies, rather than restoring optional in-place update coalescing.
+    Alternating arms covers a forwarded value on either side of the If. The
+    physical height stays 64 while valid rows may be 63 or one shared runtime
+    SSA value: partial validity must not disable the capacity repair.
+    """
+    columns = width
+    dynamic_valid = valid_rows == "dynamic"
+    partial_valid = valid_rows == 63
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, columns], pl.FP32],
+            flag0: pl.Scalar[pl.INT32],
+            flag1: pl.Scalar[pl.INT32],
+            flag2: pl.Scalar[pl.INT32],
+            runtime_rows: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[128, columns], pl.FP32]],
+        ) -> pl.Tensor[[128, columns], pl.FP32]:
+            selected_rows = runtime_rows
+            if not dynamic_valid:
+                selected_rows = pl.const(64, pl.INDEX)
+            if partial_valid:
+                selected_rows = pl.const(63, pl.INDEX)
+            initial = pl.tile.load(
+                x, [0, 0], [64, columns], [selected_rows, columns], target_memory=pl.Mem.Vec
+            )
+            if flag0 > 0:
+                update0 = pl.tile.recip(initial)
+                first = pl.yield_(update0)
+            else:
+                first = pl.yield_(initial)
+            if flag1 > 0:
+                second = pl.yield_(first)
+            else:
+                update1 = pl.tile.recip(first)
+                second = pl.yield_(update1)
+            if flag2 > 0:
+                update2 = pl.tile.recip(second)
+                third = pl.yield_(update2)
+            else:
+                third = pl.yield_(second)
+            if keep_original:
+                pl.store(initial, [64, 0], out)
+            return pl.store(third, [0, 0], out)
+
+    with passes.PassContext(
+        pass_verification_instruments, memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False
+    ):
+        if width == 256 and keep_original:
+            # Two update buffers plus a retained original genuinely exceed UB.
+            with pytest.raises(ValueError, match="Vec buffer usage.*exceeds platform limit"):
+                PassManager(OptimizationStrategy.Default).run_passes(Before)
+            return
+        after = PassManager(OptimizationStrategy.Default).run_passes(Before)
+
+    text = after.as_python()
+    moves = []
+    initial_types = []
+
+    class MoveCollector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if op.var.name_hint.startswith("initial__") and isinstance(op.var.type, ir.TileType):
+                initial_types.append(op.var.type)
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.move").name:
+                moves.append(op)
+            super().visit_assign_stmt(op)
+
+    MoveCollector().visit_program(after)
+    assert len(initial_types) == 1
+    assert isinstance(initial_types[0].shape[0], ir.ConstInt)
+    assert initial_types[0].shape[0].value == 64
+    initial_valid_rows = initial_types[0].get_effective_tile_view().valid_shape[0]
+    if dynamic_valid:
+        assert isinstance(initial_valid_rows, ir.Var)
+    else:
+        assert isinstance(initial_valid_rows, ir.ConstInt)
+        assert initial_valid_rows.value == valid_rows
+    if width == 64:
+        # The native plan fits; preserve its zero-copy selection behavior.
+        assert "vec_selection_copy_" not in text
+        return
+    assert len(moves) == 3
+    for move in moves:
+        source_valid = move.value.args[0].type.get_effective_tile_view().valid_shape
+        target_valid = move.var.type.get_effective_tile_view().valid_shape
+        assert ir.structural_equal(source_valid[0], target_valid[0])
+        if dynamic_valid:
+            assert isinstance(source_valid[0], ir.Var)
+        else:
+            assert isinstance(source_valid[0], ir.ConstInt)
+            assert source_valid[0].value == valid_rows
+    storage = _storage(after)
+    bases = [
+        next(base for name, base in storage.items() if name.startswith(prefix + "__"))
+        for prefix in ("initial", "update0", "update1", "update2")
+    ]
+    assert all(left is not right for left, right in zip(bases, bases[1:]))
+    assert len(set(bases)) == 2
+
+
+def test_capacity_materialization_preserves_shared_sibling_result(ascend_backend):
+    """A mutually exclusive shared allocation is not private to its first arm.
+
+    The small If returns (b, a) or (a, c), with b/c already sharing a legal
+    compiler-owned allocation. Copying a into b's allocation on the else path
+    would destroy c, the second result. A separate large update chain forces
+    the capacity retry to run and fit, so declining the unsafe copy is tested.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            small: pl.Tensor[[16, 256], pl.FP32],
+            large: pl.Tensor[[64, 256], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            small_out: pl.Out[pl.Tensor[[32, 256], pl.FP32]],
+            large_out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+        ) -> pl.Tensor[[64, 256], pl.FP32]:
+            a = pl.load(small, [0, 0], [16, 256], target_memory=pl.Mem.Vec)
+            if flag > 0:
+                b = pl.tile.adds(a, 1.0)
+                small_first, small_second = pl.yield_(b, a)
+            else:
+                c = pl.tile.adds(a, 2.0)
+                small_first, small_second = pl.yield_(a, c)
+            initial = pl.load(large, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+            if flag > 1:
+                updated0 = pl.tile.recip(initial)
+                first = pl.yield_(updated0)
+            else:
+                first = pl.yield_(initial)
+            if flag > 2:
+                updated1 = pl.tile.recip(first)
+                second = pl.yield_(updated1)
+            else:
+                second = pl.yield_(first)
+            if flag > 3:
+                updated2 = pl.tile.recip(second)
+                third = pl.yield_(updated2)
+            else:
+                third = pl.yield_(second)
+            pl.store(small_first, [0, 0], small_out)
+            pl.store(small_second, [16, 0], small_out)
+            return pl.store(third, [0, 0], large_out)
+
+    definitions = {}
+
+    class DefinitionCollector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if op.var.name_hint in {"b", "c"}:
+                definitions[op.var.name_hint] = op.var
+            super().visit_assign_stmt(op)
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False):
+        initialized = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        DefinitionCollector().visit_program(initialized)
+        b, c = definitions["b"], definitions["c"]
+        assert isinstance(b.type, ir.TileType) and b.type.memref is not None
+        assert isinstance(c.type, ir.TileType) and c.type.memref is not None
+        # Model legal earlier compiler placement, without an author-pinned
+        # declaration: b and c execute on opposite paths of the same If.
+        shared_c = ir.Var(
+            c.name_hint,
+            ir.TileType(c.type.shape, c.type.dtype, b.type.memref, c.type.tile_view, c.type.memory_space),
+            c.span,
+        )
+
+        class ShareBranchAllocation(ir.IRMutator):
+            def visit_var(self, op):
+                if op is c:
+                    return shared_c
+                return super().visit_var(op)
+
+        shared = ShareBranchAllocation().visit_program(initialized)
+        after = passes.allocate_memory_addr()(passes.memory_reuse()(shared))
+
+    moves = []
+
+    class MoveCollector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.move").name:
+                moves.append(op)
+            super().visit_assign_stmt(op)
+
+    MoveCollector().visit_program(after)
+    # All three wide selections must materialize for allocation to fit. The
+    # sibling result forbids a fourth copy from the small value a into b/c.
+    assert len(moves) == 3
+    assert all(op.value.args[0].name_hint != "a" for op in moves)
+    storage = _storage(after)
+    assert storage["b"] is storage["c"]
+    assert storage["a"] is not storage["b"]
 
 
 if __name__ == "__main__":

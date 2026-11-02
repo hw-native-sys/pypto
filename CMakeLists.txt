@@ -203,6 +203,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/memory_reuse/allocation_constraints.cpp
     src/ir/transforms/memory_reuse/lifetime_analysis.cpp
     src/ir/transforms/memory_reuse/packing.cpp
+    src/ir/transforms/memory_reuse/selection_materialization.cpp
     src/ir/transforms/memory_reuse/semantic_aliases.cpp
     src/ir/transforms/memory_reuse/storage.cpp
     src/ir/transforms/memory_reuse/yield_fixup.cpp

@@ -1585,8 +1585,7 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
                     std::map<const ir::Var*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
-                    bool& software_pipeline_slots,
-                    std::map<std::string, std::vector<Producer>>& producer_map)
+                    bool& software_pipeline_slots, std::map<std::string, std::vector<Producer>>& producer_map)
         : var_to_memref(mapping),
           memref_to_var_name(reverse_mapping),
           tile_var_allocs(allocs),

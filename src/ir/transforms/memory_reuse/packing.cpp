@@ -47,6 +47,7 @@
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
+#include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
@@ -154,7 +155,7 @@ ReuseMap IdentifyReuseOpportunities(
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
-    const FunctionPtr& func, std::vector<Diagnostic>* out_hints) {
+    const FunctionPtr& func, std::vector<Diagnostic>* out_hints, std::set<MemorySpace>* out_overflow_spaces) {
   ReuseMap reuse_map;
   std::vector<BufferRootCompatibility::Root> buffer_roots(lifetimes.size());
   const auto* buffer_context = PassContext::Current();
@@ -783,6 +784,18 @@ ReuseMap IdentifyReuseOpportunities(
         buffers = pack(/*allow_subranges=*/false);
         retry_with_subranges();
       }
+    }
+
+    // Report the final reserved-aware footprint, after every existing relief
+    // strategy. The pass may try one explicit selection-materialization plan;
+    // lifetime safety is never relaxed merely to make a plan fit.
+    if (alloc_policy && out_overflow_spaces) {
+      const auto reserved = reserved_end_by_space.find(space);
+      SpaceFootprint footprint(space, *alloc_policy,
+                               reserved == reserved_end_by_space.end() ? 0 : reserved->second);
+      for (const auto& buffer : buffers) (void)footprint.OpenBuffer(buffer.capacity);
+      const auto capacity = pack_be->GetMemSize(space);
+      if (capacity != 0 && footprint.HighWater() > capacity) out_overflow_spaces->insert(space);
     }
 
     // Commit the final packing. Every member maps directly to the arena owner;
