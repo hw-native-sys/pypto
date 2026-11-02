@@ -25,12 +25,11 @@ namespace pypto::ir {
 /// An op allowlist certifies that preserving its sequential execution preserves
 /// dependencies and fits the target's resource model. Unlisted calls stay Unknown.
 struct HardwareLoopProfile {
-  std::string profile_id = "unsupported";
-  std::string toolchain_id = "unavailable";
   bool supported = false;
+  /// Unsigned counter width; both the initial and terminating values must fit.
   int counter_bits = 16;
   bool allow_negative_step = false;
-  int64_t max_trip_count = 32767;
+  int64_t max_trip_count = 65535;
   int max_depth = 4;
   int64_t max_body_nodes = 256;
   bool allow_scalar_carry = true;
@@ -46,8 +45,6 @@ struct HardwareLoopQualification {
   std::string reason;
   std::optional<int64_t> trip_count;
   std::optional<int64_t> post_iv;
-  std::string profile_id;
-  std::string toolchain_id;
   std::string loop_id;
   std::optional<int64_t> lower;
   std::optional<int64_t> upper;

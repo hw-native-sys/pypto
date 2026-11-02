@@ -105,10 +105,12 @@ Static zero-trip Sequential loops are exempt: Simplify removes them and replaces
 results with initial iter_args. A dynamic loop that might be empty is not exempt.
 Require retains intent even for a single trip. Builder and manually constructed
 IR must also use constant `start=0` and `step=1`, even for zero-trip loops.
-For a signed 16-bit counter, `stop=32767` fits while `stop=32768` does not.
+The counter is unsigned 16-bit: `stop=65535` fits while `stop=65536` does not.
+For `stop=65535`, the loop executes 65535 times with induction values 0 through
+65534; the terminating induction value is 65535.
 
-Target profiles carry counter/trip limits, nesting/resource bounds, carry types,
-and profile/toolchain IDs. Unknown operations are conservative unless explicitly
+Target profiles carry unsigned counter/trip limits, nesting/resource bounds,
+and carry types. Unknown operations are conservative unless explicitly
 certified by the profile. Reports are recomputed from current IR and are not
 persisted in serialization or structural hashes. With
 `passes.PassContext([], report_hardware_loops=True)`, codegen records the latest

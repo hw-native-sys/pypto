@@ -49,8 +49,6 @@ struct BodySummary {
 HardwareLoopQualification Qualify(const ForStmtPtr& loop, const HardwareLoopProfile& profile,
                                   const BodySummary& body, const std::string& id) {
   HardwareLoopQualification result;
-  result.profile_id = profile.profile_id;
-  result.toolchain_id = profile.toolchain_id;
   result.loop_id = id;
   result.lower = Constant(loop->start_);
   result.upper = Constant(loop->stop_);
@@ -99,13 +97,12 @@ HardwareLoopQualification Qualify(const ForStmtPtr& loop, const HardwareLoopProf
       (loop->hardware_loop_policy_ == HardwareLoopPolicy::Require || !profile.allow_negative_step)) {
     return finish(HardwareLoopState::Ineligible, "HWL_STEP_SIGN");
   }
-  if (profile.counter_bits < 2 || profile.counter_bits > 64 || profile.max_trip_count < 0 ||
-      profile.max_depth < 1 || profile.max_body_nodes < 0 || profile.profile_id.empty() ||
-      profile.toolchain_id.empty()) {
+  if (profile.counter_bits < 1 || profile.counter_bits > 64 || profile.max_trip_count < 0 ||
+      profile.max_depth < 1 || profile.max_body_nodes < 0) {
     return finish(HardwareLoopState::Unknown, "HWL_INVALID_PROFILE");
   }
-  const Wide limit = Wide{1} << (profile.counter_bits - 1);
-  if (lower < -limit || lower >= limit || post < -limit || post >= limit) {
+  const Wide limit = Wide{1} << profile.counter_bits;
+  if (lower < 0 || lower >= limit || post < 0 || post >= limit) {
     return finish(HardwareLoopState::Ineligible, "HWL_COUNTER_RANGE");
   }
   if (count > profile.max_trip_count) return finish(HardwareLoopState::Ineligible, "HWL_TRIP_COUNT");
@@ -224,10 +221,8 @@ void Enforce(const ForStmtPtr& loop, const HardwareLoopQualification& result) {
                       : result.state == HardwareLoopState::Ineligible ? "Ineligible"
                                                                       : "Unknown";
   CHECK_SPAN(result.state == HardwareLoopState::Eligible, loop->span_)
-      << "HardwareLoopPolicy.Require " << state << " [" << result.loop_id << ", " << result.profile_id << ", "
-      << result.toolchain_id << "]: " << result.reason;
+      << "HardwareLoopPolicy.Require " << state << " [" << result.loop_id << "]: " << result.reason;
   CHECK_SPAN(false, loop->span_) << "HardwareLoopPolicy.Require backend evidence missing [" << result.loop_id
-                                 << ", " << result.profile_id << ", " << result.toolchain_id
                                  << "]: qualification is not hardware evidence";
 }
 }  // namespace

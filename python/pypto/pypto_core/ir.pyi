@@ -4492,10 +4492,8 @@ class HardwareLoopState(enum.Enum):
     Unknown = 2
 
 class HardwareLoopProfile:
-    """Versioned target resource and dependency-preservation contract."""
+    """Target resource and dependency-preservation contract with unsigned counters."""
 
-    profile_id: str
-    toolchain_id: str
     supported: bool
     counter_bits: int
     allow_negative_step: bool
@@ -4513,8 +4511,6 @@ class HardwareLoopQualification:
     reason: Final[str]
     trip_count: Final[int | None]
     post_iv: Final[int | None]
-    profile_id: Final[str]
-    toolchain_id: Final[str]
     loop_id: Final[str]
     lower: Final[int | None]
     upper: Final[int | None]

@@ -265,10 +265,12 @@ Eligible 仍不等于最终产物的硬件证据，计数器窄化与 `scf.for` 
 静态零次 Sequential 循环豁免资格和证据要求，由 Simplify 消除并返回初始 iter_args；
 可能为空的动态循环不豁免。Require 在单次循环中也不能丢失意图。
 Builder 和手工构造的 IR 同样必须使用常量 `start=0`、`step=1`，零次循环也不例外。
-对于有符号 16 位计数器，`stop=32767` 合法，`stop=32768` 超出范围。
+计数器为无符号 16 位：`stop=65535` 合法，`stop=65536` 超出范围。
+当 `stop=65535` 时，循环执行 65535 次，归纳变量依次为 0 至 65534，
+终止时归纳变量为 65535。
 
-目标 profile 定义计数器、次数、嵌套和资源限制、允许的循环携带类型以及 profile/toolchain
-版本标识。未显式认证的操作按未知处理。分析在当前 IR 上重新计算，结果不进入序列化
+目标 profile 定义无符号计数器、次数、嵌套和资源限制以及允许的循环携带类型。
+未显式认证的操作按未知处理。分析在当前 IR 上重新计算，结果不进入序列化
 和结构哈希。`passes.PassContext([], report_hardware_loops=True)` 可启用 codegen 报告，
 由 `context.get_hardware_loop_reports()` 读取；报告不是可复用的正确性证明。
 硬件循环候选内部的嵌套 `for` 也必须使用同一 profile 进行资格分析。内层循环即使保持

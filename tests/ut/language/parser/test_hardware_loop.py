@@ -191,8 +191,6 @@ def test_required_loop_inside_register_scope(ascend_backend):
     assert required.hardware_loop_policy == ir.HardwareLoopPolicy.Require
     p = ir.HardwareLoopProfile()
     p.supported = True
-    p.profile_id = "reg-test-v1"
-    p.toolchain_id = "test-v1"
     assert ir.analyze_hardware_loop(required, p).state == ir.HardwareLoopState.Unknown
     p.allowed_ops = ["reg.load", "reg.add"]
     assert ir.analyze_hardware_loop(required, p).state == ir.HardwareLoopState.Eligible

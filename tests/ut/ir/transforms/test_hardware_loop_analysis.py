@@ -42,8 +42,6 @@ def loop(
 
 def profile(**kwargs):
     p = ir.HardwareLoopProfile()
-    p.profile_id = "synthetic-v1"
-    p.toolchain_id = "test-compiler-v1"
     p.supported = True
     for name, value in kwargs.items():
         setattr(p, name, value)
@@ -58,7 +56,9 @@ def profile(**kwargs):
         ((8, 0, -1), "Ineligible", None, None),
         ((32760, 32767, 4), "Ineligible", None, None),
         ((0, 32767, 1), "Eligible", 32767, 32767),
-        ((0, 32768, 1), "Ineligible", 32768, 32768),
+        ((0, 32768, 1), "Eligible", 32768, 32768),
+        ((0, 65535, 1), "Eligible", 65535, 65535),
+        ((0, 65536, 1), "Ineligible", 65536, 65536),
         ((8, 0, 1), "Ineligible", None, None),
         ((0, 8, -1), "Ineligible", None, None),
         ((-(2**63), 2**63 - 1, 1), "Ineligible", None, None),
@@ -70,8 +70,23 @@ def test_bounds(bounds, state, count, post):
     assert result.trip_count == count
     assert result.post_iv == post
     assert result.reason
-    assert result.profile_id == "synthetic-v1"
-    assert result.toolchain_id == "test-compiler-v1"
+    assert result.loop_id == "root/loop0"
+
+
+def test_unsigned_counter_range_is_independent_of_trip_limit():
+    p = profile(max_trip_count=70000)
+    largest = ir.analyze_hardware_loop(loop(upper=65535), p)
+    assert largest.state == ir.HardwareLoopState.Eligible
+    assert largest.post_iv == 65535
+    overflow = ir.analyze_hardware_loop(loop(upper=65536), p)
+    assert overflow.state == ir.HardwareLoopState.Ineligible
+    assert overflow.reason == "HWL_COUNTER_RANGE"
+
+
+def test_trip_limit_can_be_stricter_than_unsigned_counter_range():
+    result = ir.analyze_hardware_loop(loop(upper=65535), profile(max_trip_count=65534))
+    assert result.state == ir.HardwareLoopState.Ineligible
+    assert result.reason == "HWL_TRIP_COUNT"
 
 
 @pytest.mark.parametrize("dynamic_arg", ["upper", "step"])
@@ -81,7 +96,7 @@ def test_dynamic_require_bounds_fail(dynamic_arg):
     result = ir.analyze_hardware_loop(op, profile())
     state = "Unknown" if dynamic_arg == "upper" else "Ineligible"
     assert result.state.name == state
-    with pytest.raises(ValueError, match=rf"{state}.*root/loop0.*synthetic-v1.*test-compiler-v1"):
+    with pytest.raises(ValueError, match=rf"{state}.*root/loop0"):
         ir.verify_hardware_loop_requirement(op, profile())
 
 
@@ -162,10 +177,7 @@ def test_empty_outer_does_not_require_inner_evidence():
     ir.verify_hardware_loop_requirement(outer, profile())
 
 
-def test_profile_version_and_unknown_calls():
-    first = ir.analyze_hardware_loop(loop(), profile())
-    second = ir.analyze_hardware_loop(loop(), profile(toolchain_id="test-compiler-v2"))
-    assert first.toolchain_id != second.toolchain_id
+def test_unknown_calls_are_not_eligible():
     span = ir.Span.unknown()
     call = ir.Call(ir.Op("unknown_effect"), [], span)
     op = loop(body=ir.EvalStmt(call, span))

@@ -358,8 +358,6 @@ void BindIR(nb::module_& m) {
       .value("Unknown", HardwareLoopState::Unknown);
   nb::class_<HardwareLoopProfile>(ir, "HardwareLoopProfile")
       .def(nb::init<>())
-      .def_rw("profile_id", &HardwareLoopProfile::profile_id)
-      .def_rw("toolchain_id", &HardwareLoopProfile::toolchain_id)
       .def_rw("supported", &HardwareLoopProfile::supported)
       .def_rw("counter_bits", &HardwareLoopProfile::counter_bits)
       .def_rw("allow_negative_step", &HardwareLoopProfile::allow_negative_step)
@@ -375,8 +373,6 @@ void BindIR(nb::module_& m) {
       .def_ro("reason", &HardwareLoopQualification::reason)
       .def_ro("trip_count", &HardwareLoopQualification::trip_count)
       .def_ro("post_iv", &HardwareLoopQualification::post_iv)
-      .def_ro("profile_id", &HardwareLoopQualification::profile_id)
-      .def_ro("toolchain_id", &HardwareLoopQualification::toolchain_id)
       .def_ro("loop_id", &HardwareLoopQualification::loop_id)
       .def_ro("lower", &HardwareLoopQualification::lower)
       .def_ro("upper", &HardwareLoopQualification::upper)
