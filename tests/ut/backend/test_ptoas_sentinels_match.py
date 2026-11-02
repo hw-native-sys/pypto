@@ -53,7 +53,9 @@ using namespace pto;
 extern "C" __global__ AICORE void main_kernel(__gm__ int64_t* args) {
     AICORE void helper();
     helper();
-    TLOAD<pto::TLoadL2Hint::NormalPersistent>(tile, gm);
+    // __pypto_l2_hint_begin load NormalPersistent
+    TLOAD(tile, gm);
+    // __pypto_l2_hint_end
 }
 
 AICORE void helper() {}
@@ -173,6 +175,34 @@ def test_rebuild_preserves_fixed_multi_buffer_addresses() -> None:
         "--enable-insert-sync",
         "--pto-level=level3",
     ]
+
+
+def test_compile_pto_module_rejects_lost_isa_passthrough(tmp_path, monkeypatch) -> None:
+    def fake_run_ptoas(pto_path, output_path, ptoas_flags=None):
+        Path(output_path).write_text("TLOAD(tile, src);\n")
+
+    monkeypatch.setattr(pto_backend, "_run_ptoas", fake_run_ptoas)
+    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
+    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
+    source = 'module {\n  emitc.verbatim "// __pypto_l2_hint_begin load NormalFirstVictim"\n}\n'
+    with pytest.raises(RuntimeError, match="passthrough markers were lost"):
+        pto_backend._compile_pto_module(source, "hinted_kernel", str(tmp_path))
+
+
+def test_rebuild_rejects_lost_passthrough_and_removes_build_stamp(tmp_path, monkeypatch) -> None:
+    pto = tmp_path / "hinted.pto"
+    cpp = tmp_path / "hinted.cpp"
+    pto.write_text('module {\n  emitc.verbatim "// __pypto_l2_hint_begin store NotAllocClean"\n}\n')
+
+    def fake_run(*args, **kwargs):
+        cpp.write_text("TSTORE(dst, tile);\n")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(pto_rebuild, "_check_ptoas_version", lambda _: None)
+    monkeypatch.setattr(pto_rebuild.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="passthrough markers were lost"):
+        pto_rebuild._run_ptoas("ptoas", pto, cpp)
+    assert not cpp.exists(), "a failed rebuild must not leave a fresh unhinted build stamp"
 
 
 if __name__ == "__main__":

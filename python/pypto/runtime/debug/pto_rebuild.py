@@ -33,6 +33,7 @@ import subprocess
 from pathlib import Path
 
 from pypto._environment import env_flag_disabled
+from pypto.backend._l2_hint import apply_l2_hints
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
@@ -97,6 +98,16 @@ def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"ptoas rebuild failed for {pto_path.name}: {result.stderr.strip()}")
+    raw_cpp = out_cpp.read_text(encoding="utf-8")
+    try:
+        cpp = apply_l2_hints(raw_cpp, pto_code=pto_content)
+    except RuntimeError:
+        # This file is also the rebuild stamp. A failed passthrough must not
+        # leave a fresh unhinted file that a subsequent rebuild would skip.
+        out_cpp.unlink(missing_ok=True)
+        raise
+    if cpp != raw_cpp:
+        out_cpp.write_text(cpp, encoding="utf-8")
 
 
 def _extract_func_names(ptoas_cpp: str) -> list[str]:

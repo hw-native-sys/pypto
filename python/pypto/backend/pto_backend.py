@@ -51,6 +51,7 @@ from pypto._function_attrs import (
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
+from pypto.backend._l2_hint import apply_l2_hints
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -1556,6 +1557,14 @@ def _compile_pto_module(
     # Do not scan operation spellings: comments and source locations can contain
     # vecscope too. VPTO emits a host-linkable fat object, never C++ source.
     is_vpto = 'pto.backend = "vpto"' in pto_code.partition("\n")[0]
+    if is_vpto and re.search(
+        r'^\s*emitc\.verbatim\s+"// __pypto_l2_hint_begin (?:load|store) ', pto_code, re.MULTILINE
+    ):
+        raise ValueError(
+            f"A5 CachePolicy load/store modes are not supported in VPTO compilation unit '{unit_name}' "
+            "containing pl.reg_scope: the binary path cannot apply ISA cache hints. "
+            "Omit explicit A5 cache policies or use a compilation unit without pl.reg_scope."
+        )
     suffix = "o" if is_vpto else "cpp"
     compiled_path = os.path.join(ptoas_dir, f"{unit_name}.{suffix}")
     _run_ptoas(
@@ -1567,9 +1576,12 @@ def _compile_pto_module(
     if is_vpto:
         # Binary output is persisted directly; the text-file API returns a marker.
         return ""
-    # PTOAS emits the complete ISA semantics, including native L2 attributes.
     with open(compiled_path) as f:
-        cpp = f.read()
+        raw_cpp = f.read()
+    cpp = apply_l2_hints(raw_cpp, pto_code=pto_code)
+    if cpp != raw_cpp:
+        with open(compiled_path, "w") as f:
+            f.write(cpp)
     return cpp
 
 

@@ -425,7 +425,7 @@ class PadValue(enum.Enum):
     """Min value padding."""
 
 class LoadL2Hint(enum.IntEnum):
-    """Raw load ISA encodings; DSL cache arguments require CachePolicy instead."""
+    """Internal load ISA encodings used by cache-policy finalization."""
 
     NormalFirstVictim = 0
     NormalLastVictim = 1
@@ -435,7 +435,7 @@ class LoadL2Hint(enum.IntEnum):
     NotAllocDrop = 6
 
 class StoreL2Hint(enum.IntEnum):
-    """Raw store ISA encodings; DSL cache arguments require CachePolicy instead."""
+    """Internal store ISA encodings used by cache-policy finalization."""
 
     NormalFirstVictim = 0
     NormalLastVictim = 1
