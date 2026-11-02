@@ -95,7 +95,7 @@ helper 控制流及其他内存格式尚不支持。诊断 VMI 生成支持的 I
 
 ## 运行完整示例
 
-在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.70 或更新版本，
+在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.72 或更新版本，
 配置匹配的 CANN/Bisheng 工具链，保持 runtime pin 检查开启。先预约空闲 A5 设备，
 再运行以下命令：
 

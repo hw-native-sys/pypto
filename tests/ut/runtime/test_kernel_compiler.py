@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION
 
 
 @pytest.fixture
@@ -377,7 +378,9 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
     caller = tmp_path / "caller"
     launcher = caller / "tools/ptoas"
     launcher.parent.mkdir(parents=True)
-    launcher.write_text("#!/bin/sh\nprintf 'ptoas 0.70\\n'\n")
+    # Keep this path-resolution test valid when the supported compiler advances.
+    version_output = f"ptoas {PTOAS_MIN_VERSION.removeprefix('v')}"
+    launcher.write_text(f"#!/bin/sh\nprintf '{version_output}\\n'\n")
     launcher.chmod(0o755)
     monkeypatch.chdir(caller)
     monkeypatch.setenv("PTOAS_ROOT", "tools")
@@ -388,7 +391,7 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
     result = subprocess.run(
         [ptoas, "--version"], cwd=compiler.project_root, capture_output=True, text=True, check=True
     )
-    assert result.stdout.strip() == "ptoas 0.70"
+    assert result.stdout.strip() == version_output
 
 
 if __name__ == "__main__":

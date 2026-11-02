@@ -106,7 +106,7 @@ hardware evidence; it must not weaken rejection of unknown relationships.
 
 ## Run the complete examples
 
-Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.70
+Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.72
 or newer, and configure the matching CANN/Bisheng toolchain. Keep runtime pin
 checking enabled. Reserve an idle A5 device before running either command:
 

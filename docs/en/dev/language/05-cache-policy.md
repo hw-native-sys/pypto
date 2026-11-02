@@ -8,7 +8,7 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Requires PTOAS >= v0.64** (`PTOAS_VERSION` in `toolchain/versions.env`), and
+> **Requires PTOAS >= v0.72** (`PTOAS_VERSION` in `toolchain/versions.env`), and
 > **has an effect on a2a3 only**. A `BYPASS` declaration becomes a
 > `cache_policy` attribute on `pto.tload` plus an `offset` operand carrying that
 > device's no-cache alias distance, which the assembler adds to that one load's
