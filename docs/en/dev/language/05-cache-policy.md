@@ -8,9 +8,9 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Toolchain:** use the released PTOAS version pinned in `toolchain/versions.env`
-> (currently v0.70). A5 uses ISA template passthrough and does not require native
-> PTOAS L2 attributes or a modified compiler.
+> **Toolchain:** use PTOAS v0.72 or newer. The version and wheel checksums in
+> `toolchain/versions.env` pin the released compiler with native A5 `l2_hint`
+> attributes; PyPTO emits these attributes directly on each transfer.
 > **On A2/A3**, a `BYPASS` declaration becomes a
 > `cache_policy` attribute on `pto.tload` plus an `offset` operand carrying that
 > device's no-cache alias distance, which the assembler adds to that one load's
@@ -35,13 +35,6 @@ either architecture. An explicit DEFAULT can reset an inherited scope policy.
 | CachePolicy | A5 load ISA mode | A5 store ISA mode |
 | ----------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
-| NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
-| NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
-| NOT_ALLOC_KEEP | NotAllocKeep (4) | Rejected: load-only |
-| NOT_ALLOC_CLEAN | NotAllocClean (5) | NotAllocClean (4) |
-| NOT_ALLOC_DROP | NotAllocDrop (6) | Rejected: load-only |
-
-FirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
 | NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
 | NOT_ALLOC_KEEP | NotAllocKeep (4) | Rejected: load-only |
@@ -81,26 +74,28 @@ Stores are controlled explicitly on `pl.store`, not by scope declarations.
 Scope read policies follow GM destination handles returned by `pl.assemble`
 and `pl.store`; an explicit policy on a later load still takes precedence.
 
-**Integration:** the IR carries semantic integer `cache` kwargs. A2/A3 uses
-PTOAS's existing bypass attribute and explicit offset operand. On A5, PyPTO
-keeps real `pto.tload` / `pto.tstore` operations for synchronization and memory
-planning, with `emitc.verbatim` markers selecting the ISA overload during C++
-finalization. The explicit NORMAL_FIRST_VICTIM policy retains ISA encoding zero.
-Finalization checks the original PTO's hint multiset against the C++ markers;
-missing, changed, malformed or ambiguous transfers raise an error. Whole marked
-regions may move without relying on their original global order.
-Store phase, atomic and quantization arguments remain intact. The wrapper and
-debug rebuild share finalization; PTOAS-only output from `skip_ptoas=True`
-still needs this finalization. Non-default policies stay on the Tile path;
-forced Buffer lowering rejects unsupported transfer policies.
+**Integration:** the IR carries semantic integer `cache` kwargs. A2/A3 retains
+PTOAS's `cache_policy` attribute and explicit runtime offset operand. A5 emits
+native, direction-specific optional attributes on the transfer itself:
 
-Binary VPTO compilation units (`pto.backend = "vpto"`) reject explicit A5
-`CachePolicy` modes and legacy BYPASS reads before assembly: the current C++
-finalizer cannot apply hints to a VPTO object. The restriction applies to every
-transfer in that binary unit. Use the EmitC compilation path for hinted
-transfers.
+```mlir
+// Load: ISA encoding 5.
+pto.tload ins(%src : !pto.partition_tensor_view<32x32xf32>) outs(%tile : !pto.tile_buf<vec, 32x32xf32>) {l2_hint = #pto.load_l2_hint<not_alloc_clean>}
+// Store: ISA encoding 4.
+pto.tstore ins(%tile : !pto.tile_buf<vec, 32x32xf32>) outs(%dst : !pto.partition_tensor_view<32x32xf32>) {l2_hint = #pto.store_l2_hint<not_alloc_clean>}
+```
 
-No PTOAS, simpler or workflow changes are required.
+PTOAS verifies the target, transfer path and attribute type, then EmitC lowering
+selects `TLOAD<TLoadL2Hint::...>` / `TSTORE<TStoreL2Hint::...>` directly.
+An omitted attribute remains absent; explicit NORMAL_FIRST_VICTIM retains the
+zero-valued attribute. Store phase, atomic, ReLU and quantization arguments
+remain intact. Standalone PTOAS compilation, PyPTO compilation and debug
+rebuilds therefore share the same semantics without a C++ text rewrite.
+
+This requires PTOAS with native `load_l2_hint` / `store_l2_hint` support; older
+releases reject the attributes. Binary VPTO compilation units currently reject
+explicit A5 modes in the PTOAS verifier. Non-default policies stay on the Tile
+path; forced Buffer lowering rejects unsupported transfer policies.
 
 ## CachePolicy surfaces
 

@@ -7,8 +7,8 @@
 该策略是*作者声明的契约（contract）*，绝不是编译器推断出来的提示（hint）。因此它必须
 显式书写，粒度二选一，并且从 DSL 一路原样传递到代码生成（codegen）。
 
-> **工具链：**使用 `toolchain/versions.env` 固定的已发布 PTOAS（当前为 v0.70）。
-> A5 使用 ISA 模板参数透传，不依赖 PTOAS 原生 L2 属性或修改后的编译器。
+> **工具链：**使用 PTOAS v0.72 或更新版本。`toolchain/versions.env` 中的版本及 wheel
+> 校验和固定了已发布、支持 A5 原生 `l2_hint` 属性的编译器；PyPTO 直接在每条搬运操作上发射这些属性。
 > **在 A2/A3 上**，`BYPASS` 声明会变成 `pto.tload` 上的一个 `cache_policy`
 > 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条
 > load 的源地址上。参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。
@@ -28,13 +28,6 @@ NotAllocKeep；新 A5 代码应使用 `CachePolicy.NOT_ALLOC_KEEP`。
 | CachePolicy | A5 load ISA 模式 | A5 store ISA 模式 |
 | ----------- | ---------------- | ----------------- |
 | NORMAL_FIRST_VICTIM | NormalFirstVictim (0) | NormalFirstVictim (0) |
-| NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
-| NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
-| NOT_ALLOC_KEEP | NotAllocKeep (4) | 拒绝：仅支持 load |
-| NOT_ALLOC_CLEAN | NotAllocClean (5) | NotAllocClean (4) |
-| NOT_ALLOC_DROP | NotAllocDrop (6) | 拒绝：仅支持 load |
-
-FirstVictim (0) | NormalFirstVictim (0) |
 | NORMAL_LAST_VICTIM | NormalLastVictim (1) | NormalLastVictim (1) |
 | NORMAL_PERSISTENT | NormalPersistent (2) | NormalPersistent (2) |
 | NOT_ALLOC_KEEP | NotAllocKeep (4) | 拒绝：仅支持 load |
@@ -63,26 +56,32 @@ retained = pl.load(x, [0, 0], [32, 32], cache=pl.CachePolicy.NORMAL_PERSISTENT)
 out = pl.store(retained, [0, 0], out, cache=pl.CachePolicy.NOT_ALLOC_CLEAN)
 ```
 
-`cache=None` 不显式指定单次读取策略，因此可继承作用域策略；显式 load 策略优先于 `pl.set_cache_policy`。
+`cache=None` 不指定逐次 load 策略，因此仍可继承作用域策略；
+显式 load 策略优先于 `pl.set_cache_policy`。
 作用域接口接受同一枚举，仅控制读取，非分配策略要求张量在该作用域内只读。
 store 由 `pl.store` 的参数控制，不继承作用域声明。
 作用域读取策略会跟随 `pl.assemble` 和 `pl.store` 返回的 GM 目标句柄；
 后续 load 显式指定的策略仍然优先。
 
-**接入方式：** IR 在 `cache` kwarg 中保存语义整数。A2/A3 使用 PTOAS 原有的
-bypass 属性和显式 offset 操作数。A5 保留真实的 `pto.tload` / `pto.tstore`
-供同步及内存规划分析，通过 `emitc.verbatim` 标记在生成 C++ 后选择 ISA 重载。
-显式 NORMAL_FIRST_VICTIM 保留 ISA 零值，store 的 phase、atomic 和量化参数保持不变。
-最终处理会核对原始 PTO 与 C++ 标记中 hint 的多重集；标记丢失、模式改变、格式错误或
-搬运匹配不明确都会报错。完整标记区域可以重排，不依赖原始的全局顺序。
-包装入口与调试重编译使用相同处理；`skip_ptoas=True` 的 PTOAS 输出仍需此处理。
+**接入方式：** IR 在 `cache` kwarg 中保存语义整数。A2/A3 保留 PTOAS 原有的
+`cache_policy` 属性和运行时 offset 操作数。A5 在搬运操作本身携带按方向区分的可选原生属性：
+
+```mlir
+// Load: ISA encoding 5.
+pto.tload ins(%src : !pto.partition_tensor_view<32x32xf32>) outs(%tile : !pto.tile_buf<vec, 32x32xf32>) {l2_hint = #pto.load_l2_hint<not_alloc_clean>}
+// Store: ISA encoding 4.
+pto.tstore ins(%tile : !pto.tile_buf<vec, 32x32xf32>) outs(%dst : !pto.partition_tensor_view<32x32xf32>) {l2_hint = #pto.store_l2_hint<not_alloc_clean>}
+```
+
+PTOAS 校验目标架构、搬运路径和属性类型，再由 EmitC lowering 直接生成
+`TLOAD<TLoadL2Hint::...>` / `TSTORE<TStoreL2Hint::...>`。
+未指定的属性保持缺省；显式 NORMAL_FIRST_VICTIM 保留值为零的属性。
+store 的 phase、atomic、ReLU 和量化参数保持不变。单独调用 PTOAS、PyPTO 编译及调试
+重编译因此具有相同语义，无需重写生成的 C++ 文本。
+
+需要使用支持原生 `load_l2_hint` / `store_l2_hint` 的 PTOAS；旧版本会拒绝这些属性。
+二进制 VPTO 编译单元中的显式 A5 模式目前由 PTOAS verifier 拒绝。
 非默认策略保留 Tile 路线，强制 Buffer lowering 会拒绝尚不支持的搬运策略。
-
-不需要修改 PTOAS、simpler 或 workflow。
-
-二进制 VPTO 编译单元（`pto.backend = "vpto"`）中的显式 A5 `CachePolicy`
-模式和旧接口 BYPASS 读取会在汇编前报错，因为当前 C++ 后处理无法给 VPTO 对象应用
-hint。限制作用于该二进制单元中的所有搬运；需要显式策略的搬运应使用 EmitC 编译路径。
 
 ## CachePolicy 的书写面
 
