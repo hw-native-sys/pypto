@@ -632,15 +632,11 @@ def test_bundle_checks_runtime_selected_capture_storage(capture_role, view_kind,
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "SelectedCapture", SPAN))
         program = passes.allocate_memory_addr()(program)
     generator = codegen.PTOCodegen()
-    if same_source:
-        # Identical yielded SSAs retain their actual local allocation; an If
-        # alone must not exclude an otherwise supported fixed capture.
-        assert len(generator.generate_bundle(program).helpers) == 1
-    else:
-        with pytest.raises(ValueError, match="runtime-selected Tiles") as error:
-            generator.generate_bundle(program)
-        assert "register_kernel.py" in str(error.value)
-        assert len(generator.generate_bundle(build_kernel()).helpers) == 1
+    # Native If results uniformly retain dynamic storage, even for equal arms.
+    with pytest.raises(ValueError, match="runtime-selected Tiles") as error:
+        generator.generate_bundle(program)
+    assert "register_kernel.py" in str(error.value)
+    assert len(generator.generate_bundle(build_kernel()).helpers) == 1
 
 
 @pytest.mark.parametrize("view_kind", ["direct", "slice", "reshape", "alias"])

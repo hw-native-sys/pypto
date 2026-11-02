@@ -1074,7 +1074,7 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
 
 // A fixed-address declaration can stand in for inherited storage only when the
 // source is fixed too. A selected tile and all views derived from it must retain
-// their runtime-selected address even when the result has a representative MemRef.
+// their runtime-selected address; these descriptors have no fixed MemRef.
 static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
                                const std::string& target, const std::string& result_type,
                                bool result_has_memref, bool parameter_backed) {

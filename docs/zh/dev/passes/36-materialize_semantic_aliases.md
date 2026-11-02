@@ -83,13 +83,13 @@ program = passes.materialize_semantic_aliases()(program)
    所选 carry 保留诊断：写回快照无法保留另一句柄的旧初始值。
    Acc 没有可写入的 move，其临时选择仍交给必需的
    accumulator 合并处理，或由已有的 Acc 分歧诊断拒绝。
-   同一存储空间中仍存活的 native 选择也保守视为可能观测该输入，涵盖非代表分支。
+   同一存储空间中仍存活的 native 选择也保守视为可能观测该输入，涵盖两个分支。
    不支持复制的存储空间保留重定向保护和已有显式复制报错。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
-   seed、phi result、alias 和嵌套 loop carry 重定向到 reused input 的规范 `Acc`
-   allocation。accumulator loop 和 sibling seed 都必须位于各自分支内，而且 target
+   seed、alias 和嵌套 loop carry 重定向到 reused input 的规范 `Acc` allocation。
+   重写过程在内部记录已证明的 producer 存储；后续别名规范化会清除原生 phi 的 MemRef。accumulator loop 和 sibling seed 都必须位于各自分支内，而且 target
    在 seed 分支剩余部分必须已 dead。无论 continuation 是直接的
    `tile.matmul_acc` 还是分支内 loop，它复用的 input 及所有 bare/metadata alias 在
    `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
@@ -99,7 +99,7 @@ program = passes.materialize_semantic_aliases()(program)
    能在分支之后再次执行该读取，也会阻止合并。重复读取索引只考虑在读取句柄定义之后
    才进入的循环，因此每轮在循环体内重新生成的累加器仍可安全合并。别名和循环区间
    索引均预先建立，分析复杂度保持 O(N log N)。
-   Acc producer 重定向及合并也保护此前的 native 选择：后续数据读取可能通过非代表
+   Acc producer 重定向及合并也保护此前的 native 选择：后续数据读取可能通过任一
    分支观测原始输入。观测来源沿描述符绑定和固定循环初始值传播；仅因回边而标记为
    selected 的推进中 carry 不属于旧描述符。定义顺序扫描及分支、重复读取索引区分
    这些旧观测者与当前 phi 的 consumer，无需展开候选来源集合。
@@ -131,13 +131,10 @@ slot 身份；tile 结果还会跟随输入的 memory space。从操作重新计
 迭代路径。独立产生的 yield tensor 保留自己的存储。Tile carry 仍使用单独的
 规范缓冲区及 yield 修复规则；yield tile 需要写入 carry 缓冲区时会插入显式传输。
 
-yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始集合，并沿裸别名、
-写回结果和首输入别名传播未决状态，也会经过 tensor 循环参数和返回值继续传播。
-所有依赖它的调用都不会被锚定到临时窗口。
-控制流边界确定后，后续归一化遍历再修复整条链。Buffer IR 在索引旧值观测之前，
-以及隔离循环入口之后，也使用这一延迟形式，因为分支存储尚未确定；边界确定后的
-归一化无需延迟处理集合。yield 修复前后的归一化遍历见
-[MemoryReuse 算法步骤 6](37-memory_reuse.md#算法)。
+原生 If 结果没有固定 MemRef。裸别名、注册的写回结果和零拷贝视图都保持这种
+动态存储，不借用某个分支的分配；真正产生数据的算子仍拥有独立分配。
+Buffer IR 在 yield 修复前使用归一化，推迟对临时分支目标的别名绑定，直到规范
+存储确定后再处理。相关遍历见 [MemoryReuse 算法步骤 6](37-memory_reuse.md#算法)。
 
 本 pass 跳过 orchestration 类函数，包括 graph body。其他函数即使 `Compute`
 没有返回重定向改写，仍会执行别名归一化，独立修复已有的类型漂移。
@@ -165,14 +162,13 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 
 生命周期分析记录所有候选来源，并沿别名和 view 传播使用关系。对 `%selected`
 的后续使用使两支候选都保持存活；最后一次使用后，每个候选分配都能参与普通
-内存复用。候选之间不是必须别名，不能因为结果的 MemRef 元数据代表其中一支
-就合并它们的存储。
+内存复用。候选仍是独立分配；selected 自身没有固定 MemRef，也不产生新的数据分配。
 
 对于普通 native If 结果，本 pass 不会为了复用而将新生成的 Vec 分支结果与
 另一支原样转发的存储合并。后续内存规划可在生命周期和分配约束允许时复用存储。
 
-写回别名在后置归一化中移动时，还会同步刷新外层 native If 的提示，释放不再
-使用的提示分配。
+producer 改写后，别名归一化仍让原生 If 结果及其派生描述符保持无固定 MemRef。
+两支恰好指向同一存储时也统一如此，但保留共同的 memory space。
 
 原生 Tile carry 仍使用固定缓冲区。For 保留既有输入隔离、选中来源安全检查及
 必要写回；这些规则无法安全处理的选择才会诊断，并非所有选中 initializer 或
@@ -184,17 +180,21 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 新插入的 move 隐藏隐式交换。所选来源可能指向自身目标时，会在所有写回之前
 复制到独立快照，包括只有一个 carry 的情况，避免运行时的自复制。若证明所有
 来源路径均指向同一 carry 窗口，且形状、布局和有效维度保持一致，则无需传输或
-快照。新存储或未知来源均阻止该证明，即使代表性提示与 carry 相同也不能省略。
+快照。新存储或未知来源均阻止该证明，即使其中一个候选与 carry 相同也不能省略。
 快照存储在生命周期分析和地址规划之前显式建立；显式物化复制保留既有行为。
+若 For 循环之前选出的初始句柄在所有 yield 路径中都通过同一迭代句柄写回，
+initializer 和 carry 的必需别名继续保持动态、没有 MemRef；此句柄同一性证明
+不会把 If 结果判为静态。对于只有一行 NZ box 的 Acc，valid rows 的变化也不改变
+固定 carry 的数据步长，因此该边界不需要 Acc-to-Acc 传输。
 
 如果多个 producer 已共享同一物理分配，PTO codegen 会在兄弟区域之前声明存储，
-并在各 producer 处设置逻辑有效形状。若两支返回完全相同的 SSA 句柄，结果会
-直接绑定该句柄，为 PTOAS 保留其本地 allocation 来源。
+并在各 producer 处设置逻辑有效形状。所有原生 Tile 结果统一生成为 `scf.if`
+描述符，即使两支返回相同 SSA，也不为结果设置固定分配。
 若已有 producer 支配其他使用点，则保留其局部声明，让顺序执行的累加器族
 继续复用存储。
 
 带地址的 PTO 输出中，所选平坦 Vec tile 的切片可从实际所选句柄的地址派生视图，
-保留来源的物理步长，无需复制数据或使用代表性的 MemRef。此回退要求推导出的
+保留来源的物理步长，无需复制数据或替换成固定的分支地址。此回退要求推导出的
 有效形状为静态值，或显式提供有效维度。无地址输出、视图选择及打包布局仍使用
 原有 subview 路径，并受其 PTOAS 限制。
 对于已证明连续的窗口，需要稠密操作数的 consumer 使用实际所选地址的描述符

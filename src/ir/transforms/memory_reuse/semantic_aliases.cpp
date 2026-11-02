@@ -854,12 +854,12 @@ class LoopInputIsolation : public IRVisitor {
       recurring_events[base].emplace_back(positions_.at(loop), loop_ends_.at(loop));
     }
     for (const auto& [position, var] : reads_) {
-      const auto tile = GetTileTypeWithMemRef(var->GetType());
+      const auto tile = As<TileType>(var->GetType());
       auto definition = definitions_.find(var.get());
-      const auto* base = GetDefinedMemRef(tile)->base_.get();
+      const auto* base = tile->memref_ ? (*tile->memref_)->base_.get() : nullptr;
       const size_t version = definition == definitions_.end() ? 0 : definition->second;
       const size_t reverse = read_reverse_.at(position);
-      reachable_events[base].emplace_back(position, reverse);
+      if (base) reachable_events[base].emplace_back(position, reverse);
       const bool selected = selected_values_.count(var.get()) != 0;
       if (selected) selected_events[tile->GetMemorySpace()].emplace_back(position, reverse);
       observations.push_back({base, position, reverse, version, selected, tile->GetMemorySpace()});
@@ -875,7 +875,7 @@ class LoopInputIsolation : public IRVisitor {
       // A range maximum then tests both branch orderings in O(log N).
       while (next < observations.size() && observations[next].definition < positions_.at(loop.get())) {
         const auto& event = observations[next++];
-        reachable_indexes_[event.base].Activate(event.position, event.reverse);
+        if (event.base) reachable_indexes_[event.base].Activate(event.position, event.reverse);
         if (event.selected) selected_indexes_[event.memory].Activate(event.position, event.reverse);
       }
       if (auto for_loop = As<ForStmt>(loop)) PlanLoop(for_loop);
@@ -946,7 +946,8 @@ class LoopInputIsolation : public IRVisitor {
   void VisitVarLike_(const VarPtr& value) override {
     const auto observation = payload_observations_.find(current_statement_);
     if (observation == payload_observations_.end() || observation->second.count(value) == 0) return;
-    if (GetTileTypeWithMemRef(value->GetType())) {
+    if (As<TileType>(value->GetType()) &&
+        (GetTypeMemRef(value->GetType()) || selected_values_.count(value.get()) != 0)) {
       reads_.emplace_back(current_, value);
       read_reverse_[current_] = current_reverse_;
       const auto definition = definitions_.find(value.get());
@@ -956,7 +957,9 @@ class LoopInputIsolation : public IRVisitor {
       const auto loop =
           std::upper_bound(loop_stack_.begin(), loop_stack_.end(), version,
                            [](size_t position, const auto& entry) { return position < entry.first; });
-      if (loop != loop_stack_.end()) recurring_reads_.emplace_back(value, loop->second);
+      if (loop != loop_stack_.end() && GetTypeMemRef(value->GetType())) {
+        recurring_reads_.emplace_back(value, loop->second);
+      }
     }
   }
 
@@ -1026,8 +1029,22 @@ class LoopInputIsolation : public IRVisitor {
     std::set<const Var*> unknown_bases;
     for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
       const auto& initial = loop->iter_args_[i]->initValue_;
-      auto tile = GetTileTypeWithMemRef(initial->GetType());
+      auto tile = As<TileType>(initial->GetType());
       if (!tile) continue;
+      if (!tile->memref_) {
+        // A runtime-selected initializer has no fixed carry buffer. Entry
+        // materialization supplies the storage required by existing loop
+        // lowering without assigning storage to the If result itself.
+        const auto memory = tile->GetMemorySpace();
+        // Acc entry selections must reach the mandatory producer coalescer
+        // below. Acc has no copy destination; isolation cannot invent one.
+        if (recurrence_only_ && memory && !IsTileMoveEverPossibleInto(*memory)) continue;
+        CHECK_SPAN(memory && IsTileMoveEverSupported(*memory, *memory), loop->span_)
+            << "A Tile selected by an if cannot cross an updating loop-carry boundary without "
+               "a supported entry copy";
+        isolate.insert(i);
+        continue;
+      }
       const auto memref = GetDefinedMemRef(tile);
       const auto* base = memref->base_.get();
       const auto reachable = reachable_indexes_.find(base);
@@ -1047,7 +1064,7 @@ class LoopInputIsolation : public IRVisitor {
         // unsupported spaces retain the retarget guard and explicit copy error.
         const auto memory = tile->GetMemorySpace();
         // An independently consumed native descriptor may retain this input
-        // as its non-representative candidate. Its hint cannot prove disjoint
+        // through either candidate. It has no fixed window proving disjoint
         // storage. There is one index per hardware space (plus unknown), so
         // this bounded scan does not expand transitive candidate root sets.
         const bool selected_observation =
@@ -1121,13 +1138,17 @@ class LoopInputIsolation : public IRVisitor {
       const auto& argument = loop->iter_args_[index];
       auto source = AsVarLike(argument->initValue_);
       CHECK_SPAN(source, loop->span_) << "Buffer IR loop initializers must be storage variables";
-      const auto tile = GetTileTypeWithMemRef(source->GetType());
+      const auto tile = As<TileType>(source->GetType());
       const auto memory = tile->GetMemorySpace();
       CHECK_SPAN(memory && IsTileMoveEverSupported(*memory, *memory), loop->span_)
           << "Buffer IR cannot preserve an independently live loop input without a same-space copy; "
              "produce an independent initial tile for this carry";
       auto base = std::make_shared<Var>(names_.Fresh("mem_carry_input_"), GetPtrType(), source->span_);
-      auto memref = std::make_shared<MemRef>(base, int64_t{0}, GetDefinedMemRef(tile)->size_, source->span_);
+      const auto bytes = tile->memref_ ? std::make_optional((*tile->memref_)->size_)
+                                       : utils::StaticPhysicalAllocationBytes(tile, *memory, nullptr);
+      INTERNAL_CHECK_SPAN(bytes.has_value(), source->span_)
+          << "Internal error: a private loop input requires a static physical tile size";
+      auto memref = std::make_shared<MemRef>(base, int64_t{0}, *bytes, source->span_);
       auto [initial, transfer] = CreateStorageMove(
           source, memref, memory, [](const ExprPtr& e) { return e; }, names_.Fresh("carry_input_"));
       allocations.push_back(CreateAllocStatement(memref, *memory));
@@ -1278,6 +1299,7 @@ class TopDownRetargeter {
   std::map<VarPtr, VarPtr> inplace_root_cache_;
   std::map<VarPtr, VarPtr> accumulator_input_cache_;
   std::set<VarPtr> non_accumulator_producers_;
+  std::map<VarPtr, VarPtr> bare_alias_root_cache_;
   std::map<const MemRef*, size_t> memref_component_;
   std::map<size_t, ReachableEventIndex> physical_access_index_;
   std::map<const Var*, VersionedReachableEventIndex> alias_read_index_;
@@ -1379,14 +1401,21 @@ class TopDownRetargeter {
   /// until RetypeApplier would let a later phi choose an abandoned view window.
   void FollowBranchStorageAlias(const VarPtr& result, const VarPtr& source, const CallPtr& call = nullptr) {
     auto output = CurrentTileType(result);
+    if (!output) output = As<TileType>(result->GetType());
     auto input = source ? CurrentTileType(source) : nullptr;
     if (!output || !input) return;
     auto target = GetDefinedMemRef(input);
     if (call && !op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-      target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), GetDefinedMemRef(output)->size_,
-                                  result->span_);
+      const auto memory = input->GetMemorySpace();
+      INTERNAL_CHECK_SPAN(memory.has_value(), result->span_)
+          << "Internal error: a canonical branch view requires a memory space";
+      const auto size = output->memref_ ? std::make_optional((*output->memref_)->size_)
+                                        : utils::StaticPhysicalAllocationBytes(output, *memory, nullptr);
+      INTERNAL_CHECK_SPAN(size.has_value(), result->span_)
+          << "Internal error: a canonical branch view requires a static storage size";
+      target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), *size, result->span_);
     }
-    if (!SamePhysicalWindow(GetDefinedMemRef(output), target) ||
+    if (!output->memref_ || !SamePhysicalWindow(*output->memref_, target) ||
         output->GetMemorySpace() != input->GetMemorySpace()) {
       PlanRewrite(result, target, input->GetMemorySpace());
     }
@@ -1426,7 +1455,7 @@ class TopDownRetargeter {
       auto else_yield = else_body ? transform_utils::GetLastYieldStmt(*else_body) : nullptr;
       for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
         auto result = branch->return_vars_[i];
-        auto result_tile = CurrentTileType(result);
+        auto result_tile = As<TileType>(result->GetType());
         if (!result_tile) continue;
         CHECK_SPAN(else_body.has_value() && then_yield && else_yield && i < then_yield->value_.size() &&
                        i < else_yield->value_.size(),
@@ -1450,8 +1479,8 @@ class TopDownRetargeter {
                "coalesced; Acc-to-Acc transfers are unsupported";
         auto base = std::make_shared<Var>("mem_branch_result_" + std::to_string(branch_storage_counter_++),
                                           GetPtrType(), result->span_);
-        const auto size =
-            std::max({GetDefinedMemRef(result_tile)->size_, then_memref->size_, else_memref->size_});
+        const auto size = std::max({result_tile->memref_ ? (*result_tile->memref_)->size_ : uint64_t{0},
+                                    then_memref->size_, else_memref->size_});
         auto target = std::make_shared<MemRef>(base, static_cast<int64_t>(0), size, result->span_);
         allocations->push_back(CreateAllocStatement(target, *memory));
         PlanRewrite(result, target, memory);
@@ -1855,6 +1884,7 @@ class TopDownRetargeter {
     inplace_root_cache_.clear();
     accumulator_input_cache_.clear();
     non_accumulator_producers_.clear();
+    bare_alias_root_cache_.clear();
 
     const auto& registry = OpRegistry::GetInstance();
     for (const auto& [var, def] : defs_) {
@@ -2092,12 +2122,35 @@ class TopDownRetargeter {
     return ResolveInplaceRoot(var).get() == root.get();
   }
 
+  VarPtr ResolveBareAlias(const VarPtr& var) {
+    std::vector<VarPtr> path;
+    std::set<const Var*> seen;
+    auto current = var;
+    while (seen.insert(current.get()).second) {
+      const auto cached = bare_alias_root_cache_.find(current);
+      if (cached != bare_alias_root_cache_.end()) {
+        current = cached->second;
+        break;
+      }
+      const auto def = defs_.find(current);
+      if (def == defs_.end() || def->second.kind != VarDef::kAssign) break;
+      const auto assign = As<AssignStmt>(def->second.assign_stmt);
+      const auto source = assign ? AsVarLike(assign->value_) : nullptr;
+      if (!source) break;
+      path.push_back(current);
+      current = source;
+    }
+    for (const auto& member : path) bare_alias_root_cache_[member] = current;
+    bare_alias_root_cache_[var] = current;
+    return current;
+  }
+
   /// Resolve a branch-local accumulator loop seeded by a value defined outside
   /// ``branch_scope``. Both locality halves are required: the loop itself must
   /// be inside the branch and its seed must be outside it.
   std::optional<AccumulatorTarget> FindExternallySeededAccumulatorLoop(const VarPtr& var,
                                                                        const IfStmtPtr& branch_scope) {
-    auto it = defs_.find(var);
+    auto it = defs_.find(ResolveBareAlias(var));
     if (it == defs_.end() || it->second.kind != VarDef::kForReturn) return std::nullopt;
     auto loop = As<ForStmt>(it->second.control_stmt);
     if (!loop || it->second.return_idx >= loop->iter_args_.size()) return std::nullopt;
@@ -2106,7 +2159,7 @@ class TopDownRetargeter {
 
     auto init = AsVarLike(loop->iter_args_[it->second.return_idx]->initValue_);
     auto init_tile = init ? CurrentTileType(init) : nullptr;
-    if (!init || !CurrentTileType(var) || !init_tile) return std::nullopt;
+    if (!init || !As<TileType>(var->GetType()) || !init_tile) return std::nullopt;
 
     auto init_def = defs_.find(init);
     if (init_def != defs_.end() && IsInside(init_def->second.definition_stmt, branch_scope)) {
@@ -2224,9 +2277,9 @@ class TopDownRetargeter {
           << "' refused retarget onto the accumulator buffer, which would force an illegal "
              "Acc->Acc tile.move.";
 
-      // The phi itself is part of the semantic accumulator family. Pinning it
-      // here is required by the PTOAS planner, which skips legacy MemoryReuse
-      // and otherwise declares a separate head handle for the merged value.
+      // Record the proven common producer storage for this retargeting analysis.
+      // Native alias normalization removes it from the region result before
+      // exposing the function to the next pass; the descriptor owns no allocation.
       PlanRewrite(if_stmt->return_vars_[i], target.memref, target.memory_space);
       transaction.Commit();
     }
@@ -2297,10 +2350,11 @@ class TopDownRetargeter {
     if (!call) {
       auto alias = AsVarLike(assign->value_);
       if (!alias) return false;
-      auto alias_tile = GetTileTypeWithMemRef(alias->GetType());
-      auto var_tile = GetTileTypeWithMemRef(var->GetType());
-      if (!alias_tile || !var_tile ||
-          !SamePhysicalWindow(GetDefinedMemRef(alias_tile), GetDefinedMemRef(var_tile))) {
+      auto alias_tile = As<TileType>(alias->GetType());
+      auto var_tile = As<TileType>(var->GetType());
+      if (!SameKnownTileMemorySpace(alias_tile, var_tile) ||
+          (alias_tile->memref_ && var_tile->memref_ &&
+           !SamePhysicalWindow(*alias_tile->memref_, *var_tile->memref_))) {
         return false;
       }
       if (!TryRetargetVar(alias, target, target_memory)) return false;
@@ -2402,8 +2456,8 @@ class TopDownRetargeter {
   /// safe ops (e.g. addc may overwrite src0, but never its carry operand).
   /// Resolve semantic aliases before reading planned types: earlier storage
   /// legalization can move the source away from its original MemRef hint.
-  /// An unresolved native If can still select another allocation, so decline
-  /// rather than use its representative hint as a proof of disjointness.
+  /// A native If has no fixed allocation, so decline unresolved same-space
+  /// operands rather than treating the absence of an address as disjointness.
   bool ForbiddenOutputAliasConflicts(const Call& call, const OpRegistryEntry& entry, const Var* target_base,
                                      std::optional<MemorySpace> target_memory) {
     for (const auto index : entry.ForbidOutputAliasArgs()) {
@@ -2981,9 +3035,9 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // emits handles. Planner-specific repetitions remain below because later
   // YieldFixup/reuse steps can create fresh mismatches.
   //
-  // No IfStmt YieldFixup has run yet, so defer dependent alias hints until that
-  // pass refreshes each result. The later normalization can then follow the
-  // current representative without retaining an abandoned producer allocation.
+  // Native If descriptors and their required aliases have no fixed storage.
+  // Buffer IR branch destinations remain provisional until its boundary fixup,
+  // so defer anchoring aliases to those fixed windows.
   new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
   // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
@@ -3030,9 +3084,8 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
     new_body = AlignLoopCarriesToInit(new_body);
     new_body = FixupYields(new_body, func->params_);
-    // Fixup refreshes an If descriptor's representative MemRef. Its aliases and
-    // relative views must follow that hint too, just as under the DSA planner;
-    // their runtime bindings still follow the actual selected SSA in codegen.
+    // Preserve dynamic storage on native If results and their aliases after
+    // producer and fixed-carry rewrites, just as under the DSA planner.
     new_body = NormalizeIdentityCopyBuffers(new_body);
   }
 

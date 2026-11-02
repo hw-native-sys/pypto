@@ -207,6 +207,39 @@ def _assert_same_tile_window(actual: ir.MemRef, expected: ir.MemRef):
         assert ir.structural_equal(actual.slot_index_, expected.slot_index_)
 
 
+def _descriptor_roots(mlir: str, handle: str) -> set[str]:
+    """Follow actual If yields and views instead of assigning a phi one buffer."""
+    sources: dict[str, set[str]] = {}
+    branches: list[tuple[int, str]] = []
+    for line in mlir.splitlines():
+        indent = len(line) - len(line.lstrip())
+        while branches and indent <= branches[-1][0] and "} else {" not in line:
+            branches.pop()
+        branch = re.match(r"\s*(%[\w.$-]+) = scf\.if\b", line)
+        if branch:
+            branches.append((indent, branch.group(1)))
+        if branches and indent == branches[-1][0] + 2 and "scf.yield " in line:
+            values = line.split("scf.yield ", 1)[1].split(" : ", 1)[0]
+            sources.setdefault(branches[-1][1], set()).update(re.findall(r"%[\w.$-]+", values))
+        view = re.match(r"\s*(%[\w.$-]+) = pto\.(?:subview|treshape) (%[\w.$-]+)", line)
+        if view:
+            sources[view.group(1)] = {view.group(2)}
+        if "iter_args(" in line:
+            for carried, initial in re.findall(r"(%[\w.$-]+) = (%[\w.$-]+)", line.split("iter_args(")[1]):
+                sources[carried] = {initial}
+    roots, visited, pending = set(), set(), [handle]
+    while pending:
+        value = pending.pop()
+        if value in visited:
+            continue
+        visited.add(value)
+        if value in sources:
+            pending.extend(sources[value])
+        else:
+            roots.add(value)
+    return roots
+
+
 def _calls_with_loop_depth(program):
     class Collector(ir.IRVisitor):
         def __init__(self):
@@ -377,7 +410,7 @@ def test_ptoas_loop_carry_is_in_place_single_handle():
 
 
 def test_ptoas_conditional_gather_phis_share_the_written_mat_window():
-    """The second update and transpose must observe the first phi's repaired storage."""
+    """Required updates follow dynamic results without inventing a phi allocation."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
@@ -388,14 +421,15 @@ def test_ptoas_conditional_gather_phis_share_the_written_mat_window():
     assert len(phis) == 2
     base = next(var for name, var in tiles.items() if name.startswith("base")).type.memref
     assert base is not None
-    for phi, arms in phis:
-        assert phi.type.memref is not None
-        _assert_same_tile_window(phi.type.memref, base)
-        for arm in arms:
-            assert arm is not None
-            _assert_same_tile_window(arm, base)
+    for phi, _ in phis:
+        assert phi.type.memref is None
+        assert phi.type.memory_space == ir.MemorySpace.Mat
+    for arm in phis[0][1]:
+        assert arm is not None
+        _assert_same_tile_window(arm, base)
+    assert phis[1][1] == [None, None]
     transposed = next(var for name, var in tiles.items() if name.startswith("transposed"))
-    _assert_same_tile_window(transposed.type.memref, base)
+    assert transposed.type.memref is None
 
 
 @pytest.mark.parametrize("enable_buffer_ir", [False, True])
@@ -412,7 +446,9 @@ def test_ptoas_conditional_gather_preserves_one_mat_buffer(enable_buffer_ir):
         for line in mlir.splitlines()
         if "pto.subview " in line
     }
-    assert len(bases) == 1, mlir
+    roots = {_root for base in bases for _root in _descriptor_roots(mlir, base)}
+    assert len(bases) == 2 and len(roots) == 1, mlir
+    assert mlir.count("= scf.if") == 2, mlir
 
 
 def test_ptoas_conditional_inplace_vec_updates_reuse_mixed_view_handle():
@@ -640,7 +676,9 @@ def test_ptoas_nested_mat_phi_does_not_reuse_sibling_branch_declaration(identity
     assert len(panel_allocations) == 1, mlir  # One existing shared family, dominating every branch.
     assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in lines), mlir
     transposes = [line for line in lines if "pto.treshape" in line]
-    assert transposes and f"pto.treshape {nested_handles[0]} :" in transposes[-1], mlir
+    assert transposes, mlir
+    selected = transposes[-1].split("pto.treshape ", 1)[1].split(" :", 1)[0]
+    assert _descriptor_roots(mlir, selected) == {nested_handles[0]}, mlir
 
 
 def test_ptoas_nested_mat_phi_reuses_dominating_enclosing_branch_declaration():
@@ -774,8 +812,8 @@ def test_ptoas_loop_local_shared_accumulator_keeps_dynamic_validity_in_scope():
     assert valid_row and not valid_row.group(1).startswith("%c"), mlir
 
 
-def test_ptoas_repaired_mat_phi_preserves_partial_view_and_gather_storage():
-    """Repair a descendant slice descriptor without changing its relative window or slot."""
+def test_ptoas_dynamic_mat_phi_preserves_partial_view_and_gather_geometry():
+    """A descendant slice retains its geometry and follows the dynamic descriptor."""
     span = ir.Span.unknown()
     allocation = ir.Var("allocation", ir.PtrType(), span)
     stale_allocation = ir.Var("stale_allocation", ir.PtrType(), span)
@@ -833,13 +871,22 @@ def test_ptoas_repaired_mat_phi_preserves_partial_view_and_gather_storage():
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(before)
     phis, tiles = _collect_tile_phi_storage(after)
-    _assert_same_tile_window(phis[0][0].type.memref, source)
-    expected = ir.MemRef(allocation, slice_offset, 2048, slots=2, slot=slot)
+    assert phis[0][0].type.memref is None
+    for arm in phis[0][1]:
+        _assert_same_tile_window(arm, source)
     for name in ("sliced", "gathered"):
         tile_type = tiles[name].type
-        assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None
-        _assert_same_tile_window(tile_type.memref, expected)
+        assert isinstance(tile_type, ir.TileType) and tile_type.memref is None
+        assert tile_type.memory_space == ir.MemorySpace.Mat
         assert tile_type.tile_view == slice_type.tile_view
+    function = next(iter(after.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    slice_assign = function.body.stmts[1]
+    assert isinstance(slice_assign, ir.AssignStmt)
+    slice_call = slice_assign.value
+    assert isinstance(slice_call, ir.Call)
+    assert ir.structural_equal(slice_call.args[1], dims(16, 64))
+    assert ir.structural_equal(slice_call.args[2], dims(16, 0))
 
 
 def test_ptoas_loop_mat_identity_phi_gather_writes_nonzero_row_subview():
@@ -937,7 +984,7 @@ def test_ptoas_loop_mat_identity_phi_gather_writes_nonzero_row_subview():
         while handle in views:
             handle = views[handle]
             path.add(handle)
-        assert handle == base, mlir
+        assert _descriptor_roots(mlir, handle) == {base}, mlir
         writes_lower_window |= bool(path & lower_views)
     assert writes_lower_window, mlir
     allocations = [line for line in lines if "pto.alloc_tile" in line and "loc=mat" in line]
@@ -992,7 +1039,7 @@ def test_ptoas_loop_mat_identity_phi_gather_writes_nonzero_row_subview():
     ],
 )
 def test_ptoas_if_selection_preserves_each_source_window(memory_space, difference):
-    """A representative hint follows then without changing either selected source."""
+    """Even equal windows stay dynamic; neither yielded source is rebound."""
     span = ir.Span.unknown()
     allocation = ir.Var("allocation", ir.PtrType(), span)
     other_allocation = ir.Var("other_allocation", ir.PtrType(), span)
@@ -1069,30 +1116,25 @@ def test_ptoas_if_selection_preserves_each_source_window(memory_space, differenc
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(before)
 
-    if a_storage is None or phi_memref is None:
-        # Missing storage remains outside hint refresh; it is not invented by
-        # native selection. The selected source operands stay intact below.
-        ir.assert_structural_equal(after, before)
-        return
-
     phis, tiles = _collect_tile_phi_storage(after)
     new_phi, arms = phis[0]
-    _assert_same_tile_window(new_phi.type.memref, a_memref)
-    assert new_phi.type.memory_space == memory_space
-    expected_phi = ir.TileType(phi_type.shape, dtype, a_memref, phi_type.tile_view, memory_space)
-    assert new_phi.type.tile_view == expected_phi.tile_view
-    _assert_same_tile_window(arms[0], a_memref)
+    assert new_phi.type.memref is None
+    assert new_phi.type.memory_space == phi_space
+    assert new_phi.type.tile_view == phi_type.tile_view
+    if a_storage is None:
+        assert arms[0] is None
+    else:
+        _assert_same_tile_window(arms[0], a_storage)
     if b_storage is None:
         assert arms[1] is None
     else:
         _assert_same_tile_window(arms[1], b_storage)
-    # All geometry differences remain exercised. In particular, the else
-    # allocation/offset/slot must never be rebound to then's hint.
+    # Allocation/offset/slot differences stay on the yielded operands, never
+    # on the selected result or its required aliases.
     for name in ("reshaped", "alias"):
         tile_type = tiles[name].type
-        assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None
-        _assert_same_tile_window(tile_type.memref, a_memref)
-        assert tile_type.memory_space == memory_space and tile_type.dtype == dtype
+        assert isinstance(tile_type, ir.TileType) and tile_type.memref is None
+        assert tile_type.memory_space == phi_space and tile_type.dtype == dtype
         assert len(tile_type.shape) == 2
         for dimension, extent in zip(tile_type.shape, [8, 32]):
             assert isinstance(dimension, ir.ConstInt) and dimension.value == extent

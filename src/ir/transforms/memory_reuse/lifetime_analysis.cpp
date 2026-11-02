@@ -89,14 +89,9 @@ class SelectionCollector : public IRVisitor {
       if (i >= lhs->value_.size() || i >= rhs->value_.size()) continue;
       Edge(target, lhs->value_[i]);
       Edge(target, rhs->value_[i]);
-      const auto a = GetTileTypeWithMemRef(lhs->value_[i]->GetType());
-      const auto b = GetTileTypeWithMemRef(rhs->value_[i]->GetType());
-      if (lhs->value_[i] != rhs->value_[i] &&
-          (!a || !b || a->GetMemorySpace() != b->GetMemorySpace() ||
-           (CompareBaseAddress(GetDefinedMemRef(a), GetDefinedMemRef(b)) != AddressRelation::kSame ||
-            GetDefinedMemRef(a)->size_ != GetDefinedMemRef(b)->size_))) {
-        result.values.insert(target.get());
-      }
+      // Region results uniformly select descriptors. Equal sources or equal
+      // physical windows do not turn the result into a fixed-storage variable.
+      result.values.insert(target.get());
     }
   }
 

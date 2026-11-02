@@ -921,6 +921,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     bool return_vars_changed = false;
     auto new_return_vars = RebuildVec(
         op->return_vars_, [this](const auto& v) { return MaybeRebuildVar(v); }, &return_vars_changed);
+    AdoptLoopCarryTypes(op->iter_args_, new_iter_args, op->return_vars_, &new_return_vars,
+                        &return_vars_changed);
 
     bool changed = (new_start.get() != op->start_.get()) || (new_stop.get() != op->stop_.get()) ||
                    (new_step.get() != op->step_.get()) || (new_body.get() != op->body_.get()) ||
@@ -1141,6 +1143,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     bool return_vars_changed = false;
     auto new_return_vars = RebuildVec(
         op->return_vars_, [this](const auto& v) { return MaybeRebuildVar(v); }, &return_vars_changed);
+    AdoptLoopCarryTypes(op->iter_args_, new_iter_args, op->return_vars_, &new_return_vars,
+                        &return_vars_changed);
 
     bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get()) ||
                    iter_args_changed || return_vars_changed;
@@ -1560,8 +1564,25 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // refer to the declared fresh scalar even when its carry follows theirs.
     for (size_t i = 0; i < iter_args.size(); ++i) {
       fresh[i]->FinalizeType(SimplifyType(iter_args[i]->GetType()));
+      if (!As<TileType>(iter_args[i]->GetType())) continue;
+      // Folding an If can replace a dynamic initializer by one fixed source.
+      // Preserve the pre-existing type equality at the carry declaration too.
+      auto matched = MatchRewrittenValueType(iter_args[i], iter_args[i]->initValue_->GetType(),
+                                             fresh[i]->initValue_, fresh[i]);
+      fresh[i]->FinalizeType(matched->GetType());
     }
     return result;
+  }
+
+  void AdoptLoopCarryTypes(const std::vector<IterArgPtr>& old_args, const std::vector<IterArgPtr>& new_args,
+                           const std::vector<VarPtr>& old_results, std::vector<VarPtr>* new_results,
+                           bool* changed) {
+    for (size_t i = 0; i < old_results.size() && i < new_args.size(); ++i) {
+      if (!As<TileType>(old_args[i]->GetType()) || redefined_.count(old_results[i].get()) != 0) continue;
+      auto result = AdoptValueType(old_results[i], old_args[i]->GetType(), new_args[i], (*new_results)[i]);
+      *changed |= result != (*new_results)[i];
+      (*new_results)[i] = std::move(result);
+    }
   }
 
   VarPtr LookupVarRemap(const Var* key) {

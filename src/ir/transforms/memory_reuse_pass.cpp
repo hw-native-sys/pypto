@@ -161,15 +161,15 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   //    the pre-normalization buffers every rename still sits on a buffer of its
   //    own, so no conflict is visible and a shift register silently collapses
   //    ([#2481]).
-  //  - after, because YieldFixup refreshes an If result's representative MemRef
-  //    after reuse. Its aliases must follow that hint as well; the descriptor
-  //    still selects its actual storage at runtime.
+  //  - after, because carry writebacks can replace their output bindings.
+  //    Required aliases follow those bindings, while native If results and
+  //    their aliases retain dynamic storage without a fixed MemRef.
   //
   // The mutator is idempotent, so the second run is a no-op whenever the first
   // already settled everything.
   new_body = memory_reuse::NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
-  // Step 4: Reconcile fixed carry storage and refresh native If result hints
+  // Step 4: Reconcile fixed carry storage; native If descriptors remain dynamic.
   const auto* ctx = PassContext::Current();
   // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
   // like every other allocation, and Step 5 below keeps it because it is in use.

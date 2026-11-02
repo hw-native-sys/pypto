@@ -1097,7 +1097,7 @@ class TestYieldMemRef:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    def test_if_yield_return_var_shares_memref(self):
+    def test_if_yield_return_var_has_dynamic_storage(self):
         """IfStmt: return_var shares MemRef with the then-branch yield value."""
 
         @pl.program
@@ -1122,10 +1122,8 @@ class TestYieldMemRef:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
                 return result
 
-        # then-yield (tile_a) uses mem_vec_2; return_var (if_result) also uses
-        # mem_vec_2 — shared per InitMemRef's phi-resolution rule. The else-
-        # branch yield (tile_b) uses a separate mem_vec_3 — it's a distinct
-        # temporary that MemoryReuse will later merge.
+        # Each arm owns its allocation. The region result has only descriptor
+        # metadata and no fixed MemRef, regardless of which arm runs.
         @pl.program
         class Expected:
             @pl.function
@@ -1147,9 +1145,7 @@ class TestYieldMemRef:
                             target_memory=pl.Mem.Vec,
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_a)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_a)
                 else:
                     tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.load(
@@ -1160,9 +1156,7 @@ class TestYieldMemRef:
                             target_memory=pl.Mem.Vec,
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     if_result, [0, 0], output
                 )
@@ -1197,7 +1191,7 @@ class TestYieldMemRef:
 
         # tile_a → alias_a → then-yield all share mem_vec_2 (alias chain).
         # The else-branch computation (tile_b) uses a fresh mem_vec_3.
-        # The phi return_var (if_result) picks up the then-branch's mem_vec_2.
+        # The region result remains dynamic even when its then source is an alias.
         @pl.program
         class Expected:
             @pl.function
@@ -1214,16 +1208,12 @@ class TestYieldMemRef:
                 )
                 if cond < 2:
                     alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = tile_a
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(alias_a)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(alias_a)
                 else:
                     tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(tile_a, tile_a)
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     if_result, [0, 0], output
                 )

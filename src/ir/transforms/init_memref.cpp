@@ -69,8 +69,9 @@ namespace ir {
 namespace {
 
 // A tile owns no general-pool buffer ("buffer-less by design") when its defining
-// value is a cross-core tpop result, or a non-permuting zero-copy view / plain
-// alias chained off a buffer-less source. `source_buffer_less` reports whether a
+// value is a cross-core tpop result, or a required alias of a buffer-less source.
+// Native If results also have no fixed MemRef: their descriptor selects one of
+// the branch allocations at runtime. `source_buffer_less` reports whether a
 // source Var is itself buffer-less (the MemRef-creating mutator queries the type;
 // the HasMemRefs verifier consults its tracked set). tile.transpose is excluded —
 // pto.ttrans is not in-place safe and always needs a fresh buffer.
@@ -81,8 +82,9 @@ bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source
     if (IsOp(call, "tile.tpop_from_aic") || IsOp(call, "tile.tpop_from_aiv")) {
       return true;
     }
-    if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-      auto in = AsVarLike(call->args_[0]);
+    const auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+    if (writeback || (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty())) {
+      auto in = AsVarLike(call->args_[writeback.value_or(0)]);
       return in && source_buffer_less(in.get());
     }
     return false;
@@ -714,9 +716,8 @@ class InitMemRefMutator : public IRMutator {
   }
 
   // Rebuild an AssignStmt whose LHS tile var keeps its TileType + memory_space but
-  // carries no MemRef. Used for tiles that own no general-pool buffer: cross-core
-  // tpop results and zero-copy views over them (codegen lowers those to
-  // pto.treshape over the source rather than a fresh alloc_tile).
+  // carries no MemRef. Pipe results, native If results and their required aliases
+  // follow an existing runtime descriptor instead of owning general-pool storage.
   StmtPtr MakeMemRefLessAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {
     auto var_expr = std::static_pointer_cast<const Expr>(op->var_);
     if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var_expr->GetType())) {
@@ -740,9 +741,7 @@ class InitMemRefMutator : public IRMutator {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
 
-    // A tile that owns no general-pool buffer — a cross-core tpop result (its
-    // data lives in the reserved C2V/V2C slot, addressed via the pipe), or a
-    // zero-copy view / plain alias chained off one — stays MemRef-less, so
+    // A pipe result or an alias of a runtime descriptor stays MemRef-less, so
     // AllocateMemoryAddr reserves no phantom buffer and no fresh, disconnected
     // buffer is created.
     if (As<TileType>(op->var_->GetType()) && ProducesBufferLessTile(new_value, [](const Var* v) {
@@ -817,8 +816,8 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Tile alias: a = b where b is a tile Var — share b's MemRef.
-    // Without this, the alias gets a fresh MemRef that is never written to,
-    // breaking IfStmt return_vars that inherit the alias's empty MemRef.
+    // Without this, the alias gets a fresh MemRef that is never written to.
+    // Aliases of dynamic descriptors were handled by MakeMemRefLessAssign above.
     if (auto value_var = As<Var>(new_value)) {
       if (As<TileType>(op->var_->GetType())) {
         auto result = ShareMemRefFrom(value_var, op, new_value);
@@ -940,13 +939,29 @@ class InitMemRefMutator : public IRMutator {
     auto else_yield = new_if->else_body_.has_value() ? FindYieldStmt(new_if->else_body_.value()) : nullptr;
     if (!then_yield && !else_yield) return result;
 
-    auto get_yield_var = [&](size_t i) -> VarPtr {
-      VarPtr var = nullptr;
-      if (then_yield && i < then_yield->value_.size()) var = As<Var>(then_yield->value_[i]);
-      if (!var && else_yield && i < else_yield->value_.size()) var = As<Var>(else_yield->value_[i]);
-      return var;
-    };
-    auto [patched, changed] = PatchReturnVarsFromYield(new_if->return_vars_, op->return_vars_, get_yield_var);
+    // A region result is a descriptor, not a new allocation or an alias of one
+    // arbitrarily chosen arm. Keep only the common memory space. Even identical
+    // arm buffers use this representation; storage provenance follows the yields.
+    auto patched = new_if->return_vars_;
+    bool changed = false;
+    for (size_t i = 0; i < patched.size(); ++i) {
+      auto tile = As<TileType>(patched[i]->GetType());
+      if (!tile) continue;
+      const auto then_tile = then_yield && i < then_yield->value_.size()
+                                 ? As<TileType>(then_yield->value_[i]->GetType())
+                                 : nullptr;
+      const auto else_tile = else_yield && i < else_yield->value_.size()
+                                 ? As<TileType>(else_yield->value_[i]->GetType())
+                                 : nullptr;
+      CHECK_SPAN(then_tile && else_tile && then_tile->GetMemorySpace() &&
+                     then_tile->GetMemorySpace() == else_tile->GetMemorySpace(),
+                 op->span_)
+          << "Tile If branches must yield tiles in the same memory space";
+      auto type = CloneTypeWithMemRef(tile, std::nullopt, then_tile->GetMemorySpace());
+      patched[i] = std::make_shared<Var>(patched[i]->name_hint_, type, patched[i]->span_);
+      var_map_[op->return_vars_[i]] = patched[i];
+      changed = true;
+    }
 
     if (!changed) return result;
 
@@ -956,7 +971,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
  private:
-  // Share return storage with loop carries (For/While) or branch yield values (If).
+  // Share loop return storage with its corresponding carry.
   // get_yield_var(i) resolves the yield variable for the i-th return_var.
   using YieldVarResolver = std::function<VarPtr(size_t)>;
   std::pair<std::vector<VarPtr>, bool> PatchReturnVarsFromYield(const std::vector<VarPtr>& new_return_vars,
@@ -968,7 +983,7 @@ class InitMemRefMutator : public IRMutator {
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
       auto yield_var = get_yield_var(i);
-      auto yield_tile = yield_var ? GetTileTypeWithMemRef(yield_var->GetType()) : nullptr;
+      auto yield_tile = yield_var ? As<TileType>(yield_var->GetType()) : nullptr;
       if (As<TileType>(new_return_vars[i]->GetType()) && yield_tile) {
         auto new_type = CloneTypeWithMemRef(new_return_vars[i]->GetType(), yield_tile->memref_,
                                             yield_tile->GetMemorySpace());
@@ -1128,6 +1143,29 @@ class HasMemRefsVerifier : public IRVisitor {
  public:
   explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
+  void VisitStmt_(const ForStmtPtr& op) override {
+    TrackDynamicCarries(op->iter_args_);
+    IRVisitor::VisitStmt_(op);
+    TrackDynamicResults(op->iter_args_, op->return_vars_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    TrackDynamicCarries(op->iter_args_);
+    IRVisitor::VisitStmt_(op);
+    TrackDynamicResults(op->iter_args_, op->return_vars_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    for (const auto& result : op->return_vars_) {
+      if (auto tile = As<TileType>(result->GetType()); tile && !tile->memref_) {
+        // These are runtime-selected descriptors; aliases inherit the absence of
+        // fixed storage, while payload-producing consumers still need a MemRef.
+        buffer_less_.insert(result.get());
+      }
+    }
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op || !op->var_ || !op->var_->GetType()) return;
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
@@ -1144,9 +1182,27 @@ class HasMemRefsVerifier : public IRVisitor {
   }
 
  private:
-  // A cross-core tpop result (its data lives in the reserved C2V/V2C slot, not a
-  // tile MemRef) and any zero-copy view / plain alias chained off such a result
-  // legitimately carry no MemRef. Shares the rule with the MemRef-creating mutator
+  void TrackDynamicCarries(const std::vector<IterArgPtr>& iter_args) {
+    for (const auto& arg : iter_args) {
+      auto source = AsVarLike(arg->initValue_);
+      auto tile = As<TileType>(arg->GetType());
+      if (tile && !tile->memref_ && source && buffer_less_.count(source.get())) {
+        buffer_less_.insert(arg.get());
+      }
+    }
+  }
+
+  void TrackDynamicResults(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& results) {
+    for (size_t i = 0; i < results.size() && i < iter_args.size(); ++i) {
+      auto tile = As<TileType>(results[i]->GetType());
+      if (tile && !tile->memref_ && buffer_less_.count(iter_args[i].get())) {
+        buffer_less_.insert(results[i].get());
+      }
+    }
+  }
+
+  // A pipe result, a native If result, and their required aliases legitimately
+  // have no fixed MemRef. Shares the rule with the MemRef-creating mutator
   // via ProducesBufferLessTile; here a source is buffer-less iff it is tracked.
   [[nodiscard]] bool IsBufferLessByDesign(const AssignStmtPtr& op) const {
     return ProducesBufferLessTile(op->value_, [this](const Var* v) { return buffer_less_.count(v) > 0; });

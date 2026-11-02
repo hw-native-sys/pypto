@@ -111,14 +111,15 @@ its own fresh MemRef. This pass closes that gap:
    its provisional selections reach mandatory accumulator coalescing or the
    existing divergent-Acc diagnostic instead.
    A live native selection in the same memory space is conservatively treated
-   as a possible observer of that input, including its non-representative arm.
+   as a possible observer of that input, through either arm.
    Unsupported copy spaces retain the retarget guard and existing diagnostic.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.
    When exactly one branch is the accumulator continuation, retarget the other
-   branch's local seed, the phi result, aliases, and nested loop carry onto the
-   reused input's canonical `Acc` allocation. Both the accumulator loop and the
+   branch's local seed, aliases, and nested loop carry onto the reused input's
+   canonical `Acc` allocation. The rewrite tracks the proven producer storage
+   internally; subsequent alias normalization clears the native phi's MemRef. Both the accumulator loop and the
    sibling seed must be local to their respective branches, and the target must
    be dead in the remainder of the seed branch. Whether the continuation is a
    direct `tile.matmul_acc` or a branch-local loop, its reused input and every
@@ -133,7 +134,7 @@ its own fresh MemRef. This pass closes that gap:
    recreated inside the loop can still be coalesced safely. These queries use
    precomputed alias and loop-interval indexes, retaining O(N log N) analysis.
    Acc producer retargeting and coalescing also protect older native selections:
-   a later payload read may observe the input through a non-representative arm.
+   a later payload read may observe the input through either arm.
    Observer provenance follows descriptor bindings and fixed loop initializers;
    a carry marked selected only through its backedge is not an old descriptor.
    Definition-order sweeps and branch/recurrence indexes distinguish these old
@@ -176,16 +177,12 @@ loops. Independently produced yielded tensors keep their own storage. Tile
 carries retain their separate canonical-buffer and yield-fixup rules, including
 explicit transfers when a yielded tile needs to reach the carry buffer.
 
-The pre-yield-fixup form of normalization seeds unresolved `IfStmt` results and
-propagates that status through bare aliases, writeback results, and first-input
-aliases, including through tensor loop arguments and returns. None of the
-dependent calls is anchored to that provisional window.
-Once the control-flow boundary is resolved, the following normalization walk
-repairs the whole chain. Buffer IR also uses this deferred form before indexing
-old-value observations and after loop-entry isolation, while branch storage is
-still provisional; normalization after boundary resolution needs no deferred
-seed. See [MemoryReuse step 6](37-memory_reuse.md#algorithm) for the normalization
-walks around yield fixup.
+Native If results have no fixed MemRef. Bare aliases, registered writeback
+results and zero-copy views preserve that dynamic storage instead of borrowing
+one branch's allocation. Payload-producing operations retain independent
+allocations. Buffer IR uses the pre-yield-fixup normalization to defer aliases
+of provisional branch destinations until canonical storage has been established.
+See [MemoryReuse step 6](37-memory_reuse.md#algorithm) for the surrounding walks.
 
 The pass skips orchestration-like functions, including graph bodies. In other
 functions, alias normalization still runs when `Compute` returns no retargeting
@@ -218,15 +215,16 @@ representations without a data transfer.
 The lifetime analysis records both possible sources and follows aliases and
 views. A later use of `%selected` keeps both candidates alive through that use;
 after their last use, ordinary memory reuse applies to each allocation. The
-candidates are not unconditional aliases and must not be merged just because
-one of them represents the result's MemRef metadata.
+candidates remain independent allocations. The selected result itself has no
+fixed MemRef and acquires no payload allocation.
 
 For ordinary native If results, this pass does not opportunistically coalesce
 a fresh Vec branch producer with an unchanged sibling. Later memory planning
 may reuse storage when lifetimes and allocation constraints permit it.
 
-Post-fixup alias normalization also refreshes enclosing native If hints when
-their yielded writeback aliases move, so abandoned hint allocations can be freed.
+Alias normalization keeps native If results and their dependent descriptors
+without fixed MemRefs after producer rewrites. This also applies when both arms
+happen to refer to the same storage; their common memory space is still retained.
 
 Tile carries on the native path still use fixed buffers. For retains the
 existing input isolation, selected-source safety checks and necessary
@@ -245,24 +243,29 @@ snapshotted into independent storage before any writeback, including for a
 single carry. This prevents runtime self-moves. If every source path is proven
 to name exactly the same carry window, with unchanged shape, layout and validity,
 no transfer or scratch is needed. A fresh or unknown source prevents that proof,
-even when the representative hint matches the carry. Scratch storage is explicit
+even when one candidate matches the carry. Scratch storage is explicit
 before lifetime and address planning; explicit materializing copies retain their
 existing behavior.
+An initializer selected before a For loop can remain dynamic when every yielded
+path writes back through the same iteration handle. Required carry aliases keep
+no MemRef, and this handle-identity proof never makes the If result static.
+A single row of Acc NZ boxes also keeps the same fixed-carry payload pitch when
+valid rows change; that boundary needs no Acc-to-Acc transfer.
 
 When producers already share one physical allocation, PTO codegen declares
 that storage before sibling regions and initializes logical validity at each
-producer site. If both arms yield the exact same SSA handle, the result binds
-directly to that handle, preserving its local allocation provenance for PTOAS.
+producer site. Every native Tile result remains an `scf.if` descriptor, including
+identical yielded SSAs, and owns no fixed allocation.
 An existing producer that dominates the other sites keeps its local declaration
 so sequential accumulator families can reuse storage.
 
 In addressed PTO output, a slice of a selected flat Vec tile can derive a view
 from the actual selected handle's address. The view preserves the source's
-physical pitch without copying contents or using its representative MemRef.
+physical pitch without copying contents or substituting a fixed branch address.
 This fallback requires static inferred validity or explicit valid dimensions.
 Consumers requiring dense operands use a descriptor alias of the actual
 selected address for proven contiguous windows. Lazy materialization must not
-write into a representative branch allocation; uncertain selected windows are
+write into one statically chosen branch allocation; uncertain selected windows are
 rejected unless an earlier pass has materialized independent storage.
 Unaddressed output, selections of views, and packed layouts retain the existing
 subview path and its PTOAS limitations.

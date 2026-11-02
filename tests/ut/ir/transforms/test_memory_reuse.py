@@ -145,9 +145,18 @@ def _assert_if_phi_arms_write_the_phi_buffer(program: ir.Program) -> None:
                         continue
                     arm_value = yield_stmt.value[i]
                     phi_type, arm_type = phi.type, arm_value.type
-                    if not isinstance(phi_type, ir.TileType) or phi_type.memref is None:
+                    if not isinstance(phi_type, ir.TileType):
                         continue
-                    assert isinstance(arm_type, ir.TileType) and arm_type.memref is not None
+                    assert isinstance(arm_type, ir.TileType)
+                    if phi_type.memref is None:
+                        # Native results select descriptors and have no fixed
+                        # destination. The actual branch types retain the common
+                        # memory space; separate payload assertions below cover
+                        # required Acc producer coalescing.
+                        assert phi_type.memory_space == arm_type.memory_space
+                        checked += 1
+                        continue
+                    assert arm_type.memref is not None
                     arm_name = arm_value.name_hint if isinstance(arm_value, ir.Var) else str(arm_value)
                     assert ir.MemRef.same_allocation(arm_type.memref, phi_type.memref), (
                         f"if-phi '{phi.name_hint}' has an arm yielding '{arm_name}' from a different buffer"
@@ -2268,9 +2277,7 @@ class TestYieldFixup:
                             [64, 64],
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_b)
                 else:
                     tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.load(
@@ -2280,9 +2287,7 @@ class TestYieldFixup:
                             [64, 64],
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_c)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_c)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     if_result, [0, 0], output
                 )
@@ -2358,13 +2363,9 @@ class TestYieldFixup:
                         merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.mrgsort(tile_iter, block_len=64)
                         )
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(merged)
-                        )
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.Mem.Vec] = pl.yield_(merged)
                     else:
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_iter)
-                        )
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_iter)
                     phi_mv: pl.Tile[
                         [1, 4096], pl.FP32, pl.MemRef(mem_vec_carry_spill_0, 0, 16384), pl.Mem.Vec
                     ] = pl.tile.move(phi, target_memory=pl.Mem.Vec)
@@ -2455,16 +2456,12 @@ class TestYieldFixup:
                 )
                 for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
                     if i < 1:
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_iter)
-                        )
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_iter)
                     else:
                         merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.mrgsort(tile_iter, block_len=64)
                         )
-                        phi: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(merged)
-                        )
+                        phi: pl.Tile[[1, 4096], pl.FP32, pl.Mem.Vec] = pl.yield_(merged)
                     phi_mv: pl.Tile[
                         [1, 4096], pl.FP32, pl.MemRef(mem_vec_carry_spill_0, 0, 16384), pl.Mem.Vec
                     ] = pl.tile.move(phi, target_memory=pl.Mem.Vec)
@@ -3008,16 +3005,12 @@ class TestControlFlow:
                         tile_c: pl.Tile[
                             [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
                         ] = pl.tile.add(acc, tile_a)
-                        if_result: pl.Tile[
-                            [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                        ] = pl.yield_(tile_c)
+                        _if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_c)
                     else:
-                        if_result: pl.Tile[
-                            [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                        ] = pl.yield_(acc)
+                        _if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(acc)
                     loop_out: pl.Tile[
                         [64, 64], pl.FP32, pl.MemRef(mem_carry_input_0, 0, 16384), pl.Mem.Vec
-                    ] = pl.yield_(if_result)
+                    ] = pl.yield_(acc)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     loop_out, [0, 0], output
                 )
@@ -3074,9 +3067,7 @@ class TestControlFlow:
                             [64, 64],
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_b)
                 else:
                     tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.load(
@@ -3086,9 +3077,7 @@ class TestControlFlow:
                             [64, 64],
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_c)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_c)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     if_result, [0, 0], output
                 )
@@ -3367,18 +3356,14 @@ class TestControlFlow:
                         tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(tile_a, tile_b)
                         )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_c)
-                        )
+                        _if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_c)
                     else:
                         tile_d: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(tile_b, tile_a)
                         )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_d)
-                        )
+                        _if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_d)
                     loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(if_result)
+                        pl.yield_(acc)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     loop_out, [0, 0], output
@@ -3450,12 +3435,12 @@ class TestControlFlow:
                     b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(
                         a, a
                     )
-                    r: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.yield_(b)
+                    r: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(b)
                 else:
                     c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.mul(
                         a, a
                     )
-                    r: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.yield_(c)
+                    r: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(c)
                 e: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = pl.tile.add(a, a)
                 f: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(r, e)
                 g: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(a, f)
@@ -3973,18 +3958,45 @@ class TestTopDownRetargeter:
             lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
 
         seed_bases, updated_bases, stored_bases = set(), set(), set()
+        dynamic_sources = {}
+
+        def roots(value):
+            tile_type = value.type
+            assert isinstance(tile_type, ir.TileType)
+            if tile_type.memref is not None:
+                return {tile_type.memref.base_.unique_id}
+            assert value.unique_id in dynamic_sources, f"missing descriptor sources for {value.name_hint}"
+            return dynamic_sources[value.unique_id]
 
         class CheckCopies(ir.IRVisitor):
+            def visit_if_stmt(self, op):
+                super().visit_if_stmt(op)
+                assert op.else_body is not None
+                then_yield = ir.get_last_yield_stmt(op.then_body)
+                else_yield = ir.get_last_yield_stmt(op.else_body)
+                assert then_yield is not None and else_yield is not None
+                for index, result in enumerate(op.return_vars):
+                    if isinstance(result.type, ir.TileType):
+                        assert result.type.memref is None
+                        dynamic_sources[result.unique_id] = roots(then_yield.value[index]) | roots(
+                            else_yield.value[index]
+                        )
+
             def visit_assign_stmt(self, op):
                 tile_type = op.var.type
                 if isinstance(tile_type, ir.TileType) and tile_type.memory_space == ir.MemorySpace.Acc:
-                    assert tile_type.memref is not None
-                    base = tile_type.memref.base_.unique_id
+                    if tile_type.memref is None:
+                        # The accumulating output and renamed results may follow
+                        # a dynamic descriptor. Verify their actual candidates
+                        # rather than asking them to pretend to own one buffer.
+                        source = op.value.args[0] if isinstance(op.value, ir.Call) else op.value
+                        dynamic_sources[op.var.unique_id] = roots(source)
                     if isinstance(op.value, ir.Call):
                         if op.value.op.name == ir.get_op("tile.matmul").name:
-                            seed_bases.add(base)
+                            assert tile_type.memref is not None
+                            seed_bases.update(roots(op.var))
                         elif op.value.op.name == ir.get_op("tile.matmul_acc").name:
-                            updated_bases.add(base)
+                            updated_bases.update(roots(op.var))
                 super().visit_assign_stmt(op)
 
             def visit_call(self, op):
@@ -3992,8 +4004,7 @@ class TestTopDownRetargeter:
                     source = op.args[0].type
                     assert isinstance(source, ir.TileType)
                     assert source.memory_space == ir.MemorySpace.Acc
-                    assert source.memref is not None
-                    stored_bases.add(source.memref.base_.unique_id)
+                    stored_bases.update(roots(op.args[0]))
                 if op.op.name == ir.get_op("tile.move").name:
                     source, target = op.args[0].type, op.type
                     assert not (
@@ -4082,16 +4093,12 @@ class TestTopDownRetargeter:
                     seed: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
                         pl.tile.matmul(sa, sb)
                     )
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
-                        seed
-                    )
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(seed)
                 else:
                     acc: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = (
                         pl.tile.matmul_acc(prev, sa, sb)
                     )
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_acc_5, 0, 4096), pl.Mem.Acc] = pl.yield_(
-                        acc
-                    )
+                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(acc)
                 result: pl.Tensor[[16, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)] = pl.tile.store(
                     phi, [0, 0], out
                 )
@@ -4566,22 +4573,20 @@ class SharedSuffix:
         for name in ("prev", "seed", "acc"):
             assert ranges[name] == (0, 4096), f"{name} did not use the canonical Acc window: {ranges}"
 
-        phi_ranges: list[tuple[int, int]] = []
+        phi_memrefs: list[ir.MemRef | None] = []
 
         class _IfReturnCollector(ir.IRVisitor):
             def visit_if_stmt(self, stmt):  # type: ignore[override]
                 for var in stmt.return_vars:
                     tile_type = var.type
-                    if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
-                        offset = tile_type.memref.byte_offset_
-                        assert isinstance(offset, ir.ConstInt)
-                        phi_ranges.append((offset.value, tile_type.memref.size_))
+                    if isinstance(tile_type, ir.TileType):
+                        phi_memrefs.append(tile_type.memref)
                 super().visit_if_stmt(stmt)
 
         main = after.get_function("kernel")
         assert main is not None
         _IfReturnCollector().visit_stmt(main.body)
-        assert phi_ranges == [(0, 4096)]
+        assert phi_memrefs == [None], "the If descriptor itself owns no fixed Acc window"
 
     def test_divergent_bare_acc_alias_fails_closed(self):
         """An alias with a stale MemRef cannot select the accumulator target."""
@@ -4840,13 +4845,9 @@ class SharedSuffix:
                         tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(acc_0, acc_0)
                         )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_c)
-                        )
+                        if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_c)
                     else:
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(acc_0)
-                        )
+                        if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(acc_0)
                     _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                         acc_0, [0, 0], output
                     )
@@ -5765,8 +5766,11 @@ class TestWhileAccumulatorAliasSafety:
 
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
             after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
-        refs = _collect_named_tile_memrefs(after, {"initial", "fresh", "accumulated", "viewed"})
-        for name in ("fresh", "accumulated", "viewed"):
+        names = {"initial", "fresh", "accumulated"}
+        if buffer_ir:
+            names.add("viewed")
+        refs = _collect_named_tile_memrefs(after, names)
+        for name in names - {"initial"}:
             assert _same_base_address(refs["initial"], refs[name]), after.as_python()
         _assert_if_phi_arms_write_the_phi_buffer(after)
 
@@ -9424,9 +9428,10 @@ class TestAliasingOutputPropagation:
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
             after = passes.memory_reuse()(passes.materialize_semantic_aliases()(input_program))
         _assert_if_phi_arms_write_the_phi_buffer(after)
-        memrefs = _collect_named_tile_memrefs(
-            after, {"seed", "first", "viewed", "renamed", "second", "final_view"}
-        )
+        names = {"seed", "first"}
+        if buffer_ir:
+            names.update({"viewed", "renamed", "second", "final_view"})
+        memrefs = _collect_named_tile_memrefs(after, names)
 
         class _AliasWindowChecker(ir.IRVisitor):
             def visit_assign_stmt(self, stmt):  # type: ignore[override]
@@ -9441,8 +9446,10 @@ class TestAliasingOutputPropagation:
                 else:
                     return super().visit_assign_stmt(stmt)
                 output_memref, source_memref = _carry_memref(stmt.var), _carry_memref(source)
-                assert output_memref is not None and source_memref is not None
-                assert _same_base_address(output_memref, source_memref), stmt.var.name_hint
+                if output_memref is None or source_memref is None:
+                    assert output_memref is source_memref is None, stmt.var.name_hint
+                else:
+                    assert _same_base_address(output_memref, source_memref), stmt.var.name_hint
                 super().visit_assign_stmt(stmt)
 
         function = after.get_function("kernel")

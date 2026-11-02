@@ -41,7 +41,9 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -192,6 +194,9 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
 class CarrySourceCollector : public IRVisitor {
  public:
   std::map<const Var*, std::vector<const Var*>> sources;
+  std::map<const Var*, MemRefPtr> fixed_carries;
+  std::set<const Var*> carries;
+  std::set<const Var*> views;
   std::set<const Var*> unknown;
   std::vector<MemRefPtr> carry_ranges;
 
@@ -212,15 +217,25 @@ class CarrySourceCollector : public IRVisitor {
         // write, not a shifted origin for the result descriptor.
         Bind(op->var_, {call->args_[0]});
       } else if (op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        views.insert(op->var_.get());
         const auto input = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
-        const auto source = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
-        const auto target = GetTileTypeWithMemRef(op->var_->GetType());
+        const auto source = input ? As<TileType>(input->GetType()) : nullptr;
+        const auto target = As<TileType>(op->var_->GetType());
+        if (target && target->memref_) {
+          // This view has an actual fixed window, rather than a selected-arm
+          // hint. Its current geometry is authoritative; do not retrace older
+          // metadata views when proving a fixed-carry writeback.
+          IRVisitor::VisitStmt_(op);
+          return;
+        }
         // Reshape preserves byte origin, including the row/column-vector
         // legalization around arithmetic. Do not infer this for slices from
-        // representative hints: their deferred view offsets may still be stale.
+        // a selected descriptor: it has no fixed window for an offset proof.
         if (call->op_->name_ == "tile.reshape" && source && target && source->dtype_ == target->dtype_ &&
             source->GetMemorySpace() == target->GetMemorySpace() &&
-            SamePhysicalWindow(GetDefinedMemRef(source), GetDefinedMemRef(target))) {
+            ((!source->memref_ && !target->memref_) ||
+             (source->memref_ && target->memref_ &&
+              SamePhysicalWindow(*source->memref_, *target->memref_)))) {
           Bind(op->var_, {input});
         } else {
           unknown.insert(op->var_.get());
@@ -265,12 +280,21 @@ class CarrySourceCollector : public IRVisitor {
   void Loop(const LoopPtr& op) {
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       const auto& argument = op->iter_args_[i];
-      Bind(argument, {argument->initValue_});
+      carries.insert(argument.get());
       VisitExpr(argument->initValue_);
       const auto source = AsVarLike(argument->initValue_);
       const auto tile = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
-      if (tile) carry_ranges.push_back(GetDefinedMemRef(tile));
-      if (i < op->return_vars_.size()) Bind(op->return_vars_[i], {argument});
+      if (tile) {
+        // A fixed carry reads its current buffer, not the initializer's view
+        // history on every iteration. Use the initializer's current window so
+        // this proof also survives producer storage rewrites.
+        VisitVarLike_(argument);
+        fixed_carries[argument.get()] = GetDefinedMemRef(tile);
+        carry_ranges.push_back(GetDefinedMemRef(tile));
+      } else {
+        Bind(argument, {argument->initValue_});
+      }
+      if (i < op->return_vars_.size()) Bind(op->return_vars_[i], {argument->initValue_});
     }
     IRVisitor::VisitStmt_(op);
   }
@@ -310,8 +334,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     if (canonical_branch_storage_ && !LoopMayExecute(op, false)) {
       return IRMutator::VisitStmt_(As<ForStmt>(FixupCanonicalLoop(op)));
     }
-    // If hint refresh replaces result Vars while visiting the body, retain the
-    // original yield slots for queries against the pre-mutation selection index.
+    // Nested storage rewrites can replace result Vars while visiting the body.
+    // Retain original yield slots for the pre-mutation candidate-source index.
     const auto original_yield = FindYieldStmt(op->body_);
     // First recurse into nested control flow
     auto result = IRMutator::VisitStmt_(op);
@@ -332,6 +356,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     RejectOverlappingCarryBuffers(for_stmt, carry_index);
 
     std::vector<CarryCopy> copies;
+    auto canonical_yield_values = yield_stmt->value_;
+    bool canonicalized_yield = false;
     for (size_t i = 0; i < yield_stmt->value_.size() && i < for_stmt->iter_args_.size(); ++i) {
       // AsVarLike, not As<Var>: a nested loop both yields and seeds carries with
       // the enclosing loop's IterArg, whose own ObjectKind As<Var> does not match.
@@ -345,36 +371,58 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // construction, whatever their (possibly still stale) types say.
       if (yield_var.get() == static_cast<const Var*>(for_stmt->iter_args_[i].get())) continue;
 
-      auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
+      auto yield_tile = As<TileType>(yield_var->GetType());
       if (!yield_tile) continue;
-      auto yield_memref = GetDefinedMemRef(yield_tile);
+      auto yield_memref = yield_tile->memref_.value_or(nullptr);
 
       // Get the initValue's MemRef (the actual buffer used at runtime)
       auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
-      if (!init_tile) continue;
+      if (!init_tile) {
+        // A handle chosen before this loop remains stable when every yielded
+        // path only writes back through this IterArg. This proves SSA handle
+        // identity, without assigning an address to the selected initializer.
+        const auto handle = original_yield && i < original_yield->value_.size()
+                                ? AsVarLike(original_yield->value_[i])
+                                : nullptr;
+        const auto found = handle ? carry_handles_.find(handle.get()) : carry_handles_.end();
+        if (found != carry_handles_.end() && found->second == op->iter_args_[i].get()) {
+          canonical_yield_values[i] = for_stmt->iter_args_[i];
+          canonicalized_yield = true;
+        }
+        continue;
+      }
       auto init_memref = GetDefinedMemRef(init_tile);
       const auto original_source = original_yield && i < original_yield->value_.size()
                                        ? AsVarLike(original_yield->value_[i])
                                        : nullptr;
       const bool selected_source = original_source && selected_before_fixup_.count(original_source.get());
-      // A nested phi may be marked selected solely because its old hint has
-      // not followed producer reuse yet. Its actual sources can still all be
-      // this exact carry. Prove both storage and descriptor identity before
-      // eliding a transfer; a genuine own-or-fresh choice must keep writeback.
+      if (selected_source && !LoopMayExecute(op, false)) continue;
+      // A nested selection can have this exact carry as every actual source. Prove both storage and
+      // fixed-carry descriptor compatibility before eliding a transfer; a genuine own-or-fresh choice must
+      // keep writeback.
       if (selected_source && IsExactOwnSource(original_source, init_memref) &&
-          SameCarryDescriptor(yield_tile, init_tile)) {
+          CanUseFixedCarryDescriptor(yield_tile, init_tile)) {
+        // Every candidate writes the current carry with a compatible layout. Record that
+        // proof at the fixed loop boundary instead of assigning a fictitious
+        // MemRef to the dynamic If result.
+        canonical_yield_values[i] = for_stmt->iter_args_[i];
+        canonicalized_yield = true;
         continue;
       }
 
       // Compare addresses, not allocations: two slots of one pl.MemRef(slots=N)
       // share a base, so "same allocation" would skip the copy that moves the
       // value from one slot to the other and silently carry the wrong slot.
-      const AddressRelation relation = CompareBaseAddress(yield_memref, init_memref);
-      // A selected value's hint can equal the carry on one arm while another
-      // arm yields fresh storage. Reconcile it regardless of that hint; the
-      // snapshot below makes its unchanged arm safe without a self-copy.
+      // A selected descriptor has no single address to compare with the carry.
+      // Its candidate summary above/below proves copy elision and self-aliasing;
+      // otherwise materialize its current value into the fixed carry.
+      const AddressRelation relation =
+          yield_memref ? CompareBaseAddress(yield_memref, init_memref) : AddressRelation::kDifferent;
+      // A selected source can yield the carry on one arm and fresh storage on
+      // the other. The snapshot below makes its unchanged arm safe without a
+      // runtime self-copy.
       // A statically zero-trip loop forwards its initializer and needs no dead
       // self-copy when the standalone storage passes preserve its body.
       if (relation == AddressRelation::kSame && (!selected_source || !LoopMayExecute(op, false))) continue;
@@ -399,6 +447,14 @@ class YieldFixupMutator : public StorageBoundaryMutator {
                                  init_memref, target_memory});
     }
 
+    if (canonicalized_yield) {
+      auto canonical_yield = MutableCopy(yield_stmt);
+      canonical_yield->value_ = std::move(canonical_yield_values);
+      auto canonical_loop = MutableCopy(for_stmt);
+      canonical_loop->body_ = InsertMovesAndReplaceYield(for_stmt->body_, canonical_yield, {});
+      for_stmt = canonical_loop;
+      yield_stmt = canonical_yield;
+    }
     if (copies.empty()) {
       // Even without tile.move insertion, iter_arg and return_var may have stale MemRefs
       // (MemoryReuse updates initValue/yield but not iter_arg/return_var types).
@@ -415,7 +471,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
         const auto source = copy.index < original_yield->value_.size()
                                 ? AsVarLike(original_yield->value_[copy.index])
                                 : nullptr;
-        // The static ordering below only sees representative addresses. Permit
+        // The static ordering below only sees fixed addresses. Permit
         // conditional sources proven to read their own destination or storage
         // untouched by every copy. Ambiguous conditional multi-copy boundaries
         // remain unsupported: a hidden sibling source could be overwritten.
@@ -439,7 +495,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
         const auto source = copy.index < original_yield->value_.size()
                                 ? AsVarLike(original_yield->value_[copy.index])
                                 : nullptr;
-        const auto source_tile = GetTileTypeWithMemRef(copy.source->GetType());
+        const auto source_tile = As<TileType>(copy.source->GetType());
         const auto source_memory = source_tile->GetMemorySpace();
         // Distinct hardware memory spaces cannot self-alias. In particular,
         // copying Acc into Vec must not request an unsupported Acc snapshot.
@@ -495,37 +551,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     if (!if_stmt || if_stmt->return_vars_.empty()) return result;
     if (canonical_branch_storage_) return FixupCanonicalIf(if_stmt);
 
-    // A Tile result selects the handle yielded by the executed arm. Its
-    // provisional MemRef is not a destination that the other arm must fill.
-    // Preserve both yields for native scf.if instead of copying their payloads.
-    // Refresh the representative hint after producer reuse so it cannot keep
-    // an abandoned allocation alive. This is not an alias claim about else.
-    const auto then_yield = transform_utils::GetLastYieldStmt(if_stmt->then_body_);
-    if (!then_yield) return result;
-    auto return_vars = if_stmt->return_vars_;
-    bool changed = false;
-    for (size_t i = 0; i < return_vars.size() && i < then_yield->value_.size(); ++i) {
-      const auto result_tile = GetTileTypeWithMemRef(return_vars[i]->GetType());
-      const auto source_tile = GetTileTypeWithMemRef(then_yield->value_[i]->GetType());
-      if (!result_tile || !source_tile) continue;
-      const auto source_memref = GetDefinedMemRef(source_tile);
-      if (SameKnownTileMemorySpace(result_tile, source_tile) &&
-          SamePhysicalWindow(GetDefinedMemRef(result_tile), source_memref)) {
-        continue;
-      }
-      auto type = CloneTypeWithMemRefAndRemapExprs(
-          result_tile, source_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-          source_tile->GetMemorySpace());
-      auto replacement = std::make_shared<Var>(return_vars[i]->name_hint_, type, return_vars[i]->span_);
-      var_remap_[op->return_vars_[i].get()] = replacement;
-      var_remap_[return_vars[i].get()] = replacement;
-      return_vars[i] = std::move(replacement);
-      changed = true;
-    }
-    if (!changed) return result;
-    auto updated = MutableCopy(if_stmt);
-    updated->return_vars_ = std::move(return_vars);
-    return updated;
+    // Native If results select descriptors at runtime. They never acquire a
+    // fixed MemRef here; InitMemRef and alias normalization preserve that fact.
+    return result;
   }
 
  public:
@@ -778,7 +806,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   struct CarrySourceSummary {
     bool unknown = false;
     bool has_disjoint_root = false;
-    bool descriptor_changed = false;
+    bool incompatible_descriptor = false;
     // Retain at most two distinct windows that overlap any loop carry in the
     // function. All other roots are fresh with respect to every carry write.
     // A bounded summary avoids transitive root-set expansion for nested phis.
@@ -787,7 +815,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     void Merge(const CarrySourceSummary& source) {
       if (unknown) return;
       has_disjoint_root |= source.has_disjoint_root;
-      descriptor_changed |= source.descriptor_changed;
+      incompatible_descriptor |= source.incompatible_descriptor;
       unknown = source.unknown;
       if (!unknown) {
         for (const auto& window : source.windows) {
@@ -807,10 +835,51 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   };
 
   std::map<const Var*, CarrySourceSummary> carry_sources_;
+  std::map<const Var*, const Var*> carry_handles_;
+
+  void IndexCarryHandles(const CarrySourceCollector& collector) {
+    std::map<const Var*, size_t> remaining;
+    std::map<const Var*, std::vector<const Var*>> users;
+    std::vector<const Var*> pending;
+    std::set<const Var*> incompatible;
+    for (const auto& [value, inputs] : collector.sources) {
+      carry_handles_[value] = value;
+      if (collector.unknown.count(value)) incompatible.insert(value);
+      if (collector.carries.count(value) || inputs.empty()) {
+        pending.push_back(value);
+        continue;
+      }
+      remaining[value] = inputs.size();
+      carry_handles_[value] = nullptr;
+      for (const auto* input : inputs) {
+        users[input].push_back(value);
+        if (collector.views.count(value) &&
+            !CanUseFixedCarryDescriptor(As<TileType>(input->GetType()), As<TileType>(value->GetType()))) {
+          incompatible.insert(value);
+        }
+      }
+    }
+    while (!pending.empty()) {
+      const auto* source = pending.back();
+      pending.pop_back();
+      if (incompatible.count(source)) carry_handles_[source] = nullptr;
+      for (const auto* target : users[source]) {
+        const auto* root = carry_handles_.at(source);
+        auto& target_root = carry_handles_.at(target);
+        if (!root || (target_root && target_root != root)) incompatible.insert(target);
+        target_root = root;
+        if (--remaining.at(target) == 0) pending.push_back(target);
+      }
+    }
+    for (const auto& [value, count] : remaining) {
+      if (count != 0) carry_handles_[value] = nullptr;
+    }
+  }
 
   void IndexCarrySources(const StmtPtr& body) {
     CarrySourceCollector collector;
     collector.VisitStmt(body);
+    IndexCarryHandles(collector);
     const CarryRangeIndex all_carries(collector.carry_ranges);
     std::map<const Var*, size_t> remaining;
     std::map<const Var*, std::vector<const Var*>> users;
@@ -821,16 +890,19 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       remaining[value] = inputs.size();
       for (const auto* input : inputs) {
         users[input].push_back(value);
-        // A phi's own type is only a representative. Every incoming alias
-        // must preserve the descriptor, including an untaken metadata-changing
-        // arm or a reshape roundtrip, before exact-own copy elision is legal.
-        summary.descriptor_changed |=
-            !SameCarryDescriptor(As<TileType>(input->GetType()), As<TileType>(value->GetType()));
+        // A phi has no fixed storage. Every incoming alias
+        // must remain compatible with the fixed carry, including an untaken
+        // metadata-changing arm or a reshape roundtrip, before eliding a transfer.
+        summary.incompatible_descriptor |=
+            !CanUseFixedCarryDescriptor(As<TileType>(input->GetType()), As<TileType>(value->GetType()));
       }
       if (!inputs.empty()) continue;
       pending.push_back(value);
       const auto tile = GetTileTypeWithMemRef(value->GetType());
-      const auto window = tile ? GetDefinedMemRef(tile) : nullptr;
+      const auto carry = collector.fixed_carries.find(value);
+      const auto window = carry != collector.fixed_carries.end() ? carry->second
+                          : tile                                 ? GetDefinedMemRef(tile)
+                                                                 : nullptr;
       // A symbolic view offset cannot prove either independence or exact own
       // storage. Leave such sources to the existing unsupported-case diagnostic.
       if (!window || !As<ConstInt>(window->byte_offset_)) summary.unknown = true;
@@ -882,26 +954,56 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   [[nodiscard]] bool IsExactOwnSource(const VarPtr& source, const MemRefPtr& destination) const {
     const auto found = carry_sources_.find(source.get());
     if (found == carry_sources_.end() || found->second.unknown || found->second.has_disjoint_root ||
-        found->second.descriptor_changed || found->second.windows.empty()) {
+        found->second.incompatible_descriptor || found->second.windows.empty()) {
       return false;
     }
     return std::all_of(found->second.windows.begin(), found->second.windows.end(),
                        [&](const MemRefPtr& window) { return SamePhysicalWindow(window, destination); });
   }
 
-  static bool SameCarryDescriptor(const TileTypePtr& source, const TileTypePtr& destination) {
+  static bool CanUseFixedCarryDescriptor(const TileTypePtr& source, const TileTypePtr& destination) {
     if (!source || !destination || source->dtype_ != destination->dtype_ ||
         !SameKnownTileMemorySpace(source, destination) || source->shape_.size() != 2 ||
         destination->shape_.size() != 2) {
       return false;
     }
-    // Pointer identity or equal constants are sufficient proofs. Do not walk
-    // arbitrary symbolic expression DAGs once per carry merely to elide a copy.
+    // Storage rewrites can rebuild equal scalar expressions such as min(rows,
+    // 64). Prove those small descriptors structurally, with a fixed traversal
+    // budget so repeated carry checks cannot scan arbitrary expression DAGs.
+    class BoundedExpression : public IRVisitor {
+     public:
+      void VisitExpr(const ExprPtr& expr) override {
+        if (expr && ++nodes <= 32) IRVisitor::VisitExpr(expr);
+      }
+      size_t nodes = 0;
+
+     protected:
+      void VisitVarLike_(const VarPtr&) override {}
+      void VisitExpr_(const IterArgPtr& op) override { VisitVarLike_(op); }
+      void VisitExpr_(const CallPtr& op) override {
+        if (op->args_.size() > 32 || !op->kwargs_.empty() || !op->attrs_.empty()) {
+          nodes = 33;
+          return;
+        }
+        IRVisitor::VisitExpr_(op);
+      }
+      void VisitExpr_(const MakeTuplePtr& op) override {
+        if (op->elements_.size() > 32) {
+          nodes = 33;
+          return;
+        }
+        IRVisitor::VisitExpr_(op);
+      }
+    };
     auto same_expr = [](const ExprPtr& lhs, const ExprPtr& rhs) {
       if (lhs == rhs) return true;
       const auto a = As<ConstInt>(lhs);
       const auto b = As<ConstInt>(rhs);
-      return a && b && a->value_ == b->value_;
+      if (a || b) return a && b && a->value_ == b->value_;
+      BoundedExpression left, right;
+      left.VisitExpr(lhs);
+      right.VisitExpr(rhs);
+      return left.nodes <= 32 && right.nodes <= 32 && structural_equal(lhs, rhs);
     };
     auto same_dims = [&](const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
       return lhs.size() == rhs.size() && lhs.size() <= 2 &&
@@ -909,10 +1011,20 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     };
     const auto a = tile_view_semantics::GetEffectiveTileView(*source);
     const auto b = tile_view_semantics::GetEffectiveTileView(*destination);
-    return same_dims(source->shape_, destination->shape_) && same_dims(a.valid_shape, b.valid_shape) &&
-           same_dims(a.stride, b.stride) && same_expr(a.start_offset, b.start_offset) &&
-           a.blayout == b.blayout && a.slayout == b.slayout && a.fractal == b.fractal && a.pad == b.pad &&
-           a.compact == b.compact;
+    // A fixed Acc carry with one row of NZ boxes has the same payload pitch
+    // for every valid row count, including compact boundary writes. Its loop
+    // boundary already uses the initializer's descriptor; no payload transfer
+    // is needed merely because the dynamic If descriptor narrows valid rows.
+    // Keep that If result dynamic and prove only this fixed-carry writeback.
+    const auto geometry = tile_view_semantics::GetAccumulatorTileGeometry(*source);
+    const auto rows = As<ConstInt>(source->shape_[0]);
+    const bool single_row_box = source->GetMemorySpace() == MemorySpace::Acc && geometry && rows &&
+                                rows->value_ == geometry->box.rows && a.valid_shape.size() == 2 &&
+                                b.valid_shape.size() == 2 && same_expr(a.valid_shape[1], b.valid_shape[1]);
+    return same_dims(source->shape_, destination->shape_) &&
+           (same_dims(a.valid_shape, b.valid_shape) || single_row_box) && same_dims(a.stride, b.stride) &&
+           same_expr(a.start_offset, b.start_offset) && a.blayout == b.blayout && a.slayout == b.slayout &&
+           a.fractal == b.fractal && a.pad == b.pad && (a.compact == b.compact || single_row_box);
   }
 
   /// The byte range each carry owns, indexed by iter_arg position (null when the
@@ -996,6 +1108,10 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     std::vector<std::vector<size_t>> successors(count);
     std::vector<size_t> in_degree(count, 0);
     for (size_t i = 0; i < count; ++i) {
+      // Dynamic sources were checked against every destination and snapshotted
+      // above when they may read their own carry. Remaining ones are disjoint
+      // from all writes and therefore contribute no ordering edge.
+      if (!(*copies)[i].src_memref) continue;
       carry_index.ForEachOverlapping((*copies)[i].src_memref, [&](size_t carry) {
         auto hit = copy_of_carry.find(carry);
         if (hit == copy_of_carry.end() || hit->second == i) return;
@@ -1177,10 +1293,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   /// longer reads a buffer its siblings overwrite. Emits the scratch allocation
   /// into `pending_allocs_` for the caller to hoist.
   void SpillCarrySource(CarryCopy* copy, std::vector<StmtPtr>* spills) {
-    auto src_tile = GetTileTypeWithMemRef(copy->source->GetType());
+    auto src_tile = As<TileType>(copy->source->GetType());
     INTERNAL_CHECK_SPAN(src_tile, copy->source->span_)
-        << "Internal error: a loop-carry copy source must be a TileType with a MemRef";
-    auto src_memref = GetDefinedMemRef(src_tile);
+        << "Internal error: a loop-carry copy source must be a TileType";
     auto src_memory = src_tile->GetMemorySpace();
     if (canonical_branch_storage_) {
       CHECK_SPAN(src_memory && IsTileMoveEverSupported(*src_memory, *src_memory), copy->source->span_)
@@ -1188,6 +1303,11 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     }
     INTERNAL_CHECK_SPAN(src_memory.has_value(), copy->source->span_)
         << "Internal error: a loop-carry copy source must carry a memory space to spill";
+    const auto bytes = src_tile->memref_
+                           ? std::make_optional((*src_tile->memref_)->size_)
+                           : utils::StaticPhysicalAllocationBytes(src_tile, *src_memory, nullptr);
+    INTERNAL_CHECK_SPAN(bytes.has_value(), copy->source->span_)
+        << "Internal error: a loop-carry snapshot requires a static physical tile size";
 
     // `mem_<space>_carry_spill_N` cannot collide with InitMemRef's
     // `mem_<space>_<N>`, which never has a non-numeric segment before its
@@ -1201,8 +1321,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
         canonical_branch_storage_ ? names_.Fresh("mem_" + space_str + "_carry_spill_")
                                   : "mem_" + space_str + "_carry_spill_" + std::to_string(spill_counter_++);
     auto scratch_base = std::make_shared<Var>(base_name, GetPtrType(), copy->source->span_);
-    auto scratch_memref = std::make_shared<MemRef>(scratch_base, static_cast<int64_t>(0), src_memref->size_,
-                                                   copy->source->span_);
+    auto scratch_memref =
+        std::make_shared<MemRef>(scratch_base, static_cast<int64_t>(0), *bytes, copy->source->span_);
     pending_allocs_.push_back(CreateAllocStatement(scratch_memref, *src_memory));
 
     auto [spilled_var, spill_stmt] = CreateTileMove(copy->source, scratch_memref, src_memory);
@@ -1371,11 +1491,11 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
  public:
   NormalizeIdentityCopyBuffersMutator() = default;
 
-  /// `unsettled` seeds IfStmt results before YieldFixup refreshes their MemRef;
+  /// `unsettled` seeds unresolved Buffer IR branch destinations;
   /// the traversal grows it with every required alias. See
   /// `ReanchorAliasingOutput` for why anchoring onto one is wrong.
   explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
-      : unsettled_(std::move(unsettled)), refresh_native_phi_hints_(false) {}
+      : unsettled_(std::move(unsettled)) {}
 
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = subst_.find(op);
@@ -1387,11 +1507,10 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (found != var_remap_.end()) return found->second;
     auto visited = As<IterArg>(StorageBoundaryMutator::VisitExpr_(op));
     INTERNAL_CHECK_SPAN(visited, op->span_) << "Internal error: IterArg visit must yield an IterArg";
-    if (!AsTensorTypeLike(visited->GetType())) return visited;
-    // GM loop carries are mutable references: codegen binds their handles to
-    // the initializer, including on zero-trip loops. A renamed initializer may
-    // have moved even when this carry's own type has not changed.
-    if (auto type = TensorBoundaryType(visited->GetType(), visited->initValue_)) {
+    if (!AsTensorTypeLike(visited->GetType()) && !As<TileType>(visited->GetType())) return visited;
+    // Loop carries are mutable references to their initializer, including on
+    // zero-trip loops. Preserve either its fixed storage or its dynamic handle.
+    if (auto type = BoundaryAliasType(visited->GetType(), visited->initValue_)) {
       visited = std::make_shared<IterArg>(visited->name_hint_, type, visited->initValue_, visited->span_);
     }
     if (IsUnsettled(AsVarLike(op->initValue_)) || IsUnsettled(AsVarLike(visited->initValue_))) {
@@ -1402,33 +1521,23 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     return visited;
   }
 
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return NormalizeTensorLoop(op); }
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return NormalizeTensorLoop(op); }
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return NormalizeLoopAliases(op); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return NormalizeLoopAliases(op); }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto visited = As<IfStmt>(IRMutator::VisitStmt_(op));
     const auto* context = PassContext::Current();
-    if (!refresh_native_phi_hints_ || (context && context->GetEnableBufferIR())) return visited;
-    const auto yield = transform_utils::GetLastYieldStmt(visited->then_body_);
-    if (!yield) return visited;
+    if (context && context->GetEnableBufferIR()) return visited;
     auto result = MutableCopy(visited);
     bool changed = false;
-    for (size_t i = 0; i < visited->return_vars_.size() && i < yield->value_.size(); ++i) {
+    for (size_t i = 0; i < visited->return_vars_.size(); ++i) {
       const auto& var = visited->return_vars_[i];
-      const auto tile = GetTileTypeWithMemRef(var->GetType());
-      const auto source = GetTileTypeWithMemRef(yield->value_[i]->GetType());
-      if (!tile || !source ||
-          (SamePhysicalWindow(GetDefinedMemRef(tile), GetDefinedMemRef(source)) &&
-           tile->GetMemorySpace() == source->GetMemorySpace())) {
-        continue;
-      }
-      // Writeback aliases in the then arm may have moved during this very
-      // normalization walk. Refresh only the native descriptor's hint, without
-      // coalescing its candidates. Otherwise an abandoned hint allocation stays
-      // artificially live and downstream aliases can address stale storage.
-      auto replacement = std::make_shared<Var>(
-          var->name_hint_, CloneTypeWithMemRef(var->GetType(), source->memref_, source->GetMemorySpace()),
-          var->span_);
+      const auto tile = As<TileType>(var->GetType());
+      if (!tile || !tile->memref_) continue;
+      // Producer retargeting can change branch storage, but the region result
+      // remains a dynamic descriptor even when both arms now share a buffer.
+      auto replacement =
+          std::make_shared<Var>(var->name_hint_, CloneTypeWithMemRef(tile, std::nullopt), var->span_);
       result->return_vars_[i] = replacement;
       subst_[op->return_vars_[i]] = replacement;
       changed = true;
@@ -1450,8 +1559,9 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
       }
       auto lhs = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
       auto rhs = new_src ? std::dynamic_pointer_cast<const ShapedType>(new_src->GetType()) : nullptr;
-      if (lhs && rhs && lhs->memref_ && rhs->memref_ &&
-          (!SamePhysicalWindow(*lhs->memref_, *rhs->memref_) ||
+      if (lhs && rhs &&
+          (lhs->memref_.has_value() != rhs->memref_.has_value() ||
+           (lhs->memref_ && !SamePhysicalWindow(*lhs->memref_, *rhs->memref_)) ||
            lhs->GetMemorySpace() != rhs->GetMemorySpace())) {
         auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_src->GetType(), op->var_->span_);
         if (IsUnsettled(op->var_)) unsettled_.insert(new_lhs.get());
@@ -1467,7 +1577,17 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
  private:
-  TypePtr TensorBoundaryType(const TypePtr& type, const ExprPtr& source) {
+  TypePtr BoundaryAliasType(const TypePtr& type, const ExprPtr& source) {
+    const auto target_tile = As<TileType>(type);
+    const auto input_tile = source ? As<TileType>(source->GetType()) : nullptr;
+    if (target_tile && input_tile) {
+      if (target_tile->memref_.has_value() != input_tile->memref_.has_value() ||
+          (target_tile->memref_ && !SamePhysicalWindow(*target_tile->memref_, *input_tile->memref_)) ||
+          target_tile->GetMemorySpace() != input_tile->GetMemorySpace()) {
+        return CloneTypeWithMemRef(type, input_tile->memref_, input_tile->GetMemorySpace());
+      }
+      return nullptr;
+    }
     auto target = AsTensorTypeLike(type);
     auto input = source ? AsTensorTypeLike(source->GetType()) : nullptr;
     if (!target || !input || !target->memref_ || !input->memref_ ||
@@ -1479,16 +1599,16 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
   template <typename LoopPtr>
-  StmtPtr NormalizeTensorLoop(const LoopPtr& op) {
+  StmtPtr NormalizeLoopAliases(const LoopPtr& op) {
     auto visited = std::static_pointer_cast<const typename LoopPtr::element_type>(IRMutator::VisitStmt_(op));
     auto result = MutableCopy(visited);
     bool changed = false;
     for (size_t i = 0; i < visited->iter_args_.size() && i < visited->return_vars_.size(); ++i) {
       const auto& argument = visited->iter_args_[i];
       const auto& return_var = visited->return_vars_[i];
-      if (!AsTensorTypeLike(return_var->GetType())) continue;
+      if (!AsTensorTypeLike(return_var->GetType()) && !As<TileType>(return_var->GetType())) continue;
       auto replacement = return_var;
-      if (auto type = TensorBoundaryType(return_var->GetType(), argument)) {
+      if (auto type = BoundaryAliasType(return_var->GetType(), argument)) {
         replacement = std::make_shared<Var>(return_var->name_hint_, type, return_var->span_);
         subst_[op->return_vars_[i]] = replacement;
         result->return_vars_[i] = replacement;
@@ -1510,21 +1630,10 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     return var != nullptr && unsettled_.count(var.get()) != 0;
   }
 
-  /// Skips a reused input listed in `unsettled_` — an IfStmt return_var, or a
-  /// alias of one, on the pre-YieldFixup run. A phi is not a tracked def in the
-  /// reuse analysis (see
-  /// LifetimeAnalyzer's IfStmt handler), so it still carries its pre-reuse buffer
-  /// here and YieldFixup chooses the real one in Step 4.  Anchoring onto the
-  /// stale buffer pins this producer to storage that is about to be abandoned:
-  /// YieldFixup then reads it as the canonical target for the *next* phi in the
-  /// chain and reconciles the other arm with a same-space `tile.move` no target
-  /// can lower, while the post-fixup run silently re-anchors the producer back —
-  /// leaving the phi buffer unwritten on the taken arm.  Two conditionals over
-  /// one in-place tile (what `pl.unroll(2)` around an `if` produces) are enough.
-  /// Rebuild a registered writeback result or first-input alias from its current
-  /// source. Preserve result shape/dtype/view metadata, including TensorType and
-  /// DistributedTensorType writebacks. These are required aliases, not reuse
-  /// opportunities; allocating transpose/extract operations are excluded.
+  /// Rebuild a required alias from its current source. Runtime descriptors
+  /// propagate the absence of fixed storage. Buffer IR provisional destinations
+  /// defer fixed-window anchoring until canonical branch storage is established.
+  /// Preserve result shape/dtype/view metadata; allocating ops stay independent.
   StmtPtr ReanchorAliasingOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
     if (!call || !call->op_) return nullptr;
@@ -1536,23 +1645,42 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
     if (!new_in) return nullptr;
+    auto lhs = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
+    auto input = std::dynamic_pointer_cast<const ShapedType>(new_in->GetType());
+    if (!lhs || !input) return nullptr;
+    if (!input->memref_) {
+      // A required alias of a runtime-selected descriptor has no fixed storage
+      // either. Preserve the result's shape/view while removing stale allocation
+      // metadata; the emitted view/writeback follows its operand SSA.
+      if (!lhs->memref_ && lhs->GetMemorySpace() == input->GetMemorySpace()) return nullptr;
+      auto type = CloneTypeWithMemRef(op->var_->GetType(), std::nullopt, input->GetMemorySpace());
+      auto replacement = std::make_shared<Var>(op->var_->name_hint_, type, op->var_->span_);
+      subst_[op->var_] = replacement;
+      auto recursed = As<AssignStmt>(IRMutator::VisitStmt_(op));
+      return std::make_shared<AssignStmt>(replacement, recursed->value_, recursed->span_);
+    }
     if (IsUnsettled(in_var) || IsUnsettled(new_in)) {
-      // The phi's representative hint has not been refreshed yet. Defer its
-      // dependent hints too, retaining this state through the alias chain.
+      // Buffer IR establishes its phi destination later. Native dynamic inputs
+      // were handled above and must never regain a fixed alias window.
       unsettled_.insert(op->var_.get());
       return nullptr;
     }
-    auto lhs = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
-    auto input = std::dynamic_pointer_cast<const ShapedType>(new_in->GetType());
-    if (!lhs || !input || !lhs->memref_ || !input->memref_) return nullptr;
     auto target = *input->memref_;
     if (!reuse_idx) {
       // Derive only the view-relative offset. A writeback's transfer offset
       // selects what it writes; its result still denotes the whole destination.
       auto relative = ComputeViewByteOffset(call, new_in->GetType());
-      target = MakeAliasingMemRef(target, relative, (*lhs->memref_)->size_, (*lhs->memref_)->span_);
+      const auto memory = input->GetMemorySpace();
+      INTERNAL_CHECK_SPAN(memory.has_value(), op->span_)
+          << "Internal error: a required alias view needs a memory space";
+      const auto bytes = lhs->memref_ ? std::make_optional((*lhs->memref_)->size_)
+                                      : utils::StaticPhysicalAllocationBytes(lhs, *memory, nullptr);
+      INTERNAL_CHECK_SPAN(bytes.has_value(), op->span_)
+          << "Internal error: a required alias view needs a static physical size";
+      target = MakeAliasingMemRef(target, relative, *bytes, op->span_);
     }
-    if (SamePhysicalWindow(*lhs->memref_, target) && lhs->GetMemorySpace() == input->GetMemorySpace()) {
+    if (lhs->memref_ && SamePhysicalWindow(*lhs->memref_, target) &&
+        lhs->GetMemorySpace() == input->GetMemorySpace()) {
       return nullptr;
     }
     auto new_type = CloneTypeWithMemRef(op->var_->GetType(), target, input->GetMemorySpace());
@@ -1565,10 +1693,9 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
 
   std::map<VarPtr, ExprPtr> subst_;
   std::set<const Var*> unsettled_;
-  bool refresh_native_phi_hints_ = true;
 };
 
-/// Every IfStmt return_var whose MemRef has not been refreshed by YieldFixup.
+/// IfStmt destinations that remain provisional on the Buffer IR path.
 class IfPhiReturnVarCollector : public IRVisitor {
  public:
   std::set<const Var*> phis;
@@ -1602,8 +1729,8 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Va
 }
 
 /// The pre-YieldFixup half of the identity-copy normalization bracket: identical
-/// to the plain run except that an in-place producer is never anchored onto a phi
-/// whose representative MemRef has not been refreshed (`ReanchorAliasingOutput`).
+/// to the plain run except that fixed-window aliases of provisional Buffer IR
+/// branch destinations are deferred (`ReanchorAliasingOutput`).
 StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body) {
   IfPhiReturnVarCollector collector;
   collector.VisitStmt(body);
@@ -1615,8 +1742,8 @@ StmtPtr AlignLoopCarriesToInit(const StmtPtr& body) {
 }
 
 StmtPtr NormalizeIdentityCopyBuffers(const StmtPtr& body) {
-  // This also refreshes descriptor aliases' representative hints. Their runtime
-  // provenance and SSA handles still follow the actual selected source.
+  // Required aliases follow either their fixed source window or the absence
+  // of fixed storage on a runtime-selected descriptor.
   return NormalizeIdentityCopyBuffersMutator().VisitStmt(body);
 }
 

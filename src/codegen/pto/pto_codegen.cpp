@@ -2839,8 +2839,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (const auto source = AsVarLike(op->value_); source && As<TileType>(op->var_->GetType())) {
     const std::string source_ssa = LookupVarName(source);
     if (IsSelectedTileName(source_ssa)) {
-      // The MemRef on a phi is only a representative allocation. Even with
-      // explicit addresses, a bare alias must retain the runtime-selected SSA.
+      // A native phi has no fixed allocation. Its bare aliases retain the
+      // runtime-selected SSA even when the branch allocations have addresses.
       BindVarToMlir(op->var_, source_ssa);
       return;
     }
@@ -2854,7 +2854,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const size_t writeback_index = writeback_arg.value_or(0);
   const bool selected_writeback = writeback_arg && As<TileType>(op->var_->GetType()) &&
                                   IsSelectedTileName(GetExprAsCode(call->args_[writeback_index]));
-  const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op) || selected_writeback;
+  // Simplify can eliminate a constant If after storage legalization. Required
+  // writebacks still forward their operand even if the result retains no MemRef.
+  const bool descriptor_writeback = writeback_arg && As<TileType>(op->var_->GetType()) &&
+                                    !ir::GetTypeMemRef(op->var_->GetType()) &&
+                                    As<TileType>(call->args_[writeback_index]->GetType());
+  const bool alias_result_to_in_place_input =
+      ShouldAliasResultToInPlaceInput(op) || selected_writeback || descriptor_writeback;
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
   const auto multi_tile_alias = FindMultiTileInputAlias(op);
   if (multi_tile_alias) {
@@ -2916,11 +2922,11 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         // there is no MemRef to read. Register it before the op codegen runs so
         // GetCurrentResultTileBufTypeString() can emit the `-> type` annotation.
         result_tile_type = tile_type;
-        result_buf = selected_writeback ? GetExprAsCode(call->args_[writeback_index])
-                                        : NewNamedTemp(op->var_->name_hint_);
+        result_buf = alias_result_to_in_place_input ? GetExprAsCode(call->args_[writeback_index])
+                                                    : NewNamedTemp(op->var_->name_hint_);
         BindVarToMlir(op->var_, result_buf);
         std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
-        if (!selected_writeback && !type_str.empty()) {
+        if (!alias_result_to_in_place_input && !type_str.empty()) {
           RegisterTileBufType(result_buf, type_str, tile_type);
         }
       } else if (alias_array_update_to_input) {
@@ -3021,7 +3027,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         return;
       }
     } else if (auto tile_type = As<TileType>(op->var_->GetType());
-               tile_type && (!emit_tile_addr_ || IsParameterBackedTile(tile_type))) {
+               tile_type && (!emit_tile_addr_ || !tile_type->memref_ || IsParameterBackedTile(tile_type))) {
       // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
       // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
       // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /

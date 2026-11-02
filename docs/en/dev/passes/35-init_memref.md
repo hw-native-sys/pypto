@@ -53,7 +53,8 @@ program_with_memrefs = init_pass(program)
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
-   - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
+   - **Loop return variables**: follow their carry initializer's MemRef
+   - **IfStmt Tile results**: retain common shape/dtype/memory-space metadata but no fixed MemRef, including when both arms yield the same source. Their required aliases and views also remain without fixed storage; actual payload producers still receive MemRefs
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author

@@ -23,6 +23,105 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 _PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 
 
+def _assert_dynamic_if_results(program):
+    class Checker(ir.IRVisitor):
+        def visit_if_stmt(self, op):
+            for result in op.return_vars:
+                if isinstance(result.type, ir.TileType):
+                    assert result.type.memref is None, "If results must not inherit an arm's allocation"
+                    assert result.type.memory_space is not None
+            super().visit_if_stmt(op)
+
+    Checker().visit_program(program)
+
+
+@pytest.mark.parametrize("same_source", [False, True])
+def test_init_memref_keeps_selected_storage_dynamic(same_source, ascend_backend):
+    """An If and its aliases own no payload, including identical branch sources."""
+    other = "a" if same_source else "b"
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+               out: pl.Out[pl.Tensor[[2, 16], pl.FP32]]) -> pl.Tensor[[2, 16], pl.FP32]:
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_({other})
+        alias = selected
+        viewed = pl.tile.reshape(alias, [2, 16])
+        updated = pl.tile.assemble(viewed, viewed, [0, 0])
+        fresh = pl.tile.adds(updated, 1.0)
+        return pl.store(fresh, [0, 0], out)
+""")
+    with passes.PassContext(
+        [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)], enable_buffer_ir=False
+    ):
+        initialized = passes.init_mem_ref()(program)
+        _assert_dynamic_if_results(initialized)
+
+    variables = {}
+
+    class Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.var.type, ir.TileType):
+                variables[op.var.name_hint] = op.var.type
+            super().visit_assign_stmt(op)
+
+    Collector().visit_program(initialized)
+    for name in ("alias", "viewed", "updated"):
+        assert variables[name].memref is None, f"{name} must follow the dynamic descriptor"
+        assert variables[name].memory_space == pl.Mem.Vec
+    for name in ("a", "b", "fresh"):
+        assert variables[name].memref is not None, f"{name} owns actual payload storage"
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_init_memref_preserves_dynamic_storage_through_identity_loop(count, ascend_backend):
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+               out: pl.Out[pl.Tensor[[4, 8], pl.FP32]]) -> pl.Tensor[[4, 8], pl.FP32]:
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        for i, (carry,) in pl.range({count}, init_values=(selected,)):
+            alias = carry
+            viewed = pl.tile.reshape(alias, [4, 8])
+            result = pl.yield_(viewed)
+        after = result
+        return pl.store(after, [0, 0], out)
+""")
+    with passes.PassContext(
+        [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)], enable_buffer_ir=False
+    ):
+        initialized = passes.init_mem_ref()(program)
+
+    class Checker(ir.IRVisitor):
+        def visit_for_stmt(self, op):
+            assert isinstance(op.iter_args[0].type, ir.TileType)
+            assert isinstance(op.return_vars[0].type, ir.TileType)
+            assert op.iter_args[0].type.memref is None
+            assert op.return_vars[0].type.memref is None
+            super().visit_for_stmt(op)
+
+        def visit_assign_stmt(self, op):
+            if op.var.name_hint in ("alias", "viewed", "after"):
+                assert isinstance(op.var.type, ir.TileType)
+                assert op.var.type.memref is None
+            super().visit_assign_stmt(op)
+
+    Checker().visit_program(initialized)
+
+
 @pl.program
 class PinnedInputs:
     @pl.function(type=pl.FunctionType.InCore)
@@ -125,6 +224,7 @@ def test_native_if_compiles_without_copies(
         pass_verification_instruments, memory_planner=planner, enable_buffer_ir=enable_buffer_ir
     ):
         lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        _assert_dynamic_if_results(lowered)
         text = codegen.PTOCodegen().generate(
             lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
         )
@@ -428,9 +528,10 @@ def test_shared_accumulator_declaration_dominates_if_arms(tmp_path, ascend_backe
     allocations = [line for line in text.splitlines() if "pto.alloc_tile" in line and "loc=acc" in line]
     assert len(allocations) == 1, text
     assert text.index(allocations[0]) < text.index("scf.for"), text
-    # Matching handles require no descriptor selection, and retain the local
-    # provenance PTOAS needs for subsequent mutable-validity operations.
-    assert not re.search(r"scf.if .* -> .*loc=acc", text), text
+    # Shared producers still declare one buffer, while the If result uniformly
+    # remains a dynamic descriptor even when its arms yield that same handle.
+    _assert_dynamic_if_results(lowered)
+    assert re.search(r"scf.if .* -> .*loc=acc", text), text
     source = tmp_path / "shared_accumulator.pto"
     source.write_text(text)
     compiled = subprocess.run(
@@ -568,6 +669,41 @@ def _compile_native_loop(text, planner, tmp_path):
         check=False,
     )
     assert compiled.returncode == 0, compiled.stderr
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_dynamic_acc_initializer_keeps_one_handle_during_inplace_loop(planner, ascend_backend, tmp_path):
+    """A stable runtime handle needs neither an entry Acc copy nor a fixed MemRef."""
+    program = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32, 32], pl.FP16], flag: pl.Scalar[pl.INT32],
+               out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]) -> pl.Tensor[[32, 32], pl.FP32]:
+        tile = pl.load(x, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        lhs = pl.tile.move(tile, target_memory=pl.Mem.Left)
+        rhs = pl.tile.move(tile, target_memory=pl.Mem.Right)
+        a = pl.tile.matmul(lhs, rhs)
+        b = pl.tile.matmul(lhs, rhs)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        for i, (carry,) in pl.range(2, init_values=(selected,)):
+            updated = pl.tile.matmul_acc(carry, lhs, rhs)
+            result = pl.yield_(updated)
+        return pl.store(result, [0, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        _assert_dynamic_if_results(lowered)
+        text = codegen.PTOCodegen().generate(
+            lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+        )
+    assert "= scf.if" in text and "scf.for" in text, text
+    assert not any("pto.tmov" in line and line.count("loc=acc") == 2 for line in text.splitlines()), text
+    _compile_native_loop(text, planner, tmp_path)
 
 
 @pytest.mark.ptoas_compile
@@ -1022,7 +1158,7 @@ class Before:
 def test_saved_acc_selection_blocks_destructive_carry_coalescing(
     planner, saved_then_initial, alias, ascend_backend
 ):
-    """A saved Acc descriptor can still observe the carry's non-representative input."""
+    """A saved Acc descriptor can still observe either input to the carry."""
     alias_statement = (
         "saved_alias = pl.tile.reshape(saved, [16, 64])" if alias == "reshape" else "saved_alias = saved"
     )

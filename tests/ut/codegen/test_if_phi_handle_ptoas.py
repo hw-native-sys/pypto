@@ -123,10 +123,8 @@ def test_loop_carried_if_phi_keeps_baked_addr_aliasing_under_pypto(enable_buffer
     mlir = codegen.PTOCodegen().generate(_ir.Program([func], "kernel", optimized.span))
 
     decls = [ln for ln in mlir.splitlines() if "= pto.alloc_tile" in ln]
-    if enable_buffer_ir:
-        assert len(decls) == 1, f"Buffer IR uses one shared carry handle:\n{mlir}"
-    else:
-        assert len(decls) > 1, f"Tile IR declares one alloc_tile per var:\n{mlir}"
+    assert func.ir_stage == _ir.FunctionIRStage.Functional
+    assert len(decls) > 1, f"Native Tile IR declares one alloc_tile per payload var:\n{mlir}"
     addrs = {_first_group(r"addr = (%[A-Za-z0-9_]+)", ln) for ln in decls}
     assert len(addrs) == 1, f"the aliased tiles must share one baked addr, got {addrs}:\n{mlir}"
 

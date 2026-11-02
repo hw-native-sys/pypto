@@ -19,8 +19,8 @@ def _storage(program):
 
     class Collector(ir.IRVisitor):
         def visit_var(self, op):
-            if isinstance(op.type, ir.TileType) and op.type.memref is not None:
-                base = op.type.memref.base_
+            if isinstance(op.type, ir.TileType):
+                base = op.type.memref.base_ if op.type.memref is not None else None
                 assert result.setdefault(op.name_hint, base) is base
 
     Collector().visit_program(program)
@@ -180,8 +180,9 @@ def test_inplace_unsafe_update_after_selected_phi_keeps_separate_storage(ascend_
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"]
-    assert storage["first"] is not storage["a"]
+    assert storage["first"] is None
+    assert storage["update_a"] is not None
+    assert storage["update_a"] is not storage["a"]
     assert storage["sorted_value"] is not storage["first"]
     assert storage["sorted_value"] is not storage["a"]
 
@@ -238,8 +239,9 @@ def test_addc_update_after_selected_phi_keeps_carry_candidates_separate(ascend_b
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"]
-    assert storage["first"] is not storage["a"]
+    assert storage["first"] is None
+    assert storage["update_a"] is not None
+    assert storage["update_a"] is not storage["a"]
     assert storage["update"] is not storage["first"]
     assert storage["update"] is not storage["a"]
 
@@ -293,8 +295,9 @@ def test_selected_addc_carry_hint_does_not_prove_loop_destination_disjoint(ascen
             return pl.store(result, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    # picked's representative hint names other, but its else arm reads current.
-    assert storage["picked"] is storage["picked_alias"] is storage["other"]
+    # Both selected aliases remain dynamic; their else arm can read current.
+    assert storage["picked"] is storage["picked_alias"] is None
+    assert storage["other"] is not None
     assert storage["update"] is not storage["result"]
 
 
@@ -330,8 +333,9 @@ def test_value_escaping_through_another_selection_keeps_old_storage(ascend_backe
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"]
-    assert storage["first"] is not storage["a"]
+    assert storage["first"] is None
+    assert storage["update_a"] is not None
+    assert storage["update_a"] is not storage["a"]
     # saved may retain either update_a or the original a through first.
     # A later update must preserve both possible saved payloads.
     assert storage["update_b"] is not storage["first"]
@@ -365,15 +369,17 @@ def test_bare_rename_of_unresolved_phi_does_not_authorize_reuse(ascend_backend):
             return pl.store(second, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["update_a"] is storage["first"] is storage["renamed"]
-    assert storage["first"] is not storage["a"]
-    assert storage["update_b"] is storage["second"]
+    assert storage["first"] is storage["renamed"] is None
+    assert storage["update_a"] is not None
+    assert storage["update_a"] is not storage["a"]
+    assert storage["second"] is None
+    assert storage["update_b"] is not None
     assert storage["update_b"] is not storage["first"]
     assert storage["update_b"] is not storage["a"]
 
 
-def test_nested_assemble_chain_refreshes_every_phi_hint_after_reuse(ascend_backend):
-    """A reused assemble root must not leave phantom allocations on later phis."""
+def test_nested_assemble_chain_preserves_dynamic_storage_after_reuse(ascend_backend):
+    """Nested descriptors and their writebacks never acquire phantom allocations."""
 
     @pl.program
     class Before:
@@ -410,14 +416,14 @@ def test_nested_assemble_chain_refreshes_every_phi_hint_after_reuse(ascend_backe
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False):
         after = passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before)))
     storage = _storage(after)
+    assert storage["update_a"] is storage["a"]
     assert all(
-        storage[name] is storage["a"]
-        for name in ("update_a", "inner_a", "first", "update_b", "inner_b", "selected", "flat")
+        storage[name] is None for name in ("inner_a", "first", "update_b", "inner_b", "selected", "flat")
     )
 
 
-def test_nested_selected_assemble_refreshes_hint_without_merging_candidates(ascend_backend):
-    """Updating a nested chosen tile changes only hints, not either possible allocation."""
+def test_nested_selected_assemble_preserves_dynamic_storage_without_merging_candidates(ascend_backend):
+    """A writeback to a selected tile follows its runtime descriptor without a fixed MemRef."""
 
     @pl.program
     class Before:
@@ -444,7 +450,7 @@ def test_nested_selected_assemble_refreshes_hint_without_merging_candidates(asce
             return pl.store(selected, [0, 0], out)
 
     storage = _storage(_materialize(Before))
-    assert storage["selected"] is storage["update"] is storage["a"]
+    assert storage["picked"] is storage["selected"] is storage["update"] is None
     assert storage["a"] is not storage["b"]
     assert storage["a"] is not storage["c"]
     assert storage["b"] is not storage["c"]

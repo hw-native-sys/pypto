@@ -553,7 +553,13 @@ def test_branch_identity_moves_preserve_actual_shared_storage():
     # Native If no longer invents a new destination. Both explicit moves name
     # the same value/window as their source, so they are genuine no-ops. Keep
     # the original low-level shared-MemRef input and verify its actual binding.
-    view = _line(mlir, f"{phi} = pto.treshape %root ")
+    assert "= scf.if" in _line(mlir, f"{phi} = "), mlir
+    yields = [line for line in mlir.splitlines() if "scf.yield " in line]
+    assert len(yields) == 2, mlir
+    sources = {line.split("scf.yield ")[1].split(" : ")[0] for line in yields}
+    assert len(sources) == 1, mlir
+    source_handle = sources.pop()
+    view = _line(mlir, f"{source_handle} = pto.treshape %root ")
     assert mlir.index(view) < mlir.index("scf.if"), mlir
     assert "rows=32, cols=1," in definitions[phi], mlir
     assert "pto.tmov" not in mlir, mlir
