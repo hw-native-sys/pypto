@@ -1,0 +1,39 @@
+// Copyright (c) PyPTO Contributors.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Same memory layout and masked add as helper.pto, with a retained loop.
+// Keep this fixture independent of PyPTO's admission checks: it establishes
+// whether the selected toolchain can realize the required hardware loop.
+module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
+  func.func @run_vf_loop(%base: !pto.ptr<f32, ub>, %n: i32) attributes {pto.aiv} {
+    %zero = arith.constant 0 : index
+    %one = arith.constant 1 : index
+    %trips = arith.constant 16 : index
+    %lanes = arith.constant 64 : index
+    %rhs_offset = arith.constant 1024 : index
+    %out_offset = arith.constant 2048 : index
+    %rhs = pto.addptr %base, %rhs_offset : <f32, ub> -> <f32, ub>
+    %out = pto.addptr %base, %out_offset : <f32, ub> -> <f32, ub>
+    pto.vecscope {
+      %count = builtin.unrealized_conversion_cast %n : i32 to si32
+      %limit = pto.vmi.vbrc %count : si32 -> !pto.vmi.vreg<64xsi32>
+      %all = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<64xpred>
+      scf.for %i = %zero to %trips step %one {
+        %offset = arith.muli %i, %lanes : index
+        %lane = arith.index_cast %offset : index to i32
+        %index = pto.vmi.vci %lane {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+        %mask = pto.vmi.vcmp %index, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+        %a = pto.vmi.vload %base[%offset] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+        %b = pto.vmi.vload %rhs[%offset] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+        %sum = pto.vmi.vadd %a, %b : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+        pto.vmi.vstore %sum, %out[%offset], %mask {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      }
+    }
+    return
+  }
+}

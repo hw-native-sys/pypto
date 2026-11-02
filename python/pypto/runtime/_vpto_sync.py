@@ -12,17 +12,21 @@
 This checks canonical LLVM emitted by PTOAS, before Bisheng can optimize away
 memory operations. It inserts no barriers and does not replace PTOAS analysis.
 Unknown syntax is rejected, including after a compiler output-format change.
-Only one straight-line AIV scope, contiguous FP32 accesses, one symbolic UB root
-and constant byte displacements are admitted. Scalars and masks may be dynamic.
+One AIV scope admits straight-line operations or one explicitly required
+canonical loop, contiguous FP32 accesses and one symbolic UB root. Scalars and masks may be dynamic.
 Required barrier coverage is checked at 32-byte granularity, conservatively
-using all 64 lanes for a masked access. The walk is linear: each access touches
-eight fixed-size blocks; pointer provenance is resolved in SSA definition order.
+using all 64 lanes for a masked access. Straight-line accesses touch eight
+fixed-size blocks; loop summaries use
+O(N log N) interval queries. Pointer provenance follows SSA definition order.
 """
 
 import re
-from typing import NoReturn
 
-VERSION = "static-ub-f32-v3"
+from . import _vpto_loop
+from ._vpto_memory import StaticMemoryHistory as _MemoryHistory
+from ._vpto_memory import reject as _reject
+
+VERSION = "affine-loop-ub-f32-v4"
 _SSA = r"%[-a-zA-Z$._0-9]+"
 _PURE_OPS = frozenset(
     "add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv fneg "
@@ -34,46 +38,6 @@ _PURE_INTRINSIC = re.compile(
     r"v(?:add|sub|mul|min|max)\.s\.x\.v64(?:f32|i32)|"
     r"vcmp\.(?:lt|le|gt|ge|eq|ne)\.s\.z\.v64(?:f32|i32))"
 )
-
-
-def _reject(reason: str) -> NoReturn:
-    raise ValueError(f"unsupported VF synchronization contract: {reason}")
-
-
-class _MemoryHistory:
-    """Verify existing barriers in O(N) without inserting or moving any."""
-
-    def __init__(self) -> None:
-        self.reads: dict[int, int] = {}
-        self.writes: dict[int, int] = {}
-        # A frontier denotes every operation of that pipe up to its position.
-        # Do not assume FIFO memory completion within either pipe. Only an
-        # explicit barrier transfers the source pipe's issued operations and
-        # their proven ancestors to subsequent operations of the target pipe.
-        self.before = {pipe: {"vld": -1, "vst": -1} for pipe in ("vld", "vst")}
-        self.issued = {pipe: {"vld": -1, "vst": -1} for pipe in ("vld", "vst")}
-
-    def barrier(self, kind: str) -> None:
-        source, target = kind.split(".")
-        for pipe in ("vld", "vst"):
-            self.before[target][pipe] = max(self.before[target][pipe], self.issued[source][pipe])
-
-    def access(self, displacement: int, load: bool, position: int) -> None:
-        blocks = range(displacement // 32, displacement // 32 + 8)
-        target = "vld" if load else "vst"
-        dependencies = [(self.writes, "vst")] if load else [(self.reads, "vld"), (self.writes, "vst")]
-        for history, source in dependencies:
-            if any(history.get(block, -1) > self.before[target][source] for block in blocks):
-                _reject(
-                    f"missing {source}.{target} barrier/order "
-                    f"for overlapping UB access at byte {displacement}"
-                )
-        history = self.reads if load else self.writes
-        for block in blocks:
-            history[block] = position
-        for pipe in ("vld", "vst"):
-            self.issued[target][pipe] = max(self.issued[target][pipe], self.before[target][pipe])
-        self.issued[target][target] = position
 
 
 def _scope_instructions(lines: list[str]) -> tuple[list[str], list[str]]:
@@ -109,15 +73,15 @@ def _scope_instructions(lines: list[str]) -> tuple[list[str], list[str]]:
     return entry[:-1], body[:-1]
 
 
-def validate_sync_contract(llvm: str, source: str) -> None:
+def validate_sync_contract(llvm: str, source: str, *, hardware_loop_trip_count: int = 0) -> None:
     """Reject unproven relationships, access modes and control flow, with context."""
     try:
-        _validate(llvm)
+        _validate(llvm, hardware_loop_trip_count)
     except ValueError as error:
         raise ValueError(f"VPTO helper {source}: {error}") from error
 
 
-def _validate(llvm: str) -> None:
+def _validate(llvm: str, hardware_loop_trip_count: int = 0) -> None:
     # LLVM has already parsed/verified the source inside PTOAS. This deliberately
     # recognizes a closed output subset instead of guessing at general LLVM IR.
     lines = [line.split(";", 1)[0].strip() for line in llvm.splitlines()]
@@ -143,7 +107,16 @@ def _validate(llvm: str) -> None:
             pointers[match[1]] = (match[1], 0)
         elif not re.fullmatch(rf"(?:float|i32|i64) {_SSA}", argument):
             _reject("only UB pointers and supported scalars are admitted")
-    entry, body = _scope_instructions(lines[start + 1 : end])
+    if hardware_loop_trip_count:
+        _vpto_loop.validate_loop(
+            lines[start + 1 : end],
+            pointers,
+            hardware_loop_trip_count,
+            lambda instruction: _validate_instructions([], [instruction], {}),
+        )
+        entry, body = [], lines[start + 1 : end]
+    else:
+        entry, body = _scope_instructions(lines[start + 1 : end])
     if body:
         loop = next(re.finditer(r"!llvm.loop (!\d+)", llvm), None)
         record = (
@@ -153,7 +126,8 @@ def _validate(llvm: str) -> None:
         )
         if record is None or f'{record[1]} = !{{!"llvm.loop.aivector_scope"}}' not in lines:
             _reject("missing AIV scope metadata")
-    _validate_instructions(entry, body, pointers)
+    if not hardware_loop_trip_count:
+        _validate_instructions(entry, body, pointers)
 
 
 def _validate_instructions(entry: list[str], body: list[str], pointers: dict[str, tuple[str, int]]) -> None:

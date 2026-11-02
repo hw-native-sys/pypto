@@ -370,7 +370,31 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto_sync, "VERSION", "next-contract")
     identities.append(key())
-    assert len(set(identities)) == 7
+    monkeypatch.setattr(compiler_module._vpto, "HARDWARE_LOOP_EVIDENCE_VERSION", "next-evidence")
+    identities.append(key())
+    assert len(set(identities)) == 8
+
+
+@pytest.mark.parametrize("opcode", ["VLOOPV2_V310", "VADD"])
+def test_required_loop_checks_exact_linked_image(compiler_module, monkeypatch, tmp_path, opcode):
+    compiler = compiler_module.KernelCompiler("a5")
+    source = tmp_path / "required.pto"
+    source.write_text("// pypto.hardware_loop: helper 16\nmodule {}")
+    linked = tmp_path / "linked.elf"
+    calls = []
+
+    def disassemble(command, **kwargs):
+        calls.append(command)
+        assert kwargs["check"] and kwargs["timeout"] == 900
+        return SimpleNamespace(stdout=f"00000100 <helper.vector.thread>:\n  118: c1001f1e {opcode} S2")
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", disassemble)
+    if opcode == "VLOOPV2_V310":
+        compiler._validate_vpto_hardware_loops((str(source),), linked)
+    else:
+        with pytest.raises(ValueError, match="backend evidence missing"):
+            compiler._validate_vpto_hardware_loops((str(source),), linked)
+    assert calls == [["llvm-objdump", "-d", str(linked)]]
 
 
 def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, monkeypatch, tmp_path):

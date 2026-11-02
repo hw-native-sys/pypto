@@ -433,7 +433,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
     result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
     assert result.error is None
     manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert manifest["effect_scope"] == "whole-tile"
     assert manifest["synchronization"] == "ptoas-insert-sync"
     entry = manifest["helpers"][0]
@@ -444,6 +444,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
     assert entry["parameter_indices"] == helper.parameter_indices
     assert entry["capture_byte_offsets"] == helper.capture_byte_offsets
     assert entry["parameter_effects"] == ["read", "readwrite"]
+    assert entry["hardware_loop_trip_count"] == 0
 
 
 def test_execution_rejects_old_ptoas_before_emitting_tile_adapter(tmp_path, monkeypatch):
@@ -693,6 +694,80 @@ def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def hardware_loop_kernel(trips=16, stride=64, initialized=True):
+    """Carry a store version through a loop while retaining its external Tile."""
+    builder = IRBuilder()
+    with builder.function("hardware_add", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = builder.let(
+            "src",
+            tile.full([1024], dtype=DataType.FP32, value=1.0)
+            if initialized
+            else tile.create([1024], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec),
+        )
+        dst = builder.let("dst", tile.full([1024], dtype=DataType.FP32, value=0.0))
+        with builder.reg_scope(SPAN):
+            induction = builder.var("i", ir.ScalarType(DataType.INDEX), SPAN)
+            with builder.for_loop(
+                induction, 0, trips, 1, span=SPAN, hardware_loop_policy=ir.HardwareLoopPolicy.Require
+            ) as loop:
+                carry = loop.iter_arg("carry", dst, span=SPAN)
+                result = loop.return_var("result", span=SPAN)
+                offset = builder.let(
+                    "offset", ir.mul(induction, ir.ConstInt(stride, DataType.INDEX, SPAN), SPAN)
+                )
+                value = builder.emit_reg("value", "reg.load", [src, offset], {"lanes": 64}, SPAN)
+                summed = builder.emit_reg("summed", "reg.add", [value, value], span=SPAN)
+                updated = builder.emit_reg_store("updated", carry, summed, offset=offset, span=SPAN)
+                builder.emit(ir.YieldStmt([updated], SPAN))
+        builder.let("consumer", tile.add(result, src))
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "HardwareLoop", SPAN))
+        return passes.allocate_memory_addr()(program)
+
+
+def test_required_hardware_loop_bundle_preserves_loop_and_storage(tmp_path):
+    with passes.PassContext([]):
+        bundle = codegen.PTOCodegen().generate_bundle(hardware_loop_kernel(), emit_source_loc=False)
+    assert len(bundle.helpers) == 1
+    helper = bundle.helpers[0]
+    assert helper.hardware_loop_trip_count == 16
+    assert f"// pypto.hardware_loop: {helper.symbol} 16" in helper.source
+    assert helper.source.count("scf.for") == 1
+    assert helper.source.count("pto.vmi.vload ") == 1
+    assert helper.source.count("pto.vmi.vstore ") == 1
+    assert helper.parameter_effects == ["read", "readwrite"]
+    assert helper.parameter_types == ["!pto.ptr<f32, ub>"]
+    assert "pto.tadd" in bundle.caller_source
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    source = tmp_path / "loop.pto"
+    source.write_text(helper.source)
+    llvm = tmp_path / "loop.ll"
+    from pypto.runtime import _vpto, _vpto_sync  # noqa: PLC0415
+
+    compiled = subprocess.run(
+        [compiler, str(source), *_vpto.PTOAS_FLAGS, "-o", str(llvm)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    _vpto_sync.validate_sync_contract(llvm.read_text(), str(source), hardware_loop_trip_count=16)
+
+
+def test_hardware_loop_rejects_uninitialized_input():
+    with passes.PassContext([]), pytest.raises(ValueError, match="initialized Tile"):
+        codegen.PTOCodegen().generate_bundle(hardware_loop_kernel(initialized=False))
+
+
+@pytest.mark.parametrize("trips,stride", [(17, 64), (16, 65), (16, -64)])
+def test_hardware_loop_bundle_rejects_unproved_access(trips, stride):
+    with passes.PassContext([]), pytest.raises(ValueError, match="hardware-loop.*(bounds|aligned|stride)"):
+        codegen.PTOCodegen().generate_bundle(hardware_loop_kernel(trips, stride))
 
 
 if __name__ == "__main__":

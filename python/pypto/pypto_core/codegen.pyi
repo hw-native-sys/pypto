@@ -30,6 +30,10 @@ class VFHelper:
     def parameter_indices(self) -> list[int]: ...
     @property
     def capture_byte_offsets(self) -> list[int]: ...
+    @property
+    def hardware_loop_trip_count(self) -> int:
+        """Required loop count, or zero for a straight-line helper."""
+        ...
 
 class PTOCodegenBundle:
     """Execution artifacts owned by one PTO codegen invocation."""

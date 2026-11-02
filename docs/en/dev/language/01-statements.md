@@ -94,7 +94,11 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
 ```
 
 This expresses intent, not a guarantee that the installed backend implements it.
-Current backends report unsupported qualification for surviving Require loops.
+A5 supplies a restricted execution profile: one static loop of 2–32767 trips,
+FP32/64-lane affine memory accesses, and storage-preserving Tile carries. See
+[VPTO VF execution](../codegen/03-vpto-vf-integration.md#required-hardware-loops).
+Other targets remain unsupported. The scalar-carry example above illustrates
+frontend intent and is outside the current executable A5 subset.
 The profile-driven `ir.analyze_hardware_loop(loop, profile)` API distinguishes
 Eligible, Ineligible and Unknown; Eligible still requires final artifact evidence.
 Dynamic integer `stop` values are accepted without a static range proof or an

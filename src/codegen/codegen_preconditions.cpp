@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -101,17 +103,19 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
 
 void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
-  // Qualification is recomputed at the emission boundary. Installed backends
-  // default to unsupported; no cached report can authorize a Require loop.
+  // Qualification is recomputed at the emission boundary. It admits source
+  // generation only; the production helper contract requires linked evidence.
   auto* context = PassContext::Current();
-  const auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
+  const auto profile =
+      context
+          ? context->GetHardwareLoopProfile()
+          : backend::GetBackendInstance(backend::GetBackendType())->GetHandler()->GetHardwareLoopProfile();
   if (context && context->GetReportHardwareLoops()) {
     context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
   }
-  VerifyHardwareLoopRequirements(program, profile);
+  VerifyHardwareLoopRequirements(program, profile, true);
 
-  // Check lexical register ownership before emission. Hardware-loop Require
-  // remains unsupported until its separate lowering and evidence contract.
+  // Check lexical register ownership before emission.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
     void VisitFunction(const ir::FunctionPtr& func) override {

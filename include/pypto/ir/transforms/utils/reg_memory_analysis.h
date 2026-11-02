@@ -21,6 +21,8 @@ namespace pypto::ir {
 /// Visits the function in execution order and rejects uninitialized static reads.
 /// This is a conservative verifier, not an SSA rewrite or runtime bounds check;
 /// exhaustive branches retain their common facts; unknown loops add no facts.
-void VerifyRegMemoryInitialization(const FunctionPtr& function);
+// Executable helpers additionally require incoming initialization for dynamic
+// reads and credit no dynamic writes; diagnostic emission keeps its old policy.
+void VerifyRegMemoryInitialization(const FunctionPtr& function, bool require_dynamic_inputs = false);
 }  // namespace pypto::ir
 #endif  // PYPTO_IR_TRANSFORMS_UTILS_REG_MEMORY_ANALYSIS_H_

@@ -11,7 +11,7 @@ lowering without changing the DSL or automatically selecting vector scopes.
 flowchart TD
   IR[Planned A5 AIV function] --> Bundle[PTOCodegen.generate_bundle]
   Bundle --> Caller[Caller PTO: Tiles and annotated adapter]
-  Bundle --> Helper[Helper PTO: common UB base and static offsets]
+  Bundle --> Helper[Helper PTO: common UB base and proven offsets]
   Caller --> EmitC[PTOAS EmitC and caller synchronization]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
@@ -30,7 +30,7 @@ flowchart TD
 `PTOCodegen.generate()` retains the combined typed-VMI representation for
 diagnostics. The execution driver uses `generate_bundle()` and writes helpers
 under `vpto/<kernel>/`, with a manifest describing symbols, parameter types,
-effects and offsets. `kernel_config.py` attaches their paths as `vpto_sources`.
+effects, offsets and `hardware_loop_trip_count` (manifest schema 4). `kernel_config.py` attaches their paths as `vpto_sources`.
 Multiple explicit scopes produce multiple helpers linked into the same kernel.
 
 The helper emitter reuses `PTOCodegen`'s register operation lowering. Its UB
@@ -92,17 +92,54 @@ is position independent; helpers still have to obey the device-call ABI.
 | Property | Current support |
 | -------- | --------------- |
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
-| Scope | Straight-line register operations; static loops must be unrolled |
-| Memory | Contiguous FP32 accesses, 64 lanes, static offsets aligned to 32 bytes |
+| Scope | Straight-line operations, or one required hardware loop per register scope |
+| Memory | Contiguous FP32, 64 lanes, 32-byte alignment; constants or proven `64 * i + constant` offsets |
 | Aliasing | Common UB base, static view displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
 | Packaging | Source artifact relocation, helper-aware binary cache |
 
 Grouped/peer functions, CPU simulation of device objects, Bridge calls,
-dynamic memory offsets, general helper control flow and other memory formats
+unproved dynamic memory offsets, general helper control flow and other memory formats
 are not admitted. Diagnostic VMI generation supports a wider IR subset than
 this execution path. Extending admission requires corresponding compiler and
 hardware evidence; it must not weaken rejection of unknown relationships.
+
+## Required hardware loops
+
+A5 admits a single `pl.hardware_loop(N)` in each helper with static
+`2 <= N <= 32767`, start zero and step one. The public IR contract remains
+unsigned 16-bit; this narrower executable profile matches PTOAS's signed i16
+counter lowering. Dynamic counts, scalar/register carries, nested loops,
+conditionals and ordinary retained `pl.range` loops remain unsupported here.
+Tile carries must preserve the same external storage view through `reg.store`.
+
+Memory accesses inside the loop require FP32/64 lanes and a proven INDEX affine
+offset `64 * i + constant`. Every intermediate expression must fit signed i64;
+the whole access range must fit a fully valid static Tile. Read views must be
+initialized before the loop; dynamic writes establish no initialization facts.
+Unrolling is unnecessary: one `scf.for` and one copy of its body reach PTOAS.
+
+Each helper source carries its required symbol and trip count. Before device
+compilation, the LLVM checker verifies the canonical counter and 256-byte
+post-increment pointer backedges. Whole-loop byte intervals conservatively check
+entry, cyclic and exit dependencies against existing PTOAS barriers in
+O(N log N), where N is the number of instructions, independently of trip count.
+Only the same moving instruction's iterations are known disjoint; overlapping
+streams may require more ordering than their exact iteration addresses do.
+Unknown forms fail closed. This check never inserts synchronization.
+
+After device linking, `llvm-objdump` from the selected CANN toolchain must show
+exactly one `VLOOPV2_V310` in each required helper's `.vector.thread` symbol.
+An unrolled body, a software loop or missing/ambiguous evidence fails compilation
+before cache insertion or `.text` extraction. The LLVM count check and final
+instruction check are separate requirements. Source markers and validation
+versions participate in cache identity; source packaging preserves the markers.
+
+The toolchain-only loop fixture is under
+`tests/ut/backend/vpto_vf_validation/`. The normal JIT regression
+`tests/st/runtime/vpto/test_reg_scope_onboard.py` uses `pl.hardware_loop(16)`
+and checks masked tails, changed inputs, caching and relocated artifacts through
+the persistent Worker. Run it with the explicit A5 opt-in described below.
 
 ## Run the complete examples
 

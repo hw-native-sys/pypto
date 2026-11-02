@@ -11,7 +11,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -27,6 +30,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -39,10 +43,13 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::vector<CallPtr> memory;
   std::map<const Var*, VarPtr> aliases;
   std::map<const Var*, VarPtr> references;
+  std::map<const Var*, ExprPtr> values;
+  std::vector<ForStmtPtr> loops;
+  std::map<const Call*, ForStmtPtr> memory_loops;
   bool has_control_flow = false;
 
   void VisitStmt(const StmtPtr& stmt) override {
-    has_control_flow |= As<ForStmt>(stmt) || As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    has_control_flow |= As<WhileStmt>(stmt) || As<IfStmt>(stmt);
     var_collectors::VarDefUseCollector::VisitStmt(stmt);
   }
 
@@ -56,6 +63,7 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitExpr_(var);
   }
   void VisitStmt_(const AssignStmtPtr& stmt) override {
+    values.emplace(stmt->var_.get(), stmt->value_);
     if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store")) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
     }
@@ -63,9 +71,124 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) memory.push_back(call);
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
+      memory.push_back(call);
+      if (current_loop_) memory_loops.emplace(call.get(), current_loop_);
+    }
     IRVisitor::VisitExpr_(call);
   }
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    loops.push_back(loop);
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      auto arg = loop->iter_args_[i];
+      auto result = loop->return_vars_[i];
+      references.emplace(arg.get(), arg);
+      references.emplace(result.get(), result);
+      if (As<TileType>(arg->GetType())) {
+        aliases.emplace(arg.get(), AsVarLike(arg->initValue_));
+        aliases.emplace(result.get(), arg);
+      }
+    }
+    auto previous = current_loop_;
+    current_loop_ = loop;
+    var_collectors::VarDefUseCollector::VisitStmt_(loop);
+    current_loop_ = previous;
+  }
+
+ private:
+  ForStmtPtr current_loop_;
+};
+
+// Memoize SSA and expression DAG nodes once, independently of the trip count.
+// Only INDEX arithmetic is admitted, and every intermediate affine range must
+// fit signed i64 so this proof cannot erase a real fixed-width overflow.
+class LoopOffsets {
+ public:
+  LoopOffsets(const VFOperands& operands, ForStmtPtr loop, int64_t trips)
+      : operands_(operands), loop_(std::move(loop)), trips_(trips) {}
+
+  RegMemoryEffect Effect(const CallPtr& call) {
+    const auto tile = As<TileType>(call->args_[0]->GetType());
+    const auto reg = As<RegType>(IsOp(call, "reg.load") ? call->GetType() : call->args_[2]->GetType());
+    CHECK_SPAN(tile && tile->dtype_ == DataType::FP32 && reg && reg->shape_ == 64, call->span_)
+        << "VF hardware-loop memory requires FP32 and 64 lanes";
+    auto form = Affine(call->args_[1]);
+    CHECK_SPAN(form && form->first == 64, call->span_)
+        << "VF hardware-loop address requires a proven 64-element stride";
+    CHECK_SPAN(form->second >= 0 && form->second % 8 == 0, call->span_)
+        << "VF hardware-loop address must be nonnegative and 32-byte aligned";
+    int64_t capacity = 1;
+    for (size_t i = 0; i < tile->shape_.size(); ++i) {
+      auto extent = As<ConstInt>(tile->shape_[i]);
+      CHECK_SPAN(extent && extent->value_ > 0 && extent->value_ <= INT32_MAX / 4 / capacity, call->span_)
+          << "VF hardware-loop bounds require a static bounded Tile";
+      capacity *= extent->value_;
+      if (tile->tile_view_ && !tile->tile_view_->valid_shape.empty()) {
+        auto valid = As<ConstInt>(tile->tile_view_->valid_shape[i]);
+        CHECK_SPAN(valid && valid->value_ == extent->value_, call->span_)
+            << "VF hardware-loop bounds require a fully valid Tile view";
+      }
+    }
+    const __int128 last = static_cast<__int128>(form->second) + 64 * (trips_ - 1);
+    CHECK_SPAN(last + 64 <= capacity, call->span_) << "VF hardware-loop access exceeds Tile bounds";
+    // Reuse the operator's view/root-capacity validation at both endpoints.
+    // No IR node is rewritten: the original affine operand reaches PTOAS.
+    auto args = call->args_;
+    args[1] = std::make_shared<ConstInt>(form->second, DataType::INDEX, call->span_);
+    auto first = GetRegMemoryEffect(
+        OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_));
+    args[1] = std::make_shared<ConstInt>(static_cast<int64_t>(last), DataType::INDEX, call->span_);
+    auto final = GetRegMemoryEffect(
+        OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_));
+    first.end = final.end;
+    return first;
+  }
+
+ private:
+  using Form = std::optional<std::pair<int64_t, int64_t>>;  // coefficient * i + constant, in elements
+  Form Affine(const ExprPtr& expr) {
+    if (auto it = cache_.find(expr.get()); it != cache_.end()) {
+      return it->second;
+    }
+    cache_.emplace(expr.get(), std::nullopt);  // Cyclic/unknown SSA never supplies a proof.
+    auto type = As<ScalarType>(expr->GetType());
+    if (!type || type->dtype_ != DataType::INDEX) return std::nullopt;
+    Form result;
+    if (expr.get() == loop_->loop_var_.get()) {
+      result = {{1, 0}};
+    } else if (auto constant = As<ConstInt>(expr)) {
+      result = {{0, constant->value_}};
+    } else if (auto var = AsVarLike(expr)) {
+      if (auto it = operands_.values.find(var.get()); it != operands_.values.end())
+        result = Affine(it->second);
+    } else if (auto binary = As<BinaryExpr>(expr)) {
+      auto lhs = Affine(binary->left_), rhs = Affine(binary->right_);
+      if (!lhs || !rhs) return std::nullopt;
+      __int128 a = 0, b = 0;
+      if (As<Add>(expr) || As<Sub>(expr)) {
+        const int sign = As<Add>(expr) ? 1 : -1;
+        a = static_cast<__int128>(lhs->first) + sign * static_cast<__int128>(rhs->first);
+        b = static_cast<__int128>(lhs->second) + sign * static_cast<__int128>(rhs->second);
+      } else if (As<Mul>(expr) && (lhs->first == 0 || rhs->first == 0)) {
+        a = static_cast<__int128>(lhs->first) * rhs->second + static_cast<__int128>(rhs->first) * lhs->second;
+        b = static_cast<__int128>(lhs->second) * rhs->second;
+      } else {
+        return std::nullopt;
+      }
+      auto fits = [](__int128 value) {
+        return value >= std::numeric_limits<int64_t>::min() && value <= std::numeric_limits<int64_t>::max();
+      };
+      if (fits(a) && fits(b) && fits(a * (trips_ - 1) + b)) {
+        result = {{static_cast<int64_t>(a), static_cast<int64_t>(b)}};
+      }
+    }
+    cache_[expr.get()] = result;
+    return result;
+  }
+  const VFOperands& operands_;
+  ForStmtPtr loop_;
+  int64_t trips_;
+  std::map<const Expr*, Form> cache_;
 };
 }  // namespace
 
@@ -79,10 +202,20 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       << "VF execution requires the PyPTO Tile memory planner";
   VFOperands operands;
   operands.VisitStmt(scope->body_);
-  // Keep the execution subset within the straight-line synchronization proof.
-  // Diagnostic codegen still supports register control flow.
-  CHECK_SPAN(!operands.has_control_flow, scope->span_)
-      << "VF execution currently requires straight-line RegScope; unroll static loops before codegen";
+  // A helper has either no control flow or exactly one required loop. This
+  // makes its source requirement map to exactly one final vector-thread loop.
+  CHECK_SPAN(!operands.has_control_flow && operands.loops.size() <= 1, scope->span_)
+      << "VF execution requires straight-line RegScope or one required hardware loop";
+  int64_t trips = 0;
+  if (!operands.loops.empty()) {
+    const auto loop = operands.loops.front();
+    auto stop = As<ConstInt>(loop->stop_);
+    CHECK_SPAN(loop->hardware_loop_policy_ == HardwareLoopPolicy::Require, loop->span_)
+        << "VF execution requires straight-line RegScope or an explicit hardware_loop";
+    CHECK_SPAN(stop && stop->value_ >= 2 && stop->value_ <= 32767, loop->span_)
+        << "VF hardware-loop execution requires a static trip count in [2, 32767]";
+    trips = stop->value_;
+  }
 
   // Collapse SSA store versions to their existing caller view. Memoization
   // bounds chained stores to O(N log N); identity, never names, identifies views.
@@ -90,7 +223,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   auto resolve = [&](ir::VarPtr var) {
     std::vector<ir::VarPtr> path;
     std::set<const ir::Var*> seen;
-    while (operands.aliases.count(var.get()) || fs_.tile_aliases.count(var.get())) {
+    while (var && (operands.aliases.count(var.get()) || fs_.tile_aliases.count(var.get()))) {
       if (auto it = roots.find(var.get()); it != roots.end()) {
         var = it->second;
         break;
@@ -104,6 +237,18 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     return var;
   };
 
+  for (const auto& loop : operands.loops) {
+    auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto arg = loop->iter_args_[i];
+      CHECK_SPAN(As<TileType>(arg->GetType()) && resolve(AsVarLike(arg->initValue_)) && yield &&
+                     i < yield->value_.size() &&
+                     resolve(AsVarLike(yield->value_[i])) == resolve(AsVarLike(arg->initValue_)),
+                 loop->span_)
+          << "VF hardware-loop carries must preserve the same external Tile view";
+    }
+  }
+
   PTOCodegen helper(backend_);
   helper.emit_source_loc_ = emit_source_loc_;
   helper.inside_reg_scope_ = true;
@@ -112,12 +257,14 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   helper.indent_level_ = 2;
   VFHelper artifact;
   artifact.symbol = "__pypto_vf_" + fs_.current_function->name_ + "_" + std::to_string(vf_helpers_.size());
+  artifact.hardware_loop_trip_count = trips;
   artifact.adapter_symbol = artifact.symbol + "_tile_adapter";
   std::vector<std::string> arguments;
   std::map<const ir::Var*, size_t> captures;
   std::vector<int64_t> origins;
   std::vector<ir::TileTypePtr> capture_tiles;
   size_t base_index = 0;
+  LoopOffsets offsets(operands, operands.loops.empty() ? nullptr : operands.loops.front(), trips);
   // Memory captures precede scalar captures, both in deterministic first-use
   // order. Keep Tile operands at the call site so PTOAS can relate the helper's
   // effects to surrounding transfers and aliases. Only the adapter extracts UB
@@ -137,7 +284,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // Check every access, including later uses of an already captured Tile.
     // The diagnostic VMI path accepts dynamic offsets; executable helpers
     // require the static addresses understood by synchronization admission.
-    auto effect = ir::GetRegMemoryEffect(call);
+    auto effect =
+        operands.memory_loops.count(call.get()) ? offsets.Effect(call) : ir::GetRegMemoryEffect(call);
     CHECK_SPAN(effect.root && effect.begin, call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
@@ -193,6 +341,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       const auto& address = addresses[captures.at(resolve(target).get())];
       helper.reg_addresses_[target.get()] = address;
       helper.BindVarToMlir(target, address);
+      helper.BindVarToMlir(resolve(target), address);
     }
   }
   for (const auto* raw : operands.var_uses_ordered) {
@@ -242,6 +391,10 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       "  func.func @" +
       artifact.symbol + "(" + signature + ") attributes {pto.aiv} {\n" + helper.fs_.constants_section.str() +
       helper.stream_.str() + "  }\n}\n";
+  if (trips) {
+    artifact.source =
+        "// pypto.hardware_loop: " + artifact.symbol + " " + std::to_string(trips) + "\n" + artifact.source;
+  }
   // The adapter's PIPE_V/effect contract lets PTOAS place dependencies here.
   // The A5 VF exits after its register instructions complete; this models the
   // caller boundary, not VF-internal UB hazards. Kernel-tail sync stays enabled.

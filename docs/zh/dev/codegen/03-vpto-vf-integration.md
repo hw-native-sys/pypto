@@ -10,7 +10,7 @@ VPTO helper。本功能扩展 typed VMI lowering，不改变 DSL，也不自动�
 flowchart TD
   IR[完成内存规划的 A5 AIV 函数] --> Bundle[PTOCodegen.generate_bundle]
   Bundle --> Caller[Caller PTO: Tiles 与带注解 adapter]
-  Bundle --> Helper[Helper PTO: 公共 UB 基址与静态偏移]
+  Bundle --> Helper[Helper PTO: 公共 UB 基址与已证明偏移]
   Caller --> EmitC[PTOAS EmitC 与 caller 同步]
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
@@ -28,7 +28,7 @@ flowchart TD
 
 `PTOCodegen.generate()` 保留组合的 typed VMI 表示，供诊断使用。执行路径使用
 `generate_bundle()`，把 helper 写入 `vpto/<kernel>/`，并生成记录符号、参数类型、
-effects 与偏移的 manifest。`kernel_config.py` 通过 `vpto_sources` 关联这些路径。
+effects、偏移与 `hardware_loop_trip_count` 的 manifest（schema 4）。`kernel_config.py` 通过 `vpto_sources` 关联这些路径。
 多个显式作用域生成多个 helper，最终链接进同一个 kernel。
 
 Helper 发射复用 `PTOCodegen` 的寄存器操作 lowering。UB 指针对应内存规划得到的
@@ -83,15 +83,44 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前验证 helpe
 | 属性 | 当前支持 |
 | ---- | -------- |
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
-| 作用域 | 直线寄存器操作；静态循环须先展开 |
-| 内存 | 连续 FP32 访问、64 lane、32 字节对齐的静态偏移 |
+| 作用域 | 直线寄存器操作，或每个寄存器作用域一个强制硬件循环 |
+| 内存 | 连续 FP32、64 lane、32 字节对齐；常量或已证明的 `64 * i + constant` 偏移 |
 | 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
-Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用、动态内存偏移、一般
+Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用、未证明的动态内存偏移、一般
 helper 控制流及其他内存格式尚不支持。诊断 VMI 生成支持的 IR 范围比执行路径更广。
 扩展准入范围需要相应的编译器和硬件证据，不能放宽对未知关系的拒绝检查。
+
+## 强制硬件循环
+
+A5 每个 helper 支持一个 `pl.hardware_loop(N)`，要求静态
+`2 <= N <= 32767`、起点为零、步长为一。公开 IR 契约仍为无符号 16 位；
+当前执行 profile 的范围更窄，与 PTOAS 的有符号 i16 计数器 lowering 对齐。
+动态次数、标量/寄存器携带值、嵌套循环、条件分支及保留的普通 `pl.range`
+仍不受此路径支持。Tile 携带值必须经 `reg.store` 保持同一个外部存储 view。
+
+循环内访存要求 FP32/64 lane，以及已证明的 INDEX 仿射偏移（affine offset）
+`64 * i + constant`。所有中间表达式必须不溢出有符号 i64，整个访问范围必须落在
+完全有效的静态 Tile 内。读取的 view 必须在循环前初始化，动态写入不建立初始化
+事实。无需展开：PTOAS 接收一个 `scf.for` 和一份循环体。
+
+Helper 源码记录要求的符号与次数。设备编译前，LLVM 检查器验证规范计数器与
+每次递增 256 字节的指针回边。整个循环的字节区间用于保守检查入口、循环及出口
+依赖是否被已有 PTOAS 屏障覆盖；复杂度为 O(N log N)，N 为指令数量，与迭代次数无关。
+只有同一移动访存指令的不同迭代被视为互不重叠；不同流的重叠可能需要比精确迭代
+地址更多的排序。未知形式直接拒绝，此检查不插入同步。
+
+设备链接后，所选 CANN 工具链的 `llvm-objdump` 必须在每个要求的 helper 的
+`.vector.thread` 符号中找到恰好一个 `VLOOPV2_V310`。展开体、软件循环或缺失/歧义
+证据会在缓存写入和 `.text` 提取前使编译失败。LLVM 次数验证与最终指令验证是
+独立要求。源码标记与验证版本参与缓存标识，源码打包会保留标记。
+
+工具链循环 fixture 位于 `tests/ut/backend/vpto_vf_validation/`。
+普通 JIT 回归 `tests/st/runtime/vpto/test_reg_scope_onboard.py` 使用
+`pl.hardware_loop(16)`，通过常驻 Worker 检查 mask 尾部、输入变化、缓存及迁移产物。
+运行时需要下文说明的显式 A5 启用配置。
 
 ## 运行完整示例
 

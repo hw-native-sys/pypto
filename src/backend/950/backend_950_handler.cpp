@@ -27,6 +27,22 @@ namespace backend {
 
 Ascend950Handler::Ascend950Handler() : BackendHandler(Backend950::Instance()) {}
 
+ir::HardwareLoopProfile Ascend950Handler::GetHardwareLoopProfile() const {
+  ir::HardwareLoopProfile profile;
+  profile.supported = true;
+  // PTOAS currently narrows constant counters using signed i16 bounds. This
+  // execution profile is deliberately narrower than the public u16 IR contract.
+  // The runtime must still verify VLOOP evidence in the linked helper symbol.
+  profile.max_trip_count = 32767;
+  profile.max_depth = 1;
+  profile.allow_scalar_carry = false;
+  profile.allow_tile_carry = true;  // The helper additionally proves storage identity.
+  profile.allowed_ops = {"reg.load",        "reg.store",   "reg.add",       "reg.sub",       "reg.mul",
+                         "reg.minimum",     "reg.maximum", "reg.broadcast", "reg.index_gen", "reg.full_mask",
+                         "reg.active_mask", "reg.compare", "reg.select"};
+  return profile;
+}
+
 bool Ascend950Handler::SupportsRegType(const ir::RegType& type) const {
   if (type.shape_ <= 0) return false;
   if (type.kind_ == ir::RegKind::MaskReg) return type.dtype_ == DataType::BOOL;

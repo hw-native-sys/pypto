@@ -91,6 +91,9 @@ struct VFHelper {
   std::vector<size_t> parameter_indices;
   /// Per-caller-argument byte offset from the shared UB base (zero for scalars).
   std::vector<int64_t> capture_byte_offsets;
+  /// Zero for straight-line helpers; otherwise the sole Require loop's count.
+  /// The source carries the same contract through relocation and binary caching.
+  int64_t hardware_loop_trip_count = 0;
 };
 
 struct PTOCodegenBundle {

@@ -58,6 +58,7 @@
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/reg_memory_analysis.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -888,6 +889,9 @@ PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit
                                             bool emit_source_loc) {
   separate_vf_ = true;
   auto caller = GenerateImpl(program, emit_tile_addr, emit_source_loc);
+  for (const auto& [name, function] : program->functions_) {
+    ir::VerifyRegMemoryInitialization(function, true);
+  }
   return {std::move(caller), vf_helpers_};
 }
 

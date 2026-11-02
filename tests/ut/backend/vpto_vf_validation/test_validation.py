@@ -444,5 +444,24 @@ def _standalone_numerics(
         assert f"PASS n={n}: active lanes and unchanged tail" in result
 
 
+def test_required_hardware_loop_survives_device_link(tmp_path):
+    from pypto.runtime import _vpto, _vpto_sync  # noqa: PLC0415
+
+    cann = Path(os.environ["ASCEND_HOME_PATH"])
+    ptoas = shutil.which("ptoas")
+    assert ptoas
+    llvm, obj, linked = (tmp_path / name for name in ("loop.ll", "loop.o", "loop.elf"))
+    run(tmp_path, "emit-loop", [ptoas, SOURCE / "hardware_loop.pto", *_vpto.PTOAS_FLAGS, "-o", llvm])
+    _vpto_sync.validate_sync_contract(llvm.read_text(), "hardware_loop.pto", hardware_loop_trip_count=16)
+    run(
+        tmp_path,
+        "compile-loop",
+        [cann / "bin/bisheng", *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", llvm, "-o", obj],
+    )
+    run(tmp_path, "link-loop", [cann / "bin/ld.lld", "-e", "run_vf_loop", "-o", linked, obj])
+    disassembly = run(tmp_path, "disassemble-loop", [cann / "bin/llvm-objdump", "-d", linked])
+    _vpto.validate_hardware_loop_evidence(disassembly, [("run_vf_loop", 16)])
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, f"--confcutdir={SOURCE}", "-v"]))

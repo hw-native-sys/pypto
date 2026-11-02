@@ -211,15 +211,15 @@ class Analyzer : public IRVisitor {
   bool in_empty_loop_ = false;
 };
 
-void Enforce(const ForStmtPtr& loop, const HardwareLoopQualification& result) {
+void Enforce(const ForStmtPtr& loop, const HardwareLoopQualification& result, bool defer_evidence = false) {
   if (loop->hardware_loop_policy_ == HardwareLoopPolicy::Auto || result.trip_count == 0) return;
   const char* state = result.state == HardwareLoopState::Eligible     ? "Eligible"
                       : result.state == HardwareLoopState::Ineligible ? "Ineligible"
                                                                       : "Unknown";
   CHECK_SPAN(result.state == HardwareLoopState::Eligible, loop->span_)
       << "HardwareLoopPolicy.Require " << state << " [" << result.loop_id << "]: " << result.reason;
-  CHECK_SPAN(false, loop->span_) << "HardwareLoopPolicy.Require backend evidence missing [" << result.loop_id
-                                 << "]: qualification is not hardware evidence";
+  CHECK_SPAN(defer_evidence, loop->span_) << "HardwareLoopPolicy.Require backend evidence missing ["
+                                          << result.loop_id << "]: qualification is not hardware evidence";
 }
 }  // namespace
 
@@ -252,12 +252,13 @@ void VerifyHardwareLoopRequirement(const ForStmtPtr& loop, const HardwareLoopPro
     if (!analyzer.unreachable[i]) Enforce(analyzer.loops[i], analyzer.results[i]);
   }
 }
-void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile) {
+void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile,
+                                    bool defer_evidence) {
   CHECK(program != nullptr) << "VerifyHardwareLoopRequirements requires a program";
   Analyzer analyzer(profile);
   analyzer.VisitProgram(program);
   for (size_t i = 0; i < analyzer.results.size(); ++i) {
-    if (!analyzer.unreachable[i]) Enforce(analyzer.loops[i], analyzer.results[i]);
+    if (!analyzer.unreachable[i]) Enforce(analyzer.loops[i], analyzer.results[i], defer_evidence);
   }
 }
 }  // namespace pypto::ir

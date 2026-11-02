@@ -257,6 +257,7 @@ class KernelCompiler:
             )
             if helpers:
                 _vpto.validate_device_image(binary)
+                self._validate_vpto_hardware_loops(helpers, linked)
             return binary
 
     def _vpto_toolchain(self) -> tuple[str, str]:
@@ -296,6 +297,7 @@ class KernelCompiler:
                 repr(_vpto.CALLER_FLAGS),
                 repr(_vpto.LINK_SYMBOL_ORDER),
                 _vpto_sync.VERSION,
+                _vpto.HARDWARE_LOOP_EVIDENCE_VERSION,
                 repr(self.sdk.ccec.get_compile_flags(core_type=core_type)),
             ),
         )
@@ -322,7 +324,13 @@ class KernelCompiler:
                     f"VPTO helper {source} is not self-contained: {', '.join(unsupported)}. "
                     "Bridge operations and external helper dependencies are not supported."
                 )
-            _vpto_sync.validate_sync_contract(llvm.read_text(), source)
+            requirement = _vpto.hardware_loop_requirement(Path(source).read_text())
+            llvm_text = llvm.read_text()
+            if requirement and f"define void @{requirement[0]}(" not in llvm_text:
+                raise ValueError(f"VF hardware-loop requirement does not match the emitted helper: {source}")
+            _vpto_sync.validate_sync_contract(
+                llvm_text, source, hardware_loop_trip_count=requirement[1] if requirement else 0
+            )
             self._run(
                 [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)],
                 obj,
@@ -330,6 +338,22 @@ class KernelCompiler:
             )
             objects.append(obj)
         return objects
+
+    def _validate_vpto_hardware_loops(self, sources: tuple[str, ...], linked: Path) -> None:
+        """Disassemble the exact ELF returned to the cache and persistent loader."""
+        requirements = [
+            requirement
+            for source in sources
+            if (requirement := _vpto.hardware_loop_requirement(Path(source).read_text())) is not None
+        ]
+        if not requirements:
+            return
+        assert self.sdk.ccec is not None
+        objdump = str(Path(self.sdk.ccec.cxx_path).with_name("llvm-objdump"))
+        result = subprocess.run(
+            [objdump, "-d", str(linked)], capture_output=True, text=True, check=True, timeout=self._timeout_s
+        )
+        _vpto.validate_hardware_loop_evidence(result.stdout, requirements)
 
     def compile_orchestration(
         self,

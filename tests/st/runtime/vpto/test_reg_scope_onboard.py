@@ -44,10 +44,10 @@ def _prepare(directory: Path):
         a = pl.reshape(a, [1024])
         b = pl.reshape(b, [1024])
         c = pl.reshape(c, [1024])
-        # Static unrolling gives one helper fixed bounds while n remains a
-        # runtime scalar. Masked stores preserve the initialized output tail.
+        # A required hardware loop retains all 16 iterations in one helper.
+        # Masked stores preserve the initialized output tail.
         with pl.reg_scope():
-            for chunk in pl.unroll(16):
+            for chunk in pl.hardware_loop(16):
                 x = pl.reg.load(a, offset=chunk * 64, lanes=64)
                 y = pl.reg.load(b, offset=chunk * 64, lanes=64)
                 base = pl.cast(chunk * 64, pl.INT32)
@@ -88,6 +88,9 @@ def _prepare(directory: Path):
     assert kernel["core_type"] == "aiv"
     assert kernel["vpto_sources"], "Normal JIT lost the structured helper bundle"
     assert all("pto.vmi." in Path(p).read_text() for p in kernel["vpto_sources"])
+    helpers = [Path(path).read_text() for path in kernel["vpto_sources"]]
+    assert len(helpers) == 1 and helpers[0].count("scf.for") == 1
+    assert "pypto.hardware_loop:" in helpers[0]
     wrapper = Path(kernel["source"]).read_text()
     assert "__pypto_vf_" in wrapper
     assert "args[3]" in wrapper

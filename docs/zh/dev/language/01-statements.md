@@ -257,7 +257,10 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
     return x
 ```
 
-该 API 表达意图。当前后端对保留的 Require 循环报告不支持的资格状态。
+该 API 表达意图。A5 提供受限的执行 profile：一个静态 2–32767 次循环、
+FP32/64-lane 仿射访存及保持存储 view 的 Tile 携带值。参见
+[VPTO VF 执行](../codegen/03-vpto-vf-integration.md#强制硬件循环)。
+其他目标仍不支持。上面的标量携带值示例用于说明前端意图，不属于当前 A5 可执行子集。
 `ir.analyze_hardware_loop(loop, profile)` 区分 Eligible、Ineligible 和 Unknown；
 Eligible 仍不等于最终产物的硬件证据，计数器窄化与 `scf.for` 均不能替代证据。
 动态整数 `stop` 无需静态范围证明，也不插入运行时范围检查；其迭代次数和终止归纳变量

@@ -9,10 +9,54 @@
 
 """Build contract for separately compiled, self-contained A5 VPTO helpers."""
 
+import re
 import struct
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
+
+HARDWARE_LOOP_EVIDENCE_VERSION = "a5-single-vloop-v1"
+
+
+def hardware_loop_requirement(source: str) -> tuple[str, int] | None:
+    """Read the source-owned obligation, which survives relocation and caching."""
+    markers = [line for line in source.splitlines() if "pypto.hardware_loop:" in line]
+    if not markers:
+        return None
+    match = re.fullmatch(r"// pypto\.hardware_loop: ([A-Za-z_][A-Za-z_0-9]*) ([0-9]+)", markers[0])
+    if len(markers) != 1 or match is None or not 2 <= int(match[2]) <= 32767:
+        raise ValueError("Invalid VF hardware-loop requirement: expected one helper and count in [2, 32767]")
+    return match[1], int(match[2])
+
+
+def validate_hardware_loop_evidence(disassembly: str, requirements: Sequence[tuple[str, int]]) -> None:
+    """Require one actual VLOOP in each required helper's linked vector thread.
+
+    Admission validates the source count against canonical LLVM before device
+    compilation. This second boundary checks that the loop was actually realized
+    in the final linked symbol, not unfolded or replaced with software control.
+    Unknown disassembler output and instruction variants remain unsupported.
+    """
+    symbols: dict[str, list[str]] = {}
+    instructions: list[str] | None = None
+    for line in disassembly.splitlines():
+        if symbol := re.fullmatch(r"[0-9a-fA-F]+ <([^>]+)>:", line.strip()):
+            if symbol[1] in symbols:
+                raise ValueError(f"Ambiguous VF hardware-loop symbol: {symbol[1]}")
+            instructions = symbols.setdefault(symbol[1], [])
+        elif instructions is not None:
+            instruction = re.match(r"\s*[0-9a-fA-F]+:\s+[0-9a-fA-F]+\s+([A-Z][A-Z0-9_.]*)\b", line)
+            if instruction:
+                instructions.append(instruction[1])
+    for symbol, count in requirements:
+        thread = symbols.get(f"{symbol}.vector.thread", [])
+        loops = [opcode for opcode in thread if opcode.startswith("VLOOP")]
+        if loops != ["VLOOPV2_V310"]:
+            raise ValueError(
+                f"HardwareLoopPolicy.Require backend evidence missing for {symbol} ({count} iterations): "
+                "expected exactly one VLOOPV2_V310 in the linked vector thread"
+            )
+
 
 # These options are also included in the binary cache identity. Keep LLVM
 # compilation separate from the C++ flags and retain PTOAS's validated device

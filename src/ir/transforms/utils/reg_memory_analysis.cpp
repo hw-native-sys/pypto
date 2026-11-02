@@ -75,36 +75,37 @@ class RegisterRoots : public IRVisitor {
 // possibly-empty loop establishes no new definite initialization.
 class InitializationChecker : public IRVisitor {
  public:
-  explicit InitializationChecker(const std::set<const Var*>& roots) : roots_(roots) {}
+  InitializationChecker(const std::set<const Var*>& roots, bool require_dynamic_inputs)
+      : roots_(roots), require_dynamic_inputs_(require_dynamic_inputs) {}
   // Credit an input parameter or data-producing Tile result's valid region.
   // Unknown geometry contributes no proof; this never changes Tile metadata.
-  void Initialize(const ExprPtr& expr) {
+  bool Initialize(const ExprPtr& expr, bool require_initialized = false) {
     auto tile = As<TileType>(expr->GetType());
-    if (!tile || !tile->memref_.has_value()) return;
+    if (!tile || !tile->memref_.has_value()) return false;
     const auto memref = tile->memref_.value();
-    if (!roots_.count(memref->base_.get())) return;
+    if (!roots_.count(memref->base_.get())) return false;
     auto offset = As<ConstInt>(memref->byte_offset_);
-    if (!offset || offset->value_ < 0) return;
+    if (!offset || offset->value_ < 0) return false;
     const int64_t bytes = static_cast<int64_t>(tile->dtype_.GetByte());
-    if (bytes <= 0) return;
+    if (bytes <= 0) return false;
     int64_t begin = offset->value_, count = 1;
     // A missing start_offset is the canonical zero origin, not an unknown address.
     if (tile->tile_view_ && tile->tile_view_->start_offset) {
       auto start = As<ConstInt>(tile->tile_view_->start_offset);
       if (!start || start->value_ < 0 ||
           start->value_ > (std::numeric_limits<int64_t>::max() - begin) / bytes) {
-        return;
+        return false;
       }
       begin += start->value_ * bytes;
     }
     const auto& valid_shape = tile->tile_view_ ? tile->tile_view_->valid_shape : tile->shape_;
-    if (!valid_shape.empty() && valid_shape.size() != tile->shape_.size()) return;
+    if (!valid_shape.empty() && valid_shape.size() != tile->shape_.size()) return false;
     // Validate every dimension first: a zero outer valid extent means no bytes
     // are initialized, even if a partial inner extent would stop prefix growth.
     for (size_t i = 0; i < tile->shape_.size(); ++i) {
       auto shape = As<ConstInt>(tile->shape_[i]);
       auto valid = valid_shape.empty() ? shape : As<ConstInt>(valid_shape[i]);
-      if (!shape || !valid || valid->value_ <= 0 || shape->value_ < valid->value_) return;
+      if (!shape || !valid || valid->value_ <= 0 || shape->value_ < valid->value_) return false;
     }
     // Credit the contiguous initialized prefix. A partial innermost dimension
     // still initializes its first row (e.g. [1,128] valid [1,64] initializes 64
@@ -117,13 +118,15 @@ class InitializationChecker : public IRVisitor {
       auto valid = tile->tile_view_ && !tile->tile_view_->valid_shape.empty()
                        ? As<ConstInt>(tile->tile_view_->valid_shape[i - 1])
                        : shape;
-      if (!shape || !valid || valid->value_ < 0 || shape->value_ < valid->value_) return;
-      if (valid->value_ && count > std::numeric_limits<int64_t>::max() / valid->value_) return;
+      if (!shape || !valid || valid->value_ < 0 || shape->value_ < valid->value_) return false;
+      if (valid->value_ && count > std::numeric_limits<int64_t>::max() / valid->value_) return false;
       count *= valid->value_;
       if (valid->value_ != shape->value_) break;
     }
-    if (count > (std::numeric_limits<int64_t>::max() - begin) / bytes) return;
+    if (count > (std::numeric_limits<int64_t>::max() - begin) / bytes) return false;
+    if (require_initialized) return Contains(memref->base_.get(), begin, begin + count * bytes);
     Add(memref->base_.get(), begin, begin + count * bytes);
+    return true;
   }
 
  protected:
@@ -149,6 +152,15 @@ class InitializationChecker : public IRVisitor {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
       auto effect = GetRegMemoryEffect(call);
       if (!effect.root || !roots_.count(effect.root.get())) {
+        IRVisitor::VisitExpr_(call);
+        return;
+      }
+      if (require_dynamic_inputs_ && (!effect.begin || !effect.end)) {
+        // An unknown write proves no initialization. A dynamic read requires
+        // its entire view to be initialized before entering the loop; never
+        // credit the union of writes from iterations that have not run yet.
+        CHECK_SPAN(effect.access != ArgEffect::Read || Initialize(effect.target, true), call->span_)
+            << "VF hardware-loop reg.load requires an initialized Tile view";
         IRVisitor::VisitExpr_(call);
         return;
       }
@@ -256,6 +268,7 @@ class InitializationChecker : public IRVisitor {
   };
   // Borrowed from the collector, which outlives this function-local checker.
   const std::set<const Var*>& roots_;
+  bool require_dynamic_inputs_;
   // Definite initialization, shared by all Tile aliases of a MemRef base.
   std::map<const Var*, Intervals> initialized_;
   // Known true-prefix lane counts for direct full_mask/active_mask results.
@@ -306,14 +319,16 @@ class InitializationChecker : public IRVisitor {
 };
 }  // namespace
 
-void VerifyRegMemoryInitialization(const FunctionPtr& function) {
+void VerifyRegMemoryInitialization(const FunctionPtr& function, bool require_dynamic_inputs) {
   // Runtime-bound declarations have no body to analyze.
   if (!function || !function->body_) return;
   RegisterRoots collector;
   collector.VisitStmt(function->body_);
-  for (auto root : collector.dynamic_roots) collector.roots.erase(root);
+  if (!require_dynamic_inputs) {
+    for (auto root : collector.dynamic_roots) collector.roots.erase(root);
+  }
   if (collector.roots.empty()) return;
-  InitializationChecker checker(collector.roots);
+  InitializationChecker checker(collector.roots, require_dynamic_inputs);
   // In/InOut contents come from the caller. Out parameters supply storage only
   // and must be written before a Reg load can consume their contents.
   for (size_t i = 0; i < function->params_.size(); ++i) {

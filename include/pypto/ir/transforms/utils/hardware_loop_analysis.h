@@ -58,10 +58,12 @@ HardwareLoopQualification AnalyzeHardwareLoop(const ForStmtPtr& loop, const Hard
 std::vector<HardwareLoopQualification> AnalyzeHardwareLoops(const ProgramPtr& program,
                                                             const HardwareLoopProfile& profile);
 
-/// PR4 deliberately provides no successful evidence path. Until a backend can map
-/// a surviving loop to a final artifact, even Eligible Require fails closed.
+/// A standalone qualification is never final hardware evidence.
 void VerifyHardwareLoopRequirement(const ForStmtPtr& loop, const HardwareLoopProfile& profile);
-void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile);
+/// Source generation may defer evidence to the production compiler, which must
+/// carry each requirement into its helper artifact and validate the linked ELF.
+void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile,
+                                    bool defer_evidence = false);
 
 }  // namespace pypto::ir
 #endif  // PYPTO_IR_TRANSFORMS_UTILS_HARDWARE_LOOP_ANALYSIS_H_
