@@ -1012,7 +1012,11 @@ def test_gather_rejects_unsupported_lanes_or_index_width(lanes, dtype):
         if int(policy) >= 2 and policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
     ],
 )
+@pytest.mark.ptoas_compile
 def test_register_unit_native_verifier_rejects_a5_cache_modes(tmp_path, planner, direction, policy):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable")
+
     load_cache = f", cache=pl.{type(policy).__name__}.{policy.name}" if direction == "load" else ""
     store_cache = f", cache=pl.CachePolicy.{policy.name}" if direction == "store" else ""
     program = pl.parse_program(f"""
