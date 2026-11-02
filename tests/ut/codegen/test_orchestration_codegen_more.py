@@ -793,11 +793,11 @@ int main() {{
         ib = IRBuilder()
         with ib.function("orch_strided_view", type=ir.FunctionType.Orchestration) as function:
             source = function.param("source", ir.TensorType([9, 4160], DataType.INT8))
-            viewed = ib.let("viewed", tensor_ops.view(source, [9, 32, 128], strides=[4160, 128, 1]))
+            viewed = ib.let("viewed", tensor_ops.strided_view(source, [9, 32, 128], strides=[4160, 128, 1]))
             function.return_type(viewed.type)
             ib.return_stmt(viewed)
         program = ir.Program([function.get_result()], "strided_view", ir.Span.unknown())
-        with pytest.raises(ValueError, match="explicit strides.*only inside InCore"):
+        with pytest.raises(ValueError, match="tensor.strided_view.*only inside InCore"):
             _generate_orch_code(program)
 
     def test_tensor_view_shape_layout_combination_rejected(self):

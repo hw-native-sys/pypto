@@ -11,8 +11,8 @@
 
 The op reinterprets a TensorType over the same physical memory: it can flip
 the layout tag, reinterpret with a new product-preserving shape, or both.
-``tensor.reshape`` is unaffected. Explicit strides additionally describe
-non-overlapping padded ND views within packed source storage.
+``tensor.reshape`` is unaffected. The separate ``tensor.strided_view`` interface
+describes non-overlapping padded ND views within packed source storage.
 
 This file covers ``DeduceTensorViewType`` (type inference + validity); the
 Simplify-pass identity-elimination rule is covered in
@@ -542,7 +542,7 @@ def test_layout_view_preserves_pad_on_bare_tensor():
 def test_explicit_strides_preserve_page_gaps(page_bytes, dtype):
     """Logical Key elements exclude each page's metadata without a copy."""
     src = _tensor_var([9, page_bytes], dtype=dtype)
-    call = ir.op.tensor.view(src, [9, 32, 128], strides=[page_bytes, 128, 1])
+    call = ir.op.tensor.strided_view(src, [9, 32, 128], strides=[page_bytes, 128, 1])
 
     assert len(call.args) == 4
     assert isinstance(call.args[2], ir.MakeTuple)
@@ -560,7 +560,7 @@ def test_explicit_strides_preserve_page_gaps(page_bytes, dtype):
 def test_explicit_strides_accept_full_target_validity(valid_shape):
     source_view = ir.TensorView([8, 1], ir.TensorLayout.ND, [2, 8], ir.PadValue.zero)
     src = _tensor_var([2, 8], view=source_view)
-    call = ir.op.tensor.view(src, [2, 4], valid_shape, strides=[8, 1])
+    call = ir.op.tensor.strided_view(src, [2, 4], valid_shape, strides=[8, 1])
 
     view = _result_view(call)
     assert view is not None
@@ -573,7 +573,7 @@ def test_explicit_strides_preserve_memref_and_offset():
     """Capacity belongs to the source region even when its allocation is larger."""
     memref = ir.MemRef("storage", 64, 4096, _span())
     src = ir.Var("src", ir.TensorType([2, 8], DataType.INT8, memref), _span())
-    call = ir.op.tensor.view(src, [2, 4], strides=[8, 1])
+    call = ir.op.tensor.strided_view(src, [2, 4], strides=[8, 1])
 
     result = call.type
     assert isinstance(result, ir.TensorType)
@@ -583,12 +583,12 @@ def test_explicit_strides_preserve_memref_and_offset():
     assert isinstance(result_memref.byte_offset_, ir.ConstInt)
     assert result_memref.byte_offset_.value == 64
     with pytest.raises(ValueError, match="exceeds source capacity 16"):
-        ir.op.tensor.view(src, [2, 4], strides=[16, 1])
+        ir.op.tensor.strided_view(src, [2, 4], strides=[16, 1])
 
 
 def test_explicit_strides_accept_exact_storage_end():
     src = _tensor_var([12])
-    call = ir.op.tensor.view(src, [2, 4], strides=[8, 1])
+    call = ir.op.tensor.strided_view(src, [2, 4], strides=[8, 1])
     view = _result_view(call)
     assert view is not None
     assert _values_of(view.stride) == [8, 1]
@@ -600,7 +600,7 @@ def test_explicit_strides_symbolic_pages_and_pitch():
     pitch = ir.Var("pitch", ir.ScalarType(DataType.INT32), _span())
     source_stride = ir.TensorView([pitch, _const(1)], ir.TensorLayout.ND)
     src = _tensor_var([pages, pitch], DataType.INT8, source_stride)
-    call = ir.op.tensor.view(src, [pages, 32, 128], strides=[pitch, 128, 1])
+    call = ir.op.tensor.strided_view(src, [pages, 32, 128], strides=[pitch, 128, 1])
 
     result = call.type
     assert isinstance(result, ir.TensorType)
@@ -617,7 +617,9 @@ def test_explicit_strides_dsl_unwraps_scalar_shape_and_stride():
     pitch = ir.Var("pitch", ir.ScalarType(DataType.INDEX), _span())
     source = Tensor(expr=_tensor_var([pages, pitch], DataType.INT8))
 
-    result = dsl_tensor_ops.view(source, [Scalar(expr=pages), 32, 128], strides=[Scalar(expr=pitch), 128, 1])
+    result = dsl_tensor_ops.strided_view(
+        source, [Scalar(expr=pages), 32, 128], strides=[Scalar(expr=pitch), 128, 1]
+    )
 
     assert isinstance(result, Tensor)
     result_type = result.unwrap().type
@@ -641,7 +643,7 @@ def test_explicit_strides_preserve_root_read_write_provenance():
         ) -> pl.Tensor[[2, 16], pl.INT32]:
             value = pl.tile.load(seed, [0, 0], [2, 8])
             root_written = pl.tile.store(value, [0, 0], cache)
-            keys = pl.tensor.view(root_written, [2, 8], strides=[16, 1])
+            keys = pl.tensor.strided_view(root_written, [2, 8], strides=[16, 1])
             from_view = pl.tile.load(keys, [0, 0], [2, 8])
             _view_written = pl.tile.store(from_view, [0, 0], keys)
             _from_root = pl.tile.load(cache, [0, 0], [2, 8])
@@ -655,7 +657,7 @@ def test_explicit_strides_preserve_root_read_write_provenance():
         ) -> pl.Tensor[[2, 16], pl.INT32]:
             value = pl.tile.load(seed, [0, 0], [2, 8])
             root_written = pl.tile.store(value, [0, 0], cache)
-            keys = pl.tensor.view(root_written, [2, 8], strides=[16, 1])
+            keys = pl.tensor.strided_view(root_written, [2, 8], strides=[16, 1])
             from_view = pl.tile.load(keys, [0, 0], [2, 8])
             _view_written = pl.tile.store(from_view, [0, 0], keys)
             _from_root = pl.tile.load(cache, [0, 0], [2, 8])
@@ -667,12 +669,25 @@ def test_explicit_strides_preserve_root_read_write_provenance():
 
 def test_explicit_strides_require_shape_and_keyword():
     src = _tensor_var([16])
-    with pytest.raises(ValueError, match="strides requires shape"):
-        ir.op.tensor.view(src, strides=[1])
+    with pytest.raises(TypeError, match="shape"):
+        ir.op.tensor.strided_view(src, strides=[1])
     with pytest.raises(TypeError):
-        inspect.signature(ir.op.tensor.view).bind(src, [16], [], [1])
+        inspect.signature(ir.op.tensor.strided_view).bind(src, [16], [], [1])
     with pytest.raises(TypeError):
-        inspect.signature(dsl_tensor_ops.view).bind(Tensor(expr=src), [16], [], [1])
+        inspect.signature(dsl_tensor_ops.strided_view).bind(Tensor(expr=src), [16], [], [1])
+    with pytest.raises(TypeError, match="strides"):
+        inspect.signature(ir.op.tensor.strided_view).bind(src, [16])
+    with pytest.raises(TypeError, match="strides"):
+        inspect.signature(dsl_tensor_ops.strided_view).bind(Tensor(expr=src), [16])
+
+
+def test_ordinary_view_does_not_accept_strides():
+    """The new interface must not change either existing view signature."""
+    src = _tensor_var([16])
+    for view, tensor in ((ir.op.tensor.view, src), (dsl_tensor_ops.view, Tensor(expr=src))):
+        assert "strides" not in inspect.signature(view).parameters
+        with pytest.raises(TypeError, match="strides"):
+            view(tensor, [16], strides=[1])
 
 
 @pytest.mark.parametrize(
@@ -691,7 +706,7 @@ def test_explicit_strides_require_shape_and_keyword():
 )
 def test_explicit_strides_reject_invalid_shape_and_stride(shape, strides, message):
     with pytest.raises(ValueError, match=message):
-        ir.op.tensor.view(_tensor_var([32]), shape, strides=strides)
+        ir.op.tensor.strided_view(_tensor_var([32]), shape, strides=strides)
 
 
 @pytest.mark.parametrize("field", ["shape", "strides", "valid_shape"])
@@ -699,7 +714,7 @@ def test_explicit_strides_reject_noninteger_elements(field):
     values: dict[str, list[int | ir.Expr]] = {"shape": [2, 4], "strides": [8, 1], "valid_shape": []}
     values[field] = [ir.ConstFloat(2.0, DataType.FP32, _span()), _const(1)]
     with pytest.raises(ValueError, match="integer scalar dtype"):
-        ir.op.tensor.view(
+        ir.op.tensor.strided_view(
             _tensor_var([32]), values["shape"], values["valid_shape"], strides=values["strides"]
         )
 
@@ -707,47 +722,47 @@ def test_explicit_strides_reject_noninteger_elements(field):
 @pytest.mark.parametrize("shape", [[0, 8], [-1, 8]])
 def test_explicit_strides_reject_nonpositive_source(shape):
     with pytest.raises(ValueError, match="source shape element 0 must be positive"):
-        ir.op.tensor.view(_tensor_var(shape), [1], strides=[1])
+        ir.op.tensor.strided_view(_tensor_var(shape), [1], strides=[1])
 
 
 @pytest.mark.parametrize("valid_shape", [[1, 4], [2]])
 def test_explicit_strides_reject_partial_target_validity(valid_shape):
     with pytest.raises(ValueError, match="fully valid target"):
-        ir.op.tensor.view(_tensor_var([2, 8]), [2, 4], valid_shape, strides=[8, 1])
+        ir.op.tensor.strided_view(_tensor_var([2, 8]), [2, 4], valid_shape, strides=[8, 1])
 
 
 def test_explicit_strides_reject_partial_source_validity():
     view = ir.TensorView([8, 1], ir.TensorLayout.ND, [1, 8])
     with pytest.raises(ValueError, match="fully valid source"):
-        ir.op.tensor.view(_tensor_var([2, 8], view=view), [2, 4], strides=[8, 1])
+        ir.op.tensor.strided_view(_tensor_var([2, 8], view=view), [2, 4], strides=[8, 1])
 
 
 def test_explicit_strides_reject_gapped_source():
     view = ir.TensorView([16, 1], ir.TensorLayout.ND)
     with pytest.raises(ValueError, match="packed ND source"):
-        ir.op.tensor.view(_tensor_var([2, 8], view=view), [2, 4], strides=[8, 1])
+        ir.op.tensor.strided_view(_tensor_var([2, 8], view=view), [2, 4], strides=[8, 1])
 
 
 @pytest.mark.parametrize("layout", [ir.TensorLayout.DN, ir.TensorLayout.NZ, ir.TensorLayout.MX_A_ZZ])
 def test_explicit_strides_reject_non_nd_layout(layout):
     src = _tensor_var([2, 8])
     with pytest.raises(ValueError, match="ND source and target"):
-        ir.op.tensor.view(src, [2, 4], strides=[8, 1], layout=layout)
+        ir.op.tensor.strided_view(src, [2, 4], strides=[8, 1], layout=layout)
     source_view = ir.TensorView([], layout)
     with pytest.raises(ValueError, match="ND source and target"):
-        ir.op.tensor.view(_tensor_var([2, 8], view=source_view), [2, 4], strides=[8, 1])
+        ir.op.tensor.strided_view(_tensor_var([2, 8], view=source_view), [2, 4], strides=[8, 1])
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2, DataType.INT4, DataType.BOOL])
 def test_explicit_strides_reject_packed_and_subbyte_dtypes(dtype):
     with pytest.raises(ValueError, match="packed FP4 or sub-byte"):
-        ir.op.tensor.view(_tensor_var([32], dtype=dtype), [16], strides=[1])
+        ir.op.tensor.strided_view(_tensor_var([32], dtype=dtype), [16], strides=[1])
 
 
 def test_explicit_strides_reject_distributed_source():
     src = ir.Var("distributed", ir.DistributedTensorType([2, 8], DataType.INT8), _span())
     with pytest.raises(ValueError, match="do not support distributed"):
-        ir.op.tensor.view(src, [2, 4], strides=[8, 1])
+        ir.op.tensor.strided_view(src, [2, 4], strides=[8, 1])
 
 
 @pytest.mark.parametrize("symbolic", [False, True])
@@ -756,7 +771,7 @@ def test_explicit_strides_reject_capacity_overflow_with_symbolic_prefix(symbolic
     prefix = ir.Var("pages", ir.ScalarType(DataType.INDEX), _span()) if symbolic else _const(1)
     src = _tensor_var([prefix, _const(1 << 62), _const(4)])
     with pytest.raises(ValueError, match="source capacity overflows int64"):
-        ir.op.tensor.view(src, [1], strides=[1])
+        ir.op.tensor.strided_view(src, [1], strides=[1])
 
 
 @pytest.mark.parametrize("symbolic", [False, True])
@@ -769,13 +784,13 @@ def test_explicit_strides_reject_span_overflow_with_symbolic_prefix(symbolic, ov
     else:
         shape, strides = [prefix, 2, 2, 1], [1 << 62, 1 << 62, 1 << 62, 1]
     with pytest.raises(ValueError, match="storage span overflows int64"):
-        ir.op.tensor.view(_tensor_var([(1 << 63) - 1], DataType.INT8), shape, strides=strides)
+        ir.op.tensor.strided_view(_tensor_var([(1 << 63) - 1], DataType.INT8), shape, strides=strides)
 
 
 def test_explicit_strides_reject_known_out_of_bounds_with_symbolic_axis():
     pages = ir.Var("pages", ir.ScalarType(DataType.INDEX), _span())
     with pytest.raises(ValueError, match="exceeds source capacity"):
-        ir.op.tensor.view(_tensor_var([16]), [pages, 2, 4], strides=[32, 16, 1])
+        ir.op.tensor.strided_view(_tensor_var([16]), [pages, 2, 4], strides=[32, 16, 1])
 
 
 @pytest.mark.parametrize("symbolic", [False, True])
@@ -786,7 +801,7 @@ def test_explicit_strides_reject_canonical_product_overflow(symbolic):
     # The known span is exactly maximum, but stride[1] * shape[1] exceeds
     # int64. The shared relaxed verifier alone would treat that as symbolic.
     with pytest.raises(ValueError, match="canonical stride product overflows int64"):
-        ir.op.tensor.view(
+        ir.op.tensor.strided_view(
             _tensor_var([maximum], DataType.INT8), [prefix, 2, 1], strides=[maximum, maximum - 1, 1]
         )
 
@@ -796,14 +811,16 @@ def test_explicit_strides_reject_source_byte_capacity_overflow(symbolic):
     prefix = ir.Var("pages", ir.ScalarType(DataType.INDEX), _span()) if symbolic else _const(1)
     source = _tensor_var([prefix, _const(1 << 62)], DataType.FP16)
     with pytest.raises(ValueError, match="source capacity in bytes overflows int64"):
-        ir.op.tensor.view(source, [1], strides=[1])
+        ir.op.tensor.strided_view(source, [1], strides=[1])
 
 
 @pytest.mark.parametrize("symbolic", [False, True])
 def test_explicit_strides_reject_storage_byte_span_overflow(symbolic):
     prefix = ir.Var("pages", ir.ScalarType(DataType.INDEX), _span()) if symbolic else _const(1)
     with pytest.raises(ValueError, match="storage span in bytes overflows int64"):
-        ir.op.tensor.view(_tensor_var([16], DataType.FP16), [prefix, 2, 1], strides=[1 << 62, 1 << 62, 1])
+        ir.op.tensor.strided_view(
+            _tensor_var([16], DataType.FP16), [prefix, 2, 1], strides=[1 << 62, 1 << 62, 1]
+        )
 
 
 def test_explicit_strides_do_not_relax_ordinary_view():

@@ -452,7 +452,7 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   // form rather than silently turning a padded alias into a packed descriptor.
   const bool has_explicit_strides = op->args_.size() == 4;
   CHECK_SPAN(!has_explicit_strides, op->span_)
-      << "tensor.view with explicit strides is supported only inside InCore functions; "
+      << "tensor.strided_view is supported only inside InCore functions; "
          "pass the packed source tensor and create the view inside the InCore function";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);

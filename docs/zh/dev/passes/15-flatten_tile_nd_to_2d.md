@@ -67,7 +67,7 @@ program_2d = flatten_pass(program)
 启用，要求静态、完全有效且不启用 clamp 的窗口，只把目标 Tile 从 `[B,M,N]`
 展平为 `[B*M,N]`。动态源尺寸、偏移和 stride 仍由调用方保证运行时前置条件；
 编译器不生成边界 guard 或自动逐页回退。详见
-[显式 stride 视图合同](../ir/05-tensor-tile-ops.md)。
+[`tensor.strided_view` 视图合同](../ir/05-tensor-tile-ops.md)。
 
 通用 Call 会统一替换参数、缓存的结果类型和包含表达式的属性。任意一处变化时，
 都会同步重建 Call 及其定义 Var，并记录该 Var 供下游引用。即使只有元数据变化，

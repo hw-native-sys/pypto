@@ -71,7 +71,7 @@ Currently enabled on A2/A3, this path requires a static, fully valid window with
 no clamping, and folds only its destination Tile `[B,M,N]` to `[B*M,N]`.
 Dynamic source dimensions, offsets, and strides remain caller preconditions;
 no runtime bounds guards or automatic per-page fallback are generated. See the
-[explicit-stride view contract](../ir/05-tensor-tile-ops.md).
+[`tensor.strided_view` contract](../ir/05-tensor-tile-ops.md).
 
 Generic Calls substitute their arguments, cached result types, and expression-valued
 attributes together. A change in any of these rebuilds both the Call and its defining

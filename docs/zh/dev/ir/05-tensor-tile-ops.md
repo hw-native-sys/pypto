@@ -13,7 +13,10 @@
 
 `tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）。编排层通常仅支持 ND shape 重新解释，且不能同时改变 layout；FP8E8M0 dynamic scale storage 还允许在 packed ND 与 `MX_A_ZZ` 或 `MX_B_NN` 之间建立元素数相同的 shaped alias，编排层保留同一个 runtime tensor，不调用 `reshape`。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 
-显式指定 `strides=` 时，采用独立的 InCore 视图合同。源必须是本地、完全有效、
+`tensor.strided_view(src, shape, *, strides=...)` 是独立的 InCore 接口；现有
+`tensor.view` 的签名不增加 `strides` 参数。两种接口复用 `tensor.view` IR，显式
+步长形式将 shape、valid_shape 和 strides 保存为普通操作数，继续复用原有存储
+别名和依赖分析。源必须是本地、完全有效、
 紧密排列的 ND 张量；结果是同 dtype、同 MemRef（包括字节偏移）的完全有效 ND
 别名。stride 单位为元素，必须为正，且满足现有的非重叠 ND 规范（最内层 stride
 为 1）。该形式暂不支持 FP4/亚字节存储、分布式张量、部分有效区域或布局变换。
@@ -37,7 +40,7 @@
 ```python
 pages = pl.tensor.dim(native_cache, 0)
 pitch = pl.tensor.dim(native_cache, 1)
-keys = pl.tensor.view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
+keys = pl.tensor.strided_view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
 pair = pl.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.MemorySpace.Mat)
 ```
 

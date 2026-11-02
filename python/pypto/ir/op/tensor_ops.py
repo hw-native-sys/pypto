@@ -1957,7 +1957,6 @@ def view(
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     *,
     layout: TensorLayout | None = None,
-    strides: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Reinterpret ``tensor`` over the same physical memory.
@@ -1970,20 +1969,13 @@ def view(
 
     1. The target shape must have rank at least 1. A DN target must have rank
        at least 2 (RFC #1300 section 4.2 trailing-pair layout).
-    2. When ``shape`` is provided without ``strides``, the total element count must be
+    2. When ``shape`` is provided, the total element count must be
        product-preserving (new product == old product), except for symbolic
        dimensions where equality is unprovable and accepted optimistically.
        Static target dimensions must be positive. A source with a partial
        ``valid_shape`` can only use a packed ND leading-dimension collapse to
        2D or a contiguous-prefix linear collapse to ``[1, product(shape)]``;
        both require an explicit target ``valid_shape``.
-    Explicit ``strides`` instead describe a fully valid, non-overlapping ND view
-    within a fully valid packed local ND source. Strides use dtype elements;
-    the last addressed element must remain within the source region. Static
-    violations and int64 overflow are rejected. Symbolic positivity, stride
-    relationships, storage bounds, and address-arithmetic bounds are caller
-    preconditions; no runtime guards or copies are generated. This form is
-    supported only inside InCore functions and excludes FP4/sub-byte dtypes.
     Combining ``shape`` with a layout change is valid for type deduction and
     PTO in-core lowering. Only orchestration lowering is restricted: it supports
     ND shape reinterprets and shaped ND/MX_A_ZZ/MX_B_NN backing/consumer views
@@ -1993,7 +1985,7 @@ def view(
 
     Args:
         tensor: Input tensor expression.
-        shape: New shape for the view. Without ``strides``, must be product-preserving unless
+        shape: New shape for the view. Must be product-preserving unless
             symbolic dimensions are present. May introduce or remove unit
             dimensions (RFC #1300 P4). Must be a sequence of ints or
             Expr values, or a ``MakeTuple``. In an InCore function, the source
@@ -2007,8 +1999,6 @@ def view(
             Orchestration also permits shaped ND/MX_A_ZZ/MX_B_NN backing and
             consumer views for FP8E8M0 MX scales; other layout-changing shape
             views remain limited to in-core lowering.
-        strides: Explicit ND strides in dtype elements. Requires ``shape``;
-            ``valid_shape`` must be omitted, empty, or equal to ``shape``.
         span: Optional source span for debugging (auto-captured if not
             provided).
 
@@ -2019,8 +2009,6 @@ def view(
         ValueError: If the requested shape/layout is missing, unsupported, or
             inconsistent with the source tensor metadata.
     """
-    if strides is not None and shape is None:
-        raise ValueError("tensor.view strides requires shape")
     if shape is None and layout is None:
         raise ValueError("tensor.view requires at least one of shape or layout")
     if valid_shape is not None and shape is None:
@@ -2031,13 +2019,56 @@ def view(
         args.append(_to_make_tuple(shape, actual_span))
     if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
-    elif strides is not None:
-        # Explicit strides require a fully valid target. The empty valid_shape
-        # encodes that default in operand three, keeping strides in operand four.
-        args.append(_to_make_tuple([], actual_span))
-    if strides is not None:
-        # Keep dynamic strides as Expr operands for substitution and serialization.
-        args.append(_to_make_tuple(strides, actual_span))
+    kwargs: dict[str, Any] = {}
+    if layout is not None:
+        kwargs["layout"] = layout
+    return _ir_core.create_op_call("tensor.view", args, kwargs, actual_span)
+
+
+def strided_view(
+    tensor: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    *,
+    strides: Sequence[int | Expr] | _ir_core.MakeTuple,
+    layout: TensorLayout | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Create a zero-copy ND view with explicit strides in dtype elements.
+
+    The source must be a fully valid, packed local ND tensor. The result must
+    have positive, non-overlapping ND strides with innermost stride 1, and its
+    last accessible element must fit within the source region. Static bounds
+    and int64 overflow are checked. Symbolic positivity, non-overlap, capacity,
+    and address-arithmetic bounds remain caller preconditions; no runtime guard
+    or copy is generated. FP4/sub-byte dtypes are unsupported.
+
+    This interface is supported only inside InCore functions. It uses the
+    existing four-operand tensor.view IR form so storage aliasing, dependency
+    analysis, and backend lowering retain their existing behavior. Ordinary
+    view() keeps its shape/layout interface without an explicit-stride option.
+
+    Args:
+        tensor: Packed source tensor expression.
+        shape: Target shape with rank at least 1.
+        valid_shape: Must be omitted, empty, or equal to shape.
+        strides: Address strides, in dtype elements, one per target dimension.
+        layout: Must be omitted or TensorLayout.ND.
+        span: Optional source span, auto-captured when omitted.
+
+    Returns:
+        Call describing an alias of the source storage, including its offset.
+
+    Raises:
+        ValueError: If the source, shape, strides, layout, or storage span is invalid.
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [
+        tensor,
+        _to_make_tuple(shape, actual_span),
+        _to_make_tuple([] if valid_shape is None else valid_shape, actual_span),
+        _to_make_tuple(strides, actual_span),
+    ]
     kwargs: dict[str, Any] = {}
     if layout is not None:
         kwargs["layout"] = layout

@@ -1950,7 +1950,7 @@ def test_explicit_stride_view_print_parse_roundtrip(dynamic, with_storage):
     shape = [pages, pitch] if dynamic else [9, 4160]
     storage = ir.MemRef("cache", 64, 37440, span) if with_storage else None
     data = ir.Var("data", ir.TensorType(shape, DataType.INT8, storage), span)
-    value = ir.op.tensor.view(
+    value = ir.op.tensor.strided_view(
         data,
         [pages if dynamic else 9, 32, 128],
         strides=[pitch if dynamic else 4160, 128, 1],
@@ -1969,6 +1969,8 @@ def test_explicit_stride_view_print_parse_roundtrip(dynamic, with_storage):
     if with_storage:
         assert 'pl._dump.call("tensor.view"' in printed
     else:
+        assert "pl.tensor.strided_view(" in printed
+        assert "pl.tensor.view(" not in printed
         assert "strides=" in printed
     reparsed = pl.parse_program(printed)
     ir.assert_structural_equal(program, reparsed)

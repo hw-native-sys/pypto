@@ -614,6 +614,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
+  // The explicit-stride IR form stays a tensor.view so all existing alias
+  // analyses see the same storage relationship. Its public spelling is a
+  // separate interface; ordinary view has no strides parameter.
+  const bool view_kw_strides = IsOp(op, "tensor.view") && op->args_.size() == 4;
+  if (view_kw_strides) op_name = "tensor.strided_view";
   // Keep the existing barrier IR while presenting its parameterized public
   // API. The native ops have no operands or kwargs; retain the legacy call
   // spelling for noncanonical calls rather than silently dropping metadata.
@@ -871,9 +876,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool cast_kw_tmp = IsOp(op, "tile.cast") && op->args_.size() == 2;
   const bool sort32_kw_tmp = IsOp(op, "tile.sort32") && op->args_.size() == 3;
   // Strides are an operand (so SSA substitution sees dynamic pitches), but the
-  // public view API keeps them keyword-only. Preserve the empty valid_shape
+  // public strided_view API keeps them keyword-only. Preserve the empty valid_shape
   // placeholder in slot three so the ordinary parser rebuilds all four args.
-  const bool view_kw_strides = IsOp(op, "tensor.view") && op->args_.size() == 4;
   // pld.tensor.all_to_all_v carries its requested block limit as a keyword-only
   // 6th operand; printing it positionally would re-parse as too many arguments.
   const bool a2av_kw_core_num = (IsOp(op, "pld.tensor.all_to_all_v") && op->args_.size() == 6) ||

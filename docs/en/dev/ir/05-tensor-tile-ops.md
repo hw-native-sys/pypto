@@ -13,7 +13,11 @@ Part of the [Operator System](05-operators.md) reference.
 
 `tensor.view` is a metadata-only zero-copy shape/layout reinterpret. It is registered as a `TensorOp` passthrough in `ConvertTensorToTileOps`; PTO in-core codegen lowers it to `pto.make_tensor_view` over the original base pointer. Targets require rank at least 1 (DN requires rank at least 2). Orchestration shape reinterpret is normally ND-only and cannot also change layout. FP8E8M0 dynamic scale storage additionally permits an equal-element-count shaped alias between packed ND and `MX_A_ZZ` or `MX_B_NN`; orchestration preserves the same runtime tensor without calling `reshape`. Shape reinterpretation of a partially valid source is limited to either a packed ND leading-dimension collapse to 2D or a contiguous-prefix linear collapse to `[1, product(shape)]`; both require an explicit target `valid_shape`. These forms preserve the source tensor kind and backing metadata.
 
-An explicit `strides=` selects a separate InCore-only view contract. The source
+`tensor.strided_view(src, shape, *, strides=...)` is a separate InCore-only
+interface; the existing `tensor.view` signature has no `strides` parameter.
+Both interfaces reuse `tensor.view` IR: the strided form carries shape,
+valid_shape, and strides as ordinary operands so existing alias and dependency
+analysis still sees the same source storage. The source
 must be a local, fully valid, packed ND tensor; the result is a fully valid ND
 alias of the same dtype and MemRef, including its byte offset. Strides are in
 elements, must be positive, and must satisfy the existing non-overlapping ND
@@ -44,7 +48,7 @@ root-input contract:
 ```python
 pages = pl.tensor.dim(native_cache, 0)
 pitch = pl.tensor.dim(native_cache, 1)
-keys = pl.tensor.view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
+keys = pl.tensor.strided_view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
 pair = pl.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.MemorySpace.Mat)
 ```
 

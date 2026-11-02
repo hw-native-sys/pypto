@@ -2163,7 +2163,6 @@ def view(
     valid_shape: Sequence[IntLike] | None = None,
     *,
     layout: TensorLayout | None = None,
-    strides: Sequence[IntLike] | None = None,
 ) -> _TensorT:
     """Reinterpret a tensor over the same physical memory.
 
@@ -2172,16 +2171,9 @@ def view(
     ND/DN layout view. The result is a zero-copy view over the same physical
     memory, and its target shape must have rank at least 1.
 
-    Explicit ``strides`` describe a fully valid ND view within a fully valid
-    packed local ND source and are supported only inside InCore functions.
-    Static bounds and int64 overflow are checked; symbolic positivity,
-    non-overlap, storage bounds, and address-arithmetic bounds remain caller
-    preconditions. This form generates no runtime guards or copies and does
-    not support FP4/sub-byte dtypes.
-
     Args:
         tensor: Source tensor.
-        shape: New shape for the view. Without ``strides``, must be product-preserving unless
+        shape: New shape for the view. Must be product-preserving unless
             symbolic dimensions are present. Rank-zero views are not supported.
         valid_shape: Explicit valid dimensions for a packed ND
             leading-dimension collapse to 2D or contiguous-prefix linear
@@ -2192,9 +2184,6 @@ def view(
             ND/MX_A_ZZ/MX_B_NN backing and consumer views for dynamic FP8E8M0
             MX scales. Other layout-changing shape views are limited to in-core
             lowering.
-        strides: Explicit ND strides in dtype elements. Requires ``shape`` and
-            innermost stride 1. ``valid_shape`` must be omitted, empty, or equal
-            to ``shape``; the last addressed element must fit the source region.
 
     Returns:
         Tensor wrapping the view operation.
@@ -2208,7 +2197,46 @@ def view(
         None if shape is None else _normalize_intlike(shape),
         None if valid_shape is None else _normalize_intlike(valid_shape),
         layout=layout,
-        strides=None if strides is None else _normalize_intlike(strides),
+    )
+    return tensor.__class__(expr=call_expr)
+
+
+def strided_view(
+    tensor: _TensorT,
+    shape: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
+    *,
+    strides: Sequence[IntLike],
+    layout: TensorLayout | None = None,
+) -> _TensorT:
+    """Create an InCore zero-copy ND view with explicit element strides.
+
+    The source must be a fully valid, packed local ND tensor. Strides must be
+    positive, non-overlapping, and have innermost stride 1. The last accessible
+    element must fit the source region. Static bounds and int64 overflow are
+    checked; symbolic positivity, non-overlap, storage bounds, and address
+    arithmetic remain caller preconditions. No copy or runtime guard is added.
+    FP4/sub-byte dtypes are unsupported.
+
+    Args:
+        tensor: Packed source tensor.
+        shape: Target shape with rank at least 1.
+        valid_shape: Must be omitted, empty, or equal to shape.
+        strides: Address strides in dtype elements, one per target dimension.
+        layout: Must be omitted or TensorLayout.ND.
+
+    Returns:
+        Tensor aliasing the source storage and preserving its offset.
+
+    Raises:
+        ValueError: If the source, shape, strides, layout, or storage span is invalid.
+    """
+    call_expr = _ir_ops.strided_view(
+        tensor.unwrap(),
+        _normalize_intlike(shape),
+        None if valid_shape is None else _normalize_intlike(valid_shape),
+        strides=_normalize_intlike(strides),
+        layout=layout,
     )
     return tensor.__class__(expr=call_expr)
 

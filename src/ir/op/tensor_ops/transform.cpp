@@ -467,11 +467,12 @@ namespace {
 
 std::vector<ExprPtr> ExtractViewIntegerTuple(const ExprPtr& arg, const char* name) {
   auto tuple_type = As<TupleType>(arg->GetType());
-  CHECK_SPAN(tuple_type, arg->span_) << "tensor.view: " << name << " must be a tuple of integer scalars";
+  CHECK_SPAN(tuple_type, arg->span_) << "tensor.strided_view: " << name
+                                     << " must be a tuple of integer scalars";
   for (const auto& type : tuple_type->types_) {
     auto scalar = As<ScalarType>(type);
     CHECK_SPAN(scalar && scalar->dtype_.IsInt(), arg->span_)
-        << "tensor.view: " << name << " elements must have integer scalar dtype";
+        << "tensor.strided_view: " << name << " elements must have integer scalar dtype";
   }
   if (auto tuple = As<MakeTuple>(arg)) return tuple->elements_;
   std::vector<ExprPtr> elements;
@@ -486,10 +487,10 @@ void CheckPositiveViewValues(const std::vector<ExprPtr>& values, const char* nam
   for (size_t i = 0; i < values.size(); ++i) {
     auto scalar = As<ScalarType>(values[i]->GetType());
     CHECK_SPAN(scalar && scalar->dtype_.IsInt(), span)
-        << "tensor.view: " << name << " element " << i << " must have integer scalar dtype";
+        << "tensor.strided_view: " << name << " element " << i << " must have integer scalar dtype";
     if (auto value = As<ConstInt>(values[i])) {
-      CHECK_SPAN(value->value_ > 0, span)
-          << "tensor.view: " << name << " element " << i << " must be positive, got " << value->value_;
+      CHECK_SPAN(value->value_ > 0, span) << "tensor.strided_view: " << name << " element " << i
+                                          << " must be positive, got " << value->value_;
     }
   }
 }
@@ -497,7 +498,7 @@ void CheckPositiveViewValues(const std::vector<ExprPtr>& values, const char* nam
 void CheckViewByteExtent(int64_t elements, DataType dtype, const char* name, const Span& span) {
   int64_t bytes = 0;
   CHECK_SPAN(!__builtin_mul_overflow(elements, static_cast<int64_t>(dtype.GetByte()), &bytes), span)
-      << "tensor.view: " << name << " in bytes overflows int64";
+      << "tensor.strided_view: " << name << " in bytes overflows int64";
 }
 
 std::optional<int64_t> CheckedViewCapacity(const std::vector<ExprPtr>& shape, DataType dtype,
@@ -508,7 +509,7 @@ std::optional<int64_t> CheckedViewCapacity(const std::vector<ExprPtr>& shape, Da
     if (auto value = As<ConstInt>(dim)) {
       int64_t next = 0;
       CHECK_SPAN(!__builtin_mul_overflow(capacity, value->value_, &next), span)
-          << "tensor.view: source capacity overflows int64";
+          << "tensor.strided_view: source capacity overflows int64";
       capacity = next;
     } else {
       // Dynamic extents are positive by contract. Continue checking the known
@@ -534,7 +535,7 @@ int64_t StaticViewSpanLowerBound(const std::vector<ExprPtr>& shape, const std::v
     CHECK_SPAN(!__builtin_mul_overflow(extent->value_ - 1, stride->value_, &contribution) &&
                    !__builtin_add_overflow(end, contribution, &next),
                span)
-        << "tensor.view: explicit-stride storage span overflows int64";
+        << "tensor.strided_view: explicit-stride storage span overflows int64";
     end = next;
   }
   // Unknown contributions are nonnegative under the positive-size/stride
@@ -547,35 +548,35 @@ TypePtr DeduceExplicitStridedTensorViewType(const std::vector<ExprPtr>& args, co
                                             TensorLayout target_layout) {
   const auto& span = args[0]->span_;
   CHECK_SPAN(!As<DistributedTensorType>(args[0]->GetType()), span)
-      << "tensor.view: explicit strides do not support distributed tensors";
+      << "tensor.strided_view: explicit strides do not support distributed tensors";
   const auto source_layout = source->tensor_view_ ? source->tensor_view_->layout : TensorLayout::ND;
   CHECK_SPAN(source_layout == TensorLayout::ND && target_layout == TensorLayout::ND, span)
-      << "tensor.view: explicit strides require ND source and target layouts";
+      << "tensor.strided_view: explicit strides require ND source and target layouts";
   CHECK_SPAN(!source->dtype_.IsPackedFp4() && source->dtype_.GetBit() >= 8, span)
-      << "tensor.view: explicit strides do not support packed FP4 or sub-byte dtypes";
+      << "tensor.strided_view: explicit strides do not support packed FP4 or sub-byte dtypes";
 
   auto shape = ExtractViewIntegerTuple(args[1], "shape");
   auto valid_shape = ExtractViewIntegerTuple(args[2], "valid_shape");
   auto strides = ExtractViewIntegerTuple(args[3], "strides");
-  CHECK_SPAN(!shape.empty(), span) << "tensor.view: target shape must have rank >= 1";
+  CHECK_SPAN(!shape.empty(), span) << "tensor.strided_view: target shape must have rank >= 1";
   CHECK_SPAN(strides.size() == shape.size(), span)
-      << "tensor.view: strides rank (" << strides.size() << ") must match target shape rank (" << shape.size()
-      << ")";
+      << "tensor.strided_view: strides rank (" << strides.size() << ") must match target shape rank ("
+      << shape.size() << ")";
   CheckPositiveViewValues(source->shape_, "source shape", span);
   CheckPositiveViewValues(shape, "shape", span);
   CheckPositiveViewValues(strides, "strides", span);
   CHECK_SPAN(valid_shape.empty() || tile_view_semantics::ShapeExprListsEquivalent(valid_shape, shape), span)
-      << "tensor.view: explicit strides require a fully valid target valid_shape";
+      << "tensor.strided_view: explicit strides require a fully valid target valid_shape";
   if (source->tensor_view_) {
     const auto& view = *source->tensor_view_;
     CHECK_SPAN(view.valid_shape.empty() ||
                    tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, source->shape_),
                span)
-        << "tensor.view: explicit strides require a fully valid source valid_shape";
+        << "tensor.strided_view: explicit strides require a fully valid source valid_shape";
     CHECK_SPAN(view.stride.empty() || tile_view_semantics::ShapeExprListsEquivalent(
                                           view.stride, BuildRowMajorStrides(source->shape_)),
                span)
-        << "tensor.view: explicit strides require a packed ND source";
+        << "tensor.strided_view: explicit strides require a packed ND source";
   }
 
   // Both quantities are in source-dtype elements, relative to the source's
@@ -585,7 +586,7 @@ TypePtr DeduceExplicitStridedTensorViewType(const std::vector<ExprPtr>& args, co
   const auto minimum_span = StaticViewSpanLowerBound(shape, strides, span);
   CheckViewByteExtent(minimum_span, source->dtype_, "explicit-stride storage span", span);
   CHECK_SPAN(!capacity || minimum_span <= *capacity, span)
-      << "tensor.view: explicit-stride storage span " << minimum_span << " exceeds source capacity "
+      << "tensor.strided_view: explicit-stride storage span " << minimum_span << " exceeds source capacity "
       << capacity.value_or(0);
   // The shared verifier keeps overflowing products symbolic. Here a known
   // shape[i] * stride[i] above int64 cannot be bounded by any legal outer
@@ -596,11 +597,11 @@ TypePtr DeduceExplicitStridedTensorViewType(const std::vector<ExprPtr>& args, co
     if (extent && stride) {
       int64_t packed = 0;
       CHECK_SPAN(!__builtin_mul_overflow(extent->value_, stride->value_, &packed), span)
-          << "tensor.view: canonical stride product overflows int64 at dimension " << i;
+          << "tensor.strided_view: canonical stride product overflows int64 at dimension " << i;
     }
   }
   const auto canonical = tensor_view_semantics::CheckCanonicalView(shape, strides, TensorLayout::ND);
-  CHECK_SPAN(canonical.ok, span) << "tensor.view: explicit strides are not canonical ND: "
+  CHECK_SPAN(canonical.ok, span) << "tensor.strided_view: explicit strides are not canonical ND: "
                                  << canonical.reason;
 
   // Symbolic positivity, non-overlap, capacity and address-arithmetic bounds

@@ -195,7 +195,7 @@ def test_tensor_view_explicit_strides_skip_padding_and_preserve_alias(page_pitch
     """The reference must skip page tails and retain a subregion's origin."""
     source = _tensor_var("source", [9, page_pitch], DataType.INT8)
     page = _scalar("page")
-    view_call = ir.op.tensor.view(source, [9, 32, 128], valid_shape, strides=[page_pitch, 128, 1])
+    view_call = ir.op.tensor.strided_view(source, [9, 32, 128], valid_shape, strides=[page_pitch, 128, 1])
     keys = ir.Var("keys", view_call.type, _span())
     pair_call = ir.op.tile.load(keys, [page, 0, 0], [2, 32, 128], target_memory=ir.MemorySpace.Mat)
     pair = ir.Var("pair", pair_call.type, _span())
@@ -244,7 +244,7 @@ def test_tensor_view_dynamic_explicit_strides_codegen_and_execution():
     pages = _scalar("pages", DataType.INDEX)
     pitch = _scalar("pitch", DataType.INDEX)
     source = ir.Var("source", ir.TensorType([pages, pitch], DataType.INT8), _span())
-    view_call = ir.op.tensor.view(source, [pages, 32, 128], strides=[pitch, 128, 1])
+    view_call = ir.op.tensor.strided_view(source, [pages, 32, 128], strides=[pitch, 128, 1])
     keys = ir.Var("keys", view_call.type, _span())
     body = ir.SeqStmts([ir.AssignStmt(keys, view_call, _span()), ir.ReturnStmt([keys], _span())], _span())
     function = _simple_function("dynamic_keys", [source, pages, pitch], body, [keys.type])
@@ -268,7 +268,7 @@ def test_tensor_view_dynamic_explicit_strides_codegen_and_execution():
 def test_issue3038_mat_load_replays_before_and_after_flatten(page_pitch, first_page):
     """Load two full Key pages while skipping each page's scale/padding tail."""
     source = _tensor_var("source", [9, page_pitch], DataType.INT8)
-    view_call = ir.op.tensor.view(source, [9, 32, 128], strides=[page_pitch, 128, 1])
+    view_call = ir.op.tensor.strided_view(source, [9, 32, 128], strides=[page_pitch, 128, 1])
     keys = ir.Var("keys", view_call.type, _span())
     load_call = ir.op.tile.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=ir.MemorySpace.Mat)
     loaded = ir.Var("loaded", load_call.type, _span())

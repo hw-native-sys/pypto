@@ -725,7 +725,7 @@ def _strided_key_view_kernel(
 ):
     pages = pl.tensor.dim(native_cache, 0)
     pitch = pl.tensor.dim(native_cache, 1)
-    keys = pl.tensor.view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
+    keys = pl.tensor.strided_view(native_cache, [pages, 32, 128], strides=[pitch, 128, 1])
     page = pl.tensor.read(first_page, [0])
     pair = pl.load(keys, [page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
     flat = pl.tile.reshape(pair, [64, 128])

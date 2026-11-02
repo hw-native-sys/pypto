@@ -4812,7 +4812,7 @@ def test_strided_tensor_view_and_flatten_emit_original_page_stride(page_pitch, f
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, source: pl.Tensor[[9, page_pitch], pl.INT8]) -> pl.Tensor[[9, page_pitch], pl.INT8]:
-            keys = pl.tensor.view(source, [9, 32, 128], strides=[page_pitch, 128, 1])
+            keys = pl.tensor.strided_view(source, [9, 32, 128], strides=[page_pitch, 128, 1])
             _loaded = pl.tile.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
             return source
 
@@ -4866,7 +4866,7 @@ def test_scalar_gm_access_checks_layout_flipped_views(backend_type, layout, pitc
     backend.set_backend_type(backend_type)
     span = ir.Span.unknown()
     source = ir.Var("source", ir.TensorType([2, pitch], DataType.INT8), span)
-    alias_call = tensor_ops.view(source, [2, 8], strides=[pitch, 1])
+    alias_call = tensor_ops.strided_view(source, [2, 8], strides=[pitch, 1])
     alias = ir.Var("alias", alias_call.type, span)
     viewed_call = tensor_ops.view(alias, layout=layout)
     viewed = ir.Var("viewed", viewed_call.type, span)
@@ -4928,7 +4928,7 @@ def test_strided_rank2_load_checks_backend_row_pitch(backend_type, target_memory
 class Rank2Stride:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(self, source: pl.Tensor[[2, {pitch}], pl.INT8]):
-        view = pl.tensor.view(source, [2, 128], strides=[{pitch}, 1])
+        view = pl.tensor.strided_view(source, [2, 128], strides=[{pitch}, 1])
         _loaded = pl.load(
             view, [0, 0], [16, 128], valid_shape=[2, 128], target_memory=pl.Mem.{target_memory.name}
         )

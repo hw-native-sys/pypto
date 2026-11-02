@@ -6397,7 +6397,7 @@ def test_strided_rank3_mat_load_preserves_source_window(page_pitch, row_pitch, f
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, source: pl.Tensor[[9, page_pitch], pl.INT8]) -> pl.Tensor[[9, page_pitch], pl.INT8]:
-            keys = pl.tensor.view(source, [9, 32, 128], strides=[page_pitch, row_pitch, 1])
+            keys = pl.tensor.strided_view(source, [9, 32, 128], strides=[page_pitch, row_pitch, 1])
             loaded = pl.tile.load(keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
             return source
 
@@ -6405,7 +6405,7 @@ def test_strided_rank3_mat_load_preserves_source_window(page_pitch, row_pitch, f
     class Expected:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, source: pl.Tensor[[9, page_pitch], pl.INT8]) -> pl.Tensor[[9, page_pitch], pl.INT8]:
-            keys = pl.tensor.view(source, [9, 32, 128], strides=[page_pitch, row_pitch, 1])
+            keys = pl.tensor.strided_view(source, [9, 32, 128], strides=[page_pitch, row_pitch, 1])
             loaded: pl.Tile[[64, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
                 keys, [first_page, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat
             )
@@ -6422,7 +6422,7 @@ def test_explicit_packed_strides_keep_the_2d_source_collapse():
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, source: pl.Tensor[[9, 4096], pl.INT8]) -> pl.Tensor[[9, 4096], pl.INT8]:
-            keys = pl.tensor.view(source, [9, 32, 128], strides=[4096, 128, 1])
+            keys = pl.tensor.strided_view(source, [9, 32, 128], strides=[4096, 128, 1])
             loaded = pl.tile.load(keys, [1, 0, 0], [2, 32, 128], target_memory=pl.Mem.Mat)
             return source
 
@@ -6430,7 +6430,7 @@ def test_explicit_packed_strides_keep_the_2d_source_collapse():
     class Expected:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, source: pl.Tensor[[9, 4096], pl.INT8]) -> pl.Tensor[[9, 4096], pl.INT8]:
-            keys = pl.tensor.view(source, [9, 32, 128], strides=[4096, 128, 1])
+            keys = pl.tensor.strided_view(source, [9, 32, 128], strides=[4096, 128, 1])
             loaded_view2d = pl.tensor.view(keys, [288, 128])
             loaded: pl.Tile[[64, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
                 loaded_view2d, [32, 0], [64, 128], target_memory=pl.Mem.Mat
@@ -6448,7 +6448,7 @@ def test_strided_rank4_mat_load_rejected_before_packed_collapse():
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(self, source: pl.Tensor[[4, 4160], pl.INT8]) -> pl.Tensor[[4, 4160], pl.INT8]:
-            keys = pl.tensor.view(source, [2, 2, 32, 128], strides=[8320, 4160, 128, 1])
+            keys = pl.tensor.strided_view(source, [2, 2, 32, 128], strides=[8320, 4160, 128, 1])
             loaded = pl.tile.load(keys, [0, 0, 0, 0], [2, 2, 32, 128], target_memory=pl.Mem.Mat)
             return source
 
