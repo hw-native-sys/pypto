@@ -36,6 +36,7 @@ from pypto.runtime.bench import (
     _L3_SWIMLANE_TIMING_END,
     _LEGACY_SPAN_NAMES,
     BenchmarkStats,
+    TraceSpan,
     _parse_stats_from_strace,
     _span_names,
     benchmark,
@@ -267,6 +268,43 @@ def test_parse_populates_full_span_tree_and_format(span_root):
     assert "   `- device_wall [dev]" in tree
 
 
+@pytest.mark.parametrize(
+    "name,attrs,is_device",
+    [
+        ("chip.run.runner_run.device_wall", "clk=dev", True),
+        ("chip.run.runner_run.device_boundaries", "clk=dev", False),
+        ("chip.run.runner_run.device_boundaries", "", False),
+        ("chip.run", "", False),
+    ],
+)
+@pytest.mark.parametrize("root", ["run_prepared", "simpler_run", "chip.run"])
+def test_trace_span_clock_domain(name, attrs, is_device, root):
+    # Boundary records describe device clocks but are positioned on the host
+    # timeline. They must not acquire the device tag in benchmark trees.
+    name = name.replace("chip.run", root, 1)
+    span = TraceSpan(pid=1, tid=1, inv=1, hid="abc", depth=0, name=name, ts=1000, dur=0, attrs=attrs)
+    assert span.is_device is is_device
+
+
+@pytest.mark.parametrize("root", ["run_prepared", "simpler_run", "chip.run"])
+def test_parse_preserves_boundary_clock_domain(span_root, monkeypatch, root):
+    # Exercise the historical roots even when the installed SDK is current.
+    # Only naming is substituted; parsing and tree mirroring use the real SDK.
+    names = {key: value.replace(span_root, root, 1) for key, value in _span_names().items()}
+    monkeypatch.setattr("pypto.runtime.bench._span_names", lambda: names)
+    lines = [
+        *_launch_lines(0, root, host_us=10, device_us=2),
+        _strace_line(0, f"{root}.runner_run.device_boundaries", 0, depth=2, dev=True),
+    ]
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
+    boundary = stats.invocations[0].by_name()[f"{root}.runner_run.device_boundaries"]
+    assert not boundary.is_device
+    assert "device_boundaries [dev]" not in stats.format_tree(launch=0)
+    assert "device_boundaries [dev]" not in stats.format_mean_tree()
+    assert stats.host_wall_us == [10.0]
+    assert stats.device_wall_us == [2.0]
+
+
 def test_format_tree_no_capture_message():
     stats = BenchmarkStats(rounds=2, warmup=0)
     assert "no span tree captured" in stats.format_tree()
@@ -405,6 +443,60 @@ def test_parse_l3_incomplete_timing_region_returns_no_contaminated_samples(span_
     assert stats.fallback_flattened is True
     assert stats.device_wall_us == []
     assert stats.host_wall_us == []
+
+
+@pytest.mark.parametrize("warmup", [0, 1, 2])
+def test_parse_l2_ignores_setup_groups_sharing_dispatch_hash(span_root, warmup):
+    # The resident logger emits prewarm and chip.run records with hid=0.
+    # Setup must not consume a warmup slot or enter the measured span trees.
+    lines = [_strace_line(0, "chip.prewarm.build", 800_000, hid="0")]
+    for inv in range(1, warmup + 1):
+        lines += _launch_lines(inv, span_root, host_us=999, device_us=99, hid="0")
+    for inv, (host_us, device_us) in enumerate([(100, 10), (300, 30)], start=warmup + 1):
+        lines += _launch_lines(inv, span_root, host_us=host_us, device_us=device_us, hid="0")
+    lines.append(_strace_line(warmup + 3, "chip.prewarm.build", 900_000, hid="0"))
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=warmup)
+
+    assert stats.host_wall_us == [100.0, 300.0]
+    assert stats.device_wall_us == [10.0, 30.0]
+    assert len(stats.invocations) == 2
+    assert all("chip.prewarm.build" not in inv.by_name() for inv in stats.invocations)
+
+
+@pytest.mark.parametrize("warmup,missing_inv", [(0, 0), (1, 0), (1, 1), (1, 2)])
+@pytest.mark.parametrize("drop_launch", [False, True])
+def test_parse_l2_rejects_incomplete_dispatches(span_root, warmup, missing_inv, drop_launch):
+    # Dropped warmup or measured records must not shift the warmup boundary or
+    # return fewer samples while still reporting the requested round count.
+    lines = [_strace_line(99, "chip.prewarm.build", 800_000, hid="0")]
+    for inv in range(warmup + 2):
+        launch = _launch_lines(inv, span_root, host_us=100, device_us=10, hid="0")
+        if inv == missing_inv:
+            launch = [] if drop_launch else launch[1:]
+        lines.extend(launch)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"incomplete or ambiguous L2.*expected {warmup + 2} dispatch invocations.*found {warmup + 1}",
+    ):
+        _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=warmup)
+
+
+def test_parse_l2_rejects_extra_dispatches(span_root):
+    lines = []
+    for inv in range(4):
+        lines += _launch_lines(inv, span_root, host_us=100, device_us=10)
+    with pytest.raises(RuntimeError, match="expected 3 dispatch invocations.*found 4"):
+        _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=1)
+
+
+def test_parse_l2_setup_only_has_no_samples(span_root):
+    lines = [_strace_line(0, "chip.prewarm.build", 800_000, hid="0")]
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0)
+    assert stats.host_wall_us == []
+    assert stats.device_wall_us == []
+    assert stats.invocations == []
 
 
 def test_parse_l3_ignores_prepare_time_prewarm_groups(span_root):

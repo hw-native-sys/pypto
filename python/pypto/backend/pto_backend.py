@@ -296,14 +296,16 @@ _DEFERRED_COMPLETION_ADAPTER = """\
 // scheduler to observe it.
 //
 // The __has_include guard on that header only proves it exists, not that it
-// still matches. This static_assert is the sole automatic drift detector, and
-// it anchors kMaxDeferredConditionsPerWaiter in
+// still matches. Compile tests cover the helper API; this static_assert also
+// anchors kMaxDeferredConditionsPerWaiter in
 // include/pypto/ir/transforms/utils/scope_outline_utils.h, which bounds the
 // same budget at compile time without access to any runtime header.
 static_assert(MAX_COMPLETIONS_PER_TASK == 64,
     "PyPTO's DeferredWaitContractValidator hard-codes 64 conditions per waiter; "
     "update kMaxDeferredConditionsPerWaiter in scope_outline_utils.h to match");
 
+// Match the PTOAS C-linkage prototype while keeping this wrapper helper private.
+extern "C" {
 static __aicore__ void pypto_register_counter_completion(
     __gm__ int64_t* raw_args,
     __gm__ int32_t* counter_base,
@@ -394,6 +396,7 @@ static __aicore__ void pypto_register_counter_completion(
         reinterpret_cast<volatile __gm__ void*>(base + offset * kElementBytes),
         static_cast<uint32_t>(expected));
 }
+} // extern "C"
 
 """
 

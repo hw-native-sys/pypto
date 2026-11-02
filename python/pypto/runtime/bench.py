@@ -109,8 +109,10 @@ class TraceSpan:
 
     @property
     def is_device(self) -> bool:
-        """``True`` for device-domain spans (emitted with ``clk=dev``)."""
-        return "clk=dev" in self.attrs
+        """``True`` when the span's timestamp uses the device clock."""
+        # Match simpler's Span contract: legacy boundary records carry device
+        # clock attributes, but their own timestamp is host CLOCK_MONOTONIC.
+        return "clk=dev" in self.attrs and not self.name.endswith(".runner_run.device_boundaries")
 
     @property
     def dur_us(self) -> float:
@@ -1195,8 +1197,9 @@ def _parse_stats_from_strace(
 
     L2 (``distributed=False``): groups markers by ``(pid, inv)``, buckets by
     callable hash, takes the busiest bucket (our register-once callable emits one
-    invocation per launch), orders by ``inv``, drops the first *warmup*
-    invocations, and reads each remaining launch's host (``<root>``) and device
+    invocation per launch), orders by ``inv``, requires exactly ``warmup +
+    rounds`` dispatches before dropping warmup, and reads each measured launch's
+    host (``<root>``) and device
     (``<root>.runner_run.device_wall``) span durations (µs). The ``<root>`` span
     name is resolved per :func:`_span_names` (``chip.run`` on current simpler).
 
@@ -1250,9 +1253,26 @@ def _parse_stats_from_strace(
     if distributed:
         return _parse_l3_stats(invocations, stats, rounds=rounds, warmup=warmup)
 
+    # The resident logger can give setup spans and dispatches the same hid
+    # (including zero). Exclude setup groups before bucketing or dropping
+    # warmup, or a prewarm group consumes a warmup slot and adds a sample.
+    invocations = [inv for inv in invocations if _is_dispatch_invocation(inv, names["host"])]
+    if not invocations:
+        return stats
+
     # Busiest hid bucket = our register-once callable (one invocation per launch);
     # bucket_by_hid orders each bucket by inv, so warmup drops in dispatch order.
     busiest = max(_strace_timing.bucket_by_hid(invocations).values(), key=len)
+    # A dropped host span removes a launch from the dispatch filter. Slicing
+    # warmup from that shortened stream would discard a measured launch instead.
+    # Extra dispatches are ambiguous too: neither case proves round alignment.
+    expected = warmup + rounds
+    if len(busiest) != expected:
+        raise RuntimeError(
+            "benchmark(): incomplete or ambiguous L2 [STRACE] capture: "
+            f"expected {expected} dispatch invocations (warmup={warmup}, rounds={rounds}), "
+            f"found {len(busiest)}. Cannot align warmup and measured launches."
+        )
     for inv in busiest[warmup:]:
         stats.host_wall_us.append(_inv_span_us(inv, names["host"]))
         stats.device_wall_us.append(_inv_span_us(inv, names["device"]))
@@ -1365,8 +1385,10 @@ def benchmark(
         ValueError: ``rounds <= 0``, ``warmup < 0``, *config* passed together
             with *platform* / *device_id* (L2), or *platform* / *device_id*
             passed for an L3 program.
-        RuntimeError: No ``[STRACE]`` markers were captured at all, so no timing
-            could be read. The markers are gated by the runtime's compile-time
+        RuntimeError: L2 dispatch counts do not match ``warmup + rounds``, so
+            warmup and measured launches cannot be aligned, or no ``[STRACE]``
+            markers were captured at all, so no timing could be read. The
+            markers are gated by the runtime's compile-time
             ``SIMPLER_HOST_STRACE`` macro; a runtime built without it emits none.
 
     Note:
