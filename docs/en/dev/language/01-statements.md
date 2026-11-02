@@ -73,6 +73,58 @@ for i in pl.parallel(start, stop, step):
 
 **Key points:** Loop-carried values use `pl.range()` or `pl.parallel()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values. `pl.parallel()` produces a `ForKind.Parallel` loop while `pl.range()` produces `ForKind.Sequential` (default).
 
+### Required hardware loops
+
+`pl.range` persists `HardwareLoopPolicy.Auto`.
+`pl.hardware_loop(stop, *, init_values=None)` persists `Require` and creates a
+Sequential loop over `[0, stop)` with fixed `start=0` and `step=1`. Only `stop`
+and optional loop-carried `init_values` are accepted; start, step and attrs
+arguments are rejected. The `init_values` overloads retain carried-value types.
+`Require` is valid only inside an enclosing `pl.reg_scope()`, including for empty
+loops. A scope inside the loop body does not satisfy this requirement. Ordinary
+`pl.range` loops remain valid outside register scopes.
+
+```python
+@pl.jit.incore
+def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+    with pl.reg_scope():
+        for i, (acc,) in pl.hardware_loop(8, init_values=(x,)):
+            _result = pl.yield_(acc + i)
+    return x
+```
+
+This expresses intent, not a guarantee that the installed backend implements it.
+Current backends report unsupported qualification for surviving Require loops.
+The profile-driven `ir.analyze_hardware_loop(loop, profile)` API distinguishes
+Eligible, Ineligible and Unknown; Eligible still requires final artifact evidence.
+Dynamic integer `stop` values are accepted without a static range proof or an
+inserted runtime range guard. Their trip count and terminating induction value
+remain unknown; body, nesting and backend checks still apply. Floating-point and
+other noninteger stops are rejected. Dynamic steps or unknown effects remain
+Unknown. Counter narrowing and
+`scf.for` syntax are not hardware evidence. Auto retains ordinary loop semantics
+regardless of qualification.
+
+Static zero-trip Sequential loops are exempt: Simplify removes them and replaces
+results with initial iter_args. A dynamic loop that might be empty is not exempt.
+Require retains intent even for a single trip. Builder and manually constructed
+IR must also use constant `start=0` and `step=1`, even for zero-trip loops.
+For static stops, the counter is unsigned 16-bit: `stop=65535` fits while
+`stop=65536` does not. Callers must supply dynamic stops within the target's
+supported range; no range proof is required by qualification.
+For `stop=65535`, the loop executes 65535 times with induction values 0 through
+65534; the terminating induction value is 65535.
+
+Target profiles carry unsigned counter/trip limits, nesting/resource bounds,
+and carry types. Unknown operations are conservative unless explicitly
+certified by the profile. Reports are recomputed from current IR and are not
+persisted in serialization or structural hashes. With
+`passes.PassContext([], report_hardware_loops=True)`, codegen records the latest
+reports for `context.get_hardware_loop_reports()`; these are not reusable proofs.
+Nested `for` statements inside a hardware-loop candidate are analyzed with the
+same profile. They may remain `Auto` when they qualify; an ineligible or unknown
+inner loop prevents the enclosing hardware-loop qualification.
+
 ### While Loop (SSA-style with iter_args)
 
 ```python

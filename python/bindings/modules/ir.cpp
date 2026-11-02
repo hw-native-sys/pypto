@@ -53,6 +53,7 @@
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -350,6 +351,36 @@ void CheckSlotCount(uint64_t slots) {
 
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
+
+  nb::enum_<HardwareLoopState>(ir, "HardwareLoopState")
+      .value("Eligible", HardwareLoopState::Eligible)
+      .value("Ineligible", HardwareLoopState::Ineligible)
+      .value("Unknown", HardwareLoopState::Unknown);
+  nb::class_<HardwareLoopProfile>(ir, "HardwareLoopProfile")
+      .def(nb::init<>())
+      .def_rw("supported", &HardwareLoopProfile::supported)
+      .def_rw("counter_bits", &HardwareLoopProfile::counter_bits)
+      .def_rw("allow_negative_step", &HardwareLoopProfile::allow_negative_step)
+      .def_rw("max_trip_count", &HardwareLoopProfile::max_trip_count)
+      .def_rw("max_depth", &HardwareLoopProfile::max_depth)
+      .def_rw("max_body_nodes", &HardwareLoopProfile::max_body_nodes)
+      .def_rw("allow_scalar_carry", &HardwareLoopProfile::allow_scalar_carry)
+      .def_rw("allow_reg_carry", &HardwareLoopProfile::allow_reg_carry)
+      .def_rw("allow_tile_carry", &HardwareLoopProfile::allow_tile_carry)
+      .def_rw("allowed_ops", &HardwareLoopProfile::allowed_ops);
+  nb::class_<HardwareLoopQualification>(ir, "HardwareLoopQualification")
+      .def_ro("state", &HardwareLoopQualification::state)
+      .def_ro("reason", &HardwareLoopQualification::reason)
+      .def_ro("trip_count", &HardwareLoopQualification::trip_count)
+      .def_ro("post_iv", &HardwareLoopQualification::post_iv)
+      .def_ro("loop_id", &HardwareLoopQualification::loop_id)
+      .def_ro("lower", &HardwareLoopQualification::lower)
+      .def_ro("upper", &HardwareLoopQualification::upper)
+      .def_ro("step", &HardwareLoopQualification::step);
+  ir.def("analyze_hardware_loop", &AnalyzeHardwareLoop, nb::arg("loop"), nb::arg("profile"));
+  ir.def("analyze_hardware_loops", &AnalyzeHardwareLoops, nb::arg("program"), nb::arg("profile"));
+  ir.def("verify_hardware_loop_requirement", &VerifyHardwareLoopRequirement, nb::arg("loop"),
+         nb::arg("profile"));
 
   // Span - value type, copy semantics
   nb::class_<Span>(ir, "Span", "Source location information tracking file, line, and column positions")

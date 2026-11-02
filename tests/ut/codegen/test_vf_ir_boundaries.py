@@ -69,7 +69,7 @@ def test_pto_codegen_rejects_register_typed_parameters_until_lowering_exists(fun
 
 
 def test_pto_codegen_rejects_unimplemented_required_hardware_loop():
-    with pytest.raises(ValueError, match="Require.*not supported"):
+    with pytest.raises(ValueError, match="Require.*Unknown.*HWL_UNSUPPORTED_PROFILE"):
         codegen.PTOCodegen().generate(_program(_loop()))
 
 
@@ -97,6 +97,24 @@ def test_host_codegen_rejects_vf_infrastructure(entrypoint, register_scope):
             function = program.get_function("kernel")
             assert function is not None
             codegen.generate_orchestration(program, function)
+
+
+def test_auto_loop_codegen_report_keeps_original_loop(ascend_backend):
+    span = ir.Span.unknown()
+    original = _loop()
+    automatic = ir.ForStmt(
+        original.loop_var, original.start, original.stop, original.step, [], original.body, [], span
+    )
+    program = _program(automatic)
+    before = ir.serialize(program)
+    with passes.PassContext([], report_hardware_loops=True) as context:
+        text = codegen.PTOCodegen().generate(program)
+        reports = context.get_hardware_loop_reports()
+    assert "scf.for" in text
+    assert len(reports) == 1
+    assert reports[0].state == ir.HardwareLoopState.Unknown
+    assert reports[0].loop_id == "kernel/loop0"
+    assert ir.serialize(program) == before
 
 
 if __name__ == "__main__":

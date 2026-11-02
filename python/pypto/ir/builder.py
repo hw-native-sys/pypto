@@ -153,6 +153,7 @@ class IRBuilder:
         span: ir.Span | None = None,
         kind: ir.ForKind = ir.ForKind.Sequential,
         attrs: dict[str, object] | None = None,
+        hardware_loop_policy: ir.HardwareLoopPolicy = ir.HardwareLoopPolicy.Auto,
     ) -> Iterator["ForLoopBuilder"]:
         """Context manager for building for loops.
 
@@ -164,6 +165,8 @@ class IRBuilder:
             span: Optional explicit span. If None, automatically captured.
             kind: Loop kind (default: Sequential)
             attrs: Loop-level attributes (key-value metadata, default: empty)
+            hardware_loop_policy: Auto (default) or Require. Require needs a Sequential
+                loop inside RegScope, INDEX start=0 and step=1, and empty attrs.
 
         Yields:
             ForLoopBuilder: Helper object for building the loop
@@ -192,6 +195,7 @@ class IRBuilder:
             begin_span,
             kind,
             attrs=attrs_list,
+            hardware_loop_policy=hardware_loop_policy,
         )
         builder_obj = ForLoopBuilder(self)
         body_ok = False

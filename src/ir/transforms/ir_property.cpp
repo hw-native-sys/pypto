@@ -127,6 +127,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileStorageAllocated";
     case IRProperty::RegScopeValid:
       return "RegScopeValid";
+    case IRProperty::HardwareLoopContractValid:
+      return "HardwareLoopContractValid";
     default:
       return "Unknown";
   }
@@ -171,6 +173,7 @@ const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::HardwareLoopContractValid,
                                    IRProperty::InlineFunctionsEliminated,
                                    IRProperty::MixedKernelExpanded,
                                    IRProperty::AllocatedMemoryAddr,
@@ -219,6 +222,7 @@ VerificationLevel GetDefaultVerificationLevel() {
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::HardwareLoopContractValid,
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
                                    IRProperty::UseAfterDef,
@@ -235,11 +239,18 @@ const IRPropertySet& GetStructuralProperties() {
 }
 
 const IRPropertySet& GetDefaultVerifyProperties() {
-  static const IRPropertySet props{
-      IRProperty::SSAForm,           IRProperty::TypeChecked,         IRProperty::RegScopeValid,
-      IRProperty::NoNestedCalls,     IRProperty::BreakContinueValid,  IRProperty::NoRedundantBlocks,
-      IRProperty::UseAfterDef,       IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-      IRProperty::TileTypeCoherence, IRProperty::ArrayNotEscaped};
+  static const IRPropertySet props{IRProperty::SSAForm,
+                                   IRProperty::TypeChecked,
+                                   IRProperty::RegScopeValid,
+                                   IRProperty::HardwareLoopContractValid,
+                                   IRProperty::NoNestedCalls,
+                                   IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks,
+                                   IRProperty::UseAfterDef,
+                                   IRProperty::OutParamNotShadowed,
+                                   IRProperty::NoNestedInCore,
+                                   IRProperty::TileTypeCoherence,
+                                   IRProperty::ArrayNotEscaped};
   return props;
 }
 

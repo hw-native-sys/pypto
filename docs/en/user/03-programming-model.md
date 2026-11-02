@@ -179,6 +179,16 @@ Two properties of the IR matter to you as a user:
 - **It is immutable.** Passes build new IR rather than mutating it, which is what makes
   per-pass snapshots meaningful for debugging.
 
+### Hardware loops
+
+For a loop that must use a hardware loop when the target supports it, use
+`pl.hardware_loop(stop, *, init_values=None)` inside `pl.reg_scope()`. It fixes
+start to zero and step to one, and supports loop-carried values through
+`init_values`. Target qualification and final artifact evidence are checked
+during code generation.
+
+See [Control Flow](../dev/language/01-statements.md) for the full contract.
+
 ### Memory hierarchy
 
 Tile-level code is explicit about memory because the hardware is. `pl.load` and
@@ -289,6 +299,7 @@ kernels and cross-core pipelines exist as concepts; see
 
 ## See Also
 
+- [Control Flow](../dev/language/01-statements.md) — loop forms and hardware-loop requirements.
 - [Quickstart](02-quickstart.md) — the examples this page explains.
 - [Language Guide](language/index.md) — the full surface: types, functions, control flow, memory, scopes and tasks, directives.
 - [Passes](../dev/passes/index.md) — every pass in the pipeline, in execution order.

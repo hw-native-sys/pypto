@@ -351,21 +351,18 @@ def test_review_tile_alias_provenance_resets_between_functions(separate_calls):
         assert "pto.tile_buf_addr %alias_tile" in second_body
 
 
-def test_review_index_gen_rejects_bf16_vci():
+def test_index_gen_bf16_rejected_by_builder_before_codegen():
     ib = IRBuilder()
-    with ib.function("bf16_index_gen", span=SPAN, type=ir.FunctionType.AIV) as f:
-        with ib.reg_scope(SPAN):
-            ib.emit_reg(
-                "indices",
-                "reg.index_gen",
-                [ir.ConstFloat(0.0, DataType.BF16, SPAN)],
-                {"lanes": 64, "dtype": DataType.BF16, "order": "ascending"},
-                SPAN,
-            )
-    with passes.PassContext([]):
-        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Review", SPAN))
     with pytest.raises(ValueError, match="index_gen.*BF16|BF16.*VCI"):
-        codegen.PTOCodegen().generate(program, emit_source_loc=False)
+        with ib.function("bf16_index_gen", span=SPAN, type=ir.FunctionType.AIV):
+            with ib.reg_scope(SPAN):
+                ib.emit_reg(
+                    "indices",
+                    "reg.index_gen",
+                    [ir.ConstFloat(0.0, DataType.BF16, SPAN)],
+                    {"lanes": 64, "dtype": DataType.BF16, "order": "ascending"},
+                    SPAN,
+                )
 
 
 @pytest.mark.ptoas_compile
@@ -789,6 +786,219 @@ def test_review_branch_returned_view_address(tmp_path, addressed, nested_loop):
     # inside the register scope, under either memory-planning mode.
     assert "pto.tmov" not in source.split("pto.vecscope {", 1)[1]
     compile_review_pto(source, tmp_path, level="level3" if addressed else "level2")
+
+
+FAMILY_SPAN = ir.Span.unknown()
+UNARY = ["abs", "neg", "relu", "exp", "log", "sqrt", "bitwise_not"]
+BINARY = ["bitwise_and", "bitwise_or", "bitwise_xor", "shift_left", "shift_right"]
+SCALAR = ["adds", "muls", "maximums", "minimums", "shift_lefts", "shift_rights"]
+REDUCE = ["reduce_sum", "reduce_max", "reduce_min"]
+OPS = UNARY + BINARY + SCALAR + REDUCE + ["compares", "gather_lanes"]
+OPCODES = dict(
+    zip(
+        OPS,
+        [
+            "vabs",
+            "vneg",
+            "vrelu",
+            "vexp",
+            "vln",
+            "vsqrt",
+            "vnot",
+            "vand",
+            "vor",
+            "vxor",
+            "vshl",
+            "vshr",
+            "vadds",
+            "vmuls",
+            "vmaxs",
+            "vmins",
+            "vshls",
+            "vshrs",
+            "vcadd",
+            "vcmax",
+            "vcmin",
+            "vcmps",
+            "vselr",
+        ],
+        strict=True,
+    )
+)
+
+
+def vector(dtype=DataType.FP32, lanes=64):
+    return ir.Var("x", ir.RegType(lanes, dtype, ir.RegKind.VecReg), FAMILY_SPAN)
+
+
+def mask(lanes=64):
+    return ir.Var("m", ir.RegType(lanes, DataType.BOOL, ir.RegKind.MaskReg), FAMILY_SPAN)
+
+
+def invoke(op, x, m, masked=True):
+    fn = getattr(pl.reg, op)
+    if op in UNARY:
+        return fn(x, m if masked else None).unwrap()
+    if op in BINARY:
+        return fn(x, x, m if masked else None).unwrap()
+    if op in SCALAR:
+        return fn(x, 1, m).unwrap()
+    if op in REDUCE:
+        return fn(x, m, **({"reassoc": True} if op == "reduce_sum" else {})).unwrap()
+    if op == "compares":
+        return fn(x, 1, m, predicate="ge").unwrap()
+    idx_dtype = {1: DataType.UINT8, 2: DataType.UINT16, 4: DataType.UINT32}[x.type.dtype.get_byte()]
+    idx = pl.reg.index_gen(0, lanes=64, dtype=idx_dtype)
+    return fn(x, idx).unwrap()
+
+
+def kernel(op, dtype, masked):
+    ib = IRBuilder()
+    with ib.function("extended", type=ir.FunctionType.AIV, span=FAMILY_SPAN) as f:
+        ty = ir.TileType(
+            [1, 128],
+            dtype,
+            tile_view=ir.TileView([1, 128], [128, 1], ir.ConstInt(0, DataType.INDEX, FAMILY_SPAN)),
+            memory_space=ir.MemorySpace.Vec,
+        )
+        src = ib.let("src", tile.full([1, 128], dtype=dtype, value=1), type=ty)
+        dst = ib.let("dst", tile.full([1, 128], dtype=dtype, value=0), type=ty)
+        with ib.reg_scope(FAMILY_SPAN):
+            x = ib.emit_reg(
+                "x",
+                "reg.load",
+                [src, ir.ConstInt(0, DataType.INDEX, FAMILY_SPAN)],
+                {"lanes": 64},
+                FAMILY_SPAN,
+            )
+            m = ib.emit_reg(
+                "m",
+                "reg.active_mask",
+                [ir.ConstInt(32, DataType.INDEX, FAMILY_SPAN)],
+                {"lanes": 64},
+                FAMILY_SPAN,
+            )
+            if op == "gather_lanes":
+                idx = ib.emit_reg(
+                    "idx",
+                    "reg.index_gen",
+                    [ir.ConstInt(0, DataType.UINT32, FAMILY_SPAN)],
+                    {"lanes": 64, "dtype": DataType.UINT32},
+                    FAMILY_SPAN,
+                )
+                call = pl.reg.gather_lanes(x, idx).unwrap()
+            else:
+                call = invoke(op, x, m, masked)
+            y = ib.let("y", call)
+            if op == "compares":
+                y = ib.emit_reg("selected", "reg.select", [y, x, x], span=FAMILY_SPAN)
+            ib.emit_reg_store("out", dst, y, span=FAMILY_SPAN)
+    with passes.PassContext([]):
+        return passes.init_mem_ref()(ir.Program([f.get_result()], "Extended", FAMILY_SPAN))
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("op", OPS)
+@pytest.mark.parametrize("masked", [False, True])
+def test_basic_family_compiles(op, masked, tmp_path):
+    dtype = (
+        DataType.INT32
+        if op in BINARY or op in ("bitwise_not", "shift_lefts", "shift_rights")
+        else DataType.FP32
+    )
+    mlir = codegen.PTOCodegen().generate(
+        kernel(op, dtype, masked), emit_tile_addr=False, emit_source_loc=False
+    )
+    assert f"pto.vmi.{OPCODES[op]} " in mlir
+    if op in REDUCE:
+        assert "-> !pto.vmi.vreg<1xf32>" in mlir
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    source = tmp_path / "extended.pto"
+    source.write_text(mlir)
+    result = subprocess.run(
+        [compiler, str(source), "--pto-arch=a5", "--emit-vpto", "-o", str(tmp_path / "out.vpto")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, f"{mlir}\n{result.stderr}"
+
+
+@pytest.mark.parametrize(
+    "op", ["adds", "muls", "maximums", "minimums", "compares", "shift_lefts", "shift_rights"]
+)
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.UINT32])
+@pytest.mark.ptoas_compile
+def test_integer_scalar_compiles(op, dtype, tmp_path):
+    mlir = codegen.PTOCodegen().generate(kernel(op, dtype, True), emit_tile_addr=False, emit_source_loc=False)
+    source = tmp_path / "integer.pto"
+    source.write_text(mlir)
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    result = subprocess.run(
+        [compiler, str(source), "--pto-arch=a5", "--emit-vpto", "-o", str(tmp_path / "out.vpto")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, f"{mlir}\n{result.stderr}"
+
+
+@pytest.mark.parametrize(
+    "op,dtype",
+    [
+        ("abs", DataType.UINT32),
+        ("neg", DataType.BF16),
+        ("relu", DataType.INT16),
+        ("exp", DataType.INT32),
+        ("log", DataType.INT32),
+        ("sqrt", DataType.INT32),
+        ("bitwise_not", DataType.FP32),
+        ("shift_left", DataType.FP32),
+        ("muls", DataType.INT8),
+        ("reduce_sum", DataType.INT8),
+        ("reduce_max", DataType.BF16),
+        ("compares", DataType.INT16),
+    ],
+)
+def test_unsupported_dtype_rejected(op, dtype):
+    with pytest.raises((ValueError, TypeError), match="dtype|type|support"):
+        invoke(op, vector(dtype), mask())
+
+
+def test_float_sum_requires_explicit_reassociation():
+    with pytest.raises(ValueError, match="reassoc"):
+        pl.reg.reduce_sum(vector(), mask())
+
+
+@pytest.mark.parametrize("op", UNARY + BINARY + SCALAR + REDUCE + ["compares"])
+def test_mask_lane_mismatch_rejected(op):
+    dtype = DataType.INT32 if "bitwise" in op or "shift" in op else DataType.FP32
+    with pytest.raises(ValueError, match="[Mm]ask|lane"):
+        invoke(op, vector(dtype), mask(32))
+
+
+def test_scalar_ssa_is_not_implicitly_cast():
+    with pytest.raises(ValueError, match="[Ss]calar|dtype"):
+        pl.reg.adds(vector(), ir.Var("s", ir.ScalarType(DataType.INT32), FAMILY_SPAN), mask())
+
+
+def test_scalar_shift_requires_i16_ssa():
+    with pytest.raises(ValueError, match="[Ss]calar|i16|dtype"):
+        pl.reg.shift_lefts(
+            vector(DataType.INT32), ir.Var("s", ir.ScalarType(DataType.INT32), FAMILY_SPAN), mask()
+        )
+
+
+@pytest.mark.parametrize("lanes,dtype", [(32, DataType.UINT32), (64, DataType.UINT16)])
+def test_gather_rejects_unsupported_lanes_or_index_width(lanes, dtype):
+    with pytest.raises(ValueError, match="lane|width"):
+        pl.reg.gather_lanes(vector(lanes=lanes), vector(dtype, lanes))
 
 
 if __name__ == "__main__":
