@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Full-pipeline GM subview regression and conservative safety gates."""
+"""GM subviews use ordinary Tensor descriptors and shared MemRef storage."""
 
 import subprocess
 
@@ -86,11 +86,11 @@ def lower(program, backend_type=BackendType.Ascend910):
 @pytest.mark.parametrize("sliced", [False, True])
 def test_subview_pipeline_emits_only_result_tile(tmp_path, sliced):
     optimized = lower(make_program(sliced=sliced))
-    borrowed: set[str] = set()
-    borrowed_memrefs = []
+    selected_view: set[str] = set()
+    view_memrefs = []
     root_memrefs = []
 
-    class CheckBorrowedStorage(ir.IRVisitor):
+    class CheckSubviewStorage(ir.IRVisitor):
         def visit_var(self, op: ir.Var) -> None:
             tensor = op.type
             if isinstance(tensor, ir.TensorType):
@@ -99,15 +99,15 @@ def test_subview_pipeline_emits_only_result_tile(tmp_path, sliced):
                 view = tensor.tensor_view
                 if view and op.name_hint.startswith(("selected", "narrowed")):
                     assert tensor.memref is not None
-                    borrowed_memrefs.append(tensor.memref)
-                    borrowed.add(op.name_hint)
+                    view_memrefs.append(tensor.memref)
+                    selected_view.add(op.name_hint)
             super().visit_var(op)
 
-    CheckBorrowedStorage().visit_program(optimized)
-    assert borrowed
+    CheckSubviewStorage().visit_program(optimized)
+    assert selected_view
     assert root_memrefs
-    assert all(memref.base_ is root_memrefs[0].base_ for memref in borrowed_memrefs)
-    assert all(memref.byte_offset_ == 1024 for memref in borrowed_memrefs)
+    assert all(memref.base_ is root_memrefs[0].base_ for memref in view_memrefs)
+    assert all(memref.byte_offset_ == 1024 for memref in view_memrefs)
     text = str(optimized)
     assert "tensor.subview" in text
     assert "tensor.slice" not in text
@@ -169,21 +169,21 @@ def test_subview_cpu_reference_selects_rows_one_and_four_without_snapshot():
     output = torch.empty((2, 512), dtype=torch.bfloat16)
     actual = namespace["copy_selected"](cache, output)
     torch.testing.assert_close(actual, cache[[1, 4]], rtol=0, atol=0)
-    borrowed = namespace["_tensor_subview"](cache, [2, 512], [1, 0], [3, 1])
-    assert borrowed.stride() == (1536, 1)
+    selected_view = namespace["_tensor_subview"](cache, [2, 512], [1, 0], [3, 1])
+    assert selected_view.stride() == (1536, 1)
     cache[1, 0] = 127
-    assert borrowed[0, 0] == 127
+    assert selected_view[0, 0] == 127
 
 
-def test_subview_unknown_bounds_are_rejected_by_direct_conversion():
+def test_subview_unknown_bounds_are_allowed_by_direct_conversion():
     span = ir.Span.unknown()
     unknown = ir.Var("unknown", ir.ScalarType(DataType.INDEX), span)
     program = make_program(offset=unknown, extra_params=(unknown,))
-    with pytest.raises(ValueError, match="subview.*cannot prove"):
-        passes.convert_tensor_to_tile_ops()(program)
+    converted = passes.convert_tensor_to_tile_ops()(program)
+    assert "tensor.subview" in str(converted)
 
 
-def test_subview_validshape_remains_a_borrowed_tensor():
+def test_subview_validshape_remains_a_gm_tensor():
     optimized = lower(make_program(narrowed=True))
     assert "tensor.set_validshape" in str(optimized)
     assert "tile.set_validshape" not in str(optimized)
@@ -311,10 +311,6 @@ def test_subview_dynamic_shape_with_static_load(tmp_path, guarded):
     rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
     program = make_program(step=1, subview_rows=rows, extra_params=(rows,))
     func = next(iter(program.functions.values()))
-    if not guarded:
-        with pytest.raises(ValueError, match="subview.*cannot prove"):
-            lower(program)
-        return
     condition = ir.And(
         ir.Ge(rows, ir.ConstInt(2, DataType.INDEX, span), DataType.BOOL, span),
         ir.Le(rows, ir.ConstInt(4, DataType.INDEX, span), DataType.BOOL, span),
@@ -329,7 +325,7 @@ def test_subview_dynamic_shape_with_static_load(tmp_path, guarded):
         span,
     )
     function = ir.Function(func.name, func.params, func.return_types, body, span, type=ir.FunctionType.InCore)
-    optimized = lower(ir.Program([function], "dynamic_shape", span))
+    optimized = lower(ir.Program([function], "dynamic_shape", span) if guarded else program)
     mlir = codegen.PTOCodegen().generate(optimized)
     assert mlir.count("pto.tload") == 1
     assert "rows=2, cols=512" in mlir
@@ -356,35 +352,25 @@ def test_subview_dynamic_shape_with_static_load(tmp_path, guarded):
             assert run.returncode == 0, run.stdout + run.stderr + mlir
 
 
-def test_subview_unknown_bounds_are_rejected_by_direct_codegen():
+def test_subview_unknown_bounds_are_allowed_by_direct_codegen():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
     span = ir.Span.unknown()
     unknown = ir.Var("unknown", ir.ScalarType(DataType.INDEX), span)
-    with pytest.raises(ValueError, match="subview.*cannot prove"):
-        codegen.PTOCodegen().generate(make_program(offset=unknown, extra_params=(unknown,)))
+    mlir = codegen.PTOCodegen().generate(make_program(offset=unknown, extra_params=(unknown,)))
+    assert mlir.count("pto.addptr") == 1
 
 
-def test_subview_rejects_compiler_owned_root():
+def test_subview_requires_gm_after_tensor_to_tile_like_view():
     program = make_program()
     func = next(iter(program.functions.values()))
     span = ir.Span.unknown()
     create = ir.op.tensor.create([8, 512], DataType.BF16)
     body = ir.SeqStmts([ir.AssignStmt(func.params[0], create, span), *statements(func)], span)
     bad = ir.Function(func.name, [func.params[1]], func.return_types, body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*caller-owned"):
+    # tensor.create becomes a Tile; both view APIs require a GM Tensor input.
+    with pytest.raises(ValueError, match="requires a GM Tensor input"):
         passes.convert_tensor_to_tile_ops()(ir.Program([bad], "owned_root", span))
-
-
-def test_subview_rejects_overflowing_address_arithmetic_before_conversion():
-    span = ir.Span.unknown()
-    source = ir.Var("cache", ir.TensorType([2**62, 512], DataType.BF16), span)
-    call = ir.op.tensor.subview(source, [2, 512], [0, 0], steps=[2**61, 1])
-    selected = ir.Var("selected", call.type, span)
-    body = ir.SeqStmts([ir.AssignStmt(selected, call, span), ir.ReturnStmt([], span)], span)
-    func = ir.Function("overflow", [source], [], body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*overflow-free"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([func], "overflow", span))
 
 
 def test_subview_assignment_preserves_memref_alias():
@@ -422,77 +408,6 @@ def test_subview_assignment_preserves_memref_alias():
     assert len(selected_memrefs) >= 2
     assert all(memref.base_ is selected_memrefs[0].base_ for memref in selected_memrefs)
     assert all(memref.byte_offset_ == 1024 for memref in selected_memrefs)
-
-
-@pytest.mark.parametrize("control_flow", ["if", "while", "for"])
-def test_subview_cannot_use_overflowed_control_flow_bounds(control_flow):
-    span = ir.Span.unknown()
-    row = ir.Var("row", ir.ScalarType(DataType.INDEX), span)
-    # Mathematical cancellation gives 1. INT32 multiplication wraps to zero,
-    # so the actual bound is -4294967295 and admits negative GM origins.
-    integer = ir.ConstInt(65536, DataType.INT32, span)
-    overflow = ir.Mul(integer, integer, DataType.INT32, span)
-    bound = ir.Add(
-        ir.Sub(
-            ir.Cast(overflow, DataType.INDEX, span),
-            ir.ConstInt(2**32, DataType.INDEX, span),
-            DataType.INDEX,
-            span,
-        ),
-        ir.ConstInt(1, DataType.INDEX, span),
-        DataType.INDEX,
-        span,
-    )
-    func = next(iter(make_program(offset=row).functions.values()))
-    body_stmts = statements(func)[:-1]
-    condition = ir.And(
-        ir.Ge(row, bound, DataType.BOOL, span),
-        ir.Le(row, ir.ConstInt(2, DataType.INDEX, span), DataType.BOOL, span),
-        DataType.BOOL,
-        span,
-    )
-    if control_flow == "if":
-        region = ir.IfStmt(condition, ir.SeqStmts(body_stmts, span), None, [], span)
-    elif control_flow == "while":
-        region = ir.WhileStmt(
-            condition, [], ir.SeqStmts([*body_stmts, ir.YieldStmt([], span)], span), [], span
-        )
-    else:
-        region = ir.ForStmt(
-            row,
-            bound,
-            ir.ConstInt(2, DataType.INDEX, span),
-            ir.ConstInt(1, DataType.INDEX, span),
-            [],
-            ir.SeqStmts([*body_stmts, ir.YieldStmt([], span)], span),
-            [],
-            span,
-        )
-    body = ir.SeqStmts([region, ir.ReturnStmt([func.params[1]], span)], span)
-    params = func.params if control_flow == "for" else [*func.params, row]
-    bad = ir.Function(func.name, params, func.return_types, body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*(cannot prove|overflow-free)"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([bad], "overflowed_facts", span))
-
-
-def test_subview_rejects_narrow_overflow_hidden_by_widening_and_cancellation():
-    span = ir.Span.unknown()
-    integer = ir.ConstInt(65536, DataType.INT32, span)
-    product = ir.Mul(integer, integer, DataType.INT32, span)
-    widened = ir.Var("widened", ir.ScalarType(DataType.INDEX), span)
-    offset = ir.Add(
-        ir.Sub(widened, ir.ConstInt(2**32, DataType.INDEX, span), DataType.INDEX, span),
-        ir.ConstInt(1, DataType.INDEX, span),
-        DataType.INDEX,
-        span,
-    )
-    func = next(iter(make_program(offset=offset).functions.values()))
-    body = ir.SeqStmts(
-        [ir.AssignStmt(widened, ir.Cast(product, DataType.INDEX, span), span), *statements(func)], span
-    )
-    bad = ir.Function(func.name, func.params, func.return_types, body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*overflow-free"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([bad], "narrow_overflow", span))
 
 
 def test_subview_nested_origins_and_view_alias_preserve_current_pointer():
@@ -598,7 +513,7 @@ def test_subview_fp32_load_uses_existing_backend_path(tmp_path, backend_type, ar
 
 
 @pytest.mark.parametrize("direct_codegen", [False, True])
-def test_subview_scalar_read_requires_explicit_load(direct_codegen):
+def test_subview_scalar_read_uses_ordinary_tensor_path(direct_codegen):
     span = ir.Span.unknown()
     func = next(iter(make_program().functions.values()))
     definition = statements(func)[0]
@@ -612,11 +527,13 @@ def test_subview_scalar_read_requires_explicit_load(direct_codegen):
     program = ir.Program([function], "scalar_read", span)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
-    with pytest.raises(ValueError, match="subview.*explicit load.*tensor.read"):
-        if direct_codegen:
-            codegen.PTOCodegen().generate(program)
-        else:
-            passes.convert_tensor_to_tile_ops()(program)
+    if not direct_codegen:
+        program = passes.convert_tensor_to_tile_ops()(program)
+    mlir = codegen.PTOCodegen().generate(program)
+    assert "pto.load" in mlir
+    assert "pto.addptr" in mlir
+    read_line = next(line for line in mlir.splitlines() if " = pto.load " in line)
+    assert "[%c1536_index]" in read_line
 
 
 @pytest.mark.parametrize("backend_type,arch", [(BackendType.Ascend910, "a3"), (BackendType.Ascend950, "a5")])
@@ -672,37 +589,6 @@ def test_subview_nd_load_survives_tile_flattening(tmp_path, backend_type, arch, 
         assert result.returncode == 0, result.stdout + result.stderr + mlir
 
 
-@pytest.mark.parametrize("bad_shape,bad_valid", [([17, 16], [8, 16]), ([16, 16], [7, 16])])
-def test_subview_flattened_load_must_preserve_window(bad_shape, bad_valid):
-    span = ir.Span.unknown()
-    source = ir.Var("source", ir.TensorType([4, 8, 16], DataType.FP32), span)
-    subview = ir.op.tensor.subview(source, [2, 8, 16], [0, 0, 0])
-    selected = ir.Var("selected", subview.type, span)
-    load = ir.op.tile.load(
-        selected, [0, 0, 0], [2, 8, 16], valid_shape=[1, 8, 16], target_memory=ir.MemorySpace.Vec
-    )
-    result_type = ir.TileType(
-        bad_shape,
-        DataType.FP32,
-        tile_view=ir.TileView(valid_shape=bad_valid),
-        memory_space=ir.MemorySpace.Vec,
-    )
-    forged = ir.Call(load.op, load.args, result_type, span)
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(selected, subview, span),
-            ir.AssignStmt(ir.Var("tile", result_type, span), forged, span),
-            ir.ReturnStmt([], span),
-        ],
-        span,
-    )
-    function = ir.Function("bad_flatten", [source], [], body, span, type=ir.FunctionType.InCore)
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910)
-    with pytest.raises(ValueError, match="subview.*load result matches"):
-        codegen.PTOCodegen().generate(ir.Program([function], "bad_flatten", span))
-
-
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
 @pytest.mark.parametrize("valid", [None, [16, 64]])
 def test_subview_fp4_load_checks_source_window_before_packing(tmp_path, dtype, valid):
@@ -739,7 +625,7 @@ def test_subview_fp4_load_checks_source_window_before_packing(tmp_path, dtype, v
         assert result.returncode == 0, result.stdout + result.stderr + mlir
 
 
-def test_subview_return_is_rejected():
+def test_subview_return_uses_ordinary_output_conversion():
     program = make_program()
     func = next(iter(program.functions.values()))
     stmts = statements(func)
@@ -748,28 +634,34 @@ def test_subview_return_is_rejected():
     span = ir.Span.unknown()
     body = ir.SeqStmts([stmts[0], ir.ReturnStmt([selected], span)], span)
     bad = ir.Function(func.name, func.params, [selected.type], body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*escape"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([bad], "bad_escape", span))
+    converted = passes.convert_tensor_to_tile_ops()(ir.Program([bad], "return_view", span))
+    assert isinstance(converted, ir.Program)
 
 
-def test_subview_writer_is_rejected_before_lowering():
+def test_subview_writer_uses_ordinary_tensor_path():
     program = make_program()
     func = next(iter(program.functions.values()))
     stmts = statements(func)
     assert isinstance(stmts[0], ir.AssignStmt)
     selected = stmts[0].var
     span = ir.Span.unknown()
-    write = ir.op.tensor.write(selected, [0, 0], ir.ConstFloat(0, DataType.BF16, span))
+    write = ir.op.tensor.write(selected, [1, 0], ir.ConstFloat(0, DataType.BF16, span))
     result = ir.Var("written", write.type, span)
     body = ir.SeqStmts(
         [stmts[0], ir.AssignStmt(result, write, span), ir.ReturnStmt([func.params[1]], span)], span
     )
     bad = ir.Function(func.name, func.params, func.return_types, body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*read-only"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([bad], "bad_write", span))
+    converted = passes.convert_tensor_to_tile_ops()(ir.Program([bad], "write_view", span))
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    mlir = codegen.PTOCodegen().generate(converted)
+    assert "pto.store" in mlir
+    assert "pto.addptr" in mlir
+    write_line = next(line for line in mlir.splitlines() if "pto.store " in line)
+    assert "[%c1536_index]" in write_line
 
 
-def test_subview_transpose_requires_explicit_materialization():
+def test_subview_transpose_uses_existing_conversion():
     span = ir.Span.unknown()
     func = next(iter(make_program().functions.values()))
     definition = statements(func)[0]
@@ -780,208 +672,8 @@ def test_subview_transpose_requires_explicit_materialization():
         [definition, ir.AssignStmt(result, call, span), ir.ReturnStmt([func.params[1]], span)], span
     )
     bad = ir.Function(func.name, func.params, func.return_types, body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*explicit load"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([bad], "transpose", span))
-
-
-@pytest.mark.parametrize("rows", [2, 4])
-def test_subview_view_symbolic_shape_must_preserve_element_count(rows):
-    span = ir.Span.unknown()
-    size = ir.Var("size", ir.ScalarType(DataType.INDEX), span)
-    func = next(iter(make_program(step=1).functions.values()))
-    definition = statements(func)[0]
-    assert isinstance(definition, ir.AssignStmt)
-    call = ir.op.tensor.view(definition.var, [size, 512])
-    alias = ir.Var("alias", call.type, span)
-    condition = ir.Eq(size, ir.ConstInt(rows, DataType.INDEX, span), DataType.BOOL, span)
-    # No load is needed to expose the contract violation: view itself must not
-    # enlarge a borrowed window merely because its shape is symbolic at build.
-    body = ir.SeqStmts(
-        [
-            ir.IfStmt(
-                condition,
-                ir.SeqStmts([definition, ir.AssignStmt(alias, call, span)], span),
-                None,
-                [],
-                span,
-            ),
-            ir.ReturnStmt([func.params[1]], span),
-        ],
-        span,
-    )
-    guarded = ir.Function(
-        func.name, [*func.params, size], func.return_types, body, span, type=ir.FunctionType.InCore
-    )
-    program = ir.Program([guarded], "symbolic_view", span)
-    if rows == 2:
-        passes.convert_tensor_to_tile_ops()(program)
-    else:
-        with pytest.raises(ValueError, match="subview.*(cannot prove|element count)"):
-            passes.convert_tensor_to_tile_ops()(program)
-
-
-@pytest.mark.parametrize("rows", [8, 10, None])
-@pytest.mark.parametrize("through_alias", [False, True])
-def test_subview_canonical_view_ancestor_requires_proven_footprint(rows, through_alias):
-    span = ir.Span.unknown()
-    size = ir.Var("size", ir.ScalarType(DataType.INDEX), span)
-    cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
-    output = ir.Var("output", ir.TensorType([2, 512], DataType.BF16), span)
-    view_call = ir.op.tensor.view(cache, [size, 512])
-    view = ir.Var("view", view_call.type, span)
-    body: list[ir.Stmt] = [ir.AssignStmt(view, view_call, span)]
-    if through_alias:
-        alias = ir.Var("alias", view.type, span)
-        body.append(ir.AssignStmt(alias, view, span))
-        view = alias
-    # At size=10 the symbolic view would expose rows 8/9 past the real GM
-    # allocation. Even an in-bounds subview needs a proven-safe view ancestor.
-    selected_call = ir.op.tensor.subview(view, [2, 512], [0 if rows == 8 else 8, 0])
-    selected = ir.Var("selected", selected_call.type, span)
-    load = ir.op.tile.load(selected, [0, 0], [2, 512], target_memory=ir.MemorySpace.Vec)
-    body.extend(
-        [
-            ir.AssignStmt(selected, selected_call, span),
-            ir.AssignStmt(ir.Var("pair", load.type, span), load, span),
-        ]
-    )
-    inner = ir.SeqStmts(body, span)
-    if rows is not None:
-        condition = ir.Eq(size, ir.ConstInt(rows, DataType.INDEX, span), DataType.BOOL, span)
-        inner = ir.IfStmt(condition, inner, None, [], span)
-    function = ir.Function(
-        "canonical_ancestor",
-        [cache, output, size],
-        [output.type],
-        ir.SeqStmts(
-            [*body, ir.ReturnStmt([output], span)]
-            if rows is None
-            else [inner, ir.ReturnStmt([output], span)],
-            span,
-        ),
-        span,
-        type=ir.FunctionType.InCore,
-    )
-    program = ir.Program([function], "canonical_ancestor", span)
-    if rows == 8:
-        optimized = lower(program)
-        assert "pto.tload" in codegen.PTOCodegen().generate(optimized)
-    else:
-        with pytest.raises(ValueError, match="subview.*(cannot prove|element count)"):
-            passes.convert_tensor_to_tile_ops()(program)
-        with pytest.raises(ValueError, match="subview.*(cannot prove|element count)"):
-            backend.reset_for_testing()
-            backend.set_backend_type(BackendType.Ascend910B)
-            codegen.PTOCodegen().generate(program)
-
-
-@pytest.mark.parametrize("valid_rows", [6, 10])
-def test_subview_parent_valid_extent_cannot_exceed_physical_shape(valid_rows):
-    span = ir.Span.unknown()
-    rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
-    cache = ir.Var(
-        "cache",
-        ir.TensorType(
-            [8, 512], DataType.BF16, tensor_view=ir.TensorView([], ir.TensorLayout.ND, [rows, 512])
-        ),
-        span,
-    )
-    output = ir.Var("output", ir.TensorType([2, 512], DataType.BF16), span)
-    selected_call = ir.op.tensor.subview(cache, [2, 512], [0 if valid_rows == 6 else 8, 0])
-    selected = ir.Var("selected", selected_call.type, span)
-    load = ir.op.tile.load(selected, [0, 0], [2, 512], target_memory=ir.MemorySpace.Vec)
-    condition = ir.Eq(rows, ir.ConstInt(valid_rows, DataType.INDEX, span), DataType.BOOL, span)
-    # A symbolic valid extent is metadata, not permission to access beyond the
-    # physical parameter shape. Rows 8/9 do not exist in this GM allocation.
-    body = ir.SeqStmts(
-        [
-            ir.IfStmt(
-                condition,
-                ir.SeqStmts(
-                    [
-                        ir.AssignStmt(selected, selected_call, span),
-                        ir.AssignStmt(ir.Var("pair", load.type, span), load, span),
-                    ],
-                    span,
-                ),
-                None,
-                [],
-                span,
-            ),
-            ir.ReturnStmt([output], span),
-        ],
-        span,
-    )
-    function = ir.Function(
-        "invalid_valid_extent", [rows, cache, output], [output.type], body, span, type=ir.FunctionType.InCore
-    )
-    program = ir.Program([function], "invalid_valid_extent", span)
-    if valid_rows == 6:
-        assert isinstance(lower(program), ir.Program)
-    else:
-        with pytest.raises(ValueError, match="subview.*(cannot prove|valid extent)"):
-            lower(program)
-
-
-@pytest.mark.parametrize("metadata_op", ["view", "set_validshape"])
-def test_metadata_cannot_forge_subview_provenance(metadata_op):
-    span = ir.Span.unknown()
-    cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
-    ordinary = (
-        ir.op.tensor.view(cache, [8, 512])
-        if metadata_op == "view"
-        else ir.op.tensor.set_validshape(cache, 8, 512)
-    )
-    # An explicit IR result type must not turn an ordinary metadata call into a
-    # borrowed descriptor and bypass subview geometry/provenance verification.
-    forged_type = ir.TensorType(
-        [16, 512], DataType.BF16, tensor_view=ir.TensorView([512, 1], ir.TensorLayout.ND)
-    )
-    forged = ir.Call(ordinary.op, ordinary.args, forged_type, span)
-    alias = ir.Var("forged", forged_type, span)
-    definitions: list[ir.Stmt] = [ir.AssignStmt(alias, forged, span)]
-    borrowed = ir.op.tensor.subview(alias, [2, 512], [8, 0])
-    definitions.append(ir.AssignStmt(ir.Var("selected", borrowed.type, span), borrowed, span))
-    body = ir.SeqStmts([*definitions, ir.ReturnStmt([], span)], span)
-    function = ir.Function("forged_metadata", [cache], [], body, span, type=ir.FunctionType.InCore)
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
-    with pytest.raises(ValueError, match="subview.*(metadata|provenance|cannot prove|element count)"):
-        codegen.PTOCodegen().generate(ir.Program([function], "forged_metadata", span))
-
-
-@pytest.mark.parametrize("metadata_op", ["view", "set_validshape"])
-@pytest.mark.parametrize("forge_shape", [False, True])
-def test_subview_rejects_forged_canonical_stride(metadata_op, forge_shape):
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910)
-    span = ir.Span.unknown()
-    cache = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
-    ordinary = (
-        ir.op.tensor.view(cache, [8, 512])
-        if metadata_op == "view"
-        else ir.op.tensor.set_validshape(cache, 8, 512)
-    )
-    forged_type = ir.TensorType(
-        [16, 256] if forge_shape else [8, 512],
-        DataType.BF16,
-        tensor_view=ir.TensorView([512, 1] if forge_shape else [4096, 1], ir.TensorLayout.ND),
-    )
-    forged = ir.Call(ordinary.op, ordinary.args, forged_type, span)
-    alias = ir.Var("forged", forged_type, span)
-    borrowed = ir.op.tensor.subview(alias, [2, 256] if forge_shape else [2, 512], [1, 0], steps=[3, 1])
-    selected = ir.Var("selected", borrowed.type, span)
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(alias, forged, span),
-            ir.AssignStmt(selected, borrowed, span),
-            ir.ReturnStmt([], span),
-        ],
-        span,
-    )
-    function = ir.Function("forged_stride", [cache], [], body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="alias geometry equality|defining address map"):
-        codegen.PTOCodegen().generate(ir.Program([function], "forged_stride", span))
+    converted = passes.convert_tensor_to_tile_ops()(ir.Program([bad], "transpose", span))
+    assert "tile.transpose" in str(converted)
 
 
 def test_subview_does_not_strengthen_unrelated_canonical_view_contract():
@@ -1066,3 +758,113 @@ def test_subview_worked_jit_example_specializes_and_outlines():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_subview_dynamic_offsets_use_ordinary_tensor_path():
+    span = ir.Span.unknown()
+    offset = ir.Var("offset", ir.ScalarType(DataType.INDEX), span)
+    optimized = lower(make_program(offset=offset, extra_params=(offset,)))
+    mlir = codegen.PTOCodegen().generate(optimized)
+    assert mlir.count("pto.addptr") == 1
+    assert mlir.count("pto.tload") == 1
+
+
+def test_gm_validshape_does_not_require_subview_provenance():
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([8, 512], DataType.BF16), span)
+    valid = ir.op.tensor.set_validshape(source, 6, 512)
+    alias = ir.Var("alias", valid.type, span)
+    load = ir.op.tile.load(alias, [0, 0], [2, 512], target_memory=ir.MemorySpace.Vec)
+    function = ir.Function(
+        "gm_metadata",
+        [source],
+        [],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(alias, valid, span),
+                ir.AssignStmt(ir.Var("tile", load.type, span), load, span),
+                ir.ReturnStmt([], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    converted = passes.convert_tensor_to_tile_ops()(ir.Program([function], "gm_metadata", span))
+    text = str(converted)
+    assert "tensor.set_validshape" in text
+    assert "tile.set_validshape" not in text
+    assert "tile.load" in text
+
+
+@pytest.mark.parametrize("forged_stride", [False, True])
+def test_explicit_subview_call_rejects_static_geometry_mismatch(forged_stride):
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([8, 512], DataType.BF16), span)
+    call = ir.op.tensor.subview(source, [2, 512], [1, 0], steps=[3, 1])
+    result_type = ir.TensorType(
+        [2, 512] if forged_stride else [3, 512],
+        DataType.BF16,
+        tensor_view=ir.TensorView([2048, 1] if forged_stride else [1536, 1], ir.TensorLayout.ND),
+    )
+    forged = ir.Call(call.op, call.args, result_type, span)
+    function = ir.Function(
+        "bad_geometry",
+        [source],
+        [],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(ir.Var("selected", result_type, span), forged, span),
+                ir.ReturnStmt([], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    with pytest.raises(ValueError, match="subview result metadata does not match"):
+        passes.convert_tensor_to_tile_ops()(ir.Program([function], "bad_geometry", span))
+
+
+def test_subview_can_flow_through_ordinary_tensor_yield():
+    span = ir.Span.unknown()
+    func = next(iter(make_program().functions.values()))
+    definition = statements(func)[0]
+    assert isinstance(definition, ir.AssignStmt)
+    merged = ir.Var("merged", definition.var.type, span)
+    flag = ir.Var("flag", ir.ScalarType(DataType.BOOL), span)
+    choice = ir.IfStmt(
+        flag,
+        ir.YieldStmt([definition.var], span),
+        ir.YieldStmt([definition.var], span),
+        [merged],
+        span,
+    )
+    load = ir.op.tile.load(merged, [0, 0], [2, 512], target_memory=ir.MemorySpace.Vec)
+    function = ir.Function(
+        "yield_view",
+        [*func.params, flag],
+        [],
+        ir.SeqStmts(
+            [
+                definition,
+                choice,
+                ir.AssignStmt(ir.Var("tile", load.type, span), load, span),
+                ir.ReturnStmt([], span),
+            ],
+            span,
+        ),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    converted = passes.convert_tensor_to_tile_ops()(ir.Program([function], "yield_view", span))
+    assert "tensor.subview" in str(converted)
+    assert "tile.load" in str(converted)
+
+
+def test_subview_validshape_before_slice_keeps_gm_metadata():
+    converted = passes.convert_tensor_to_tile_ops()(make_program(narrowed=True, sliced=True))
+    text = str(converted)
+    assert "tensor.set_validshape" in text
+    assert "tile.set_validshape" not in text
+    assert text.count("tile.load(") == 1

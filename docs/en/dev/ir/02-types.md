@@ -416,9 +416,9 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   `tensor.slice(..., pad_value=PadValue.zero)` writes this field.
 
 `tensor.subview` keeps its affine element strides in `TensorView`; its origin
-and allocation identity are resolved as a borrowed MemRef alias by `InitMemRef`.
-Subview provenance is derived from the defining IR operation and its alias
-chain, then revalidated at conversion and PTO emission entry.
+and allocation identity are resolved as a MemRef alias by `InitMemRef`.
+The result uses ordinary TensorView/MemRef semantics, without a separate
+ownership or provenance classification.
 
 #### Canonical TensorView form (RFC #1300)
 

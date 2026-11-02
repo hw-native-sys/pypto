@@ -2699,7 +2699,7 @@ def subview(
     steps: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Borrow a strictly contained affine GM window without copying data.
+    """Describe a strictly contained affine GM window without copying data.
 
     The source coordinate is ``offsets[i] + index[i] * steps[i]`` on each
     axis. Result strides multiply the immediate parent's strides by steps;
@@ -2717,11 +2717,11 @@ def subview(
             Result strides must also satisfy the ordinary canonical layout relations.
 
     Returns:
-        Read-only borrowed tensor descriptor with no MemRef allocation.
+        Ordinary Tensor descriptor sharing the source storage, with no new allocation.
 
     Raises:
-        ValueError: Invalid geometry. Compilation also rejects containment or
-            strict reduction that cannot be proven from dominating facts.
+        ValueError: Statically invalid geometry or noncanonical addressing.
+            Unknown dynamic bounds are allowed and remain the caller's responsibility.
             Native consumers retain their existing dtype, layout and target
             restrictions; subview adds no device-specific load limits.
     """

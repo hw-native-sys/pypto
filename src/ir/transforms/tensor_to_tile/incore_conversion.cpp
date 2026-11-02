@@ -391,6 +391,45 @@ bool NeedsPackedFp4DnCastLoad(const CallPtr& call, size_t index) {
          source->tensor_view_.has_value() && source->tensor_view_->layout == TensorLayout::DN;
 }
 
+// Metadata needed by a GM-only consumer must not become a Tile. Index
+// metadata/SSA aliases once, then propagate consumer demand backward once per
+// edge (O(N) expected time), independently of the Tensor's allocation provenance.
+std::unordered_set<const Var*> CollectGmMetadataVars(const StmtPtr& body) {
+  class Collector : public IRVisitor {
+   public:
+    std::unordered_map<const Var*, const Var*> sources;
+    std::vector<const Var*> pending;
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      ExprPtr source = op->value_;
+      if (auto call = As<Call>(source)) {
+        if ((IsOp(call, "tensor.set_validshape") || IsOp(call, "tensor.view")) && !call->args_.empty()) {
+          source = call->args_[0];
+        }
+      }
+      if (auto var = AsVarLike(source)) sources.emplace(op->var_.get(), var.get());
+      IRVisitor::VisitStmt_(op);
+    }
+    void VisitExpr_(const CallPtr& op) override {
+      if (!op->args_.empty() &&
+          (IsOp(op, "tile.load") || IsOp(op, "tensor.slice") || IsOp(op, "tensor.view") ||
+           IsOp(op, "tensor.subview") || IsOp(op, "tensor.read") || IsOp(op, "tensor.write"))) {
+        if (auto var = AsVarLike(op->args_[0])) pending.push_back(var.get());
+      }
+      IRVisitor::VisitExpr_(op);
+    }
+  } collector;
+  collector.VisitStmt(body);
+  std::unordered_set<const Var*> required;
+  while (!collector.pending.empty()) {
+    auto var = collector.pending.back();
+    collector.pending.pop_back();
+    if (!required.insert(var).second) continue;
+    auto it = collector.sources.find(var);
+    if (it != collector.sources.end()) collector.pending.push_back(it->second);
+  }
+  return required;
+}
+
 /**
  * @brief Visitor that collects tensor-typed variables used directly by converted ops.
  *
@@ -408,8 +447,9 @@ bool NeedsPackedFp4DnCastLoad(const CallPtr& call, size_t index) {
  */
 class TensorArgsInConvertedOpsCollector : public IRVisitor {
  public:
-  explicit TensorArgsInConvertedOpsCollector(const OpConversionRegistry& conv_registry)
-      : conv_registry_(conv_registry) {}
+  TensorArgsInConvertedOpsCollector(const OpConversionRegistry& conv_registry,
+                                    const std::unordered_set<const Var*>& gm_metadata_vars)
+      : conv_registry_(conv_registry), gm_metadata_vars_(gm_metadata_vars) {}
 
   [[nodiscard]] const std::unordered_set<const Var*>& GetUsed() const { return used_; }
 
@@ -447,7 +487,8 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Skip ops whose inputs are handled by their own converter (self-loading):
       // they create loads with specific offsets/spaces, so Phase-1 default Vec loads
       // would be redundant or wrong.
-      if (!UsesDefaultTileInputs(call)) {
+      if (!UsesDefaultTileInputs(call) ||
+          (IsOp(call, "tensor.set_validshape") && gm_metadata_vars_.count(op->var_.get()))) {
         IRVisitor::VisitStmt_(op);
         return;
       }
@@ -490,6 +531,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
 
  private:
   const OpConversionRegistry& conv_registry_;
+  const std::unordered_set<const Var*>& gm_metadata_vars_;
   std::unordered_set<const Var*> used_;
   std::unordered_map<const Var*, ExprPtr> iter_arg_to_init_;
 };
@@ -689,7 +731,9 @@ class ConsumerSpaceCollector : public IRVisitor {
 /// whose GM storage or loaded tile values may be modified from load sharing.
 class TensorConversionAnalysis : public IRVisitor {
  public:
-  explicit TensorConversionAnalysis(const OpConversionRegistry& registry) : registry_(registry) {}
+  TensorConversionAnalysis(const OpConversionRegistry& registry,
+                           const std::unordered_set<const Var*>& gm_metadata_vars)
+      : registry_(registry), gm_metadata_vars_(gm_metadata_vars) {}
 
   void Propagate() {
     // Yield edges can precede the tuple definitions in their branch/body.
@@ -753,7 +797,8 @@ class TensorConversionAnalysis : public IRVisitor {
       if (AsVarLike(op->value_) || As<TupleGetItemExpr>(op->value_)) {
         AddFlow(op->value_, op->var_);
       } else if (auto call = As<Call>(op->value_); call && registry_.Lookup(call->op_->name_)) {
-        if (IsOp(call, "tensor.write") || IsOp(call, "tensor.assemble")) {
+        if (IsOp(call, "tensor.write") || IsOp(call, "tensor.assemble") ||
+            (IsOp(call, "tensor.set_validshape") && gm_metadata_vars_.count(op->var_.get()))) {
           AddFlow(call->args_[0], op->var_);
         } else if (IsOp(call, "tensor.expand_clone")) {
           AddFlow(call->args_[1], op->var_);
@@ -850,6 +895,7 @@ class TensorConversionAnalysis : public IRVisitor {
   }
 
   const OpConversionRegistry& registry_;
+  const std::unordered_set<const Var*>& gm_metadata_vars_;
   std::unordered_map<const Var*, ExprPtr> tuple_definitions_;
   std::unordered_map<const Expr*, ExprPtr> resolved_flow_sources_;
   std::vector<std::pair<ExprPtr, VarPtr>> projection_flows_;
@@ -869,67 +915,18 @@ class TensorConversionAnalysis : public IRVisitor {
 // substitution and propagation of the resulting types.
 // ============================================================================
 
-class SubviewAliasCollector : public IRVisitor {
- public:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (!op) return;
-    definitions_[op->var_.get()] = op->value_;
-    if (auto call = As<Call>(op->value_); call && IsOp(call, "tensor.subview") && !call->args_.empty()) {
-      pending_.push_back(call->args_[0]);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  std::unordered_set<const Var*> Finish() {
-    std::unordered_set<const Var*> result;
-    for (auto source : pending_) {
-      std::unordered_set<const Var*> seen;
-      while (auto var = AsVarLike(source)) {
-        if (!seen.insert(var.get()).second) break;
-        result.insert(var.get());
-        auto it = definitions_.find(var.get());
-        if (it == definitions_.end()) break;
-        auto call = As<Call>(it->second);
-        if (call && (IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) &&
-            !call->args_.empty()) {
-          source = call->args_[0];
-        } else if (!call) {
-          source = it->second;
-        } else {
-          break;
-        }
-      }
-    }
-    return result;
-  }
-
- private:
-  std::unordered_map<const Var*, ExprPtr> definitions_;
-  std::vector<ExprPtr> pending_;
-};
-
-}  // namespace
-
-std::unordered_set<const Var*> CollectSubviewAliasVars(const StmtPtr& body) {
-  SubviewAliasCollector collector;
-  collector.VisitStmt(body);
-  return collector.Finish();
-}
-
-namespace {
-
 class TensorToTileMutator : public TypePropagatingMutator {
  public:
   TensorToTileMutator(const OpConversionRegistry& conv_registry, const OpRegistry& op_registry,
                       const ConsumerSpaceCollector& consumer_collector,
                       const TensorConversionAnalysis& tile_values, CachePolicyByParam cache_policies,
-                      std::unordered_set<const Var*> required_borrowed_tensor_vars)
+                      const std::unordered_set<const Var*>& gm_metadata_vars)
       : conv_registry_(conv_registry),
         op_registry_(op_registry),
         consumer_collector_(consumer_collector),
         tile_values_(tile_values),
         cache_policies_(std::move(cache_policies)),
-        required_borrowed_tensor_vars_(std::move(required_borrowed_tensor_vars)) {}
+        gm_metadata_vars_(gm_metadata_vars) {}
 
   /// A cached load is a compute operand, never an SSA replacement for its GM
   /// source. Only parameters proven unwritten throughout the function enter
@@ -1010,9 +1007,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return HandlePassThroughAssign(op, new_value);
     }
 
-    // A borrowed GM descriptor keeps valid-shape metadata until a consuming
-    // load materializes a Tile.
-    if (IsOp(call, "tensor.set_validshape") && IsBorrowedTensorExpr(call)) {
+    // Preserve metadata demanded as a GM descriptor. Pure compute metadata
+    // still follows the existing Tile converter, regardless of the GM origin.
+    if (IsOp(call, "tensor.set_validshape") && gm_metadata_vars_.count(op->var_.get()) &&
+        !call->args_.empty() && AsTensorTypeLike(call->args_[0]->GetType())) {
       return HandlePassThroughAssign(op, new_value);
     }
 
@@ -1149,22 +1147,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto assign = As<AssignStmt>(result);
     INTERNAL_CHECK_SPAN(assign, op->span_)
         << "Internal error: pass-through assignment must stay an assignment";
-    if (IsBorrowedTensorExpr(new_value)) borrowed_tensor_vars_.insert(assign->var_.get());
     RecordPackedTile(assign->var_, assign->value_);
     return result;
-  }
-
-  [[nodiscard]] bool IsBorrowedTensorExpr(const ExprPtr& expr) const {
-    if (!expr) return false;
-    if (auto var = AsVarLike(expr)) {
-      return borrowed_tensor_vars_.count(var.get()) != 0 ||
-             required_borrowed_tensor_vars_.count(var.get()) != 0;
-    }
-    auto call = As<Call>(expr);
-    if (!call) return false;
-    return IsOp(call, "tensor.subview") ||
-           ((IsOp(call, "tensor.view") || IsOp(call, "tensor.set_validshape")) && !call->args_.empty() &&
-            IsBorrowedTensorExpr(call->args_[0]));
   }
 
   void SetYieldTileTargets(const std::vector<VarPtr>& vars) {
@@ -1596,13 +1580,12 @@ class TensorToTileMutator : public TypePropagatingMutator {
   const ConsumerSpaceCollector& consumer_collector_;
   const TensorConversionAnalysis& tile_values_;
   std::unordered_map<const Expr*, ExprPtr> preloaded_tiles_;
-  std::unordered_set<const Expr*> borrowed_tensor_vars_;
   ConversionContext conversion_context_;
   std::vector<bool> yield_tile_targets_;
   /// Declared GM cache policies of this function's params (empty when the
   /// function carries no ``pl.set_cache_policy`` declaration).
   const CachePolicyByParam cache_policies_;
-  std::unordered_set<const Var*> required_borrowed_tensor_vars_;
+  const std::unordered_set<const Var*>& gm_metadata_vars_;
 };
 
 struct ReturnedAssembleLoopRewrite {
@@ -1951,19 +1934,20 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // erased when the transformed function is rebuilt.
   auto cache_policies = BuildCachePolicyByParam(func);
 
-  TensorConversionAnalysis tile_values(conv_registry);
+  const auto gm_metadata_vars = CollectGmMetadataVars(canonical_body);
+  TensorConversionAnalysis tile_values(conv_registry, gm_metadata_vars);
   tile_values.VisitStmt(canonical_body);
   tile_values.Propagate();
 
   TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector, tile_values, cache_policies,
-                              CollectSubviewAliasVars(canonical_body));
+                              gm_metadata_vars);
 
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;
 
   // Phase 1: Share entry loads for read-only default compute operands. These
   // tiles are kept in a separate cache, never installed in the SSA var map.
-  TensorArgsInConvertedOpsCollector collector(conv_registry);
+  TensorArgsInConvertedOpsCollector collector(conv_registry, gm_metadata_vars);
   collector.VisitStmt(canonical_body);
   collector.TraceIterArgInitValues([&tile_values](const Var* var) { return tile_values.IsTile(var); });
   const auto& params_used_by_converted_ops = collector.GetUsed();

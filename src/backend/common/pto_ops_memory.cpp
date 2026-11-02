@@ -738,6 +738,21 @@ static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
   return EmitFlatOffsetSSAFromValues(index_ssa, shape, codegen, "flat_offset");
 }
 
+// Tensor scalar accesses use the descriptor's element pitches, just like DMA
+// loads. Shape-derived dense offsets would silently ignore outer-axis sampling.
+static std::string GetTensorOffsetSSA(const ir::MakeTuplePtr& indices, const std::vector<ir::ExprPtr>& shape,
+                                      const std::optional<ir::TensorView>& view,
+                                      codegen::PTOCodegen& codegen) {
+  if (!view || view->stride.empty()) return GetFlatOffsetSSA(indices, shape, codegen);
+  INTERNAL_CHECK_SPAN(indices->elements_.size() == view->stride.size(), indices->span_)
+      << "Internal error: Tensor scalar index rank must match descriptor strides";
+  ir::ExprPtr offset = ir::MakeZeroByteOffset();
+  for (size_t i = 0; i < view->stride.size(); ++i) {
+    offset = ir::AddByteOffsets(offset, ir::MulByteOffsets(indices->elements_[i], view->stride[i]));
+  }
+  return codegen.EmitCastToIndex(offset, codegen.GetExprAsCode(offset));
+}
+
 // Helper function for tile.read (indices -> flat offset -> pto.tgetval)
 static std::string MakeTileReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -829,7 +844,8 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
     src_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
   }
 
-  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+  std::string off =
+      GetTensorOffsetSSA(indices_tuple, tensor_type_ptr->shape_, tensor_type_ptr->tensor_view_, codegen);
 
   std::ostringstream oss;
   oss << result << " = pto.load " << src << "[" << off << "]";
@@ -863,7 +879,8 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
     tensor_type_str = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
   }
 
-  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+  std::string off =
+      GetTensorOffsetSSA(indices_tuple, tensor_type_ptr->shape_, tensor_type_ptr->tensor_view_, codegen);
 
   std::ostringstream oss;
   oss << "pto.store " << value << ", " << tensor << "[" << off << "]";

@@ -294,12 +294,12 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 `pl.TensorLayout` is the enum those layout constants come from — `pl.ND` is
 `pl.TensorLayout.ND`.
 
-`pl.tensor.subview(cache, [2, 512], [1, 0], steps=[3, 1])` borrows rows 1 and 4
+`pl.tensor.subview(cache, [2, 512], [1, 0], steps=[3, 1])` selects rows 1 and 4
 of an ordinary [8,512] Tensor without loading data or allocating a buffer. Its
 strides are [1536,1]; `pl.load` materializes only the requested consumer Tile.
-The origin and allocation identity are resolved through the borrowed MemRef
-alias. Geometry must be provably strictly smaller and contained in the parent
-valid window; unknown bounds reject. Native consumers retain their existing
+The origin and allocation identity are resolved through a MemRef alias.
+Geometry must be strictly smaller and contained in the parent valid window;
+statically invalid bounds reject, while unknown dynamic bounds are allowed. Native consumers retain their existing
 device restrictions; subview adds no hardware load limits. `tensor.view`
 retains packed reshape rules, and `tensor.slice` keeps its materializing InCore
 behavior.

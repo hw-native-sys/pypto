@@ -42,8 +42,8 @@
 namespace pypto {
 namespace ir {
 
-// Descriptor construction can precede control-flow analysis. Reject provably bad
-// geometry here; the contextual verifier must prove every remaining obligation.
+// Reject statically invalid windows. Unknown dynamic bounds follow the ordinary
+// Tensor contract and are left to the caller; no provenance analysis is required.
 TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 4) << "tensor.subview requires source, shape, offsets, steps";
@@ -67,7 +67,7 @@ TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
   TensorView view = source->tensor_view_.value_or(TensorView{});
   CHECK(view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)
       << "tensor.subview supports ND/DN affine semantics only";
-  CHECK(view.pad == PadValue::null) << "tensor.subview cannot borrow a padded source";
+  CHECK(view.pad == PadValue::null) << "tensor.subview requires an unpadded source";
   CHECK(view.layout != TensorLayout::DN || rank >= 2) << "tensor.subview DN layout requires rank >= 2";
   const auto& extent = view.valid_shape.empty() ? source->shape_ : view.valid_shape;
   CHECK(extent.size() == rank) << "tensor.subview parent valid shape rank mismatch";
@@ -98,13 +98,13 @@ TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
   CHECK(canonical.ok) << "tensor.subview requires canonical addressing: " << canonical.reason;
   CHECK(!all_equal) << "tensor.subview requires a strictly smaller parent window";
   view.valid_shape.clear();
-  // No allocation identity is attached to a borrowed descriptor.
+  // InitMemRef resolves the shared allocation and this call's origin later.
   return std::make_shared<TensorType>(shape, source->dtype_, std::nullopt, view);
 }
 
 REGISTER_OP("tensor.subview")
     .set_op_category("TensorOp")
-    .set_description("Borrow a strictly contained affine GM window without materializing payload")
+    .set_description("Describe a strictly contained affine GM window without materializing payload")
     .add_argument("source", "Ordinary GM tensor")
     .add_argument("shape", "Logical result extents")
     .add_argument("offsets", "Origin in immediate parent coordinates")

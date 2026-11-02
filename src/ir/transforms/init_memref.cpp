@@ -816,7 +816,7 @@ class InitMemRefMutator : public IRMutator {
       }
     }
 
-    // Shaped aliases: a = b shares b's MemRef so borrowed Tensor address maps
+    // Shaped aliases: a = b shares b's MemRef so Tensor view address maps
     // and Tile storage identity survive plain SSA aliases.
     if (auto value_var = As<Var>(new_value)) {
       if (As<TileType>(op->var_->GetType()) || As<TensorType>(op->var_->GetType())) {

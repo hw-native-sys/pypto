@@ -95,14 +95,14 @@ For each `FunctionType::InCore` function:
 
    An operator that never declared its effects still counts as reading every argument. That default is now confined to operators the registry has nothing to say about — most of them functional — rather than being the fallback for a hand-maintained list that a new write operator silently escaped.
 
-### Borrowed GM descriptors
+### GM descriptors
 
-`tensor.subview` remains an ordinary GM Tensor descriptor. Before conversion, a
-shared contextual verifier proves strict containment, overflow-free geometry and
-read-only caller-owned provenance; false and unknown facts reject. An affine
-`tensor.set_validshape` alias also remains Tensor and may only narrow validity.
-Consumer `tensor.slice`/compute conversions load from that descriptor using its
-actual pitch.
+`tensor.subview` remains an ordinary GM Tensor descriptor. Its defining geometry
+is checked before conversion; unknown dynamic bounds are deferred. No ownership
+or read-only provenance is tracked. Metadata needed by a GM-only consumer, such
+as an explicit load or view construction, stays Tensor; purely computational
+metadata uses retain the existing Tile conversion. Consumer `tensor.slice` and
+compute conversions load from the descriptor using its actual pitch.
 
 ### GM Identity and Read/Write Ordering
 

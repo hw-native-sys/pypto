@@ -13,8 +13,8 @@
 #define PYPTO_IR_TENSOR_SUBVIEW_H_
 #include "pypto/ir/function.h"
 namespace pypto::ir {
-// Recompute safety at conversion and emission entry; no cached proof survives
-// transformations. Consumer hardware limits belong to their existing lowering.
+// Validate defining-call geometry at conversion and emission entry. Dynamic
+// unknowns are deferred; consumers follow ordinary Tensor/MemRef semantics.
 void VerifyTensorSubviews(const FunctionPtr& function);
 }  // namespace pypto::ir
 #endif  // PYPTO_IR_TENSOR_SUBVIEW_H_

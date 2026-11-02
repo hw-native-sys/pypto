@@ -369,8 +369,8 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   `tensor.slice(..., pad_value=PadValue.zero)` 会写入该字段。
 
 `tensor.subview` 的仿射元素 stride 保存在 `TensorView` 中；其原点和分配身份由
-`InitMemRef` 解析为借用的 MemRef 别名。Subview 来源从定义操作及其别名链推导，
-并在转换和 PTO 生成入口重新验证。
+`InitMemRef` 解析为 MemRef 别名。结果沿用普通 TensorView/MemRef 语义，
+不引入独立的所有权或来源分类。
 
 #### Canonical TensorView 形式（RFC #1300）
 
