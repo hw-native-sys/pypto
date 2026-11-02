@@ -93,7 +93,7 @@ HardwareLoopQualification Qualify(const ForStmtPtr& loop, const HardwareLoopProf
       profile.max_depth < 1 || profile.max_body_nodes < 0) {
     return finish(HardwareLoopState::Unknown, "HWL_INVALID_PROFILE");
   }
-  if (result.post_iv) {
+  if (result.post_iv && result.trip_count) {
     const Wide limit = Wide{1} << profile.counter_bits;
     if (*result.post_iv < 0 || *result.post_iv >= limit) {
       return finish(HardwareLoopState::Ineligible, "HWL_COUNTER_RANGE");
