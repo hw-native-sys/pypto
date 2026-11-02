@@ -49,7 +49,8 @@ class RegisterRoots : public IRVisitor {
 
  protected:
   void VisitExpr_(const CallPtr& call) override {
-    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+        IsOp(call, "reg.scatter")) {
       auto effect = GetRegMemoryEffect(call);
       auto tile = As<TileType>(effect.target->GetType());
       if (effect.root) {
@@ -137,7 +138,7 @@ class InitializationChecker : public IRVisitor {
     } else if (IsOp(call, "reg.active_mask")) {
       masks_[stmt->var_.get()] = As<ConstInt>(call->args_[0])->value_;
     }
-    if (IsOp(call, "tile.create") || IsOp(call, "reg.store") ||
+    if (IsOp(call, "tile.create") || IsOp(call, "reg.store") || IsOp(call, "reg.scatter") ||
         op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
       return;
     }
@@ -146,7 +147,8 @@ class InitializationChecker : public IRVisitor {
     Initialize(stmt->var_);
   }
   void VisitExpr_(const CallPtr& call) override {
-    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+        IsOp(call, "reg.scatter")) {
       auto effect = GetRegMemoryEffect(call);
       if (!effect.root || !roots_.count(effect.root.get())) {
         IRVisitor::VisitExpr_(call);

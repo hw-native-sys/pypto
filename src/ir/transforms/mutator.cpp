@@ -391,8 +391,8 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   // from args, so the args walk alone won't propagate substitutions into a
   // returned TileType/TensorType's shape/view fields.
   auto new_type = RemapTypeViaVisitor(op->GetType());
-  if (args_changed && IsOp(op, "reg.store")) {
-    // reg.store's result is exactly its destination type, including storage
+  if (args_changed && (IsOp(op, "reg.store") || IsOp(op, "reg.scatter"))) {
+    // Reg stores/scatters return exactly their destination type, including storage
     // metadata rewritten by InitMemRef, MemoryReuse or AllocateMemoryAddr.
     new_type = new_args[0]->GetType();
   }

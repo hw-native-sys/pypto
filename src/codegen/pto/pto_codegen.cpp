@@ -894,6 +894,7 @@ PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   vf_helpers_.clear();
   reg_addresses_.clear();
+  reg_tuple_values_.clear();
   inside_reg_scope_ = false;
   single_vf_function_ = program->functions_.size() == 1;
   VerifyVFInfrastructureCodegenPreconditions(program);
@@ -2741,6 +2742,19 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 }
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
+  if (inside_reg_scope_) {
+    if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
+      auto it = reg_tuple_values_.find(rhs.get());
+      if (it != reg_tuple_values_.end()) {
+        reg_tuple_values_[op->var_.get()] = it->second;
+        return;
+      }
+    }
+    if (As<ir::RegType>(op->var_->GetType()) && As<ir::TupleGetItemExpr>(op->value_)) {
+      BindVarToMlir(op->var_, GetExprAsCode(op->value_));
+      return;
+    }
+  }
   auto call = As<ir::Call>(op->value_);
   if (TryEmitRegCall(call, op->var_)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(call, op->var_)) return;
@@ -3052,6 +3066,15 @@ std::string PTOCodegen::LocSuffix() const {
 }
 
 std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
+  if (auto item = As<ir::TupleGetItemExpr>(expr); item && As<ir::RegType>(item->GetType())) {
+    auto tuple = AsVarLike(item->tuple_);
+    auto it = reg_tuple_values_.find(tuple.get());
+    CHECK_SPAN(inside_reg_scope_ && it != reg_tuple_values_.end() && item->index_ >= 0 &&
+                   static_cast<size_t>(item->index_) < it->second.size(),
+               expr->span_)
+        << "Register tuple projection requires a bound result inside RegScope";
+    return it->second[item->index_];
+  }
   if (auto var = As<ir::Var>(expr)) {
     return GetVarName(var);
   }

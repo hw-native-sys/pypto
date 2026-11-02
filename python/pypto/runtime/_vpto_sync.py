@@ -12,27 +12,51 @@
 This checks canonical LLVM emitted by PTOAS, before Bisheng can optimize away
 memory operations. It inserts no barriers and does not replace PTOAS analysis.
 Unknown syntax is rejected, including after a compiler output-format change.
-Only one straight-line AIV scope, contiguous FP32 accesses, one symbolic UB root
-and constant byte displacements are admitted. Scalars and masks may be dynamic.
+Only one straight-line AIV scope, one symbolic UB root, constant base
+displacements, and explicitly modeled vector memory instructions are admitted.
+Indexed accesses conservatively overlap the entire root; no index bounds or
+disjointness are inferred from an opaque vector. Scalars and masks may be dynamic.
 Required barrier coverage is checked at 32-byte granularity, conservatively
-using all 64 lanes for a masked access. The walk is linear: each access touches
-eight fixed-size blocks; pointer provenance is resolved in SSA definition order.
+using the full 256-byte physical register for a contiguous masked access.
+The walk is linear: each access touches eight fixed-size blocks; pointer
+provenance is resolved in SSA definition order.
 """
 
 import re
 from typing import NoReturn
 
-VERSION = "static-ub-f32-v3"
+VERSION = "static-ub-vmi-v4"
 _SSA = r"%[-a-zA-Z$._0-9]+"
 _PURE_OPS = frozenset(
     "add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv fneg "
     "icmp fcmp select trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp "
-    "bitcast insertelement extractelement shufflevector freeze".split()
+    "bitcast insertelement extractelement insertvalue extractvalue shufflevector freeze".split()
 )
+# All admitted vector loads/stores move one physical 256-byte register.
+_VECTOR_TYPES = {
+    "v64f32": "<64 x float>",
+    "v64i32": "<64 x i32>",
+    "v64u32": "<64 x i32>",
+    "v128f16": "<128 x half>",
+    "v128bf16": "<128 x bfloat>",
+    "v128i16": "<128 x i16>",
+    "v128u16": "<128 x i16>",
+    "v256i8": "<256 x i8>",
+    "v256s8": "<256 x i8>",
+    "v256u8": "<256 x i8>",
+}
+_VECTOR_SUFFIX = "(?:" + "|".join(_VECTOR_TYPES) + ")"
 _PURE_INTRINSIC = re.compile(
-    r"llvm\.hivm\.(?:pset\.b32|vci\.v64i32|vdups\.z\.v64(?:f32|i32)|"
-    r"v(?:add|sub|mul|min|max)\.s\.x\.v64(?:f32|i32)|"
-    r"vcmp\.(?:lt|le|gt|ge|eq|ne)\.s\.z\.v64(?:f32|i32))"
+    r"llvm\.hivm\.(?:pset\.b(?:8|16|32)|plt\.b(?:8|16|32)\.v300|"
+    r"p(?:and|or|xor|not|pack|unpack)\.z|punpack|v(?:z|s)unpack\.v128i16|vci\.v(?:64i32|128i16)|"
+    rf"vdups\.z\.{_VECTOR_SUFFIX}|vsel\.{_VECTOR_SUFFIX}|"
+    rf"v(?:add|sub|mul|min|max)\.(?:s|u)\.x\.{_VECTOR_SUFFIX}|"
+    rf"vcmp\.(?:lt|le|gt|ge|eq|ne)\.(?:s|u)\.z\.{_VECTOR_SUFFIX}|"
+    rf"v(?:intlv|dintlv)\.{_VECTOR_SUFFIX}|"
+    r"v(?:mull|addc|subc|addcs|subcs)\.v64(?:i|u|s)32|"
+    r"vexpdif\.v64f32|vaxpy\.m\.v(?:64f32|128f16)|"
+    r"v(?:lrelu|prelu)\.x\.v(?:64f32|128f16)|"
+    rf"vmula\.(?:s|u)\.m\.{_VECTOR_SUFFIX})"
 )
 
 
@@ -46,6 +70,10 @@ class _MemoryHistory:
     def __init__(self) -> None:
         self.reads: dict[int, int] = {}
         self.writes: dict[int, int] = {}
+        # Indexed accesses have no proven interval. Track their frontier and
+        # the latest access on each pipe without scanning the block maps.
+        self.unknown = {"vld": -1, "vst": -1}
+        self.latest = {"vld": -1, "vst": -1}
         # A frontier denotes every operation of that pipe up to its position.
         # Do not assume FIFO memory completion within either pipe. Only an
         # explicit barrier transfers the source pipe's issued operations and
@@ -54,20 +82,34 @@ class _MemoryHistory:
         self.issued = {pipe: {"vld": -1, "vst": -1} for pipe in ("vld", "vst")}
 
     def barrier(self, kind: str) -> None:
+        if kind == "vv.all":
+            for target in ("vld", "vst"):
+                for source in ("vld", "vst"):
+                    for pipe in ("vld", "vst"):
+                        self.before[target][pipe] = max(self.before[target][pipe], self.issued[source][pipe])
+            return
         source, target = kind.split(".")
         for pipe in ("vld", "vst"):
             self.before[target][pipe] = max(self.before[target][pipe], self.issued[source][pipe])
 
-    def access(self, displacement: int, load: bool, position: int) -> None:
-        blocks = range(displacement // 32, displacement // 32 + 8)
+    def access(self, displacement: int | None, load: bool, position: int) -> None:
+        blocks = range(displacement // 32, displacement // 32 + 8) if displacement is not None else ()
         target = "vld" if load else "vst"
         dependencies = [(self.writes, "vst")] if load else [(self.reads, "vld"), (self.writes, "vst")]
         for history, source in dependencies:
-            if any(history.get(block, -1) > self.before[target][source] for block in blocks):
+            prior = (
+                self.latest[source]
+                if displacement is None
+                else max(self.unknown[source], max((history.get(block, -1) for block in blocks), default=-1))
+            )
+            if prior > self.before[target][source]:
                 _reject(
                     f"missing {source}.{target} barrier/order "
                     f"for overlapping UB access at byte {displacement}"
                 )
+        self.latest[target] = position
+        if displacement is None:
+            self.unknown[target] = position
         history = self.reads if load else self.writes
         for block in blocks:
             history[block] = position
@@ -156,6 +198,67 @@ def _validate(llvm: str) -> None:
     _validate_instructions(entry, body, pointers)
 
 
+def _static_access(root: str, displacement: int, load: bool) -> tuple[str, int, bool]:
+    if displacement % 32 or displacement + 256 >= 2**31:
+        _reject("UB access requires static 32-byte alignment and bounded displacement")
+    return root, displacement, load
+
+
+def _memory_access(
+    name: str, args: str, pointers: dict[str, tuple[str, int]]
+) -> tuple[str, int | None, bool] | None:
+    """Decode only known intrinsic signatures; indexed footprints stay unknown."""
+    if name == "llvm.hivm.vsldb.v256i8":
+        # Byte vload lowers to one block-strided load: block_stride=1 is
+        # encoded in bits 16+, repeat_stride=0, and pointer update is disabled.
+        memory = re.fullmatch(rf"ptr addrspace\(6\) ({_SSA}), i32 65536, i32 0, <256 x i1> {_SSA}", args)
+        if memory is None or memory[1] not in pointers:
+            _reject("byte load requires a proven pointer and contiguous non-updating stride")
+        root, displacement = pointers[memory[1]]
+        return _static_access(root, displacement, True)
+    contiguous = re.fullmatch(rf"llvm\.hivm\.(vldsx1|vstsx1)\.({_VECTOR_SUFFIX})", name)
+    indexed = re.fullmatch(
+        r"llvm\.hivm\.(vgather2\.bc|vgather2\.v300|vscatter)\.(v64(?:f32|i32|u32)|v128(?:f16|bf16|i16|u16)|v256(?:i8|s8|u8))(\.v300)?",
+        name,
+    )
+    if contiguous is None and indexed is None:
+        return None
+    if contiguous is not None:
+        mode, vector = contiguous[1], contiguous[2]
+    else:
+        assert indexed is not None
+        mode, vector = indexed[1], indexed[2]
+    load = mode.startswith("vld") or mode.startswith("vgather")
+    prefix = "" if load else re.escape(_VECTOR_TYPES[vector]) + rf" {_SSA}, "
+    pattern = prefix + rf"ptr addrspace\(6\) ({_SSA}), "
+    if contiguous:
+        store_mode = "2" if vector.startswith("v64") else "1" if vector.startswith("v128") else "0"
+        pattern += r"i32 (\d+), i32 " + ("0" if load else store_mode) + ", i32 0"
+        pattern += "" if load else rf", <256 x i1> {_SSA}"
+    else:
+        # Reject combinations outside the modeled gather/scatter paths.
+        assert indexed is not None
+        expected_mode = "vgather2.bc" if vector.startswith("v64") else "vgather2.v300"
+        if (load and (mode != expected_mode or indexed[3] or vector.startswith("v256"))) or (
+            not load and indexed[3] != ".v300"
+        ):
+            _reject("unsupported indexed memory mode")
+        index_type = "<64 x i32>" if load or vector.startswith("v64") else "<128 x i16>"
+        pattern += re.escape(index_type) + rf" {_SSA}, <256 x i1> {_SSA}"
+    memory = re.fullmatch(pattern, args)
+    if memory is None or memory[1] not in pointers:
+        _reject(
+            "contiguous UB access requires a proven pointer, static offset and supported mode"
+            if contiguous
+            else "indexed UB access requires a proven pointer, supported index vector and mask"
+        )
+    root, displacement = pointers[memory[1]]
+    if not contiguous:
+        return root, None, load
+    displacement += int(memory[2])
+    return _static_access(root, displacement, load)
+
+
 def _validate_instructions(entry: list[str], body: list[str], pointers: dict[str, tuple[str, int]]) -> None:
     roots: set[str] = set()
     history = _MemoryHistory()
@@ -166,13 +269,14 @@ def _validate_instructions(entry: list[str], body: list[str], pointers: dict[str
         result, expression = (assign[1], assign[2]) if assign else ("", instruction)
         if expression.startswith("getelementptr "):
             gep = re.fullmatch(
-                rf"getelementptr (?:inbounds )?float, ptr addrspace\(6\) ({_SSA}), i64 (-?\d+)",
+                r"getelementptr (?:inbounds )?(float|i32|half|bfloat|i16|i8), "
+                rf"ptr addrspace\(6\) ({_SSA}), i64 (-?\d+)",
                 expression,
             )
-            if not result or gep is None or gep[1] not in pointers:
-                _reject("UB pointer derivation requires a known base and constant FP32 offset")
-            root, offset = pointers[gep[1]]
-            offset += int(gep[2]) * 4
+            if not result or gep is None or gep[2] not in pointers:
+                _reject("UB pointer derivation requires a known base and constant element offset")
+            root, offset = pointers[gep[2]]
+            offset += int(gep[3]) * {"float": 4, "i32": 4, "half": 2, "bfloat": 2, "i16": 2, "i8": 1}[gep[1]]
             if not 0 <= offset < 2**31:
                 _reject("UB pointer displacement is out of range")
             pointers[result] = (root, offset)
@@ -180,35 +284,23 @@ def _validate_instructions(entry: list[str], body: list[str], pointers: dict[str
         call = re.fullmatch(r"call (.+?) @([-a-zA-Z$._0-9]+)\((.*)\)", expression)
         if call:
             name, args = call[2], call[3]
-            if name in ("llvm.hivm.vldsx1.v64f32", "llvm.hivm.vstsx1.v64f32"):
+            memory = _memory_access(name, args, pointers)
+            if memory is not None:
                 if not in_scope:
                     _reject("UB access outside the verified AIV scope")
-                load = name == "llvm.hivm.vldsx1.v64f32"
-                prefix = "" if load else rf"<64 x float> {_SSA}, "
-                suffix = "" if load else rf", <256 x i1> {_SSA}"
-                memory = re.fullmatch(
-                    prefix
-                    + rf"ptr addrspace\(6\) ({_SSA}), i32 (\d+), i32 "
-                    + ("0" if load else "2")
-                    + ", i32 0"
-                    + suffix,
-                    args,
-                )
-                if memory is None or memory[1] not in pointers:
-                    _reject(
-                        "contiguous UB access requires a proven pointer, static offset and supported mode"
-                    )
-                root, displacement = pointers[memory[1]]
-                displacement += int(memory[2])
-                if displacement % 32 or displacement + 256 >= 2**31:
-                    _reject("UB access requires static 32-byte alignment and bounded displacement")
+                root, displacement, load = memory
                 roots.add(root)
                 if len(roots) > 1:
                     _reject("UB accesses use unrelated pointer parameters; preserve a common base")
                 history.access(displacement, load, position)
             elif (
                 name
-                in ("llvm.hivm.mem.bar.vst.vld", "llvm.hivm.mem.bar.vld.vst", "llvm.hivm.mem.bar.vst.vst")
+                in (
+                    "llvm.hivm.mem.bar.vst.vld",
+                    "llvm.hivm.mem.bar.vld.vst",
+                    "llvm.hivm.mem.bar.vst.vst",
+                    "llvm.hivm.mem.bar.vv.all",
+                )
                 and not args
                 and in_scope
             ):

@@ -111,15 +111,18 @@ class RegionChecker : public IRVisitor {
         }
       }
     }
-    if (!collecting_ && (As<RegType>(op->var_->GetType()) || As<RegType>(op->value_->GetType())) &&
+    if (!collecting_ &&
+        (ContainsRegionValue(op->var_->GetType(), false) ||
+         ContainsRegionValue(op->value_->GetType(), false)) &&
         !structural_equal(op->var_->GetType(), op->value_->GetType())) {
       Error("Register assignment dtype/kind/lane mismatch", op->span_);
     }
     if (collecting_ && region_ && As<TileType>(op->var_->GetType())) {
       auto call = As<Call>(op->value_);
-      if (!call || call->op_->name_ != "reg.store") {
-        Error("RegScope Tile inputs must originate outside the region; only reg.store returns Tile",
-              op->span_);
+      if (!IsOp(call, "reg.store") && !IsOp(call, "reg.scatter")) {
+        Error(
+            "RegScope Tile inputs must originate outside the region; only reg.store/reg.scatter return Tile",
+            op->span_);
       }
     }
     // LHS is a definition, not a use. Only inspect the RHS here.

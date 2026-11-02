@@ -856,8 +856,13 @@ a5 或不提供 SDMA provider 的 runtime 上，启用该能力的 worker 会在
 
 ## 寄存器操作
 
-`reg.*` P0 schema 使用 `RegOp` 类别、显式参数效应及寄存器区域要求。
+`reg.*` schema 使用 `RegOp` 类别、显式参数效应及寄存器区域要求。
 dtype、内存、转换和归属契约见[寄存器操作](../language/06-register-operations.md)。
 
 普通 RegOp 扩展包含 unary、整数 bitwise/shifts、vector-scalar、scalar compare、
 动态 lane 选择和单 lane 归约；具体 dtype 与 mask 约束参见上述寄存器操作文档。
+
+融合算术（`expdif`、`axpy`、`mula`、`lrelu`、`prelu`）、双结果操作
+（`mull`、`addc`、`subc`、`addcs`、`subcs`、`intlv`、`dintlv`）和索引 UB
+访存（`gather`、`scatter`）扩展了初始寄存器集合。双结果操作声明输出数量为二，
+返回 `TupleType`；scatter 返回目标 Tile 的别名，并将参数 0 标记为写入。

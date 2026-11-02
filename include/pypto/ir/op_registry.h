@@ -367,7 +367,7 @@ struct OpLaneInvariantArgSpec {
   std::map<size_t, LaneInvariantArg> args;
 };
 
-/// Register schemas describe the future emitter without claiming backend support.
+/// Register schemas attach scope requirements and a VMI emitter to an operator.
 struct RegOpSpec {
   std::string emitter;
   bool requires_reg_scope = true;
@@ -384,12 +384,12 @@ struct RegMemoryEffect {
   // Half-open element interval, not byte offsets; either endpoint may be unknown.
   std::optional<int64_t> begin;
   std::optional<int64_t> end;
-  // Store predicate, or null for an unmasked access. A present mask does not
+  // Memory predicate, or null for an unmasked access. A present mask does not
   // imply that every lane is written; initialization must inspect its meaning.
   ExprPtr mask;
 };
 
-/// Validate a Reg load/store and describe its memory effect without changing IR.
+/// Validate a Reg load/store/gather/scatter and describe its memory effect.
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call);
 
 /**

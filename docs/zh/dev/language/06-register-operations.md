@@ -35,9 +35,9 @@ def kernel(
 不是张量 shape，也不是字节数。
 
 外部 Tile 和只读 Scalar 是隐式输入。寄存器与局部 Scalar 不能通过区域外使用、
-函数返回、循环结果、元组或向外部变量赋值逃逸。Tile 操作数必须源于区域外；
-`store` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
-包括 `store`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
+函数返回、循环结果、元组或向外部变量赋值逃逸；函数边界递归检查嵌套元组类型。Tile 操作数必须源于区域外；
+`store` 和 `scatter` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
+包括 `store` 和 `scatter`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
@@ -54,7 +54,7 @@ def kernel(
 | `pmode` | 非激活结果 lane 的处理策略。仅接受 `"zero"`，即非激活向量 lane 清零。 |
 
 签名中的 `*` 表示之后的参数只能按关键字传入。省略可选 mask 时所有 lane 参与。
-除转换和归约外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
+除转换、归约、`expdif` 和字节 `gather` 外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
 lane 广播。DSL 数值字面量会归一化为要求的 scalar dtype；整数参数不接受 Python
 `bool`。原始 IR 和 Builder 操作数必须已具有要求的 dtype。
 
@@ -239,6 +239,71 @@ Z 为向零舍入。H 为 PTOAS 的特定 H 舍入模式，用于 FP32→FP16 �
 同 dtype 的 DSL 转换在两个可选属性均省略时返回原寄存器。
 其余 dtype 转换对均拒绝，包括 BF16 转换。原始 IR/Builder 调用必须在要求舍入属性
 的转换中显式传入归一化后的 rounding；上表默认值由 DSL 封装提供。
+
+## 扩展 VMI 操作
+
+以下 API 位于 `pl.reg`，发射对应的 `pto.vmi.v*` 操作。除 `mula` 的 mask 可选外，
+其余操作均要求执行掩码。算术 `pmode` 为 `"zero"`；进借位操作和 `scatter` 不暴露
+`pmode` 参数。除表中特别说明外，向量输入的 dtype、符号性和 lane 数必须一致。
+已有 Scalar SSA 不会被隐式转换；`axpy`/`lrelu` 的 Python 标量字面量按向量 dtype 归一化。
+
+| API（位置参数） | VMI op | 结果和约束 |
+| --------------- | ------ | ---------- |
+| `expdif(x, max_value, mask)` | `vexpdif` | 融合 `exp(x - max_value)`；FP16/FP32 输入，始终返回 FP32 |
+| `axpy(x, acc, alpha, mask)` | `vaxpy` | 融合 `alpha * x + acc`；FP16/FP32，alpha 为标量 |
+| `mula(acc, lhs, rhs, mask=None)` | `vmula` | 融合 `acc + lhs * rhs`；FP16/BF16/FP32 或有符号/无符号 16/32 位整数 |
+| `lrelu(x, slope, mask)` | `vlrelu` | Leaky ReLU；FP16/FP32，slope 为标量 |
+| `prelu(x, alpha, mask)` | `vprelu` | PReLU；FP16/FP32，alpha 为逐 lane 向量 |
+| `mull(lhs, rhs, mask)` | `vmull` | 乘积的两个 32 位部分 `(low, high)`；INT32/UINT32，64/128/256 lanes |
+| `addc(lhs, rhs, mask)` | `vaddc` | `(result, carry)`；INT32/UINT32 |
+| `subc(lhs, rhs, mask)` | `vsubc` | `(result, not_borrow)`；INT32/UINT32 |
+| `addcs(lhs, rhs, carry_in, mask)` | `vaddcs` | `lhs + rhs + carry_in` 的 `(result, carry_out)`；INT32/UINT32 |
+| `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `lhs - rhs - (1 - carry_in)` 的 `(result, not_borrow_out)`；INT32/UINT32 |
+| `gather(tile, offsets, mask)` | `vgather` | 带掩码的索引 UB 读取；非活动结果 lane 为零 |
+| `scatter(tile, offsets, value, mask)` | `vscatter` | 带掩码的索引 UB 写入；返回目标 Tile 别名 |
+| `intlv(lhs, rhs, mask)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
+| `dintlv(lhs, rhs, mask)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
+
+双结果通过一个返回元组的 IR Call 和两个 SSA 结果表达。元组、其投影和进借位掩码
+都只能在定义它们的 RegScope 中使用。`mull` 的两部分保留输入的符号性。
+减法的进位掩码以 **true 表示无借位**，与控制执行的 mask 是两个不同参数。
+`intlv`/`dintlv` 两个输出的非活动 lane 均为零。PTOAS 0.71 未降低其 mask，
+因此 codegen 在重排后显式选择零。BF16 通过 UINT16 位视图执行选择，保持活动值的位表示。
+
+```python
+# Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
+lo, carry = pl.reg.addc(lo_a, lo_b, mask)
+hi, carry_out = pl.reg.addcs(hi_a, hi_b, carry, mask)
+product_lo, product_hi = pl.reg.mull(lo_a, lo_b, mask)
+interleaved_lo, interleaved_hi = pl.reg.intlv(lo_a, lo_b, mask)
+a, b = pl.reg.dintlv(interleaved_lo, interleaved_hi, mask)
+```
+
+索引访存的 `offsets` 为 UINT16/UINT32 VecReg，lane 数必须与值/结果及 mask 一致。
+索引按**元素**计数，相对于 Tile view 的起点。8/16 位 Tile 元素使用 UINT16
+offsets，32 位 Tile 元素使用 UINT32 offsets，与 PTOAS 的物理索引路径保持一致。
+gather 将 INT8/UINT8 源数据分别零扩展为 INT16/UINT16，其余结果保持 Tile dtype。
+scatter 的值必须匹配 Tile dtype。已有的连续 Vec Tile 几何约束仍然适用。
+
+调用者负责保证活动索引不越界，且 gather 读取的元素已初始化。活动 scatter 索引
+必须互不相同。非活动 lane 不访问内存；scatter 保留所有未写入元素，也不扩大
+`valid_shape`。索引访存效果保留分配根和掩码，但区间端点未知；与动态 offset 一样，
+不构成静态初始化证明。VF helper 保守捕获整个 Tile：gather 为 `read`，scatter 为
+`readwrite`。现有 helper ABI 限制仍适用，包括捕获 Tile 的元素类型必须一致；
+包含不同类型数据/索引 Tile 的情况可以使用诊断 VMI 路径。
+
+当前 PTOAS 屏障 pass 未跟踪索引访存依赖，因此 codegen 在每次 gather/scatter
+前后发射 `VV_ALL` 屏障。运行时同步校验器将索引访存视为可能覆盖整个 UB 分配。
+连续访存保守使用 256 字节物理寄存器范围，即使逻辑 lane 数较少也不缩小该范围。
+校验器拒绝未知 intrinsic、无法证明来源的指针和缺失的屏障，不根据索引向量推断互不重叠。
+
+```python
+with pl.reg_scope():
+    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+    mask = pl.reg.active_mask(32, lanes=64)
+    values = pl.reg.gather(src, offsets, mask)
+    out = pl.reg.scatter(dst, offsets, values, mask)
+```
 
 ## IR Builder 与查询
 

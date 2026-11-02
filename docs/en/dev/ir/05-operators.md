@@ -929,10 +929,16 @@ Core definitions live in `include/pypto/core/common.h` and `include/pypto/ir/`; 
 
 ## Register operations
 
-The `reg.*` P0 schemas use category `RegOp`, explicit argument effects and
+The `reg.*` schemas use category `RegOp`, explicit argument effects and
 register-region requirements. See [register operations](../language/06-register-operations.md)
 for dtype, memory, conversion and ownership contracts.
 
 Ordinary RegOp extensions include unary, integer bitwise/shifts, vector-scalar,
 scalar compare, dynamic lane selection and single-lane reductions; see the linked
 register operations contract for exact dtype and mask restrictions.
+
+Fused arithmetic (`expdif`, `axpy`, `mula`, `lrelu`, `prelu`), paired results
+(`mull`, `addc`, `subc`, `addcs`, `subcs`, `intlv`, `dintlv`) and indexed UB
+access (`gather`, `scatter`) extend the initial register set. Paired operations
+declare output arity two and return a `TupleType`; scatter returns an alias of
+its destination Tile and declares argument 0 as written.

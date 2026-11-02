@@ -66,7 +66,7 @@ def test_static_common_base_is_admitted_without_rewriting(offset):
         ({"offset": "4"}, "32-byte alignment"),
         (
             {"setup": "%view = getelementptr float, ptr addrspace(6) %base, i64 %dynamic"},
-            "constant FP32 offset",
+            "constant element offset",
         ),
         ({"setup": "%view = getelementptr float, ptr addrspace(6) %base, i64 -1"}, "out of range"),
         ({"setup": "%view = inttoptr i64 %dynamic to ptr addrspace(6)"}, "unmodeled instruction"),
@@ -156,7 +156,11 @@ def _trace_is_ordered_by_graph(trace):
             ancestors[i].update(ancestors[predecessor])
     for i, pipe, address in memory:
         for j, prior_pipe, prior_address in memory:
-            if j < i and address == prior_address and "vst" in (pipe, prior_pipe):
+            if (
+                j < i
+                and (address is None or prior_address is None or address == prior_address)
+                and "vst" in (pipe, prior_pipe)
+            ):
                 if j not in ancestors[i]:
                     return False
     return True
@@ -194,6 +198,110 @@ def test_write_read_write_uses_existing_transitive_barriers():
     missing_read = "\n".join(line for line in source.splitlines() if "%loaded =" not in line)
     with pytest.raises(ValueError, match="missing vst.vst"):
         validate_sync_contract(missing_read, "no-bridge.pto")
+
+
+@pytest.mark.parametrize("load", [True, False])
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_unknown_indexed_access_requires_order_against_every_interval(load, unknown_first):
+    history = _MemoryHistory()
+    history.access(None if unknown_first else 8192, not load, 0)
+    with pytest.raises(ValueError, match="missing"):
+        history.access(8192 if unknown_first else None, load, 1)
+    history.barrier("vv.all")
+    history.access(8192 if unknown_first else None, load, 2)
+
+
+def test_unknown_footprints_match_independent_dependency_graph():
+    actions = (
+        ("vld", None),
+        ("vst", None),
+        ("vld", 0),
+        ("vst", 0),
+        ("vst", 512),
+        "vst.vld",
+        "vld.vst",
+        "vst.vst",
+    )
+    for trace in product(actions, repeat=4):
+        history = _MemoryHistory()
+        accepted = True
+        try:
+            for position, action in enumerate(trace):
+                if isinstance(action, str):
+                    history.barrier(action)
+                else:
+                    history.access(action[1], action[0] == "vld", position)
+        except ValueError:
+            accepted = False
+        assert accepted == _trace_is_ordered_by_graph(trace), trace
+
+
+@pytest.mark.parametrize("suffix,element", [("v64i32", "i32"), ("v128f16", "half")])
+def test_typed_contiguous_memory_keeps_physical_256_byte_footprint(suffix, element):
+    lanes = 64 if element == "i32" else 128
+    source = llvm_helper().replace("v64f32", suffix).replace("<64 x float>", f"<{lanes} x {element}>")
+    # Replace the pure broadcast too, using a scalar of its exact element type.
+    source = source.replace("float 5.0", f"{element} 0")
+    if element == "half":
+        source = source.replace("i32 0, i32 2, i32 0", "i32 0, i32 1, i32 0")
+    validate_sync_contract(source, "typed.pto")
+    with pytest.raises(ValueError, match="missing vst.vld"):
+        validate_sync_contract(source.replace("call void @llvm.hivm.mem.bar.vst.vld()", ""), "typed.pto")
+
+
+@pytest.mark.parametrize("suffix,indices", [("v64f32", "<64 x i32>"), ("v128f16", "<128 x i16>")])
+def test_scatter_and_gather_require_barriers_against_other_accesses(suffix, indices):
+    vector = "<64 x float>" if suffix == "v64f32" else "<128 x half>"
+    scatter = (
+        f"call void @llvm.hivm.vscatter.{suffix}.v300({vector} %value, "
+        f"ptr addrspace(6) %base, {indices} %idx, <256 x i1> %mask)"
+    )
+    gather_name = "vgather2.bc.v64f32" if suffix == "v64f32" else "vgather2.v300.v128f16"
+    gather = (
+        f"%indexed = call {vector} @llvm.hivm.{gather_name}("
+        "ptr addrspace(6) %base, <64 x i32> %packed, <256 x i1> %mask)"
+    )
+    barrier = "call void @llvm.hivm.mem.bar.vv.all()"
+    source = llvm_helper(extra=f"{barrier}\n{scatter}\n{barrier}\n{gather}")
+    validate_sync_contract(source, "indexed.pto")
+    with pytest.raises(ValueError, match="missing vst.vld"):
+        validate_sync_contract(source.replace(f"{scatter}\n{barrier}", scatter), "indexed.pto")
+    with pytest.raises(ValueError, match="missing vld.vst"):
+        validate_sync_contract(source.replace(f"{barrier}\n{scatter}", scatter), "indexed.pto")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "%x = call <64 x float> @llvm.hivm.vmula.s.m.v64f32("
+        "<64 x float> %value, <64 x float> %value, <64 x float> %value, <256 x i1> %mask)",
+        "%pair = call { <64 x i32>, <256 x i1> } @llvm.hivm.vaddc.v64u32("
+        "<64 x i32> %a, <64 x i32> %b, <256 x i1> %mask)\n"
+        "%x = extractvalue { <64 x i32>, <256 x i1> } %pair, 0",
+    ],
+)
+def test_pure_extended_intrinsics_do_not_obscure_memory_dependencies(extra):
+    source = llvm_helper(extra=extra)
+    validate_sync_contract(source, "arithmetic.pto")
+    with pytest.raises(ValueError, match="missing vst.vld"):
+        validate_sync_contract(source.replace("call void @llvm.hivm.mem.bar.vst.vld()", ""), "arithmetic.pto")
+
+
+@pytest.mark.parametrize("stride,update", [(65536, 0), (131072, 0), (65536, 1)])
+def test_byte_load_requires_contiguous_non_updating_stride(stride, update):
+    source = llvm_helper(
+        extra=(
+            "%bytes = call <256 x i8> @llvm.hivm.vsldb.v256i8("
+            f"ptr addrspace(6) %base, i32 {stride}, i32 {update}, <256 x i1> %mask)"
+        )
+    )
+    if (stride, update) != (65536, 0):
+        with pytest.raises(ValueError, match="contiguous non-updating stride"):
+            validate_sync_contract(source, "byte.pto")
+    else:
+        validate_sync_contract(source, "byte.pto")
+        with pytest.raises(ValueError, match="missing"):
+            validate_sync_contract(source.replace("call void @llvm.hivm.mem.bar.vst.vld()", ""), "byte.pto")
 
 
 if __name__ == "__main__":

@@ -56,14 +56,16 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitExpr_(var);
   }
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store")) {
+    if (auto call = As<Call>(stmt->value_); call && (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
     }
     references.emplace(stmt->var_.get(), stmt->var_);
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) memory.push_back(call);
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+        IsOp(call, "reg.scatter"))
+      memory.push_back(call);
     IRVisitor::VisitExpr_(call);
   }
 };
@@ -135,10 +137,12 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
-    // The diagnostic VMI path accepts dynamic offsets; executable helpers
-    // require the static addresses understood by synchronization admission.
+    // Contiguous accesses require statically admitted intervals. Indexed
+    // accesses instead capture the whole Tile conservatively; the caller owns
+    // active-index bounds, while the allocation base must still be static.
     auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN(effect.root && effect.begin, call->span_)
+    CHECK_SPAN(effect.root && (effect.begin || IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")),
+               call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
     if (inserted) {
@@ -163,7 +167,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // Tile. Readwrite preserves dependencies on the untouched contents without
     // claiming that masked-off lanes physically read memory. Store-version
     // aliases share this capture and accumulate its conservative effect.
-    if (IsOp(call, "reg.store")) artifact.parameter_effects[it->second] = "readwrite";
+    if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))
+      artifact.parameter_effects[it->second] = "readwrite";
   }
   std::vector<std::string> addresses;
   if (!capture_tiles.empty()) {
@@ -285,8 +290,18 @@ void PTOCodegen::EmitVFAdapter(const VFHelper& helper) {
     const auto caller = helper.parameter_indices[i];
     INTERNAL_CHECK(caller < caller_count) << "Invalid VF adapter argument mapping";
     if (helper.caller_parameter_types[caller] != helper.parameter_types[i]) {
-      stream_ << "    %ptr" << caller << " = pto.tile_buf_addr %arg" << caller << " : "
-              << helper.caller_parameter_types[caller] << " -> " << helper.parameter_types[i] << "\n";
+      // Tile storage spells signed integers as signless iN. Extract that
+      // storage pointer first, then bridge the explicitly signed VMI ABI.
+      const auto& parameter_type = helper.parameter_types[i];
+      auto storage_type = parameter_type;
+      const bool signed_pointer = parameter_type.rfind("!pto.ptr<si", 0) == 0;
+      if (signed_pointer) storage_type.erase(std::string("!pto.ptr<").size(), 1);
+      stream_ << "    %" << (signed_pointer ? "storage" : "ptr") << caller << " = pto.tile_buf_addr %arg"
+              << caller << " : " << helper.caller_parameter_types[caller] << " -> " << storage_type << "\n";
+      if (signed_pointer) {
+        stream_ << "    %ptr" << caller << " = pto.castptr %storage" << caller << " : " << storage_type
+                << " -> " << parameter_type << "\n";
+      }
     }
   }
   stream_ << "    func.call @" << helper.symbol << "(";
