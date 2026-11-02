@@ -133,7 +133,7 @@ class LoopOffsets {
             << "VF hardware-loop bounds require a fully valid Tile view";
       }
     }
-    const __int128 last = static_cast<__int128>(form->second) + 64 * (trips_ - 1);
+    const __int128 last = form->second + static_cast<__int128>(64) * (trips_ - 1);
     CHECK_SPAN(last + 64 <= capacity, call->span_) << "VF hardware-loop access exceeds Tile bounds";
     // Reuse the operator's view/root-capacity validation at both endpoints.
     // No IR node is rewritten: the original affine operand reaches PTOAS.
@@ -163,8 +163,9 @@ class LoopOffsets {
     } else if (auto constant = As<ConstInt>(expr)) {
       result = {{0, constant->value_}};
     } else if (auto var = AsVarLike(expr)) {
-      if (auto it = operands_.values.find(var.get()); it != operands_.values.end())
+      if (auto it = operands_.values.find(var.get()); it != operands_.values.end()) {
         result = Affine(it->second);
+      }
     } else if (auto binary = As<BinaryExpr>(expr)) {
       auto lhs = Affine(binary->left_), rhs = Affine(binary->right_);
       if (!lhs || !rhs) return std::nullopt;

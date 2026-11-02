@@ -18,6 +18,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/type.h"
 #include "pypto/sync/resource_catalog.h"
 #include "src/backend/common/sync_resources.h"
