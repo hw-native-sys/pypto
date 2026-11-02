@@ -117,6 +117,10 @@ class LoopOffsets {
         << "VF hardware-loop address requires a proven 64-element stride";
     CHECK_SPAN(form->second >= 0 && form->second % 8 == 0, call->span_)
         << "VF hardware-loop address must be nonnegative and 32-byte aligned";
+    if (tile->tile_view_ && !tile->tile_view_->valid_shape.empty()) {
+      CHECK_SPAN(tile->tile_view_->valid_shape.size() == tile->shape_.size(), call->span_)
+          << "VF hardware-loop bounds require valid_shape rank to match Tile rank";
+    }
     int64_t capacity = 1;
     for (size_t i = 0; i < tile->shape_.size(); ++i) {
       auto extent = As<ConstInt>(tile->shape_[i]);
