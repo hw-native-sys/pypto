@@ -20,12 +20,17 @@
 
 ## 系统基础设施 (`pld.system.*`)
 
+`world_size` 仅限 host；`get_comm_ctx` 可用于 host 编排器、CHIP 编排和 InCore。
+`nranks` 支持 CHIP 编排和 InCore；`rank`、`notify`、`wait` 仍仅限 InCore，
+`defer_wait` 则要求专用的顶层 `pl.at(CORE_GROUP)` waiter。
+这五个操作均不支持 host 编排器 lowering。
+
 | 名称 | 签名 | 描述 |
 | ---- | ---- | ---- |
 | `world_size` | `() -> Scalar` | **仅限 host。** 分布式执行中的 rank 数量。 |
-| `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | 提升为 `CommCtx` 句柄。host 编排器和 InCore 代码均可用。 |
+| `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | 提升为 `CommCtx` 句柄。host 编排器、CHIP 编排和 InCore 代码均可用。 |
 | `rank` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 本地 rank 索引。 |
-| `nranks` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 通信组中 rank 数量。 |
+| `nranks` | `(ctx: Ctx) -> Scalar` | **CHIP 编排 / InCore。** 通信组中 rank 数量（`INT32`），读取 `CommContext::rankNum`。 |
 | `notify` | `(target, peer, offsets, value, *, op) -> Call` | **仅限 InCore。** 跨 rank 信号投递。仅副作用。 |
 | `wait` | `(signal, offsets, expected, *, cmp) -> Call` | **仅限 InCore。** 跨 rank 等待。仅副作用。 |
 | `defer_wait` | `(signal, offsets, expected, *, cmp) -> Call` | **仅限专用的顶层 `pl.at(CORE_GROUP)` waiter。** 注册 `signal[offsets] >= expected` 完成条件并返回，不让 AIV 自旋；条件满足前，所在任务的 TaskId 保持未完成。 |

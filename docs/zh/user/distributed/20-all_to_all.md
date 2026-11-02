@@ -161,7 +161,8 @@ L2 的 input/index 和 recv_counts 可以是本地 Tensor，recv_counts 为 INT3
 URMA，每个远端 rank 始终只有一个队列写入者。全部 B 个 AIV 平均分配本地接收行；
 每个 AIV 先提交自己的远端发送，再搬本地行，最后等待远端最终 CQE。
 一行 hidden 不跨 AIV 拆分。全部 B 个 AIV 都参与 barrier，包括分到零行的核。
-signal 为 INT32 `[P,S]`，`S >= B`，首次使用前清零。L2 要求编译期核数。各 rank 必须使用一致的布局、启动核数和 collective 顺序。
+signal 为 INT32 `[P,S]`，`S >= B`，首次使用前清零。L2 的核数可以是编译期常量或运行期值；
+动态取值的有效性由调用方负责（非正值不会启动，runtime 仍强制启动准入）。各 rank 必须使用一致的布局、启动核数和 collective 顺序。
 
 counts 必须在 `[0,C]` 内，有效 index 必须在 `[0,Nmax)` 内。这些是设备数据
 前置条件；非法值会中止执行，不做 clamp。索引尾部可以是 -1，不会被读取。

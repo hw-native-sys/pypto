@@ -28,6 +28,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -282,6 +283,21 @@ void OrchestrationStmtCodegen::VisitStmt_(const AssignStmtPtr& assign) {
           << "Internal error: orchestration get_comm_ctx could not find materialized CommCtx param for "
           << arg_name;
       EmitIndentedLine("uint64_t " + var_name + " = " + ctx_it->second + ";");
+      return;
+    }
+    // ``pld.system.nranks(ctx)``: the count is one load away, because the comm
+    // context already reaches the orchestration as a materialized CommCtx scalar
+    // param. The offset is the pinned runtime-struct offset, the same one the
+    // kernel-side lowering reads (see comm_layout.h).
+    if (IsOp(call, "pld.system.nranks")) {
+      INTERNAL_CHECK_SPAN(call->args_.size() == 1, assign->span_)
+          << "Internal error: pld.system.nranks expects exactly 1 argument";
+      INTERNAL_CHECK_SPAN(IsA<CommCtxType>(call->args_[0]->GetType()), assign->span_)
+          << "Internal error: pld.system.nranks expects a CommCtx argument, got "
+          << call->args_[0]->GetType()->TypeName();
+      EmitIndentedLine("int32_t " + var_name + " = *reinterpret_cast<const int32_t*>(" +
+                       GenerateExprString(call->args_[0]) + " + " +
+                       std::to_string(distributed::comm_layout::kRankNumOffset) + ");");
       return;
     }
 

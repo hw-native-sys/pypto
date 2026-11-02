@@ -572,10 +572,12 @@ unchanged; the per-lane completion surface stays the `AtomicAdd(-2)`
 self-clearing credit lanes.
 
 The InCore composite rail rejects any `core_num` other than a compile-time `1`,
-naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) accepts a
-compile-time `core_num`: it folds the same `B = CalAllToAllVBlocks(P, L)` at
+naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) accepts either
+form. A compile-time `core_num` folds the same `B = CalAllToAllVBlocks(P, L)` at
 lowering and attaches it as the launch spec (`core_num=B`, `sync_start`) when
-`B > 1`. A runtime `core_num` is not supported on that rail yet — see
+`B > 1`. A runtime `core_num` emits that formula as orchestration arithmetic
+over a rank count read from the comm context and attaches the computed `B`; the
+validity of dynamic values is the caller's responsibility — see
 [`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md).
 
 **CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
