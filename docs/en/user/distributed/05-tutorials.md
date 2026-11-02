@@ -96,9 +96,9 @@ tutorials: nothing exists in code without being teachable from an example.
 | Abstraction | Purpose | Chapter section | Runs on | Tutorial step |
 | ----------- | ------- | --------------- | ------- | ------------- |
 | `pld.world_size()` | Number of ranks in the world | [02-primitives](02-primitives.md) §System Substrate | Host (orchestrator) | 01 |
-| `pld.get_comm_ctx(dt)` | Resolve the comm context a `DistributedTensor` belongs to | [02-primitives](02-primitives.md) §System Substrate | Host / InCore | 04 |
+| `pld.get_comm_ctx(dt)` | Resolve the comm context a `DistributedTensor` belongs to | [02-primitives](02-primitives.md) §System Substrate | Host / CHIP orchestration / InCore | 04 |
 | `pld.rank(ctx)` | This rank's index in the context | [02-primitives](02-primitives.md) §System Substrate | InCore | 04 |
-| `pld.nranks(ctx)` | Rank count in the context | [02-primitives](02-primitives.md) §System Substrate | InCore | 04 |
+| `pld.nranks(ctx)` | Rank count in the context | [02-primitives](02-primitives.md) §System Substrate | CHIP orchestration / InCore | 04 |
 | `pl.dynamic("NR")` | Name a runtime-resolved dimension (e.g. the rank count) | [00-getting_started](../00-getting_started.md) | — | 07 |
 
 ### Memory

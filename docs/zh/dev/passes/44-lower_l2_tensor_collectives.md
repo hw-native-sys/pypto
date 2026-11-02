@@ -6,7 +6,7 @@
 它把写在 **CHIP orchestration 函数体**里的 `pld.tensor.*` 集合通信改写成对编译器
 合成的 AIV kernel 的调用，使该集合通信成为调用方自身 pipeline 里的一个普通 task。
 
-目前支持 `pld.tensor.all_to_all_v`，且要求 `core_num` 为编译期常量。
+目前支持 `pld.tensor.all_to_all_v`，`core_num` 可以是编译期常量，也可以是运行期值。
 
 HOST 通路（[`LowerHostTensorCollectives`](51-lower_host_tensor_collectives.md)）
 在上一层解决同一问题，做法不同：它把集合通信按设备扇出成**每个设备一次**
@@ -111,8 +111,9 @@ kernel 走同一条路径，区别只在于文本来自模板而非 ptoas。
 两条通路都不传 rank 数标量。kernel 读 `CommContext::rankNum`，它与 HOST dispatch
 过去传的 `domain_size` 是同一个数：`comm_derive_context` **按 comm domain** 建
 context，其 `rankNum` 就是该域的 rank 数。去掉这个标量的代价是入口处多一次 GM
-读取，换来的是一份共享源码。这在 CHIP 通路上也是唯一可行方案 —— 它根本无法计算
-rank 数，`pld.system.nranks` 只有 InCore 代码生成，没有 orchestration 代码生成。
+读取，换来的是一份共享源码。这在 CHIP 通路上曾经也是唯一可行方案 —— 它当时根本无法计算
+rank 数。RFC #2521 O2 改变了这一点：`pld.system.nranks` 现在也有 orchestration
+代码生成，因此本通路可以从它已经持有的 context 中读取 rank 数（见*启动宽度*）。
 
 `args[6..7]` 的副本是 `MaterializeDistTensorCtx` **为每个 `DistributedTensor`
 参数各追加一个 `CommCtx` 参数**的产物。合成签名中恰好声明三个这样的参数 ——
@@ -123,26 +124,51 @@ rank 数，`pld.system.nranks` 只有 InCore 代码生成，没有 orchestration
 
 ## 启动宽度
 
-`core_num` 是请求的 block 上限 `L`。在本通路上它必须是编译期常量，因此 pass 自己折叠出准入的
-block 数 `B = CalAllToAllVBlocks(P, L)`：当 `L < P` 时取 `L`，否则取不超过 `L` 的最大 `P` 的倍数。
-`P` 是 `[NR, S]` signal 的静态 `NR`。
+`core_num` 是请求的 block 上限 `L`，准入的 block 数为 `B = CalAllToAllVBlocks(P, L)`：当 `L < P`
+时取 `L`，否则取不超过 `L` 的最大 `P` 的倍数（RFC #2521 冻结项 #3 —— 它是 `(P, L)` 的纯函数，
+不含任何 payload 输入）。`B` 在何处计算取决于 `L` 是否为编译期已知。
+
+**编译期 `L`**。pass 自己折叠 `B`，其中 `P` 取 `[NR, S]` signal 的静态 `NR`。
 
 - `B == 1` 时 kernel 调用保持不变。
 - `B > 1` 时在 kernel 调用上附加 `core_num=B` 与 `sync_start=True`。感知 block 的 barrier 要求所有
   准入的 block 同时驻留，而 runtime 会拒绝超出容量的 sync-start 启动，而不是只启动一部分。
 
-启动规格放在调用的 attrs 上，而 attrs 不是 kernel 参数，所以上文的五操作数 ABI 不变。被校验的是 `B`
-而不是 `L`：`signal` 必须满足 `S >= B`，因此 `L=10, P=8`（实际启动 8 个 block）接受 `S=8`。HOST
-通路在其生成的 entry 中计算同一个 `B`；两处实现都对照 RFC #2521 的算例表固定。`NR` 必须等于运行期
-通信域大小，因为 kernel 从 `CommContext` 读取 rank 数。
+被校验的是 `B` 而不是 `L`：`signal` 必须满足 `S >= B`，因此 `L=10, P=8`（实际启动 8 个 block）
+接受 `S=8`。
+
+**运行期 `L`**。此时无法折叠，因此 pass 在 dispatch 之前把同一个公式作为 orchestration 算术发射
+出来。由于表达式代码生成没有三元运算符，而仅用 `min`/`max` 也无法表达这一分支，公式采用无分支形式：
+
+```text
+P = nranks(get_comm_ctx(target))      # 从 orchestration 已持有的 context 读取
+D = max(P, 1)
+B = L - (L % D) * (L >= D)
+```
+
+`D` 是保证算术全域有定义的向下取整，而不是校验：当通信域报告 `P = 0` 时，它避免生成代码中的
+`L % P` 成为未定义行为。得到的 `B` 原样附加到启动规格上。
+[`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md) 无法证明运行期 `B` 为正，因此会把 dispatch
+包进 `if (B > 0)` 并保留空分支；若把宽度钳位成 `max(B, 1)`，畸形调用反而会启动一个 block。
+
+动态参数的有效性 —— `L > 0`、`P > 0`、`P == NR`、`S >= B` 以及不超过 AIV 数 —— 由调用方负责，本 pass
+**不**校验。runtime 仍会强制启动准入：超容量的 `require_sync_start` 启动会在提交时被拒绝，而不是
+只启动一部分。
+
+indexed 变体（`pld.tensor.indexed_all_to_all_v`）精确启动其 `L` —— 即 `B = L`，不做 rank 算术 ——
+同样接受编译期或运行期形式。
+
+两种情况下启动规格都放在调用的 attrs 上，而 attrs 不是 kernel 参数，所以上文的五操作数 ABI 不变，
+同一个二进制可服务于任意运行期 `L`。HOST 通路在其生成的 entry 中计算同一个 `B`；所有实现都对照
+RFC #2521 的算例表固定。
 
 ## 约束与诊断
 
 | 条件 | 诊断 |
 | ---- | ---- |
-| `core_num` 不是编译期常量 | 拒绝 —— 本通路暂不支持运行期 `core_num` |
-| `core_num` 不在 `[1, INT32_MAX]` 内 | 拒绝 —— 与 HOST 通路 entry 在运行期强制的上界相同 |
-| `signal` 步长 `S < B` | 拒绝 —— `B` 是折叠后的 block 数（见 *启动宽度*），不是原始 `core_num` |
+| 编译期 `core_num` 不在 `[1, INT32_MAX]` 内 | 拒绝 —— 与 HOST 通路 entry 在运行期强制的上界相同 |
+| 编译期 `signal` 步长 `S < B` | 拒绝 —— `B` 是折叠后的 block 数（见 *启动宽度*），不是原始 `core_num` |
+| 运行期 `core_num` / rank 数 / signal 步长 | 不在此诊断 —— 动态有效性由调用方负责（RFC #2521 冻结项 #10）；runtime 仍会在提交时拒绝超容量的 sync-start 启动 |
 | `dtype != FP32 && dtype != INT8` | 拒绝 —— 支持 FP32 与 INT8（与 HOST 通路的 allowlist 一致） |
 | 集合通信残留在非 HOST 的 orchestration 函数体中 | 被本 pass 自身的后置条件检查拒绝 |
 
@@ -162,9 +188,11 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 
 ## 当前限制
 
-- **运行期 `core_num`**。仅接受编译期 `core_num`。运行期值需要在生成的 orchestration 中计算 `B`，并做
-  运行期 `S >= B` 检查，而 orchestration 目前没有抛出该致命错误的途径。HOST 通路因其 entry 运行在
-  host 上而接受运行期值。
+- **运行期 `core_num` 校验被推迟**。动态 `L`、非正的 rank 数、`NR != P` 以及 `S < B` 都不在编译期诊断，
+  本变更也不会发射运行期守卫。RFC #2521 §12.3 要求这些检查；将其表示为 IR（由通用代码生成降低的
+  带副作用运行期断言）属于后续工作。在此之前，动态参数的有效性由调用方负责；故障仍是逐 rank 的：
+  其对端会阻塞在没有超时的 exchange barrier 上，因此畸形请求会一直挂到看门狗触发（冻结项 #10 接受
+  这一点）。
 - **除连续性外，操作数校验是静态的，且别名只覆盖了一部分**。`pld.tensor.all_to_all_v` 的类型
   推导只拒绝仅凭操作数类型即可证明的违规：非 ND 布局、与紧凑步长不符的 stride
   向量、比 shape 更窄的 `valid_shape`，以及 `input` 与 `target` 是**同一个表达式**。
@@ -193,8 +221,9 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   kernel 仍带有 `require_contiguous_operands`，orchestration codegen 会在提交之前为每个
   tensor 操作数生成一条 `is_contiguous` 检查，并在第一个违规处锁存
   `SIMPLER_ERROR_INVALID_ARGS`，作为调用方提供的操作数的兜底：参数打包会拒绝非连续的 host
-  torch tensor，但预先构建的运行期 `Tensor` 只在这里检查。另一项需要运行期形式的检查
-  （signal stride `>= B`）仍由 lowering 阶段静态校验：`S` 与折叠出的 `B` 都是编译期常量。
+  torch tensor，但预先构建的运行期 `Tensor` 只在这里检查。signal stride 检查 `S >= B`
+  只是编译期诊断：它适用于 `core_num` 为编译期、`B` 已折叠的情况。对运行期 `core_num`，
+  `S` 仍是静态字面量而 `B` 不是，因此该比较交由调用方负责。
 - **rank 数**。kernel 读取 `CommContext::rankNum`，因此当显式设备子集小于 context
   的 rank 数时，其行为与传入 comm domain `domain_size` 的 HOST 通路不同。
 - **「同属一个通信域」是未经检查的前置条件**。kernel 通过单个 `CommContext`
@@ -210,7 +239,7 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 
 - `tests/ut/ir/transforms/test_lower_l2_tensor_collectives.py` —— 改写后的形态、
   合成签名与方向、模板 attrs、variant 共享、InCore 透传、启动规格附加与 block 数折叠、
-  容量检查、运行期 `core_num` 拒绝、INT8 variant。
+  容量检查、运行期 `core_num` 的宽度发射、编译期请求不发射运行期前奏、INT8 variant。
 - `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` ——
   HOST 与 CHIP 通路对 FP32 / INT8 渲染逐字节相同的 kernel。
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` —— composite 通路把
@@ -232,7 +261,8 @@ recv_counts, index, core_num=L)` 使用托管 L2 任务流程及独立的内核�
 六个 Tensor 操作数之后，第一个 CommContext 位于槽位 6。input、index 和
 recv_counts 可以是本地 Tensor；send_counts 必须是窗口。
 包括 `index` 在内的全部六个操作数，与普通算子一样接受连续性检查与兜底（见[当前限制](#当前限制)）。
-`L` 为编译期正整数，表示精确启动核数。全部 AIV 在远端提交与 CQ 等待之间
+`L` 为正整数，表示精确启动核数，可以是编译期常量或运行期 `Scalar[INDEX]`；
+动态取值的有效性由调用方负责（与普通算子一致）。全部 AIV 在远端提交与 CQ 等待之间
 分担本地搬运；超过 P 的 AIV 只参与本地搬运。仅支持 A5 URMA PER_PEER 传输，
 每个目标队列只有一个写入者。调用者必须为共享队列的交换建立顺序；即使
 payload 窗口不同，复用同一个 InOut signal 也能建立此依赖。

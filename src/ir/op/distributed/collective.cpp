@@ -653,9 +653,11 @@ TypePtr DeduceTensorAllToAllVTypeImpl(const std::vector<ExprPtr>& args,
   // (a Scalar[INDEX] Expr), not a compile-time-only kwarg, so a fully dynamic
   // request can flow through IR: only a statically-known ConstInt is
   // range-checked here, exactly as no other dynamic scalar argument in this
-  // op (e.g. send_counts' runtime values) is compile-time-checked either. A
-  // dynamic core_num's positivity is validated at the runtime entry instead.
-  // The InCore composite rail requires a compile-time core_num == 1;
+  // op (e.g. send_counts' runtime values) is compile-time-checked either.
+  // Dynamic validity — including positivity — is the caller's responsibility:
+  // on the CHIP rail a non-positive value is not launched, while the HOST
+  // entry validates it at runtime. The InCore composite rail requires a
+  // compile-time core_num == 1;
   // LowerCompositeOps enforces that, so this deducer only rejects a
   // statically-provable non-positive value no rail could ever honour.
   CheckAllToAllVCoreNumType(args.back(), "pld.tensor.all_to_all_v");
