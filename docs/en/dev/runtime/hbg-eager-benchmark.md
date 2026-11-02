@@ -40,11 +40,6 @@ Each implementation is checked against its own reference, not against the other
 implementation's known zero-tolerance differences. Compilation is forbidden
 during measurement of the fixed artifact.
 
-`paired-diagnostic` separately records Native Torch dispatcher operator counts
-and PyPTO spans. Instrumented timings are not performance evidence. Dispatcher
-names do not establish which ACLNN API is used; inspect the matching extension
-or a profiler trace before attributing costs to ACLNN.
-
 The historical three-version `bench --suite current` runs one version per
 process, with A/A controls. PTO reuses metadata while Native produces it, and
 Native is measured first once. Its Native/PTO ratio is not an equivalent-work

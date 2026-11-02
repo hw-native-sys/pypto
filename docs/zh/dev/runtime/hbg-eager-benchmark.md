@@ -36,10 +36,6 @@ compact metadata。包含 PyPTO adapter 的每次构造成本。输入恢复、�
 自身 reference 做完整状态校验，不将已知 Native/PTO 零容差差异当作数值验收通过。
 固定已编译 artifact，计时期间禁止编译。
 
-将 `--mode` 改为 `paired-diagnostic` 可单独采集 Native Torch dispatcher 算子次数和
-PyPTO 调用 spans。此模式有插桩开销，不能作为性能数字。Torch dispatcher 名称也不能
-证明底层必然使用某个 ACLNN API；需结合匹配版本的扩展实现或 profiler 确认。
-
 历史三版对照使用 `--mode bench --suite current`：每个进程测一版 PyPTO，两个
 A/A 标签校准噪声；此模式 PyPTO **复用** metadata，而 Native 保留原生生成路径，
 且 Native 先行测一次。因此其中 Native/PTO 比值不能作为同口径性能验收。

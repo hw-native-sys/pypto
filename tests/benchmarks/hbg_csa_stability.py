@@ -27,7 +27,6 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 
@@ -126,64 +125,12 @@ def measure_cpu(args: Any, stages: Any, reset: Any, run: Any, drain: Any, verify
         (args.output / "pto-lifecycle-orders.json").write_text(json.dumps(orders))
 
 
-def diagnose_sources(
-    args: Any, stages: Any, root: Any, reset: Any, run: Any, drain: Any, verify: Any
-) -> dict[str, Any]:
-    """Count real source registration/release in a separate, untimed process."""
-    from hbg_eager_latency import _DiagnosticPatches  # noqa: PLC0415
-    from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
-
-    state = get_process_kernel_state()
-    session = state._worker
-    rows = []
-    for stage in stages:
-        drain()
-        counters: dict[str, int] = {}
-        patches = _DiagnosticPatches()
-
-        def instrument(owner: Any, name: str, label: str) -> None:
-            original = getattr(owner, name)
-            counters[label] = 0
-
-            def counted(*call_args: Any, **kwargs: Any) -> Any:
-                counters[label] += 1
-                return original(*call_args, **kwargs)
-
-            patches.set(owner, name, counted)
-
-        try:
-            for owner, name, label in (
-                (root, "_resolve_compiled", "resolver_calls"),
-                (root, "_compile", "compile_attempts"),
-                (session.sources, "acquire", "source_acquire"),
-                (session.sources, "release", "source_release"),
-                (session.sources, "_release_buffer", "source_buffer_release"),
-                (session.worker, "_record_device_alloc", "consumer_register"),
-                (session.worker, "_drop_device_alloc", "consumer_unregister"),
-            ):
-                instrument(owner, name, label)
-            for _ in range(args.samples):
-                reset()
-                run()
-            drain()
-        finally:
-            patches.restore()
-        assert counters["resolver_calls"] == args.samples and counters["compile_attempts"] == 0, counters
-        assert counters["consumer_register"] == counters["consumer_unregister"], counters
-        rows.append({"stage": stage, "calls": args.samples, "counts": counters, "checks": verify()})
-    result = {"method": "untimed_diagnostic", "us_p50": None, "counts": rows}
-    (args.output / "source-counts.json").write_text(json.dumps(result, indent=2, allow_nan=False))
-    # The legacy fixture divides the returned p50 values. This internal sentinel
-    # propagates "not measured"; final report loading converts it to JSON null.
-    return result | {"us_p50": float("nan")}
-
-
 def install_measurement(case: Any, root: Any, args: Any) -> None:
-    from hbg_eager_latency import npu  # noqa: PLC0415
     from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
     from pypto.runtime.kernel.arguments import _load_api  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
 
+    npu = importlib.import_module("torch_npu").npu
     stages = ("current_a", "current_b")
     rng = random.Random(args.seed)
     calls = 0
@@ -268,8 +215,6 @@ def install_measurement(case: Any, root: Any, args: Any) -> None:
             return checked
 
         try:
-            if is_pto and args.mode == "diagnostic":
-                return diagnose_sources(args, stages, root, reset, run, drain, verify)
             for batch in range(args.blocks if is_pto else 1):
                 order = list(selected)
                 rng.shuffle(order)
@@ -412,67 +357,18 @@ def install_paired_measurement(case: Any, root: Any, args: Any) -> None:
             contexts["pto"][0]()
             npu.synchronize()
             state.drain()
-            if args.mode == "paired":
-                for batch in range(args.blocks):
-                    order = ("native", "pto") if (batch + args.seed) % 2 else ("pto", "native")
-                    for arm in order:
-                        run_arm(arm, batch)
-            else:
-                Spans = importlib.import_module("hbg_pypto_spans").Spans
-                TorchDispatchMode = importlib.import_module("torch.utils._python_dispatch").TorchDispatchMode
-
-                counts: dict[str, int] = {}
-
-                class CountOps(TorchDispatchMode):
-                    def __torch_dispatch__(
-                        self, func: Any, types: Any, args: Any = (), kwargs: Any = None
-                    ) -> Any:
-                        key = str(func)
-                        counts[key] = counts.get(key, 0) + 1
-                        return func(*args, **(kwargs or {}))
-
-                # Counts and spans are diagnostic only, never Host performance evidence.
-                reset(contexts["native"][1])
-                torch.ops._C_ascend.npu_vllm_quant_lightning_indexer = contexts["native_hook"]
-                with CountOps():
-                    contexts["native"][0]()
-                npu.synchronize()
-                (args.output / "native-op-counts.json").write_text(json.dumps(counts, indent=2))
-                torch.ops._C_ascend.npu_vllm_quant_lightning_indexer = original_hook
-                spans = Spans()
-                spans.install(SimpleNamespace(session=state._worker, worker=state._worker.worker))
-                try:
-                    for sample in range(args.samples):
-                        reset(contexts["pto"][1])
-                        spans.sample = sample
-                        contexts["pto"][0]()
-                        npu.synchronize()
-                        spans.sample = None
-                    state.drain()
-                finally:
-                    spans.restore()
-                (args.output / "pto-spans.json").write_text(json.dumps(spans.events))
-                for arm in ("native", "pto"):
-                    run, output, topk, reference, exact = contexts[arm]
-                    reset(output)
-                    torch.ops._C_ascend.npu_vllm_quant_lightning_indexer = (
-                        contexts["native_hook"] if arm == "native" else original_hook
-                    )
-                    run()
-                    npu.synchronize()
-                    checks[arm].append(check_state(case, fixture, output, topk, reference, exact))
-                (args.output / "paired-checks.json").write_text(json.dumps(checks))
+            for batch in range(args.blocks):
+                order = ("native", "pto") if (batch + args.seed) % 2 else ("pto", "native")
+                for arm in order:
+                    run_arm(arm, batch)
         finally:
             torch.ops._C_ascend.npu_vllm_quant_lightning_indexer = original_hook
             del root._compile
             npu.synchronize()
             state.drain()
         result = {"method": "paired_eager_host", "metadata": "produce", "us_p50": float("nan")}
-        if args.mode == "paired":
-            native_result.update(result, us_p50=statistics.median(row["host_us"] for row in rows["native"]))
-            result["us_p50"] = statistics.median(row["host_us"] for row in rows["pto"])
-        else:
-            native_result.update(method="untimed_diagnostic", us_p50=float("nan"))
+        native_result.update(result, us_p50=statistics.median(row["host_us"] for row in rows["native"]))
+        result["us_p50"] = statistics.median(row["host_us"] for row in rows["pto"])
         return result
 
     case.measure_graph_interval = capture
@@ -541,9 +437,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--suite", choices=("current",), default="current")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--mode", choices=("smoke", "bench", "diagnostic", "paired", "paired-diagnostic"), default="smoke"
-    )
+    parser.add_argument("--mode", choices=("smoke", "bench", "paired"), default="smoke")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--history", type=int, default=8192)
     parser.add_argument("--metadata", choices=("reuse", "produce"), default="reuse")
@@ -614,10 +508,6 @@ def main() -> None:
     path = args.output / "report.json"
     report = json.loads(path.read_text(), parse_constant=lambda value: None)
     report["execution_config"]["path"] = "kernel_eager"
-    if args.mode in ("diagnostic", "paired-diagnostic"):
-        report["timing"].pop("native_over_pto_p50", None)
-        report["timing"]["pto"].pop("us_p50", None)
-        report["timing"]["native"].pop("us_p50", None)
     report["timing"].update(scope="CSA KERNEL eager Host timing", method="No graph capture or replay")
     path.write_text(json.dumps(report, indent=2, allow_nan=False))
 
