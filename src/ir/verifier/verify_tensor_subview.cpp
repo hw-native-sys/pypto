@@ -398,6 +398,10 @@ class SubviewVerifier : public IRVisitor {
                    result->tensor_view_->pad == PadValue::null && result->tensor_view_->valid_shape.empty(),
                op->span_)
         << "tensor.subview result must preserve parent dtype/layout with a fully valid borrowed window";
+    auto canonical_result = tensor_view_semantics::CheckCanonicalView(
+        result->shape_, result->tensor_view_->stride, result->tensor_view_->layout, true);
+    CHECK_SPAN(canonical_result.ok, op->span_)
+        << "tensor.subview result requires canonical addressing: " << canonical_result.reason;
     const auto& extent = parent_view.valid_shape.empty() ? parent->shape_ : parent_view.valid_shape;
     auto strides = parent_view.stride.empty() ? tensor_view_semantics::BuildLogicalStridesFromLayout(
                                                     parent->shape_, parent_view.layout)

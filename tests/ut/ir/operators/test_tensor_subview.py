@@ -11,7 +11,7 @@
 from collections.abc import Sequence
 
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, ir, passes
 
 
 def values(expressions: Sequence[ir.Expr]) -> list[int]:
@@ -65,8 +65,8 @@ def test_subview_rejects_invalid_constant_geometry(shape, offsets, steps):
 def test_nested_subview_composes_immediate_parent_stride():
     first = ir.op.tensor.subview(source(), [3, 512], [0, 0], steps=[2, 1])
     parent = ir.Var("first", first.type, ir.Span.unknown())
-    child = ir.op.tensor.subview(parent, [1, 248], [1, 16], steps=[1, 2])
-    assert values(tensor_view(child).stride) == [1024, 2]
+    child = ir.op.tensor.subview(parent, [1, 248], [1, 16], steps=[1, 1])
+    assert values(tensor_view(child).stride) == [1024, 1]
 
 
 def test_subview_serialization_preserves_stride_metadata():
@@ -105,7 +105,7 @@ def test_subview_view_cannot_flatten_a_row_gap():
 
 @pytest.mark.parametrize(
     "shape,new_shape,offsets,steps,expected",
-    [([8], [2], [1], [3], [3]), ([4, 8, 16], [2, 3, 8], [1, 0, 0], [1, 2, 2], [128, 32, 2])],
+    [([8], [2], [1], [1], [1]), ([4, 8, 16], [2, 3, 8], [1, 0, 0], [1, 2, 1], [128, 32, 1])],
 )
 def test_subview_generic_rank_and_inner_step_semantics(shape, new_shape, offsets, steps, expected):
     call = ir.op.tensor.subview(source(shape), new_shape, offsets, steps=steps)
@@ -137,6 +137,61 @@ def test_subview_device_integer_geometry_is_widened_before_arithmetic():
     scalar_type = offsets.elements[0].type
     assert isinstance(scalar_type, ir.ScalarType)
     assert scalar_type.dtype == DataType.INDEX
+
+
+@pytest.mark.parametrize("layout,steps", [(ir.TensorLayout.ND, [1, 2]), (ir.TensorLayout.DN, [2, 1])])
+def test_subview_rejects_inner_sampling(layout, steps):
+    span = ir.Span.unknown()
+    tensor = ir.Var(
+        "source", ir.TensorType([8, 8], DataType.BF16, tensor_view=ir.TensorView([], layout)), span
+    )
+    with pytest.raises(ValueError, match="subview.*contiguous inner storage axis"):
+        ir.op.tensor.subview(tensor, [2, 2], [0, 0], steps=steps)
+
+
+@pytest.mark.parametrize("layout,steps", [(ir.TensorLayout.ND, [2, 1]), (ir.TensorLayout.DN, [1, 2])])
+def test_subview_reuses_canonical_verifier(layout, steps):
+    span = ir.Span.unknown()
+    tensor = ir.Var(
+        "source", ir.TensorType([8, 8], DataType.BF16, tensor_view=ir.TensorView([], layout)), span
+    )
+    call = ir.op.tensor.subview(tensor, [2, 2], [0, 0], steps=steps)
+    selected = ir.Var("selected", call.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(selected, call, span), ir.ReturnStmt([], span)], span)
+    function = ir.Function("canonical_subview", [tensor], [], body, span, type=ir.FunctionType.InCore)
+    assert not passes.verify_tensor_view_canonical(ir.Program([function], "canonical_subview", span))
+
+
+@pytest.mark.parametrize("layout", [ir.TensorLayout.ND, ir.TensorLayout.DN])
+def test_subview_rejects_unknown_inner_stride(layout):
+    span = ir.Span.unknown()
+    tensor = ir.Var(
+        "source", ir.TensorType([8, 8], DataType.BF16, tensor_view=ir.TensorView([], layout)), span
+    )
+    step = ir.Var("step", ir.ScalarType(DataType.INDEX), span)
+    steps = [1, step] if layout == ir.TensorLayout.ND else [step, 1]
+    with pytest.raises(ValueError, match="subview.*contiguous inner storage axis"):
+        ir.op.tensor.subview(tensor, [2, 2], [0, 0], steps=steps)
+
+
+def test_canonical_verifier_does_not_exempt_subview_results():
+    span = ir.Span.unknown()
+    tensor = source([8, 8])
+    call = ir.op.tensor.subview(tensor, [2, 2], [0, 0])
+    forged_type = ir.TensorType([2, 2], DataType.BF16, tensor_view=ir.TensorView([8, 2], ir.TensorLayout.ND))
+    forged_call = ir.Call(call.op, call.args, forged_type, span)
+    selected = ir.Var("selected", forged_type, span)
+    body = ir.SeqStmts([ir.AssignStmt(selected, forged_call, span), ir.ReturnStmt([], span)], span)
+    function = ir.Function("forged_subview", [tensor], [], body, span, type=ir.FunctionType.InCore)
+    diagnostics = passes.verify_tensor_view_canonical(ir.Program([function], "forged_subview", span))
+    assert diagnostics
+    assert any("innermost stride" in diagnostic.message for diagnostic in diagnostics)
+
+
+def test_subview_rejects_noncanonical_outer_stride_relation():
+    # A singleton sampled axis still has to obey the shared canonical contract.
+    with pytest.raises(ValueError, match="subview.*canonical addressing"):
+        ir.op.tensor.subview(source([2, 8, 8]), [1, 1, 8], [0, 0, 0], steps=[1, 9, 1])
 
 
 if __name__ == "__main__":

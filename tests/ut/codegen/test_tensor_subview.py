@@ -540,7 +540,7 @@ def test_subview_nested_origins_and_view_alias_preserve_current_pointer():
     "dtype,parent_shape,shape,steps",
     [
         (DataType.FP32, [8, 512], [2, 512], [3, 1]),
-        (DataType.BF16, [8, 512], [2, 256], [3, 2]),
+        (DataType.BF16, [8, 512], [2, 256], [3, 1]),
         (DataType.BF16, [8, 512], [2, 511], [3, 1]),
         (DataType.BF16, [10000, 16], [5000, 16], [1, 1]),
         (DataType.BF16, [8, (1 << 32) + 16], [2, 16], [1, 1]),
@@ -563,23 +563,11 @@ def test_subview_descriptor_has_no_native_load_profile(backend_type, dtype, pare
     assert "pto.alloc_tile" not in mlir
 
 
-def test_subview_strided_columns_require_a_consumer_that_preserves_the_address_map():
+def test_subview_strided_columns_are_rejected_before_load():
     span = ir.Span.unknown()
     source = ir.Var("cache", ir.TensorType([8, 512], DataType.BF16), span)
-    subview = ir.op.tensor.subview(source, [2, 256], [0, 0], steps=[3, 2])
-    selected = ir.Var("selected", subview.type, span)
-    load = ir.op.tile.load(selected, [0, 0], [2, 256], target_memory=ir.MemorySpace.Vec)
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(selected, subview, span),
-            ir.AssignStmt(ir.Var("tile", load.type, span), load, span),
-            ir.ReturnStmt([], span),
-        ],
-        span,
-    )
-    function = ir.Function("noncontiguous_load", [source], [], body, span, type=ir.FunctionType.InCore)
-    with pytest.raises(ValueError, match="subview.*load.*contiguous"):
-        passes.convert_tensor_to_tile_ops()(ir.Program([function], "noncontiguous_load", span))
+    with pytest.raises(ValueError, match="subview.*contiguous inner storage axis"):
+        ir.op.tensor.subview(source, [2, 256], [0, 0], steps=[3, 2])
 
 
 @pytest.mark.parametrize("backend_type,arch", [(BackendType.Ascend910, "a3"), (BackendType.Ascend950, "a5")])

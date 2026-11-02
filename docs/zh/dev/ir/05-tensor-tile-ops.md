@@ -104,8 +104,11 @@ canonical `view` 必须保持元素数。所有几何和地址运算必须证明
 支持嵌套 subview。Metadata 别名必须保持地址映射，`set_validshape` 只能缩小
 有效区。描述符逃逸、编译器分配的根存储及通过借用描述符写入均拒绝。
 
-消费者沿用已有 lowering 和设备约束。现有 ND/DN load 要求最内层存储轴连续；
-该轴上的非单位步长需要支持它的消费者。标量 `tensor.read` 须先将窗口 load 到
+消费者沿用已有 lowering 和设备约束。Subview 本身要求最内层存储轴连续：
+ND 的 stride[-1]、DN 的 stride[-2] 必须为 1。非 1 或无法证明为 1 的内层 stride
+在构造时拒绝，即使没有 load 消费者也是如此。外层轴采样后的 stride 也必须
+满足已有 canonical 布局关系；结果统一使用
+TensorView canonical 校验。标量 `tensor.read` 须先将窗口 load 到
 Tile。N-D load 保留来源坐标，由流水线展平结果 Tile。Subview 本身不增加
 后端专属的 dtype、rank、DMA 行数、行间隔位宽或对齐限制。
 

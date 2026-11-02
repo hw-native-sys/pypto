@@ -68,6 +68,7 @@ TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
   CHECK(view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)
       << "tensor.subview supports ND/DN affine semantics only";
   CHECK(view.pad == PadValue::null) << "tensor.subview cannot borrow a padded source";
+  CHECK(view.layout != TensorLayout::DN || rank >= 2) << "tensor.subview DN layout requires rank >= 2";
   const auto& extent = view.valid_shape.empty() ? source->shape_ : view.valid_shape;
   CHECK(extent.size() == rank) << "tensor.subview parent valid shape rank mismatch";
   if (view.stride.empty()) {
@@ -87,6 +88,14 @@ TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
     all_equal &= analyzer.CanProveEqual(shape[i], extent[i]);
     view.stride[i] = tensor_view_semantics::MakeIndexMul(view.stride[i], steps[i]);
   }
+  const size_t inner_axis = view.layout == TensorLayout::DN ? rank - 2 : rank - 1;
+  auto one = std::make_shared<ConstInt>(1, DataType::INDEX, args[0]->span_);
+  CHECK(analyzer.CanProveEqual(view.stride[inner_axis], one))
+      << "tensor.subview requires a contiguous inner storage axis (stride must be 1)";
+  // Keep the same structural form required by TensorViewCanonical.
+  view.stride[inner_axis] = one;
+  auto canonical = tensor_view_semantics::CheckCanonicalView(shape, view.stride, view.layout, true);
+  CHECK(canonical.ok) << "tensor.subview requires canonical addressing: " << canonical.reason;
   CHECK(!all_equal) << "tensor.subview requires a strictly smaller parent window";
   view.valid_shape.clear();
   // No allocation identity is attached to a borrowed descriptor.

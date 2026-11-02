@@ -2779,6 +2779,9 @@ def subview(
         shape: Positive logical result extents, with the source rank.
         offsets: Nonnegative origin in immediate parent coordinates.
         steps: Positive sampling steps; defaults to one on every axis.
+            The inner storage axis must retain stride 1 (ND: last axis;
+            DN: second-to-last axis); non-unit or unproven inner strides are rejected.
+            Result strides must also satisfy the ordinary canonical layout relations.
 
     Returns:
         Read-only borrowed tensor descriptor with no MemRef allocation.

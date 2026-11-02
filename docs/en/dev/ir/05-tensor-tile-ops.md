@@ -120,10 +120,13 @@ Metadata aliases must preserve the address map; `set_validshape` may only narrow
 validity. Descriptor escape, compiler-owned roots, and writes through the
 borrowed descriptor are rejected.
 
-Consumers retain their existing lowering and device restrictions. Existing
-ND/DN loads require a contiguous inner storage axis; a non-unit step on that
-axis needs a consumer that supports it. Scalar `tensor.read` requires loading
-the window into a Tile first. N-D loads retain source coordinates while the
+Consumers retain their existing lowering and device restrictions.
+Subview requires a contiguous inner storage axis: stride[-1] must be 1 for ND,
+and stride[-2] must be 1 for DN. Non-unit or unproven inner strides are rejected
+at construction, including descriptor-only uses. Outer-axis sampling remains
+supported when result strides satisfy the ordinary canonical layout relations;
+results use the ordinary TensorView canonical verifier. Scalar `tensor.read`
+requires loading the window into a Tile first. N-D loads retain source coordinates while the
 pipeline flattens the result Tile. Subview itself adds no backend-specific
 dtype, rank, DMA row-count, gap-width, or alignment limits.
 
