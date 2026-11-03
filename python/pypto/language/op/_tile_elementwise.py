@@ -9,6 +9,8 @@
 
 """Tile element-wise arithmetic, comparisons, and scalar dispatch."""
 
+from typing import Literal, overload
+
 from pypto.ir.op import tile_ops as _ir_ops
 from pypto.ir.utils import (
     _get_span_or_capture,
@@ -249,6 +251,10 @@ def sqrt(tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
+@overload
+def rsqrt(tile: Tile, tmp: None = None, *, high_precision: Literal[False] = False) -> Tile: ...
+@overload
+def rsqrt(tile: Tile, tmp: Tile, *, high_precision: Literal[True]) -> Tile: ...
 def rsqrt(tile: Tile, tmp: Tile | None = None, *, high_precision: bool = False) -> Tile:
     """Element-wise reciprocal square root.
 

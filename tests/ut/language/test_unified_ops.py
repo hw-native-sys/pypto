@@ -1682,7 +1682,13 @@ class TestUnifiedOpsCrossPathKwargs:
 
     def test_rsqrt_tile_high_precision_requires_tmp(self):
         with pytest.raises(ValueError, match="high_precision=True requires a tmp"):
-            unified_ops.rsqrt(_tile("t", [64, 64], DataType.FP32), high_precision=True)
+            unified_ops.rsqrt(_tile("t", [64, 64], DataType.FP32), high_precision=True)  # type: ignore[call-overload]
+
+    def test_rsqrt_tile_default_rejects_tmp(self):
+        t = _tile("t", [64, 64], DataType.FP32)
+        tmp = _tile("tmp", [64, 64], DataType.FP32)
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            unified_ops.rsqrt(t, high_precision=False, tmp=tmp)  # type: ignore[call-overload]
 
     def test_rsqrt_tile_explicit_high_precision(self):
         t = _tile("t", [64, 64], DataType.FP32)

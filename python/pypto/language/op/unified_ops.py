@@ -693,7 +693,9 @@ def sqrt(input: object) -> Tensor | Tile:
 @overload
 def rsqrt(input: Tensor, high_precision: bool = ..., *, tmp: None = ...) -> Tensor: ...
 @overload
-def rsqrt(input: Tile, high_precision: bool = ..., *, tmp: Tile | None = ...) -> Tile: ...
+def rsqrt(input: Tile, high_precision: Literal[False] = False, *, tmp: None = None) -> Tile: ...
+@overload
+def rsqrt(input: Tile, high_precision: Literal[True], *, tmp: Tile) -> Tile: ...
 def rsqrt(input: object, high_precision: bool = False, *, tmp: Tile | None = None) -> Tensor | Tile:
     """Element-wise reciprocal square root with explicit precision selection.
 
@@ -705,7 +707,13 @@ def rsqrt(input: object, high_precision: bool = False, *, tmp: Tile | None = Non
         _reject_tmp_for_tensor("rsqrt", tmp, "tmp")
         return _tensor.rsqrt(input, high_precision=high_precision)
     if isinstance(input, Tile):
-        return _tile.rsqrt(input, tmp=tmp, high_precision=high_precision)
+        if high_precision:
+            if tmp is None:
+                raise ValueError("tile.rsqrt: high_precision=True requires a tmp tile")
+            return _tile.rsqrt(input, tmp=tmp, high_precision=True)
+        if tmp is not None:
+            raise ValueError("tile.rsqrt: tmp requires high_precision=True")
+        return _tile.rsqrt(input)
     raise TypeError(f"pl.rsqrt: expected Tensor or Tile, got {type(input).__name__}")
 
 
