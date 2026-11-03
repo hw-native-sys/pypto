@@ -85,12 +85,13 @@ class OpParser:
 
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
         """Read canonical SIMT ops; inline simt_scope syntax belongs to outlining."""
-        return ir.create_op_call(
+        result = ir.create_op_call(
             f"simt.{name}",
             [self.callbacks.expression(arg) for arg in call.args],
             self.parse_op_kwargs(call),
             self.services.span_tracker.get_span(call),
         )
+        return self.attrs.attach_op_attrs(result, self.attrs.parse_op_attrs(call))
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
         """Parse operation call like pl.tensor.create_tensor() or pl.add().

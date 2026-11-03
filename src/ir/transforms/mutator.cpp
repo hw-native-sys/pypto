@@ -33,6 +33,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
@@ -1143,9 +1144,23 @@ StmtPtr IRMutator::VisitStmt_(const SimtLaunchStmtPtr& op) {
     changed |= mapped != arg;
     arg = std::move(mapped);
   }
-  for (auto& var : result->results_) {
+  for (size_t i = 0; i < result->results_.size(); ++i) {
+    auto& var = result->results_[i];
     auto mapped = AsVarLike(VisitExpr(var));
     INTERNAL_CHECK_SPAN(mapped, op->span_) << "SIMT result mutated to a non-variable";
+    const auto& arg_type = result->args_[result->result_param_indices_[i]]->GetType();
+    if (!structural_equal(mapped->GetType(), arg_type)) {
+      // A rewritten storage argument (e.g. an identity tensor.view fold) may
+      // acquire different metadata. The launch defines that same storage type;
+      // record its new identity so all later uses observe the corrected type.
+      if (auto iter_arg = As<IterArg>(mapped)) {
+        mapped =
+            std::make_shared<IterArg>(iter_arg->name_hint_, arg_type, iter_arg->initValue_, iter_arg->span_);
+      } else {
+        mapped = std::make_shared<Var>(mapped->name_hint_, arg_type, mapped->span_);
+      }
+      var_remap_[var.get()] = mapped;
+    }
     changed |= mapped != var;
     var = std::move(mapped);
   }

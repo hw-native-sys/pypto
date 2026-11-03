@@ -10,12 +10,16 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -40,6 +44,10 @@ TypePtr QueryType(const std::vector<ExprPtr>&, const Kwargs& kwargs) {
 }
 
 TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool store) {
+  // Functional op dispatch reaches type deduction before enforcing positional arity.
+  const size_t expected_args = store ? 3 : 2;
+  CHECK(args.size() == expected_args) << "simt." << (store ? "store" : "load") << " requires exactly "
+                                      << expected_args << " arguments, got " << args.size();
   const auto tile = As<TileType>(args[0]->GetType());
   const auto tensor = As<TensorType>(args[0]->GetType());
   CHECK(tile || tensor) << "SIMT memory access requires Tile (UB) or Tensor (GM) storage";
@@ -54,8 +62,9 @@ TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
   }
   const auto& shape = tile ? tile->shape_ : tensor->shape_;
   const auto dtype = tile ? tile->dtype_ : tensor->dtype_;
-  CHECK(dtype.GetBit() >= 8 && dtype != DataType::INDEX && dtype != DataType::TASK_ID)
-      << "SIMT scalar storage requires a byte-addressable numeric element dtype";
+  // Packed FP4 carriers occupy a byte but represent two elements, not one scalar.
+  CHECK(dtype.GetBit() >= 8 && !dtype.IsPackedFp4() && dtype != DataType::INDEX && dtype != DataType::TASK_ID)
+      << "SIMT scalar storage requires an unpacked byte-addressable numeric element dtype";
   auto indices = As<MakeTuple>(args[1]);
   CHECK(indices && indices->elements_.size() == shape.size())
       << "SIMT indices must be a MakeTuple with one index per storage dimension";

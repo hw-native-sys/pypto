@@ -13,6 +13,7 @@
 #define PYPTO_BACKEND_950_BACKEND_950_HANDLER_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 

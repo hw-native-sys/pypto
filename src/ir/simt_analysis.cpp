@@ -11,13 +11,20 @@
 
 #include "pypto/ir/simt_analysis.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <unordered_map>
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 

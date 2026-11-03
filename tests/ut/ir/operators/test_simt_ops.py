@@ -80,5 +80,33 @@ def test_cube_storage_is_not_accessible():
         simt.load(storage, [0])
 
 
+@pytest.mark.parametrize(
+    "op,arity",
+    [("load", 0), ("load", 1), ("load", 3), ("store", 0), ("store", 1), ("store", 2), ("store", 4)],
+)
+def test_memory_op_arity_checked_before_type_deduction(op, arity):
+    # The canonical parser and low-level IR builder bypass the Python wrappers.
+    # Too few operands must produce a diagnostic rather than native out-of-bounds access.
+    storage = ir.Var("storage", ir.TensorType([16], DataType.FP32), SPAN)
+    indices = ir.MakeTuple([ir.ConstInt(0, DataType.INT32, SPAN)], SPAN)
+    value = ir.ConstFloat(1.0, DataType.FP32, SPAN)
+    args = [storage, indices, value, value][:arity]
+    expected = 2 if op == "load" else 3
+    with pytest.raises(ValueError, match=f"simt.{op} requires exactly {expected} arguments, got {arity}"):
+        ir.create_op_call(f"simt.{op}", args, {}, SPAN)
+
+
+@pytest.mark.parametrize("storage_type", [ir.TensorType, ir.TileType])
+@pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+def test_packed_fp4_storage_is_not_scalar(storage_type, dtype):
+    # Packed FP4 has an eight-bit carrier, but each carrier contains two elements.
+    storage = ir.Var("packed", storage_type([16], dtype), SPAN)
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    with pytest.raises(ValueError, match="unpacked byte-addressable"):
+        simt.load(storage, [0])
+    with pytest.raises(ValueError, match="unpacked byte-addressable"):
+        simt.store(storage, [0], value)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

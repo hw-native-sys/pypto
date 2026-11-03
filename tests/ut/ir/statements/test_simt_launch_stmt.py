@@ -290,6 +290,64 @@ def test_simplify_retains_launch_inputs_and_helper_store():
     assert "simt.store" in ir.python_print(after)
 
 
+def test_simplify_retypes_launch_results_and_downstream_uses():
+    before = parse_program("""
+@pl.program
+class Retype:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def helper(self, x: pl.InOut[pl.Tensor[[8, 4], pl.FP32]]):
+        pl.simt.store(x, (0, 0), pl.const(1.0, pl.FP32))
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
+        view = pl.tensor.view(x, layout=pl.TensorLayout.ND)
+        first = pl.simt.launch(self.helper, view, block_dims=(32, 1, 1), result_param_indices=(0,))
+        second = pl.simt.launch(self.helper, first, block_dims=(32, 1, 1), result_param_indices=(0,))
+        return second
+""")
+    # The identity view has explicit strides; folding it adopts x's bare type.
+    # Both launch results and the final return must follow the retyped storage.
+    before_body = require_function(before, "kernel").body
+    assert isinstance(before_body, ir.SeqStmts)
+    before_launch = before_body.stmts[1]
+    assert isinstance(before_launch, ir.SimtLaunchStmt)
+    before_type = before_launch.results[0].type
+    assert isinstance(before_type, ir.TensorType)
+    assert before_type.tensor_view is not None
+
+    after = passes.simplify()(before)
+    kernel = require_function(after, "kernel")
+    body = kernel.body
+    assert isinstance(body, ir.SeqStmts)
+    launches = [stmt for stmt in body.stmts if isinstance(stmt, ir.SimtLaunchStmt)]
+    assert len(launches) == 2
+    for launch in launches:
+        ir.assert_structural_equal(launch.results[0].type, kernel.params[0].type)
+        ir.assert_structural_equal(launch.results[0].type, launch.args[0].type)
+    assert launches[1].args[0] is launches[0].results[0]
+    ret = body.stmts[-1]
+    assert isinstance(ret, ir.ReturnStmt)
+    assert ret.value[0] is launches[1].results[0]
+    assert not verify(after, passes.IRProperty.SimtValid, passes.IRProperty.UseAfterDef)
+    ir.verify_structural_bindings(after)
+    ir.assert_structural_equal(after, ir.deserialize(ir.serialize(after)))
+    ir.assert_structural_equal(after, parse_program(ir.python_print(after)))
+
+
+def test_simt_call_attrs_survive_print_parse_round_trip():
+    program, _ = make_program()
+
+    class AddMetadata(ir.IRMutator):
+        def visit_call(self, call):
+            # Cover coordinate queries, value-producing loads and void stores.
+            return ir.set_call_attrs(call, {"simt_test_tag": call.op.name, "simt_test_flag": True})
+
+    before = AddMetadata().visit_program(program)
+    after = parse_program(ir.python_print(before))
+    ir.assert_structural_equal(before, after)
+    ir.verify_structural_bindings(after)
+
+
 def test_launch_outputs_in_branch_and_loop_ssa():
     code = """
 @pl.program

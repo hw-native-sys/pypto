@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -16,12 +17,21 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/simt_analysis.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto::ir {
@@ -48,18 +58,23 @@ class SimtChecker : public IRVisitor {
       for (size_t i = 0; i < function_->params_.size(); ++i) {
         const auto& param = function_->params_[i];
         const auto& type = param->GetType();
-        if (!IsStorage(type) && !As<ScalarType>(type))
+        if (!IsStorage(type) && !As<ScalarType>(type)) {
           Error("SIMT parameters must be scalar, Tile or Tensor", param->span_);
+        }
         if (auto tile = As<TileType>(type);
-            tile && tile->memory_space_ && tile->memory_space_ != MemorySpace::Vec)
+            tile && tile->memory_space_ && tile->memory_space_ != MemorySpace::Vec) {
           Error("SIMT Tile parameters require Vec (UB) memory", param->span_);
+        }
         const auto direction = function_->param_directions_[i];
-        if (direction == ParamDirection::Out)
+        if (direction == ParamDirection::Out) {
           Error("SIMT helpers do not support Out parameters; use InOut", param->span_);
-        if (direction == ParamDirection::InOut && !IsStorage(type))
+        }
+        if (direction == ParamDirection::InOut && !IsStorage(type)) {
           Error("SIMT InOut parameters must be storage", param->span_);
-        if (access[i].writes && direction != ParamDirection::InOut)
+        }
+        if (access[i].writes && direction != ParamDirection::InOut) {
           Error("SIMT store requires an InOut parameter", param->span_);
+        }
       }
     }
     VisitStmt(function_->body_);
@@ -92,14 +107,16 @@ class SimtChecker : public IRVisitor {
  protected:
   void VisitVarLike_(const VarPtr& var) override {
     if (helper_ && !As<ScalarType>(var->GetType())) {
-      if (!parameters_.count(var.get()))
+      if (!parameters_.count(var.get())) {
         Error("SIMT control flow cannot define or carry storage handles", var->span_);
+      }
     }
     IRVisitor::VisitVarLike_(var);
   }
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (helper_ && !As<ScalarType>(stmt->var_->GetType()))
+    if (helper_ && !As<ScalarType>(stmt->var_->GetType())) {
       Error("SIMT helpers cannot allocate or rebind storage handles", stmt->span_);
+    }
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitStmt_(const ReturnStmtPtr& stmt) override {
@@ -109,28 +126,33 @@ class SimtChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& call) override {
     const auto symbol = As<GlobalVar>(call->op_);
     const auto callee = symbol ? program_->GetFunction(symbol->name_) : nullptr;
-    if (callee && callee->func_type_ == FunctionType::SIMT)
+    if (callee && callee->func_type_ == FunctionType::SIMT) {
       Error("SIMT helpers require SimtLaunchStmt, not ordinary Call", call->span_);
-    if (helper_ && !IsSimtOp(call))
+    }
+    if (helper_ && !IsSimtOp(call)) {
       Error("SIMT helper contains an unsupported call or whole-storage operation", call->span_);
+    }
     if (!helper_ && IsSimtOp(call)) Error("SIMT operations are only valid inside SIMT helpers", call->span_);
     if (helper_ && (IsOp(call, "simt.load") || IsOp(call, "simt.store"))) {
       const bool borrowed = !call->args_.empty() && parameters_.count(call->args_[0].get());
-      if (!borrowed)
+      if (!borrowed) {
         Error("SIMT memory access must refer directly to a borrowed helper parameter", call->span_);
+      }
     }
     IRVisitor::VisitExpr_(call);
   }
   void VisitExpr_(const SubmitPtr& submit) override {
     auto symbol = As<GlobalVar>(submit->op_);
     auto callee = symbol ? program_->GetFunction(symbol->name_) : nullptr;
-    if (helper_ || (callee && callee->func_type_ == FunctionType::SIMT))
+    if (helper_ || (callee && callee->func_type_ == FunctionType::SIMT)) {
       Error("SIMT helpers cannot submit runtime tasks or be submitted as tasks", submit->span_);
+    }
     IRVisitor::VisitExpr_(submit);
   }
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override {
-    if (function_->func_type_ != FunctionType::AIV && function_->func_type_ != FunctionType::InCore)
+    if (function_->func_type_ != FunctionType::AIV && function_->func_type_ != FunctionType::InCore) {
       Error("SIMT launch requires an AIV or pre-expansion InCore caller", launch->span_);
+    }
     const auto callee = program_->GetFunction(launch->callee_->name_);
     if (!callee || callee->func_type_ != FunctionType::SIMT) {
       Error("SIMT launch callee must resolve to a SIMT helper", launch->span_);
@@ -161,24 +183,28 @@ class SimtChecker : public IRVisitor {
         }
         if (!AsVarLike(arg)) Error("SIMT storage arguments must be variables", launch->span_);
         if (auto tile = As<TileType>(arg_type);
-            tile && tile->memory_space_ && tile->memory_space_ != MemorySpace::Vec)
+            tile && tile->memory_space_ && tile->memory_space_ != MemorySpace::Vec) {
           compatible = false;
+        }
         if (auto tensor = As<TensorType>(arg_type); tensor && tensor->tensor_view_ &&
                                                     tensor->tensor_view_->layout != TensorLayout::ND &&
-                                                    tensor->tensor_view_->layout != TensorLayout::DN)
+                                                    tensor->tensor_view_->layout != TensorLayout::DN) {
           compatible = false;
+        }
       } else {
         compatible &= structural_equal(param_type, arg_type);
       }
       if (!compatible) Error("SIMT launch argument type does not match helper parameter", launch->span_);
       if (callee->param_directions_[i] == ParamDirection::InOut) {
         expected.push_back(static_cast<int>(i));
-        if (occurrences.at(arg.get()) > 1)
+        if (occurrences.at(arg.get()) > 1) {
           Error("SIMT writable arguments must not alias another argument", launch->span_);
+        }
       }
     }
-    if (expected != launch->result_param_indices_)
+    if (expected != launch->result_param_indices_) {
       Error("SIMT results must map exactly to InOut parameters in parameter order", launch->span_);
+    }
     IRVisitor::VisitStmt_(launch);
   }
 
@@ -195,7 +221,7 @@ class SimtChecker : public IRVisitor {
 
 class SimtVerifier : public PropertyVerifier {
  public:
-  std::string GetName() const override { return "SimtValid"; }
+  [[nodiscard]] std::string GetName() const override { return "SimtValid"; }
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     for (const auto& [_, function] : program->functions_) SimtChecker(program, function, diagnostics).Check();
   }
