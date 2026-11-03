@@ -408,6 +408,11 @@ class DeclaredAllocCollector : public IRVisitor {
 
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
+  struct IfResultSources {
+    ExprPtr then_value;
+    ExprPtr else_value;
+  };
+
  public:
   InitMemRefMutator(const DeclaredAllocMap& declared_allocs, const backend::BackendHandler* handler,
                     FunctionType func_type)
@@ -612,7 +617,29 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<Var>(var->name_hint_, new_type, var->span_);
   }
 
-  // Create a new Var with MemRef initialized
+  // If results select existing storage. Resolve their branch types after the
+  // default If traversal has visited both bodies, without creating a temporary
+  // allocation identity for the result itself.
+  VarPtr VisitIfResult(const VarPtr& var, const IfResultSources& sources) {
+    const auto then_value = sources.then_value ? VisitExpr(sources.then_value) : nullptr;
+    const auto else_value = sources.else_value ? VisitExpr(sources.else_value) : nullptr;
+    const auto then_tile = then_value ? As<TileType>(then_value->GetType()) : nullptr;
+    const auto else_tile = else_value ? As<TileType>(else_value->GetType()) : nullptr;
+    CHECK_SPAN(then_tile && else_tile && then_tile->GetMemorySpace() &&
+                   then_tile->GetMemorySpace() == else_tile->GetMemorySpace(),
+               var->span_)
+        << "Tile If branches must yield tiles in the same memory space";
+
+    // Keep the result's logical type and update embedded SSA expressions just
+    // like ordinary variables. Only the common space comes from the branches;
+    // neither branch's address becomes the result's fixed storage.
+    auto type = CloneTypeWithMemRefAndRemapExprs(
+        var->GetType(), std::nullopt, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+        then_tile->GetMemorySpace());
+    return std::make_shared<Var>(var->name_hint_, type, var->span_);
+  }
+
+  // Create a variable with its required storage, or a storage-less If result.
   VarPtr GetNewVar(const VarPtr& old_var) {
     // Check cache first to prevent infinite recursion
     auto it = var_map_.find(old_var);
@@ -622,7 +649,9 @@ class InitMemRefMutator : public IRMutator {
 
     // Dispatch based on variable type
     VarPtr new_var;
-    if (std::dynamic_pointer_cast<const IterArg>(old_var)) {
+    if (auto selected = if_result_sources_.find(old_var); selected != if_result_sources_.end()) {
+      new_var = VisitIfResult(old_var, selected->second);
+    } else if (std::dynamic_pointer_cast<const IterArg>(old_var)) {
       new_var = ProcessIterArg(old_var);
     } else {
       new_var = ProcessNormalVar(old_var);
@@ -931,43 +960,19 @@ class InitMemRefMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    auto result = IRMutator::VisitStmt_(op);
-    auto new_if = As<IfStmt>(result);
-    if (!new_if || new_if->return_vars_.empty()) return result;
-
-    auto then_yield = FindYieldStmt(new_if->then_body_);
-    auto else_yield = new_if->else_body_.has_value() ? FindYieldStmt(new_if->else_body_.value()) : nullptr;
-    if (!then_yield && !else_yield) return result;
-
-    // A region result is a descriptor, not a new allocation or an alias of one
-    // arbitrarily chosen arm. Keep only the common memory space. Even identical
-    // arm buffers use this representation; storage provenance follows the yields.
-    auto patched = new_if->return_vars_;
-    bool changed = false;
-    for (size_t i = 0; i < patched.size(); ++i) {
-      auto tile = As<TileType>(patched[i]->GetType());
-      if (!tile) continue;
-      const auto then_tile = then_yield && i < then_yield->value_.size()
-                                 ? As<TileType>(then_yield->value_[i]->GetType())
-                                 : nullptr;
-      const auto else_tile = else_yield && i < else_yield->value_.size()
-                                 ? As<TileType>(else_yield->value_[i]->GetType())
-                                 : nullptr;
-      CHECK_SPAN(then_tile && else_tile && then_tile->GetMemorySpace() &&
-                     then_tile->GetMemorySpace() == else_tile->GetMemorySpace(),
-                 op->span_)
-          << "Tile If branches must yield tiles in the same memory space";
-      auto type = CloneTypeWithMemRef(tile, std::nullopt, then_tile->GetMemorySpace());
-      patched[i] = std::make_shared<Var>(patched[i]->name_hint_, type, patched[i]->span_);
-      var_map_[op->return_vars_[i]] = patched[i];
-      changed = true;
+    const auto then_yield = FindYieldStmt(op->then_body_);
+    const auto else_yield = op->else_body_ ? FindYieldStmt(*op->else_body_) : nullptr;
+    // Register only direct bindings, not transitive roots. The default visitor
+    // visits both bodies before return_vars, so GetNewVar can read the already
+    // updated yielded variables and cache each dynamic result exactly once.
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& var = op->return_vars_[i];
+      if (!As<TileType>(var->GetType())) continue;
+      auto then_value = then_yield && i < then_yield->value_.size() ? then_yield->value_[i] : nullptr;
+      auto else_value = else_yield && i < else_yield->value_.size() ? else_yield->value_[i] : nullptr;
+      if_result_sources_.emplace(var, IfResultSources{then_value, else_value});
     }
-
-    if (!changed) return result;
-
-    auto patched_if = MutableCopy(new_if);
-    patched_if->return_vars_ = std::move(patched);
-    return patched_if;
+    return IRMutator::VisitStmt_(op);
   }
 
  private:
@@ -1000,6 +1005,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
   std::map<VarPtr, VarPtr> var_map_;
+  std::map<VarPtr, IfResultSources> if_result_sources_;
   std::set<MemRefPtr> non_dense_view_memrefs_;
   const DeclaredAllocMap& declared_allocs_;
   const backend::BackendHandler* handler_ = nullptr;
