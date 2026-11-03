@@ -11,7 +11,6 @@
 import importlib.util
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -36,8 +35,8 @@ def cleaner():
 
 @pytest.fixture
 def host(cleaner, monkeypatch):
-    """Model immutable Docker IDs and exact GitHub attempt responses."""
-    state: dict[str, Any] = {"networks": {}, "containers": {}, "runs": {}, "removed": [], "calls": []}
+    """Model Docker's label-filtered listing and exact GitHub attempt responses."""
+    state: dict[str, Any] = {"network": {}, "container": {}, "runs": {}, "removed": [], "calls": []}
 
     def command(*args):
         state["calls"].append(args)
@@ -50,58 +49,33 @@ def host(cleaner, monkeypatch):
             return json.dumps(record)
         assert args[0] == "docker" and args[1] in {"network", "container"}
         kind, action = args[1:3]
-        resources = state[f"{kind}s"]
         if action == "ls":
-            if args[-1].startswith("name="):
-                return "\n".join(
-                    identity
-                    for identity, resource in resources.items()
-                    if re.search(args[-1][len("name=") :], resource["Name"])
-                )
-            filter_value = args[-1].removeprefix("label=")
-            key, _, expected = filter_value.partition("=")
+            assert "--no-trunc" in args
+            assert ("--all" in args) == (kind == "container")
+            if "--quiet" in args:
+                return "\n".join(state[kind])
+            assert args[-1] == cleaner.RESOURCE_FORMAT
+            key, expected = args[args.index("--filter") + 1].removeprefix("label=").split("=")
             return "\n".join(
-                identity
-                for identity, resource in resources.items()
-                if key
-                in (labels := (resource.get("Config", {}) if kind == "container" else resource)["Labels"])
-                and (not expected or labels[key] == expected)
+                json.dumps([identity, labels.get(LABEL + "run", ""), labels.get(LABEL + "attempt", "")])
+                for identity, labels in state[kind].items()
+                if labels.get(key) == expected
             )
-        if action == "inspect":
-            return json.dumps([resources[args[-1]]])
         assert action == "rm"
         identity = args[-1]
-        if kind == "container":
-            assert args[3] == "--force"
-            for network in state["networks"].values():
-                network["Containers"].pop(identity, None)
-        else:
-            assert not resources[identity]["Containers"], "Network still has live endpoints"
+        assert ("--force" in args) == (kind == "container")
         state["removed"].append((kind, identity))
-        del resources[identity]
+        del state[kind][identity]
         return ""
 
     monkeypatch.setattr(cleaner, "command", command)
     return state
 
 
-def add_attempt(host, run="100", attempt="1", *, status="completed", legacy=False, repository="42"):
-    suffix = f"{run}-{attempt}" + ("-12345" if legacy else "")
-    labels = {LABEL + "run": run}
-    if not legacy:
-        labels |= {LABEL + "repository": repository, LABEL + "attempt": attempt}
-    network_id, proxy_id = f"network-{suffix}", f"proxy-{suffix}"
-    host["networks"][network_id] = {
-        "Id": network_id,
-        "Name": f"codex-review-{suffix}",
-        "Labels": labels,
-        "Containers": {proxy_id: {"Name": f"codex-proxy-{suffix}"}},
-    }
-    host["containers"][proxy_id] = {
-        "Id": proxy_id,
-        "Name": f"/codex-proxy-{suffix}",
-        "Config": {"Labels": {} if legacy else labels.copy()},
-    }
+def add_attempt(host, run="100", attempt="1", *, status="completed", repository="42"):
+    labels = {LABEL + "repository": repository, LABEL + "run": run, LABEL + "attempt": attempt}
+    for kind in ("container", "network"):
+        host[kind][f"{kind}-{run}-{attempt}"] = labels.copy()
     host["runs"][(run, attempt)] = {
         "id": int(run),
         "run_attempt": int(attempt),
@@ -110,19 +84,16 @@ def add_attempt(host, run="100", attempt="1", *, status="completed", legacy=Fals
         "status": status,
         "conclusion": "cancelled",
     }
-    return network_id, proxy_id
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("conclusion", ["cancelled", "failure", "success", "timed_out"])
-def test_completed_attempt_releases_proxy_before_network(cleaner, host, legacy, conclusion):
-    network, proxy = add_attempt(host, legacy=legacy)
+def test_completed_attempt_releases_containers_before_networks(cleaner, host, conclusion):
+    add_attempt(host)
     host["runs"][("100", "1")]["conclusion"] = conclusion
     cleaner.reconcile("owner/repo", "42")
-    assert host["removed"] == [("container", proxy), ("network", network)]
-    # Idempotent recovery is important after a second cancellation during cleanup.
-    cleaner.reconcile("owner/repo", "42")
-    assert not host["networks"] and not host["containers"]
+    assert host["removed"] == [("container", "container-100-1"), ("network", "network-100-1")]
+    cleaner.reconcile("owner/repo", "42")  # Cleanup is idempotent.
+    assert not host["network"] and not host["container"]
 
 
 @pytest.mark.parametrize("status", ["in_progress", "queued", "waiting", "pending", None])
@@ -133,11 +104,11 @@ def test_active_or_unknown_status_retains_resources(cleaner, host, status):
 
 
 def test_rerun_retains_active_attempt_and_cleans_old_attempt(cleaner, host):
-    network, proxy = add_attempt(host)
-    active_network, active_proxy = add_attempt(host, attempt="2", status="in_progress")
+    add_attempt(host)
+    add_attempt(host, attempt="2", status="in_progress")
     cleaner.reconcile("owner/repo", "42")
-    assert host["removed"] == [("container", proxy), ("network", network)]
-    assert active_network in host["networks"] and active_proxy in host["containers"]
+    assert host["removed"] == [("container", "container-100-1"), ("network", "network-100-1")]
+    assert "container-100-2" in host["container"] and "network-100-2" in host["network"]
 
 
 @pytest.mark.parametrize(
@@ -163,90 +134,56 @@ def test_unverifiable_owner_aborts_before_any_removal(cleaner, host, error):
     ],
 )
 def test_wrong_github_identity_never_authorizes_removal(cleaner, host, change):
-    add_attempt(host, legacy=True)
+    add_attempt(host)
     host["runs"][("100", "1")].update(change)
     with pytest.raises(ValueError, match="Unexpected workflow identity"):
         cleaner.reconcile("owner/repo", "42")
     assert not host["removed"]
 
 
-def test_other_repository_and_shared_infrastructure_are_untouched(cleaner, host):
+def test_foreign_legacy_and_shared_resources_are_untouched(cleaner, host):
     add_attempt(host, repository="43")
-    host["networks"]["egress"] = {
-        "Id": "egress",
-        "Name": "pypto-codex-egress",
-        "Labels": {},
-        "Containers": {},
-    }
-    host["containers"]["relay"] = {
-        "Id": "relay",
-        "Name": "/pypto-codex-proxy-relay",
-        "Config": {"Labels": {}},
-    }
+    host["network"].update({"egress": {}, "codex-review-100-1-12345": {LABEL + "run": "100"}})
+    host["container"].update({"relay": {}, "codex-proxy-100-1-12345": {}})
     cleaner.reconcile("owner/repo", "42")
     assert not host["removed"]
     assert not any(call[0] == "gh" for call in host["calls"])
 
 
-@pytest.mark.parametrize("role", ["proxy", "agent", "session-init", "session-read", "session-write"])
-def test_labelled_container_without_private_network_is_recovered(cleaner, host, role):
-    network, proxy = add_attempt(host)
-    del host["networks"][network]
-    host["containers"][proxy]["Name"] = f"/codex-{role}-100-1"
-    cleaner.reconcile("owner/repo", "42")
-    assert host["removed"] == [("container", proxy)]
-
-
-def test_legacy_proxy_stranded_before_network_connect_is_recovered(cleaner, host):
-    network, proxy = add_attempt(host, legacy=True)
-    host["networks"][network]["Containers"] = {}
-    cleaner.reconcile("owner/repo", "42")
-    assert host["removed"] == [("container", proxy), ("network", network)]
-
-
-def test_unlabelled_proxy_without_ownership_network_is_preserved(cleaner, host):
-    network, _ = add_attempt(host, legacy=True)
-    del host["networks"][network]
+@pytest.mark.parametrize("field,value", [("run", ""), ("attempt", ""), ("attempt", "invalid")])
+def test_incomplete_or_invalid_ownership_is_preserved(cleaner, host, field, value):
+    add_attempt(host)
+    for kind in ("container", "network"):
+        host[kind][f"{kind}-100-1"][LABEL + field] = value
     cleaner.reconcile("owner/repo", "42")
     assert not host["removed"]
 
 
-def test_mismatched_labels_are_not_treated_as_legacy(cleaner, host):
-    network, proxy = add_attempt(host, legacy=True)
-    host["networks"][network]["Labels"][LABEL + "attempt"] = "2"
-    host["containers"][proxy]["Config"]["Labels"][LABEL + "attempt"] = "2"
+def test_labelled_container_without_private_network_is_recovered(cleaner, host):
+    add_attempt(host)
+    host["network"].clear()
     cleaner.reconcile("owner/repo", "42")
-    assert not host["removed"]
+    assert host["removed"] == [("container", "container-100-1")]
 
 
-def test_legacy_network_does_not_authorize_unrelated_container(cleaner, host):
-    network, proxy = add_attempt(host, legacy=True)
-    host["containers"][proxy]["Name"] = "/codex-proxy-100-1-99999"
-    # Docker refuses to remove a network with an unknown endpoint; it must not be forced away.
-    with pytest.raises(AssertionError, match="live endpoints"):
-        cleaner.reconcile("owner/repo", "42")
-    assert not host["removed"]
-    assert network in host["networks"] and proxy in host["containers"]
+@pytest.mark.parametrize("kind", ["container", "network"])
+@pytest.mark.parametrize("still_exists", [False, True])
+def test_failed_removal_rechecks_existence(cleaner, monkeypatch, kind, still_exists):
+    """Ignore concurrent deletion, but propagate failures for resources still present."""
 
+    def command(*args):
+        if args[2] == "rm":
+            raise subprocess.CalledProcessError(1, args, stderr="Docker error")
+        assert args[:3] == ("docker", kind, "ls")
+        assert ("--all" in args) == (kind == "container")
+        return "abc123" if still_exists else ""
 
-@pytest.mark.parametrize("kind", ["network", "container"])
-@pytest.mark.parametrize("operation", ["inspect", "rm"])
-def test_concurrent_cleanup_can_remove_discovered_resource(cleaner, monkeypatch, kind, operation):
-    def disappeared(*args):
-        raise subprocess.CalledProcessError(1, args, stderr=f"Error: No such {kind}: abc123")
-
-    monkeypatch.setattr(cleaner, "command", disappeared)
-    assert cleaner.docker_resource(kind, operation, "abc123") is None
-
-
-@pytest.mark.parametrize("message", ["Docker daemon unavailable", "Error: No such container: other-id"])
-def test_docker_failure_is_not_mistaken_for_disappearance(cleaner, monkeypatch, message):
-    def failed(*args):
-        raise subprocess.CalledProcessError(1, args, stderr=message)
-
-    monkeypatch.setattr(cleaner, "command", failed)
-    with pytest.raises(subprocess.CalledProcessError):
-        cleaner.inspect("container", "abc123")
+    monkeypatch.setattr(cleaner, "command", command)
+    if still_exists:
+        with pytest.raises(subprocess.CalledProcessError):
+            cleaner.remove(kind, "abc123")
+    else:
+        cleaner.remove(kind, "abc123")
 
 
 @pytest.fixture

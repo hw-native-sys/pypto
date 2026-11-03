@@ -149,11 +149,9 @@ egress network/relay are preserved.
 Before starting another review, trusted host code reconciles leftover resources
 under the same runner lock. It queries GitHub with **Actions: read** permission
 and removes resources only when their exact owning attempt is `completed` and
-its repository and workflow identity match. Older run-labelled private networks
-also identify legacy proxies by their exact name suffix, including proxies left
-before network attachment. Unlabelled proxies without that network evidence
-require manual investigation. Active attempts,
-foreign resources and unidentified containers are retained; API failures stop
+its repository and workflow identity match. Discovery uses ownership labels only;
+legacy resources without complete labels require a one-time manual cleanup.
+Active attempts and other repositories' resources are retained; API failures stop
 startup before any stale-resource deletion. A runner outage can prevent the
 `always()` step; reconciliation recovers Docker resources on the next review
 on that host. It does not recover temporary credential files left by a host outage.
