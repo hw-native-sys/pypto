@@ -21,11 +21,10 @@ the two halves of that separately: the attribute is still emitted on both
 backends (PTOAS's input must not change), and the warning appears on exactly
 the backend that ignores it.
 
-``tile.rsqrt`` is deliberately absent. It opts into high precision by taking a
-scratch tile rather than by carrying ``precisionType``, and that form is
-implemented on Ascend910 too, so it is honoured and must stay silent. The DSL
-rejects ``pl.rsqrt(tile, high_precision=True)`` outright, which is what keeps it
-away from this path.
+``tile.rsqrt`` is deliberately absent from this warning hook. Its explicit
+``high_precision=True`` flag requires scratch and emits the selector for A5;
+Ascend910 honours the request through its scratch overload, so it must stay
+silent even though that backend ignores the selector itself.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.

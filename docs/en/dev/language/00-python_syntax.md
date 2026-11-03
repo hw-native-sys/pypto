@@ -431,7 +431,7 @@ guarding a whole call should catch both:
 
 ```python
 pl.matmul(tile_a, tile_b, b_trans=True)   # TypeError — tile transpose is a view, not a flag
-pl.rsqrt(tile, high_precision=True)       # TypeError — tile precision is selected by passing tmp
+pl.rsqrt(tile, high_precision=True)       # ValueError — high precision requires tmp=workspace
 pl.div(tile, 2.0, high_precision=True)    # TypeError — high_precision needs a Tile rhs
 pl.row_max(tile)                          # TypeError — Tile inputs require tmp_tile
 pl.slice(tile, [64, 64], [64, 0])         # ValueError — window runs off the source tile

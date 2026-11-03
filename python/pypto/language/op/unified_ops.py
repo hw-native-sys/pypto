@@ -189,9 +189,6 @@ _TILE_C_MATRIX_NZ_REMEDY = (
     "The tile matmul result layout is fixed by its Acc tile type; there is no "
     "tile-level equivalent of this tensor-level flag."
 )
-_TILE_RSQRT_PRECISION_REMEDY = (
-    "The tile form selects precision by taking a scratch tile: pl.tile.rsqrt(tile, tmp)."
-)
 
 
 def _reject_tmp_for_tensor(op_name: str, tmp: Any, param: str = "tmp") -> None:
@@ -694,24 +691,21 @@ def sqrt(input: object) -> Tensor | Tile:
 
 
 @overload
-def rsqrt(input: Tensor, high_precision: bool = ...) -> Tensor: ...
+def rsqrt(input: Tensor, high_precision: bool = ..., *, tmp: None = ...) -> Tensor: ...
 @overload
-def rsqrt(input: Tile, high_precision: Literal[False] = ...) -> Tile: ...
-def rsqrt(input: object, high_precision: bool = False) -> Tensor | Tile:
-    """Element-wise reciprocal square root, dispatched by input type.
+def rsqrt(input: Tile, high_precision: bool = ..., *, tmp: Tile | None = ...) -> Tile: ...
+def rsqrt(input: object, high_precision: bool = False, *, tmp: Tile | None = None) -> Tensor | Tile:
+    """Element-wise reciprocal square root with explicit precision selection.
 
-    ``high_precision`` is Tensor-only: the compiler allocates the scratch tile
-    during Tensor-to-Tile lowering. ``tile.rsqrt`` carries no such attribute —
-    precision is selected purely by *passing* that scratch tile — so tile
-    callers use ``pl.tile.rsqrt(tile, tmp)`` directly and passing
-    ``high_precision=True`` with a Tile raises rather than silently yielding the
-    low-precision path.
+    ``high_precision`` defaults to False on both paths. Tensor lowering allocates
+    scratch automatically. Tile callers must provide ``tmp`` when requesting
+    high precision and omit it in default mode; scratch alone never selects precision.
     """
     if isinstance(input, Tensor):
+        _reject_tmp_for_tensor("rsqrt", tmp, "tmp")
         return _tensor.rsqrt(input, high_precision=high_precision)
     if isinstance(input, Tile):
-        _reject_unsupported("rsqrt", "Tile", high_precision=(high_precision, _TILE_RSQRT_PRECISION_REMEDY))
-        return _tile.rsqrt(input)
+        return _tile.rsqrt(input, tmp=tmp, high_precision=high_precision)
     raise TypeError(f"pl.rsqrt: expected Tensor or Tile, got {type(input).__name__}")
 
 

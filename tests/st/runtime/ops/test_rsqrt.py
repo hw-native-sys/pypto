@@ -14,7 +14,7 @@ Covers both DSL layers exposed by commit 8b8b055e (pto.trsqrt high-precision mod
 
   TileRsqrtTest              : Tile level, 1-operand basic form.      out = rsqrt(a)
   TileRsqrtHighPrecisionTest : Tile level, 2-operand (user-managed    out = rsqrt(a) (high precision)
-                               scratch tile via pl.tile.rsqrt(src, tmp=...)).
+                               scratch tile via pl.tile.rsqrt(src, tmp=..., high_precision=True)).
   TensorRsqrtTest            : Tensor level, basic form               out = pl.rsqrt(x)
   TensorRsqrtHighPrecisionTest : Tensor level, compiler-inserted      out = pl.rsqrt(x, high_precision=True)
                                scratch allocation.
@@ -109,7 +109,7 @@ def tile_rsqrt_high_precision_kernel(
 ) -> pl.Tensor[[M, N], pl.FP32]:
     tile_a: pl.Tile[[M, N], pl.FP32] = pl.load(a, [0, 0], [M, N])
     tmp: pl.Tile[[M, N], pl.FP32] = pl.tile.create([M, N], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
-    tile_c: pl.Tile[[M, N], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp)
+    tile_c: pl.Tile[[M, N], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp, high_precision=True)
     out = pl.store(tile_c, [0, 0], out)
     return out
 
@@ -124,7 +124,7 @@ def tile_rsqrt_high_precision(
 
 
 class TileRsqrtHighPrecisionTest(PTOTestCase):
-    """Tile rsqrt high-precision: out = rsqrt(a) via pl.tile.rsqrt(src, tmp=...)."""
+    """Tile rsqrt high-precision: out = rsqrt(a) via an explicit flag and scratch."""
 
     __test__ = False
 
@@ -282,7 +282,7 @@ def _a5_tile_rsqrt_precision_kernel(
 ):
     a = pl.load(x, [0, 0], [M, N])
     tmp = pl.tile.create([M, N], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
-    precise = pl.store(pl.tile.rsqrt(a, tmp=tmp), [0, 0], precise)
+    precise = pl.store(pl.tile.rsqrt(a, tmp=tmp, high_precision=True), [0, 0], precise)
     default = pl.store(pl.tile.rsqrt(a), [0, 0], default)
     return precise, default
 

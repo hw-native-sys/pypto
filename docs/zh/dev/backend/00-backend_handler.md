@@ -66,6 +66,8 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | `GetL0cMAlignment(dtype)` | L0C 切分、dbC 容量与分配共同使用的物理 M 行对齐 | INT32 为 32；其余为 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | 跨核传输边界处的 tile 视图 | Mat/Left/Right 转 NZ；Vec 保持原样 | Mat/Left/Right 转 NZ（a5 硬件要求边界为 fractal）；Vec 保持原样 |
 
+`tile.rsqrt(high_precision=True)` 不适用此告警钩子：它要求 scratch tile，并为 A5 生成 `precisionType`；A2/A3 虽然忽略选择器，但会通过 scratch 重载兑现高精度请求。精度由显式属性选择，不再仅由 scratch 是否存在决定。
+
 `SupportsRuntimeBoundLocalSoftwarePipeline()` 默认返回 `false`，在后端启用这条降低
 路径前保留既有循环回退行为。该查询独立于跨核传输，不表示硬件是否支持相关事件。
 

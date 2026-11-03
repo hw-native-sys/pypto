@@ -2448,7 +2448,7 @@ def test_aligned_count_rsqrt_workspace_preserves_data_partition():
             pair = pl.tile.gather_compare(src, pl.const(1.0, pl.FP32), tmp, cmp_mode="eq", out_cols=16)
             seed = pl.tile.move(rhs, target_memory=pl.Mem.Mat)  # noqa: F841
             counts = pl.tile.cast(pair[1], pl.FP32)
-            scaled = pl.tile.rsqrt(counts, tmp=scratch)
+            scaled = pl.tile.rsqrt(counts, tmp=scratch, high_precision=True)
             return pl.tile.store(scaled, [0, 0], out)
 
     _assert_count_consumer_partition(_lower(Before), "tile.rsqrt", 8, [[1, 8], [1, 8]])
@@ -2854,7 +2854,7 @@ def test_replicated_singleton_consumers_check_validity(lhs_cols, rhs_cols, accep
             rhs = pl.tile.load(data, [0, 0], [1, 64], valid_shape=[1, rhs_cols], target_memory=pl.Mem.Vec)
             result = pl.tile.add(lhs, rhs)
             scratch = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-            scaled = pl.tile.rsqrt(result, tmp=scratch)
+            scaled = pl.tile.rsqrt(result, tmp=scratch, high_precision=True)
             return pl.tile.store(scaled, [0, 0], out)
 
     if not accepted:
@@ -3588,7 +3588,7 @@ def test_scratch_the_deducer_pins_needs_no_declaration():
             out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
         ) -> pl.Tensor[[256, 128], pl.FP32]:
             v = pl.tile.load(x, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
-            scaled = pl.tile.rsqrt(v, tmp=tmp)
+            scaled = pl.tile.rsqrt(v, tmp=tmp, high_precision=True)
             gathered_mat = pl.tile.move(scaled, target_memory=pl.Mem.Mat)
             left = pl.tile.move(gathered_mat, target_memory=pl.Mem.Left)
             acc = pl.tile.matmul(left, rhs)
@@ -6234,7 +6234,7 @@ def test_singleton_rsqrt_with_private_vec_scratch_stays_replicated():
             popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
             scale = pl.tile.load(scales, [0, 0], [1, 64], target_memory=pl.Mem.Vec)
             scratch = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-            inverse_scale = pl.tile.rsqrt(scale, tmp=scratch)
+            inverse_scale = pl.tile.rsqrt(scale, tmp=scratch, high_precision=True)
             scaled = pl.tile.mul(popped, inverse_scale)
             return pl.tile.store(scaled, [0, 0], out)
 
@@ -6250,7 +6250,7 @@ def test_singleton_rsqrt_with_private_vec_scratch_stays_replicated():
             popped = pl.tile.aiv_shard(qk, split=1)
             scale = pl.tile.load(scales, [0, 0], [1, 64], target_memory=pl.Mem.Vec)
             scratch = pl.tile.create([1, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
-            inverse_scale = pl.tile.rsqrt(scale, tmp=scratch)
+            inverse_scale = pl.tile.rsqrt(scale, tmp=scratch, high_precision=True)
             scaled: pl.Tile[
                 [8, 64],
                 pl.FP32,

@@ -750,7 +750,9 @@ class TestRsqrtHighPrecisionCodegen:
                 tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.rsqrt(input_tile, tmp=tmp_tile)
+                result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.rsqrt(
+                    input_tile, tmp=tmp_tile, high_precision=True
+                )
                 updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
                 return updated_output
 
@@ -821,7 +823,7 @@ class TestRsqrtHighPrecisionCodegen:
                 def kernel(self, x: pl.Tensor[[16, 32], dtype], out: pl.Out[pl.Tensor[[16, 32], dtype]]):
                     a = pl.load(x, [0, 0], [16, 32])
                     tmp = pl.tile.create([16, 32], dtype=dtype, target_memory=pl.MemorySpace.Vec)
-                    return pl.store(pl.tile.rsqrt(a, tmp=tmp), [0, 0], out)
+                    return pl.store(pl.tile.rsqrt(a, tmp=tmp, high_precision=True), [0, 0], out)
 
         else:
 

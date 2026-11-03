@@ -1680,14 +1680,20 @@ class TestUnifiedOpsCrossPathKwargs:
 
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
 
-    def test_rsqrt_tile_rejects_high_precision(self):
-        """tile.rsqrt selects precision by taking a scratch tile, not by a flag."""
-        with pytest.raises(TypeError) as exc_info:
-            unified_ops.rsqrt(_tile("t", [64, 64], DataType.FP32), high_precision=True)  # type: ignore[call-overload]
+    def test_rsqrt_tile_high_precision_requires_tmp(self):
+        with pytest.raises(ValueError, match="high_precision=True requires a tmp"):
+            unified_ops.rsqrt(_tile("t", [64, 64], DataType.FP32), high_precision=True)
 
-        msg = str(exc_info.value)
-        assert "'high_precision'" in msg
-        assert "pl.tile.rsqrt(tile, tmp)" in msg
+    def test_rsqrt_tile_explicit_high_precision(self):
+        t = _tile("t", [64, 64], DataType.FP32)
+        tmp = _tile("tmp", [64, 64], DataType.FP32)
+        unified = unified_ops.rsqrt(t, high_precision=True, tmp=tmp)
+        explicit = pl.tile.rsqrt(t, tmp=tmp, high_precision=True)
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_rsqrt_tensor_rejects_tmp(self):
+        with pytest.raises(TypeError, match="Tensor inputs must not pass tmp"):
+            unified_ops.rsqrt(_tensor("x", [64, 64]), tmp=_tile("tmp", [64, 64]))  # type: ignore[call-overload]
 
     def test_rsqrt_tile_default_still_lowers(self):
         t = _tile("t", [64, 64], DataType.FP32)

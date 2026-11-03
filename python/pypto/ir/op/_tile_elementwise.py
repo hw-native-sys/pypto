@@ -945,21 +945,25 @@ def sqrt(tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.sqrt", [tile], {}, actual_span)
 
 
-def rsqrt(tile: Expr, tmp: Expr | None = None, span: Span | None = None) -> Call:
+def rsqrt(
+    tile: Expr, tmp: Expr | None = None, span: Span | None = None, *, high_precision: bool = False
+) -> Call:
     """Element-wise reciprocal square root (1/sqrt(x)) of a tile.
 
     Args:
         tile: Input tile (TileType)
         tmp: Optional scratch tile (TileType, same shape/dtype as ``tile``).
-            Passing it selects the high-precision PTO lowering.
+            Required when ``high_precision=True``; omit it in default mode.
         span: Optional source span for debugging (auto-captured if not provided)
+        high_precision: Select the high-precision algorithm explicitly (default False).
 
     Returns:
         Call expression for element-wise reciprocal square root
     """
     actual_span = _get_span_or_capture(span)
     args: list[Expr] = [tile] if tmp is None else [tile, tmp]
-    return _ir_core.create_op_call("tile.rsqrt", args, {}, actual_span)
+    kwargs: dict[str, bool] = {"high_precision": high_precision} if high_precision else {}
+    return _ir_core.create_op_call("tile.rsqrt", args, kwargs, actual_span)
 
 
 def cast(
