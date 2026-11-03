@@ -200,11 +200,11 @@ def test_compile_logs_artifact_dir_at_debug(tmp_path, capfd):
 
     # The C++ logger writes to std::cerr, so capture at the FD level.
     err = capfd.readouterr().err
-    assert f"PyPTO artifacts written to {os.path.abspath(compiled.output_dir)}" in err
+    assert f"PyPTO artifacts written to {os.path.realpath(compiled.output_dir)}" in err
 
 
 def test_compile_logs_absolute_path_for_relative_output_dir(tmp_path, monkeypatch, capfd):
-    """A relative output dir is still reported as a clickable absolute path."""
+    """A relative output dir is still reported as a resolved absolute path."""
     monkeypatch.chdir(tmp_path)
     saved = get_log_level()
     set_log_level(LogLevel.DEBUG)
@@ -219,10 +219,37 @@ def test_compile_logs_absolute_path_for_relative_output_dir(tmp_path, monkeypatc
         set_log_level(saved)
 
     # CompiledProgram normalizes the stored path; the log must still have
-    # absolutized the relative input before it reached the wrapper.
+    # resolved the relative input before it reached the wrapper.
     assert Path(compiled.output_dir) == tmp_path / "relative_out"
     err = capfd.readouterr().err
     assert f"PyPTO artifacts written to {tmp_path / 'relative_out'}" in err
+
+
+def test_compile_logs_resolved_path_through_symlink(tmp_path, monkeypatch, capfd):
+    """A symlinked output path is logged at the directory actually written."""
+    target = tmp_path / "target"
+    (target / "sub").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(target / "sub")
+
+    monkeypatch.chdir(tmp_path)
+    saved = get_log_level()
+    set_log_level(LogLevel.DEBUG)
+    try:
+        compiled = ir.compile(
+            _scalar_program(),
+            output_dir="link/../out",
+            dump_passes=False,
+            skip_ptoas=True,
+        )
+    finally:
+        set_log_level(saved)
+
+    # abspath would lexically collapse link/.. to tmp_path; the filesystem
+    # follows the symlink, so the artifacts land in target/out.
+    expected = str(target / "out")
+    assert Path(compiled.output_dir) == target / "out"
+    err = capfd.readouterr().err
+    assert f"PyPTO artifacts written to {expected}" in err
 
 
 def test_compile_artifact_dir_log_is_debug_only(tmp_path, capfd):
