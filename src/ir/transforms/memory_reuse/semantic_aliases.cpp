@@ -1299,7 +1299,6 @@ class TopDownRetargeter {
   std::map<VarPtr, VarPtr> inplace_root_cache_;
   std::map<VarPtr, VarPtr> accumulator_input_cache_;
   std::set<VarPtr> non_accumulator_producers_;
-  std::map<VarPtr, VarPtr> bare_alias_root_cache_;
   std::map<const MemRef*, size_t> memref_component_;
   std::map<size_t, ReachableEventIndex> physical_access_index_;
   std::map<const Var*, VersionedReachableEventIndex> alias_read_index_;
@@ -1401,21 +1400,14 @@ class TopDownRetargeter {
   /// until RetypeApplier would let a later phi choose an abandoned view window.
   void FollowBranchStorageAlias(const VarPtr& result, const VarPtr& source, const CallPtr& call = nullptr) {
     auto output = CurrentTileType(result);
-    if (!output) output = As<TileType>(result->GetType());
     auto input = source ? CurrentTileType(source) : nullptr;
     if (!output || !input) return;
     auto target = GetDefinedMemRef(input);
     if (call && !op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-      const auto memory = input->GetMemorySpace();
-      INTERNAL_CHECK_SPAN(memory.has_value(), result->span_)
-          << "Internal error: a canonical branch view requires a memory space";
-      const auto size = output->memref_ ? std::make_optional((*output->memref_)->size_)
-                                        : utils::StaticPhysicalAllocationBytes(output, *memory, nullptr);
-      INTERNAL_CHECK_SPAN(size.has_value(), result->span_)
-          << "Internal error: a canonical branch view requires a static storage size";
-      target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), *size, result->span_);
+      target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), GetDefinedMemRef(output)->size_,
+                                  result->span_);
     }
-    if (!output->memref_ || !SamePhysicalWindow(*output->memref_, target) ||
+    if (!SamePhysicalWindow(GetDefinedMemRef(output), target) ||
         output->GetMemorySpace() != input->GetMemorySpace()) {
       PlanRewrite(result, target, input->GetMemorySpace());
     }
@@ -1455,7 +1447,7 @@ class TopDownRetargeter {
       auto else_yield = else_body ? transform_utils::GetLastYieldStmt(*else_body) : nullptr;
       for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
         auto result = branch->return_vars_[i];
-        auto result_tile = As<TileType>(result->GetType());
+        auto result_tile = CurrentTileType(result);
         if (!result_tile) continue;
         CHECK_SPAN(else_body.has_value() && then_yield && else_yield && i < then_yield->value_.size() &&
                        i < else_yield->value_.size(),
@@ -1479,8 +1471,8 @@ class TopDownRetargeter {
                "coalesced; Acc-to-Acc transfers are unsupported";
         auto base = std::make_shared<Var>("mem_branch_result_" + std::to_string(branch_storage_counter_++),
                                           GetPtrType(), result->span_);
-        const auto size = std::max({result_tile->memref_ ? (*result_tile->memref_)->size_ : uint64_t{0},
-                                    then_memref->size_, else_memref->size_});
+        const auto size =
+            std::max({GetDefinedMemRef(result_tile)->size_, then_memref->size_, else_memref->size_});
         auto target = std::make_shared<MemRef>(base, static_cast<int64_t>(0), size, result->span_);
         allocations->push_back(CreateAllocStatement(target, *memory));
         PlanRewrite(result, target, memory);
@@ -1884,7 +1876,6 @@ class TopDownRetargeter {
     inplace_root_cache_.clear();
     accumulator_input_cache_.clear();
     non_accumulator_producers_.clear();
-    bare_alias_root_cache_.clear();
 
     const auto& registry = OpRegistry::GetInstance();
     for (const auto& [var, def] : defs_) {
@@ -2122,35 +2113,12 @@ class TopDownRetargeter {
     return ResolveInplaceRoot(var).get() == root.get();
   }
 
-  VarPtr ResolveBareAlias(const VarPtr& var) {
-    std::vector<VarPtr> path;
-    std::set<const Var*> seen;
-    auto current = var;
-    while (seen.insert(current.get()).second) {
-      const auto cached = bare_alias_root_cache_.find(current);
-      if (cached != bare_alias_root_cache_.end()) {
-        current = cached->second;
-        break;
-      }
-      const auto def = defs_.find(current);
-      if (def == defs_.end() || def->second.kind != VarDef::kAssign) break;
-      const auto assign = As<AssignStmt>(def->second.assign_stmt);
-      const auto source = assign ? AsVarLike(assign->value_) : nullptr;
-      if (!source) break;
-      path.push_back(current);
-      current = source;
-    }
-    for (const auto& member : path) bare_alias_root_cache_[member] = current;
-    bare_alias_root_cache_[var] = current;
-    return current;
-  }
-
   /// Resolve a branch-local accumulator loop seeded by a value defined outside
   /// ``branch_scope``. Both locality halves are required: the loop itself must
   /// be inside the branch and its seed must be outside it.
   std::optional<AccumulatorTarget> FindExternallySeededAccumulatorLoop(const VarPtr& var,
                                                                        const IfStmtPtr& branch_scope) {
-    auto it = defs_.find(ResolveBareAlias(var));
+    auto it = defs_.find(ResolveInplaceRoot(var));
     if (it == defs_.end() || it->second.kind != VarDef::kForReturn) return std::nullopt;
     auto loop = As<ForStmt>(it->second.control_stmt);
     if (!loop || it->second.return_idx >= loop->iter_args_.size()) return std::nullopt;

@@ -48,6 +48,19 @@ namespace pypto {
 namespace ir {
 namespace {
 
+// Return the direct storage source of a rename, registered writeback or aliasing
+// view. Fresh-producing calls return nullptr even when an input is dynamic.
+VarPtr GetDirectStorageSource(const AssignStmtPtr& assign) {
+  if (auto source = AsVarLike(assign->value_)) return source;
+  const auto call = As<Call>(assign->value_);
+  if (!call || !call->op_) return nullptr;
+  auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+  if (!index && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+    index = 0;
+  }
+  return index ? AsVarLike(call->args_[*index]) : nullptr;
+}
+
 // Build descriptor edges once, including loop backedges, then propagate one
 // boolean per value. Each node/edge is processed once (ordered lookups add log N).
 class SelectionCollector : public IRVisitor {
@@ -65,14 +78,7 @@ class SelectionCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (AsVarLike(op->value_)) Edge(op->var_, op->value_);
-    if (const auto call = As<Call>(op->value_); call && call->op_) {
-      auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-      if (!index && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-        index = 0;
-      }
-      if (index) Edge(op->var_, call->args_[*index]);
-    }
+    if (auto source = GetDirectStorageSource(op)) Edge(op->var_, source);
     IRVisitor::VisitStmt_(op);
   }
 
@@ -232,22 +238,12 @@ class LifetimeAnalyzer : public IRVisitor {
     if (tile_type) {
       if (native_if_) {
         std::vector<VarPtr> sources;
-        if (auto source = AsVarLike(op->value_)) {
-          sources.push_back(source);
-        } else if (auto call = As<Call>(op->value_); call && call->op_) {
-          auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-          if (!index && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-            index = 0;
-          }
-          if (index) {
-            if (auto source = AsVarLike(call->args_[*index])) sources.push_back(source);
-          }
-        }
+        if (auto source = GetDirectStorageSource(op)) sources.push_back(source);
         RegisterStorageBinding(op->var_, std::move(sources), order);
       }
-      // A view/rename/writeback of an If descriptor owns no new allocation.
-      // Grouping its geometry-only MemRef with then's allocation would assert
-      // a false must-alias and lose the other runtime choice.
+      // Dynamic-storage values forward the selected descriptor and own no
+      // allocation. Keep their source bindings for use propagation, but exclude
+      // them from the fixed-MemRef allocation groups below.
       if (!selection_aliases_.count(op->var_.get())) {
         ordered_defs_.push_back(op->var_);
         var_def_order_[op->var_] = order;
@@ -509,6 +505,8 @@ class LifetimeAnalyzer : public IRVisitor {
 
   void RecordRawUse(const VarPtr& var, int use_order) {
     if (native_if_) {
+      // Both fixed-storage and dynamic-storage Tiles need use positions. The
+      // reverse binding walk propagates dynamic uses to their possible storage.
       if (As<TileType>(var->GetType())) {
         auto& last = var_raw_last_use_[var];
         last = std::max(last, use_order);

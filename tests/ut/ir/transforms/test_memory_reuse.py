@@ -51,6 +51,28 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
     return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
 
 
+def _materialize_native_tile_if(program: ir.Program) -> ir.Program:
+    """Apply function selection so the global Buffer option cannot reroute Tile Ifs."""
+    program = passes.select_buffer_ir_functions()(program)
+    function = program.get_function("kernel")
+    assert function is not None and function.attrs["buffer_ir_selected"] is False
+    after = passes.materialize_semantic_aliases()(program)
+    checked = 0
+
+    class Checker(ir.IRVisitor):
+        def visit_if_stmt(self, op):
+            nonlocal checked
+            for result in op.return_vars:
+                if isinstance(result.type, ir.TileType):
+                    assert result.type.memref is None, "native Tile If results must keep dynamic storage"
+                    checked += 1
+            super().visit_if_stmt(op)
+
+    Checker().visit_program(after)
+    assert checked > 0, "the test must exercise a Tile-valued If"
+    return after
+
+
 def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, int]]:
     """Collect constant addressed Tile MemRefs from a transformed program."""
     ranges: dict[str, tuple[int, int]] = {}
@@ -5726,7 +5748,7 @@ class Before:
 class TestWhileAccumulatorAliasSafety:
     """Accumulator phi coalescing must account for old handles across while iterations."""
 
-    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["buffer_disabled", "buffer_enabled"])
     def test_accumulator_phi_with_metadata_view_yield(self, buffer_ir, pass_verification_instruments):
         """A carry advances on its own backedge; that read is not an old-seed observer.
 
@@ -5765,10 +5787,8 @@ class TestWhileAccumulatorAliasSafety:
                 return out
 
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
-            after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+            after = _materialize_native_tile_if(passes.init_mem_ref()(Before))
         names = {"initial", "fresh", "accumulated"}
-        if buffer_ir:
-            names.add("viewed")
         refs = _collect_named_tile_memrefs(after, names)
         for name in names - {"initial"}:
             assert _same_base_address(refs["initial"], refs[name]), after.as_python()
@@ -5839,7 +5859,7 @@ class Before:
             _assert_if_phi_arms_write_the_phi_buffer(after)
 
     @pytest.mark.parametrize("nested_for", [False, True], ids=["direct_phi", "for_carry_phi"])
-    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["buffer_disabled", "buffer_enabled"])
     @pytest.mark.parametrize(
         "accumulator_scope, handle_scope",
         [("outside", "outside"), ("outside", "inside"), ("inside", "inside")],
@@ -5936,19 +5956,9 @@ class Before:
                         return replacements[op.unique_id]
 
                 initialized = _DriftAliasDescriptor().visit_program(initialized)
-            if buffer_ir and not recreated:
-                # Acc has no same-space copy to preserve the independently live
-                # old value: either loop-input isolation or phi legalization
-                # must reject the unsupported transfer before it can clobber it.
-                message = (
-                    "cannot preserve an independently live loop input"
-                    if nested_for
-                    else "divergent Acc branch results to be coalesced"
-                )
-                with pytest.raises(ValueError, match=message):
-                    passes.materialize_semantic_aliases()(initialized)
-                return
-            after = passes.materialize_semantic_aliases()(initialized)
+            # Both global Buffer settings retain native If handles. An external
+            # old value must stay observable rather than force a shared Acc buffer.
+            after = _materialize_native_tile_if(initialized)
 
         refs = _collect_named_tile_memrefs(after, {"previous", "old_value", "fresh", "accumulated"})
         assert _same_base_address(refs["previous"], refs["old_value"])
@@ -9351,7 +9361,7 @@ class TestAliasingOutputPropagation:
             assert memrefs[name].base_ is not memrefs["updated"].base_
 
     @pytest.mark.parametrize("views_on_canonical", [False, True], ids=["pending_views", "canonical_views"])
-    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["buffer_disabled", "buffer_enabled"])
     def test_unsettled_phi_propagates_through_view_and_rename(
         self, views_on_canonical, buffer_ir, pass_verification_instruments
     ):
@@ -9426,11 +9436,9 @@ class TestAliasingOutputPropagation:
             input_program = _SeedViewTypes().visit_program(Before)
 
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
-            after = passes.memory_reuse()(passes.materialize_semantic_aliases()(input_program))
+            after = passes.memory_reuse()(_materialize_native_tile_if(input_program))
         _assert_if_phi_arms_write_the_phi_buffer(after)
         names = {"seed", "first"}
-        if buffer_ir:
-            names.update({"viewed", "renamed", "second", "final_view"})
         memrefs = _collect_named_tile_memrefs(after, names)
 
         class _AliasWindowChecker(ir.IRVisitor):
@@ -9455,9 +9463,8 @@ class TestAliasingOutputPropagation:
         function = after.get_function("kernel")
         assert function is not None
         _AliasWindowChecker().visit_stmt(function.body)
-        if not buffer_ir:
-            for name, memref in memrefs.items():
-                assert _same_base_address(memref, memrefs["seed"]), f"{name} left the written L1 buffer"
+        for name, memref in memrefs.items():
+            assert _same_base_address(memref, memrefs["seed"]), f"{name} left the written L1 buffer"
         assert "pl.tile.move(" not in after.as_python(), "phi repair emitted an unlowerable Mat->Mat move"
 
 
