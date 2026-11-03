@@ -775,5 +775,121 @@ def test_fresh_backedge_preserves_live_payload_versions(
     _compile_native_loop(text, planner, tmp_path)
 
 
+@pytest.mark.parametrize("loop", ["for", "while"])
+def test_loop_if_branch_reuse_preserves_previous_iteration_payload(
+    loop, ascend_backend, pass_verification_instruments
+):
+    """Lexically exclusive producers can coexist with each other's preceding iteration."""
+    header = (
+        "for i, (current,) in pl.range(count, init_values=(seed,)):"
+        if loop == "for"
+        else "for i, current in pl.while_(init_values=(0, seed)):\n    pl.cond(i < count)"
+    )
+    backedge = (
+        "result = pl.yield_(selected)" if loop == "for" else "final_i, result = pl.yield_(i + 1, selected)"
+    )
+    body = (
+        """if i % 2 == 0:
+    a = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+    selected = pl.yield_(a)
+else:
+    c = pl.load(x, [8, 0], [4, 8], target_memory=pl.Mem.Vec)
+    selected = pl.yield_(c)
+pl.store(current, [0, 0], out)
+"""
+        + backedge
+    )
+    loop_body = header + "\n" + indent(body, "    ")
+    program = _program(
+        f"""
+        seed = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+{indent(loop_body, "        ")}
+        return pl.store(result, [4, 0], out)
+""",
+        input_shape="[12, 8]",
+        output_shape="[8, 8]",
+    )
+    lowered, _ = _lower(program, passes.MemoryPlanner.PYPTO, pass_verification_instruments)
+    _assert_dynamic_if_results(lowered)
+    _assert_descriptor_carries(lowered, 1)
+    nodes = _Nodes(lowered)
+    assert len(nodes.loops) == len(nodes.branches) == 1
+    loop_stmt, branch = nodes.loops[0], nodes.branches[0]
+    definitions = {statement.var.unique_id: statement for statement in nodes.assignments}
+    tiles = {
+        statement.var.name_hint.split("__", 1)[0]: statement.var
+        for statement in nodes.assignments
+        if isinstance(statement.var.type, ir.TileType)
+    }
+
+    def window(value):
+        tile = value.type
+        assert isinstance(tile, ir.TileType) and tile.memref is not None
+        offset = tile.memref.byte_offset_
+        assert isinstance(offset, ir.ConstInt)
+        return offset.value, offset.value + tile.memref.size_
+
+    def disjoint(left, right):
+        a, b = window(left), window(right)
+        return a[1] <= b[0] or b[1] <= a[0]
+
+    # Iteration zero produces A before observing seed; the next iteration
+    # produces C before observing A. A/C are not dynamically exclusive unless
+    # the preceding payload has already moved to independent retained storage.
+    assert disjoint(tiles["seed"], tiles["a"]), lowered.as_python()
+    index, current = next(
+        (index, argument)
+        for index, argument in enumerate(loop_stmt.iter_args)
+        if isinstance(argument.type, ir.TileType)
+    )
+    statements = loop_stmt.body.stmts if isinstance(loop_stmt.body, ir.SeqStmts) else [loop_stmt.body]
+    positions = {
+        statement.var.unique_id: position
+        for position, statement in enumerate(statements)
+        if isinstance(statement, ir.AssignStmt)
+    }
+    branch_position = next(i for i, statement in enumerate(statements) if isinstance(statement, ir.IfStmt))
+    calls = [
+        (i, statement.value if isinstance(statement, ir.AssignStmt) else statement.expr)
+        for i, statement in enumerate(statements)
+        if isinstance(statement, (ir.AssignStmt, ir.EvalStmt))
+    ]
+    old_read_position, old_read = next(
+        (i, call)
+        for i, call in calls
+        if isinstance(call, ir.Call) and call.op.name == ir.get_op("tile.store").name
+    )
+    assert old_read_position > branch_position
+
+    def moves_from(value: ir.Expr, source: ir.Var | ir.IterArg):
+        moves = []
+        while True:
+            assert isinstance(value, (ir.Var, ir.IterArg))
+            if value.unique_id == source.unique_id:
+                break
+            definition = definitions[value.unique_id]
+            assert isinstance(definition.value, ir.Call)
+            assert definition.value.op.name == ir.get_op("tile.move").name
+            moves.append(definition)
+            value = definition.value.args[0]
+        return moves
+
+    observed = old_read.args[0]
+    old_snapshots = moves_from(observed, current)
+    if old_snapshots:
+        assert all(positions[move.var.unique_id] < branch_position for move in old_snapshots)
+        assert all(disjoint(observed, tiles[name]) for name in ("a", "c")), lowered.as_python()
+    if not disjoint(tiles["a"], tiles["c"]) and not old_snapshots:
+        # Accept legal producer reuse only when the descriptor carried into
+        # the next iteration points at a protected payload, not at A/C's bytes.
+        yield_stmt = ir.get_last_yield_stmt(loop_stmt.body)
+        assert yield_stmt is not None
+        retained = yield_stmt.value[index]
+        transfers = moves_from(retained, branch.return_vars[0])
+        assert transfers, "overlapping producers need a retained version of the old carry"
+        assert all(positions[move.var.unique_id] > old_read_position for move in transfers)
+        assert all(disjoint(retained, tiles[name]) for name in ("a", "c")), lowered.as_python()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

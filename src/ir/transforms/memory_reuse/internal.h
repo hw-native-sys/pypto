@@ -57,7 +57,7 @@ using ReuseMap = std::map<VarPtr, ReusePlacement>;
 ReuseMap IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
     const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
-    const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+    const BranchExclusionInfo& branch_exclusion, const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,

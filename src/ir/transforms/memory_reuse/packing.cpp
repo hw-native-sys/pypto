@@ -150,7 +150,7 @@ struct PackedBuffer {
 ReuseMap IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
     const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
-    const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+    const BranchExclusionInfo& branch_exclusion, const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
@@ -221,14 +221,24 @@ ReuseMap IdentifyReuseOpportunities(
   // Decide whether a group-interval overlap between two intervals actually
   // blocks sharing.  This is invoked ONLY when their merged intervals overlap.
   //
-  // To keep behaviour identical to the prior coarse gate for everything that is
-  // not phi-related, we block unless a phi family makes the overlap spurious:
+  // When allocation ownership does not prove opposite If arms, preserve the
+  // existing phi-family rule rather than relaxing arbitrary merged overlaps:
   // some cross-group var pair must be phi-family-related (the same value across
   // mutually-exclusive scf.if paths), AND no *non*-family cross-group pair may
   // truly overlap.  The latter still catches a real conflict hidden behind a
   // branch-local alias of an outside-live buffer (e.g. `result = seed` aliasing
   // a `seed` that overlaps the sibling branch).
   auto overlap_blocks_sharing = [&](const LifetimeInterval& a, const LifetimeInterval& b) {
+    // Native Vec ownership is a pairwise branch proof, independent of phi slot
+    // families: co-live A/B in then can each exclude C in else without excluding
+    // one another. Ownership includes every definition of each original base.
+    // This only relaxes the lifetime gate; hazards, workspaces, no-alias, pinned
+    // storage and pipeline constraints still run, against every packed member.
+    if (a.memory_space == MemorySpace::Vec && b.memory_space == MemorySpace::Vec &&
+        (buffer_context == nullptr || !buffer_context->GetEnableBufferIR()) &&
+        branch_exclusion.AreMutuallyExclusive(a.branch_context, b.branch_context)) {
+      return false;
+    }
     const auto* ga = group_members(a.variable);
     const auto* gb = group_members(b.variable);
     const std::vector<VarPtr> sa = ga ? std::vector<VarPtr>{} : std::vector<VarPtr>{a.variable};
