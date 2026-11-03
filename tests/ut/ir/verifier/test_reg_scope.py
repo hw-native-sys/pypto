@@ -478,3 +478,102 @@ def test_register_control_flow_requires_unpacked_values(control_flow, nested, pa
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize(
+    "dtype,value", [(DataType.UINT32, -1), (DataType.UINT8, 256), (DataType.UINT32, 65536)]
+)
+def test_hardware_loop_static_unsigned_stop_is_checked_before_emission(dtype, value):
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        ir.ConstInt(value, dtype, SPAN),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    diagnostics = verify(region(loop))
+    assert any("stop" in d.message for d in diagnostics)
+
+
+@pytest.mark.parametrize("policy", [ir.HardwareLoopPolicy.Auto, ir.HardwareLoopPolicy.Require])
+@pytest.mark.parametrize("outer_stop", [0, 1])
+def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop, policy):
+    body = sequence()
+    for level in range(5):
+        body = ir.ForStmt(
+            scalar(f"i{level}"),
+            integer(0),
+            integer(65536),
+            integer(1),
+            [],
+            body,
+            [],
+            SPAN,
+            hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+        )
+    body = ir.ForStmt(
+        scalar("outer"),
+        integer(0),
+        integer(outer_stop),
+        integer(1),
+        [],
+        body,
+        [],
+        SPAN,
+        hardware_loop_policy=policy,
+    )
+    diagnostics = verify(region(body))
+    assert bool(diagnostics) == bool(outer_stop)
+
+
+@pytest.mark.parametrize("value", [-129, 128])
+def test_signed_stop_must_be_representable_before_empty_classification(value):
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        ir.ConstInt(value, DataType.INT8, SPAN),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("representable" in d.message for d in verify(region(loop)))
+
+
+def test_return_inside_hardware_loop_is_rejected_by_ir_verifier():
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        integer(2),
+        integer(1),
+        [],
+        ir.ReturnStmt([], SPAN),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("ReturnStmt" in d.message for d in verify(region(loop)))
+
+
+@pytest.mark.parametrize("stmt_type", [ir.BreakStmt, ir.ContinueStmt])
+@pytest.mark.parametrize("stop", [0, 2])
+def test_hardware_loop_rejects_break_continue_even_when_empty(stmt_type, stop):
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        integer(stop),
+        integer(1),
+        [],
+        stmt_type(SPAN),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    diagnostics = verify(region(loop))
+    assert any("is not supported inside hardware_loop" in d.message for d in diagnostics)

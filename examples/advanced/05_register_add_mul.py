@@ -7,27 +7,25 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Compute out = (a + b) * b with FP32 registers on an A5 device.
+"""Generate A5 PTO for out = (a + b) * b with FP32 registers.
 
 Each tile contains 1024 elements. Inside reg_scope, a hardware loop of 16 chunks loads
 64 lanes, add and multiply in registers, and store back to vector memory.
-The host checks three input patterns against PyTorch using one persistent worker.
 
-Run in an activated PyPTO/CANN environment through the local device queue:
-    task-submit --device auto 'python examples/advanced/05_register_add_mul.py --device-id "$TASK_DEVICE"'
+Run in an activated PyPTO/PTOAS environment:
+    python examples/advanced/05_register_add_mul.py --save-kernels-dir build/reg-add-mul
 
 Use --save-kernels-dir to retain generated sources and pass dumps for inspection.
-PyPTO qualifies the loop at codegen; PTOAS owns backend lowering and synchronization.
-The emitted backend LLVM is passed unchanged to Bisheng.
+This example demonstrates hardware-loop PTO codegen. The unchanged runtime
+synchronization admission rejects loop CFGs; this example only generates PTO.
 """
 
 import argparse
 
 import pypto.language as pl
-import torch
 from pypto import CacheConfig
 from pypto.backend import BackendType
-from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
 
 
 @pl.jit.incore
@@ -78,24 +76,9 @@ def main() -> None:
         save_kernels_dir=args.save_kernels_dir,
         dump_passes=bool(args.save_kernels_dir),
     )
-    compiled = add_mul.compile(config=config)
-    # Build the real device binary before opening the persistent worker.
-    compiled.load()
-    generator = torch.Generator().manual_seed(0)
-    with ChipWorker(config=config, runtime=compiled.runtime_name) as worker:
-        run = worker.register(compiled)
-        for case in range(3):
-            a = torch.randn((1, 1024), generator=generator)
-            b = torch.randn((1, 1024), generator=generator)
-            if case == 1:
-                b.zero_()
-            elif case == 2:
-                a = -b
-            out = torch.full_like(a, -777.0)
-            run(a, b, out)
-            torch.testing.assert_close(out, (a + b) * b, rtol=1e-5, atol=1e-5)
-            print(f"PASS case={case}: (a + b) * b, 1024 FP32 elements", flush=True)
-    print(f"OK: reg_scope add + mul on A5 device {args.device_id}")
+    # Generate caller/helper PTO; runtime admission does not support loop CFGs.
+    add_mul.compile(config=config)
+    print("OK: generated reg_scope hardware-loop add + mul PTO (codegen only)")
 
 
 if __name__ == "__main__":

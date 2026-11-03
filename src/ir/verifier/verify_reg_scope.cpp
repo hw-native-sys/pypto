@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -23,6 +24,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -203,11 +205,38 @@ class RegionChecker : public IRVisitor {
     // walk. No target profile or repeated per-loop body analysis is needed.
     const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
     if (hardware_loop) ++hardware_loop_depth_;
-    if (collecting_ && hardware_loop) {
-      if (hardware_loop_depth_ > 4)
-        Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
-      if (auto stop = As<ConstInt>(op->stop_); stop && stop->value_ > 65535) {
-        Error("Hardware loop stop must not exceed 65535", op->span_);
+    const bool previous_empty = empty_hardware_loop_;
+    const auto stop = As<ConstInt>(op->stop_);
+    const auto stop_type = As<ScalarType>(op->stop_->GetType());
+    const bool unsigned_stop = stop_type && stop_type->dtype_.IsUnsignedInt();
+    const auto bits = stop_type ? stop_type->dtype_.GetBit() : 64;
+    // Validate the literal before interpreting emptiness: narrowing an invalid
+    // signed or unsigned literal can change both sign and iteration count.
+    const bool invalid_stop =
+        stop && ((unsigned_stop && stop->value_ < 0) ||
+                 (bits < 63 && (unsigned_stop ? stop->value_ >= (int64_t{1} << bits)
+                                              : stop->value_ < -(int64_t{1} << (bits - 1)) ||
+                                                    stop->value_ >= (int64_t{1} << (bits - 1)))));
+    const auto start = As<ConstInt>(op->start_);
+    const auto step = As<ConstInt>(op->step_);
+    // Empty sequential ancestors suppress hardware realization requirements
+    // even when the ancestor uses Auto policy rather than Require.
+    if (start && stop && step && !invalid_stop &&
+        ((step->value_ > 0 && start->value_ >= stop->value_) ||
+         (step->value_ < 0 && start->value_ <= stop->value_))) {
+      empty_hardware_loop_ = true;
+    }
+    if (collecting_ && hardware_loop && !previous_empty) {
+      if (invalid_stop) {
+        Error("Hardware loop stop must be representable in its dtype", op->span_);
+      }
+      if (!empty_hardware_loop_) {
+        if (hardware_loop_depth_ > 4) {
+          Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
+        }
+        if (stop && stop->value_ > 65535) {
+          Error("Hardware loop stop must not exceed 65535", op->span_);
+        }
       }
     }
     const auto previous = yield_region_;
@@ -219,6 +248,7 @@ class RegionChecker : public IRVisitor {
     }
     IRVisitor::VisitStmt_(op);
     if (hardware_loop) --hardware_loop_depth_;
+    empty_hardware_loop_ = previous_empty;
     yield_region_ = previous;
   }
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -240,7 +270,20 @@ class RegionChecker : public IRVisitor {
     IRVisitor::VisitStmt_(op);
     region_ = previous;
   }
+  void VisitStmt_(const BreakStmtPtr& op) override {
+    if (collecting_ && hardware_loop_depth_ > 0) {
+      Error("BreakStmt is not supported inside hardware_loop", op->span_);
+    }
+  }
+  void VisitStmt_(const ContinueStmtPtr& op) override {
+    if (collecting_ && hardware_loop_depth_ > 0) {
+      Error("ContinueStmt is not supported inside hardware_loop", op->span_);
+    }
+  }
   void VisitStmt_(const ReturnStmtPtr& op) override {
+    if (collecting_ && region_) {
+      Error("ReturnStmt is not supported inside RegScope", op->span_);
+    }
     auto previous = region_;
     region_ = nullptr;
     IRVisitor::VisitStmt_(op);
@@ -291,6 +334,7 @@ class RegionChecker : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
   bool final_;
   int hardware_loop_depth_ = 0;
+  bool empty_hardware_loop_ = false;
   bool incore_;
   bool collecting_ = true;
   bool blocked_ = false;

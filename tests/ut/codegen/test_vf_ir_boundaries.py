@@ -68,8 +68,8 @@ def test_pto_codegen_rejects_register_typed_parameters_until_lowering_exists(fun
         codegen.PTOCodegen().generate(program)
 
 
-def test_pto_codegen_rejects_unimplemented_required_hardware_loop():
-    with pytest.raises(ValueError, match="Require.*Unknown.*HWL_UNSUPPORTED_PROFILE"):
+def test_pto_codegen_reuses_ir_verifier_for_required_hardware_loop():
+    with pytest.raises(ValueError, match="HardwareLoopPolicy.Require requires RegScope"):
         codegen.PTOCodegen().generate(_program(_loop()))
 
 

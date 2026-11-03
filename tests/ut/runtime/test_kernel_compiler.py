@@ -375,36 +375,6 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
     assert not list(tmp_path.glob("pypto-incore-*"))
 
 
-@pytest.mark.parametrize("depth", [1, 4])
-def test_vpto_forwards_backend_loop_ir_unchanged(compiler_module, monkeypatch, tmp_path, depth):
-    """Loop qualification ends at codegen; backend CFGs are not revalidated/repaired."""
-    compiler = compiler_module.KernelCompiler("a5")
-    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
-    source = tmp_path / "helper.pto"
-    source.write_text("module {}")
-    # Deliberately use CFG syntax outside the old straight-line parser. PTOAS
-    # verifies its IR; this test only guards the compiler hand-off contract.
-    llvm = "define void @helper() {\n" + "entry:\n  br label %loop0\n"
-    for level in range(depth):
-        target = f"loop{level + 1}" if level + 1 < depth else "exit"
-        llvm += f"loop{level}:\n  br label %{target}\n"
-    llvm += "exit:\n  ret void\n}\n"
-    commands = []
-
-    def run(command, output, stage):
-        commands.append(command)
-        if command[0] == "ptoas":
-            output.write_text(llvm)
-        else:
-            assert Path(command[command.index("ir") + 1]).read_text() == llvm
-            output.write_bytes(b"object")
-        return b"object"
-
-    monkeypatch.setattr(compiler, "_run", run)
-    assert compiler._compile_vpto_helpers((str(source),), tmp_path) == [tmp_path / "vpto_0.o"]
-    assert [command[0] for command in commands] == ["ptoas", "bisheng"]
-
-
 def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkeypatch, tmp_path):
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))

@@ -15,8 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend_config.h"
-#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -105,13 +103,9 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
   auto* context = PassContext::Current();
   const auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
-  const bool a5 = backend::BackendConfig::IsConfigured() &&
-                  backend::GetBackend()->GetHandler()->GetPtoTargetArch() == "a5";
   if (context && context->GetReportHardwareLoops()) {
     context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
   }
-  // A5 emits canonical PTO loops; it does not require final-machine-code evidence.
-  if (!a5) VerifyHardwareLoopRequirements(program, profile);
 
   // Reuse the IR verifier for register ownership and hardware-loop contracts.
   class VFInfrastructureChecker : public ir::IRVisitor {
