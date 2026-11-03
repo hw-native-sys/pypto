@@ -19,7 +19,7 @@ on:
 permissions: {}
 
 env:
-  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:518e4bd03afaad04fd1a65df32f75b8a6ec2d4cdfc34f200bf0d2b9c8d7b69c6
+  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:4a9bb9234cd214fdaacd82a7ba07145843d7c9eae843abe4f3f7ed3bf7a053ac
   CODEX_PROXY_IMAGE: localhost:5000/pypto-codex-proxy@sha256:632f77b3544d5c663cb08ac48b2150a7bfa6cb9bac0852fbcf620b1d4e284a6b
   CODEX_EGRESS_NETWORK: pypto-codex-egress
   CODEX_RELAY_CONTAINER: pypto-codex-proxy-relay
@@ -157,6 +157,7 @@ jobs:
       group: codex-review-${{ needs.prepare.outputs.number }}
       cancel-in-progress: true
     permissions:
+      actions: read
       contents: read
       pull-requests: read
       issues: read
@@ -219,6 +220,17 @@ jobs:
             --ignore-submodules=none "$merge_base" "$HEAD_SHA" >/dev/null
           echo "Complete review diff verified: $merge_base..$HEAD_SHA"
 
+      - name: Prepare review resource identities
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          # Publish identities before starting Docker or writing credential material.
+          echo "CODEX_RESOURCE_SUFFIX=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_ENV"
+          auth_snapshot=$(mktemp "$RUNNER_TEMP/codex-auth.XXXXXX")
+          echo "CODEX_AUTH_SNAPSHOT=$auth_snapshot" >>"$GITHUB_ENV"
+          secret_patterns=$(mktemp "$RUNNER_TEMP/codex-secret-patterns.XXXXXX")
+          echo "CODEX_SECRET_PATTERNS=$secret_patterns" >>"$GITHUB_ENV"
+
       - name: Review in an isolated container
         id: codex
         working-directory: ${{ steps.workspace.outputs.path }}
@@ -253,15 +265,22 @@ jobs:
           # Only conversation rollouts and their index persist, never auth/config.
           session_volume="pypto-codex-sessions-${REPOSITORY_ID}-${PR_NUMBER}"
           index_volume="${session_volume}-index"
-          auth_snapshot=$(mktemp "$RUNNER_TEMP/codex-auth.XXXXXX")
-          secret_patterns=$(mktemp "$RUNNER_TEMP/codex-secret-patterns.XXXXXX")
-          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}"
+          auth_snapshot="$CODEX_AUTH_SNAPSHOT"
+          secret_patterns="$CODEX_SECRET_PATTERNS"
+          suffix="$CODEX_RESOURCE_SUFFIX"
           review_network="codex-review-${suffix}"
           proxy_container="codex-proxy-${suffix}"
           review_container="codex-agent-${suffix}"
 
+          resource_labels=(
+            --label "org.pypto.codex-review.repository=$REPOSITORY_ID"
+            --label "org.pypto.codex-review.run=$GITHUB_RUN_ID"
+            --label "org.pypto.codex-review.attempt=$GITHUB_RUN_ATTEMPT"
+          )
+
           cleanup() {
             docker rm -f "$review_container" "$proxy_container" \
+              "codex-session-init-$suffix" "codex-session-read-$suffix" "codex-session-write-$suffix" \
               >/dev/null 2>&1 || true
             docker network rm "$review_network" >/dev/null 2>&1 || true
             rm -f "$auth_snapshot" "$secret_patterns"
@@ -285,6 +304,10 @@ jobs:
           exec 9>"$auth_lock"
           flock --exclusive 9
           command -v gh >/dev/null || { echo "GitHub CLI is required on the review runner" >&2; exit 1; }
+          # Load only trusted host code; the PR checkout must never control cleanup.
+          resource_cleaner="$session_tools/cleanup_codex_review_resources.py"
+          git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/cleanup_codex_review_resources.py" >"$resource_cleaner"
+          python "$resource_cleaner"
           # Recheck under the same lock used by close cleanup, before creating volumes.
           session_status=$(python "$session_tools/manage_codex_review_session.py" review)
           if [ "$session_status" = skipped ]; then
@@ -311,7 +334,7 @@ jobs:
           docker network create \
             --internal \
             --opt com.docker.network.bridge.inhibit_ipv4=true \
-            --label "org.pypto.codex-review.run=$GITHUB_RUN_ID" \
+            "${resource_labels[@]}" \
             "$review_network" >/dev/null
 
           # The dedicated runner provides this internal network and the
@@ -335,6 +358,7 @@ jobs:
           # review network has no host gateway and no route to other networks.
           docker run --detach \
             --name "$proxy_container" \
+            "${resource_labels[@]}" \
             --network "$CODEX_EGRESS_NETWORK" \
             --read-only \
             --cap-drop ALL \
@@ -354,6 +378,7 @@ jobs:
           # Volumes are scoped to the immutable base repository ID and PR number.
           # Initialize ownership with trusted image code, no network or PR mount.
           docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER \
+            --name "codex-session-init-$suffix" "${resource_labels[@]}" \
             --security-opt no-new-privileges --user 0:0 \
             --mount "type=volume,src=$session_volume,dst=/sessions" \
             --mount "type=volume,src=$index_volume,dst=/state" \
@@ -361,6 +386,7 @@ jobs:
             -ec 'chown 1002:1003 /sessions /state; chmod 700 /sessions /state'
           resume_args=()
           previous_session=$(docker run --rm --network none --read-only --cap-drop ALL \
+            --name "codex-session-read-$suffix" "${resource_labels[@]}" \
             --security-opt no-new-privileges --user 1002:1003 \
             --mount "type=volume,src=$index_volume,dst=/state,readonly" \
             --entrypoint /bin/sh "$CODEX_REVIEW_IMAGE" \
@@ -379,6 +405,7 @@ jobs:
           while ! docker run --rm \
             --interactive \
             --name "$review_container" \
+            "${resource_labels[@]}" \
             --hostname codex-review \
             --network "$review_network" \
             --read-only \
@@ -487,6 +514,7 @@ jobs:
           fi
           # Publish the checkpoint only after a completed, schema-valid review.
           docker run --rm --network none --read-only --cap-drop ALL \
+            --name "codex-session-write-$suffix" "${resource_labels[@]}" \
             --security-opt no-new-privileges --user 1002:1003 \
             --mount "type=volume,src=$index_volume,dst=/state" \
             --entrypoint /bin/sh "$CODEX_REVIEW_IMAGE" \
@@ -494,6 +522,32 @@ jobs:
             sh "$session_id"
           rm -f "$events"
           echo "completed=true" >>"$GITHUB_OUTPUT"
+
+      - name: Remove review containers and network
+        if: ${{ always() }}
+        timeout-minutes: 2
+        env:
+          REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          set -Eeuo pipefail
+          # This separate runner step survives cancellation of the review shell.
+          # Delete credential snapshots even when Docker cleanup fails.
+          trap 'rm -f -- "${CODEX_AUTH_SNAPSHOT:-}" "${CODEX_SECRET_PATTERNS:-}"' EXIT
+          filters=(
+            --filter "label=org.pypto.codex-review.repository=$REPOSITORY_ID"
+            --filter "label=org.pypto.codex-review.run=$GITHUB_RUN_ID"
+            --filter "label=org.pypto.codex-review.attempt=$GITHUB_RUN_ATTEMPT"
+          )
+          containers=$(docker container ls --all --quiet --no-trunc "${filters[@]}")
+          if [ -n "$containers" ]; then
+            mapfile -t container_ids <<<"$containers"
+            docker container rm --force "${container_ids[@]}"
+          fi
+          networks=$(docker network ls --quiet --no-trunc "${filters[@]}")
+          if [ -n "$networks" ]; then
+            mapfile -t network_ids <<<"$networks"
+            docker network rm "${network_ids[@]}"
+          fi
 
       - name: Upload review result
         id: upload_review
