@@ -93,9 +93,12 @@ root it wrote:
 2026-11-03 08:47:25.652 D | PyPTO artifacts written to /tmp/build_output/_jit_tile_add_20261103_084725_ksde7qr6
 ```
 
-Depending on the options, that directory contains `ptoas/` (the `.pto` per
-InCore function), `kernels/`, and `passes_dump/` when enabled. From the shell,
-the same opt-in is `PYPTO_LOG_LEVEL=debug`.
+Depending on the options, that directory contains `ptoas/` (ptoas
+intermediates, including the `.pto` per InCore function when ptoas runs),
+`kernels/` (compiled kernels; with `skip_ptoas=True` — including `@pl.jit` when
+ptoas is unavailable — the raw `.pto` files land here), and `passes_dump/` when
+enabled. From the shell, use `export PYPTO_LOG_LEVEL=debug`, or prefix the
+command: `PYPTO_LOG_LEVEL=debug python your_script.py`.
 
 ### Environment variables
 
