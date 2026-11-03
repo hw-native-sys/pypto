@@ -249,19 +249,20 @@ def sqrt(tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def rsqrt(tile: Tile, tmp: Tile | None = None) -> Tile:
+def rsqrt(tile: Tile, tmp: Tile | None = None, *, high_precision: bool = False) -> Tile:
     """Element-wise reciprocal square root.
 
     Args:
         tile: Input tile
-        tmp: Optional scratch tile (same shape/dtype as ``tile``) that activates
-            the high-precision PTO lowering.
+        tmp: Scratch tile (same shape/dtype as ``tile``), required only when
+            ``high_precision=True``. Omit it in default mode.
+        high_precision: Explicit precision selection, default False.
 
     Returns:
         Tile wrapping the rsqrt operation
     """
     tmp_expr = tmp.unwrap() if tmp is not None else None
-    call_expr = _ir_ops.rsqrt(tile.unwrap(), tmp_expr)
+    call_expr = _ir_ops.rsqrt(tile.unwrap(), tmp_expr, high_precision=high_precision)
     return Tile(expr=call_expr)
 
 
