@@ -281,7 +281,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     }
     auto value = GetExprAsCode(arg);
     auto type = operand_type(arg);
-    if (ir::IsOp(call, "reg.broadcast")) {
+    if (ir::IsOp(call, "reg.broadcast") || ir::IsOp(call, "reg.adds") || ir::IsOp(call, "reg.muls") ||
+        ir::IsOp(call, "reg.maximums") || ir::IsOp(call, "reg.minimums") || ir::IsOp(call, "reg.compares")) {
       auto scalar = ir::As<ir::ScalarType>(arg->GetType());
       if (scalar && scalar->dtype_.IsSignedInt()) {
         const auto signed_type = RegisterElement(scalar->dtype_);
@@ -296,12 +297,9 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
   }
   if (ir::IsOp(call, "reg.full_mask")) operands = "\"PAT_ALL\"";
   if (ir::IsOp(call, "reg.index_gen")) {
-    const auto reg_type = ir::As<ir::RegType>(validated->GetType());
-    CHECK_SPAN(reg_type && reg_type->dtype_ != DataType::BF16, call->span_)
-        << "reg.index_gen does not support BF16 VCI in PTOAS; use an integer index dtype";
     attrs = " {order = \"ASC\"}";
   }
-  if (ir::IsOp(call, "reg.compare")) {
+  if (ir::IsOp(call, "reg.compare") || ir::IsOp(call, "reg.compares")) {
     attrs = " {cmp = \"" + ir::GetStringKwarg(call->kwargs_, "predicate", "") + "\"}";
   }
   if (ir::IsOp(call, "reg.convert")) {
@@ -324,9 +322,11 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (!attrs.empty()) attrs += "}";
   }
 
-  if (args.size() == 3 && ir::As<ir::RegType>(args[0]->GetType()) && !ir::IsOp(call, "reg.compare") &&
-      !ir::IsOp(call, "reg.select")) {
-    attrs = " {pmode = \"zero\"}";
+  // Attribute-driven predication works for unary, binary and scalar families
+  // without confusing compare seeds or lane-permutation operands with masks.
+  for (const auto& [key, value] : call->kwargs_) {
+    if (key == "pmode") attrs = " {pmode = \"zero\"}";
+    if (key == "reassoc" && std::any_cast<bool>(value)) attrs = " {reassoc}";
   }
   auto name = NewNamedTemp(result->name_hint_);
   auto type = GetRegTypeString(ir::As<ir::RegType>(validated->GetType()));

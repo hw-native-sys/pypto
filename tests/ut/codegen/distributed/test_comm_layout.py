@@ -24,12 +24,12 @@ from pypto.pypto_core import ir
 
 def test_comm_context_layout_constants():
     layout = ir.comm_layout
-    assert layout.RANK_ID_OFFSET == 16
-    assert layout.RANK_NUM_OFFSET == 20
-    assert layout.WINDOWS_IN_OFFSET == 32
-    assert layout.WINDOWS_OUT_OFFSET == 544
+    assert layout.RANK_ID_OFFSET == 0
+    assert layout.RANK_NUM_OFFSET == 4
+    assert layout.WINDOWS_IN_OFFSET == 16
+    assert layout.WINDOWS_OUT_OFFSET == 528
     assert layout.WINDOW_SLOT_STRIDE == 8
-    assert layout.COMM_CTX_SIZE == 1056
+    assert layout.COMM_CTX_SIZE == 1088
 
 
 def test_window_slot_array_fits_between_in_and_out():

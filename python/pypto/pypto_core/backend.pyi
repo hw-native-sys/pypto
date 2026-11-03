@@ -108,6 +108,14 @@ class BackendHandler:
     """
 
     def get_pto_target_arch(self) -> str: ...
+    def has_hardware_loop_evidence(self, qualification: ir.HardwareLoopQualification, artifact: str) -> bool:
+        """Check final artifact evidence; unsupported targets return false."""
+        ...
+
+    def get_hardware_loop_profile(self) -> ir.HardwareLoopProfile:
+        """Return target capabilities; eligibility does not imply final evidence."""
+        ...
+
     def supports_reg_type(self, type: ir.RegType) -> bool:
         """Whether the target supports this logical VMI register type."""
         ...

@@ -120,8 +120,10 @@ Diagnostics require an output directory; this step reserves the configuration,
 while public DFX windows are a later step. The workspace budget follows the
 public Worker's minimum of 1024 bytes and excludes borrowed tensor storage.
 
-The runtime submodule follows upstream's Simpler pin
-`6b6b88f2353cca12cfafe809750b50b59931b0d1`. The existing `check_runtime_pin`
+The runtime submodule pins the matching Simpler revision
+`096efb9757a5fd9fab49fe01e553b3101adcc723`. Distributed codegen derives the
+1088-byte `CommContext` layout from this runtime and pins its field offsets
+with compile-time assertions. The existing `check_runtime_pin`
 policy remains authoritative for the installed native binding, including its
 missing-identity and explicit-skip rules. A separate availability check requires
 public borrowed init, caller-stream submit, Buffer/TaskArgs, RunHandle and

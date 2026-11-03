@@ -171,11 +171,20 @@ def _resolve_chip_worker(orch: Any, worker: int | None) -> int:
     return seq % chip_count
 
 
-def _reset_dfx_dispatch_state(orch: Any, chip_cids: dict[str, Any]) -> None:
-    """Reset the per-run dispatch state :func:`_submit_chip` reads off ``orch``.
+def _reset_dfx_dispatch_state(
+    orch: Any,
+    chip_cids: dict[str, Any],
+    *,
+    dispatch_idx: dict[str, int] | None = None,
+) -> None:
+    """Install the dispatch state :func:`_submit_chip` reads off ``orch``.
 
-    ``_dfx_dispatch_idx`` numbers each card's dispatches ``d0, d1, ...`` fresh per
-    run, so the swimlane two-pass files one dispatch under one directory.
+    ``_dfx_dispatch_idx`` numbers each card's dispatches ``d0, d1, ...`` and must
+    mirror the ChipWorker child's ``local_capture_index``, which spans the
+    *process*. Callers on a long-lived child (prepared and persistent workers)
+    therefore pass the worker-owned dict here so the numbering continues across
+    runs; the one-shot path, which forks a fresh child per pass, passes nothing
+    and gets a fresh counter. Reset when the child resets.
 
     ``_dfx_chip_names`` reverses the registered ``callables`` mapping so
     ``_submit_chip`` can name the L2 program behind an otherwise opaque
@@ -183,7 +192,7 @@ def _reset_dfx_dispatch_state(orch: Any, chip_cids: dict[str, Any]) -> None:
     hashable, and ``chip_cids`` holds every one alive for the whole run, so the
     ids are stable and unique.
     """
-    orch._dfx_dispatch_idx = {}
+    orch._dfx_dispatch_idx = {} if dispatch_idx is None else dispatch_idx
     orch._dfx_chip_names = {id(cid): name for name, cid in chip_cids.items()}
 
 
@@ -236,14 +245,14 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     this wrapper only derives the same directory — for the marker below and the
     offline post-pass — and forwards ``config`` untouched.
 
-    ``k`` comes from a per-card counter on ``orch`` reset at the top of every
-    run (see :func:`_reset_dfx_dispatch_state`), so it is this run's dispatch
-    ordinal. The child's own counter spans the whole process, so the two
-    numberings agree only on a worker's first run: the marker
-    :func:`_record_dispatch_program` stamps here therefore lands on the first
-    run's capture directory — the graph pass of a swimlane two-pass — and
-    :func:`_collect_l3_swimlane` reads it back through the capture pairing
-    rather than expecting it beside the records.
+    ``k`` comes from a per-card counter on ``orch`` that mirrors the child's own
+    ``local_capture_index``. Both are process-scoped: a prepared or persistent
+    worker carries the counter across runs, while a one-shot worker — which
+    forks a fresh child for each pass — starts it over. The marker
+    :func:`_record_dispatch_program` stamps therefore lands in the same
+    ``rank{w}/d{k}`` the child files that capture under, on the graph pass of a
+    swimlane two-pass; :func:`_collect_l3_swimlane` still resolves it through the
+    capture pairing.
 
     When DFX is off (``output_prefix`` unset) the call is forwarded unchanged.
 
@@ -263,9 +272,15 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
         idx_map = orch._dfx_dispatch_idx = cast("dict[str, int]", {})
     rank_label = _dfx_rank_label(worker)
     k = idx_map.get(rank_label, 0)
-    idx_map[rank_label] = k + 1
     _record_dispatch_program(orch, callable_id, Path(f"{base}/{rank_label}/d{k}"))
-    return orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    handle = orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    # Advance only once the submit is accepted. A synchronous rejection creates
+    # no capture, so counting it would leave every later marker one directory
+    # ahead of the child's own numbering -- self-correcting when the counter was
+    # reset per run, permanent now that a prepared worker carries it across
+    # runs. The marker already at ``d{k}`` is overwritten by the next submit.
+    idx_map[rank_label] = k + 1
+    return handle
 
 
 # ctypes retains the sender's explicit scalar width. In particular, Simpler

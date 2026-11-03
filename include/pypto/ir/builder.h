@@ -163,7 +163,8 @@ class IRBuilder {
    */
   void BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop, const ExprPtr& step,
                     const Span& span, ForKind kind = ForKind::Sequential,
-                    std::vector<std::pair<std::string, std::any>> attrs = {});
+                    std::vector<std::pair<std::string, std::any>> attrs = {},
+                    HardwareLoopPolicy policy = HardwareLoopPolicy::Auto);
 
   /**
    * @brief Add an iteration argument to the current for loop
@@ -670,13 +671,15 @@ class FunctionContext : public BuildContext {
 class ForLoopContext : public BuildContext {
  public:
   ForLoopContext(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, Span span,
-                 ForKind kind = ForKind::Sequential, std::vector<std::pair<std::string, std::any>> attrs = {})
+                 ForKind kind = ForKind::Sequential, std::vector<std::pair<std::string, std::any>> attrs = {},
+                 HardwareLoopPolicy policy = HardwareLoopPolicy::Auto)
       : BuildContext(Type::FOR_LOOP, std::move(span)),
         loop_var_(std::move(loop_var)),
         start_(std::move(start)),
         stop_(std::move(stop)),
         step_(std::move(step)),
         kind_(kind),
+        policy_(policy),
         attrs_(std::move(attrs)) {}
 
   void AddIterArg(const IterArgPtr& iter_arg) { iter_args_.push_back(iter_arg); }
@@ -690,6 +693,7 @@ class ForLoopContext : public BuildContext {
   [[nodiscard]] const std::vector<IterArgPtr>& GetIterArgs() const { return iter_args_; }
   [[nodiscard]] const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
   [[nodiscard]] ForKind GetKind() const { return kind_; }
+  [[nodiscard]] HardwareLoopPolicy GetPolicy() const { return policy_; }
   [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
 
  private:
@@ -698,6 +702,7 @@ class ForLoopContext : public BuildContext {
   ExprPtr stop_;
   ExprPtr step_;
   ForKind kind_;
+  HardwareLoopPolicy policy_;
   std::vector<std::pair<std::string, std::any>> attrs_;
   std::vector<IterArgPtr> iter_args_;
   std::vector<VarPtr> return_vars_;

@@ -280,6 +280,13 @@ chip.run                   71784.1us  ±6797.5  [66482.4..89832.6]
 故子节点时长之和不必等于父节点。要取原始 span 用
 `stats.invocations[i].by_name()[<name>].dur_us`。
 
+旧版 `chip.run.runner_run.device_boundaries` 记录使用主机时钟时间戳，即使属性包含
+`clk=dev`，也不会在树中标记为设备时钟。
+`chip.prewarm.build` 等仅用于准备阶段的跟踪分组会在丢弃预热 launch 之前被排除，
+即使它们与实际 dispatch 使用相同的 callable hash。
+排除后，L2 跟踪中所选 callable 的 dispatch 数量必须恰好为 `warmup + rounds`；
+否则 `benchmark` 会在丢弃预热记录之前抛出 `RuntimeError`，避免返回不完整或错位的样本。
+
 `benchmark` 也接受 L3 的 `DistributedCompiledProgram`，并会自行打开 prepared
 worker。参数应传共享内存 host 张量；外部分配的常驻张量属于另一个 worker，不能传入。
 同时省略 `platform=` / `device_id=`（设备集在编译期由 `distributed_config` 固定）。

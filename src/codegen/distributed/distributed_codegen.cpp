@@ -1904,7 +1904,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       CHECK_SPAN(tensor, call->span_) << "Distributed tensor returns must use flat return positions";
       if (plan[i].output_param) {
         const size_t param = *plan[i].output_param;
-        CHECK_SPAN(param < call->args_.size(), call->span_) << "Missing returned output argument";
+        INTERNAL_CHECK_SPAN(param < call->args_.size(), call->span_) << "Missing returned output argument";
         return_tensors[i] = GetExprAsCode(call->args_[param]);
         continue;
       }
@@ -2497,7 +2497,7 @@ ir::ExprPtr DistributedCodegen::ResolveEmbeddedContextOrigin(const ir::ExprPtr& 
     break;
   }
   const auto query = ir::As<ir::Call>(current);
-  CHECK_SPAN(
+  INTERNAL_CHECK_SPAN(
       projections.empty() && query && ir::IsOp(query, "pld.system.get_comm_ctx") && query->args_.size() == 1,
       span)
       << "Embedded CommCtx must be a received formal or a window context query";
