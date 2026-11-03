@@ -105,6 +105,43 @@ def test_program_round_trips_and_defs(storage):
     ir.assert_structural_equal(launch, clone, enable_auto_mapping=True)
 
 
+def test_deep_clone_retypes_launch_results_and_mapping():
+    view_type = ir.TensorType(
+        [64], DataType.FP32, tensor_view=ir.TensorView(stride=[1], layout=ir.TensorLayout.ND)
+    )
+    source = ir.Var("source", view_type, SPAN)
+    replacement = ir.Var("replacement", ir.TensorType([64], DataType.FP32), SPAN)
+    first, second = (ir.Var(name, view_type, SPAN) for name in ("first", "second"))
+    callee = ir.GlobalVar("helper")
+    dims = [integer(64), integer(1), integer(1)]
+    before = ir.SeqStmts(
+        [
+            ir.SimtLaunchStmt(callee, dims, [source], [first], [0], SPAN),
+            ir.SimtLaunchStmt(callee, dims, [first], [second], [0], SPAN),
+            ir.ReturnStmt([first, second], SPAN),
+        ],
+        SPAN,
+    )
+
+    after, mapping = ir.deep_clone(before, [(source, replacement)])
+
+    assert isinstance(after, ir.SeqStmts)
+    first_launch, second_launch, ret = after.stmts
+    assert isinstance(first_launch, ir.SimtLaunchStmt)
+    assert isinstance(second_launch, ir.SimtLaunchStmt)
+    assert isinstance(ret, ir.ReturnStmt)
+    assert first_launch.args[0] is replacement
+    assert second_launch.args[0] is first_launch.results[0]
+    assert ret.value[0] is first_launch.results[0]
+    assert ret.value[1] is second_launch.results[0]
+    clones = dict(mapping)
+    assert set(clones) == {first, second}
+    for original, launch in ((first, first_launch), (second, second_launch)):
+        assert clones[original] is launch.results[0]
+        assert launch.results[0] is not original
+        ir.assert_structural_equal(launch.results[0].type, replacement.type)
+
+
 def test_access_summary_and_physical_store_effect():
     program, _ = make_program()
     helper = require_function(program, "helper")
