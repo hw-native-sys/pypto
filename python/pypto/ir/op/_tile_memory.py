@@ -1012,9 +1012,11 @@ def set_validshape(
     """Update valid-shape metadata of a tile without data movement.
 
     .. note::
-        The operand must not be a view (a ``pl.tile.slice`` or reshape result): a
-        view carries its valid extent in its type, so there is nothing to update.
-        Narrow at the slice with ``valid_shape=`` instead.
+        A ``pl.tile.slice`` window is supported when the result is assigned.
+        Buffer lowering rebuilds it from its original parent and offsets.
+        Relabelled-window setters remain on Tile IR. Other view operands are
+        not covered by this support: their valid extent is part of the view
+        type. Narrow at the slice with ``valid_shape=`` instead.
 
     Args:
         tile: Input tile expression (must be 2D TileType)

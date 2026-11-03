@@ -998,6 +998,55 @@ def _compile_dynamic_state_native(lowered, tmp_path, planner):
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("consumer", ["slice", "reshape", "reinterpret", "assemble"])
+def test_static_window_setter_dominates_view_consumers(tmp_path, planner, consumer):
+    body = {
+        "slice": "value = pl.tile.slice(narrowed, [4, 32], [2, 16])",
+        "reshape": "value = pl.reshape(narrowed, [8, 128])",
+        "reinterpret": "value = pl.tile.reinterpret_view(narrowed, pl.INT32)",
+        "assemble": """target = pl.tile.full([16, 64], pl.FP32, -1.0)
+        value = pl.tile.assemble(target, narrowed, [0, 0])""",
+    }[consumer]
+    dtype = "INT32" if consumer == "reinterpret" else "FP32"
+    program = pl.parse_program(f"""
+@pl.program
+class StaticWindowSetter:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32],
+               out: pl.InOut[pl.Tensor[[32, 128], pl.{dtype}]]
+               ) -> pl.Tensor[[32, 128], pl.{dtype}]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 64], [8, 0])
+        narrowed = pl.tile.set_validshape(window, 8, 64)
+        {body}
+        return pl.store(value, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.BufferIR)
+    assert passes.PropertyVerifierRegistry.verify(properties, lowered) == []
+    ir.assert_structural_equal(lowered, ir.deserialize(ir.serialize(lowered)))
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    out = torch.full((32, 128), -777, dtype=torch.int32 if consumer == "reinterpret" else torch.float32)
+    expected = out.clone()
+    if consumer == "slice":
+        expected[:4, :32] = x[10:14, 16:48]
+    elif consumer == "reshape":
+        expected[:4, :128] = x[8:16].reshape(4, 128)
+    elif consumer == "reinterpret":
+        expected[:8, :64] = x[8:16].view(torch.int32)
+    else:
+        expected[:16, :64] = -1
+        expected[:8, :64] = x[8:16]
+    namespace["kernel"](x, out)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    _compile_dynamic_state_native(lowered, tmp_path, planner)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("kind", ["window_setter", "if", "for", "while"])
 def test_default_dynamic_valid_state_regions(tmp_path, planner, kind):
     body = {

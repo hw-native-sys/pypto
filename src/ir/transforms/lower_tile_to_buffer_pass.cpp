@@ -914,8 +914,13 @@ class TileToBufferMutator : public IRMutator {
           << "LowerTileToBuffer: window setter requires an unrelabelled slice source";
       // Rebuild from the original parent and offsets, not from the narrowed
       // view. Widening valid metadata must not accumulate its offset twice.
-      window_recipes_[result_type.get()] = recipe->second;
-      deferred_windows_[result_type.get()] = {recipe->second, result};
+      const auto original_slice = recipe->second;
+      window_recipes_[result_type.get()] = original_slice;
+      if (!NeedsRuntimeBufferValid(result_type)) {
+        // Static windows must also dominate slice, relabel and assemble uses.
+        return LowerCall(original_slice, result);
+      }
+      deferred_windows_[result_type.get()] = {original_slice, result};
       return Empty(call->span_);
     }
     const bool store = IsOp(call, "tile.store");
