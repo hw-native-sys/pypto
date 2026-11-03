@@ -57,6 +57,8 @@ _KWARGS: dict[str, dict] = {
     "tile.cmp": {"cmp_type": 0},
     "tile.gather_compare": {"cmp_mode": 0, "out_cols": 32},
     "tile.mrgsort_format2": {"exhausted": False},
+    # The multi-tile probe includes rsqrt scratch, which requires an explicit flag.
+    "tile.rsqrt": {"high_precision": True},
     "tile.scatter_mask": {"mask_pattern": 1},
     "tile.tmov_x2zz": {"group_axis": 1},
     "tile.tquant_mx_raw": {"group_axis": 1},
