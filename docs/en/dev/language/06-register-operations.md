@@ -328,16 +328,12 @@ element without enlarging `valid_shape`. Indexed effects retain the allocation
 root and predicate but have unknown interval endpoints. Like dynamic offsets,
 they do not establish static initialization proofs. VF helpers capture the
 whole accessed Tile conservatively (`read` for gather, `readwrite` for scatter).
-Existing helper ABI restrictions, including matching capture element types,
-still apply; mixed-type data/index Tiles can instead use the diagnostic VMI path.
+Mixed-dtype captures use typed pointers derived from the same UB base.
 
-Indexed codegen emits a `VV_ALL` barrier before and after each gather/scatter,
-because the current PTOAS barrier pass does not track their dependencies.
-The runtime synchronization validator treats indexed accesses as potentially
-overlapping the whole UB allocation. Contiguous accesses retain conservative
-256-byte physical-register footprints even with a smaller logical lane count.
-The validator rejects unknown intrinsics, pointer provenance and missing
-barriers; it does not infer disjointness from the index vectors.
+Indexed codegen emits a `VV_ALL` barrier before and after each gather/scatter
+as a workaround for the reproduced missing scatter-to-gather barrier in
+[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730). PTOAS owns
+VF dependency analysis; PyPTO does not recheck barrier coverage in emitted LLVM.
 
 ```python
 with pl.reg_scope():
@@ -383,7 +379,10 @@ lane count. The independent accumulator and result are UINT16 VecRegs with
 128 or 256 bins, covering 0–127 or 0–255. The mask does not gate accumulator
 bins: an empty mask returns the accumulator unchanged. Both operations return
 new register values without mutating `acc`. Cumulative bins 128–255 include
-counts from values below 128 as well.
+counts from values below 128 as well. Results can be stored back over the loaded
+accumulator with `pl.reg.store`; PTOAS determines ordering from memory and SSA
+dependencies. The A5 regression covers both histogram operations with in-place
+128/256-bin updates, including accumulator wraparound.
 
 Grouped-mask geometry consists of positive static integers. The active count
 is an INDEX scalar or integer literal in `[0, group_size]`; dynamic counts are

@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pypto.runtime import _vpto, _vpto_sync
+from pypto.runtime import _vpto
 from test_validation import ROOT, run
 
 pytestmark = pytest.mark.skipif(
@@ -116,7 +116,6 @@ def test_static_alias_sync(kind: str, offset: int, relation: str):
     assert len(report["barrier_calls"]) == expected, report
     log = (directory / "lower.log").read_text()
     assert "PTOInsertVecScopeMemBar" in log
-    _vpto_sync.validate_sync_contract((directory / "helper.ll").read_text(), str(directory / "helper.pto"))
 
 
 @pytest.mark.parametrize("kind", ["wr", "rw", "ww"])
@@ -125,10 +124,6 @@ def test_disabled_auto_sync_control(kind: str):
     directory = (output / f"{kind}-disabled-32").resolve()
     report = compile_helper(directory, helper_source(kind, 32), enabled=False)
     assert not report["barrier_calls"]
-    with pytest.raises(ValueError, match="missing .* barrier"):
-        _vpto_sync.validate_sync_contract(
-            (directory / "helper.ll").read_text(), str(directory / "helper.pto")
-        )
 
 
 @pytest.mark.parametrize("relation", ["unknown", "dynamic"])
@@ -147,8 +142,7 @@ def test_unresolved_relation_is_not_rejected_by_ptoas(kind: str, relation: str):
         json.dumps(
             {
                 "compiler_accepted": True,
-                "required_contract": "reject unresolved relation",
-                "contract_satisfied": False,
+                "unresolved_relation": relation,
                 "hardware_executed": False,
             },
             indent=2,
@@ -159,11 +153,15 @@ def test_unresolved_relation_is_not_rejected_by_ptoas(kind: str, relation: str):
 
 @pytest.mark.parametrize("relation", ["unknown", "dynamic"])
 @pytest.mark.parametrize("kind", ["wr", "rw", "ww"])
-def test_production_compiler_rejects_unresolved_relationship(monkeypatch, kind, relation):
-    compiler_class = importlib.import_module("pypto.runtime.kernel_compiler").KernelCompiler
+def test_production_compiler_defers_to_ptoas(monkeypatch, kind, relation):
+    """Preserve PTOAS diagnostics without imposing another LLVM admission model.
 
+    These are compilation probes only; unknown pointer relationships do not
+    establish a hardware correctness verdict.
+    """
+    compiler_class = importlib.import_module("pypto.runtime.kernel_compiler").KernelCompiler
     output = Path(os.environ.get("PYPTO_VPTO_ALIAS_OUTPUT", ROOT / "build/vf-alias-validation"))
-    directory = (output / f"production-reject-{kind}-{relation}").resolve()
+    directory = (output / f"production-{kind}-{relation}").resolve()
     directory.mkdir(parents=True, exist_ok=True)
     source = directory / "helper.pto"
     source.write_text(helper_source(kind, 32, relation))
@@ -176,19 +174,14 @@ def test_production_compiler_rejects_unresolved_relationship(monkeypatch, kind, 
         return original(command, output, phase)
 
     monkeypatch.setattr(compiler, "_run", record)
-    with pytest.raises((ValueError, RuntimeError)) as error:
-        compiler._compile_vpto_helpers((str(source),), directory)
-    message = str(error.value)
     if relation == "dynamic" and kind in ("rw", "ww"):
-        assert "proven store alignment" in message
+        with pytest.raises(RuntimeError, match="proven store alignment"):
+            compiler._compile_vpto_helpers((str(source),), directory)
+        assert len(commands) == 1 and Path(commands[0][0]).name == "ptoas"
     else:
-        assert "unsupported VF synchronization contract" in message
-    assert len(commands) == 1 and Path(commands[0][0]).name == "ptoas"
-    assert not list(directory.glob("*.o"))
-    (directory / "rejection.json").write_text(
-        json.dumps({"error": message, "commands": commands, "device_compilation_started": False}, indent=2)
-        + "\n"
-    )
+        objects = compiler._compile_vpto_helpers((str(source),), directory)
+        assert len(objects) == 1 and objects[0].stat().st_size > 0
+        assert [Path(command[0]).name for command in commands] == ["ptoas", "bisheng"]
 
 
 def masked_helper_source(kind: str, offset: int, mode: str) -> str:
@@ -234,7 +227,6 @@ def test_masked_alias_compiler_contract(kind, offset, mode):
     directory = (output / f"masked-{kind}-{offset}-{mode}").resolve()
     report = compile_helper(directory, masked_helper_source(kind, offset, mode))
     assert len(report["barrier_calls"]) == (1 if offset < 64 else 0), report
-    _vpto_sync.validate_sync_contract((directory / "helper.ll").read_text(), str(directory / "helper.pto"))
 
 
 def interleaved_helper_source(offset: int) -> str:
@@ -275,36 +267,20 @@ def interleaved_helper_source(offset: int) -> str:
 
 
 @pytest.mark.parametrize("offset", [8, 32, 64])
-def test_interleaved_masked_barriers_and_missing_edge_rejection(offset):
+def test_interleaved_masked_barriers(offset):
     output = Path(os.environ.get("PYPTO_VPTO_ALIAS_OUTPUT", ROOT / "build/vf-masked-alias/compiler"))
     directory = (output / f"interleaved-{offset}").resolve()
     report = compile_helper(directory, interleaved_helper_source(offset))
     assert len(report["barrier_calls"]) == (5 if offset < 64 else 3)
-    llvm = (directory / "helper.ll").read_text()
-    _vpto_sync.validate_sync_contract(llvm, "interleaved.pto")
-    lines = llvm.splitlines()
-    rejected = []
-    for i, line in enumerate(lines):
-        if "call void @llvm.hivm.mem.bar" not in line:
-            continue
-        damaged = "\n".join(lines[:i] + lines[i + 1 :])
-        with pytest.raises(ValueError, match="missing .* barrier") as error:
-            _vpto_sync.validate_sync_contract(damaged, "removed-barrier.pto")
-        rejected.append({"removed": line.strip(), "error": str(error.value)})
-    (directory / "removed-barriers.json").write_text(json.dumps(rejected, indent=2) + "\n")
 
 
 @pytest.mark.parametrize("mode", ["prefix32", "dynamic", "split"])
 @pytest.mark.parametrize("kind", ["wr", "rw", "ww"])
-def test_masked_full_footprint_policy_rejects_disabled_sync(kind, mode):
+def test_masked_disabled_auto_sync_control(kind, mode):
     output = Path(os.environ.get("PYPTO_VPTO_ALIAS_OUTPUT", ROOT / "build/vf-masked-alias/compiler"))
     directory = (output / f"disabled-masked-{kind}-{mode}").resolve()
     report = compile_helper(directory, masked_helper_source(kind, 0, mode), enabled=False)
     assert not report["barrier_calls"]
-    # Complementary-mask cases document the current full-footprint policy,
-    # not a claim that their active lanes really overlap.
-    with pytest.raises(ValueError, match="missing .* barrier"):
-        _vpto_sync.validate_sync_contract((directory / "helper.ll").read_text(), "disabled.pto")
 
 
 if __name__ == "__main__":

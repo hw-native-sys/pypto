@@ -20,7 +20,6 @@ from pypto.ir.op import tile
 from pypto.ir.printer import python_print
 from pypto.language.parser import ParserError
 from pypto.runtime._vpto import PTOAS_FLAGS
-from pypto.runtime._vpto_sync import validate_sync_contract
 
 SPAN = ir.Span.unknown()
 CASES = [
@@ -356,7 +355,6 @@ def test_extended_vf_helpers_compile_to_llvm(name, dtype, statement, tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    validate_sync_contract((tmp_path / "helper.ll").read_text(), str(path))
 
 
 @pytest.mark.ptoas_compile
@@ -452,7 +450,6 @@ def kernel(n: pl.Scalar[pl.INDEX]):
     assert result.returncode == 0, result.stderr
     assert "llvm.hivm.chistv2" in llvm.read_text()
     assert "llvm.hivm.dhistv2" in llvm.read_text()
-    validate_sync_contract(llvm.read_text(), str(source))
 
 
 if __name__ == "__main__":

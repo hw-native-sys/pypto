@@ -296,13 +296,12 @@ scatter 的值必须匹配 Tile dtype。已有的连续 Vec Tile 几何约束仍
 必须互不相同。非活动 lane 不访问内存；scatter 保留所有未写入元素，也不扩大
 `valid_shape`。索引访存效果保留分配根和掩码，但区间端点未知；与动态 offset 一样，
 不构成静态初始化证明。VF helper 保守捕获整个 Tile：gather 为 `read`，scatter 为
-`readwrite`。现有 helper ABI 限制仍适用，包括捕获 Tile 的元素类型必须一致；
-包含不同类型数据/索引 Tile 的情况可以使用诊断 VMI 路径。
+`readwrite`。不同 dtype 的捕获通过同一 UB 基址派生出的对应类型指针访问。
 
-当前 PTOAS 屏障 pass 未跟踪索引访存依赖，因此 codegen 在每次 gather/scatter
-前后发射 `VV_ALL` 屏障。运行时同步校验器将索引访存视为可能覆盖整个 UB 分配。
-连续访存保守使用 256 字节物理寄存器范围，即使逻辑 lane 数较少也不缩小该范围。
-校验器拒绝未知 intrinsic、无法证明来源的指针和缺失的屏障，不根据索引向量推断互不重叠。
+索引 codegen 在每次 gather/scatter 前后发射 `VV_ALL` 屏障，临时处理
+[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 中已复现的
+scatter 到 gather 自动屏障缺失问题。VF 依赖分析由 PTOAS 负责，PyPTO 不再
+检查生成 LLVM 中的屏障覆盖情况。
 
 ```python
 with pl.reg_scope():
@@ -344,7 +343,9 @@ RegScope 会报错，避免丢失元数据；二进制序列化保留这些字�
 直方图的 `source` 为 UINT8 VecReg，掩码 lane 数必须与**源**一致。
 累加器与结果独立使用 128 或 256 lane 的 UINT16 VecReg，分别覆盖 bin 0–127 或 0–255。
 掩码不控制累加器 bin；空掩码保留原累加器值。两个算子均返回新寄存器值，不修改 `acc`。
-累积直方图的 bin 128–255 也包含小于 128 的源值计数。
+累积直方图的 bin 128–255 也包含小于 128 的源值计数。结果可通过 `pl.reg.store`
+原地写回已读取的累加器区域；PTOAS 根据访存与 SSA 数据依赖确定顺序。
+A5 回归覆盖两个直方图算子的 128/256-bin 原地更新，包括累加器溢出回绕。
 
 分组掩码的组数和组大小必须为正静态整数。每组活动数量为 INDEX 标量或整数字面量，
 范围为 `[0, group_size]`。支持动态数量，由调用者保证范围；常量数量会在构造时检查。

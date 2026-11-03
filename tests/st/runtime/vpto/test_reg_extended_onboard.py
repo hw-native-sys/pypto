@@ -80,6 +80,13 @@ def _histogram_body(bins):
             c = pl.reg.store(c, offset=256, value=h)
             c = pl.reg.store(c, offset=512, value=d)
             c = pl.reg.store(c, offset=768, value=h2)
+            # chist writes over its original accumulator. dhist reloads its
+            # output and updates that same interval, exercising both SSA-ordered
+            # writeback and PTOAS store-to-load synchronization on real hardware.
+            c = pl.reg.store(c, offset=0, value=h)
+            d_acc = pl.reg.load(c, offset=512, lanes=bins)
+            d2 = pl.reg.dhist(d_acc, x, mask)
+            c = pl.reg.store(c, offset=512, value=d2)
         c = pl.reshape(c, [1, 1024])
         pl.store(c, [0, 0], out)
         return out
@@ -373,7 +380,8 @@ def _golden(case, data, n):
         cumulative = np.cumsum(counts)[:bins]
         acc = expected[:bins].astype(np.uint64)
         expected[256 : 256 + bins] = ((acc + cumulative) % 65536).astype(np.uint16)
-        expected[512 : 512 + bins] = ((acc + counts[:bins]) % 65536).astype(np.uint16)
+        expected[:bins] = ((acc + cumulative) % 65536).astype(np.uint16)
+        expected[512 : 512 + bins] = ((acc + 2 * counts[:bins]) % 65536).astype(np.uint16)
         expected[768 : 768 + bins] = ((acc + 2 * cumulative) % 65536).astype(np.uint16)
         return expected
     if case == "reinterpret":

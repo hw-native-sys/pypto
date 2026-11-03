@@ -299,10 +299,29 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
-@pytest.mark.parametrize("bridge", [False, True])
-def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monkeypatch, tmp_path, bridge):
+@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "bridge"])
+def test_vpto_compilation_links_helpers_and_rejects_bridge(
+    compiler_module, monkeypatch, tmp_path, helper_kind
+):
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    # A load-dependent writeback needs no additional frontend synchronization
+    # proof. Forward the LLVM produced by PTOAS unchanged to Bisheng.
+    writeback = """declare <64 x float> @llvm.hivm.vldsx1.v64f32(ptr addrspace(6), i32, i32, i32)
+declare void @llvm.hivm.vstsx1.v64f32(<64 x float>, ptr addrspace(6), i32, i32, i32, <256 x i1>)
+define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
+  %acc = call <64 x float> @llvm.hivm.vldsx1.v64f32(ptr addrspace(6) %base, i32 0, i32 0, i32 0)
+  %result = fadd <64 x float> %acc, %acc
+  call void @llvm.hivm.vstsx1.v64f32(<64 x float> %result, ptr addrspace(6) %base,
+    i32 0, i32 2, i32 0, <256 x i1> %mask)
+  ret void
+}
+"""
+    llvm = {
+        "empty": "define void @helper() {\n  ret void\n}\n",
+        "ssa_writeback": writeback,
+        "bridge": "declare void @bridge()",
+    }[helper_kind]
     helpers = [tmp_path / "first.pto", tmp_path / "second.pto"]
     for helper in helpers:
         helper.write_text("module {}")
@@ -312,10 +331,10 @@ def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monk
         commands.append(command)
         output = Path(command[command.index("-o") + 1])
         if command[0] == "ptoas":
-            output.write_text(
-                "declare void @bridge()" if bridge else "define void @helper() {\n  ret void\n}\n"
-            )
+            output.write_text(llvm)
         else:
+            if command[0] == "bisheng":
+                assert Path(command[command.index("ir") + 1]).read_text() == llvm
             if command[0] == "linker":
                 order = next(
                     arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering-file=")
@@ -326,7 +345,7 @@ def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monk
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), vpto_sources=list(map(str, helpers)))
-    if bridge:
+    if helper_kind == "bridge":
         with pytest.raises(ValueError, match="not self-contained: bridge"):
             compiler.compile_incore(_source(tmp_path), **kwargs)
         assert not any(command[0] == "linker" for command in commands)
@@ -369,7 +388,7 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto, "LINK_SYMBOL_ORDER", ("another_entry",))
     identities.append(key())
-    monkeypatch.setattr(compiler_module._vpto_sync, "VERSION", "next-contract")
+    monkeypatch.setattr(compiler_module._vpto, "PTOAS_FLAGS", ("--enable-vecscope-mem-bar=true",))
     identities.append(key())
     assert len(set(identities)) == 7
 
