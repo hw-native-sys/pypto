@@ -74,6 +74,15 @@ print(pypto.get_log_level())
 
 `NONE` / `FATAL` / `ERROR` / `WARN` / `INFO` / `EVENT` / `DEBUG`，依次更吵。默认是 `INFO`。
 
+`DEBUG` 级别下，成功的编译还会打印产物根目录的绝对路径：
+
+```text
+2026-11-03 08:47:25.652 D | PyPTO artifacts written to /tmp/build_output/_jit_tile_add_20261103_084725_ksde7qr6
+```
+
+视编译选项而定，该目录包含 `ptoas/`（每个 InCore 函数的 `.pto`）、`kernels/`，以及启用后的
+`passes_dump/`。在 shell 里同样用 `PYPTO_LOG_LEVEL=debug` 打开。
+
 ### 环境变量
 
 | 变量 | 控制 |

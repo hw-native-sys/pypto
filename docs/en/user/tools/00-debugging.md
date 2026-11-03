@@ -86,6 +86,17 @@ print(pypto.get_log_level())
 `NONE` / `FATAL` / `ERROR` / `WARN` / `INFO` / `EVENT` / `DEBUG`, increasing in volume.
 `INFO` is the default.
 
+At `DEBUG`, a successful compile also prints the absolute path of the artifact
+root it wrote:
+
+```text
+2026-11-03 08:47:25.652 D | PyPTO artifacts written to /tmp/build_output/_jit_tile_add_20261103_084725_ksde7qr6
+```
+
+Depending on the options, that directory contains `ptoas/` (the `.pto` per
+InCore function), `kernels/`, and `passes_dump/` when enabled. From the shell,
+the same opt-in is `PYPTO_LOG_LEVEL=debug`.
+
 ### Environment variables
 
 | Variable | Controls |
