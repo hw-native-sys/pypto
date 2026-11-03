@@ -194,14 +194,14 @@ def main() -> int:
         print(f"\n{len(todo)} invocation(s)")
         return 0
 
-    # The ring intrinsic selects distinct Tile handles before narrowing the
-    # tail. PTOAS cannot set_validshape on that scf.if result yet; keep the
+    # The allreduce intrinsics select Tile handles before narrowing the tail.
+    # PTOAS cannot set_validshape on that scf.if result yet; keep the
     # documented invocation listed and report its temporary exclusion openly.
     skipped = [
         argv
         for argv in todo
-        if argv[0] == "examples/distributed/11_allreduce_reveal.py"
-        and argv[-4:] == ["-d", "0,1,2,3", "--mode", "ring"]
+        if argv[0]
+        in {"examples/distributed/11_allreduce_reveal.py", "examples/distributed/16_putting_it_together.py"}
     ]
     for argv in skipped:
         print(f"SKIP  {' '.join(argv)} (https://github.com/hw-native-sys/PTOAS/issues/1708)", flush=True)
