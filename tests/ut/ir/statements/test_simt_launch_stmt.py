@@ -113,15 +113,13 @@ def test_deep_clone_retypes_launch_results_and_mapping():
     replacement = ir.Var("replacement", ir.TensorType([64], DataType.FP32), SPAN)
     first, second = (ir.Var(name, view_type, SPAN) for name in ("first", "second"))
     callee = ir.GlobalVar("helper")
-    dims = [integer(64), integer(1), integer(1)]
-    before = ir.SeqStmts(
-        [
-            ir.SimtLaunchStmt(callee, dims, [source], [first], [0], SPAN),
-            ir.SimtLaunchStmt(callee, dims, [first], [second], [0], SPAN),
-            ir.ReturnStmt([first, second], SPAN),
-        ],
-        SPAN,
-    )
+    dims: list[ir.Expr] = [integer(64), integer(1), integer(1)]
+    stmts: list[ir.Stmt] = [
+        ir.SimtLaunchStmt(callee, dims, [source], [first], [0], SPAN),
+        ir.SimtLaunchStmt(callee, dims, [first], [second], [0], SPAN),
+        ir.ReturnStmt([first, second], SPAN),
+    ]
+    before = ir.SeqStmts(stmts, SPAN)
 
     after, mapping = ir.deep_clone(before, [(source, replacement)])
 
@@ -134,10 +132,9 @@ def test_deep_clone_retypes_launch_results_and_mapping():
     assert second_launch.args[0] is first_launch.results[0]
     assert ret.value[0] is first_launch.results[0]
     assert ret.value[1] is second_launch.results[0]
-    clones = dict(mapping)
-    assert set(clones) == {first, second}
+    assert len(mapping) == 2
     for original, launch in ((first, first_launch), (second, second_launch)):
-        assert clones[original] is launch.results[0]
+        assert any(key is original and clone is launch.results[0] for key, clone in mapping)
         assert launch.results[0] is not original
         ir.assert_structural_equal(launch.results[0].type, replacement.type)
 
