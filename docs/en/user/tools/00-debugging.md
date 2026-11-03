@@ -86,19 +86,16 @@ print(pypto.get_log_level())
 `NONE` / `FATAL` / `ERROR` / `WARN` / `INFO` / `EVENT` / `DEBUG`, increasing in volume.
 `INFO` is the default.
 
-At `DEBUG`, a successful compile also prints the absolute path of the artifact
-root it wrote:
+At `DEBUG`, a successful compile prints the absolute artifact root:
 
 ```text
 2026-11-03 08:47:25.652 D | PyPTO artifacts written to /tmp/build_output/_jit_tile_add_20261103_084725_ksde7qr6
 ```
 
-Depending on the options, that directory contains `ptoas/` (ptoas
-intermediates, including the `.pto` per InCore function when ptoas runs),
-`kernels/` (compiled kernels; with `skip_ptoas=True` — including `@pl.jit` when
-ptoas is unavailable — the raw `.pto` files land here), and `passes_dump/` when
-enabled. From the shell, use `export PYPTO_LOG_LEVEL=debug`, or prefix the
-command: `PYPTO_LOG_LEVEL=debug python your_script.py`.
+The directory holds `kernels/` (compiled kernels; the raw `.pto` files with
+`skip_ptoas=True`, including `@pl.jit` without ptoas), `ptoas/` (the `.pto`
+inputs and other ptoas intermediates when ptoas runs), and `passes_dump/` when
+enabled. Enable it with `export PYPTO_LOG_LEVEL=debug`.
 
 ### Environment variables
 
