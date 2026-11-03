@@ -354,6 +354,8 @@ class ForbidAliasCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
+  std::map<const Var*, std::vector<VarPtr>> TakeRecurrentInputs() { return std::move(recurrent_inputs_); }
+
   ForbidAliasMap Take() {
     for (auto& [output, inputs] : forbidden_) {
       static_cast<void>(output);
@@ -426,6 +428,12 @@ class ForbidAliasCollector : public IRVisitor {
     for (const auto& input : forbidden_inputs) {
       const auto& roots = StorageRoots(input);
       inputs.insert(roots.begin(), roots.end());
+      const auto source_type = As<TileType>(input->GetType());
+      const auto output_type = GetTileTypeWithMemRef(output->GetType());
+      if (source_type && !source_type->memref_ && output_type &&
+          std::binary_search(roots.begin(), roots.end(), output)) {
+        recurrent_inputs_[output.get()].push_back(input);
+      }
     }
     for (const auto& root : StorageRoots(output)) {
       const auto rep_it = member_to_rep_.find(root.get());
@@ -435,6 +443,7 @@ class ForbidAliasCollector : public IRVisitor {
     }
   }
 
+  std::map<const Var*, std::vector<VarPtr>> recurrent_inputs_;
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
   const TileStorageSources& storage_sources_;
@@ -1009,6 +1018,7 @@ void CollectAccessConstraints(const FunctionPtr& func, const LifetimeAnalysisRes
                                         lifetimes.storage_sources);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
+  result.recurrent_inputs = forbid_collector.TakeRecurrentInputs();
 }
 
 }  // namespace

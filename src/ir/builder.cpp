@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <any>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -26,15 +27,56 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+// Loop slots have one region type on the backedge and the exit. An explicit
+// result annotation can describe a dynamic Tile even when the entry operand
+// owns a fixed allocation. Finalize the parameter after result types are known,
+// rather than treating its temporary entry-based inference as authoritative.
+// This applies to both For and While and uses the existing typed-yield syntax.
+class FinalizeLoopParameterTypes : public IRMutator {
+ public:
+  void Run(std::vector<IterArgPtr>& arguments, const std::vector<VarPtr>& results, StmtPtr& body,
+           ExprPtr* condition = nullptr) {
+    for (size_t i = 0; i < arguments.size() && i < results.size(); ++i) {
+      const auto input = As<TileType>(arguments[i]->GetType());
+      const auto output = As<TileType>(results[i]->GetType());
+      if (!input || !output || !input->memref_ || output->memref_) continue;
+      auto argument =
+          std::make_shared<IterArg>(arguments[i]->name_hint_, CloneTypeWithMemRef(input, std::nullopt),
+                                    arguments[i]->initValue_, arguments[i]->span_);
+      replacements_[arguments[i].get()] = argument;
+      arguments[i] = argument;
+    }
+    if (replacements_.empty()) return;
+    if (condition) *condition = VisitExpr(*condition);
+    body = VisitStmt(body);
+  }
+
+ protected:
+  ExprPtr VisitExpr_(const IterArgPtr& argument) override {
+    const auto found = replacements_.find(argument.get());
+    return found == replacements_.end() ? IRMutator::VisitExpr_(argument) : found->second;
+  }
+
+ private:
+  std::map<const IterArg*, IterArgPtr> replacements_;
+};
+
+}  // namespace
 
 // ========== IRBuilder Implementation ==========
 
@@ -168,11 +210,14 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
   Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
                      end_span.begin_line_, end_span.begin_column_);
 
+  auto arguments = loop_ctx->GetIterArgs();
+  FinalizeLoopParameterTypes().Run(arguments, loop_ctx->GetReturnVars(), body);
+
   // Create for statement
-  auto for_stmt = std::make_shared<ForStmt>(
-      loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(), loop_ctx->GetStep(),
-      loop_ctx->GetIterArgs(), body, loop_ctx->GetReturnVars(), combined_span, loop_ctx->GetKind(),
-      loop_ctx->GetAttrs(), std::vector<std::string>{}, loop_ctx->GetPolicy());
+  auto for_stmt = std::make_shared<ForStmt>(loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(),
+                                            loop_ctx->GetStep(), arguments, body, loop_ctx->GetReturnVars(),
+                                            combined_span, loop_ctx->GetKind(), loop_ctx->GetAttrs(),
+                                            std::vector<std::string>{}, loop_ctx->GetPolicy());
 
   // Pop context
   context_stack_.pop_back();
@@ -237,9 +282,13 @@ StmtPtr IRBuilder::EndWhileLoop(const Span& end_span) {
   Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
                      end_span.begin_line_, end_span.begin_column_);
 
+  auto arguments = loop_ctx->GetIterArgs();
+  auto condition = loop_ctx->GetCondition();
+  FinalizeLoopParameterTypes().Run(arguments, loop_ctx->GetReturnVars(), body, &condition);
+
   // Create while statement
-  auto while_stmt = std::make_shared<WhileStmt>(loop_ctx->GetCondition(), loop_ctx->GetIterArgs(), body,
-                                                loop_ctx->GetReturnVars(), combined_span);
+  auto while_stmt =
+      std::make_shared<WhileStmt>(condition, arguments, body, loop_ctx->GetReturnVars(), combined_span);
 
   // Pop context
   context_stack_.pop_back();

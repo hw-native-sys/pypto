@@ -27,7 +27,6 @@
 #include <sstream>
 #include <string>
 #include <tuple>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -92,52 +91,6 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
-
-// Fixed-buffer loops cannot consume a runtime storage choice as proof of one
-// destination. Diagnose unresolved boundaries after retargeting, which may prove
-// ordinary in-place branch updates share storage. Ifs used only in the body are
-// unaffected. Full descriptor carries/rotation belong to a separate lowering.
-class CheckNativeLoopSelections : public ir::IRVisitor {
- public:
-  explicit CheckNativeLoopSelections(const ir::StmtPtr& body) : info_(ir::AnalyzeTileSelections(body)) {}
-
-  template <typename LoopPtr>
-  void Loop(const LoopPtr& op) {
-    bool may_execute = true;
-    if constexpr (std::is_same_v<LoopPtr, ir::ForStmtPtr>) {
-      const auto start = As<ir::ConstInt>(op->start_);
-      const auto stop = As<ir::ConstInt>(op->stop_);
-      const auto step = As<ir::ConstInt>(op->step_);
-      if (start && stop && step && step->value_ != 0) {
-        may_execute = step->value_ > 0 ? start->value_ < stop->value_ : start->value_ > stop->value_;
-      }
-    } else if (const auto condition = As<ir::ConstBool>(op->condition_)) {
-      may_execute = condition->value_;
-    }
-    if (may_execute) {
-      const auto yield = ir::transform_utils::GetLastYieldStmt(op->body_);
-      for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-        if (!info_.carries.count(op->iter_args_[i].get())) continue;
-        // An unchanged carry only forwards its actual initializer, including a
-        // selected initializer. It requires no write into a fixed destination.
-        if (yield && i < yield->value_.size() && yield->value_[i] == op->iter_args_[i]) continue;
-        CHECK_SPAN(false, op->span_)
-            << "A Tile selected by an if cannot cross an updating loop-carry boundary on the "
-               "legacy Tile path yet. This loop carries '"
-            << op->iter_args_[i]->name_hint_
-            << "'. Use one fixed Tile buffer for the carry or move the selection after the loop; "
-               "native descriptor carries require separate loop lowering.";
-      }
-    }
-    ir::IRVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
-  // Native While carries the actual Tile descriptors through scf.while.
-  void VisitStmt_(const WhileStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
-
- private:
-  ir::TileSelectionInfo info_;
-};
 
 // Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
 // this name reserved in modules that use deferred completion so a user kernel
@@ -1144,7 +1097,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   fs_.Reset();
   fs_.current_function = func;
-  if (func->body_) CheckNativeLoopSelections(func->body_).VisitStmt(func->body_);
 
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into

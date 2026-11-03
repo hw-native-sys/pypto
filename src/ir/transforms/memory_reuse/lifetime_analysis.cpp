@@ -23,6 +23,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -204,7 +205,7 @@ class LifetimeAnalyzer : public IRVisitor {
     }
 
     // Propagate greatest use positions through descriptor bindings. Native
-    // While introduces backedges, so a reverse definition walk is insufficient.
+    // loops introduce backedges, so a reverse definition walk is insufficient.
     // Processing demands in descending order finalizes each node once; every
     // edge is relaxed at most once, for O((N + E) log N) time including cycles.
     std::priority_queue<std::pair<int, VarPtr>> demands;
@@ -225,14 +226,14 @@ class LifetimeAnalyzer : public IRVisitor {
       }
     }
     // A backedge source can be consumed before its lexical definition on the
-    // next iteration. Its allocation must survive the entire While, including
+    // next iteration. Its allocation must survive the entire loop, including
     // temporaries preceding that definition. Propagate the earliest header to
     // every possible source, rather than assuming the initializer owns carry
     // storage. A branch family is not exclusive across different iterations.
     std::priority_queue<std::pair<int, VarPtr>, std::vector<std::pair<int, VarPtr>>,
                         std::greater<std::pair<int, VarPtr>>>
         headers;
-    for (const auto& [value, order] : while_headers_) headers.emplace(order, value);
+    for (const auto& [value, order] : loop_headers_) headers.emplace(order, value);
     finalized.clear();
     while (!headers.empty()) {
       const auto [order, value] = headers.top();
@@ -408,14 +409,26 @@ class LifetimeAnalyzer : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    ProcessLoopBody(op->iter_args_, op->body_);
-    RegisterReturnVars(op->iter_args_, op->return_vars_);
+    const bool descriptor_carry =
+        native_if_ && std::any_of(op->iter_args_.begin(), op->iter_args_.end(), [](const auto& arg) {
+          const auto tile = As<TileType>(arg->GetType());
+          return tile && !tile->memref_;
+        });
+    if (descriptor_carry) {
+      VisitLoop(op);
+    } else {
+      ProcessLoopBody(op->iter_args_, op->body_);
+      RegisterReturnVars(op->iter_args_, op->return_vars_);
+    }
   }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitLoop(op); }
 
-  void VisitStmt_(const WhileStmtPtr& op) override {
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& op) {
     if (!native_if_) {
       ProcessLoopBody(op->iter_args_, op->body_);
-      CollectUsesFromExpr(op->condition_, current_order_);
+      if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>)
+        CollectUsesFromExpr(op->condition_, current_order_);
       RegisterReturnVars(op->iter_args_, op->return_vars_);
       return;
     }
@@ -431,9 +444,15 @@ class LifetimeAnalyzer : public IRVisitor {
         if (auto next = AsVarLike(yield->value_[i])) sources.push_back(next);
       }
       RegisterStorageBinding(argument, std::move(sources), start, /*selection=*/true);
-      while_headers_.emplace_back(argument, start);
+      loop_headers_.emplace_back(argument, start);
     }
-    CollectUsesFromExpr(op->condition_, start);
+    if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) {
+      CollectUsesFromExpr(op->condition_, start);
+    } else {
+      CollectUsesFromExpr(op->start_, start);
+      CollectUsesFromExpr(op->stop_, start);
+      CollectUsesFromExpr(op->step_, start);
+    }
     VisitStmt(op->body_);
     const int end = current_order_++;
     loop_scopes_.push_back({start, end});
@@ -445,7 +464,7 @@ class LifetimeAnalyzer : public IRVisitor {
   int current_order_ = 0;
   bool native_if_;
   TileStorageSources storage_sources_;
-  std::vector<std::pair<VarPtr, int>> while_headers_;
+  std::vector<std::pair<VarPtr, int>> loop_headers_;
   std::map<const Var*, int> binding_points_;
   std::set<const Var*> selection_aliases_;
 

@@ -53,7 +53,7 @@ program_with_memrefs = init_pass(program)
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
-   - **Loop return variables**: follow their carry initializer's MemRef
+   - **Loop parameters and results**: native While Tile slots and For Tile slots connected to runtime selection have no fixed MemRef; stationary For slots retain their fixed-storage optimization
    - **IfStmt Tile results**: retain common shape/dtype/memory-space metadata but no fixed MemRef, including when both arms yield the same source. Their required aliases and views also remain without fixed storage; actual payload producers still receive MemRefs
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
@@ -276,23 +276,29 @@ gaps, listed here so the table above is not mistaken for a claim of correctness:
   structure as the accumulator. Their slice offsets carry the same latent mismatch and are
   deliberately left unchanged here; modelling them is separate work.
 
-## ForStmt Loop-Carry Variables
+## Loop-carried Tiles
 
-ForStmt has four loop-carry related variables with specific MemRef sharing rules:
+On the native Tile path, a While parameter/result is a descriptor, not an
+allocation. The same applies to For slots whose initializer or backedge is
+connected to an If selection. Entry and backedge operands own their actual
+storage; neither loop entry nor yield requires a copy into one fixed carry
+buffer. `InitMemRef` preserves shape, dtype, memory space and view metadata while
+leaving these region parameters/results without a MemRef. Aliasing operations
+follow that dynamic storage through the body.
 
-| Role | Description | MemRef Source |
-| ---- | ----------- | ------------- |
-| initValue | Initial value before first iteration | From producing operation |
-| iter_arg | Loop body variable | Inherited from initValue |
-| yield value | Produced at end of each iteration | From producing operation (independent) |
-| return_var | Captures final yield value after loop | Inherited from yield value |
+The native-selection predicate is shared with `SelectBufferIRFunctions`, so this
+also holds when global Buffer IR is enabled but a Tile-valued If forces the
+function onto the native path. Capability selection still runs after MemRef
+initialization, where it can check concrete view/stride metadata.
 
-**Sharing groups**:
+Stationary For slots retain the existing optimization: the parameter initially
+shares its initializer's MemRef and the result follows the yielded value.
+`MaterializeSemanticAliases` and yield fixup reconcile their fixed destinations.
+Buffer IR retains its existing fixed-window rules.
 
-- Group A: initValue + iter_arg (same MemRef)
-- Group B: yield value + return_var (same MemRef)
-
-Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by MemoryReuse (which inserts `tile.move` if needed).
+IR reconstruction finalizes loop parameter types from the typed loop results
+once the body is complete. This preserves descriptor parameters through ordinary
+printed-IR round trips even when their initializers have fixed MemRefs.
 
 ## Implementation
 

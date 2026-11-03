@@ -42,6 +42,18 @@ program = passes.materialize_semantic_aliases()(program)
 
 ## Algorithm
 
+Native While carries and For carries connected to runtime selection retain
+SSA descriptors without fixed carry storage. They bypass entry isolation,
+producer retargeting and fixed-destination yield copies. The rules below apply
+to stationary For slots and Buffer IR boundaries.
+
+A non-inplace operation can receive its own previous output through a descriptor
+backedge. Before allocation, this pass uses the shared operator no-alias analysis
+to materialize an independent input snapshot for that recurrent operand. This
+copy protects the operator's read while it writes its output; it does not change
+the loop's descriptor carry or depend on capacity. Operations that allow the
+input/output alias require no such snapshot.
+
 `InitMemRef` already gives the loop-carried `iter_arg` and `return_var` the same
 MemRef as the `initValue` (the accumulator buffer), but the *producer* of the
 yielded value — e.g. the `tile.add` that computes `acc_next` — is still assigned
@@ -226,7 +238,8 @@ Alias normalization keeps native If results and their dependent descriptors
 without fixed MemRefs after producer rewrites. This also applies when both arms
 happen to refer to the same storage; their common memory space is still retained.
 
-Native While Tile carries are SSA descriptors passed through `scf.while`,
+Native While Tile carries and For slots connected to runtime selection are SSA
+descriptors passed through `scf.for` or `scf.while`,
 `scf.condition` and `scf.yield`. Their iter_args and results have no fixed MemRef;
 entry does not copy a selected initializer into a permanent carry allocation.
 Swaps and fanout rebind descriptors simultaneously without payload writebacks.
@@ -235,27 +248,11 @@ retain their existing in-place behavior. Initializer and yielded Tile descriptor
 types must match. Lifetime analysis follows both initializer and backedge
 sources, preserving backedge allocations across the entire loop iteration.
 
-Native For carries retain fixed buffers, input isolation, selected-source safety
-checks and required writebacks. Choices those rules cannot safely handle are
-diagnosed; this does not reject every selected initializer or backedge.
-
-Before inserting multiple For-carry writebacks, the existing yield fixup checks
-the original selected sources. A bounded source summary permits choices that read only
-their own destination or storage untouched by every copy. Other conditional
-multi-copy boundaries are diagnosed; inserted moves must not hide an implicit
-swap from this check. A selected source that may name its own destination is
-snapshotted into independent storage before any writeback, including for a
-single carry. This prevents runtime self-moves. If every source path is proven
-to name exactly the same carry window, with unchanged shape, layout and validity,
-no transfer or scratch is needed. A fresh or unknown source prevents that proof,
-even when one candidate matches the carry. Scratch storage is explicit
-before lifetime and address planning; explicit materializing copies retain their
-existing behavior.
-An initializer selected before a For loop can remain dynamic when every yielded
-path writes back through the same iteration handle. Required carry aliases keep
-no MemRef, and this handle-identity proof never makes the If result static.
-A single row of Acc NZ boxes also keeps the same fixed-carry payload pitch when
-valid rows change; that boundary needs no Acc-to-Acc transfer.
+Stationary For slots retain their existing fixed-storage optimization and
+writeback repair. Dynamic slots bypass those rules: selected initializers,
+conditional updates, swaps and fanout carry the chosen descriptors directly.
+Only operator no-alias constraints can require a recurrent input snapshot;
+that snapshot is independent of the descriptor carried by the loop.
 
 When producers already share one physical allocation, PTO codegen declares
 that storage before sibling regions and initializes logical validity at each
@@ -279,8 +276,8 @@ subview path and its PTOAS limitations.
 on the native Tile path, regardless of whether it also contains For/While loops
 and even when Buffer IR is globally enabled. Buffer lowering currently erases
 Tile region results and cannot represent this dynamic handle choice.
-The native Tile path keeps the existing For-carry writeback repair and uses
-SSA Tile descriptors for While carries. Buffer IR retains its existing canonical
+The native Tile path uses SSA Tile descriptors for selected For carries and
+While carries; stationary For slots retain fixed-storage writeback repair. Buffer IR retains its existing canonical
 loop fixups. These boundaries do not change the native Tile If routing rule.
 
 ### Staged Buffer IR pipeline

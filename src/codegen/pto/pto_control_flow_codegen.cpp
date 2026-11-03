@@ -488,14 +488,13 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   std::string loop_var_name = NewNamedTemp(op->loop_var_->name_hint_);
   BindVarToMlir(op->loop_var_, loop_var_name);
 
-  // Scalars and registers (including masks) are immutable SSA values and need
-  // iter_args/yield to carry each iteration's result. TileType and TensorType
-  // are mutable references written in-place via outs(), so they are mapped
-  // directly to their init values and excluded from iter_args/yield.
+  // Scalars, registers and Tile descriptors are loop-carried SSA values.
+  // Tensor/array backing storage retains its existing in-place reference.
   std::vector<bool> is_ssa(op->iter_args_.size(), false);
   bool has_ssa_iter_args = false;
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType())) {
+    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType()) ||
+        As<TileType>(op->iter_args_[i]->GetType())) {
       is_ssa[i] = true;
       has_ssa_iter_args = true;
     }
@@ -612,7 +611,19 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       BindVarToMlir(iter_arg, iter_name);
       iter_arg_names.push_back(iter_name);
 
-      iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
+      if (auto tile = As<TileType>(iter_arg->GetType())) {
+        const auto& initial = init_values.back();
+        const auto type = GetSSATileBufType(initial);
+        INTERNAL_CHECK_SPAN(!type.empty(), op->span_)
+            << "Internal error: missing native For initializer descriptor type";
+        iter_arg_types.push_back(type);
+        const auto physical = GetSSATileType(initial);
+        RegisterTileBufType(iter_name, type, physical ? physical : tile);
+        RegisterSelectedTileName(iter_name);
+        if (IsTileViewName(initial)) RegisterTileViewName(iter_name);
+      } else {
+        iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
+      }
     }
 
     // Register return_vars SSA names (SSA values only)
@@ -622,6 +633,12 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       std::string ret_name = NewNamedTemp(op->return_vars_[i]->name_hint_);
       BindVarToMlir(op->return_vars_[i], ret_name);
       return_var_names.push_back(ret_name);
+      if (As<TileType>(op->return_vars_[i]->GetType())) {
+        const auto slot = return_var_names.size() - 1;
+        RegisterTileBufType(ret_name, iter_arg_types[slot], GetSSATileType(init_values[slot]));
+        RegisterSelectedTileName(ret_name);
+        if (IsTileViewName(init_values[slot])) RegisterTileViewName(ret_name);
+      }
     }
 
     // Emit: %ret0 = scf.for %i = %start to %stop step %step
@@ -638,7 +655,13 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     std::vector<std::string> ssa_yields;
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (is_ssa[i] && i < fs_.yield_buffer.size()) {
-        ssa_yields.push_back(fs_.yield_buffer[i]);
+        const auto& value = fs_.yield_buffer[i];
+        if (As<TileType>(op->iter_args_[i]->GetType())) {
+          CHECK_SPAN(GetSSATileBufType(value) == iter_arg_types[ssa_yields.size()], op->span_)
+              << "Native For Tile carry requires matching initializer and yielded descriptor types; "
+              << "got " << GetSSATileBufType(value) << " versus " << iter_arg_types[ssa_yields.size()];
+        }
+        ssa_yields.push_back(value);
       }
     }
 
@@ -658,7 +681,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       Emit(yield_oss.str());
     }
     CHECK(ssa_yields.size() == iter_arg_types.size())
-        << "ForStmt scalar yield count (" << ssa_yields.size() << ") must match scalar iter_args ("
+        << "ForStmt SSA yield count (" << ssa_yields.size() << ") must match SSA iter_args ("
         << iter_arg_types.size() << ")";
     fs_.yield_buffer.clear();
 
@@ -782,6 +805,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
         for (const auto& name : {before_arg_names.back(), after_arg_names.back()}) {
           RegisterTileBufType(name, type, physical ? physical : tile);
           RegisterSelectedTileName(name);
+          if (IsTileViewName(initial)) RegisterTileViewName(name);
         }
       } else {
         iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
@@ -800,6 +824,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
         const auto slot = return_var_names.size() - 1;
         RegisterTileBufType(ret_name, iter_arg_types[slot], GetSSATileType(init_values[slot]));
         RegisterSelectedTileName(ret_name);
+        if (IsTileViewName(init_values[slot])) RegisterTileViewName(ret_name);
       }
     }
 

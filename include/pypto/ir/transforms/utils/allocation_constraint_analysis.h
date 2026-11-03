@@ -77,6 +77,11 @@ struct AllocationConstraintAnalysis {
   std::set<const Var*> declared_allocation_bases;
   AllocationHazardInputs target_hazard_inputs;
   AllocationForbidAliasMap forbid_alias;
+  // Fresh outputs whose forbidden dynamic inputs can denote that same output
+  // on a later iteration. Snapshot those operands before the non-inplace op;
+  // assigning descriptors alone cannot make a single allocation disjoint from
+  // itself across a backedge. Keyed by output Var, values are operand Vars.
+  std::map<const Var*, std::vector<VarPtr>> recurrent_inputs;
   bool needs_load_tpop_hazard_guard = false;
 };
 

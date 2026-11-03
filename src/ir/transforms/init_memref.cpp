@@ -21,6 +21,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -51,7 +52,9 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -546,7 +549,7 @@ class InitMemRefMutator : public IRMutator {
     auto new_init = VisitExpr(iter_arg->initValue_);
 
     // Extract MemRef from initValue and create new type
-    auto memref = GetTypeMemRef(new_init->GetType());
+    auto memref = native_carries_.count(old_var.get()) ? std::nullopt : GetTypeMemRef(new_init->GetType());
     auto old_var_expr = std::static_pointer_cast<const Expr>(old_var);
     auto source_memory_space = ExtractMemorySpaceFromType(new_init->GetType());
     TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
@@ -651,6 +654,12 @@ class InitMemRefMutator : public IRMutator {
     VarPtr new_var;
     if (auto selected = if_result_sources_.find(old_var); selected != if_result_sources_.end()) {
       new_var = VisitIfResult(old_var, selected->second);
+    } else if (native_carries_.count(old_var.get()) && !As<IterArg>(old_var)) {
+      new_var = std::make_shared<Var>(
+          old_var->name_hint_,
+          CloneTypeWithMemRefAndRemapExprs(old_var->GetType(), std::nullopt,
+                                           [this](const ExprPtr& expr) { return VisitExpr(expr); }),
+          old_var->span_);
     } else if (std::dynamic_pointer_cast<const IterArg>(old_var)) {
       new_var = ProcessIterArg(old_var);
     } else {
@@ -860,8 +869,9 @@ class InitMemRefMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    RegisterNativeCarries(op);
     // Manual traversal of ForStmt fields to ensure correct MemRef assignment:
-    // - iter_args inherit MemRef from initValue (via ProcessIterArg)
+    // - stationary iter_args inherit MemRef; descriptor slots remain dynamic
     // - return_vars share MemRef with corresponding yield values
 
     // Step 1: Visit loop bounds and loop_var
@@ -873,7 +883,7 @@ class InitMemRefMutator : public IRMutator {
     auto new_stop = VisitExpr(op->stop_);
     auto new_step = VisitExpr(op->step_);
 
-    // Step 2: Process iter_args (inherits MemRef from initValue via ProcessIterArg)
+    // Step 2: Process iter_args, preserving dynamic native descriptor slots
     std::vector<IterArgPtr> new_iter_args;
     new_iter_args.reserve(op->iter_args_.size());
     for (const auto& ia : op->iter_args_) {
@@ -920,10 +930,9 @@ class InitMemRefMutator : public IRMutator {
     new_for->body_ = new_body;
     new_for->return_vars_ = new_return_vars;
 
-    // Patch return_vars so each shares its iter_arg's MemRef (inherited from initValue).
-    // This establishes the invariant that initValue/iter_arg/return_var all share the
-    // same MemRef buffer — the loop accumulator lives in one place for the whole loop.
-    // Any yield-vs-buffer mismatch is the concern of downstream passes.
+    // Results have their region parameter's storage semantics: dynamic slots
+    // stay without MemRef, while stationary slots share the initializer buffer.
+    // Only fixed-storage slots require downstream yield/writeback repair.
     if (new_for->iter_args_.empty() || new_for->return_vars_.empty()) {
       return new_for;
     }
@@ -942,7 +951,9 @@ class InitMemRefMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    RegisterNativeCarries(op);
     auto result = IRMutator::VisitStmt_(op);
+    if (UsesNativeCarries()) return result;
     auto loop = As<WhileStmt>(result);
     if (!loop || loop->return_vars_.empty()) return result;
     // Match the ForStmt invariant: the result is the carried storage even if
@@ -1004,6 +1015,42 @@ class InitMemRefMutator : public IRMutator {
     return {std::move(patched), changed};
   }
 
+ public:
+  void SeedDescriptorCarries(const FunctionPtr& function) {
+    descriptor_carries_ = AnalyzeTileSelections(function->body_).carries;
+    force_native_carries_ = RequiresNativeTileSelection(function);
+  }
+
+ private:
+  bool force_native_carries_ = false;
+
+  bool UsesNativeCarries() const {
+    const auto* context = PassContext::Current();
+    return force_native_carries_ || context == nullptr || !context->GetEnableBufferIR();
+  }
+
+  template <typename LoopPtr>
+  void RegisterNativeCarries(const LoopPtr& loop) {
+    if (!UsesNativeCarries()) return;
+    // The entry operand owns storage; a region argument/result denotes the
+    // descriptor arriving along the entry/backedge, not that fixed allocation.
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& arg = loop->iter_args_[i];
+      if (!As<TileType>(arg->GetType())) continue;
+      if constexpr (std::is_same_v<LoopPtr, ForStmtPtr>) {
+        // A stationary For slot may retain its existing alias optimization.
+        // Any initializer/backedge connected to a runtime choice is a native
+        // descriptor; it must not acquire that optimization's fixed address.
+        if (!descriptor_carries_.count(arg.get())) continue;
+      }
+      native_carries_.insert(arg.get());
+      if (i < loop->return_vars_.size()) native_carries_.insert(loop->return_vars_[i].get());
+    }
+  }
+
+  std::set<const IterArg*> descriptor_carries_;
+
+  std::set<const Var*> native_carries_;
   std::map<VarPtr, VarPtr> var_map_;
   std::map<VarPtr, IfResultSources> if_result_sources_;
   std::set<MemRefPtr> non_dense_view_memrefs_;
@@ -1027,6 +1074,7 @@ class InitMemRefMutator : public IRMutator {
  * Variables without memory_space default to DDR.
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
+  BufferIRFunctionScope buffer_scope(func);
   // Lowering may introduce constant SSA aliases after the early Simplify pass.
   // Normalize them with the shared transformation before building addresses,
   // including when InitMemRef is invoked outside the default pipeline.
@@ -1081,6 +1129,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   }
 
   InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_);
+  mutator.SeedDescriptorCarries(normalized_func);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());
@@ -1150,6 +1199,11 @@ class HasMemRefsVerifier : public IRVisitor {
   explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitStmt_(const ForStmtPtr& op) override {
+    for (const auto& arg : op->iter_args_) {
+      if (auto tile = As<TileType>(arg->GetType()); tile && !tile->memref_) {
+        buffer_less_.insert(arg.get());
+      }
+    }
     TrackDynamicCarries(op->iter_args_);
     IRVisitor::VisitStmt_(op);
     TrackDynamicResults(op->iter_args_, op->return_vars_);

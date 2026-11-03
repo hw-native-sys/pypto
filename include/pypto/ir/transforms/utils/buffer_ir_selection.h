@@ -15,8 +15,11 @@
 #include <vector>
 
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 
 namespace pypto::ir {
@@ -25,6 +28,23 @@ namespace pypto::ir {
 // their transformed input. Absence denotes an explicit low-level pass pipeline.
 inline bool IsBufferIRSelected(const FunctionPtr& function) {
   return function->GetAttr<bool>(kAttrBufferIrSelected, true);
+}
+
+// This semantic routing rule is known before MemRef initialization. Capability
+// selection still runs afterwards because its view/stride proofs need MemRefs.
+// Share the predicate so InitMemRef does not create fixed loop destinations in
+// a function that selection must keep on the native Tile path.
+inline bool RequiresNativeTileSelection(const FunctionPtr& function) {
+  class Finder : public IRVisitor {
+   public:
+    bool found = false;
+    void VisitStmt_(const IfStmtPtr& branch) override {
+      for (const auto& value : branch->return_vars_) found |= As<TileType>(value->GetType()) != nullptr;
+      if (!found) IRVisitor::VisitStmt_(branch);
+    }
+  } finder;
+  finder.VisitStmt(function->body_);
+  return finder.found;
 }
 
 // Keep all storage helpers on the same per-function path, including helpers

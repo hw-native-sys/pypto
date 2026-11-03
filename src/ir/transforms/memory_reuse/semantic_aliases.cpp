@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
@@ -1033,6 +1034,10 @@ class LoopInputIsolation : public IRVisitor {
     std::set<const Var*> unknown_bases;
     for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
       const auto& initial = loop->iter_args_[i]->initValue_;
+      const auto parameter = As<TileType>(loop->iter_args_[i]->GetType());
+      // A native descriptor slot never writes back into its initializer. Old
+      // payload isolation is needed only by fixed destination slots.
+      if (recurrence_only_ && parameter && !parameter->memref_) continue;
       auto tile = As<TileType>(initial->GetType());
       if (!tile) continue;
       if (!tile->memref_) {
@@ -2935,6 +2940,74 @@ class RetypeApplier : public IRMutator {
 
 }  // namespace
 
+namespace {
+
+// A descriptor carry may arrive at a producer holding that producer's previous
+// output. For a non-inplace operation, preserving the descriptor is insufficient:
+// its input payload must survive the output write. Use the shared no-alias
+// analysis to snapshot only those recurrent operands, before memory planning.
+// This is operator correctness, not fixed carry storage or a capacity rewrite.
+class MaterializeRecurrentOperands : public IRMutator {
+ public:
+  explicit MaterializeRecurrentOperands(const FunctionPtr& function)
+      : recurrent_(AnalyzeAllocationConstraints(function, AnalyzeAllocationLifetimes(function),
+                                                "MaterializeSemanticAliases")
+                       .recurrent_inputs) {
+    names_.Collect(function->body_, function->params_);
+  }
+
+  std::vector<StmtPtr> allocations;
+
+ protected:
+  ExprPtr VisitExpr_(const IterArgPtr& argument) override { return argument; }
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& statement) override {
+    const auto found = recurrent_.find(statement->var_.get());
+    if (found == recurrent_.end()) return IRMutator::VisitStmt_(statement);
+    const auto call = As<Call>(statement->value_);
+    if (!call) return IRMutator::VisitStmt_(statement);
+    std::map<const Var*, VarPtr> snapshots;
+    std::vector<StmtPtr> prefix;
+    for (const auto& source : found->second) {
+      if (snapshots.count(source.get())) continue;
+      const auto tile = As<TileType>(source->GetType());
+      const auto memory = tile->GetMemorySpace();
+      CHECK_SPAN(memory && IsTileMoveEverSupported(*memory, *memory), statement->span_)
+          << "A non-inplace loop operation requires an independent input snapshot, but this "
+             "Tile memory space has no supported same-space copy";
+      const auto bytes = utils::StaticPhysicalAllocationBytes(tile, *memory, nullptr);
+      INTERNAL_CHECK_SPAN(bytes, statement->span_)
+          << "Internal error: a recurrent Tile operand needs a static allocation size";
+      auto base = std::make_shared<Var>(names_.Fresh("mem_recurrent_input_"), GetPtrType(), source->span_);
+      auto storage = std::make_shared<MemRef>(base, int64_t{0}, *bytes, source->span_);
+      auto [snapshot, copy] = CreateStorageMove(
+          source, storage, memory, [](const ExprPtr& value) { return value; },
+          names_.Fresh("recurrent_input_"));
+      allocations.push_back(CreateAllocStatement(storage, *memory));
+      prefix.push_back(copy);
+      snapshots.emplace(source.get(), snapshot);
+    }
+    auto arguments = call->args_;
+    for (auto& argument : arguments) {
+      const auto source = AsVarLike(argument);
+      if (source) {
+        if (auto snapshot = snapshots.find(source.get()); snapshot != snapshots.end())
+          argument = snapshot->second;
+      }
+    }
+    auto rewritten = std::make_shared<Call>(call->op_, std::move(arguments), call->kwargs_, call->attrs_,
+                                            call->GetType(), call->span_);
+    prefix.push_back(std::make_shared<AssignStmt>(statement->var_, rewritten, statement->span_));
+    return SeqStmts::Flatten(prefix, statement->span_);
+  }
+
+ private:
+  std::map<const Var*, std::vector<VarPtr>> recurrent_;
+  StorageNameSupply names_;
+};
+
+}  // namespace
+
 // Retyping also propagates a retargeted input through its aliasing views.
 StmtPtr RefreshStorageTypes(const StmtPtr& body) { return RetypeApplier({}).VisitStmt(body); }
 
@@ -2949,7 +3022,7 @@ StmtPtr CoalesceAccumulatorIfPhis(const StmtPtr& body) {
 // MemoryReuse. Propagates each ForStmt iter_arg/initValue's canonical MemRef
 // down the yield/producer chain so accumulator producers (and other loop-carry
 // / in-place chains) write directly into the carried buffer. This is a
-// *semantics-required* aliasing (the loop accumulator must live in one buffer),
+// fixed-storage aliasing for stationary For slots and Buffer IR boundaries,
 // as opposed to the opportunistic lifetime coalescing in MemoryReuse.
 //
 // Split into its own pass so it can run without the (skippable) lifetime-reuse
@@ -2966,20 +3039,6 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 
   StmtPtr new_body = func->body_;
   const auto* ctx = PassContext::Current();
-  class TileWhileFinder : public IRVisitor {
-   public:
-    bool found = false;
-    void VisitStmt_(const WhileStmtPtr& loop) override {
-      for (const auto& arg : loop->iter_args_) found |= As<TileType>(arg->GetType()) != nullptr;
-      IRVisitor::VisitStmt_(loop);
-    }
-  } tile_while;
-  tile_while.VisitStmt(new_body);
-  if ((ctx == nullptr || !ctx->GetEnableBufferIR()) && tile_while.found) {
-    // Remove provisional fixed While storage before isolation/retargeting.
-    // A native While rebinds descriptors; it does not copy into its entry Tile.
-    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
-  }
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
     SnapshotAssembleSources snapshots(func);
     new_body = snapshots.VisitStmt(new_body);
@@ -3041,6 +3100,14 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // Tile-valued If results retain the actual branch handles under every planner.
   // They do not require a common destination or an arm-to-arm transfer. Buffer
   // IR retains its existing canonical destinations and boundary fixups below.
+  if (ctx == nullptr || !ctx->GetEnableBufferIR()) {
+    auto analyzed = MutableCopy(func);
+    analyzed->body_ = new_body;
+    MaterializeRecurrentOperands recurrence(analyzed);
+    new_body = recurrence.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, recurrence.allocations);
+  }
+
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
     // The Buffer path cannot rely on codegen to repair branch producers or
     // invent copies. Establish independent phi destinations while storage can

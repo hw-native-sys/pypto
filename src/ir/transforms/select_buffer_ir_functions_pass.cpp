@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -73,7 +74,6 @@ class BufferKernelSupport : public IRVisitor {
   bool supported = true;
   bool has_load = false;
   bool has_fill = false;
-  bool has_tile_if = false;
   bool has_store = false;
 
   static bool ConstantEquals(const ExprPtr& value, int64_t expected) {
@@ -264,9 +264,6 @@ class BufferKernelSupport : public IRVisitor {
   }
 
   void VisitStmt_(const IfStmtPtr& branch) override {
-    for (const auto& result : branch->return_vars_) {
-      has_tile_if |= As<TileType>(result->GetType()) != nullptr;
-    }
     VisitExpr(branch->condition_);
     Region then_region(branch->return_vars_);
     CheckRegion(branch->then_body_, then_region);
@@ -722,7 +719,7 @@ FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper
   // Preserve native Tile SSA selection for every Tile-valued If. Loops in the
   // same function do not change this route; their fixed carry storage is
   // legalized separately on the Tile path.
-  if (support.has_tile_if) support.supported = false;
+  if (RequiresNativeTileSelection(function)) support.supported = false;
   if (support.supported) support.supported = BufferValidAnalysis(function->body_).supported();
   auto selected = std::make_shared<Function>(*function);
   selected->attrs_.emplace_back(kAttrBufferIrSelected, support.supported &&

@@ -3133,12 +3133,10 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
 
 
 def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
-    """Test that tile-typed iter_args are excluded from PTO scf.for iter_args/yield.
+    """Tile carries use typed SSA descriptors without allocating GM payloads.
 
-    In PTO, tile buffers are mutable references written in-place via outs().
-    Only scalar types need iter_args/yield for loop-carried value semantics.
-    Tile-typed iter_args should be mapped directly to their init values, and
-    the generated scf.for should not contain iter_args or scf.yield for tiles.
+    Payload operations still write Vec storage through outs(); scf.for forwards
+    the resulting descriptor explicitly, including for fixed-storage slots.
     """
 
     @pl.program
@@ -3175,13 +3173,10 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
         assert "loc=vec" in alloc_line, f"Expected loc=vec in alloc_tile, got: {alloc_line}"
         assert "loc=gm" not in alloc_line, f"Unexpected loc=gm in alloc_tile: {alloc_line}"
 
-    # scf.for should NOT have iter_args (all iter_args are tile type)
     for_line = _single_line(lines, "scf.for")
-    assert "iter_args(" not in for_line, f"scf.for should not have iter_args for tile types: {for_line}"
-
-    # No scf.yield should be present (tile yields are excluded)
-    yield_lines = _find_lines(lines, "scf.yield")
-    assert len(yield_lines) == 0, f"No scf.yield expected for tile-only iter_args: {yield_lines}"
+    assert "iter_args(" in for_line and "!pto.tile_buf<loc=vec" in for_line
+    yield_line = _single_line(lines, "scf.yield")
+    assert "!pto.tile_buf<loc=vec" in yield_line
 
     # pto.tadd (the accumulation op) must have loc=vec for all tile_buf operands
     tadd_line = _single_line(lines, "pto.tadd")

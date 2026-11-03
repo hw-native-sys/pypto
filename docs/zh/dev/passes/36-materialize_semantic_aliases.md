@@ -38,6 +38,14 @@ program = passes.materialize_semantic_aliases()(program)
 
 ## 算法
 
+原生 While carry 以及与运行时选择相连的 For carry 保持 SSA 描述符，不绑定固定
+carry 存储，因此不执行入口隔离、producer 重定向和固定目标 yield 复制。
+下述固定存储规则适用于其余 For slot 和 Buffer IR 边界。
+
+非原地算子可能通过描述符回边收到自己的上一次输出。分配之前，本 pass 使用共享的
+算子 no-alias 分析，对这种回边操作数生成独立输入快照。这次复制保护输出写入期间的
+输入读取，不改变循环描述符 carry，也不由容量触发。允许输入输出别名的算子无需此快照。
+
 `InitMemRef` 已经让循环 carried 的 `iter_arg` 和 `return_var` 与 `initValue`
 （累加器 buffer）共享同一 MemRef，但 yield 值的*生产者* —— 例如计算 `acc_next`
 的 `tile.add` —— 仍被分配了自己的新 MemRef。本 pass 补上这个缺口：
@@ -170,27 +178,17 @@ Buffer IR 在 yield 修复前使用归一化，推迟对临时分支目标的别
 producer 改写后，别名归一化仍让原生 If 结果及其派生描述符保持无固定 MemRef。
 两支恰好指向同一存储时也统一如此，但保留共同的 memory space。
 
-原生 While 的 Tile carry 是通过 `scf.while`、`scf.condition` 和 `scf.yield`
+原生 While 的 Tile carry，以及与运行时选择相连的 For slot，是通过 `scf.for`
+或 `scf.while`、`scf.condition` 和 `scf.yield`
 传递的 SSA 描述符。iter_arg 和结果没有固定 MemRef；入口不会把选中的初始值
 复制到固定 carry 分配。交换和扇出同时重绑定描述符，无需数据写回。标量和寄存器
 也使用 SSA carry；Tensor 和 Array 的底层引用保留已有原地更新行为。
 初始值与 yield 的 Tile 描述符类型必须匹配。生命周期分析同时跟踪初始来源和
 回边来源，使回边分配跨越完整循环迭代保持存活。
 
-原生 For carry 仍使用固定缓冲区，保留输入隔离、选中来源安全检查及必要写回；
-这些规则无法安全处理的选择才会诊断，并非所有选中 initializer 或回边都会拒绝。
-
-插入多个 For carry 写回前，既有 yield fixup 会检查原始选择来源。有界来源摘要允许仅
-读取自身目标或所有复制均不写入的存储。其他条件多副本边界会明确报错，避免
-新插入的 move 隐藏隐式交换。所选来源可能指向自身目标时，会在所有写回之前
-复制到独立快照，包括只有一个 carry 的情况，避免运行时的自复制。若证明所有
-来源路径均指向同一 carry 窗口，且形状、布局和有效维度保持一致，则无需传输或
-快照。新存储或未知来源均阻止该证明，即使其中一个候选与 carry 相同也不能省略。
-快照存储在生命周期分析和地址规划之前显式建立；显式物化复制保留既有行为。
-若 For 循环之前选出的初始句柄在所有 yield 路径中都通过同一迭代句柄写回，
-initializer 和 carry 的必需别名继续保持动态、没有 MemRef；此句柄同一性证明
-不会把 If 结果判为静态。对于只有一行 NZ box 的 Acc，valid rows 的变化也不改变
-固定 carry 的数据步长，因此该边界不需要 Acc-to-Acc 传输。
+其余 For slot 保留既有固定存储优化及写回修复。动态 slot 不受这些固定存储规则
+限制：选中的初始值、条件更新、交换和扇出均直接携带所选描述符。仅当算子 no-alias
+约束要求时，才对回边输入生成独立快照；该快照不改变循环携带的描述符。
 
 如果多个 producer 已共享同一物理分配，PTO codegen 会在兄弟区域之前声明存储，
 并在各 producer 处设置逻辑有效形状。所有原生 Tile 结果统一生成为 `scf.if`
@@ -209,7 +207,8 @@ initializer 和 carry 的必需别名继续保持动态、没有 MemRef；此句
 `SelectBufferIRFunctions` 将所有包含 Tile 返回值 If 的函数保留在原生 Tile 路径，
 不再根据函数是否含 For/While 区分；全局启用 Buffer IR 时也适用。
 Buffer lowering 当前会消除 Tile 区域返回值，无法表达这种动态句柄选择。
-原生 Tile 路径保留既有 For carry 写回修复；While carry 使用 SSA Tile 描述符。
+原生 Tile 路径对 selected For carry 和 While carry 使用 SSA Tile 描述符；
+其余 For slot 保留既有固定存储写回修复。
 Buffer IR 保留原有 canonical 循环修复。这些边界不改变 Tile If 一律走原生路径的规则。
 
 ### 分阶段启用的 Buffer IR 流水线

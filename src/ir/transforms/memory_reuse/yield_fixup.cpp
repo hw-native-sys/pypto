@@ -144,7 +144,7 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
 
       // Align the matching return_var's TileType to init's MemRef (only when
       // init has a tile MemRef to align to).
-      if (init_tile && i < new_return_vars.size()) {
+      if (init_tile && ia_tile && ia_tile->memref_ && i < new_return_vars.size()) {
         auto rv_tile = As<TileType>(op->return_vars_[i]->GetType());
         if (rv_tile && rv_tile->memref_.has_value() &&
             CompareBaseAddress(GetDefinedMemRef(rv_tile), init_memref) != AddressRelation::kSame) {
@@ -375,6 +375,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // construction, whatever their (possibly still stale) types say.
       if (yield_var.get() == static_cast<const Var*>(for_stmt->iter_args_[i].get())) continue;
 
+      const auto parameter = As<TileType>(for_stmt->iter_args_[i]->GetType());
+      if (parameter && !parameter->memref_) continue;
       auto yield_tile = As<TileType>(yield_var->GetType());
       if (!yield_tile) continue;
       auto yield_memref = yield_tile->memref_.value_or(nullptr);
@@ -1036,6 +1038,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   static std::vector<MemRefPtr> CollectCarryRanges(const ForStmtPtr& for_stmt) {
     std::vector<MemRefPtr> ranges(for_stmt->iter_args_.size());
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      const auto parameter = As<TileType>(for_stmt->iter_args_[i]->GetType());
+      if (parameter && !parameter->memref_) continue;
       // AsVarLike: a nested loop seeds its carries from the enclosing loop's
       // IterArg, which As<Var> would skip -- and skipping it is exactly how two
       // nested carries seeded from one outer carry would slip past the check below.
@@ -1356,6 +1360,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     std::vector<VarPtr> new_return_vars = for_stmt->return_vars_;
 
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      const auto parameter = As<TileType>(for_stmt->iter_args_[i]->GetType());
+      if (parameter && !parameter->memref_) continue;
       auto init_var = AsVarLike(for_stmt->iter_args_[i]->initValue_);
       if (!init_var) continue;
       auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
@@ -1514,13 +1520,13 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (!AsTensorTypeLike(visited->GetType()) && !As<TileType>(visited->GetType())) return visited;
     // Loop carries are mutable references to their initializer, including on
     // zero-trip loops. Preserve either its fixed storage or its dynamic handle.
-    if (native_while_args_.count(op.get()) && As<TileType>(visited->GetType())) {
-      // The initializer supplies the first descriptor, not a permanent address.
-      visited = std::make_shared<IterArg>(visited->name_hint_,
-                                          CloneTypeWithMemRef(visited->GetType(), std::nullopt),
-                                          visited->initValue_, visited->span_);
-    } else if (auto type = BoundaryAliasType(visited->GetType(), visited->initValue_)) {
-      visited = std::make_shared<IterArg>(visited->name_hint_, type, visited->initValue_, visited->span_);
+    // Native region parameters deliberately have no fixed allocation, even
+    // when the entry operand does. Only canonical Buffer bindings inherit it.
+    const auto tile = As<TileType>(visited->GetType());
+    if (!tile || tile->memref_) {
+      if (auto type = BoundaryAliasType(visited->GetType(), visited->initValue_)) {
+        visited = std::make_shared<IterArg>(visited->name_hint_, type, visited->initValue_, visited->span_);
+      }
     }
     if (IsUnsettled(AsVarLike(op->initValue_)) || IsUnsettled(AsVarLike(visited->initValue_))) {
       unsettled_.insert(op.get());
@@ -1531,26 +1537,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override { return NormalizeLoopAliases(op); }
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    const auto* context = PassContext::Current();
-    if (context && context->GetEnableBufferIR()) return NormalizeLoopAliases(op);
-    for (const auto& arg : op->iter_args_) native_while_args_.insert(arg.get());
-    auto visited = As<WhileStmt>(IRMutator::VisitStmt_(op));
-    for (const auto& arg : op->iter_args_) native_while_args_.erase(arg.get());
-    auto result = MutableCopy(visited);
-    bool changed = false;
-    for (size_t i = 0; i < visited->return_vars_.size(); ++i) {
-      const auto& value = visited->return_vars_[i];
-      if (auto tile = As<TileType>(value->GetType()); tile && tile->memref_) {
-        auto replacement =
-            std::make_shared<Var>(value->name_hint_, CloneTypeWithMemRef(tile, std::nullopt), value->span_);
-        result->return_vars_[i] = replacement;
-        subst_[op->return_vars_[i]] = replacement;
-        changed = true;
-      }
-    }
-    return changed ? result : visited;
-  }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return NormalizeLoopAliases(op); }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto visited = As<IfStmt>(IRMutator::VisitStmt_(op));
@@ -1605,8 +1592,6 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
  private:
-  std::set<const IterArg*> native_while_args_;
-
   TypePtr BoundaryAliasType(const TypePtr& type, const ExprPtr& source) {
     const auto target_tile = As<TileType>(type);
     const auto input_tile = source ? As<TileType>(source->GetType()) : nullptr;

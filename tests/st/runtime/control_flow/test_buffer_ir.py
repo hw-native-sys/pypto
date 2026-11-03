@@ -283,14 +283,16 @@ def test_public_buffer_control_flow(case_run, request):
         assert (" addr = " in text) == (case_run.case.memory_planner != passes.MemoryPlanner.PTOAS)
         headers = [line for line in text.splitlines() if "scf.for " in line or "scf.while " in line]
         assert len(headers) == {"branch": 0, "for": 1, "while": 1, "nested": 2, "fanout": 1}[kind]
-        assert all(("tile_buf" in header) == (kind == "while") for header in headers)
+        assert all(("tile_buf" in header) == (kind in {"for", "while"}) for header in headers)
         assert ("scf.while " in text) == (kind == "while")
         if kind in {"branch", "for", "while"}:
             assert "scf.if " in text
         if kind in {"for", "fanout"}:
-            # Final scalar inference types store-offset carries as INDEX.
-            assert "-> (index, index)" in headers[0]
+            # These For carries do not receive selected values. Their existing
+            # fixed-storage swap/fanout repair still emits payload transfers.
             assert "pto.tmov ins(" in text
+            if kind == "fanout":
+                assert "-> (index, index)" in headers[0]
         elif kind == "while":
             # SSA descriptors implement the parallel swap; no payload writeback
             # may overwrite the old left/right values or the saved initializer.
