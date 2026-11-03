@@ -207,6 +207,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator 运行时区域（`SIMPLER_SCOPE`）；`manual_=true` 选择手工依赖模式 |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
+| **SimtLaunchStmt** | `callee_`, `block_dims_`, `args_`, `results_` (DefField), `result_param_indices_` | 启动无返回值 SIMT helper 并定义更新后的存储版本，见[标量 SIMT IR](11-simt.md) |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
 | **BreakStmt** | *(无)* | 退出循环 |
 | **ContinueStmt** | *(无)* | 跳至下一次循环迭代 |
@@ -594,6 +595,7 @@ def sample(logits: pl.Tensor[[B, V], pl.FP32]) -> pl.Tensor[[B], pl.INT32]:
 | `Spmd` | SPMD 数据并行调度封装 |
 | `Inline` | 在每个调用点整体替换函数体；由 `InlineFunctions` 在其它 pass 之前消除 |
 | `Graph` | 可调用的编排片段，由 `host_build_graph` runtime 录制一次、之后回放 |
+| `SIMT` | 仅由 `SimtLaunchStmt` 启动的无返回值设备 helper，不携带运行时任务元数据 |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` 对 `InCore`、`AIC` 和 `AIV` 返回 `True`。
 
@@ -633,7 +635,7 @@ add_func = program.get_function("add")  # Access by name
 | **一元运算** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **调用/访问** | 2 | Call, TupleGetItemExpr |
 | **操作** | 2 | Op, GlobalVar |
-| **语句** | 17 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, SplitAivScopeStmt, GraphScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt, InlineStmt |
+| **语句** | 18 | SimtLaunchStmt, AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, SplitAivScopeStmt, GraphScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt, InlineStmt |
 | **类型** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **函数** | 2 | Function, Program |
 

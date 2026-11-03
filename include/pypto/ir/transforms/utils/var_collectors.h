@@ -38,7 +38,7 @@ namespace var_collectors {
 ///   var_defs         — variables defined by statements (unordered).
 ///   var_uses         — variables referenced in expressions (unordered).
 ///   var_defs_ordered — same as var_defs but in DFS pre-order.
-///   var_assign_defs  — subset of var_defs: only AssignStmt::var_.
+///   var_assign_defs  — straight-line definitions: AssignStmt::var_ and SimtLaunchStmt::results_.
 ///
 /// Definition order within each statement follows CollectVarDefsInOrder
 /// convention: loop_var → return_vars → iter_args → recurse body.
@@ -74,6 +74,16 @@ class VarDefUseCollector : public IRVisitor {
     var_defs_ordered.push_back(op->var_.get());
     var_assign_defs.insert(op->var_.get());
     VisitExpr(op->value_);
+  }
+
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (const auto& result : op->results_) {
+      var_defs.insert(result.get());
+      var_defs_ordered.push_back(result.get());
+      var_assign_defs.insert(result.get());
+    }
+    for (const auto& dim : op->block_dims_) VisitExpr(dim);
+    for (const auto& arg : op->args_) VisitExpr(arg);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
@@ -136,6 +146,8 @@ inline std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt
   std::unordered_set<const Var*> defs;
   if (auto assign = As<AssignStmt>(stmt)) {
     defs.insert(assign->var_.get());
+  } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+    for (const auto& result : launch->results_) defs.insert(result.get());
   } else if (auto for_stmt = As<ForStmt>(stmt)) {
     for (const auto& ret : for_stmt->return_vars_) {
       defs.insert(ret.get());

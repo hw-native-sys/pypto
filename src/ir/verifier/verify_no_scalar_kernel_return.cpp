@@ -74,7 +74,7 @@ namespace {
 /// task: the InCore variants plus the Group / Spmd scope wrappers.
 /// Orchestration / Graph / Inline / Opaque functions are ordinary callables and
 /// may return scalars.
-bool IsDeviceFunctionType(FunctionType type) { return IsInCoreType(type) || IsWrapperType(type); }
+bool IsRuntimeDeviceFunctionType(FunctionType type) { return IsInCoreType(type) || IsWrapperType(type); }
 
 /// Finds the first unsupported ScalarType reachable from ``type``, writing the
 /// path that reached it (e.g. ``"#0 element #1"``) to ``found_path``.
@@ -117,7 +117,7 @@ class NoScalarKernelReturnVerifierImpl : public PropertyVerifier {
     if (!program) return;
 
     for (const auto& [global_var, func] : program->functions_) {
-      if (!func || !IsDeviceFunctionType(func->func_type_)) continue;
+      if (!func || !IsRuntimeDeviceFunctionType(func->func_type_)) continue;
       for (size_t i = 0; i < func->return_types_.size(); ++i) {
         std::string path;
         bool is_task_id = false;

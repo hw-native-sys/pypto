@@ -47,6 +47,8 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/deserializer.h"
 #include "pypto/ir/serialization/serializer.h"
+#include "pypto/ir/simt.h"
+#include "pypto/ir/simt_analysis.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
@@ -118,6 +120,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     // NOTE: Check DataType/MemorySpace/PipeType/CoreType/PadValue BEFORE int, and bool BEFORE int
     if (nb::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<SimtAxis>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<SimtAxis>(item.second));
     } else if (nb::isinstance<MemorySpace>(item.second)) {
       kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
     } else if (nb::isinstance<TensorLayout>(item.second)) {
@@ -1426,6 +1430,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(DataType)) {
         result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(SimtAxis)) {
+        result[key.c_str()] = AnyCast<SimtAxis>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(MemorySpace)) {
         result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(TensorLayout)) {
@@ -1770,8 +1776,8 @@ void BindIR(nb::module_& m) {
       [](const ForStmtPtr& self) {
         nb::dict result;
         for (const auto& [key, value] : self->attrs_) {
-          result[key.c_str()] = AnyToPyObject<int, bool, std::string, double, float, DataType, MemorySpace,
-                                              TensorLayout, TileLayout, PadValue>(value, key);
+          result[key.c_str()] = AnyToPyObject<int, bool, std::string, double, float, DataType, SimtAxis,
+                                              MemorySpace, TensorLayout, TileLayout, PadValue>(value, key);
         }
         return result;
       },
@@ -2041,6 +2047,14 @@ void BindIR(nb::module_& m) {
       nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<SeqStmts>(seq_stmts_class);
 
+  auto simt_launch_class = nb::class_<SimtLaunchStmt, Stmt>(
+      ir, "SimtLaunchStmt", "Launch a void SIMT helper and define updated storage results");
+  simt_launch_class.def(nb::init<GlobalVarPtr, std::vector<ExprPtr>, std::vector<ExprPtr>,
+                                 std::vector<VarPtr>, std::vector<int>, Span>(),
+                        nb::arg("callee"), nb::arg("block_dims"), nb::arg("args"), nb::arg("results"),
+                        nb::arg("result_param_indices"), nb::arg("span"));
+  BindFields<SimtLaunchStmt>(simt_launch_class);
+
   // EvalStmt - const shared_ptr
   auto eval_stmt_class = nb::class_<EvalStmt, Stmt>(ir, "EvalStmt", "Evaluation statement: expr");
   eval_stmt_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("expr"), nb::arg("span"),
@@ -2074,6 +2088,20 @@ void BindIR(nb::module_& m) {
       .value("Functional", FunctionIRStage::Functional, "Tensor/Tile value semantics (default)")
       .value("Buffer", FunctionIRStage::Buffer, "Explicit storage handles and destination writes");
 
+  nb::class_<SimtParamAccess>(ir, "SimtParamAccess")
+      .def_ro("reads", &SimtParamAccess::reads)
+      .def_ro("writes", &SimtParamAccess::writes);
+  nb::class_<SimtResources>(ir, "SimtResources")
+      .def_ro("max_threads", &SimtResources::max_threads)
+      .def_ro("max_regs", &SimtResources::max_regs);
+  ir.def("analyze_simt_access", &AnalyzeSimtAccess, nb::arg("function"));
+  ir.def("infer_simt_resources", &InferSimtResources, nb::arg("launch"));
+
+  nb::enum_<SimtAxis>(ir, "SimtAxis", "Compile-time SIMT query axis")
+      .value("X", SimtAxis::X)
+      .value("Y", SimtAxis::Y)
+      .value("Z", SimtAxis::Z);
+
   // FunctionType enum
   nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
       .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")
@@ -2085,6 +2113,7 @@ void BindIR(nb::module_& m) {
       .value("Spmd", FunctionType::Spmd, "SPMD data-parallel dispatch")
       .value("Inline", FunctionType::Inline, "Whole-body substitution at every call site")
       .value("Graph", FunctionType::Graph, "Recordable/replayable orchestration fragment")
+      .value("SIMT", FunctionType::SIMT, "Per-thread device helper launched inside an AIV task")
       .export_values();
 
   // Level enum — hierarchy level in the Linqu machine model
@@ -2140,6 +2169,7 @@ void BindIR(nb::module_& m) {
   // (ir.ArgDirection.InOut) to keep the two direction models cleanly separated.
 
   // IsInCoreType helper
+  ir.def("is_device_function_type", &IsDeviceFunctionType, nb::arg("func_type"));
   ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
          "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
 
@@ -2448,8 +2478,8 @@ void BindIR(nb::module_& m) {
               // Convert kwargs to Python list of (key, value) tuples
               nb::list py_kwargs_list;
               for (const auto& [key, val] : kwargs) {
-                nb::object py_val = AnyToPyObject<DataType, MemorySpace, TensorLayout, PadValue, bool, int,
-                                                  std::string, double>(val, key);
+                nb::object py_val = AnyToPyObject<DataType, SimtAxis, MemorySpace, TensorLayout, PadValue,
+                                                  bool, int, std::string, double>(val, key);
                 nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
                 py_kwargs_list.append(pair);
               }

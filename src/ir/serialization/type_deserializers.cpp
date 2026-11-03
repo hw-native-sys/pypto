@@ -34,6 +34,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/type_registry.h"
+#include "pypto/ir/simt.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -250,6 +251,9 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
       } else if (type_name == "MemorySpace") {
         require_value("MemorySpace");
         kwargs.emplace_back(key, StringToMemorySpace(value_str));
+      } else if (type_name == "SimtAxis") {
+        if (value_str.empty()) throw TypeError("Missing 'value' field for SimtAxis kwarg: " + key);
+        kwargs.emplace_back(key, StringToSimtAxis(value_str));
       } else if (type_name == "PadValue") {
         require_value("PadValue");
         auto pad = TryStringToPadValue(value_str);
@@ -1112,6 +1116,28 @@ static IRNodePtr DeserializeEvalStmt(const msgpack::object& fields_obj, msgpack:
   return std::make_shared<EvalStmt>(expr, span, DeserializeLeadingComments(fields_obj));
 }
 
+// Deserialize a launch without converting storage results into thread returns.
+static IRNodePtr DeserializeSimtLaunchStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                           DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto callee = std::dynamic_pointer_cast<const GlobalVar>(ctx.DeserializeOp(GET_FIELD_OBJ("callee")));
+  std::vector<ExprPtr> dims;
+  std::vector<ExprPtr> args;
+  std::vector<VarPtr> results;
+  for (const auto& item : GET_FIELD_OBJ("block_dims").as<std::vector<msgpack::object>>()) {
+    dims.push_back(std::dynamic_pointer_cast<const Expr>(ctx.DeserializeNode(item, zone)));
+  }
+  for (const auto& item : GET_FIELD_OBJ("args").as<std::vector<msgpack::object>>()) {
+    args.push_back(std::dynamic_pointer_cast<const Expr>(ctx.DeserializeNode(item, zone)));
+  }
+  for (const auto& item : GET_FIELD_OBJ("results").as<std::vector<msgpack::object>>()) {
+    results.push_back(std::dynamic_pointer_cast<const Var>(ctx.DeserializeNode(item, zone)));
+  }
+  auto indices = GET_FIELD_OBJ("result_param_indices").as<std::vector<int>>();
+  return std::make_shared<SimtLaunchStmt>(callee, std::move(dims), std::move(args), std::move(results),
+                                          std::move(indices), span, DeserializeLeadingComments(fields_obj));
+}
+
 // Deserialize BreakStmt
 static IRNodePtr DeserializeBreakStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                       DeserializerContext& ctx) {
@@ -1382,6 +1408,7 @@ static TypeRegistrar _reg_scope_stmt_registrar("RegScopeStmt", DeserializeRegSco
 static TypeRegistrar _graph_scope_stmt_registrar("GraphScopeStmt", DeserializeGraphScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
+static TypeRegistrar _simt_launch_stmt_registrar("SimtLaunchStmt", DeserializeSimtLaunchStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);
 static TypeRegistrar _continue_stmt_registrar("ContinueStmt", DeserializeContinueStmt);
 static TypeRegistrar _inline_stmt_registrar("InlineStmt", DeserializeInlineStmt);

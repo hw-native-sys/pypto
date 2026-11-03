@@ -71,6 +71,11 @@ class DeepCloneMutator : public IRMutator {
   // traversal and reconstruction. This ensures VisitExpr_(VarPtr) finds
   // the fresh copies during its map lookup.
 
+  StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    if (clone_def_vars_) PreRegisterDefFields(*op);
+    return IRMutator::VisitStmt_(op);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     if (clone_def_vars_) PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);

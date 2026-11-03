@@ -117,10 +117,12 @@ set(PYPTO_SOURCES
     src/ir/memref.cpp
     src/ir/op_registry.cpp
     src/ir/program.cpp
+    src/ir/simt_analysis.cpp
     src/ir/stmt.cpp
     src/ir/type.cpp
 
     # IR - Operators
+    src/ir/op/simt_ops.cpp
     src/ir/op/buffer_ops/elementwise.cpp
     src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
@@ -340,6 +342,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_acc_store_phase.cpp
     src/ir/verifier/verify_no_scalar_kernel_return.cpp
     src/ir/verifier/warning_in_param_written.cpp
+    src/ir/verifier/verify_simt.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp

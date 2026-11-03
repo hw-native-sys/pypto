@@ -856,6 +856,27 @@ class FunctionType(enum.Enum):
     Graph = ...
     """Recordable/replayable orchestration fragment."""
 
+    SIMT = ...
+    """Per-thread device helper launched inside an AIV task, returning void."""
+
+class SimtParamAccess:
+    reads: bool
+    writes: bool
+
+class SimtResources:
+    max_threads: int
+    max_regs: int
+
+def analyze_simt_access(function: Function) -> list[SimtParamAccess]: ...
+def infer_simt_resources(launch: SimtLaunchStmt) -> SimtResources: ...
+
+class SimtAxis(enum.Enum):
+    """Compile-time axis for SIMT thread, block, and grid queries."""
+
+    X = ...
+    Y = ...
+    Z = ...
+
 class Level(enum.Enum):
     """Hierarchy level in the Linqu machine model.
 
@@ -2627,6 +2648,27 @@ class SeqStmts(Stmt):
             IndexError: If index is out of range
         """
 
+class SimtLaunchStmt(Stmt):
+    """Launch a void SIMT helper; results name logical storage updates."""
+
+    callee: GlobalVar
+    block_dims: list[Expr]
+    args: list[Expr]
+    results: list[Var]
+    result_param_indices: list[int]
+
+    def __init__(
+        self,
+        callee: GlobalVar,
+        block_dims: list[Expr],
+        args: list[Expr],
+        results: list[Var],
+        result_param_indices: list[int],
+        span: Span,
+    ) -> None:
+        """Create a launch with three block dimensions and explicit result mappings."""
+        ...
+
 class EvalStmt(Stmt):
     """Evaluation statement: expr."""
 
@@ -3135,7 +3177,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.
@@ -3157,7 +3199,7 @@ def create_op_call(
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
     span: Span,
 ) -> Call:
     """Create a Call expression for a compiler-internal operator. **Private.**
@@ -3189,7 +3231,7 @@ def _create_internal_op_call(
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
     type: Type,
     span: Span,
 ) -> Call:
@@ -3214,6 +3256,10 @@ def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
     Returns:
         A new Call with the given attrs
     """
+
+def is_device_function_type(func_type: FunctionType) -> bool:
+    """Whether this function executes device IR, including a SIMT helper."""
+    ...
 
 def is_incore_type(func_type: FunctionType) -> bool:
     """Check if a FunctionType is an InCore variant (InCore, AIC, or AIV).
@@ -4382,6 +4428,7 @@ class IRVisitor:
     def visit_yield_stmt(self, op: YieldStmt) -> None: ...
     def visit_return_stmt(self, op: ReturnStmt) -> None: ...
     def visit_eval_stmt(self, op: EvalStmt) -> None: ...
+    def visit_simt_launch_stmt(self, op: SimtLaunchStmt) -> None: ...
     def visit_break_stmt(self, op: BreakStmt) -> None: ...
     def visit_continue_stmt(self, op: ContinueStmt) -> None: ...
     def visit_inline_stmt(self, op: InlineStmt) -> None: ...
@@ -4466,6 +4513,7 @@ class IRMutator:
     def visit_yield_stmt(self, op: YieldStmt) -> Stmt: ...
     def visit_return_stmt(self, op: ReturnStmt) -> Stmt: ...
     def visit_eval_stmt(self, op: EvalStmt) -> Stmt: ...
+    def visit_simt_launch_stmt(self, op: SimtLaunchStmt) -> Stmt: ...
     def visit_break_stmt(self, op: BreakStmt) -> Stmt: ...
     def visit_continue_stmt(self, op: ContinueStmt) -> Stmt: ...
     def visit_inline_stmt(self, op: InlineStmt) -> Stmt: ...

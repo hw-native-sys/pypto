@@ -12,6 +12,7 @@
 #ifndef PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
 #define PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -120,6 +121,13 @@ struct L0CostModel {
                                  ///< bf16 and other <=2-byte inputs are 1 pass (unaffected).
 };
 
+/// Target SIMT resource envelope. Absent means scalar SIMT is unsupported.
+struct SimtLimits {
+  std::array<int, 3> max_block_dims;
+  int max_threads;
+  std::vector<std::pair<int, int>> register_tiers;
+};
+
 /**
  * @brief Backend-specific behavior dispatch interface
  *
@@ -148,6 +156,7 @@ class BackendHandler {
                                                      const std::string& /*artifact*/) const {
     return false;
   }
+  [[nodiscard]] virtual std::optional<SimtLimits> GetSimtLimits() const { return std::nullopt; }
 
   // ---------------------------------------------------------------------------
   // Codegen hooks

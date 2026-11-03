@@ -94,6 +94,8 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // synthesises one.
   Register(IRProperty::NoScalarKernelReturn, CreateNoScalarKernelReturnPropertyVerifier);
 
+  Register(IRProperty::SimtValid, CreateSimtValidPropertyVerifier);
+
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);

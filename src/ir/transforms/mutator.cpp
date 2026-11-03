@@ -1130,6 +1130,28 @@ StmtPtr IRMutator::VisitStmt_(const ContinueStmtPtr& op) { return op; }
 
 StmtPtr IRMutator::VisitStmt_(const InlineStmtPtr& op) { return op; }
 
+StmtPtr IRMutator::VisitStmt_(const SimtLaunchStmtPtr& op) {
+  auto result = MutableCopy(op);
+  bool changed = false;
+  for (auto& dim : result->block_dims_) {
+    auto mapped = VisitExpr(dim);
+    changed |= mapped != dim;
+    dim = std::move(mapped);
+  }
+  for (auto& arg : result->args_) {
+    auto mapped = VisitExpr(arg);
+    changed |= mapped != arg;
+    arg = std::move(mapped);
+  }
+  for (auto& var : result->results_) {
+    auto mapped = AsVarLike(VisitExpr(var));
+    INTERNAL_CHECK_SPAN(mapped, op->span_) << "SIMT result mutated to a non-variable";
+    changed |= mapped != var;
+    var = std::move(mapped);
+  }
+  return changed ? result : op;
+}
+
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) { return op; }
 
 }  // namespace ir

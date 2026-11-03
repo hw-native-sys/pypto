@@ -358,6 +358,43 @@ class AssignStmt : public Stmt {
 using AssignStmtPtr = std::shared_ptr<const AssignStmt>;
 
 /**
+ * @brief Launch a void SIMT helper and define its logical storage updates.
+ *
+ * Dimensions and arguments are uses; results are definitions, in writable
+ * parameter order. The mapping does not require physical aliasing: a live old
+ * Tile version must be preserved before the helper updates selected storage.
+ * Tensor results retain reference semantics. Signature and execution-context
+ * checks require a Program and are performed by SIMT verification.
+ */
+class SimtLaunchStmt : public Stmt {
+ public:
+  GlobalVarPtr callee_;
+  std::vector<ExprPtr> block_dims_;
+  std::vector<ExprPtr> args_;
+  std::vector<VarPtr> results_;
+  std::vector<int> result_param_indices_;
+
+  SimtLaunchStmt(GlobalVarPtr callee, std::vector<ExprPtr> block_dims, std::vector<ExprPtr> args,
+                 std::vector<VarPtr> results, std::vector<int> result_param_indices, Span span,
+                 std::vector<std::string> leading_comments = {});
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SimtLaunchStmt; }
+  [[nodiscard]] std::string TypeName() const override { return "SimtLaunchStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&SimtLaunchStmt::callee_, "callee"),
+                                          reflection::UsualField(&SimtLaunchStmt::block_dims_, "block_dims"),
+                                          reflection::UsualField(&SimtLaunchStmt::args_, "args"),
+                                          reflection::DefField(&SimtLaunchStmt::results_, "results"),
+                                          reflection::UsualField(&SimtLaunchStmt::result_param_indices_,
+                                                                 "result_param_indices")));
+  }
+};
+
+using SimtLaunchStmtPtr = std::shared_ptr<const SimtLaunchStmt>;
+
+/**
  * @brief Conditional statement
  *
  * Represents an if-else statement: if condition then then_body else else_body

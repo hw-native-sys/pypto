@@ -74,6 +74,7 @@ FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
     "Spmd": ir.FunctionType.Spmd,
     "Inline": ir.FunctionType.Inline,
     "Graph": ir.FunctionType.Graph,
+    "SIMT": ir.FunctionType.SIMT,
 }
 
 

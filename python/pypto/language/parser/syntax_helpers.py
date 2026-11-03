@@ -28,6 +28,7 @@ PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
 # it before falling back to expression parsing.
 ENUM_VALUE_TYPES: tuple[type, ...] = (
     DataType,
+    ir.SimtAxis,
     ir.MemorySpace,
     ir.TensorLayout,
     ir.TileLayout,
@@ -240,3 +241,16 @@ def is_dsl_call(node: ast.AST, func_name: str) -> bool:
     if isinstance(func, ast.Name):
         return func.id == func_name
     return False
+
+
+def is_simt_launch(node: ast.AST) -> bool:
+    """Recognize the canonical printed SIMT launch statement."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "launch"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "simt"
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == "pl"
+    )

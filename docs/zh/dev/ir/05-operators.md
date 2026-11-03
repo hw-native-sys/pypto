@@ -872,3 +872,9 @@ dtype、内存、转换和归属契约见[寄存器操作](../language/06-regist
 `interpret_cast`、`chist`、`dhist` 和 `create_group_mask` 是单结果的纯寄存器算子。
 位重解释保持总位数；直方图结果与 UINT16 累加器一致，而不是与 UINT8 源一致；
 分组掩码的 lane 数由静态组几何参数确定。
+
+## 标量 SIMT 操作
+
+`pypto.ir.op.simt` 提供 typed 坐标查询、`lane_id`，以及对 UB Tile 或 GM Tensor
+的标量 `load`/`store`。`store` 返回 `VoidType`，应放入 `EvalStmt`。
+操作、launch、cache 策略及验证契约见[标量 SIMT IR](11-simt.md)。

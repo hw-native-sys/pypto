@@ -949,3 +949,10 @@ its destination Tile and declares argument 0 as written.
 operations with one result. Reinterpretation preserves bit capacity; histogram
 results match the UINT16 accumulator rather than the UINT8 source; grouped
 masks derive their lane count from static group geometry.
+
+## Scalar SIMT operations
+
+`pypto.ir.op.simt` exposes typed coordinate queries, `lane_id`, and scalar
+`load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and
+belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation,
+launch, cache-policy, and validation contracts.

@@ -104,6 +104,7 @@ DEFINE_KIND_TRAIT(GraphScopeStmt, ObjectKind::GraphScopeStmt)
 DEFINE_KIND_TRAIT(RegScopeStmt, ObjectKind::RegScopeStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
+DEFINE_KIND_TRAIT(SimtLaunchStmt, ObjectKind::SimtLaunchStmt)
 DEFINE_KIND_TRAIT(BreakStmt, ObjectKind::BreakStmt)
 DEFINE_KIND_TRAIT(ContinueStmt, ObjectKind::ContinueStmt)
 DEFINE_KIND_TRAIT(InlineStmt, ObjectKind::InlineStmt)
@@ -166,6 +167,7 @@ struct KindTrait<Stmt> {
                                          ObjectKind::RegScopeStmt,
                                          ObjectKind::SeqStmts,
                                          ObjectKind::EvalStmt,
+                                         ObjectKind::SimtLaunchStmt,
                                          ObjectKind::BreakStmt,
                                          ObjectKind::ContinueStmt,
                                          ObjectKind::InlineStmt};

@@ -63,7 +63,8 @@ enum class FunctionType : uint8_t {
   Group = 5,          ///< Co-scheduled group of AIC + AIV kernels
   Spmd = 6,           ///< SPMD data-parallel dispatch
   Inline = 7,         ///< Whole-body substitution at every call site
-  Graph = 8           ///< Recordable/replayable orchestration fragment
+  Graph = 8,          ///< Recordable/replayable orchestration fragment
+  SIMT = 9            ///< Per-thread device helper launched inside an AIV task
 };
 
 /** @brief Function body representation, independent of its execution context. */
@@ -283,6 +284,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Inline";
     case FunctionType::Graph:
       return "Graph";
+    case FunctionType::SIMT:
+      return "SIMT";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -316,6 +319,12 @@ inline Level FunctionTypeToLevel(FunctionType type) {
  */
 inline bool IsInCoreType(FunctionType type) {
   return type == FunctionType::InCore || type == FunctionType::AIC || type == FunctionType::AIV;
+}
+
+/// Device helpers participate in device IR transforms without becoming
+/// independently scheduled InCore tasks or inheriting a SubWorker role.
+inline bool IsDeviceFunctionType(FunctionType type) {
+  return IsInCoreType(type) || type == FunctionType::SIMT;
 }
 
 /**
@@ -371,6 +380,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Inline;
   } else if (str == "Graph") {
     return FunctionType::Graph;
+  } else if (str == "SIMT") {
+    return FunctionType::SIMT;
   } else {
     throw pypto::TypeError("Unknown FunctionType: " + str);
   }
@@ -606,6 +617,12 @@ class Function : public IRNode {
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();
+    if (func_type_ == FunctionType::SIMT) {
+      CHECK_SPAN(return_types_.empty(), span_)
+          << "SIMT helpers return void; launch results name updated storage";
+      CHECK_SPAN(!level_ && !role_ && !requires_runtime_binding_, span_)
+          << "SIMT helpers cannot carry runtime task level, role, or binding metadata";
+    }
     if (IsInCoreType(func_type_) || func_type_ == FunctionType::Group || IsOrchestrationLike(func_type_)) {
       Level derived_level = FunctionTypeToLevel(func_type_);
       // A Graph body orchestrates tasks, so it is an Orchestrator like any other
