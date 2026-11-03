@@ -16,12 +16,11 @@ They do not claim that production PyPTO already specializes captured Tile views.
 import importlib
 import json
 import os
-import shutil
 from pathlib import Path
 
 import pytest
 from pypto.runtime import _vpto
-from test_validation import ROOT, run
+from test_validation import ROOT, require_ptoas, run
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PYPTO_RUN_VPTO_ALIAS_VALIDATION") != "1",
@@ -88,8 +87,7 @@ def helper_source(kind: str, offset: int, relation: str = "static") -> str:
 
 def compile_helper(directory: Path, source: str, *, enabled: bool = True) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
-    ptoas = shutil.which("ptoas")
-    assert ptoas, "PTOAS must be on PATH"
+    ptoas = require_ptoas()
     (directory / "helper.pto").write_text(source)
     run(directory, "version", [ptoas, "--version"])
     flags = [*_vpto.PTOAS_FLAGS, f"--enable-vecscope-mem-bar={'true' if enabled else 'false'}"]
@@ -128,8 +126,8 @@ def test_disabled_auto_sync_control(kind: str):
 
 @pytest.mark.parametrize("relation", ["unknown", "dynamic"])
 @pytest.mark.parametrize("kind", ["wr", "rw", "ww"])
-def test_unresolved_relation_is_not_rejected_by_ptoas(kind: str, relation: str):
-    """Characterize the gap: successful compilation is NOT safe acceptance."""
+def test_unresolved_relation_uses_conservative_barriers(kind: str, relation: str):
+    """Check pinned PTOAS ordering; compiler output alone is not hardware proof."""
     output = Path(os.environ.get("PYPTO_VPTO_ALIAS_OUTPUT", ROOT / "build/vf-alias-validation"))
     directory = (output / f"{kind}-{relation}").resolve()
     if relation == "dynamic" and kind in ("rw", "ww"):
@@ -137,12 +135,20 @@ def test_unresolved_relation_is_not_rejected_by_ptoas(kind: str, relation: str):
             compile_helper(directory, helper_source(kind, 32, relation))
         return
     report = compile_helper(directory, helper_source(kind, 32, relation))
-    assert not report["barrier_calls"], report
-    (directory / "acceptance-gap.json").write_text(
+    # Unknown pointers can alias any base, so PTOAS 0.72 must order the primary
+    # hazard. The final result store adds a WAR edge for a dynamic read and a
+    # WAW edge when the first store uses an unknown pointer.
+    required = {"wr": {"vst.vld"}, "rw": {"vld.vst", "vst.vst"}, "ww": {"vst.vst"}}[kind]
+    if relation == "dynamic":
+        required.add("vld.vst")
+    for barrier in required:
+        assert any(f"@llvm.hivm.mem.bar.{barrier}()" in call for call in report["barrier_calls"]), report
+    (directory / "sync-report.json").write_text(
         json.dumps(
             {
                 "compiler_accepted": True,
                 "unresolved_relation": relation,
+                "required_barriers": sorted(required),
                 "hardware_executed": False,
             },
             indent=2,

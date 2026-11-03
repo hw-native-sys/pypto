@@ -18,7 +18,33 @@ from types import SimpleNamespace
 
 import pytest
 
-RUN = runpy.run_path(str(Path(__file__).with_name("test_validation.py")))["run"]
+SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_validation.py")))
+RUN = SUPPORT["run"]
+
+
+@pytest.mark.parametrize("pin_available", [True, False])
+def test_vf_compiler_selection_honors_ptoas_root(tmp_path, monkeypatch, pin_available):
+    # CANN also installs a ptoas launcher on PATH. The acceptance harness must
+    # use the same pinned compiler as production, even when PATH points elsewhere.
+    path_dir = tmp_path / "cann-bin"
+    path_dir.mkdir()
+    fallback = path_dir / "ptoas"
+    fallback.write_text("#!/bin/sh\nexit 99\n")
+    fallback.chmod(0o755)
+    root = tmp_path / "pinned"
+    pinned = root / "bin/ptoas"
+    if pin_available:
+        pinned.parent.mkdir(parents=True)
+        pinned.write_text("#!/bin/sh\nexit 0\n")
+        pinned.chmod(0o755)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setenv("PTOAS_ROOT", str(root))
+    if pin_available:
+        assert SUPPORT["require_ptoas"]() == str(pinned)
+    else:
+        # A missing pin must fail rather than silently validating another compiler.
+        with pytest.raises(AssertionError, match="PTOAS_ROOT"):
+            SUPPORT["require_ptoas"]()
 
 
 def test_nonzero_exit_keeps_diagnostics(tmp_path):
