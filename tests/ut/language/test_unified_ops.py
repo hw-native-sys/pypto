@@ -1690,6 +1690,15 @@ class TestUnifiedOpsCrossPathKwargs:
         with pytest.raises(ValueError, match="tmp requires high_precision=True"):
             unified_ops.rsqrt(t, high_precision=False, tmp=tmp)  # type: ignore[call-overload]
 
+    def test_rsqrt_tile_tmp_requires_explicit_high_precision(self):
+        """Both DSL entries must reject legacy scratch-only calls."""
+        t = _tile("t", [64, 64], DataType.FP32)
+        tmp = _tile("tmp", [64, 64], DataType.FP32)
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            pl.tile.rsqrt(t, tmp=tmp)  # type: ignore[call-overload]
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            unified_ops.rsqrt(t, tmp=tmp)  # type: ignore[call-overload]
+
     def test_rsqrt_tile_explicit_high_precision(self):
         t = _tile("t", [64, 64], DataType.FP32)
         tmp = _tile("tmp", [64, 64], DataType.FP32)

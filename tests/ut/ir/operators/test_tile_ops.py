@@ -713,11 +713,19 @@ class TestTileUnaryOps:
             with pytest.raises(ValueError, match=message):
                 ir.create_op_call("tile.rsqrt", args, {"high_precision": high_precision}, span)
             return
-        call = tile.rsqrt(src, tmp=tmp if with_tmp else None, high_precision=high_precision)
+        call = tile.rsqrt(src, tmp=tmp, high_precision=True) if with_tmp else tile.rsqrt(src)
         assert dict(call.kwargs).get("high_precision", False) == high_precision
         assert len(call.args) == len(args)
         default = tile.rsqrt(src) if not high_precision else call
         ir.assert_structural_equal(call, default)
+
+    def test_tile_rsqrt_tmp_requires_explicit_high_precision(self):
+        """The IR Python wrapper must reject legacy scratch-only calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            tile.rsqrt(src, tmp=tmp)
 
     def test_tile_rsqrt_rejects_tmp_shape_mismatch(self):
         """tile.rsqrt rejects a tmp tile whose per-dim shape differs from the input."""

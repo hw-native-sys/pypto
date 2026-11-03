@@ -736,7 +736,7 @@ class TestRsqrtHighPrecisionCodegen:
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_tile_rsqrt_with_tmp_emits_two_operand_trsqrt(self, backend_type):
-        """pl.tile.rsqrt(src, tmp=...) emits pto.trsqrt with two ins operands."""
+        """pl.tile.rsqrt(src, tmp=..., high_precision=True) emits two ins operands."""
 
         @pl.program
         class Prog:
