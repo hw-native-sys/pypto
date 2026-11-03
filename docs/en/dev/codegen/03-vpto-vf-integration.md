@@ -17,7 +17,9 @@ flowchart TD
   Wrapper --> CallerObj[kernel.o]
   Helper --> LLVM[PTOAS VPTO LLVM and VF synchronization]
   LLVM --> Admission[Validate supported synchronization contract]
-  Admission --> HelperObj[Bisheng device helper objects]
+  Admission --> Native[PTOAS native VPTO object compilation]
+  Native --> Fatobj[Host fatobj containing the device object]
+  Fatobj --> HelperObj[Extract AIV object and add logical symbol aliases]
   CallerObj --> Link[ld.lld: kernel_entry first]
   HelperObj --> Link
   Link --> ELF[Validate linked device ELF]
@@ -59,7 +61,7 @@ PyPTO adds no fixed `pipe_barrier(PIPE_ALL)` around the call. The normal kernel
 tail synchronization remains enabled. The boundary contract relies on A5 VF
 completion semantics and is restricted to AIV helpers.
 
-Before compiling LLVM to a device object, PyPTO validates the supported
+Before requesting native object compilation, PyPTO exports LLVM and validates the supported
 instruction subset, pointer provenance and existing barrier coverage. This
 check inserts no barriers. Unknown relationships or LLVM output forms fail
 with a diagnostic rather than silently executing. Masked accesses are checked
@@ -69,10 +71,23 @@ over all 64 lanes, so this is not a mask-aware minimal-barrier optimizer.
 
 The LLVM pointer `ptr addrspace(6)`, PTO `!pto.ptr<f32, ub>` and the caller's
 `__ubuf__ float*` must describe the same UB address space and parameter ABI.
-Helper compilation retains `--cce-generic-addrspace=off` and uses the A5 vector
-device target. It emits a device object, not a host fat object. LLVM export
-and Bisheng compilation are separate to validate the helper before linking;
-all relevant flags participate in the binary cache identity.
+PTOAS owns the Bisheng invocation, address-space options and device scheduling.
+PyPTO exports LLVM for synchronization admission, then requests normal VPTO
+object output directly from the helper PTO source; it does not compile the
+inspection LLVM itself. Both calls use the same lowering options.
+
+PTOAS's native fatobj contains the relocatable AIV object in
+`__aicore_rel_binary`. PyPTO extracts it with the matching CANN `llvm-objcopy`
+and requires one little-endian AI Core ELF64 object. It reads actual global
+function exports ending in `.vector` or `_mix_aiv` and adds linker aliases for
+the caller's logical names, without executable adapter instructions. Host or
+launch images, concatenated device ELFs and objects without supported AIV
+exports are rejected.
+This helper-only container contract does not accept arbitrary mixed fatobjs.
+
+`ASCEND_HOME_PATH` must select the same Bisheng installation as the runtime SDK.
+PTOAS/Bisheng versions, lowering flags and the native-object ABI version are
+included in the binary cache identity; the old LLVM-compiled cache is not reused.
 
 The runtime consumes raw code bytes. This path extracts only `.text`, so the
 linked image must satisfy all of the following:

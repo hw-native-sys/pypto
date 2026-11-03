@@ -11,6 +11,7 @@
 | [编排代码生成](01-orchestration_codegen.md) | 生成向运行时提交任务的主机侧 C++ |
 | [PTO 内核包装器生成](02-kernel_wrapper.md) | 将 ptoas 生成的内核连接到运行时派发 |
 | [EmitC 与 VPTO VF 执行接入](03-vpto-vf-integration.md) | 独立 VF helper、同步契约与 A5 常驻执行 |
+| [VPTO 原生设备对象验证](04-vpto-native-object-validation.md) | PTOAS helper 编译、ABI 适配与常驻运行时验收 |
 
 ## 另请参阅
 

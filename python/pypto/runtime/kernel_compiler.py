@@ -270,6 +270,11 @@ class KernelCompiler:
         check_ptoas_version(ptoas)
         assert self.sdk.ccec is not None
         bisheng = str(Path(self.sdk.ccec.cxx_path).with_name("bisheng"))
+        # Native PTOAS object emission discovers Bisheng through ASCEND_HOME_PATH.
+        # It must use the same installation as the caller and cache version probe.
+        ascend_home = os.environ.get("ASCEND_HOME_PATH")
+        if not ascend_home or (Path(ascend_home) / "bin/bisheng").resolve() != Path(bisheng).resolve():
+            raise ValueError("VPTO requires ASCEND_HOME_PATH to match the runtime SDK's Bisheng installation")
         return ptoas, bisheng
 
     def vpto_cache_identity(self, sources: tuple[str, ...], core_type: str) -> str:
@@ -292,7 +297,9 @@ class KernelCompiler:
                 result.stdout,
                 result.stderr,
                 repr(_vpto.PTOAS_FLAGS),
-                repr(_vpto.DEVICE_FLAGS),
+                repr(_vpto.LLVM_FLAGS),
+                _vpto.OBJECT_ABI_VERSION,
+                _vpto.DEVICE_SECTION,
                 repr(_vpto.CALLER_FLAGS),
                 repr(_vpto.LINK_SYMBOL_ORDER),
                 _vpto_sync.VERSION,
@@ -303,11 +310,12 @@ class KernelCompiler:
     def _compile_vpto_helpers(self, sources: tuple[str, ...], directory: Path) -> list[Path]:
         """Keep all helper outputs in the caller's bounded, temporary build."""
         ptoas, bisheng = self._vpto_toolchain()
+        tools = Path(bisheng).parent
         objects: list[Path] = []
         for index, source in enumerate(sources):
             llvm = directory / f"vpto_{index}.ll"
             obj = directory / f"vpto_{index}.o"
-            self._run([ptoas, source, *_vpto.PTOAS_FLAGS, "-o", str(llvm)], llvm, "VPTO lowering")
+            self._run([ptoas, source, *_vpto.LLVM_FLAGS, "-o", str(llvm)], llvm, "VPTO admission IR")
             # LLVM text export does not link PTOAS's generated Bridge wrappers.
             # Reject all non-intrinsic declarations instead of producing an
             # object that only fails later or depends on hidden runtime support.
@@ -323,10 +331,28 @@ class KernelCompiler:
                     "Bridge operations and external helper dependencies are not supported."
                 )
             _vpto_sync.validate_sync_contract(llvm.read_text(), source)
+            fatobj = directory / f"vpto_{index}.fatobj.o"
+            self._run([ptoas, source, *_vpto.PTOAS_FLAGS, "-o", str(fatobj)], fatobj, "VPTO native object")
+            device = directory / f"vpto_{index}.device.o"
+            binary = self._run(
+                [str(tools / "llvm-objcopy"), f"--dump-section={_vpto.DEVICE_SECTION}={device}", str(fatobj)],
+                device,
+                "VPTO device extraction",
+            )
+            aliases = _vpto.device_object_aliases(binary)
+            # The EmitC caller uses logical helper names. Retain PTOAS's native
+            # exports and expose those names without changing helper code bytes.
             self._run(
-                [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)],
+                [
+                    str(tools / "ld.lld"),
+                    "-r",
+                    *(f"--defsym={name}={native}" for name, native in sorted(aliases.items())),
+                    "-o",
+                    str(obj),
+                    str(device),
+                ],
                 obj,
-                "VPTO device compilation",
+                "VPTO helper aliases",
             )
             objects.append(obj)
         return objects

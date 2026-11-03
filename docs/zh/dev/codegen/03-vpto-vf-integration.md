@@ -16,7 +16,9 @@ flowchart TD
   Wrapper --> CallerObj[kernel.o]
   Helper --> LLVM[PTOAS VPTO LLVM 与 VF 同步]
   LLVM --> Admission[验证受支持的同步契约]
-  Admission --> HelperObj[Bisheng 设备 helper 对象]
+  Admission --> Native[PTOAS 原生 VPTO 对象编译]
+  Native --> Fatobj[包含设备对象的 host fatobj]
+  Fatobj --> HelperObj[提取 AIV 对象并添加逻辑符号别名]
   CallerObj --> Link[ld.lld: kernel_entry 位于首部]
   HelperObj --> Link
   Link --> ELF[验证链接后的设备 ELF]
@@ -55,17 +57,27 @@ Masked store 使用 `readwrite`，表示未激活 lane 的内容需要保留，�
 PyPTO 不在调用前后添加固定的 `pipe_barrier(PIPE_ALL)`，正常的 kernel 尾部同步仍
 保留。调用边界契约依赖 A5 VF 完成语义，因此当前限定为 AIV helper。
 
-在把 LLVM 编译为设备对象前，PyPTO 验证受支持的指令子集、指针来源及已有屏障的
+在请求原生对象编译前，PyPTO 导出 LLVM，验证受支持的指令子集、指针来源及已有屏障的
 覆盖情况。此检查不会插入屏障。未知关系或未知 LLVM 输出形式会明确报错，避免
 静默执行。Masked 访问按完整 64 个 lane 检查，因此这不是基于 mask 的最少屏障优化器。
 
 ## 设备代码与 ABI
 
 LLVM 的 `ptr addrspace(6)`、PTO 的 `!pto.ptr<f32, ub>` 与 caller 的
-`__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。Helper 编译保留
-`--cce-generic-addrspace=off`，使用 A5 vector 设备目标，生成设备对象而非 host fat
-object。LLVM 导出与 Bisheng 编译分步进行，以便链接前验证 helper；相关编译选项
-全部参与二进制缓存标识。
+`__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。Bisheng 调用、地址空间
+选项和设备调度由 PTOAS 负责。PyPTO 导出 LLVM 进行同步准入检查，再直接从 helper
+PTO 源码请求常规 VPTO 对象输出，不自行编译检查用 LLVM。两次调用使用相同的
+lowering 选项。
+
+PTOAS 原生 fatobj 的 `__aicore_rel_binary` 中包含可重定位 AIV 对象。PyPTO 使用
+匹配的 CANN `llvm-objcopy` 提取它，要求其中只有一个小端 AI Core ELF64 对象。
+读取实际以 `.vector` 或 `_mix_aiv` 结尾的全局函数导出，再为 caller 的逻辑名添加
+链接器别名，不增加可执行 adapter 指令。Host 或 launch 镜像、拼接的多个设备 ELF
+和没有受支持 AIV 导出的对象会被拒绝。这一仅针对 helper 的容器契约不接受任意 mixed fatobj。
+
+`ASCEND_HOME_PATH` 必须与 runtime SDK 选择相同的 Bisheng 安装。PTOAS/Bisheng
+版本、lowering 选项和原生对象 ABI 版本均参与二进制缓存标识，不复用旧 LLVM
+编译路径的缓存。
 
 运行时接收原始代码字节。本路径只提取 `.text`，因此链接后的镜像必须满足：
 

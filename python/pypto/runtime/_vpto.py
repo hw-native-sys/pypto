@@ -9,39 +9,89 @@
 
 """Build contract for separately compiled, self-contained A5 VPTO helpers."""
 
+import re
 import struct
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
-# These options are also included in the binary cache identity. Keep LLVM
-# compilation separate from the C++ flags and retain PTOAS's validated device
-# profile. Generic-address-space on/off happened to produce identical code for
-# the add helper; this does not establish ABI equivalence for other helpers.
+# PTOAS owns the helper's Bisheng profile, address spaces and scheduling.
+# Export inspection LLVM separately to retain the existing synchronization gate.
 PTOAS_FLAGS = (
     "--pto-arch=a5",
     "--pto-backend=vpto",
-    "--emit-vpto-llvm-ir",
     "--vmi-fastmath=false",
     "--enable-vecscope-mem-bar=true",
 )
+LLVM_FLAGS = (*PTOAS_FLAGS, "--emit-vpto-llvm-ir")
+OBJECT_ABI_VERSION = "ptoas-native-aiv-v1"
+DEVICE_SECTION = "__aicore_rel_binary"
 # Tile operations can leave out-of-line functions before kernel_entry in the
 # caller object. Separate their sections so the linker can put the entry first;
 # the persistent loader starts at byte zero of the final .text payload.
 CALLER_FLAGS = ("-ffunction-sections",)
 LINK_SYMBOL_ORDER = ("kernel_entry",)
-DEVICE_FLAGS = (
-    "--cce-aicore-arch=dav-c310-vec",
-    "--cce-aicore-only",
-    "-O2",
-    "--cce-generic-addrspace=off",
-    "-cce-bitcode-is-aicore",
-    "-Wno-override-module",
-    "-dc",
-    "--cce-long-scbz=true",
-    "-mllvm",
-    "-cce-dyn-kernel-stack-size=true",
-)
+
+
+def _device_object_sections(data: bytes) -> list[tuple[int, ...]]:
+    """Reject incompatible or concatenated ELF payloads before reading exports."""
+    if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
+        raise ValueError("VPTO helper requires a little-endian ELF64 device object")
+    if struct.unpack_from("<HH", data, 16) != (1, 0x1029):
+        raise ValueError("VPTO helper requires a relocatable AI Core ELF, not a host or launch image")
+    (offset,) = struct.unpack_from("<Q", data, 40)
+    size, count = struct.unpack_from("<HH", data, 58)
+    end = offset + count * size
+    if size != 64 or not count or offset < 64 or end > len(data):
+        raise ValueError("VPTO helper has an invalid section table")
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, offset + i * size) for i in range(count)]
+    for section in sections:
+        if section[1] != 8:  # SHT_NOBITS has no file payload.
+            end = max(end, section[4] + section[5])
+    if end > len(data):
+        raise ValueError("VPTO helper has a truncated section")
+    if any(data[end:]):
+        raise ValueError("VPTO helper contains multiple device objects or unsupported trailing data")
+    return sections
+
+
+def device_object_aliases(data: bytes) -> dict[str, str]:
+    """Validate one native AIV object and map its logical exports to device names.
+
+    CANN fatobjs may contain multiple concatenated ELFs. This helper-only path
+    requires exactly one relocatable device object; consuming only its first
+    ELF would silently drop code. Native exports carry a CANN-dependent suffix.
+    Read the actual symbol table instead of inferring a suffix from the version.
+    Linker aliases preserve those exports and add no executable trampoline.
+    """
+    sections = _device_object_sections(data)
+
+    aliases: dict[str, str] = {}
+    for _, kind, _, _, start, length, link, _, _, stride in sections:
+        if kind != 2:  # SHT_SYMTAB
+            continue
+        if stride != 24 or length % stride or link >= len(sections) or sections[link][1] != 3:
+            raise ValueError("VPTO helper has an invalid symbol table")
+        strings = sections[link]
+        names = data[strings[4] : strings[4] + strings[5]]
+        for position in range(start, start + length, stride):
+            name, info, _, section = struct.unpack_from("<IBBH", data, position)
+            if info != 0x12 or not section:  # Defined STB_GLOBAL / STT_FUNC only.
+                continue
+            terminator = names.find(b"\0", name)
+            if name >= len(names) or terminator < 0:
+                raise ValueError("VPTO helper has an invalid symbol name")
+            native = names[name:terminator].decode("ascii")
+            suffix = next((s for s in (".vector", "_mix_aiv") if native.endswith(s)), None)
+            if suffix is None:
+                continue
+            logical = native[: -len(suffix)]
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", logical) or logical in aliases:
+                raise ValueError(f"VPTO helper has an unsupported or ambiguous export: {native!r}")
+            aliases[logical] = native
+    if not aliases:
+        raise ValueError("VPTO helper has no supported native AIV function exports")
+    return aliases
 
 
 def source_paths(value: object) -> tuple[str, ...]:

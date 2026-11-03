@@ -382,6 +382,7 @@ nav:
           - en/dev/codegen/01-orchestration_codegen.md
           - en/dev/codegen/02-kernel_wrapper.md
           - en/dev/codegen/03-vpto-vf-integration.md
+          - en/dev/codegen/04-vpto-native-object-validation.md
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md
