@@ -7,7 +7,7 @@
 该策略是*作者声明的契约（contract）*，绝不是编译器推断出来的提示（hint）。因此它必须
 显式书写，粒度二选一，并且从 DSL 一路原样传递到代码生成（codegen）。
 
-> **要求 PTOAS >= v0.64**（`toolchain/versions.env` 中的 `PTOAS_VERSION`），并且
+> **要求 PTOAS >= v0.72**（`toolchain/versions.env` 中的 `PTOAS_VERSION`），并且
 > **只在 a2a3 上真正生效**。`BYPASS` 声明会变成 `pto.tload` 上的一个 `cache_policy`
 > 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条
 > load 的源地址上。参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。

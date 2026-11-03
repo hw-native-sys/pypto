@@ -437,7 +437,7 @@ def matmul(
         c_matrix_nz: C matrix non-zero flag
         span: Optional source span for debugging (auto-captured if not provided)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication
@@ -554,7 +554,7 @@ def matmul_acc(
         span: Optional source span for debugging (auto-captured if not provided)
         init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with accumulation

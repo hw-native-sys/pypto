@@ -1360,7 +1360,7 @@ def matmul_acc(
     """Matrix multiplication with accumulation, dispatched by input type.
 
     ``tf32_mode="round_even"`` or ``"round_away"`` selects HF32 input rounding
-    for 2D FP32 operands on Ascend950 (PTOAS 0.70+). ``None`` keeps ordinary FP32.
+    for 2D FP32 operands on Ascend950 (PTOAS 0.72+). ``None`` keeps ordinary FP32.
 
     ``a_trans`` / ``b_trans`` are Tensor-only for the same reason as in
     [`matmul`][pypto.language.matmul] — at tile level transposition is a type property, not an op

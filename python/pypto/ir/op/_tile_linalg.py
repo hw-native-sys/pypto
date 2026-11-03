@@ -125,7 +125,7 @@ def matmul(
         rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. ``Final`` must be consumed
             by a store with ``STPhase.Final`` in the same straight-line region.
 
@@ -170,7 +170,7 @@ def matmul_acc(
         span: Optional source span for debugging (auto-captured if not provided)
         init_cond: Optional BOOL scalar predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. ``Final`` must be consumed
             by a store with ``STPhase.Final`` in the same straight-line region.
 
@@ -199,7 +199,7 @@ def matmul_bias(
             floating-point matrix operands, INT32 for integer matrix operands)
         span: Optional source span for debugging (auto-captured if not provided)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.70+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
 
     Returns:
         Call expression for matrix multiplication with bias
