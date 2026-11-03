@@ -212,11 +212,12 @@ class RegionChecker : public IRVisitor {
     const auto bits = stop_type ? stop_type->dtype_.GetBit() : 64;
     // Validate the literal before interpreting emptiness: narrowing an invalid
     // signed or unsigned literal can change both sign and iteration count.
-    const bool invalid_stop =
-        stop && ((unsigned_stop && stop->value_ < 0) ||
-                 (bits < 63 && (unsigned_stop ? stop->value_ >= (int64_t{1} << bits)
-                                              : stop->value_ < -(int64_t{1} << (bits - 1)) ||
-                                                    stop->value_ >= (int64_t{1} << (bits - 1)))));
+    // Guard zero widths before subtracting one to form a signed shift count.
+    const bool invalid_stop = stop && ((unsigned_stop && stop->value_ < 0) ||
+                                       (bits > 0 && bits < 63 &&
+                                        (unsigned_stop ? stop->value_ >= (int64_t{1} << bits)
+                                                       : stop->value_ < -(int64_t{1} << (bits - 1)) ||
+                                                             stop->value_ >= (int64_t{1} << (bits - 1)))));
     const auto start = As<ConstInt>(op->start_);
     const auto step = As<ConstInt>(op->step_);
     // Empty sequential ancestors suppress hardware realization requirements
