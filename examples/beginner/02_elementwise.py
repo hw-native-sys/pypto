@@ -23,16 +23,12 @@ Concepts introduced:
   - Looping over chunks when the tensor is larger than one tile
 
 Run:  python examples/beginner/02_elementwise.py
-      python examples/beginner/02_elementwise.py --a5 --device-id 0
 Next: examples/beginner/03_scalar_ops.py
 """
 
-import argparse
-
 import pypto.language as pl
 import torch
-from pypto.backend import BackendType
-from pypto.runtime import ExecutionMode, RunConfig
+from pypto.runtime import RunConfig
 
 # chunked_add works on a tensor taller than a single tile.
 ROWS = 512
@@ -100,15 +96,7 @@ def chunked_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--a5", action="store_true", help="Run on an A5 device instead of the simulator")
-    parser.add_argument("--device-id", type=int, default=0)
-    args = parser.parse_args()
-    cfg = RunConfig(
-        arch=BackendType.Ascend950 if args.a5 else BackendType.Ascend910,
-        execution_mode=ExecutionMode.ONBOARD if args.a5 else ExecutionMode.SIM,
-        device_id=args.device_id,
-    )
+    cfg = RunConfig()
 
     a128 = torch.full((128, 128), 2.0, dtype=torch.float32)
     b128 = torch.full((128, 128), 3.0, dtype=torch.float32)

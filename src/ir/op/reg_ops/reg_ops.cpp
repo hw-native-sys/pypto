@@ -195,7 +195,7 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
     if (key == "rounding") {
       rounding = true;
       auto mode = AnyCast<std::string>(value, key);
-      CHECK((narrow_float && (mode == "R" || mode == "A" || mode == "H" || mode == "Z")) ||
+      CHECK((narrow_float && (mode == "R" || mode == "A" || mode == "Z")) ||
             (float_int && (mode == "R" || mode == "A" || mode == "F" || mode == "C" || mode == "Z")))
           << "Unsupported rounding for convert pair";
     }

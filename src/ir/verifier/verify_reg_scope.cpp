@@ -199,6 +199,17 @@ class RegionChecker : public IRVisitor {
     if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
       Error("HardwareLoopPolicy.Require does not support loop attrs", op->span_);
     }
+    // Enforce target-independent hardware-loop limits during the existing IR
+    // walk. No target profile or repeated per-loop body analysis is needed.
+    const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
+    if (hardware_loop) ++hardware_loop_depth_;
+    if (collecting_ && hardware_loop) {
+      if (hardware_loop_depth_ > 4)
+        Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
+      if (auto stop = As<ConstInt>(op->stop_); stop && stop->value_ > 65535) {
+        Error("Hardware loop stop must not exceed 65535", op->span_);
+      }
+    }
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
@@ -207,6 +218,7 @@ class RegionChecker : public IRVisitor {
       for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
+    if (hardware_loop) --hardware_loop_depth_;
     yield_region_ = previous;
   }
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -278,6 +290,7 @@ class RegionChecker : public IRVisitor {
   FunctionPtr function_;
   std::vector<Diagnostic>& diagnostics_;
   bool final_;
+  int hardware_loop_depth_ = 0;
   bool incore_;
   bool collecting_ = true;
   bool blocked_ = false;

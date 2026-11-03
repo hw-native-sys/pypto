@@ -12,7 +12,7 @@
 import json
 import re
 import subprocess
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
@@ -32,10 +32,46 @@ def a5_backend():
     backend.reset_for_testing()
 
 
-def test_bundle_preserves_call_order_storage_and_diagnostic_output():
+def compile_vf_bundle(bundle, tmp_path):
+    """Compile real caller and helper PTO, without rewriting backend output."""
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    units = [("caller", bundle.caller_source, ["--enable-insert-sync"])]
+    units.extend(
+        (
+            f"helper_{index}",
+            helper.source,
+            [
+                "--pto-backend=vpto",
+                "--emit-vpto-llvm-ir",
+                "--vmi-fastmath=false",
+                "--enable-vecscope-mem-bar=true",
+            ],
+        )
+        for index, helper in enumerate(bundle.helpers)
+    )
+    for name, source, flags in units:
+        path = tmp_path / f"{name}.pto"
+        output = tmp_path / (f"{name}.cpp" if name == "caller" else f"{name}.ll")
+        path.write_text(source)
+        result = subprocess.run(
+            [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", *flags, "-o", str(output)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, f"{path}\n{source}\n{result.stderr}"
+        assert output.is_file() and output.stat().st_size > 0
+
+
+@pytest.mark.ptoas_compile
+def test_bundle_preserves_call_order_storage_and_diagnostic_output(tmp_path):
     generator = codegen.PTOCodegen()
     program = build_kernel()
     bundle = generator.generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
     assert len(bundle.helpers) == 1
     helper = bundle.helpers[0]
     assert helper.parameter_types == ["!pto.ptr<f32, ub>"]
@@ -68,8 +104,9 @@ def test_bundle_preserves_call_order_storage_and_diagnostic_output():
     assert again.helpers[0].source == helper.source
 
 
-@pytest.mark.parametrize("stride", [64, 128])
-def test_required_hardware_loop_bundle_preserves_loop_and_checks_known_bounds(stride):
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("stop", [0, 1, 2, 32768, 65535])
+def test_required_hardware_loop_bundle_preserves_loop(stop, tmp_path):
     builder = IRBuilder()
     with builder.function("required_loop", span=SPAN, type=ir.FunctionType.AIV) as f:
         tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
@@ -77,8 +114,8 @@ def test_required_hardware_loop_bundle_preserves_loop_and_checks_known_bounds(st
         dst = builder.let("dst", tile.full([128], DataType.FP32, 0.0), type=tile_type)
         index = ir.Var("chunk", ir.ScalarType(DataType.INDEX), SPAN)
         with builder.reg_scope(SPAN):
-            with builder.for_loop(index, 0, 2, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require):
-                offset = ir.Mul(index, ir.ConstInt(stride, DataType.INDEX, SPAN), DataType.INDEX, SPAN)
+            with builder.for_loop(index, 0, stop, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require):
+                offset = ir.Mul(index, ir.ConstInt(0, DataType.INDEX, SPAN), DataType.INDEX, SPAN)
                 x = builder.emit_reg("x", "reg.load", [src, offset], {"lanes": 64}, SPAN)
                 y = builder.emit_reg("y", "reg.mul", [x, x], span=SPAN)
                 builder.emit_reg_store("stored", dst, y, offset=offset, span=SPAN)
@@ -86,23 +123,24 @@ def test_required_hardware_loop_bundle_preserves_loop_and_checks_known_bounds(st
     with passes.PassContext([]):
         program = passes.init_mem_ref()(program)
     generator = codegen.PTOCodegen()
-    if stride == 128:
-        with pytest.raises(ValueError, match="offset bounds"):
-            generator.generate_bundle(program, emit_source_loc=False)
-    else:
-        helper = generator.generate_bundle(program, emit_source_loc=False).helpers[0]
-        assert "pypto.hardware_loop" not in helper.source
-        assert helper.source.count("scf.for") == 1
-        assert helper.source.count("pto.vmi.vmul") == 1
+    bundle = generator.generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
+    assert "pypto.hardware_loop" not in helper.source
+    assert helper.source.count("scf.for") == 1
+    assert helper.source.count("pto.vmi.vmul") == 1
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("depth", [1, 2, 3, 4, 5])
-@pytest.mark.parametrize("dynamic", [False, True])
-def test_hardware_loop_depth_and_dynamic_capture(depth, dynamic):
+@pytest.mark.parametrize("stop_dtype", [None, DataType.INDEX, DataType.INT32, DataType.UINT32])
+def test_hardware_loop_depth_and_dynamic_capture(depth, stop_dtype, tmp_path):
     # The former helper gate rejected any nesting/dynamic stop before PTOAS.
     builder = IRBuilder()
-    with builder.function("nested_loop", span=SPAN, type=ir.FunctionType.AIV) as f:
-        stop = f.param("stop", ir.ScalarType(DataType.INDEX)) if dynamic else 2
+    # IRBuilder invokes the IR verifier before a codegen entry point is reached.
+    validation = pytest.raises(ValueError, match="HWL_DEPTH") if depth == 5 else nullcontext()
+    with validation, builder.function("nested_loop", span=SPAN, type=ir.FunctionType.AIV) as f:
+        stop = f.param("stop", ir.ScalarType(stop_dtype)) if stop_dtype is not None else 2
         tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
         dst = builder.let("dst", tile.full([128], DataType.FP32, 0.0), type=tile_type)
         with builder.reg_scope(SPAN), ExitStack() as stack:
@@ -114,25 +152,99 @@ def test_hardware_loop_depth_and_dynamic_capture(depth, dynamic):
             offset = ir.Mul(index, ir.ConstInt(64, DataType.INDEX, SPAN), DataType.INDEX, SPAN)
             x = builder.emit_reg("x", "reg.load", [dst, offset], {"lanes": 64}, SPAN)
             builder.emit_reg_store("stored", dst, x, offset=offset, span=SPAN)
+    if depth == 5:
+        return
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "Nested", SPAN))
-    if depth == 5:
-        with pytest.raises(ValueError, match="HWL_DEPTH"):
-            codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
-        return
-    helper = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0]
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
     assert helper.source.count("scf.for") == depth
     assert "pypto.hardware_loop" not in helper.source
     assert "llvm.hivm" not in helper.source
-    if dynamic:
-        assert helper.parameter_types[-1] == "index"
+    if stop_dtype is not None:
+        assert (
+            helper.parameter_types[-1]
+            == {DataType.INDEX: "index", DataType.INT32: "i32", DataType.UINT32: "ui32"}[stop_dtype]
+        )
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("feature", ["dependent_stop", "offset_add", "scalar_compare"])
+def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
+    """Former LLVM rewrites confused body adds/comparisons and dependent bounds."""
+    builder = IRBuilder()
+    with builder.function("loop_expressions", span=SPAN, type=ir.FunctionType.AIV) as f:
+        stop = f.param("stop", ir.ScalarType(DataType.INT32))
+        dst = builder.let("dst", tile.full([192], dtype=DataType.FP32, value=0))
+        outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), SPAN)
+        with (
+            builder.reg_scope(SPAN),
+            builder.for_loop(outer, 0, stop, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require),
+            ExitStack() as nested,
+        ):
+            index = outer
+            if feature == "dependent_stop":
+                index = ir.Var("inner", ir.ScalarType(DataType.INDEX), SPAN)
+                nested.enter_context(
+                    builder.for_loop(index, 0, outer, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require)
+                )
+            base = (
+                ir.Add(index, ir.ConstInt(1, DataType.INDEX, SPAN), DataType.INDEX, SPAN)
+                if feature == "offset_add"
+                else index
+            )
+            # Modulo keeps every dynamic count in-bounds without range proofs.
+            offset = ir.Mul(
+                ir.FloorMod(base, ir.ConstInt(2, DataType.INDEX, SPAN), DataType.INDEX, SPAN),
+                ir.ConstInt(64, DataType.INDEX, SPAN),
+                DataType.INDEX,
+                SPAN,
+            )
+            x = builder.emit_reg("x", "reg.load", [dst, offset], {"lanes": 64}, SPAN)
+            if feature == "scalar_compare":
+                flag = builder.let(
+                    "flag", ir.Lt(index, ir.ConstInt(8, DataType.INDEX, SPAN), DataType.BOOL, SPAN)
+                )
+                numeric = builder.let("numeric", ir.cast(flag, DataType.FP32, SPAN))
+                value = builder.emit_reg(
+                    "value", "reg.broadcast", [numeric], {"lanes": 64, "dtype": DataType.FP32}, SPAN
+                )
+                x = builder.emit_reg("sum", "reg.add", [x, value], span=SPAN)
+            builder.emit_reg_store("stored", dst, x, offset=offset, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Expressions", SPAN))
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    assert bundle.helpers[0].source.count("scf.for") == (2 if feature == "dependent_stop" else 1)
+    compile_vf_bundle(bundle, tmp_path)
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT8, DataType.INT16, DataType.INT64, DataType.UINT64])
+def test_hardware_loop_unsupported_dynamic_stop_reports_capture_contract(dtype):
+    builder = IRBuilder()
+    with builder.function("bad_stop", span=SPAN, type=ir.FunctionType.AIV) as f:
+        stop = f.param("stop", ir.ScalarType(dtype))
+        with (
+            builder.reg_scope(SPAN),
+            builder.for_loop(
+                ir.Var("i", ir.ScalarType(DataType.INDEX), SPAN),
+                0,
+                stop,
+                1,
+                hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+            ),
+        ):
+            builder.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN)
+    with pytest.raises(ValueError, match="dynamic hardware loop stop supports INT32, UINT32 and INDEX"):
+        codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "BadStop", SPAN))
+
+
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
     "dtype,element,scalar_type",
     [(DataType.FP32, "f32", "f32"), (DataType.INT32, "si32", "i32"), (DataType.UINT32, "ui32", "ui32")],
 )
-def test_captures_scalar_once_and_collapses_store_versions(dtype, element, scalar_type):
+def test_captures_scalar_once_and_collapses_store_versions(dtype, element, scalar_type, tmp_path):
     builder = IRBuilder()
     with builder.function("scalar_capture", span=SPAN, type=ir.FunctionType.AIV) as f:
         scalar = f.param("scale", ir.ScalarType(dtype))
@@ -149,6 +261,7 @@ def test_captures_scalar_once_and_collapses_store_versions(dtype, element, scala
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "Captures", SPAN))
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
     assert bundle.helpers[0].parameter_types == [f"!pto.ptr<{element}, ub>", scalar_type]
     assert bundle.helpers[0].parameter_effects == ["readwrite", "none"]
     assert bundle.helpers[0].caller_parameter_types[1] == scalar_type
@@ -156,7 +269,8 @@ def test_captures_scalar_once_and_collapses_store_versions(dtype, element, scala
     assert bundle.helpers[0].source.count("pto.vmi.vstore") == 2
 
 
-def test_index_capture_keeps_local_cast_inside_helper():
+@pytest.mark.ptoas_compile
+def test_index_capture_keeps_local_cast_inside_helper(tmp_path):
     builder = IRBuilder()
     with builder.function("index_capture", span=SPAN, type=ir.FunctionType.AIV) as f:
         count = f.param("count", ir.ScalarType(DataType.INDEX))
@@ -164,6 +278,7 @@ def test_index_capture_keeps_local_cast_inside_helper():
             local = builder.let("count_i32", ir.cast(count, DataType.INT32, SPAN))
             builder.emit_reg("x", "reg.broadcast", [local], {"lanes": 64, "dtype": DataType.INT32}, SPAN)
     bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "IndexCapture", SPAN))
+    compile_vf_bundle(bundle, tmp_path)
     assert bundle.helpers[0].parameter_types == ["index"]
     assert bundle.helpers[0].caller_parameter_types == ["index"]
     assert bundle.helpers[0].parameter_effects == ["none"]
@@ -172,7 +287,8 @@ def test_index_capture_keeps_local_cast_inside_helper():
     assert "arith.index_cast" not in bundle.caller_source
 
 
-def test_same_named_scalar_captures_keep_distinct_identity():
+@pytest.mark.ptoas_compile
+def test_same_named_scalar_captures_keep_distinct_identity(tmp_path):
     builder = IRBuilder()
     with builder.function("capture_identity", span=SPAN, type=ir.FunctionType.AIV) as f:
         first = f.param("scale", ir.ScalarType(DataType.FP32))
@@ -182,6 +298,7 @@ def test_same_named_scalar_captures_keep_distinct_identity():
             y = builder.emit_reg("y", "reg.broadcast", [first], {"lanes": 64, "dtype": DataType.FP32}, SPAN)
             builder.emit_reg("z", "reg.add", [x, y], span=SPAN)
     bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "CaptureIdentity", SPAN))
+    compile_vf_bundle(bundle, tmp_path)
     helper = bundle.helpers[0]
     assert helper.parameter_types == ["f32", "f32"]
     broadcasts = [line for line in helper.source.splitlines() if "pto.vmi.vbr" in line]
@@ -318,7 +435,8 @@ def test_register_bundle_after_tile_flattening_and_address_assignment():
     assert "pto.vmi.vstore" in bundle.helpers[0].source
 
 
-def test_multiple_explicit_scopes_have_distinct_symbols_and_order():
+@pytest.mark.ptoas_compile
+def test_multiple_explicit_scopes_have_distinct_symbols_and_order(tmp_path):
     builder = IRBuilder()
     with builder.function("two_scopes", span=SPAN, type=ir.FunctionType.AIV) as f:
         value = f.param("value", ir.ScalarType(DataType.INT32))
@@ -336,6 +454,7 @@ def test_multiple_explicit_scopes_have_distinct_symbols_and_order():
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "TwoScopes", SPAN))
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
     assert len(bundle.helpers) == 2
     first, second = bundle.helpers
     assert first.symbol != second.symbol
@@ -350,7 +469,8 @@ def test_multiple_explicit_scopes_have_distinct_symbols_and_order():
         assert "si32 -> !pto.vmi.vreg<64xsi32>" in helper.source
 
 
-def test_load_store_load_aliases_share_one_readwrite_capture():
+@pytest.mark.ptoas_compile
+def test_load_store_load_aliases_share_one_readwrite_capture(tmp_path):
     builder = IRBuilder()
     with builder.function("alias_effect", span=SPAN, type=ir.FunctionType.AIV) as f:
         dst = builder.let(
@@ -366,6 +486,7 @@ def test_load_store_load_aliases_share_one_readwrite_capture():
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "AliasEffect", SPAN))
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
     helper = bundle.helpers[0]
     assert helper.parameter_types == ["!pto.ptr<f32, ub>"]
     assert helper.parameter_effects == ["readwrite"]
@@ -380,7 +501,8 @@ def test_bundle_rejects_dynamic_register_offset():
         codegen.PTOCodegen().generate_bundle(build_kernel(offset=offset), emit_source_loc=False)
 
 
-def test_capture_offsets_exclude_tile_view_origin():
+@pytest.mark.ptoas_compile
+def test_capture_offsets_exclude_tile_view_origin(tmp_path):
     """The adapter extracts MemRef bases; VMI adds each view origin once."""
     builder = IRBuilder()
     with builder.function("view_origin", span=SPAN, type=ir.FunctionType.AIV) as f:
@@ -410,7 +532,9 @@ def test_capture_offsets_exclude_tile_view_origin():
                 "value", "reg.load", [first, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
             )
             builder.emit_reg_store("updated", second, value, span=SPAN)
-    helper = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "Origins", SPAN)).helpers[0]
+    bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "Origins", SPAN))
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
     assert helper.capture_byte_offsets == [0, 640]
     assert helper.parameter_indices == [0]
     assert "arith.constant 160 : index" in helper.source
@@ -418,7 +542,8 @@ def test_capture_offsets_exclude_tile_view_origin():
     assert helper.source.count("arith.addi") == 1
 
 
-def test_external_plain_alias_shares_one_capture():
+@pytest.mark.ptoas_compile
+def test_external_plain_alias_shares_one_capture(tmp_path):
     builder = IRBuilder()
     with builder.function("plain_alias", span=SPAN, type=ir.FunctionType.AIV) as f:
         original = builder.let(
@@ -434,14 +559,17 @@ def test_external_plain_alias_shares_one_capture():
             builder.emit_reg_store("updated", original, value, span=SPAN)
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "Aliases", SPAN))
-    helper = codegen.PTOCodegen().generate_bundle(program).helpers[0]
+    bundle = codegen.PTOCodegen().generate_bundle(program)
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
     assert helper.parameter_effects == ["readwrite"]
     assert helper.capture_byte_offsets == [0]
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("offset", [0, 32, 64])
 @pytest.mark.parametrize("reverse", [False, True])
-def test_distinct_captured_views_preserve_shared_base(offset, reverse):
+def test_distinct_captured_views_preserve_shared_base(offset, reverse, tmp_path):
     """The adapter retains both effects; the helper reconstructs static aliases."""
     builder = IRBuilder()
     with builder.function("overlapping_views", span=SPAN, type=ir.FunctionType.AIV) as f:
@@ -473,7 +601,9 @@ def test_distinct_captured_views_preserve_shared_base(offset, reverse):
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "SharedViews", SPAN))
         program = passes.flatten_tile_nd_to_2d()(program)
-    helper = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0]
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
     assert helper.parameter_types == ["!pto.ptr<f32, ub>"]
     assert helper.capture_byte_offsets == ([offset * 4, 0] if reverse else [0, offset * 4])
     assert helper.parameter_indices == ([1] if reverse and offset else [0])

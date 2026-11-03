@@ -102,6 +102,34 @@ def test_hardware_loop_policy_requires_lexical_reg_scope(placement, stop):
         assert "HardwareLoopPolicy.Require requires RegScope" in diagnostics[0].message
 
 
+@pytest.mark.parametrize("depth", [1, 4, 5])
+@pytest.mark.parametrize("stop", [65535, 65536])
+def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop):
+    # Reject invalid loops during IR verification, without invoking codegen or
+    # a target profile. Dynamic integer counts need no compile-time range proof.
+    body = sequence()
+    for level in range(depth):
+        body = ir.ForStmt(
+            scalar(f"i{level}"),
+            integer(0),
+            integer(stop),
+            integer(1),
+            [],
+            body,
+            [],
+            SPAN,
+            hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+        )
+    diagnostics = verify(region(body))
+    messages = [diagnostic.message for diagnostic in diagnostics]
+    if depth > 4:
+        assert any("HWL_DEPTH" in message for message in messages)
+    if stop > 65535:
+        assert any("65535" in message for message in messages)
+    if depth <= 4 and stop <= 65535:
+        assert diagnostics == []
+
+
 def test_auto_loop_outside_reg_scope_remains_legal():
     loop = ir.ForStmt(scalar("i"), integer(0), integer(8), integer(1), [], sequence(), [], SPAN)
     assert verify(loop) == []

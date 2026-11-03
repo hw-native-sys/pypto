@@ -11,7 +11,6 @@
 
 #include "pypto/codegen/codegen_preconditions.h"
 
-#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -104,54 +103,17 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
 
 void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
-  // Qualification is recomputed at the emission boundary. Installed backends
-  // default to unsupported; no cached report can authorize a Require loop.
   auto* context = PassContext::Current();
-  auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
+  const auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
   const bool a5 = backend::BackendConfig::IsConfigured() &&
                   backend::GetBackend()->GetHandler()->GetPtoTargetArch() == "a5";
-  if (a5) {
-    // Qualify the current IR before emitting canonical PTO loops. Machine
-    // instruction selection and optimization remain the backend's responsibility.
-    profile.supported = true;
-    // User profiles may tighten limits, but cannot widen A5 hardware limits.
-    profile.counter_bits = std::min(profile.counter_bits, 16);
-    profile.max_trip_count = std::min<int64_t>(profile.max_trip_count, 65535);
-    profile.max_depth = std::min(profile.max_depth, 4);
-    class RegisterOps : public IRVisitor {
-     public:
-      std::vector<std::string> names;
-      void VisitExpr_(const CallPtr& call) override {
-        if (call->op_->name_.rfind("reg.", 0) == 0) names.push_back(call->op_->name_);
-        IRVisitor::VisitExpr_(call);
-      }
-    } ops;
-    ops.VisitProgram(program);
-    profile.allowed_ops = std::move(ops.names);
-    class LoweringRequirements : public IRVisitor {
-     public:
-      explicit LoweringRequirements(const HardwareLoopProfile& profile) : profile_(profile) {}
-      void VisitStmt_(const ForStmtPtr& loop) override {
-        if (loop->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
-          const auto qualification = AnalyzeHardwareLoop(loop, profile_);
-          CHECK_SPAN(qualification.state == HardwareLoopState::Eligible, loop->span_)
-              << "Hardware loop lowering rejected: " << qualification.reason;
-        }
-        IRVisitor::VisitStmt_(loop);
-      }
-
-     private:
-      const HardwareLoopProfile& profile_;
-    } requirements(profile);
-    requirements.VisitProgram(program);
-  }
   if (context && context->GetReportHardwareLoops()) {
     context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
   }
+  // A5 emits canonical PTO loops; it does not require final-machine-code evidence.
   if (!a5) VerifyHardwareLoopRequirements(program, profile);
 
-  // Check lexical register ownership before emission. Hardware-loop
-  // qualification above is the final PyPTO check at the codegen boundary.
+  // Reuse the IR verifier for register ownership and hardware-loop contracts.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
     void VisitFunction(const ir::FunctionPtr& func) override {

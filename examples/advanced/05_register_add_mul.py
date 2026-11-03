@@ -17,9 +17,8 @@ Run in an activated PyPTO/CANN environment through the local device queue:
     task-submit --device auto 'python examples/advanced/05_register_add_mul.py --device-id "$TASK_DEVICE"'
 
 Use --save-kernels-dir to retain generated sources and pass dumps for inspection.
-This demonstrates hardware-loop PTO codegen. The current runtime synchronization
-admission supports straight-line helpers and rejects this loop form; on-device
-execution needs corresponding backend support. PyPTO does not rewrite backend LLVM.
+PyPTO qualifies the loop at codegen; PTOAS owns backend lowering and synchronization.
+The emitted backend LLVM is passed unchanged to Bisheng.
 """
 
 import argparse

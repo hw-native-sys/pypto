@@ -243,7 +243,7 @@ chooses saturation. They are not universal flags: only the pairs below accept th
 | Source | Destination | `rounding` | `saturate` |
 | ------ | ----------- | ---------- | ---------- |
 | FP16 | FP32 | Must be omitted | Must be omitted |
-| FP32 | FP16 | R/A/H/Z; DSL default R | Required: True or False |
+| FP32 | FP16 | R/A/Z; DSL default R | Required: True or False |
 | FP32 | INT32 | R/A/F/C/Z; DSL default Z | Required: True or False |
 | INT32 | FP32 | Must be omitted | Must be omitted |
 | INT8 | FP16 | Must be omitted | Must be omitted |
@@ -254,9 +254,7 @@ chooses saturation. They are not universal flags: only the pairs below accept th
 | INT32 | INT8 | Must be omitted | Required: False |
 
 R rounds to nearest with ties to even; A rounds away from zero; F rounds
-toward negative infinity; C toward positive infinity; Z toward zero. H selects
-the PTOAS-specific H rounding mode for FP32-to-FP16 narrowing and is forwarded
-to the backend unchanged.
+toward negative infinity; C toward positive infinity; Z toward zero. H is not supported for FP32-to-FP16 narrowing and is rejected before codegen.
 `saturate=True` selects saturation (clamping to the target range);
 `saturate=False` selects non-saturating conversion.
 Same-dtype DSL conversion returns the original register if both optional

@@ -476,31 +476,30 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
 }
 
 std::string PTOCodegen::EmitCastToIndex(const ir::VarPtr& var, const std::string& mlir_name) {
-  if (auto scalar_type = As<ScalarType>(var->GetType())) {
-    CHECK(!scalar_type->dtype_.IsFloat())
-        << "EmitCastToIndex does not support floating-point types (got " << GetTypeString(scalar_type->dtype_)
-        << " for var '" << var->name_hint_ << "')";
-    if (scalar_type->dtype_ != DataType::INDEX) {
-      std::string idx_name = NewNamedTemp(var->name_hint_ + "_idx");
-      std::string src_type = GetTypeString(scalar_type->dtype_);
-      Emit(idx_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to index");
-      return idx_name;
-    }
-  }
-  return mlir_name;
+  return EmitCastToIndex(std::static_pointer_cast<const ir::Expr>(var), mlir_name);
 }
 
 std::string PTOCodegen::EmitCastToIndex(const ir::ExprPtr& expr, const std::string& mlir_name) {
-  if (auto var = As<ir::Var>(expr)) {
-    return EmitCastToIndex(var, mlir_name);
-  }
   if (auto scalar_type = As<ScalarType>(expr->GetType())) {
     CHECK(!scalar_type->dtype_.IsFloat()) << "EmitCastToIndex does not support floating-point types (got "
                                           << GetTypeString(scalar_type->dtype_) << ")";
     if (scalar_type->dtype_ != DataType::INDEX) {
-      std::string idx_name = NewTemp();
+      auto var = As<ir::Var>(expr);
+      const std::string idx_name = var ? NewNamedTemp(var->name_hint_ + "_idx") : NewTemp();
       std::string src_type = GetTypeString(scalar_type->dtype_);
-      Emit(idx_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to index");
+      std::string source = mlir_name;
+      const bool is_unsigned = scalar_type->dtype_.IsUnsignedInt();
+      if (is_unsigned) {
+        // Arithmetic index casts require signless integer operands. Preserve
+        // unsigned values with a bit-preserving bridge and zero extension.
+        const std::string signless = src_type.substr(1);
+        source = NewTemp();
+        Emit(source + " = builtin.unrealized_conversion_cast " + mlir_name + " : " + src_type + " to " +
+             signless);
+        src_type = signless;
+      }
+      const std::string opcode = is_unsigned ? "arith.index_castui" : "arith.index_cast";
+      Emit(idx_name + " = " + opcode + " " + source + " : " + src_type + " to index");
       return idx_name;
     }
   }

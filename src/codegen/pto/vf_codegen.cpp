@@ -12,7 +12,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
-#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -74,28 +73,6 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   }
 };
 
-// Finite nonnegative affine access bounds for the initial executable subset.
-// This does not change the public memory-effect query's unknown-range semantics.
-std::optional<int64_t> MaximumVFOffset(const ExprPtr& expr, const ForStmtPtr& loop, int depth = 0) {
-  if (depth > 64) return std::nullopt;
-  if (auto value = As<ConstInt>(expr)) {
-    if (value->value_ >= 0 && value->value_ < (int64_t{1} << 31)) return value->value_;
-    return std::nullopt;
-  }
-  if (expr == loop->loop_var_) {
-    auto stop = As<ConstInt>(loop->stop_);
-    return stop ? std::optional<int64_t>(stop->value_ - 1) : std::nullopt;
-  }
-  if (As<Add>(expr) || As<Mul>(expr)) {
-    auto binary = As<BinaryExpr>(expr);
-    auto left = MaximumVFOffset(binary->left_, loop, depth + 1);
-    auto right = MaximumVFOffset(binary->right_, loop, depth + 1);
-    if (!left || !right) return std::nullopt;
-    const int64_t maximum = As<Add>(expr) ? *left + *right : *left * *right;
-    if (maximum < (int64_t{1} << 31)) return maximum;
-  }
-  return std::nullopt;
-}
 }  // namespace
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
@@ -112,15 +89,17 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   // and synchronization belong to PTOAS; runtime branches are not admitted here.
   CHECK_SPAN(!operands.has_control_flow, scope->span_)
       << "VF execution supports straight-line RegScope or canonical hardware loops nested up to four levels";
-  ForStmtPtr hardware_loop;
   if (!operands.loops.empty()) {
-    hardware_loop = operands.loops.front();
     for (const auto& loop : operands.loops) {
       const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
       CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
                      stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
                  loop->span_)
           << "VF hardware loop lowering requires canonical integer loops without loop-carried values";
+      CHECK_SPAN(ir::As<ir::ConstInt>(loop->stop_) || stop_type->dtype_ == DataType::INT32 ||
+                     stop_type->dtype_ == DataType::UINT32 || stop_type->dtype_ == DataType::INDEX,
+                 loop->span_)
+          << "VF dynamic hardware loop stop supports INT32, UINT32 and INDEX only";
     }
   }
 
@@ -175,30 +154,12 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
-    // Preserve known bounds checks. Dynamic loop offsets are admitted without
-    // a range proof. Callers remain responsible for keeping runtime memory
-    // accesses within their Tiles; PTOAS owns backend synchronization.
+    // Loop offsets need not be static. Preserve capture provenance, but leave
+    // loop access ranges and synchronization to the caller and PTOAS respectively.
     auto effect = ir::GetRegMemoryEffect(call);
-    bool bounded_loop_access = false;
-    if (hardware_loop && effect.root && !effect.begin) {
-      auto maximum = MaximumVFOffset(call->args_[1], hardware_loop);
-      int64_t elements = 1;
-      for (const auto& extent : tile->shape_) {
-        auto dimension = ir::As<ir::ConstInt>(extent);
-        if (!dimension || dimension->value_ <= 0 || dimension->value_ > (int64_t{1} << 31) / elements) {
-          elements = 0;
-          break;
-        }
-        elements *= dimension->value_;
-      }
-      const auto reg =
-          ir::As<ir::RegType>(IsOp(call, "reg.load") ? call->GetType() : call->args_[2]->GetType());
-      const auto view_start =
-          tile->tile_view_ ? ir::As<ir::ConstInt>(tile->tile_view_->start_offset) : nullptr;
-      bounded_loop_access =
-          (!maximum || (reg && *maximum + reg->shape_ <= elements)) && (!tile->tile_view_ || view_start);
-    }
-    CHECK_SPAN(effect.root && (effect.begin || bounded_loop_access || IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")), call->span_)
+    CHECK_SPAN(effect.root && (effect.begin || !operands.loops.empty() || IsOp(call, "reg.gather") ||
+                               IsOp(call, "reg.scatter")),
+               call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
     if (inserted) {
