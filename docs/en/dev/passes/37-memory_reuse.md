@@ -35,6 +35,8 @@ and target hazards—remain hard constraints in the DSA-RP problem.
 
 When whole-buffer packing exceeds the hardware capacity, the planner also checks lifetimes with sibling `if` arms visited in reverse order. A pair is considered interfering only if its lifetimes overlap in both traversals. Statement order within each arm and loop lifetime extension are preserved. This bounded retry retains alias, pipeline and hardware hazard constraints, and keeps the previous packing if the new footprint is larger.
 
+This retry operates on separate allocations; it does not merge slots inside a materialized multi-slot storage-selection pool. The stronger conditional-reset reuse optimization is tracked separately in [#3256](https://github.com/hw-native-sys/pypto/issues/3256). Old-value observations and loop recurrence remain hard constraints.
+
 ## API
 
 | C++ | Python | Level |

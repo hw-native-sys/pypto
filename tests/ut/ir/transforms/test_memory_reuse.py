@@ -9532,35 +9532,6 @@ class TestBranchOrderCapacity:
         seed, fresh = ranges["seed__ssa_v0"], ranges["fresh__ssa_v0"]
         assert seed[0] + seed[1] <= fresh[0] or fresh[0] + fresh[1] <= seed[0]
 
-    def test_conditional_reset_reuses_value_read_only_in_sibling(self, ascend_backend):
-        """An earlier value survives only on the arm that does not reset it."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV)
-            def kernel(
-                self,
-                pool: pl.Tensor[[128, 256], pl.FP32],
-                flags: pl.Tensor[[1], pl.INT32],
-                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
-            ) -> pl.Tensor[[128, 256], pl.FP32]:
-                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
-                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
-                flag = pl.tensor.read(flags, [0])
-                if flag != 0:
-                    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
-                    selected = reset
-                else:
-                    selected = current
-                saved = pl.tile.store(selected, [0, 0], out)
-                result = pl.tile.store(held, [64, 0], saved)
-                return result
-
-        after = _run_pipeline(passes.convert_to_ssa()(Before))
-        allocated = passes.allocate_memory_addr()(after)
-        ranges = _collect_allocated_tile_ranges(allocated)
-        assert ranges["current__ssa_v0"] == ranges["reset__ssa_v0"]
-
     def test_conditional_reset_preserves_same_branch_tail_read(self, ascend_backend):
         """Reversing sibling order must preserve reads after a same-arm write."""
 
