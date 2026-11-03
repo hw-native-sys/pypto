@@ -588,10 +588,11 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
             + ", ".join(f"{p.name_hint}: {type(p.type).__name__}" for p in other_params)
         )
 
-    # CoreTaskArgs has fixed payload capacities (task_interface/arg_direction.h).
+    # Keep these capacities aligned with the pinned runtime ABI in
+    # task_interface/arg_direction.h (including the locally expanded Core payload).
     # Shape captures consume scalar slots; descriptor-derived dimensions and
     # runtime-owned hidden arguments do not. Diagnose overflow before dispatch.
-    for kind, count, limit in (("tensor", len(tensor_params), 32), ("scalar", len(scalar_params), 16)):
+    for kind, count, limit in (("tensor", len(tensor_params), 256), ("scalar", len(scalar_params), 16)):
         if count > limit:
             raise ValueError(
                 f"Kernel '{func.name}' requires {count} {kind} arguments; "

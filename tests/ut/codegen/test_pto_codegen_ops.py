@@ -5425,6 +5425,52 @@ class TestSyncAllCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
+    def test_local_signal_preserves_order_without_comm_context(self):
+        """Local signals survive lowering without collective barriers or communication contexts."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                signal: pl.InOut[pl.Tensor[[256], pl.INT32]],
+                offset: pl.Scalar[pl.INDEX],
+                tag: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[256], pl.INT32]:
+                pl.system.signal_wait(signal, [offset], tag)
+                pl.system.signal_notify(signal, [offset], tag)
+                pl.system.signal_wait(signal, [offset], tag)
+                return signal
+
+        mlir = self._generate_mlir(Prog)
+        assert mlir.count("pto.comm.tnotify(") == 1
+        assert mlir.count("pto.comm.twait(") == 2
+        assert mlir.index("pto.comm.twait(") < mlir.index("pto.comm.tnotify(")
+        assert mlir.rindex("pto.comm.twait(") > mlir.index("pto.comm.tnotify(")
+        assert "notify_op set" in mlir and "wait_cmp ge" in mlir
+        assert "pto.syncall" not in mlir
+        assert "comm_ctx" not in mlir.lower()
+
+    def test_local_signal_preserves_backoff_attribute(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                signal: pl.InOut[pl.Tensor[[256], pl.INT32]],
+                offset: pl.Scalar[pl.INDEX],
+                tag: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[256], pl.INT32]:
+                pl.system.signal_wait(signal, [offset], tag, backoff_ticks=150)
+                pl.system.signal_notify(signal, [offset], tag)
+                pl.system.signal_wait(signal, [offset], tag)
+                return signal
+
+        mlir = self._generate_mlir(Prog)
+        assert mlir.count("backoffTicks = 150 : i64") == 1
+        assert mlir.count("pto.comm.twait(") == 2
+        assert "backoffTicks = 0" not in mlir
+
     def test_syncall_emits_hard_barrier_with_core_type(self):
         """pl.system.syncall(core_type=...) emits pto.syncall() mode=<hard>."""
 

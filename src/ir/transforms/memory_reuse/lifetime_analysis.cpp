@@ -40,6 +40,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/memory_reuse/internal.h"
 
 namespace pypto {
 namespace ir {
@@ -72,6 +73,8 @@ class VarUseCollector : public IRVisitor {
  */
 class LifetimeAnalyzer : public IRVisitor {
  public:
+  explicit LifetimeAnalyzer(bool reverse_branches = false) : reverse_branches_(reverse_branches) {}
+
   struct Result {
     std::vector<VarPtr> ordered_defs;        // TileType vars in definition order
     std::map<VarPtr, int> var_def_order;     // var -> def order
@@ -151,17 +154,29 @@ class LifetimeAnalyzer : public IRVisitor {
     // Visit condition uses at the current order point (before branches)
     CollectUsesFromExpr(op->condition_, current_order_);
 
-    // Visit then body first, else body second (sequential ordering), recording
-    // each branch's order range so we can tell branch-local yield-sources apart.
-    int then_start = current_order_;
-    VisitStmt(op->then_body_);
-    int then_end = current_order_ - 1;
+    // Record each arm's own range even in the alternate traversal. Reversing
+    // sibling arms must not change which producers are branch-local phi sources.
+    int then_start = -1;
+    int then_end = -1;
     int else_start = -1;
     int else_end = -1;
-    if (op->else_body_.has_value()) {
+    auto visit_then = [&]() {
+      then_start = current_order_;
+      VisitStmt(op->then_body_);
+      then_end = current_order_ - 1;
+    };
+    auto visit_else = [&]() {
+      if (!op->else_body_) return;
       else_start = current_order_;
       VisitStmt(*op->else_body_);
       else_end = current_order_ - 1;
+    };
+    if (reverse_branches_) {
+      visit_else();
+      visit_then();
+    } else {
+      visit_then();
+      visit_else();
     }
 
     // An scf.if return_var (phi) is NOT itself a tracked def -- it is materialized
@@ -242,6 +257,7 @@ class LifetimeAnalyzer : public IRVisitor {
 
  private:
   int current_order_ = 0;
+  bool reverse_branches_ = false;
 
   // Loop boundaries recorded during Phase 1
   struct LoopBoundary {
@@ -581,6 +597,22 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func) {
   INTERNAL_CHECK(func != nullptr) << "Cannot analyze allocation lifetimes for a null function";
   return AnalyzeAllocationLifetimesImpl(func->body_, func->params_);
 }
+
+namespace memory_reuse {
+
+std::map<const Var*, std::pair<int, int>> AnalyzeReverseBranchLiveness(const FunctionPtr& func) {
+  INTERNAL_CHECK(func != nullptr) << "Cannot analyze branch lifetimes for a null function";
+  const auto analysis = LifetimeAnalyzer(/*reverse_branches=*/true).Analyze(func->body_, func->params_);
+  std::map<const Var*, std::pair<int, int>> result;
+  for (const auto& [var, definition] : analysis.var_def_order) {
+    const auto use = analysis.var_last_use.find(var);
+    result.emplace(var.get(),
+                   std::make_pair(definition, use == analysis.var_last_use.end() ? definition : use->second));
+  }
+  return result;
+}
+
+}  // namespace memory_reuse
 
 }  // namespace ir
 }  // namespace pypto

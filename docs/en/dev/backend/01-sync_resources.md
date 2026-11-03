@@ -120,3 +120,11 @@ This component supplies facts for subsequent synchronization work. It does not
 include a macro registry or resource allocator. Hidden ISA macro footprints,
 event-ID allocation, and resource-pressure repair remain outside this interface.
 The default automatic synchronization path continues to use PTOAS.
+
+### Local signal compatibility
+
+`pl.system.bar_all()` is a compatibility spelling for
+`pl.system.barrier(pipe=pl.PipeType.ALL)`; both produce the same local barrier IR.
+`signal_wait(..., backoff_ticks=N)` preserves a nonnegative INT32 device-clock
+delay as PTO `backoffTicks`. Positive delays require the PTOAS A3 local signal
+extension; zero uses ordinary TWAIT. No front-end source rewriting is required.

@@ -34,6 +34,10 @@ namespace memory_reuse {
 // may execute; after_first asks whether another iteration may run.
 bool LoopMayExecute(const StmtPtr& statement, bool after_first);
 
+// A second legal lexical order distinguishes sibling-only observations from
+// true overlap. Loop recurrence and statement order within each arm are retained.
+std::map<const Var*, std::pair<int, int>> AnalyzeReverseBranchLiveness(const FunctionPtr& func);
+
 // Private stage boundaries. The pass entry orders packing and writeback repair;
 // semantic_aliases.cpp also uses writeback repair for planners that skip reuse.
 // Each call owns its analysis/mutator state; no state survives a function pass.
@@ -62,6 +66,8 @@ struct ReusePlacement {
   // Forwarding a logical pipeline input also selects its slot. Ordinary byte
   // reuse preserves the destination's own pool/slot identity.
   bool forward_slot = false;
+  // Zero leaves the existing allocation extent unchanged.
+  uint64_t arena_capacity = 0;
 };
 using ReuseMap = std::map<VarPtr, ReusePlacement>;
 

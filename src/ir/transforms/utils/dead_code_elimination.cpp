@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -469,12 +470,14 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
   std::vector<std::shared_ptr<const AssignStmt>> all_assigns;
   CollectAllAssignStmts(stmts, all_assigns);
 
-  // Cache each assignment's RHS uses once so the fixed-point loop does not
-  // re-walk the expression every iteration — the outer loop can iterate
-  // O(chain length) times on long dependency chains.
+  // Index definition dependencies once, then visit each live definition once.
+  // The worklist bounds propagation by O(N + E), including long metadata
+  // chains introduced before core-affinity classification.
+  std::unordered_map<const Var*, std::vector<size_t>> definitions;
   std::vector<std::unordered_set<const Var*>> assign_uses;
   assign_uses.reserve(all_assigns.size());
   for (const auto& assign : all_assigns) {
+    definitions[assign->var_.get()].push_back(assign_uses.size());
     DceVarDefUseCollector collector;
     collector.VisitExpr(assign->value_);
     collector.VisitTypeExprs(assign->var_->GetType());
@@ -482,13 +485,15 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
     assign_uses.emplace_back(std::move(uses));
   }
 
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (size_t i = all_assigns.size(); i-- > 0;) {
-      if (!live.count(all_assigns[i]->var_.get())) continue;
-      for (const Var* ref : assign_uses[i]) {
-        if (live.insert(ref).second) changed = true;
+  std::vector<const Var*> pending(live.begin(), live.end());
+  while (!pending.empty()) {
+    const Var* var = pending.back();
+    pending.pop_back();
+    const auto it = definitions.find(var);
+    if (it == definitions.end()) continue;
+    for (size_t index : it->second) {
+      for (const Var* ref : assign_uses[index]) {
+        if (live.insert(ref).second) pending.push_back(ref);
       }
     }
   }
@@ -805,6 +810,16 @@ std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts
 
 std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
   return EliminateDeadCodeCore(stmts, IsRemovableForDefaultDce);
+}
+
+std::vector<StmtPtr> EliminateDeadTileMetadata(const std::vector<StmtPtr>& stmts) {
+  return EliminateDeadCodeCore(stmts, [](const StmtPtr& stmt) {
+    auto assign = As<AssignStmt>(stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    // These declarations only allocate/refine a tile handle. Do not infer
+    // general call purity from no_arg_writes: waits and loads also use it.
+    return call && (IsOp(call, "tile.create") || IsOp(call, "tile.set_validshape"));
+  });
 }
 
 std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts) {

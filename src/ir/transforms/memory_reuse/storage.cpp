@@ -73,7 +73,8 @@ std::pair<VarPtr, StmtPtr> CreateStorageMove(const VarPtr& source, const MemRefP
       !(source_tile->GetMemorySpace() == MemorySpace::Acc && target_memory.value() == MemorySpace::Acc),
       source->span_)
       << "Internal error: MemoryReuse cannot reconcile divergent L0C accumulator buffers with "
-         "tile.move; accumulator control-flow values must be coalesced before YieldFixup.";
+         "tile.move; accumulator control-flow values must be coalesced before YieldFixup. Source: "
+      << source->name_hint_ << "; requested copy: " << name;
   auto& op_reg = OpRegistry::GetInstance();
   std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", std::any(target_memory.value())}};
   auto move_call = op_reg.Create("tile.move", {source}, kwargs, source->span_);

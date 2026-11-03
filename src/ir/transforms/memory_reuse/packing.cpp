@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -61,6 +62,42 @@ namespace ir {
 namespace memory_reuse {
 
 namespace {
+
+using BarrierEpochs = std::unordered_map<const Var*, std::pair<size_t, size_t>>;
+
+// Only unconditional top-level ALL barriers retire every pending pipe before
+// the next region. Nested barriers cannot establish that ordering for all
+// paths, and a barrier inside a loop does not separate its repeated accesses.
+BarrierEpochs CollectFullBarrierEpochs(const StmtPtr& body) {
+  class Collector : public IRVisitor {
+   public:
+    BarrierEpochs ranges;
+    size_t epoch = 0;
+
+    void VisitExpr_(const VarPtr& var) override { Record(var); }
+    void VisitExpr_(const IterArgPtr& var) override {
+      Record(var);
+      IRVisitor::VisitExpr_(var);
+    }
+
+   private:
+    void Record(const VarPtr& var) {
+      const Var* base = TileMemRefBase(var);
+      if (base == nullptr) return;
+      auto [it, inserted] = ranges.try_emplace(base, epoch, epoch);
+      if (!inserted) it->second.second = epoch;
+    }
+  } collector;
+  auto sequence = As<SeqStmts>(body);
+  if (!sequence) return {};
+  for (const auto& statement : sequence->stmts_) {
+    collector.VisitStmt(statement);
+    auto eval = As<EvalStmt>(statement);
+    auto call = eval ? As<Call>(eval->expr_) : nullptr;
+    if (call && IsOp(call, "system.bar_all")) ++collector.epoch;
+  }
+  return std::move(collector.ranges);
+}
 
 // NOTE: The former tile-type reuse-compatibility gate (AreTileTypesCompatible)
 // has been removed. PTO codegen binds a per-var alloc_tile to each tile, so two
@@ -209,12 +246,23 @@ ReuseMap IdentifyReuseOpportunities(
     auto iy = phi_family_ids.find(y);
     return ix != phi_family_ids.end() && iy != phi_family_ids.end() && ids_intersect(ix->second, iy->second);
   };
+  // Build the alternate ordering at most once per function, and consult it
+  // only on overflow. Within-arm ordering, post-if uses and loop recurrence
+  // remain intact; disjointness in either traversal proves no co-live payload.
+  std::optional<std::map<const Var*, std::pair<int, int>>> reverse_liveness;
+  bool refine_branch_order = false;
   // Precise per-var overlap (touching allowed: last_use == def is fine).
   auto var_overlap = [&](const Var* x, const Var* y) {
     auto ix = var_liveness.find(x);
     auto iy = var_liveness.find(y);
     if (ix == var_liveness.end() || iy == var_liveness.end()) return true;  // unknown -> conservative
-    return !(ix->second.second <= iy->second.first || iy->second.second <= ix->second.first);
+    if (ix->second.second <= iy->second.first || iy->second.second <= ix->second.first) return false;
+    if (!refine_branch_order) return true;
+    if (!reverse_liveness) reverse_liveness = AnalyzeReverseBranchLiveness(func);
+    const auto rx = reverse_liveness->find(x);
+    const auto ry = reverse_liveness->find(y);
+    if (rx == reverse_liveness->end() || ry == reverse_liveness->end()) return true;
+    return !(rx->second.second <= ry->second.first || ry->second.second <= rx->second.first);
   };
   // Decide whether a group-interval overlap between two intervals actually
   // blocks sharing.  This is invoked ONLY when their merged intervals overlap.
@@ -297,8 +345,19 @@ ReuseMap IdentifyReuseOpportunities(
     return in_workspace_set(interval, hazard.looping_written_workspaces,
                             hazard.looping_written_workspace_bases);
   };
-  auto workspace_blocks = [&is_written_workspace, &is_looping_written_workspace](
+  std::optional<BarrierEpochs> barrier_epochs;
+  auto workspace_blocks = [&is_written_workspace, &is_looping_written_workspace, &barrier_epochs, &func](
                               const LifetimeInterval& workspace, const LifetimeInterval& other) {
+    if (!is_written_workspace(workspace)) return false;
+    // A whole-core barrier proves that the previous region's hidden writes
+    // and reads have completed. Keep the conservative rule within a region,
+    // including loop back edges and buffers observed across the barrier.
+    if (!barrier_epochs) barrier_epochs = CollectFullBarrierEpochs(func->body_);
+    auto w = barrier_epochs->find(TileMemRefBase(workspace.variable));
+    auto o = barrier_epochs->find(TileMemRefBase(other.variable));
+    if (w != barrier_epochs->end() && o != barrier_epochs->end() &&
+        (w->second.second < o->second.first || o->second.second < w->second.first))
+      return false;
     // Inside a loop the directional argument collapses: the back edge re-writes
     // the workspace from the scalar pipe on iteration i+1 while iteration i's
     // vector reads of anything sharing that buffer -- the TSELS `dst`, say, and
@@ -306,7 +365,7 @@ ReuseMap IdentifyReuseOpportunities(
     // iteration proves nothing about the next, so a looping workspace takes an
     // exclusive buffer.
     if (is_looping_written_workspace(workspace)) return true;
-    return is_written_workspace(workspace) && other.last_use_point <= workspace.def_point;
+    return other.last_use_point <= workspace.def_point;
   };
 
   // No-alias guard (directional): `writer`'s defining op forbids its output from
@@ -491,6 +550,7 @@ ReuseMap IdentifyReuseOpportunities(
   auto alloc_policy = pack_be ? pack_be->CreateMemoryAllocatorPolicy() : nullptr;
 
   for (auto& [space_binding, indices_binding] : by_space) {
+    refine_branch_order = false;
     // Bind the structured bindings to regular local references: the lambdas below capture by `[&]`,
     // and capturing a structured binding name directly is only a C++20 extension (project is C++17).
     auto& space = space_binding;
@@ -558,7 +618,11 @@ ReuseMap IdentifyReuseOpportunities(
     // cannot share bytes with the candidate as address blockers and picks the
     // lowest aligned gap. Members stay sorted by offset, so one candidate scans
     // each arena once and the pack remains O(M^2).
-    auto pack = [&](bool allow_subranges) {
+    const auto reserved_it = reserved_end_by_space.find(space);
+    const uint64_t reserved_bytes = reserved_it == reserved_end_by_space.end() ? 0 : reserved_it->second;
+    const uint64_t space_capacity = pack_be ? pack_be->GetMemSize(space) : 0;
+    const uint64_t growth_limit = space_capacity > reserved_bytes ? space_capacity - reserved_bytes : 0;
+    auto pack = [&](bool allow_subranges, bool allow_growth = false) {
       std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
         if (is_pinned[idx]) {
@@ -605,7 +669,16 @@ ReuseMap IdentifyReuseOpportunities(
             }
             if (!chosen_offset.has_value()) {
               const uint64_t aligned = alloc_policy->AlignAddress(cursor, space);
-              if (aligned <= buffer.capacity && cand.size <= buffer.capacity - aligned) {
+              const auto owner =
+                  GetTypeMemRef(lifetimes[buffer.members.front().interval_index].variable->GetType());
+              const auto owner_offset = As<ConstInt>((*owner)->byte_offset_);
+              // Buffer IR owns a typed root with its own extent contract. Only
+              // legacy, compiler-owned single-slot zero-based arenas grow here.
+              const bool can_grow = allow_growth &&
+                                    (!buffer_context || !buffer_context->GetEnableBufferIR()) &&
+                                    owner_offset && owner_offset->value_ == 0 && (*owner)->slot_count_ == 1;
+              const uint64_t limit = can_grow ? growth_limit : buffer.capacity;
+              if (aligned <= limit && cand.size <= limit - aligned) {
                 chosen_offset = aligned;
               }
             }
@@ -613,6 +686,7 @@ ReuseMap IdentifyReuseOpportunities(
 
           if (!chosen_offset.has_value()) continue;
           const PackedMember placement{idx, *chosen_offset};
+          buffer.capacity = std::max(buffer.capacity, *chosen_offset + cand.size);
           auto pos = std::upper_bound(buffer.members.begin(), buffer.members.end(), placement,
                                       [](const PackedMember& lhs, const PackedMember& rhs) {
                                         return lhs.byte_offset < rhs.byte_offset;
@@ -631,14 +705,13 @@ ReuseMap IdentifyReuseOpportunities(
 
     std::vector<PackedBuffer> buffers = pack(/*allow_subranges=*/false);
 
-    // Capacity relief uses the exact allocator footprint (SpaceFootprint, Primitive A). First retry with
-    // subranges; while that still overflows, lower the largest-slot pipeline group's depth by one residue
-    // and re-pack. Re-running the FFD (not merging in place) avoids in-place non-monotonicity, but the FFD
-    // is still not monotone
-    // under the *relaxed* (F_g==1) predicate, so exhausting the shed does NOT guarantee a fit: the loop
-    // ends in a from-scratch legacy re-pack + diagnostic (see the `!shed_group` branch below), which
-    // guarantees no fit regression vs legacy. The shed objective is MaxRelief (largest slot first, tie
-    // by lowest group id), applied unconditionally.
+    // Capacity relief uses the exact allocator footprint (SpaceFootprint, Primitive A). Retry branch-order
+    // refinement and subranges; while that still overflows, lower the largest-slot pipeline group's depth by
+    // one residue and re-pack. Re-running the FFD (not merging in place) avoids in-place non-monotonicity,
+    // but the FFD is still not monotone under the *relaxed* (F_g==1) predicate, so exhausting the shed does
+    // NOT guarantee a fit: the loop ends in a from-scratch legacy re-pack + diagnostic (see the `!shed_group`
+    // branch below), which guarantees no fit regression vs legacy. The shed objective is MaxRelief (largest
+    // slot first, tie by lowest group id), applied unconditionally.
     if (alloc_policy) {
       const uint64_t cap = pack_be->GetMemSize(space);
       auto rit = reserved_end_by_space.find(space);
@@ -654,7 +727,26 @@ ReuseMap IdentifyReuseOpportunities(
         if (!subrange_space_safe || cap == 0 || footprint(buffers) <= cap) return;
         auto subdivided = pack(/*allow_subranges=*/true);
         if (footprint(subdivided) < footprint(buffers)) buffers = std::move(subdivided);
+        if (footprint(buffers) > cap) {
+          // Different phases may fit one arena even when no individual tile
+          // owns its full extent (48+12 KiB followed by 32+32 KiB, for example).
+          // One bounded retry retains all interference and hazard checks.
+          auto grown = pack(/*allow_subranges=*/true, /*allow_growth=*/true);
+          if (footprint(grown) < footprint(buffers)) buffers = std::move(grown);
+        }
       };
+      // One additional bounded pack removes lexical sibling-order interference
+      // before splitting physical buffers. All alias, hazard and pipeline gates
+      // still apply; retain the old packing if the greedy result gets worse.
+      if (cap != 0 && footprint(buffers) > cap && !phi_family_ids.empty()) {
+        refine_branch_order = true;
+        auto refined = pack(/*allow_subranges=*/false);
+        if (footprint(refined) <= footprint(buffers)) {
+          buffers = std::move(refined);
+        } else {
+          refine_branch_order = false;
+        }
+      }
       // Preserve the legacy layout whenever it fits. Only an actual overflow
       // enables subdivision, before sacrificing software-pipeline depth.
       retry_with_subranges();
@@ -739,7 +831,7 @@ ReuseMap IdentifyReuseOpportunities(
       for (const PackedMember& member : buf.members) {
         if (member.interval_index == representative_index) continue;
         const auto& cand = lifetimes[member.interval_index];
-        reuse_map[cand.variable] = ReusePlacement{representative, member.byte_offset};
+        reuse_map[cand.variable] = ReusePlacement{representative, member.byte_offset, false, buf.capacity};
         if (const Var* cb = TileMemRefBase(cand.variable)) {
           if (const Var* rb = physical_base(representative)) {
             if (cb != rb) base_remap[cb] = rb;
@@ -820,9 +912,33 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
     explicit MemRefSharingMutator(const ReuseMap& reuse_map,
                                   const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
                                   const std::map<const Var*, uint64_t>& allocation_sizes)
-        : reuse_map_(reuse_map), sharing_groups_(sharing_groups), allocation_sizes_(allocation_sizes) {}
+        : reuse_map_(reuse_map), sharing_groups_(sharing_groups), allocation_sizes_(allocation_sizes) {
+      for (const auto& entry : reuse_map_) {
+        const auto& placement = entry.second;
+        const auto memref = GetTypeMemRef(placement.representative->GetType());
+        if (memref && *memref && placement.arena_capacity > (*memref)->size_) {
+          auto& capacity = arena_sizes_[(*memref)->base_.get()];
+          capacity = std::max(capacity, placement.arena_capacity);
+        }
+      }
+    }
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      // Preserve each tile's own window while resizing the physical allocation
+      // that backs the union of all its static subranges.
+      auto arena = arena_sizes_.find(op->var_.get());
+      if (arena != arena_sizes_.end()) {
+        auto call = As<Call>(op->value_);
+        INTERNAL_CHECK_SPAN(call && IsOp(call, "tile.alloc") && call->args_.size() >= 2, op->span_)
+            << "Internal error: grown reuse arena must have a compiler-owned tile.alloc";
+        auto args = call->args_;
+        args[1] = std::make_shared<ConstInt>(static_cast<int64_t>(arena->second), DataType::INDEX, op->span_);
+        return std::make_shared<AssignStmt>(
+            op->var_,
+            std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, call->attrs_, call->GetType(),
+                                   call->span_),
+            op->span_);
+      }
       // Check if this variable should reuse another's MemRef
       if (reuse_map_.count(op->var_)) {
         const ReusePlacement& placement = reuse_map_.at(op->var_);
@@ -841,10 +957,11 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
 
         const auto source_memref = GetDefinedMemRef(source_tile_type);
         const auto allocation = allocation_sizes_.find(source_memref->base_.get());
-        const uint64_t source_capacity =
+        const uint64_t existing_capacity =
             source_memref->slot_count_ <= 1 || allocation == allocation_sizes_.end()
                 ? source_memref->size_
                 : std::max(source_memref->size_, allocation->second);
+        const uint64_t source_capacity = std::max(existing_capacity, placement.arena_capacity);
 
         // Get current variable's TileType
         auto curr_tile_type = As<TileType>(op->var_->GetType());
@@ -895,6 +1012,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
                               old->span_)
               << "Internal error: sharing-group member offset " << old_off->value_
               << " cannot be represented inside reuse target (capacity " << source_capacity << ")";
+
           const int64_t placed_rel = static_cast<int64_t>(wide_placement + wide_rel);
           // Reusing bytes must not replace a pool member's own slot identity,
           // or turn an ordinary tile into a slot of its former allocation.
@@ -968,6 +1086,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
     }
 
    private:
+    std::map<const Var*, uint64_t> arena_sizes_;
     const ReuseMap& reuse_map_;
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups_;  // var -> sharing group
     const std::map<const Var*, uint64_t>& allocation_sizes_;
