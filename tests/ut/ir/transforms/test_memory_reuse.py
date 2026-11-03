@@ -26,7 +26,7 @@ from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
-from .storage_test_utils import without_call_memrefs
+from .storage_test_utils import _Nodes, _place, _program, without_call_memrefs
 
 # Tile-producing reads from GM. Built through the getter so a renamed operator fails at import
 # rather than silently dropping out of the membership test below.
@@ -2890,14 +2890,8 @@ class TestYieldFixup:
         _assert_carry_yield_lands_in_its_buffer(After)
         _assert_carry_writebacks_do_not_clobber(After)
 
-    def test_carries_sharing_one_buffer_are_rejected(self):
-        """Two carries seeded from one tile share a buffer, which no order can save.
-
-        ``prev`` and ``cur`` are both initialised from ``seed``, so both carries
-        *are* ``seed``'s buffer and one iteration cannot preserve both. Report it
-        against the loop, where the carries still have names, rather than leaving
-        codegen to reject the degenerate self-copy it eventually produces.
-        """
+    def test_carries_sharing_one_initializer_get_independent_buffers(self):
+        """Isolate shared seed windows before scheduling parallel fixed writebacks."""
 
         @pl.program
         class Before:
@@ -2916,8 +2910,14 @@ class TestYieldFixup:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(r_prev, [0, 0], output)
                 return result
 
-        with pytest.raises(ValueError, match="share the same on-chip buffer"):
-            _run_pipeline(Before)
+        after = _run_pipeline(Before)
+        loop = _Nodes(after).loops[0]
+        cur, prev = (arg.type for arg in loop.iter_args)
+        assert isinstance(cur, ir.TileType) and isinstance(prev, ir.TileType)
+        assert cur.memref is not None and prev.memref is not None
+        assert not ir.MemRef.may_alias(cur.memref, prev.memref)
+        _assert_carry_yield_lands_in_its_buffer(after)
+        _assert_carry_writebacks_do_not_clobber(after)
 
     def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
         """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
@@ -4742,7 +4742,9 @@ class SharedSuffix:
 
         after = _run_pipeline(Before)
         _assert_descriptor_loop_storage(after)
-        assert _count_tile_moves_in_loops(after) == 0
+        # A fresh tile_c on the next iteration must not overwrite the old
+        # acc_0 payload still read after the If; retain its backedge version.
+        assert _count_tile_moves_in_loops(after) == 2
         refs = _collect_named_tile_memrefs(after, {"init_0", "tile_c"})
         assert not ir.MemRef.may_alias(refs["init_0"], refs["tile_c"])
 
@@ -9491,6 +9493,193 @@ class TestChainedInPlaceIfPhis:
         assert not re.search(r"pto\.tmov ins\([^)]*loc=mat[^)]*\) outs\([^)]*loc=mat[^)]*\)", pto), (
             f"codegen emitted a same-space Mat->Mat pto.tmov:\n{pto}"
         )
+
+
+_NATIVE_SELECTION_PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
+
+CandidateLifetimes = _program(
+    """
+    a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+    b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+    if flag > 0:
+        selected = pl.yield_(a)
+    else:
+        selected = pl.yield_(b)
+    alias = selected
+    view = pl.tile.reshape(alias, [4, 8])
+    scratch = pl.load(x, [8, 0], [4, 8], target_memory=pl.Mem.Vec)
+    pl.store(scratch, [0, 0], out)
+    pl.store(view, [4, 0], out)
+    # Both candidates die at the store through the selected view. Later
+    # allocations should reuse them without reserving a special pool.
+    later_a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+    later_b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+    pl.store(later_a, [8, 0], out)
+    return pl.store(later_b, [12, 0], out)
+""",
+    input_shape="[12, 8]",
+    output_shape="[16, 8]",
+)
+
+
+def _allocation_windows(program: ir.Program) -> dict[str, tuple[int, int]]:
+    windows = {}
+    for assign in _Nodes(program).assignments:
+        tile = assign.var.type
+        if isinstance(tile, ir.TileType) and tile.memref is not None:
+            offset = tile.memref.byte_offset_
+            assert isinstance(offset, ir.ConstInt)
+            windows[assign.var.name_hint] = (offset.value, offset.value + tile.memref.size_)
+    return windows
+
+
+@pytest.mark.parametrize("planner", _NATIVE_SELECTION_PLANNERS)
+def test_candidates_live_through_selected_alias_and_are_reused(
+    planner, ascend_backend, pass_verification_instruments
+):
+    """A clobber between selection and use cannot overwrite either possible input."""
+    placed = _place(CandidateLifetimes, planner, pass_verification_instruments)
+
+    windows = _allocation_windows(placed)
+
+    def overlaps(left: str, right: str) -> bool:
+        a, b = windows[left], windows[right]
+        return a[0] < b[1] and b[0] < a[1]
+
+    assert not overlaps("a", "b")
+    assert not overlaps("scratch", "a")
+    assert not overlaps("scratch", "b")
+    assert any(overlaps(later, old) for later in ("later_a", "later_b") for old in ("a", "b"))
+
+
+@pytest.mark.parametrize("planner", _NATIVE_SELECTION_PLANNERS)
+def test_nested_selection_does_not_make_colive_inputs_exclusive(
+    planner, ascend_backend, pass_verification_instruments
+):
+    """Two candidates born in one outer arm still coexist inside that arm."""
+
+    Nested = _program(
+        """
+        if flag > 0:
+            a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+            if flag > 1:
+                inner = pl.yield_(a)
+            else:
+                inner = pl.yield_(b)
+            # A and B have both been initialized before this read. The
+            # enclosing branch must never label them mutually exclusive.
+            combined = pl.tile.add(a, b)
+            pl.store(combined, [0, 0], out)
+            selected = pl.yield_(inner)
+        else:
+            c = pl.load(x, [8, 0], [4, 8], target_memory=pl.Mem.Vec)
+            selected = pl.yield_(c)
+        return pl.store(selected, [0, 0], out)
+    """,
+        input_shape="[12, 8]",
+    )
+
+    placed = _place(Nested, planner, pass_verification_instruments)
+    windows = _allocation_windows(placed)
+    a, b = windows["a"], windows["b"]
+    assert a[1] <= b[0] or b[1] <= a[0]
+
+
+@pytest.mark.parametrize("planner", _NATIVE_SELECTION_PLANNERS)
+def test_non_inplace_output_is_disjoint_from_every_selected_root(
+    planner, ascend_backend, pass_verification_instruments
+):
+    """A dying phi input still forbids output reuse at the read/write boundary."""
+
+    Before = _program(
+        """
+        a = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [16, 0], [16, 16], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        transposed = pl.tile.transpose(selected, 0, 1)
+        return pl.store(transposed, [0, 0], out)
+    """,
+        input_shape="[32, 16]",
+        output_shape="[16, 16]",
+    )
+
+    placed = _place(Before, planner, pass_verification_instruments, flatten=True)
+
+    windows = _allocation_windows(placed)
+    destination = windows["transposed"]
+    # Both candidates' last use is the transpose itself, so ordinary lifetime
+    # overlap alone permits same-point reuse. The op's non-inplace contract
+    # must expand the phi's input roots and exclude both, including else's B.
+    for candidate in ("a", "b"):
+        source = windows[candidate]
+        assert destination[1] <= source[0] or source[1] <= destination[0], (candidate, windows)
+
+
+@pytest.mark.parametrize("planner", _NATIVE_SELECTION_PLANNERS)
+def test_selected_written_workspace_cannot_inherit_an_earlier_read_buffer(
+    planner, ascend_backend, pass_verification_instruments
+):
+    """Both runtime scratch choices retain the intrinsic's hidden-write hazard."""
+
+    Before = _program(
+        """
+        dead = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+        src = pl.load(x, [16, 0], [16, 16], target_memory=pl.Mem.Vec)
+        mask = pl.tile.cmps(dead, 0.0, cmp_type=4)
+        scratch_a = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+        scratch_b = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(scratch_a)
+        else:
+            selected = pl.yield_(scratch_b)
+        result = pl.tile.sels(mask, src, selected, -1.0)
+        return pl.store(result, [0, 0], out)
+    """,
+        input_shape="[32, 16]",
+        output_shape="[16, 16]",
+    )
+
+    placed = _place(Before, planner, pass_verification_instruments)
+
+    windows = _allocation_windows(placed)
+    previous = windows["dead"]
+    # CMPS retires dead logically before either scratch is created. TSELS writes
+    # its scalar into the chosen scratch on an untracked pipe, so neither choice
+    # may inherit bytes the preceding vector reader can still be using.
+    for candidate in ("scratch_a", "scratch_b"):
+        workspace = windows[candidate]
+        assert workspace[1] <= previous[0] or previous[1] <= workspace[0], (candidate, windows)
+
+
+@pytest.mark.parametrize("planner", [*_NATIVE_SELECTION_PLANNERS, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_fixed_for_carries_isolate_shared_initializer(planner, enable_buffer_ir, ascend_backend):
+    """Two fixed carries need independent slots even without an outside observer."""
+    before = _program(
+        """
+        seed = pl.load(x, [0, 0], [4, 8])
+        for i, (left, right) in pl.range(count, init_values=(seed, seed)):
+            next_left = pl.tile.adds(left, 1.0)
+            next_right = pl.tile.muls(right, 2.0)
+            result_left, result_right = pl.yield_(next_left, next_right)
+        if flag > 0:
+            selected = pl.yield_(result_left)
+        else:
+            selected = pl.yield_(result_right)
+        return pl.store(selected, [0, 0], out)
+        """
+    )
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enable_buffer_ir):
+        after = PassManager(OptimizationStrategy.Default).run_passes(before)
+    loop = _Nodes(after).loops[0]
+    left, right = (arg.type for arg in loop.iter_args)
+    assert isinstance(left, ir.TileType) and isinstance(right, ir.TileType)
+    assert left.memref is not None and right.memref is not None
+    assert not ir.MemRef.may_alias(left.memref, right.memref), after.as_python()
 
 
 if __name__ == "__main__":

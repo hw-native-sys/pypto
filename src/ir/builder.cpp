@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>

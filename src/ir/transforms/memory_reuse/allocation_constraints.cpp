@@ -290,7 +290,7 @@ class ForbidAliasCollector : public IRVisitor {
   // which every group member already shares.
   ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
                        const BufferViewAnalysis* views, const TileStorageSources& storage_sources)
-      : views_(views), storage_sources_(storage_sources) {
+      : views_(views), roots_(storage_sources) {
     for (const auto& [var, group] : sharing_groups) {
       if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
     }
@@ -366,53 +366,6 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
  private:
-  VarPtr StorageSource(const VarPtr& value) {
-    auto current = value;
-    std::vector<const Var*> aliases;
-    while (true) {
-      if (auto known = storage_source_.find(current.get()); known != storage_source_.end()) {
-        current = known->second;
-        break;
-      }
-      const auto binding = storage_sources_.find(current.get());
-      if (binding == storage_sources_.end() || binding->second.size() != 1) break;
-      aliases.push_back(current.get());
-      current = binding->second.front();
-    }
-    for (const auto* alias : aliases) storage_source_[alias] = current;
-    return current;
-  }
-
-  const std::vector<VarPtr>& StorageRoots(const VarPtr& value) {
-    // Compress single-source aliases, then visit each reachable choice once per
-    // queried operand. Cache only actual queries, not every intermediate root
-    // set: growing nested choices otherwise materialize a quadratic closure
-    // even when the consumer asks for only the final set. Candidate expansion
-    // and emitted constraints remain output-sensitive, unlike scalar liveness.
-    const auto source = StorageSource(value);
-    if (auto known = storage_roots_.find(source.get()); known != storage_roots_.end()) {
-      return known->second;
-    }
-    std::vector<VarPtr> pending{source};
-    std::set<const Var*> visited;
-    std::set<VarPtr> roots;
-    while (!pending.empty()) {
-      const auto current = StorageSource(pending.back());
-      pending.pop_back();
-      if (!visited.insert(current.get()).second) continue;
-      const auto binding = storage_sources_.find(current.get());
-      if (auto known = storage_roots_.find(current.get()); known != storage_roots_.end()) {
-        roots.insert(known->second.begin(), known->second.end());
-      } else if (binding == storage_sources_.end()) {
-        roots.insert(current);
-      } else {
-        pending.insert(pending.end(), binding->second.begin(), binding->second.end());
-      }
-    }
-    return storage_roots_.emplace(source.get(), std::vector<VarPtr>(roots.begin(), roots.end()))
-        .first->second;
-  }
-
   void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& forbidden_inputs) {
     if (!output || forbidden_inputs.empty()) return;
     if (As<TupleType>(output->GetType())) {
@@ -426,7 +379,7 @@ class ForbidAliasCollector : public IRVisitor {
     // so apply the output constraint to every possible destination as well.
     std::set<VarPtr> inputs;
     for (const auto& input : forbidden_inputs) {
-      const auto& roots = StorageRoots(input);
+      const auto& roots = roots_.Roots(input);
       inputs.insert(roots.begin(), roots.end());
       const auto source_type = As<TileType>(input->GetType());
       const auto output_type = GetTileTypeWithMemRef(output->GetType());
@@ -435,7 +388,7 @@ class ForbidAliasCollector : public IRVisitor {
         recurrent_inputs_[output.get()].push_back(input);
       }
     }
-    for (const auto& root : StorageRoots(output)) {
+    for (const auto& root : roots_.Roots(output)) {
       const auto rep_it = member_to_rep_.find(root.get());
       const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : root.get();
       auto& recorded = forbidden_[out_key];
@@ -446,9 +399,7 @@ class ForbidAliasCollector : public IRVisitor {
   std::map<const Var*, std::vector<VarPtr>> recurrent_inputs_;
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
-  const TileStorageSources& storage_sources_;
-  std::map<const Var*, VarPtr> storage_source_;
-  std::map<const Var*, std::vector<VarPtr>> storage_roots_;
+  TileStorageRootResolver roots_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
@@ -1022,6 +973,53 @@ void CollectAccessConstraints(const FunctionPtr& func, const LifetimeAnalysisRes
 }
 
 }  // namespace
+
+VarPtr TileStorageRootResolver::Source(const VarPtr& value) {
+  auto current = value;
+  std::vector<const Var*> aliases;
+  std::set<const Var*> seen;
+  while (seen.insert(current.get()).second) {
+    if (auto known = source_cache_.find(current.get()); known != source_cache_.end()) {
+      current = known->second;
+      break;
+    }
+    const auto binding = sources_.find(current.get());
+    if (binding == sources_.end() || binding->second.size() != 1) break;
+    aliases.push_back(current.get());
+    current = binding->second.front();
+  }
+  for (const auto* alias : aliases) source_cache_[alias] = current;
+  return current;
+}
+
+const std::vector<VarPtr>& TileStorageRootResolver::Roots(const VarPtr& value) {
+  // Compress single-source aliases, then visit each reachable choice once per
+  // queried operand. Cache only actual queries, not every intermediate root
+  // set: growing nested choices otherwise materialize a quadratic closure
+  // even when the consumer asks for only the final set. Candidate expansion
+  // and emitted constraints remain output-sensitive, unlike scalar liveness.
+  const auto source = Source(value);
+  if (auto known = roots_cache_.find(source.get()); known != roots_cache_.end()) {
+    return known->second;
+  }
+  std::vector<VarPtr> pending{source};
+  std::set<const Var*> visited;
+  std::set<VarPtr> roots;
+  while (!pending.empty()) {
+    const auto current = Source(pending.back());
+    pending.pop_back();
+    if (!visited.insert(current.get()).second) continue;
+    const auto binding = sources_.find(current.get());
+    if (auto known = roots_cache_.find(current.get()); known != roots_cache_.end()) {
+      roots.insert(known->second.begin(), known->second.end());
+    } else if (binding == sources_.end()) {
+      roots.insert(current);
+    } else {
+      pending.insert(pending.end(), binding->second.begin(), binding->second.end());
+    }
+  }
+  return roots_cache_.emplace(source.get(), std::vector<VarPtr>(roots.begin(), roots.end())).first->second;
+}
 
 AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
                                                           const LifetimeAnalysisResult& lifetimes,

@@ -230,9 +230,7 @@ class LifetimeAnalyzer : public IRVisitor {
     // temporaries preceding that definition. Propagate the earliest header to
     // every possible source, rather than assuming the initializer owns carry
     // storage. A branch family is not exclusive across different iterations.
-    std::priority_queue<std::pair<int, VarPtr>, std::vector<std::pair<int, VarPtr>>,
-                        std::greater<std::pair<int, VarPtr>>>
-        headers;
+    std::priority_queue<std::pair<int, VarPtr>, std::vector<std::pair<int, VarPtr>>, std::greater<>> headers;
     for (const auto& [value, order] : loop_headers_) headers.emplace(order, value);
     finalized.clear();
     while (!headers.empty()) {
@@ -427,8 +425,9 @@ class LifetimeAnalyzer : public IRVisitor {
   void VisitLoop(const LoopPtr& op) {
     if (!native_if_) {
       ProcessLoopBody(op->iter_args_, op->body_);
-      if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>)
+      if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) {
         CollectUsesFromExpr(op->condition_, current_order_);
+      }
       RegisterReturnVars(op->iter_args_, op->return_vars_);
       return;
     }

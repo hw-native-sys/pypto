@@ -52,7 +52,15 @@ backedge. Before allocation, this pass uses the shared operator no-alias analysi
 to materialize an independent input snapshot for that recurrent operand. This
 copy protects the operator's read while it writes its output; it does not change
 the loop's descriptor carry or depend on capacity. Operations that allow the
-input/output alias require no such snapshot.
+input/output alias require no such operator snapshot.
+
+Payload versioning is checked separately: if a fresh producer overwrites its
+previous output while a later read can still observe that old version through
+a carry, alias, view or selection, the affected backedges are staged and then
+transferred to independent retained buffers. All sources are staged before any
+retained buffer is written, preserving swaps and fanout. Descriptor argument and
+result types remain dynamic, and zero-trip loops still return their initializers.
+Read-before-write uses and mutually exclusive branches do not trigger this repair.
 
 `InitMemRef` already gives the loop-carried `iter_arg` and `return_var` the same
 MemRef as the `initValue` (the accumulator buffer), but the *producer* of the
@@ -251,8 +259,9 @@ sources, preserving backedge allocations across the entire loop iteration.
 Stationary For slots retain their existing fixed-storage optimization and
 writeback repair. Dynamic slots bypass those rules: selected initializers,
 conditional updates, swaps and fanout carry the chosen descriptors directly.
-Only operator no-alias constraints can require a recurrent input snapshot;
-that snapshot is independent of the descriptor carried by the loop.
+Operator no-alias constraints can require input snapshots; live-through old
+payloads can also require the backedge version transfers described above. These
+repairs preserve descriptor carries and are independent of capacity.
 
 When producers already share one physical allocation, PTO codegen declares
 that storage before sibling regions and initializes logical validity at each

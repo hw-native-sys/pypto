@@ -51,6 +51,7 @@
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -1107,11 +1108,12 @@ class LoopInputIsolation : public IRVisitor {
                "initial tile for carry '"
             << loop->iter_args_[i]->name_hint_ << "' before entering the loop.";
         if (can_isolate) isolate.insert(i);
-        continue;
-      }
-      if (external_observation || nested_observation) {
+      } else if (external_observation || nested_observation) {
         isolate.insert(i);
       }
+      // Independent fixed slots must not share an initializer window, even
+      // when no outside observer needs the seed after this loop. Descriptor
+      // slots were excluded above and continue to forward their actual handles.
       auto offset = As<ConstInt>(memref->byte_offset_);
       windows[base].emplace_back(offset ? offset->value_ : 0, i);
       if (!offset) unknown_bases.insert(base);
@@ -2942,6 +2944,182 @@ class RetypeApplier : public IRMutator {
 
 namespace {
 
+// Descriptor identity and payload version are different contracts. A fresh
+// producer has one allocation, so a descriptor carried from its previous
+// execution must not remain observable across its next write. Find those
+// live-through reads using the existing version/branch-order indexes. Only
+// affected carry families receive payload transfers; plain swaps and in-place
+// recurrences continue to pass their descriptors without copies.
+class ReconcileRecurrentPayloads : public IRMutator {
+ public:
+  explicit ReconcileRecurrentPayloads(const FunctionPtr& function) {
+    names_.Collect(function->body_, function->params_);
+    Plan(function);
+  }
+
+  std::vector<StmtPtr> allocations;
+
+ protected:
+  ExprPtr VisitExpr_(const IterArgPtr& argument) override { return argument; }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& loop) override { return Rewrite(loop); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& loop) override { return Rewrite(loop); }
+
+ private:
+  using Slot = std::pair<const Stmt*, size_t>;
+  std::map<const Stmt*, std::set<size_t>> protected_slots_;
+  StorageNameSupply names_;
+
+  void Plan(const FunctionPtr& function) {
+    DefMapVisitor definitions;
+    definitions.Run(function->body_);
+    if (definitions.loops.empty()) return;
+    const auto lifetimes = AnalyzeAllocationLifetimes(function);
+    TileStorageRootResolver roots(lifetimes.storage_sources);
+    std::map<const Var*, std::vector<Slot>> recurrent_roots;
+    auto register_loop = [&](const auto& loop) {
+      if (!LoopMayExecute(loop, true)) return;
+      const bool native =
+          std::any_of(loop->iter_args_.begin(), loop->iter_args_.end(), [](const auto& argument) {
+            const auto tile = As<TileType>(argument->GetType());
+            return tile && !tile->memref_;
+          });
+      if (!native) return;
+      const auto begin = definitions.stmt_order.at(loop.get());
+      const auto end = definitions.stmt_end_order.at(loop.get());
+      for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+        const auto& argument = loop->iter_args_[i];
+        if (!As<TileType>(argument->GetType())) continue;
+        for (const auto& root : roots.Roots(argument)) {
+          const auto definition = definitions.defs.find(root);
+          if (definition != definitions.defs.end() && definition->second.kind == VarDef::kAssign &&
+              definition->second.order > begin && definition->second.order <= end &&
+              GetTileTypeWithMemRef(root->GetType())) {
+            recurrent_roots[root.get()].emplace_back(loop.get(), i);
+          }
+        }
+      }
+    };
+    for (const auto& loop : definitions.loops) {
+      if (const auto for_loop = As<ForStmt>(loop)) {
+        register_loop(for_loop);
+      } else if (const auto while_loop = As<WhileStmt>(loop)) {
+        register_loop(while_loop);
+      }
+    }
+    if (recurrent_roots.empty()) return;
+
+    ReverseBranchOrderVisitor reverse;
+    reverse.Run(function->body_);
+    struct Read {
+      const Var* root;
+      size_t definition;
+      size_t primary;
+      size_t reverse;
+    };
+    std::vector<Read> reads;
+    std::map<const Var*, std::vector<std::pair<size_t, size_t>>> positions;
+    const auto observations =
+        BuildPayloadObservations(definitions.defs, definitions.observation_reads, definitions.binding_reads);
+    // Expand only requested root/read facts, using the same output-sensitive
+    // resolver as allocation no-alias constraints. No subtree scan is performed
+    // per carry or producer, and intermediate transitive sets are not cached.
+    for (const auto& [statement, values] : observations) {
+      for (const auto& value : values) {
+        if (!As<TileType>(value->GetType())) continue;
+        const auto definition = definitions.defs.find(value);
+        const auto order = definition == definitions.defs.end() ? 0 : definition->second.order;
+        const auto primary = definitions.stmt_order.at(statement);
+        const auto reversed = reverse.stmt_order.at(statement);
+        for (const auto& root : roots.Roots(value)) {
+          if (recurrent_roots.count(root.get()) == 0) continue;
+          reads.push_back({root.get(), order, primary, reversed});
+          positions[root.get()].emplace_back(primary, reversed);
+        }
+      }
+    }
+    std::map<const Var*, ReachableEventIndex> indexes;
+    for (auto& [root, events] : positions) indexes[root].Build(std::move(events), false);
+    std::sort(reads.begin(), reads.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.definition < rhs.definition; });
+    std::vector<std::pair<size_t, VarPtr>> producers;
+    for (const auto& [value, definition] : definitions.defs) {
+      if (recurrent_roots.count(value.get())) producers.emplace_back(definition.order, value);
+    }
+    std::sort(producers.begin(), producers.end());
+    size_t next_read = 0;
+    const auto end = definitions.stmt_end_order.at(function->body_.get());
+    for (const auto& [order, producer] : producers) {
+      while (next_read < reads.size() && reads[next_read].definition < order) {
+        const auto& read = reads[next_read++];
+        indexes.at(read.root).Activate(read.primary, read.reverse);
+      }
+      const auto index = indexes.find(producer.get());
+      const auto& definition = definitions.defs.at(producer);
+      if (index == indexes.end() ||
+          !index->second.HasAfter(order + 1, end, reverse.stmt_order.at(definition.definition_stmt.get()))) {
+        continue;
+      }
+      // Protect every slot that can retain this allocation, including parallel
+      // swaps/fanout. Otherwise writing one reconciled slot could destroy a
+      // sibling's old descriptor before its backedge is consumed.
+      for (const auto& [loop, slot] : recurrent_roots.at(producer.get())) {
+        protected_slots_[loop].insert(slot);
+      }
+    }
+  }
+
+  template <typename LoopPtr>
+  StmtPtr Rewrite(const LoopPtr& original) {
+    auto visited =
+        std::static_pointer_cast<const typename LoopPtr::element_type>(IRMutator::VisitStmt_(original));
+    const auto found = protected_slots_.find(original.get());
+    if (found == protected_slots_.end()) return visited;
+    auto result = MutableCopy(visited);
+    result->body_ =
+        transform_utils::RewriteLastYieldStmt(visited->body_, [&](const YieldStmtPtr& yield) -> StmtPtr {
+          std::vector<StmtPtr> snapshots;
+          std::vector<StmtPtr> transfers;
+          auto values = yield->value_;
+          for (const auto slot : found->second) {
+            INTERNAL_CHECK_SPAN(slot < values.size(), yield->span_)
+                << "Internal error: recurrent payload slot exceeds loop yield arity";
+            const auto source = AsVarLike(values[slot]);
+            const auto tile = source ? As<TileType>(source->GetType()) : nullptr;
+            INTERNAL_CHECK_SPAN(tile, yield->span_)
+                << "Internal error: recurrent payload yield is not a Tile variable";
+            const auto memory = tile->GetMemorySpace();
+            CHECK_SPAN(memory && IsTileMoveEverSupported(*memory, *memory), yield->span_)
+                << "A loop retains an old Tile payload across a fresh recurrent producer, but "
+                   "this memory space cannot materialize independent carry versions";
+            const auto bytes = utils::StaticPhysicalAllocationBytes(tile, *memory, nullptr);
+            INTERNAL_CHECK_SPAN(bytes, yield->span_)
+                << "Internal error: recurrent payload storage needs a static physical extent";
+            auto copy = [&](const VarPtr& input, const std::string& prefix) {
+              auto base = std::make_shared<Var>(names_.Fresh("mem_" + prefix), GetPtrType(), yield->span_);
+              auto storage = std::make_shared<MemRef>(base, int64_t{0}, *bytes, yield->span_);
+              allocations.push_back(CreateAllocStatement(storage, *memory));
+              return CreateStorageMove(
+                  input, storage, memory, [](const ExprPtr& expression) { return expression; },
+                  names_.Fresh(prefix));
+            };
+            // Read all backedges before writing any retained version. Separate
+            // staging and retained allocations also avoid runtime self-TMOVs
+            // when an unchanged arm yields the preceding retained descriptor.
+            auto [snapshot, save] = copy(source, "recurrent_saved_");
+            auto [retained, transfer] = copy(snapshot, "recurrent_value_");
+            snapshots.push_back(save);
+            transfers.push_back(transfer);
+            values[slot] = retained;
+          }
+          snapshots.insert(snapshots.end(), transfers.begin(), transfers.end());
+          snapshots.push_back(std::make_shared<YieldStmt>(std::move(values), yield->span_));
+          return SeqStmts::Flatten(snapshots, yield->span_);
+        });
+    return result;
+  }
+};
+
 // A descriptor carry may arrive at a producer holding that producer's previous
 // output. For a non-inplace operation, preserving the descriptor is insufficient:
 // its input payload must survive the output write. Use the shared no-alias
@@ -2991,8 +3169,9 @@ class MaterializeRecurrentOperands : public IRMutator {
     for (auto& argument : arguments) {
       const auto source = AsVarLike(argument);
       if (source) {
-        if (auto snapshot = snapshots.find(source.get()); snapshot != snapshots.end())
+        if (auto snapshot = snapshots.find(source.get()); snapshot != snapshots.end()) {
           argument = snapshot->second;
+        }
       }
     }
     auto rewritten = std::make_shared<Call>(call->op_, std::move(arguments), call->kwargs_, call->attrs_,
@@ -3103,6 +3282,10 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   if (ctx == nullptr || !ctx->GetEnableBufferIR()) {
     auto analyzed = MutableCopy(func);
     analyzed->body_ = new_body;
+    ReconcileRecurrentPayloads versions(analyzed);
+    new_body = versions.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, versions.allocations);
+    analyzed->body_ = new_body;
     MaterializeRecurrentOperands recurrence(analyzed);
     new_body = recurrence.VisitStmt(new_body);
     new_body = InsertAllocsIntoBody(new_body, recurrence.allocations);
@@ -3144,10 +3327,14 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 
   if (new_body == func->body_) return func;
 
-  return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
-                                          func->return_types_, new_body, func->span_, func->func_type_,
-                                          func->level_, func->role_, func->attrs_,
-                                          func->requires_runtime_binding_, func->ir_stage_);
+  auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
+                                                 func->return_types_, new_body, func->span_, func->func_type_,
+                                                 func->level_, func->role_, func->attrs_,
+                                                 func->requires_runtime_binding_, func->ir_stage_);
+  // A boundary rewrite can replace one trailing yield with several transfers.
+  // Normalize once after all rewrites, rather than flatten growing suffixes
+  // repeatedly while visiting nested transparent scopes.
+  return NormalizeStmtStructure(result);
 }
 
 }  // namespace memory_reuse
