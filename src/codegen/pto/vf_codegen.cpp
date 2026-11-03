@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -40,9 +41,11 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::map<const Var*, VarPtr> aliases;
   std::map<const Var*, VarPtr> references;
   bool has_control_flow = false;
+  std::vector<ForStmtPtr> loops;
 
   void VisitStmt(const StmtPtr& stmt) override {
-    has_control_flow |= As<ForStmt>(stmt) || As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    has_control_flow |= As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    if (auto loop = As<ForStmt>(stmt)) loops.push_back(loop);
     var_collectors::VarDefUseCollector::VisitStmt(stmt);
   }
 
@@ -70,6 +73,29 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     IRVisitor::VisitExpr_(call);
   }
 };
+
+// Finite nonnegative affine access bounds for the initial executable subset.
+// This does not change the public memory-effect query's unknown-range semantics.
+std::optional<int64_t> MaximumVFOffset(const ExprPtr& expr, const ForStmtPtr& loop, int depth = 0) {
+  if (depth > 64) return std::nullopt;
+  if (auto value = As<ConstInt>(expr)) {
+    if (value->value_ >= 0 && value->value_ < (int64_t{1} << 31)) return value->value_;
+    return std::nullopt;
+  }
+  if (expr == loop->loop_var_) {
+    auto stop = As<ConstInt>(loop->stop_);
+    return stop ? std::optional<int64_t>(stop->value_ - 1) : std::nullopt;
+  }
+  if (As<Add>(expr) || As<Mul>(expr)) {
+    auto binary = As<BinaryExpr>(expr);
+    auto left = MaximumVFOffset(binary->left_, loop, depth + 1);
+    auto right = MaximumVFOffset(binary->right_, loop, depth + 1);
+    if (!left || !right) return std::nullopt;
+    const int64_t maximum = As<Add>(expr) ? *left + *right : *left * *right;
+    if (maximum < (int64_t{1} << 31)) return maximum;
+  }
+  return std::nullopt;
+}
 }  // namespace
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
@@ -82,10 +108,21 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       << "VF execution requires the PyPTO Tile memory planner";
   VFOperands operands;
   operands.VisitStmt(scope->body_);
-  // Keep the execution subset within the straight-line synchronization proof.
-  // Diagnostic codegen still supports register control flow.
+  // Hardware loops use conservative full VF memory ordering after LLVM export.
+  // Runtime branches and loop-carried values need additional lowering support.
   CHECK_SPAN(!operands.has_control_flow, scope->span_)
-      << "VF execution currently requires straight-line RegScope; unroll static loops before codegen";
+      << "VF execution supports straight-line RegScope or canonical hardware loops nested up to four levels";
+  ForStmtPtr hardware_loop;
+  if (!operands.loops.empty()) {
+    hardware_loop = operands.loops.front();
+    for (const auto& loop : operands.loops) {
+      const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
+      CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
+                     stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
+                 loop->span_)
+          << "VF hardware loop lowering requires canonical integer loops without loop-carried values";
+    }
+  }
 
   // Collapse SSA store versions to their existing caller view. Memoization
   // bounds chained stores to O(N log N); identity, never names, identifies views.
@@ -138,12 +175,30 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
-    // Contiguous accesses require statically admitted intervals. Indexed
-    // accesses instead capture the whole Tile conservatively; the caller owns
-    // active-index bounds, while the allocation base must still be static.
+    // Preserve known bounds checks. Dynamic loop offsets are admitted without
+    // a range proof: full VF ordering covers aliases, while callers remain
+    // responsible for keeping runtime memory accesses within their Tiles.
     auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN(effect.root && (effect.begin || IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")),
-               call->span_)
+    bool bounded_loop_access = false;
+    if (hardware_loop && effect.root && !effect.begin) {
+      auto maximum = MaximumVFOffset(call->args_[1], hardware_loop);
+      int64_t elements = 1;
+      for (const auto& extent : tile->shape_) {
+        auto dimension = ir::As<ir::ConstInt>(extent);
+        if (!dimension || dimension->value_ <= 0 || dimension->value_ > (int64_t{1} << 31) / elements) {
+          elements = 0;
+          break;
+        }
+        elements *= dimension->value_;
+      }
+      const auto reg =
+          ir::As<ir::RegType>(IsOp(call, "reg.load") ? call->GetType() : call->args_[2]->GetType());
+      const auto view_start =
+          tile->tile_view_ ? ir::As<ir::ConstInt>(tile->tile_view_->start_offset) : nullptr;
+      bounded_loop_access =
+          (!maximum || (reg && *maximum + reg->shape_ <= elements)) && (!tile->tile_view_ || view_start);
+    }
+    CHECK_SPAN(effect.root && (effect.begin || bounded_loop_access || IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")), call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
     if (inserted) {
@@ -264,6 +319,12 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       "  func.func @" +
       artifact.symbol + "(" + signature + ") attributes {pto.aiv} {\n" + helper.fs_.constants_section.str() +
       helper.stream_.str() + "  }\n}\n";
+  for (size_t remaining = operands.loops.size(); remaining > 0; --remaining) {
+    const size_t index = remaining - 1;
+    const auto stop = ir::As<ir::ConstInt>(operands.loops[index]->stop_);
+    artifact.source = "// pypto.hardware_loop.v2 " + artifact.symbol + "/loop" + std::to_string(index) + " " +
+                      (stop ? std::to_string(stop->value_) : "dynamic") + "\n" + artifact.source;
+  }
   // The adapter's PIPE_V/effect contract lets PTOAS place dependencies here.
   // The A5 VF exits after its register instructions complete; this models the
   // caller boundary, not VF-internal UB hazards. Kernel-tail sync stays enabled.

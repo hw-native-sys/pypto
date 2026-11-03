@@ -257,7 +257,8 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
     return x
 ```
 
-该 API 表达意图。当前后端对保留的 Require 循环报告不支持的资格状态。
+该 API 表达意图。A5 支持一个受限的可执行子集，并检查最终设备产物证据，
+见 [VF 执行](../codegen/03-vpto-vf-integration.md#强制硬件循环)。其他目标和未支持的循环形式仍会被拒绝。
 `ir.analyze_hardware_loop(loop, profile)` 区分 Eligible、Ineligible 和 Unknown；
 Eligible 仍不等于最终产物的硬件证据，计数器窄化与 `scf.for` 均不能替代证据。
 动态整数 `stop` 无需静态范围证明，也不插入运行时范围检查；其迭代次数和终止归纳变量

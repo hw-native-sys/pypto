@@ -94,7 +94,9 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
 ```
 
 This expresses intent, not a guarantee that the installed backend implements it.
-Current backends report unsupported qualification for surviving Require loops.
+A5 supports a limited executable subset with checked final device evidence;
+see [VF execution](../codegen/03-vpto-vf-integration.md#required-hardware-loops).
+Other targets and unsupported loop forms remain rejected.
 The profile-driven `ir.analyze_hardware_loop(loop, profile)` API distinguishes
 Eligible, Ineligible and Unknown; Eligible still requires final artifact evidence.
 Dynamic integer `stop` values are accepted without a static range proof or an

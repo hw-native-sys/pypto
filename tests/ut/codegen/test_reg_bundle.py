@@ -12,6 +12,7 @@
 import json
 import re
 import subprocess
+from contextlib import ExitStack
 
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
@@ -65,6 +66,66 @@ def test_bundle_preserves_call_order_storage_and_diagnostic_output():
     again = generator.generate_bundle(program, emit_source_loc=False)
     assert again.caller_source == caller
     assert again.helpers[0].source == helper.source
+
+
+@pytest.mark.parametrize("stride", [64, 128])
+def test_required_hardware_loop_bundle_carries_mapping_and_proves_bounds(stride):
+    builder = IRBuilder()
+    with builder.function("required_loop", span=SPAN, type=ir.FunctionType.AIV) as f:
+        tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        src = builder.let("src", tile.full([128], DataType.FP32, 1.0), type=tile_type)
+        dst = builder.let("dst", tile.full([128], DataType.FP32, 0.0), type=tile_type)
+        index = ir.Var("chunk", ir.ScalarType(DataType.INDEX), SPAN)
+        with builder.reg_scope(SPAN):
+            with builder.for_loop(index, 0, 2, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require):
+                offset = ir.Mul(index, ir.ConstInt(stride, DataType.INDEX, SPAN), DataType.INDEX, SPAN)
+                x = builder.emit_reg("x", "reg.load", [src, offset], {"lanes": 64}, SPAN)
+                y = builder.emit_reg("y", "reg.mul", [x, x], span=SPAN)
+                builder.emit_reg_store("stored", dst, y, offset=offset, span=SPAN)
+    program = ir.Program([f.get_result()], "RequiredLoop", SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(program)
+    generator = codegen.PTOCodegen()
+    if stride == 128:
+        with pytest.raises(ValueError, match="offset bounds"):
+            generator.generate_bundle(program, emit_source_loc=False)
+    else:
+        helper = generator.generate_bundle(program, emit_source_loc=False).helpers[0]
+        assert f"// pypto.hardware_loop.v2 {helper.symbol}/loop0 2" in helper.source
+        assert helper.source.count("scf.for") == 1
+        assert helper.source.count("pto.vmi.vmul") == 1
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_hardware_loop_depth_and_dynamic_capture(depth, dynamic):
+    # The former helper gate rejected any nesting/dynamic stop before PTOAS.
+    builder = IRBuilder()
+    with builder.function("nested_loop", span=SPAN, type=ir.FunctionType.AIV) as f:
+        stop = f.param("stop", ir.ScalarType(DataType.INDEX)) if dynamic else 2
+        tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
+        dst = builder.let("dst", tile.full([128], DataType.FP32, 0.0), type=tile_type)
+        with builder.reg_scope(SPAN), ExitStack() as stack:
+            for level in range(depth):
+                index = ir.Var(f"i{level}", ir.ScalarType(DataType.INDEX), SPAN)
+                stack.enter_context(
+                    builder.for_loop(index, 0, stop, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require)
+                )
+            offset = ir.Mul(index, ir.ConstInt(64, DataType.INDEX, SPAN), DataType.INDEX, SPAN)
+            x = builder.emit_reg("x", "reg.load", [dst, offset], {"lanes": 64}, SPAN)
+            builder.emit_reg_store("stored", dst, x, offset=offset, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Nested", SPAN))
+    if depth == 5:
+        with pytest.raises(ValueError, match="HWL_DEPTH"):
+            codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+        return
+    helper = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0]
+    assert helper.source.count("scf.for") == depth
+    for level in range(depth):
+        assert f"{helper.symbol}/loop{level} {'dynamic' if dynamic else '2'}" in helper.source
+    if dynamic:
+        assert helper.parameter_types[-1] == "index"
 
 
 @pytest.mark.parametrize(
@@ -146,7 +207,11 @@ def test_control_flow_in_helper_is_explicitly_rejected(control_flow):
     generator = codegen.PTOCodegen()
     # The IR verifier rejects while before codegen; other control flow remains
     # legal diagnostic IR but is outside executable helper admission.
-    message = "WhileStmt.*RegScope" if control_flow == "while" else "straight-line RegScope"
+    message = {
+        "while": "WhileStmt.*RegScope",
+        "for": "hardware loop lowering requires",
+        "if": "straight-line RegScope",
+    }[control_flow]
     with pytest.raises(ValueError, match=message):
         with builder.function("control_flow", span=SPAN, type=ir.FunctionType.AIV) as f:
             with builder.reg_scope(SPAN):

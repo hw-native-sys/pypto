@@ -41,6 +41,8 @@ def kernel(
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
+当前 A5 可执行子集和硬件指令证据见 [VF 执行](../codegen/03-vpto-vf-integration.md#强制硬件循环)。
+
 ## 通用参数与 dtype 记法
 
 | 参数 | 含义 |

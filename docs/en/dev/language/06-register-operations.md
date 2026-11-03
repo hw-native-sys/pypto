@@ -45,6 +45,8 @@ Assign every operation result to a variable, including `store` and `scatter`; a 
 rejected. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
 `pl.hardware_loop()` (`HardwareLoopPolicy.Require`) is restricted to this lexical
 scope, including when the loop has zero trips.
+The current A5 executable subset and its hardware instruction evidence are
+described in [VF execution](../codegen/03-vpto-vf-integration.md#required-hardware-loops).
 
 ## Common parameters and dtype notation
 

@@ -11,10 +11,13 @@
 
 #include "pypto/codegen/codegen_preconditions.h"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -104,14 +107,51 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   // Qualification is recomputed at the emission boundary. Installed backends
   // default to unsupported; no cached report can authorize a Require loop.
   auto* context = PassContext::Current();
-  const auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
+  auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
+  const bool a5 = backend::BackendConfig::IsConfigured() &&
+                  backend::GetBackend()->GetHandler()->GetPtoTargetArch() == "a5";
+  if (a5) {
+    // This is admission to lowering, never final hardware evidence. The
+    // executable helper and linked-image checks discharge that obligation.
+    profile.supported = true;
+    // User profiles may tighten limits, but cannot widen A5 hardware limits.
+    profile.counter_bits = std::min(profile.counter_bits, 16);
+    profile.max_trip_count = std::min<int64_t>(profile.max_trip_count, 65535);
+    profile.max_depth = std::min(profile.max_depth, 4);
+    class RegisterOps : public IRVisitor {
+     public:
+      std::vector<std::string> names;
+      void VisitExpr_(const CallPtr& call) override {
+        if (call->op_->name_.rfind("reg.", 0) == 0) names.push_back(call->op_->name_);
+        IRVisitor::VisitExpr_(call);
+      }
+    } ops;
+    ops.VisitProgram(program);
+    profile.allowed_ops = std::move(ops.names);
+    class LoweringRequirements : public IRVisitor {
+     public:
+      explicit LoweringRequirements(const HardwareLoopProfile& profile) : profile_(profile) {}
+      void VisitStmt_(const ForStmtPtr& loop) override {
+        if (loop->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
+          const auto qualification = AnalyzeHardwareLoop(loop, profile_);
+          CHECK_SPAN(qualification.state == HardwareLoopState::Eligible, loop->span_)
+              << "Hardware loop lowering rejected: " << qualification.reason;
+        }
+        IRVisitor::VisitStmt_(loop);
+      }
+
+     private:
+      const HardwareLoopProfile& profile_;
+    } requirements(profile);
+    requirements.VisitProgram(program);
+  }
   if (context && context->GetReportHardwareLoops()) {
     context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
   }
-  VerifyHardwareLoopRequirements(program, profile);
+  if (!a5) VerifyHardwareLoopRequirements(program, profile);
 
-  // Check lexical register ownership before emission. Hardware-loop Require
-  // remains unsupported until its separate lowering and evidence contract.
+  // Check lexical register ownership before emission. A5 Require obligations
+  // are discharged only after executable-helper admission and device linking.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
     void VisitFunction(const ir::FunctionPtr& func) override {
