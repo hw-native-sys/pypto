@@ -110,13 +110,13 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
   // Native selections retain every candidate until its final use. Reuse only
-  // dead or branch-exclusive storage under the normal hazard and no-alias constraints;
+  // dead storage under the normal lifetime, hazard and no-alias constraints;
   // do not insert branch copies or retarget producers to force a capacity fit.
   std::vector<Diagnostic> hints;
   const auto reuse_map = memory_reuse::IdentifyReuseOpportunities(
       analysis_result.lifetimes, constraint_analysis.target_hazard_inputs, constraint_analysis.forbid_alias,
-      analysis_result.phi_family_ids, analysis_result.branch_exclusion, analysis_result.var_sharing_groups,
-      analysis_result.var_liveness, analysis_result.pipeline_membership, analysis_result.pipeline_load_tiles,
+      analysis_result.phi_family_ids, analysis_result.var_sharing_groups, analysis_result.var_liveness,
+      analysis_result.pipeline_membership, analysis_result.pipeline_load_tiles,
       analysis_result.subrange_unsafe_groups, reserved_end_by_space,
       constraint_analysis.declared_allocation_bases, planned_func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows

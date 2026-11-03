@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 
-#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -27,39 +26,6 @@
 namespace pypto {
 namespace ir {
 
-// Lexical execution contexts form a persistent tree: each If contributes one
-// fork and one child per arm. Definitions store one context, not their complete
-// ancestor paths. Euler/RMQ preprocessing costs O(N log N); common-context and
-// branch-exclusion queries are O(1), including inside the reuse packer's gates.
-class BranchExclusionInfo {
- public:
-  using ContextId = size_t;
-
-  ContextId AddFork(ContextId parent);
-  ContextId AddArm(ContextId parent);
-  void BuildIndex();
-  [[nodiscard]] ContextId CommonContext(ContextId lhs, ContextId rhs) const;
-  void RecordDefinition(const Var* value, ContextId context);
-  void ExtendAcrossLoop(const Var* value, ContextId header_context);
-  [[nodiscard]] ContextId AllocationContext(const std::vector<VarPtr>& members) const;
-  [[nodiscard]] bool AreMutuallyExclusive(ContextId lhs, ContextId rhs) const;
-
- private:
-  struct Context {
-    size_t depth = 0;
-    bool is_fork = false;
-    std::vector<ContextId> children;
-  };
-  ContextId AddContext(ContextId parent, bool is_fork);
-
-  // Context 0 is function entry/unknown ownership and proves no exclusion.
-  std::vector<Context> contexts_{Context{}};
-  std::vector<size_t> first_occurrence_;
-  std::vector<size_t> floor_logs_;
-  std::vector<std::vector<ContextId>> range_minimum_;
-  std::map<const Var*, ContextId> definition_contexts_;
-};
-
 /**
  * @brief Conservative lifetime of one physical allocation identity.
  *
@@ -73,9 +39,6 @@ struct LifetimeInterval {
   int last_use_point;
   MemorySpace memory_space;
   uint64_t size;
-  // Common lexical ownership of every tracked definition sharing this physical
-  // base. Selected descriptors do not own allocations and never narrow it.
-  BranchExclusionInfo::ContextId branch_context = 0;
 };
 
 // Direct descriptor bindings, rather than a must-alias equivalence relation.
@@ -113,7 +76,6 @@ struct LifetimeAnalysisResult {
   // Present on the legacy Tile path. Keep the graph compact instead of eagerly
   // materializing every transitive root set (quadratic for growing nested phis).
   TileStorageSources storage_sources;
-  BranchExclusionInfo branch_exclusion;
 };
 
 /**

@@ -48,110 +48,6 @@
 
 namespace pypto {
 namespace ir {
-
-BranchExclusionInfo::ContextId BranchExclusionInfo::AddContext(ContextId parent, bool is_fork) {
-  INTERNAL_CHECK(parent < contexts_.size()) << "Unknown branch context";
-  INTERNAL_CHECK(range_minimum_.empty()) << "Cannot extend an indexed branch context tree";
-  const ContextId child = contexts_.size();
-  const size_t depth = contexts_[parent].depth + 1;
-  contexts_.push_back({depth, is_fork, {}});
-  contexts_[parent].children.push_back(child);
-  return child;
-}
-
-BranchExclusionInfo::ContextId BranchExclusionInfo::AddFork(ContextId parent) {
-  return AddContext(parent, true);
-}
-
-BranchExclusionInfo::ContextId BranchExclusionInfo::AddArm(ContextId parent) {
-  return AddContext(parent, false);
-}
-
-void BranchExclusionInfo::BuildIndex() {
-  // An iterative Euler walk avoids another recursion proportional to If depth.
-  // Each context occurs once on entry and its parent once on return.
-  first_occurrence_.assign(contexts_.size(), 0);
-  std::vector<ContextId> euler{0};
-  std::vector<std::pair<ContextId, size_t>> pending{{0, 0}};
-  while (!pending.empty()) {
-    auto& [context, next_child] = pending.back();
-    if (next_child < contexts_[context].children.size()) {
-      const ContextId child = contexts_[context].children[next_child++];
-      first_occurrence_[child] = euler.size();
-      euler.push_back(child);
-      pending.emplace_back(child, 0);
-    } else {
-      pending.pop_back();
-      if (!pending.empty()) euler.push_back(pending.back().first);
-    }
-  }
-
-  floor_logs_.assign(euler.size() + 1, 0);
-  for (size_t i = 2; i < floor_logs_.size(); ++i) floor_logs_[i] = floor_logs_[i / 2] + 1;
-  range_minimum_.clear();
-  range_minimum_.push_back(std::move(euler));
-  const size_t count = range_minimum_[0].size();
-  for (size_t level = 1; level <= floor_logs_[count]; ++level) {
-    const size_t width = size_t{1} << level;
-    const size_t half = width / 2;
-    const auto& previous = range_minimum_.back();
-    std::vector<ContextId> row(count - width + 1);
-    for (size_t i = 0; i < row.size(); ++i) {
-      const ContextId lhs = previous[i];
-      const ContextId rhs = previous[i + half];
-      row[i] = contexts_[lhs].depth <= contexts_[rhs].depth ? lhs : rhs;
-    }
-    range_minimum_.push_back(std::move(row));
-  }
-}
-
-BranchExclusionInfo::ContextId BranchExclusionInfo::CommonContext(ContextId lhs, ContextId rhs) const {
-  if (lhs >= contexts_.size() || rhs >= contexts_.size()) return 0;
-  if (lhs == rhs) return lhs;
-  if (range_minimum_.empty()) return 0;
-  size_t begin = first_occurrence_[lhs];
-  size_t end = first_occurrence_[rhs];
-  if (begin > end) std::swap(begin, end);
-  const size_t level = floor_logs_[end - begin + 1];
-  const ContextId left = range_minimum_[level][begin];
-  const ContextId right = range_minimum_[level][end - (size_t{1} << level) + 1];
-  return contexts_[left].depth <= contexts_[right].depth ? left : right;
-}
-
-void BranchExclusionInfo::RecordDefinition(const Var* value, ContextId context) {
-  definition_contexts_[value] = context;
-}
-
-void BranchExclusionInfo::ExtendAcrossLoop(const Var* value, ContextId header_context) {
-  auto owner = definition_contexts_.find(value);
-  if (owner != definition_contexts_.end()) {
-    // A value surviving a backedge cannot rely on an If arm inside that loop.
-    // Keep any enclosing branch proof, without narrowing an already wider owner.
-    owner->second = CommonContext(owner->second, header_context);
-  }
-}
-
-BranchExclusionInfo::ContextId BranchExclusionInfo::AllocationContext(
-    const std::vector<VarPtr>& members) const {
-  ContextId owner = 0;
-  bool initialized = false;
-  for (const auto& member : members) {
-    const auto definition = definition_contexts_.find(member.get());
-    const ContextId context = definition == definition_contexts_.end() ? 0 : definition->second;
-    owner = initialized ? CommonContext(owner, context) : context;
-    initialized = true;
-    if (owner == 0) break;
-  }
-  return owner;
-}
-
-bool BranchExclusionInfo::AreMutuallyExclusive(ContextId lhs, ContextId rhs) const {
-  const ContextId common = CommonContext(lhs, rhs);
-  // A group's owner can itself be a fork when its definitions span both arms.
-  // Only strict descendants of that fork prove opposite, exclusive arms.
-  return contexts_[common].is_fork && common != lhs && common != rhs;
-}
-
 namespace {
 
 // Return the direct storage source of a rename, registered writeback or aliasing
@@ -290,7 +186,6 @@ class LifetimeAnalyzer : public IRVisitor {
     // without those families merging, so we store a *set* of ids per var.
     std::map<const Var*, std::set<int>> phi_family_ids;
     TileStorageSources storage_sources;
-    BranchExclusionInfo branch_exclusion;
   };
 
   Result Analyze(const StmtPtr& func_body, const std::vector<VarPtr>& entry_vars = {}) {
@@ -302,19 +197,11 @@ class LifetimeAnalyzer : public IRVisitor {
       if (!tile_type || !tile_type->memref_.has_value()) continue;
       ordered_defs_.push_back(var);
       var_def_order_[var] = current_order_;
-      if (native_if_) branch_exclusion_.RecordDefinition(var.get(), 0);
     }
 
     // Phase 1: Walk IR tree
     if (func_body) {
       VisitStmt(func_body);
-    }
-
-    branch_exclusion_.BuildIndex();
-    std::map<int, BranchExclusionInfo::ContextId> header_contexts;
-    for (const auto& [order, context] : loop_contexts_) {
-      auto [entry, inserted] = header_contexts.emplace(order, context);
-      if (!inserted) entry->second = branch_exclusion_.CommonContext(entry->second, context);
     }
 
     // Propagate greatest use positions through descriptor bindings. Native
@@ -355,9 +242,6 @@ class LifetimeAnalyzer : public IRVisitor {
         if (const auto binding = binding_points_.find(value.get());
             binding != binding_points_.end() && binding->second >= order) {
           var_family_ids_.erase(value.get());
-          const auto header = header_contexts.find(order);
-          branch_exclusion_.ExtendAcrossLoop(value.get(),
-                                             header == header_contexts.end() ? 0 : header->second);
         }
       }
       const auto sources = storage_sources_.find(value.get());
@@ -368,9 +252,8 @@ class LifetimeAnalyzer : public IRVisitor {
     // Phase 2: Apply loop-aware lifetime extension
     auto effective_last_use = ComputeEffectiveLastUse();
 
-    return {std::move(ordered_defs_),    std::move(var_def_order_),  std::move(effective_last_use),
-            std::move(var_def_stmt_),    std::move(var_family_ids_), std::move(storage_sources_),
-            std::move(branch_exclusion_)};
+    return {std::move(ordered_defs_), std::move(var_def_order_),  std::move(effective_last_use),
+            std::move(var_def_stmt_), std::move(var_family_ids_), std::move(storage_sources_)};
   }
 
  protected:
@@ -405,7 +288,6 @@ class LifetimeAnalyzer : public IRVisitor {
         ordered_defs_.push_back(op->var_);
         var_def_order_[op->var_] = order;
         var_def_stmt_[op->var_] = op;
-        if (native_if_) branch_exclusion_.RecordDefinition(op->var_.get(), current_context_);
       }
     }
 
@@ -429,20 +311,14 @@ class LifetimeAnalyzer : public IRVisitor {
 
     // Visit then body first, else body second (sequential ordering), recording
     // each branch's order range so we can tell branch-local yield-sources apart.
-    const auto outer_context = current_context_;
-    const auto fork = native_if_ ? branch_exclusion_.AddFork(outer_context) : outer_context;
     int then_start = current_order_;
-    if (native_if_) current_context_ = branch_exclusion_.AddArm(fork);
     VisitStmt(op->then_body_);
-    current_context_ = outer_context;
     int then_end = current_order_ - 1;
     int else_start = -1;
     int else_end = -1;
     if (op->else_body_.has_value()) {
       else_start = current_order_;
-      if (native_if_) current_context_ = branch_exclusion_.AddArm(fork);
       VisitStmt(*op->else_body_);
-      current_context_ = outer_context;
       else_end = current_order_ - 1;
     }
 
@@ -556,7 +432,6 @@ class LifetimeAnalyzer : public IRVisitor {
       return;
     }
     const int start = current_order_++;
-    loop_contexts_.emplace_back(start, current_context_);
     const auto yield = transform_utils::GetLastYieldStmt(op->body_);
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       const auto& argument = op->iter_args_[i];
@@ -587,9 +462,6 @@ class LifetimeAnalyzer : public IRVisitor {
  private:
   int current_order_ = 0;
   bool native_if_;
-  BranchExclusionInfo branch_exclusion_;
-  BranchExclusionInfo::ContextId current_context_ = 0;
-  std::vector<std::pair<int, BranchExclusionInfo::ContextId>> loop_contexts_;
   TileStorageSources storage_sources_;
   std::vector<std::pair<VarPtr, int>> loop_headers_;
   std::map<const Var*, int> binding_points_;
@@ -864,10 +736,6 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
 
     LifetimeInterval interval;
     interval.variable = sharing_group[0];
-    // Merge every original definition sharing the base, including outer aliases
-    // and loop-extended candidates. A branch-local rename cannot make an outer
-    // allocation exclusive, and a selected SSA descriptor owns no allocation.
-    interval.branch_context = result.branch_exclusion.AllocationContext(sharing_group);
     interval.def_point = min_def_point;
     interval.last_use_point = max_last_use;
     auto representative_tile_type = As<TileType>(sharing_group[0]->GetType());
@@ -956,8 +824,7 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
           std::move(pipeline_membership),
           std::move(pipeline_load_tiles),
           std::move(subrange_unsafe_groups),
-          std::move(result.storage_sources),
-          std::move(result.branch_exclusion)};
+          std::move(result.storage_sources)};
 }
 
 }  // namespace

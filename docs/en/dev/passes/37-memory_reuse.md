@@ -32,23 +32,11 @@ its complete capacity; whole-allocation reuse never discards a live slot.
 ## Planner boundary
 
 On the legacy Tile path, a native If selects a yielded descriptor. All possible
-source allocations remain live through uses of that descriptor. Ordinary reuse
-is allowed after a lifetime ends, or when the complete Vec allocations are
-proven to belong to opposing arms of the same If. All existing no-alias,
-target-hazard, pinned-storage and reservation constraints still apply.
-MemoryReuse does not insert branch copies or retarget producers merely to make
-Vec fit; genuine capacity overflow retains its normal diagnostic.
-
-Branch ownership is recorded for real allocation identities, including every
-definition already sharing that MemRef. A branch-local alias of an outer
-allocation does not make its storage branch-private. If then contains two
-coexisting 64 KiB allocations A/B and else contains C, either A/C or B/C can
-share: packing needs two 64 KiB buffers, and A/B must remain separate. Every
-member of a packed buffer is checked, so this pairwise permission is not
-transitive. Sources retained through a descriptor loop backedge lose any
-branch proof established inside that loop; opposite arms in different
-iterations may coexist. An indexed branch-context tree takes O(N log N)
-preprocessing and answers each ownership-exclusion query in O(1).
+source allocations remain live through uses of that descriptor. Storage is
+eligible for ordinary reuse only after its lifetime ends, subject to existing
+no-alias, target-hazard, pinned-storage and reservation constraints. MemoryReuse
+does not insert branch copies or retarget producers merely to make Vec fit;
+genuine capacity overflow retains its normal diagnostic.
 
 `MemoryReuse` selects shared MemRef identities before address assignment.
 `DSA_RP` instead keeps those identities separate and jointly chooses their
