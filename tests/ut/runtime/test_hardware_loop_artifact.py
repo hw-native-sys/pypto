@@ -125,6 +125,7 @@ def test_ordered_counter_lowering_preserves_unsigned_bounds(bound):
     llvm = fixture.read_text().replace("i16", "i64").replace("%13, 16", f"%13, {bound}")
     lowered = lower_counters(llvm, [{**LOOPS[0], "trip_count": bound}])
     assert f"icmp ult i16 %13, {bound}" in lowered
+    assert lowered.index("source_filename") < lowered.index("declare void @llvm.hivm.mem.bar.vv.all()")
     validate_ordered_hardware_loops(lowered, 1)
 
 

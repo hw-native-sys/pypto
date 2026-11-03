@@ -114,7 +114,8 @@ def lower_counters(llvm: str, loops: list[dict[str, str | int]]) -> str:
             ordered.append(barrier)
     llvm = "\n".join(ordered) + "\n"
     if "declare void @llvm.hivm.mem.bar.vv.all()" not in llvm:
-        llvm = "declare void @llvm.hivm.mem.bar.vv.all()\n" + llvm
+        # LLVM's source_filename/target directives must precede declarations.
+        llvm += "\ndeclare void @llvm.hivm.mem.bar.vv.all()\n"
     return llvm
 
 
