@@ -365,11 +365,22 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_broadcast, "builtin.tensor.broadcast") {
   const std::string variant =
       op->op_->name_ + "__root" + std::to_string(root) + "__" + Fp32VariantSuffix(dtype);
 
+  // core_num itself is validated by LowerHostTensorCollectives (including the
+  // backend capacity bound), so codegen only forwards it — same multicore
+  // treatment as builtin.tensor.allreduce (RFC #2521 plan 85/B6b).
+  const int core_num = op->GetAttr<int>("core_num");
+  INTERNAL_CHECK_SPAN(core_num > 0, op->span_)
+      << "Internal error: builtin.tensor.broadcast core_num must be positive, got " << core_num
+      << "; LowerHostTensorCollectives should have rejected it";
+
   if (dist_codegen->MarkBuiltinEmitted(variant)) {
     dist_codegen->RecordBuiltinNextLevel(
-        op, variant, {{"root_cpp", std::to_string(root)}, {"dtype_cpp", Fp32TypeCpp(dtype)}});
+        op, variant,
+        {{"root_cpp", std::to_string(root)},
+         {"dtype_cpp", Fp32TypeCpp(dtype)},
+         {"launch_core_count_method", pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod()}});
   }
-  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant, core_num);
   return "";
 }
 
@@ -384,11 +395,22 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_reduce_scatter, "builtin.tensor.reduce_sc
   const std::string variant =
       op->op_->name_ + "__" + ReduceScatterOpSuffix(reduce_op) + "__" + Fp32VariantSuffix(dtype);
 
+  // core_num itself is validated by LowerHostTensorCollectives (including the
+  // backend capacity bound), so codegen only forwards it — same multicore
+  // treatment as builtin.tensor.allreduce (RFC #2521 plan 85/B6b).
+  const int core_num = op->GetAttr<int>("core_num");
+  INTERNAL_CHECK_SPAN(core_num > 0, op->span_)
+      << "Internal error: builtin.tensor.reduce_scatter core_num must be positive, got " << core_num
+      << "; LowerHostTensorCollectives should have rejected it";
+
   if (dist_codegen->MarkBuiltinEmitted(variant)) {
     dist_codegen->RecordBuiltinNextLevel(
-        op, variant, {{"op_cpp", ReduceScatterOpCpp(reduce_op)}, {"dtype_cpp", Fp32TypeCpp(dtype)}});
+        op, variant,
+        {{"op_cpp", ReduceScatterOpCpp(reduce_op)},
+         {"dtype_cpp", Fp32TypeCpp(dtype)},
+         {"launch_core_count_method", pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod()}});
   }
-  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant, core_num);
   return "";
 }
 

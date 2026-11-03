@@ -813,6 +813,7 @@ def broadcast(
     signal: DistributedTensor,
     *,
     root: int,
+    core_num: int = 1,
 ) -> DistributedTensor:
     """Broadcast root rank's data to all ranks.
 
@@ -820,8 +821,10 @@ def broadcast(
     root's data.  Uses a window-bound INT32 ``signal`` tensor for the
     cross-rank barrier.
 
-    **Signal shape:** host builtins require rank-1 ``[world_size]``. InCore
-    composites take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
+    **Signal shape:** host builtins require rank-1 ``[world_size]`` (only
+    when ``core_num=1``) or rank-2 ``[world_size, signal_stride]`` with
+    ``signal_stride >= core_num`` (one lane per AIV block). InCore composites
+    take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
 
     .. code-block:: python
 
@@ -837,7 +840,7 @@ def broadcast(
             are ignored on input.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the
             cross-rank barrier — rank-1 ``[world_size]`` or rank-2
-            ``[world_size, 1]``.  Reusable across calls — see
+            ``[world_size, signal_stride]``.  Reusable across calls — see
             :func:`allreduce` for the shared barrier protocol.
         root: Root rank index (int, keyword-only).  Must be non-negative.
             On the HOST path with an explicit static device subset, ``root``
@@ -846,14 +849,28 @@ def broadcast(
             known during ``LowerHostTensorCollectives``.  Not checked at
             compile time for the fully-dynamic "all device" domain, since no
             device count is known there.
+        core_num: Number of AIV blocks used by a HOST broadcast builtin
+            (keyword-only). Must be a positive compile-time Python integer and
+            may not exceed the configured backend's AIV core count. Defaults
+            to 1 (RFC #2521 plan 85/B6b, mirroring allreduce's #2160
+            multicore). InCore calls must keep this value at 1 and use an
+            enclosing :func:`pl.spmd` for multi-core execution.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target``.
     """
+    if not isinstance(core_num, int) or isinstance(core_num, bool):
+        raise TypeError(
+            "pld.tensor.broadcast core_num must be a positive compile-time int, "
+            f"got {type(core_num).__name__}"
+        )
+    if core_num <= 0:
+        raise ValueError(f"pld.tensor.broadcast core_num must be positive, got {core_num}")
+
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.broadcast", target=target, signal=signal
     )
-    call = _ir_tensor.broadcast(target_expr, signal_expr, root)
+    call = _ir_tensor.broadcast(target_expr, signal_expr, root, core_num=core_num)
     return DistributedTensor(expr=call)
 
 
@@ -908,6 +925,7 @@ def reduce_scatter(
     signal: DistributedTensor,
     *,
     op: ReduceOp = ReduceOp.Sum,
+    core_num: int = 1,
 ) -> DistributedTensor:
     """Reduce-scatter: reduce chunks across ranks, one reduced chunk per rank.
 
@@ -919,29 +937,45 @@ def reduce_scatter(
         data = pld.tensor.reduce_scatter(data, sig, op=pld.ReduceOp.Sum)
         # data[my_rank, 0:SIZE] now holds this rank's reduced chunk.
 
-    **Signal shape:** host builtins require rank-1 ``[world_size]``. InCore
-    composites take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
+    **Signal shape:** host builtins require rank-1 ``[world_size]`` (only
+    when ``core_num=1``) or rank-2 ``[world_size, signal_stride]`` with
+    ``signal_stride >= core_num`` (one lane per AIV block). InCore composites
+    take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` of shape
             [NR, SIZE].  Each rank stages all NR chunks, one per row.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for
             the cross-rank barrier — rank-1 ``[world_size]`` or rank-2
-            ``[world_size, 1]``.  Reusable across calls (2 credits per
-            call — ready + post-reduce) — see :func:`allreduce` for the
-            shared barrier protocol.
+            ``[world_size, signal_stride]``.  Reusable across calls (2
+            credits per call per lane — ready + post-reduce) — see
+            :func:`allreduce` for the shared barrier protocol.
         op: :class:`pld.ReduceOp` (keyword-only).  ``Sum``, ``Max``, ``Min``,
             or ``Prod`` on the InCore rail; the HOST builtin rail lowers
             ``Sum`` only.
+        core_num: Number of AIV blocks used by a HOST reduce_scatter builtin
+            (keyword-only). Must be a positive compile-time Python integer and
+            may not exceed the configured backend's AIV core count. Defaults
+            to 1 (RFC #2521 plan 85/B6b, mirroring allreduce's #2160
+            multicore). InCore calls must keep this value at 1 and use an
+            enclosing :func:`pl.spmd` for multi-core execution.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` — rank r's row
         [r, 0:SIZE] holds the reduced chunk r.
     """
+    if not isinstance(core_num, int) or isinstance(core_num, bool):
+        raise TypeError(
+            "pld.tensor.reduce_scatter core_num must be a positive compile-time int, "
+            f"got {type(core_num).__name__}"
+        )
+    if core_num <= 0:
+        raise ValueError(f"pld.tensor.reduce_scatter core_num must be positive, got {core_num}")
+
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.reduce_scatter", target=target, signal=signal
     )
-    call = _ir_tensor.reduce_scatter(target_expr, signal_expr, op)
+    call = _ir_tensor.reduce_scatter(target_expr, signal_expr, op, core_num=core_num)
     return DistributedTensor(expr=call)
 
 

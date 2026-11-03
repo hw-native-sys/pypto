@@ -27,6 +27,11 @@
 #define __aicore__ [aicore]
 #endif
 
+// Keep this after the qualifier fallbacks so hardware builds retain the
+// [aicore] entry annotation while using simpler's logical SPMD context.
+// get_block_idx/get_block_num (RFC #2521 plan 85/B6b) come from here.
+#include "intrinsic.h"
+
 namespace {
 
 static constexpr int kRoot = {{root_cpp}};
@@ -47,6 +52,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
   int nranks = static_cast<int>(args[2]);
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
+  int32_t block_idx = get_block_idx(args);
+  int32_t block_num = get_block_num(args);
 
   int64_t numel = 1;
   for (uint32_t dim = 0; dim < target_tensor->ndims; ++dim) {
@@ -58,12 +65,25 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ int32_t *signal_base =
       reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
 
-  if (nranks <= 0 || nranks > kMaxSupportedRanks || kRoot < 0 || kRoot >= nranks || numel <= 0) {
+  if (nranks <= 0 || nranks > kMaxSupportedRanks || kRoot < 0 || kRoot >= nranks || numel <= 0 ||
+      block_num <= 0 || block_idx < 0 || block_idx >= block_num) {
     pipe_barrier(PIPE_ALL);
     return;
   }
 
   int my_rank = static_cast<int>(comm_ctx->rankId);
+
+  // RFC #2521 plan 85/B6b: same block-indexed signal-lane contract as
+  // allreduce's mesh kernel (#2160) — see reduce_scatter's kernel.cpp.in for
+  // the full rationale (identical clamp, identical lane addressing).
+  const int64_t signal_stride =
+      signal_tensor->ndims == 1 ? 1 : static_cast<int64_t>(signal_tensor->shapes[1]);
+  const int32_t active_blocks =
+      block_num < static_cast<int32_t>(signal_stride) ? block_num : static_cast<int32_t>(signal_stride);
+  if (block_idx >= active_blocks) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
 
   using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
@@ -90,7 +110,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // pipe_barrier(PIPE_ALL) between tiles ensures the store is globally
   // visible before the next tile's notify round.
   int32_t expected = 1;
-  for (int64_t base = 0; base < numel; base += kTileCount) {
+  for (int64_t base = static_cast<int64_t>(block_idx) * kTileCount; base < numel;
+       base += static_cast<int64_t>(active_blocks) * kTileCount) {
     int64_t chunk64 = numel - base;
     if (chunk64 > kTileCount) chunk64 = kTileCount;
     int chunk = static_cast<int>(chunk64);
@@ -111,13 +132,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
-      __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+      __gm__ int32_t *remote_signal =
+          CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
       pto::comm::Signal sig(remote_signal);
       pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
     }
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
-      pto::comm::Signal sig(signal_base + peer);
+      pto::comm::Signal sig(signal_base + peer * signal_stride + block_idx);
       pto::comm::TWAIT(sig, expected, pto::comm::WaitCmp::GE);
     }
     ++expected;
@@ -141,7 +163,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   const int32_t tiles = static_cast<int32_t>(expected - 1);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::Signal self_sig(signal_base + peer * signal_stride + block_idx);
     pto::comm::TNOTIFY(self_sig, -tiles, pto::comm::NotifyOp::AtomicAdd);
   }
   pipe_barrier(PIPE_ALL);

@@ -68,6 +68,15 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
   INTERNAL_CHECK_SPAN(
       op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd), span)
       << "pld.tensor.reduce_scatter lowering received unknown ReduceOp " << op_value;
+
+  // core_num > 1 is a HOST-builtin-only multicore knob (RFC #2521 plan
+  // 85/B6b, mirroring allreduce's K2/#2160 restriction) — this composite
+  // path is single-block by construction and has no block_idx to partition
+  // across.
+  auto core_num = GetRequiredKwarg<int>(call->kwargs_, "core_num", "pld.tensor.reduce_scatter");
+  CHECK_SPAN(core_num == 1, span)
+      << "pld.tensor.reduce_scatter core_num > 1 is supported only in a HOST orchestrator; "
+         "InCore composite calls must use core_num=1";
   const auto reduce_op = static_cast<ReduceOp>(op_value);
 
   auto& reg = OpRegistry::GetInstance();
