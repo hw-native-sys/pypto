@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -50,6 +52,19 @@ struct AllocationHazardInputs {
   /// runs -- `pl.pipeline` is lowered to a loop by pass 30/31.
   std::unordered_set<const Var*> looping_written_workspaces;
   std::unordered_set<const Var*> looping_written_workspace_bases;
+  /// Locally created, complete static scratch families whose only uses are
+  /// registered Scratch operands and immutable full-window metadata aliases.
+  /// Explicit written workspaces and every escaping/unknown use stay isolated.
+  std::unordered_set<const Var*> retirable_pipeline_scratch_bases;
+  /// Complete static families rooted in a local fresh producer, with only
+  /// tracked synchronous uses. Every member sharing retired scratch storage
+  /// must belong to this set, including other members of the final arena.
+  std::unordered_set<const Var*> retired_scratch_peer_bases;
+  /// Inclusive range of outermost loop IDs touching each allocation family.
+  /// Disjoint ranges prove there is no shared back edge; overlapping ranges
+  /// conservatively retain isolation. {0, 0} denotes only straight-line uses;
+  /// a missing entry is unknown. Collected only when retirable scratch exists.
+  std::unordered_map<const Var*, std::pair<int, int>> allocation_loop_ranges;
 };
 
 using AllocationForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;

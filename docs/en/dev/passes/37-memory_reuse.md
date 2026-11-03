@@ -255,6 +255,40 @@ drain statements outside that loop retain the existing allocation constraints.
 Merely enabling the option, ordinary loops and declined loops retain the
 existing legacy-scratch allocation policy.
 
+When the original packing exceeds the backend's capacity, MemoryReuse may retire
+that legacy pipeline scratch before reducing pipeline depth. Admission is
+positive and applies to both complete allocation families:
+
+- Scratch must originate from a local, independent `tile.create`. Its only
+  payload uses may be scratch operands; retaining its contents as data excludes
+  the whole family. The scan includes steady, drain, and other uses throughout
+  the function, without requiring a single pipeline owner.
+- The other family must originate from ordinary local storage, not a function
+  parameter or external backing. All members must have known definitions and
+  uses. Loop carries, branch results, asynchronous or cross-core escapes, and
+  unknown operations are ineligible on either side.
+- Both families must have fixed, complete single-slot storage. Only immutable
+  metadata aliases with a known static byte window are admitted; mutable
+  validity updates and unresolved windows retain isolation. Different families
+  need not have the same shape or dtype.
+- The other family's definition must follow the scratch family's final use,
+  including drain uses. Their outermost-loop ranges must be known and disjoint.
+  A phase may contain nested loops or runtime trip counts; two phases that
+  repeat under a common outer loop remain isolated.
+
+Every member of a packed arena is checked, not just its representative. Explicit
+written-workspace contracts remain strict. These conditions avoid relying on
+control-flow alias repair to make an opportunistic scratch relocation valid.
+
+This is a single capacity-relief retry at the requested depth. A layout that
+already fits is preserved exactly. The retry is accepted only if it fits the
+current capacity; otherwise the original packing and depth-shedding path are
+restored. This analysis establishes storage ownership and lifetime constraints;
+ordering device accesses remains the backend's responsibility. The decision
+adds no synchronization, copy, or GM promotion.
+The benefit is a larger feasible tile or preserved buffering depth, not a
+guaranteed speedup for the same tile.
+
 Without the guard, `pl.tile.select`-built clamps corrupt exactly element 0 of the compare source: the composite's synthesized workspace is born and dies inside one statement, which makes it the prime reuse candidate for the buffer the preceding `tile.cmps` is still reading.
 
 ## Example
