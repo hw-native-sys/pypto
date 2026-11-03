@@ -226,7 +226,8 @@ AICORE inline void SubmitIndexed(__gm__ CommContext* ctx, int peer, __gm__ uint8
   using namespace pto::comm;
   using namespace pto::comm::urma;
   AsyncSession session;
-  if (!BuildAsyncSession<DmaEngine::URMA>(reinterpret_cast<__gm__ uint8_t*>(ctx->workSpace), peer, session)) {
+  auto* workspace = reinterpret_cast<__gm__ uint8_t*>(comm_workspace<CommWorkspaceKind::URMA>(*ctx).addr);
+  if (!BuildAsyncSession<DmaEngine::URMA>(workspace, peer, session)) {
     FailIndexed("indexed_all_to_all_v: invalid URMA session");
     return;
   }
@@ -297,7 +298,8 @@ AICORE inline void WaitIndexed(__gm__ CommContext* ctx, int peer) {
   using namespace pto::comm;
   using namespace pto::comm::urma;
   AsyncSession session;
-  if (!BuildAsyncSession<DmaEngine::URMA>(reinterpret_cast<__gm__ uint8_t*>(ctx->workSpace), peer, session)) {
+  auto* workspace = reinterpret_cast<__gm__ uint8_t*>(comm_workspace<CommWorkspaceKind::URMA>(*ctx).addr);
+  if (!BuildAsyncSession<DmaEngine::URMA>(workspace, peer, session)) {
     FailIndexed("indexed_all_to_all_v: invalid URMA completion session");
     return;
   }
@@ -330,12 +332,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   const int my_rank = static_cast<int>(comm_ctx->rankId);
   const int64_t signal_stride = signal_tensor->shapes[1];
+  const uint64_t urma_workspace_addr = comm_workspace<CommWorkspaceKind::URMA>(*comm_ctx).addr;
   if (nranks <= 0 || my_rank < 0 || my_rank >= nranks || block_num <= 0 || signal_tensor->ndims != 2 ||
-      signal_tensor->shapes[0] != nranks || signal_stride < block_num || comm_ctx->workSpace == 0) {
+      signal_tensor->shapes[0] != nranks || signal_stride < block_num || urma_workspace_addr == 0) {
     FailIndexed("indexed_all_to_all_v: invalid domain, launch, signal or URMA workspace");
     return;
   }
-  auto* urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo*>(comm_ctx->workSpace);
+  auto* urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo*>(urma_workspace_addr);
   if (urma_info->layout != pto::comm::urma::UrmaLayout::PER_PEER) {
     FailIndexed("indexed_all_to_all_v requires PER_PEER queues");
     return;
