@@ -69,7 +69,7 @@ def test_bundle_preserves_call_order_storage_and_diagnostic_output():
 
 
 @pytest.mark.parametrize("stride", [64, 128])
-def test_required_hardware_loop_bundle_carries_mapping_and_proves_bounds(stride):
+def test_required_hardware_loop_bundle_preserves_loop_and_checks_known_bounds(stride):
     builder = IRBuilder()
     with builder.function("required_loop", span=SPAN, type=ir.FunctionType.AIV) as f:
         tile_type = ir.TileType([128], DataType.FP32, memory_space=ir.MemorySpace.Vec)
@@ -91,7 +91,7 @@ def test_required_hardware_loop_bundle_carries_mapping_and_proves_bounds(stride)
             generator.generate_bundle(program, emit_source_loc=False)
     else:
         helper = generator.generate_bundle(program, emit_source_loc=False).helpers[0]
-        assert f"// pypto.hardware_loop.v2 {helper.symbol}/loop0 2" in helper.source
+        assert "pypto.hardware_loop" not in helper.source
         assert helper.source.count("scf.for") == 1
         assert helper.source.count("pto.vmi.vmul") == 1
 
@@ -122,8 +122,8 @@ def test_hardware_loop_depth_and_dynamic_capture(depth, dynamic):
         return
     helper = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0]
     assert helper.source.count("scf.for") == depth
-    for level in range(depth):
-        assert f"{helper.symbol}/loop{level} {'dynamic' if dynamic else '2'}" in helper.source
+    assert "pypto.hardware_loop" not in helper.source
+    assert "llvm.hivm" not in helper.source
     if dynamic:
         assert helper.parameter_types[-1] == "index"
 

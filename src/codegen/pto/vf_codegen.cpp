@@ -108,8 +108,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       << "VF execution requires the PyPTO Tile memory planner";
   VFOperands operands;
   operands.VisitStmt(scope->body_);
-  // Hardware loops use conservative full VF memory ordering after LLVM export.
-  // Runtime branches and loop-carried values need additional lowering support.
+  // Preserve canonical hardware loops in the generated PTO. Backend lowering
+  // and synchronization belong to PTOAS; runtime branches are not admitted here.
   CHECK_SPAN(!operands.has_control_flow, scope->span_)
       << "VF execution supports straight-line RegScope or canonical hardware loops nested up to four levels";
   ForStmtPtr hardware_loop;
@@ -176,8 +176,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
     // Preserve known bounds checks. Dynamic loop offsets are admitted without
-    // a range proof: full VF ordering covers aliases, while callers remain
-    // responsible for keeping runtime memory accesses within their Tiles.
+    // a range proof. Callers remain responsible for keeping runtime memory
+    // accesses within their Tiles; PTOAS owns backend synchronization.
     auto effect = ir::GetRegMemoryEffect(call);
     bool bounded_loop_access = false;
     if (hardware_loop && effect.root && !effect.begin) {
@@ -319,12 +319,6 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       "  func.func @" +
       artifact.symbol + "(" + signature + ") attributes {pto.aiv} {\n" + helper.fs_.constants_section.str() +
       helper.stream_.str() + "  }\n}\n";
-  for (size_t remaining = operands.loops.size(); remaining > 0; --remaining) {
-    const size_t index = remaining - 1;
-    const auto stop = ir::As<ir::ConstInt>(operands.loops[index]->stop_);
-    artifact.source = "// pypto.hardware_loop.v2 " + artifact.symbol + "/loop" + std::to_string(index) + " " +
-                      (stop ? std::to_string(stop->value_) : "dynamic") + "\n" + artifact.source;
-  }
   // The adapter's PIPE_V/effect contract lets PTOAS place dependencies here.
   // The A5 VF exits after its register instructions complete; this models the
   // caller boundary, not VF-internal UB hazards. Kernel-tail sync stays enabled.

@@ -94,11 +94,11 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
 ```
 
 This expresses intent, not a guarantee that the installed backend implements it.
-A5 supports a limited executable subset with checked final device evidence;
+A5 qualifies canonical loops and preserves them in generated PTO;
 see [VF execution](../codegen/03-vpto-vf-integration.md#required-hardware-loops).
 Other targets and unsupported loop forms remain rejected.
 The profile-driven `ir.analyze_hardware_loop(loop, profile)` API distinguishes
-Eligible, Ineligible and Unknown; Eligible still requires final artifact evidence.
+Eligible, Ineligible and Unknown; Eligible describes IR qualification, not machine-code evidence.
 Dynamic integer `stop` values are accepted without a static range proof or an
 inserted runtime range guard. Their trip count and terminating induction value
 remain unknown; body, nesting and backend checks still apply. Floating-point and

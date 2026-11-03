@@ -111,8 +111,8 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   const bool a5 = backend::BackendConfig::IsConfigured() &&
                   backend::GetBackend()->GetHandler()->GetPtoTargetArch() == "a5";
   if (a5) {
-    // This is admission to lowering, never final hardware evidence. The
-    // executable helper and linked-image checks discharge that obligation.
+    // Qualify the current IR before emitting canonical PTO loops. Machine
+    // instruction selection and optimization remain the backend's responsibility.
     profile.supported = true;
     // User profiles may tighten limits, but cannot widen A5 hardware limits.
     profile.counter_bits = std::min(profile.counter_bits, 16);
@@ -150,8 +150,8 @@ void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   }
   if (!a5) VerifyHardwareLoopRequirements(program, profile);
 
-  // Check lexical register ownership before emission. A5 Require obligations
-  // are discharged only after executable-helper admission and device linking.
+  // Check lexical register ownership before emission. Hardware-loop
+  // qualification above is the final PyPTO check at the codegen boundary.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
     void VisitFunction(const ir::FunctionPtr& func) override {

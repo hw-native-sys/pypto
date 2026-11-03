@@ -21,10 +21,9 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-import torch
 from pypto import CacheConfig
 from pypto.backend import BackendType
-from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
 from pypto.runtime._artifact_sources import read_kernel_config
 from test_vpto_vf_onboard import FIXTURE, ROOT, _acceptance, _build_variants
 
@@ -117,109 +116,8 @@ def test_reg_scope_persistent_onboard():
     assert json.loads((output / "result.json").read_text())["numerical_checks"] == 108
 
 
-@pytest.mark.parametrize("depth", [1, 4])
-def test_dynamic_hardware_loop_persistent_onboard(depth):
-    if os.environ.get("PYPTO_RUN_VPTO_ONBOARD") != "1":
-        pytest.skip("Opt in with PYPTO_RUN_VPTO_ONBOARD=1 and PYPTO_VPTO_DEVICE_ID")
-    directory = Path(os.environ["PYPTO_VPTO_RUNTIME_OUTPUT"]).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    runpy.run_path(str(FIXTURE / "test_validation.py"))["run"](
-        directory,
-        "dynamic-hardware-loop",
-        [
-            sys.executable,
-            Path(__file__).resolve(),
-            "--hardware-loop",
-            directory,
-            int(os.environ["PYPTO_VPTO_DEVICE_ID"]),
-            depth,
-        ],
-        timeout=int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600")),
-    )
-
-
-def _run_dynamic_hardware_loop(directory: Path, device: int, depth: int) -> None:
-    # constexpr specialization removes the unused branch before HWL analysis.
-    # Repeated outer iterations deliberately alias the output: full VF ordering
-    # must preserve correctness independently of disjointness/range proofs.
-    @pl.jit.incore
-    def loop_body(
-        lhs: pl.Tensor[[1, 1024], pl.FP32],
-        rhs: pl.Tensor[[1, 1024], pl.FP32],
-        out: pl.InOut[pl.Tensor[[1, 1024], pl.FP32]],
-        n: pl.Scalar[pl.INT32],
-        levels: pl.constexpr,
-    ) -> pl.Tensor[[1, 1024], pl.FP32]:
-        a = pl.load(lhs, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec)
-        b = pl.load(rhs, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec)
-        c = pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec)
-        a = pl.reshape(a, [1024])
-        b = pl.reshape(b, [1024])
-        c = pl.reshape(c, [1024])
-        with pl.reg_scope():
-            if levels == 1:
-                for chunk in pl.hardware_loop(n):
-                    x = pl.reg.load(a, offset=chunk * 64, lanes=64)
-                    y = pl.reg.load(b, offset=chunk * 64, lanes=64)
-                    value = pl.reg.mul(pl.reg.add(x, y), y)
-                    _stored = pl.reg.store(c, offset=chunk * 64, value=value)
-            else:
-                for i in pl.hardware_loop(n):
-                    for j in pl.hardware_loop(n):
-                        for k in pl.hardware_loop(n):
-                            for chunk in pl.hardware_loop(n):
-                                x = pl.reg.load(a, offset=chunk * 64, lanes=64)
-                                y = pl.reg.load(b, offset=chunk * 64, lanes=64)
-                                value = pl.reg.mul(pl.reg.add(x, y), y)
-                                _stored = pl.reg.store(c, offset=chunk * 64, value=value)
-        c = pl.reshape(c, [1, 1024])
-        pl.store(c, [0, 0], out)
-        return out
-
-    @pl.jit
-    def dispatch_loop(
-        lhs: pl.Tensor[[1, 1024], pl.FP32],
-        rhs: pl.Tensor[[1, 1024], pl.FP32],
-        out: pl.InOut[pl.Tensor[[1, 1024], pl.FP32]],
-        n: pl.Scalar[pl.INT32],
-        levels: pl.constexpr,
-    ) -> pl.Tensor[[1, 1024], pl.FP32]:
-        out = loop_body(lhs, rhs, out, n, levels)
-        return out
-
-    config = RunConfig(
-        arch=BackendType.Ascend950,
-        execution_mode=ExecutionMode.ONBOARD,
-        device_id=device,
-        cache_config=CacheConfig(enabled=False),
-        save_kernels_dir=str(directory),
-        dump_passes=True,
-    )
-    compiled = dispatch_loop.compile(levels=depth, config=config)
-    compiled.load()
-    evidence_files = list(directory.rglob("evidence.json"))
-    assert evidence_files
-    evidence = json.loads(evidence_files[0].read_text())
-    assert len(evidence["loops"]) == depth
-    assert all(loop["instruction"] == "VLOOPV2_V310" for loop in evidence["loops"])
-    generator = torch.Generator().manual_seed(42)
-    with ChipWorker(config=config, runtime=compiled.runtime_name) as worker:
-        run = worker.register(compiled)
-        # Runtime 0 and 1 exercise the loop entry guard without recompilation.
-        for stop in [0, 1, 2, 4] + ([16] if depth == 1 else []):
-            a = torch.randn((1, 1024), generator=generator)
-            b = torch.randn((1, 1024), generator=generator)
-            out = torch.full_like(a, -777.0)
-            expected = out.clone()
-            expected[:, : stop * 64] = ((a + b) * b)[:, : stop * 64]
-            run(a, b, out, stop)
-            torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-5)
-
-
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "--hardware-loop":
-        _run_dynamic_hardware_loop(Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
-    elif len(sys.argv) == 4 and sys.argv[1] == "--worker":
+    if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         _acceptance(Path(sys.argv[2]), int(sys.argv[3]), _prepare)
     elif len(sys.argv) == 3 and sys.argv[1] == "--build":
         for name, _ in _build_variants(Path(sys.argv[2]), _prepare):

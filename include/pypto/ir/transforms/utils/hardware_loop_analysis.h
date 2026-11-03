@@ -59,7 +59,7 @@ std::vector<HardwareLoopQualification> AnalyzeHardwareLoops(const ProgramPtr& pr
                                                             const HardwareLoopProfile& profile);
 
 /// Generic backends without a final-artifact evidence path fail closed even for
-/// Eligible Require loops. A5 checks its obligations after executable linking.
+/// Eligible Require loops. A5 qualifies loops at its PTO codegen boundary.
 void VerifyHardwareLoopRequirement(const ForStmtPtr& loop, const HardwareLoopProfile& profile);
 void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile);
 
