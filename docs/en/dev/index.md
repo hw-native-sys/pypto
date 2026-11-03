@@ -140,6 +140,24 @@ new session while removing older volumes. A queued review of a closed, draft,
 or superseded head skips without publishing an artifact. GitHub state can
 change after a read; queued review and cleanup jobs recheck under the lock.
 
+Ephemeral review containers and private networks carry repository, run and attempt
+labels. Their identities are recorded before startup. Shell traps and a separate
+`always()` step remove this attempt's containers, private network and credential
+snapshots, including when the review is cancelled. Session volumes and the shared
+egress network/relay are preserved.
+
+Before starting another review, trusted host code reconciles leftover resources
+under the same runner lock. It queries GitHub with **Actions: read** permission
+and removes resources only when their exact owning attempt is `completed` and
+its repository and workflow identity match. Older run-labelled private networks
+also identify legacy proxies by their exact name suffix, including proxies left
+before network attachment. Unlabelled proxies without that network evidence
+require manual investigation. Active attempts,
+foreign resources and unidentified containers are retained; API failures stop
+startup before any stale-resource deletion. A runner outage can prevent the
+`always()` step; reconciliation recovers Docker resources on the next review
+on that host. It does not recover temporary credential files left by a host outage.
+
 Administrators enable or disable reviews with the repository Actions variable
 `CODEX_REVIEW_ENABLED`. Set it to `true` to enable reviews; unset it or use any
 other value to disable them immediately. Close-event session cleanup remains enabled.
