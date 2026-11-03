@@ -18,7 +18,6 @@ import pytest
 from pypto import DataType, ir
 from pypto.ir.op import tile
 from pypto.language.parser.diagnostics import InvalidOperationError
-from pypto.pypto_core.ir import LoadL2Hint, StoreL2Hint
 
 _OP_TILE_EXTRACT = ir.get_op("tile.extract").name
 _OP_TILE_FILLPAD_EXPAND = ir.get_op("tile.fillpad_expand").name
@@ -9762,10 +9761,10 @@ def test_dsl_store_preserves_semantic_cache_policy(policy):
     assert "l2_hint" not in dict(call.kwargs)
 
 
-def test_dsl_cache_rejects_raw_isa_enums():
+def test_dsl_cache_rejects_unrelated_enum_types():
     src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
     value = pl.load(src, [0, 0], [32, 32])
-    for hint in (LoadL2Hint.NotAllocClean, StoreL2Hint.NotAllocClean):
+    for hint in (pl.AtomicType.Add, pl.STPhase.Final):
         with pytest.raises(TypeError, match="cache must be CachePolicy"):
             pl.load(src, [0, 0], [32, 32], cache=cast(Any, hint))
         with pytest.raises(TypeError, match="cache must be CachePolicy"):

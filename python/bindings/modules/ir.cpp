@@ -145,10 +145,6 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<AccPhase>(item.second)) {
       // Cast enum to int for storage — tile.gemv-family ops read as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<AccPhase>(item.second)));
-    } else if (nb::isinstance<LoadL2Hint>(item.second)) {
-      kwargs.emplace_back(key, static_cast<int>(nb::cast<LoadL2Hint>(item.second)));
-    } else if (nb::isinstance<StoreL2Hint>(item.second)) {
-      kwargs.emplace_back(key, static_cast<int>(nb::cast<StoreL2Hint>(item.second)));
     } else if (nb::isinstance<STPhase>(item.second)) {
       // Cast enum to int for storage — tile.store reads as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<STPhase>(item.second)));
@@ -519,20 +515,6 @@ void BindIR(nb::module_& m) {
       .value("max", PadValue::max, "Max value padding")
       .value("min", PadValue::min, "Min value padding")
       .export_values();
-
-  nb::enum_<LoadL2Hint>(ir, "LoadL2Hint", nb::is_arithmetic(), "Per-transfer PTO-ISA L2 hint")
-      .value("NormalFirstVictim", LoadL2Hint::NormalFirstVictim)
-      .value("NormalLastVictim", LoadL2Hint::NormalLastVictim)
-      .value("NormalPersistent", LoadL2Hint::NormalPersistent)
-      .value("NotAllocKeep", LoadL2Hint::NotAllocKeep)
-      .value("NotAllocClean", LoadL2Hint::NotAllocClean)
-      .value("NotAllocDrop", LoadL2Hint::NotAllocDrop);
-
-  nb::enum_<StoreL2Hint>(ir, "StoreL2Hint", nb::is_arithmetic(), "Per-transfer PTO-ISA L2 hint")
-      .value("NormalFirstVictim", StoreL2Hint::NormalFirstVictim)
-      .value("NormalLastVictim", StoreL2Hint::NormalLastVictim)
-      .value("NormalPersistent", StoreL2Hint::NormalPersistent)
-      .value("NotAllocClean", StoreL2Hint::NotAllocClean);
 
   // CachePolicy enum - semantic GM cache-access policy for reads and writes.
   // nb::is_arithmetic like AtomicType: the policy rides the transfer's "cache"

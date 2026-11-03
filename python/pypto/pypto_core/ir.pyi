@@ -424,24 +424,6 @@ class PadValue(enum.Enum):
     min = ...
     """Min value padding."""
 
-class LoadL2Hint(enum.IntEnum):
-    """Raw load ISA encodings; DSL cache arguments require CachePolicy instead."""
-
-    NormalFirstVictim = 0
-    NormalLastVictim = 1
-    NormalPersistent = 2
-    NotAllocKeep = 4
-    NotAllocClean = 5
-    NotAllocDrop = 6
-
-class StoreL2Hint(enum.IntEnum):
-    """Raw store ISA encodings; DSL cache arguments require CachePolicy instead."""
-
-    NormalFirstVictim = 0
-    NormalLastVictim = 1
-    NormalPersistent = 2
-    NotAllocClean = 4
-
 class CachePolicy(enum.IntEnum):
     """GM cache policy. Supported modes depend on target and transfer direction.
 
