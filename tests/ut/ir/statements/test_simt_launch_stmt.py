@@ -338,9 +338,9 @@ def test_simt_call_attrs_survive_print_parse_round_trip():
     program, _ = make_program()
 
     class AddMetadata(ir.IRMutator):
-        def visit_call(self, call):
+        def visit_call(self, op: ir.Call) -> ir.Expr:
             # Cover coordinate queries, value-producing loads and void stores.
-            return ir.set_call_attrs(call, {"simt_test_tag": call.op.name, "simt_test_flag": True})
+            return ir.set_call_attrs(op, {"simt_test_tag": op.op.name, "simt_test_flag": True})
 
     before = AddMetadata().visit_program(program)
     after = parse_program(ir.python_print(before))
