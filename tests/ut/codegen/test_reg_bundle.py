@@ -471,7 +471,7 @@ def test_execution_rejects_old_ptoas_before_emitting_tile_adapter(tmp_path, monk
     assert result.files == {}
 
 
-def test_mixed_element_memory_captures_are_explicitly_rejected():
+def test_mixed_element_memory_captures_preserve_signed_pointer_types():
     builder = IRBuilder()
     with builder.function("mixed", span=SPAN, type=ir.FunctionType.AIV) as f:
         first = builder.let(
@@ -495,8 +495,11 @@ def test_mixed_element_memory_captures_are_explicitly_rejected():
                 )
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "Mixed", SPAN))
-    with pytest.raises(ValueError, match="identical element types"):
-        codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    helper = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False).helpers[0]
+    assert helper.parameter_types == ["!pto.ptr<f32, ub>"]
+    assert "pto.castptr %arg0 : !pto.ptr<f32, ub> -> !pto.ptr<si32, ub>" in helper.source
+    assert "!pto.vmi.vreg<64xsi32>" in helper.source
+    assert helper.parameter_effects == ["read", "read"]
 
 
 def test_dynamic_physical_capture_address_is_explicitly_rejected():

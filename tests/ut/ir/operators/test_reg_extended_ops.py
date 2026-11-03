@@ -189,5 +189,86 @@ def test_paired_schema_declares_arity():
         assert ir.get_op_output_arity(f"reg.{name}") == 2
 
 
+@pytest.mark.parametrize(
+    "src,dst,lanes,expected",
+    [
+        (DataType.FP32, DataType.UINT32, 64, 64),
+        (DataType.UINT32, DataType.UINT8, 64, 256),
+        (DataType.UINT8, DataType.FP32, 256, 64),
+        (DataType.BF16, DataType.INT16, 128, 128),
+        (DataType.INT32, DataType.UINT32, 64, 64),
+    ],
+)
+def test_interpret_cast_bit_capacity(src, dst, lanes, expected):
+    result = pl.reg.interpret_cast(vec(src, lanes), dtype=dst).unwrap()
+    assert isinstance(result.type, ir.RegType)
+    assert result.type.dtype == dst and result.type.lanes == expected
+
+
+def test_interpret_cast_rejects_invalid_contracts():
+    with pytest.raises(ValueError, match="bit count is too large"):
+        pl.reg.interpret_cast(vec(DataType.UINT32, 2**62), dtype=DataType.UINT8)
+    with pytest.raises(ValueError, match="whole destination lanes"):
+        pl.reg.interpret_cast(vec(DataType.UINT8, 3), dtype=DataType.UINT32)
+    for dtype in (DataType.BOOL, DataType.INDEX, DataType.INT64):
+        with pytest.raises(ValueError, match="destination dtype"):
+            pl.reg.interpret_cast(vec(), dtype=dtype)
+    with pytest.raises(ValueError, match="VecReg"):
+        pl.reg.interpret_cast(mask(), dtype=DataType.UINT32)
+
+
+@pytest.mark.parametrize("name", ["chist", "dhist"])
+@pytest.mark.parametrize("bins", [128, 256])
+@pytest.mark.parametrize("lanes", [1, 8, 64, 128, 256, 512])
+def test_histogram_independent_source_and_bin_counts(name, bins, lanes):
+    result = getattr(pl.reg, name)(
+        vec(DataType.UINT16, bins), vec(DataType.UINT8, lanes), mask(lanes)
+    ).unwrap()
+    assert isinstance(result.type, ir.RegType)
+    assert result.type.dtype == DataType.UINT16 and result.type.lanes == bins
+
+
+@pytest.mark.parametrize("name", ["chist", "dhist"])
+def test_histogram_invalid_contracts(name):
+    for acc in (vec(DataType.INT16, 128), vec(DataType.UINT16, 64)):
+        with pytest.raises(ValueError, match="accumulator"):
+            call(name, [acc, vec(DataType.UINT8), mask()])
+    with pytest.raises(ValueError, match="source must be UINT8"):
+        call(name, [vec(DataType.UINT16, 256), vec(DataType.INT8), mask()])
+    with pytest.raises(ValueError, match="Mask lane"):
+        call(name, [vec(DataType.UINT16, 256), vec(DataType.UINT8), mask(256)])
+    with pytest.raises(ValueError, match="expects"):
+        call(name, [vec(DataType.UINT16, 256)])
+
+
+@pytest.mark.parametrize("active", [0, 5, 16])
+def test_group_mask_geometry(active):
+    result = pl.reg.create_group_mask(active, num_groups=8, group_size=16).unwrap()
+    assert isinstance(result.type, ir.RegType)
+    assert result.type.lanes == 128 and result.type.kind == ir.RegKind.MaskReg
+
+
+def test_group_mask_dynamic_count_and_invalid_geometry():
+    active = ir.Var("n", ir.ScalarType(DataType.INDEX), SPAN)
+    with pytest.raises(ValueError, match="power-of-two"):
+        pl.reg.create_group_mask(active, num_groups=4, group_size=15)
+    result = pl.reg.create_group_mask(active, num_groups=4, group_size=16).unwrap()
+    assert isinstance(result, ir.Call)
+    assert result.args[0] is active
+    for count in (-1, 17):
+        with pytest.raises(ValueError, match="active_elems_per_group"):
+            pl.reg.create_group_mask(count, num_groups=4, group_size=16)
+    for groups, size in ((0, 16), (4, -1), (2147483647, 16)):
+        with pytest.raises(ValueError, match="positive|representable"):
+            call(
+                "create_group_mask",
+                [ir.ConstInt(1, DataType.INDEX, SPAN)],
+                num_groups=groups,
+                group_size=size,
+            )
+    with pytest.raises(ValueError, match="dtype"):
+        call("create_group_mask", [ir.ConstInt(1, DataType.INT32, SPAN)], num_groups=4, group_size=16)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

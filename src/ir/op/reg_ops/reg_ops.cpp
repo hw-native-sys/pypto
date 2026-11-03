@@ -432,6 +432,80 @@ REGISTER_OP("reg.convert")
     .no_arg_writes()
     .f_deduce_type(Convert);
 
+REGISTER_OP("reg.interpret_cast")
+    .set_op_category("RegOp")
+    .set_description("Reinterpret register bits without numeric conversion")
+    .set_reg_op("pto.vmi.vinterpret_cast")
+    .add_argument("value", "VecReg")
+    .set_attr<DataType>("dtype")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 1) << "reg.interpret_cast expects one VecReg";
+      auto x = Register(a[0], RegKind::VecReg);
+      auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.interpret_cast");
+      CHECK(Supported(dtype)) << "Unsupported reinterpret destination dtype";
+      const auto source_bits = static_cast<int64_t>(x->dtype_.GetBit());
+      const auto target_bits = static_cast<int64_t>(dtype.GetBit());
+      INTERNAL_CHECK(source_bits > 0 && target_bits > 0) << "Supported register widths must be positive";
+      CHECK(x->shape_ <= std::numeric_limits<int64_t>::max() / source_bits)
+          << "Reinterpret total bit count is too large";
+      const int64_t bits = x->shape_ * source_bits;
+      CHECK(bits % target_bits == 0) << "Reinterpret total bits must form whole destination lanes";
+      CHECK(bits / target_bits <= std::numeric_limits<int>::max())
+          << "Reinterpret result lane count is too large";
+      return std::make_shared<RegType>(bits / target_bits, dtype, RegKind::VecReg);
+    });
+
+REGISTER_OP("reg.create_group_mask")
+    .set_op_category("RegOp")
+    .set_description("Activate a prefix within each logical lane group")
+    .set_reg_op("pto.vmi.create_group_mask")
+    .add_argument("active_elems_per_group", "INDEX scalar")
+    .set_attr<int>("num_groups")
+    .set_attr<int>("group_size")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 1) << "reg.create_group_mask expects one INDEX scalar";
+      Scalar(a[0], DataType::INDEX);
+      const auto groups = GetRequiredKwarg<int>(k, "num_groups", "reg.create_group_mask");
+      const auto size = GetRequiredKwarg<int>(k, "group_size", "reg.create_group_mask");
+      CHECK(groups > 0 && size > 0 && groups <= std::numeric_limits<int>::max() / size)
+          << "Grouped mask requires positive num_groups and group_size with representable lane count";
+      if (auto active = As<ConstInt>(a[0])) {
+        CHECK_SPAN(active->value_ >= 0 && active->value_ <= size, a[0]->span_)
+            << "active_elems_per_group must be in [0, group_size]";
+      } else {
+        CHECK((size & (size - 1)) == 0) << "Dynamic grouped mask requires power-of-two group_size";
+      }
+      return std::make_shared<RegType>(groups * size, DataType::BOOL, RegKind::MaskReg);
+    });
+
+static bool RegisterHistograms() {
+  for (const auto& name : {"chist", "dhist"}) {
+    OpRegistry::GetInstance()
+        .Register(std::string("reg.") + name)
+        .set_op_category("RegOp")
+        .set_description("Accumulate masked UINT8 histogram counts into UINT16 bins")
+        .set_reg_op(std::string("pto.vmi.v") + name)
+        .add_argument("acc", "UINT16 VecReg with 128 or 256 bins")
+        .add_argument("source", "UINT8 VecReg")
+        .add_argument("mask", "MaskReg selecting source lanes")
+        .no_arg_writes()
+        .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+          CHECK(a.size() == 3) << "Histogram expects accumulator, source and mask";
+          auto acc = Register(a[0], RegKind::VecReg);
+          auto source = Register(a[1], RegKind::VecReg);
+          CHECK(acc->dtype_ == DataType::UINT16 && (acc->shape_ == 128 || acc->shape_ == 256))
+              << "Histogram accumulator must be UINT16 with 128 or 256 bins";
+          CHECK(source->dtype_ == DataType::UINT8) << "Histogram source must be UINT8";
+          Mask(a[2], source);
+          return acc;
+        });
+  }
+  return true;
+}
+static const bool histograms_registered = RegisterHistograms();
+
 static bool RegisterGenerators() {
   for (const auto& name : {"broadcast", "index_gen", "full_mask", "active_mask"}) {
     auto& e = OpRegistry::GetInstance().Register(std::string("reg.") + name);

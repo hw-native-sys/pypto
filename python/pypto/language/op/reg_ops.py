@@ -89,6 +89,59 @@ def active_mask(active_lanes: Scalar | ir.Expr | int, *, lanes: int) -> Reg:
     return Reg(_call("active_mask", [_expr(active_lanes)], lanes=_lanes(lanes)))
 
 
+def interpret_cast(value: Reg | ir.Expr, *, dtype: DataType) -> Reg:
+    """Reinterpret the same bits as dtype, without numeric conversion.
+
+    The result has input_lanes * input_bits / output_bits lanes; this must
+    be an integer. Both dtypes must be supported vector register dtypes.
+    """
+    return Reg(_call("interpret_cast", [_expr(value)], dtype=dtype))
+
+
+def create_group_mask(
+    active_elems_per_group: Scalar | ir.Expr | int, *, num_groups: int, group_size: int
+) -> Reg:
+    """Activate a prefix in each of num_groups contiguous groups.
+
+    Lane i is active when i % group_size < active_elems_per_group. The result
+    has num_groups * group_size lanes. Group geometry must be positive static
+    integers. The INDEX active count may be dynamic; callers must keep it in
+    [0, group_size]. Constant counts are checked at construction. PTOAS 0.70
+    requires dynamic counts to use power-of-two groups and 32-bit consumers;
+    byte/halfword consumers require a constant active count.
+    """
+    return Reg(
+        _call(
+            "create_group_mask",
+            [_expr(active_elems_per_group)],
+            num_groups=_lanes(num_groups),
+            group_size=_lanes(group_size),
+        )
+    )
+
+
+def chist(acc: Reg | ir.Expr, source: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Accumulate a cumulative histogram of active UINT8 source lanes.
+
+    acc is a UINT16 vector with 128 or 256 bins. Result bin b is acc[b] plus
+    the number of active source values <= b, modulo 65536. A 128-bin result
+    covers bins 0 through 127. The mask matches source lanes, not bin count;
+    an empty mask preserves acc. This op does not mutate acc.
+    """
+    return Reg(_call("chist", [_expr(acc), _expr(source), _expr(mask)]))
+
+
+def dhist(acc: Reg | ir.Expr, source: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
+    """Accumulate a distribution histogram of active UINT8 source lanes.
+
+    acc is a UINT16 vector with 128 or 256 bins. Result bin b is acc[b] plus
+    the number of active source values == b, modulo 65536. A 128-bin result
+    covers bins 0 through 127. The mask matches source lanes, not bin count;
+    an empty mask preserves acc. This op does not mutate acc.
+    """
+    return Reg(_call("dhist", [_expr(acc), _expr(source), _expr(mask)]))
+
+
 def _binary(name: str, lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, mask: Reg | ir.Expr | None, pmode: str) -> Reg:
     args = [_expr(lhs), _expr(rhs)]
     if mask is not None:

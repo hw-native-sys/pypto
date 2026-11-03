@@ -155,8 +155,6 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       auto origin = tile->memref_ ? ir::As<ir::ConstInt>((*tile->memref_)->byte_offset_) : nullptr;
       CHECK_SPAN(origin && origin->value_ >= 0, call->span_)
           << "Cannot prove register offset bounds or static VF capture address";
-      CHECK_SPAN(capture_tiles.empty() || tile->dtype_ == capture_tiles.front()->dtype_, call->span_)
-          << "VF shared-base captures currently require identical element types";
       origins.push_back(origin->value_);
       capture_tiles.push_back(tile);
       if (origins.back() < origins[base_index]) base_index = origins.size() - 1;
@@ -174,7 +172,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   }
   std::vector<std::string> addresses;
   if (!capture_tiles.empty()) {
-    const auto dtype = capture_tiles.front()->dtype_;
+    const auto dtype = capture_tiles[base_index]->dtype_;
     const auto element_bytes = static_cast<int64_t>(dtype.GetByte());
     INTERNAL_CHECK_SPAN(element_bytes > 0, scope->span_)
         << "VF capture element must have a positive byte size";
@@ -186,12 +184,29 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     for (size_t i = 0; i < origins.size(); ++i) {
       const int64_t relative = origins[i] - origins[base_index];
       artifact.capture_byte_offsets.push_back(relative);
+      const auto target_dtype = capture_tiles[i]->dtype_;
+      const auto target_element = target_dtype.IsSignedInt() ? "si" + std::to_string(target_dtype.GetBit())
+                                                             : GetTypeString(target_dtype);
+      const auto target_bytes = static_cast<int64_t>(target_dtype.GetByte());
+      INTERNAL_CHECK_SPAN(target_bytes > 0, scope->span_)
+          << "VF capture element must have a positive byte size";
+      CHECK_SPAN(relative % target_bytes == 0, scope->span_)
+          << "VF capture displacement must align to its element size";
+      // Preserve one symbolic UB root for dependency analysis, while each
+      // access retains its own element width and signedness. A histogram
+      // naturally reads bytes and writes halfword accumulator bins.
       std::string address = "%arg0";
+      if (target_dtype != dtype) {
+        address = helper.NewNamedTemp("capture_typed" + std::to_string(i));
+        helper.Emit(address + " = pto.castptr %arg0 : !pto.ptr<" + element + ", ub> -> !pto.ptr<" +
+                    target_element + ", ub>");
+      }
       if (relative != 0) {
+        const auto base = address;
         address = helper.NewNamedTemp("capture" + std::to_string(i));
-        const auto offset = helper.GetOrEmitConstant(relative / element_bytes, DataType::INDEX);
-        helper.Emit(address + " = pto.addptr %arg0, " + offset + " : <" + element + ", ub> -> <" + element +
-                    ", ub>");
+        const auto offset = helper.GetOrEmitConstant(relative / target_bytes, DataType::INDEX);
+        helper.Emit(address + " = pto.addptr " + base + ", " + offset + " : <" + target_element +
+                    ", ub> -> <" + target_element + ", ub>");
       }
       addresses.push_back(address);
     }

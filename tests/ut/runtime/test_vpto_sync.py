@@ -304,5 +304,20 @@ def test_byte_load_requires_contiguous_non_updating_stride(stride, update):
             validate_sync_contract(source.replace("call void @llvm.hivm.mem.bar.vst.vld()", ""), "byte.pto")
 
 
+@pytest.mark.parametrize("name", ["chistv2", "dhistv2"])
+def test_histograms_are_pure_but_do_not_hide_memory_hazards(name):
+    source = llvm_helper(
+        extra=(
+            f"%hist = call <128 x i16> @llvm.hivm.{name}.m("
+            "<128 x i16> %acc, <256 x i8> %bytes, <256 x i1> %mask, i32 0)"
+        )
+    )
+    validate_sync_contract(source, "histogram.pto")
+    with pytest.raises(ValueError, match="missing vst.vld"):
+        validate_sync_contract(source.replace("call void @llvm.hivm.mem.bar.vst.vld()", ""), "histogram.pto")
+    with pytest.raises(ValueError, match="unmodeled intrinsic"):
+        validate_sync_contract(source.replace("<256 x i8> %bytes", "ptr addrspace(6) %base"), "histogram.pto")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

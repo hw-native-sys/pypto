@@ -59,7 +59,7 @@ scope, including when the loop has zero trips.
 | `pmode` | Inactive-result policy. Only `"zero"` is accepted, so inactive vector lanes become zero. |
 
 `*` in a signature starts keyword-only parameters. Omitted optional masks mean
-all lanes participate. Except for conversion, reduction, `expdif` and byte `gather`, results preserve the
+all lanes participate. Except for conversion, reinterpretation, histograms, reduction, `expdif` and byte `gather`, results preserve the
 input vector dtype and lanes. There is no implicit vector promotion or lane
 broadcasting. DSL numeric literals are normalized to the requested scalar dtype;
 Python `bool` is not accepted as an integer argument. Raw IR and Builder operands
@@ -368,3 +368,31 @@ RegScope with nonempty `name_hint` or `attrs` raises an error to avoid losing
 metadata; binary serialization preserves those fields. Empty scopes print as
 `pass`. The API list above describes the supported frontend surface; PTOAS
 instructions without a corresponding listed API are not exposed through `pl.reg`.
+
+## Bit reinterpretation, histograms and grouped masks
+
+| API | PTOAS operation | Contract |
+| --- | --------------- | -------- |
+| `interpret_cast(value, *, dtype)` | `vinterpret_cast` | Preserve every bit, without numeric conversion. Source and destination use `T`; result lanes equal `input_lanes * input_bits / output_bits`, which must be integral. |
+| `chist(acc, source, mask)` | `vchist` | `result[b] = acc[b] + count(active source <= b)`, modulo 65536. |
+| `dhist(acc, source, mask)` | `vdhist` | `result[b] = acc[b] + count(active source == b)`, modulo 65536. |
+| `create_group_mask(active_elems_per_group, *, num_groups, group_size)` | `create_group_mask` | Return a BOOL MaskReg with `num_groups * group_size` lanes. Lane `i` is active iff `i % group_size < active_elems_per_group`. |
+
+Histogram `source` is a UINT8 VecReg; its governing mask has the **source**
+lane count. The independent accumulator and result are UINT16 VecRegs with
+128 or 256 bins, covering 0–127 or 0–255. The mask does not gate accumulator
+bins: an empty mask returns the accumulator unchanged. Both operations return
+new register values without mutating `acc`. Cumulative bins 128–255 include
+counts from values below 128 as well.
+
+Grouped-mask geometry consists of positive static integers. The active count
+is an INDEX scalar or integer literal in `[0, group_size]`; dynamic counts are
+supported and callers must keep them in range. Constant counts are validated.
+These four APIs have no `pmode` argument and access no UB memory themselves.
+
+PTOAS 0.70 restricts **dynamic** grouped masks to power-of-two `group_size`
+and 32-bit consumers (b32 mask granularity). Use constant active counts for
+byte/halfword consumers, including histograms. Other dynamic granularities
+are rejected by PTOAS lowering. VF helpers support mixed Tile dtypes through
+typed pointers derived from one shared UB base; offsets use each Tile's own
+element width.

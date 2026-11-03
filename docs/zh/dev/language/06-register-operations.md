@@ -54,7 +54,7 @@ def kernel(
 | `pmode` | 非激活结果 lane 的处理策略。仅接受 `"zero"`，即非激活向量 lane 清零。 |
 
 签名中的 `*` 表示之后的参数只能按关键字传入。省略可选 mask 时所有 lane 参与。
-除转换、归约、`expdif` 和字节 `gather` 外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
+除转换、位重解释、直方图、归约、`expdif` 和字节 `gather` 外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
 lane 广播。DSL 数值字面量会归一化为要求的 scalar dtype；整数参数不接受 Python
 `bool`。原始 IR 和 Builder 操作数必须已具有要求的 dtype。
 
@@ -331,3 +331,26 @@ Python 文本语法不接受区域元数据。打印带非空 `name_hint` 或 `a
 RegScope 会报错，避免丢失元数据；二进制序列化保留这些字段。空区域打印为 `pass`。
 以上 API 列表表示当前前端支持范围；PTOAS 中没有对应上述 API 的指令尚未通过
 `pl.reg` 暴露。
+
+## 位重解释、直方图与分组掩码
+
+| API | PTOAS 算子 | 契约 |
+| --- | ---------- | ---- |
+| `interpret_cast(value, *, dtype)` | `vinterpret_cast` | 保留所有位，不做数值转换。源和目标均支持 `T`；结果 lane 数为 `input_lanes * input_bits / output_bits`，必须整除。 |
+| `chist(acc, source, mask)` | `vchist` | `result[b] = acc[b] + count(active source <= b)`，按 65536 取模。 |
+| `dhist(acc, source, mask)` | `vdhist` | `result[b] = acc[b] + count(active source == b)`，按 65536 取模。 |
+| `create_group_mask(active_elems_per_group, *, num_groups, group_size)` | `create_group_mask` | 返回 `num_groups * group_size` lane 的 BOOL MaskReg；当 `i % group_size < active_elems_per_group` 时，第 `i` lane 有效。 |
+
+直方图的 `source` 为 UINT8 VecReg，掩码 lane 数必须与**源**一致。
+累加器与结果独立使用 128 或 256 lane 的 UINT16 VecReg，分别覆盖 bin 0–127 或 0–255。
+掩码不控制累加器 bin；空掩码保留原累加器值。两个算子均返回新寄存器值，不修改 `acc`。
+累积直方图的 bin 128–255 也包含小于 128 的源值计数。
+
+分组掩码的组数和组大小必须为正静态整数。每组活动数量为 INDEX 标量或整数字面量，
+范围为 `[0, group_size]`。支持动态数量，由调用者保证范围；常量数量会在构造时检查。
+这四个 API 均无 `pmode` 参数，自身不访问 UB 内存。
+
+PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费者使用
+32 位元素（b32 掩码粒度）。字节和半字消费者（包括直方图）必须使用常量活动数量；
+其他动态粒度会被 PTOAS lowering 拒绝。VF helper 支持混合 Tile dtype：
+从同一 UB 基址派生对应类型的指针，偏移按各 Tile 自身的元素位宽计算。

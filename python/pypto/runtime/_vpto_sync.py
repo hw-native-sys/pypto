@@ -25,7 +25,7 @@ provenance is resolved in SSA definition order.
 import re
 from typing import NoReturn
 
-VERSION = "static-ub-vmi-v4"
+VERSION = "static-ub-vmi-v5"
 _SSA = r"%[-a-zA-Z$._0-9]+"
 _PURE_OPS = frozenset(
     "add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv fneg "
@@ -54,6 +54,8 @@ _PURE_INTRINSIC = re.compile(
     rf"vcmp\.(?:lt|le|gt|ge|eq|ne)\.(?:s|u)\.z\.{_VECTOR_SUFFIX}|"
     rf"v(?:intlv|dintlv)\.{_VECTOR_SUFFIX}|"
     r"v(?:mull|addc|subc|addcs|subcs)\.v64(?:i|u|s)32|"
+    r"(?:chistv2|dhistv2)\.m|v(?:adds|muls|shls|shrs)\.s\.x\.v64i32|"
+    r"vcmps\.lt\.s\.z\.v64i32|pintlv\.b8|"
     r"vexpdif\.v64f32|vaxpy\.m\.v(?:64f32|128f16)|"
     r"v(?:lrelu|prelu)\.x\.v(?:64f32|128f16)|"
     rf"vmula\.(?:s|u)\.m\.{_VECTOR_SUFFIX})"

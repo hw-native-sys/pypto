@@ -866,3 +866,7 @@ dtype、内存、转换和归属契约见[寄存器操作](../language/06-regist
 （`mull`、`addc`、`subc`、`addcs`、`subcs`、`intlv`、`dintlv`）和索引 UB
 访存（`gather`、`scatter`）扩展了初始寄存器集合。双结果操作声明输出数量为二，
 返回 `TupleType`；scatter 返回目标 Tile 的别名，并将参数 0 标记为写入。
+
+`interpret_cast`、`chist`、`dhist` 和 `create_group_mask` 是单结果的纯寄存器算子。
+位重解释保持总位数；直方图结果与 UINT16 累加器一致，而不是与 UINT8 源一致；
+分组掩码的 lane 数由静态组几何参数确定。

@@ -942,3 +942,8 @@ Fused arithmetic (`expdif`, `axpy`, `mula`, `lrelu`, `prelu`), paired results
 access (`gather`, `scatter`) extend the initial register set. Paired operations
 declare output arity two and return a `TupleType`; scatter returns an alias of
 its destination Tile and declares argument 0 as written.
+
+`interpret_cast`, `chist`, `dhist` and `create_group_mask` are pure register
+operations with one result. Reinterpretation preserves bit capacity; histogram
+results match the UINT16 accumulator rather than the UINT8 source; grouped
+masks derive their lane count from static group geometry.

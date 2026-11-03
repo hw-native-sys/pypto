@@ -362,6 +362,13 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     types += type;
   }
   if (ir::IsOp(call, "reg.full_mask")) operands = "\"PAT_ALL\"";
+  if (ir::IsOp(call, "reg.create_group_mask")) {
+    attrs = " {num_groups = " +
+            std::to_string(ir::GetRequiredKwarg<int>(call->kwargs_, "num_groups", "reg.create_group_mask")) +
+            ", group_size = " +
+            std::to_string(ir::GetRequiredKwarg<int>(call->kwargs_, "group_size", "reg.create_group_mask")) +
+            "}";
+  }
   if (ir::IsOp(call, "reg.index_gen")) {
     attrs = " {order = \"ASC\"}";
   }

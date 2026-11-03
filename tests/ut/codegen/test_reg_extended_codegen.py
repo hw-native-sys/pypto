@@ -333,7 +333,6 @@ def test_extended_ops_survive_default_pipeline(name, dtype, statement, tmp_path)
     [case for case in CASES if (case[0], case[1]) not in (("expdif", "FP16"), ("gather", "INT8"))],
 )
 def test_extended_vf_helpers_compile_to_llvm(name, dtype, statement, tmp_path):
-    # The shared-base helper ABI requires matching captured Tile element types.
     # Widening variants above are covered through the direct VMI/VPTO path.
     compiler = find_ptoas_binary()
     if compiler is None:
@@ -388,6 +387,72 @@ def test_signed_vf_adapter_compiles_with_ptoas(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("bins", [128, 256])
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("reverse_captures", [False, True])
+def test_histogram_group_mask_and_reinterpret_codegen(bins, dynamic, reverse_captures, tmp_path):
+    extra = (
+        "dm = pl.reg.create_group_mask(n, num_groups=4, group_size=16)\n"
+        "        zero = pl.reg.broadcast(0, lanes=64, dtype=pl.UINT32)\n"
+        "        words = pl.reg.select(dm, words, zero)"
+        if dynamic
+        else ""
+    )
+    loads = ["x = pl.reg.load(src, lanes=256)", f"acc = pl.reg.load(dst, offset=768, lanes={bins})"]
+    if reverse_captures:
+        loads.reverse()
+    load_statements = "\n        ".join(loads)
+    function = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(n: pl.Scalar[pl.INDEX]):
+    src = pl.tile.full([256], pl.UINT8, 1)
+    dst = pl.tile.full([1024], pl.UINT16, 3)
+    with pl.reg_scope():
+        {load_statements}
+        m = pl.reg.create_group_mask(7, num_groups=16, group_size=16)
+        h = pl.reg.chist(acc, x, m)
+        d = pl.reg.dhist(acc, x, m)
+        words = pl.reg.interpret_cast(x, dtype=pl.UINT32)
+        {extra}
+        halves = pl.reg.interpret_cast(words, dtype=pl.UINT16)
+        out = pl.reg.store(dst, value=h)
+        out = pl.reg.store(out, offset=256, value=d)
+        out = pl.reg.store(out, offset=512, value=halves)
+    _consumer = pl.tile.add(out, out)
+""")
+    ir.assert_structural_equal(
+        function, pl.parse(python_print(function, format=False)), enable_auto_mapping=True
+    )
+    bundle = codegen.PTOCodegen().generate_bundle(lower(function), emit_source_loc=False)
+    helper = bundle.helpers[0]
+    assert helper.parameter_types[0] == "!pto.ptr<ui8, ub>"
+    assert helper.parameter_indices[0] == (1 if reverse_captures else 0)
+    assert "pto.castptr" in helper.source
+    assert helper.source.count("pto.vmi.create_group_mask") == (2 if dynamic else 1)
+    for name in ("vchist", "vdhist"):
+        assert helper.source.count(f"pto.vmi.{name}") == 1
+    assert "num_groups = 16, group_size = 16" in helper.source
+    assert "!pto.vmi.vreg<64xui32>" in helper.source
+    assert helper.source.count("pto.vmi.vinterpret_cast") == 2
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    source = tmp_path / "histogram.pto"
+    llvm = tmp_path / "histogram.ll"
+    source.write_text(helper.source)
+    result = subprocess.run(
+        [compiler, str(source), *PTOAS_FLAGS, "-o", str(llvm)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "llvm.hivm.chistv2" in llvm.read_text()
+    assert "llvm.hivm.dhistv2" in llvm.read_text()
+    validate_sync_contract(llvm.read_text(), str(source))
 
 
 if __name__ == "__main__":
