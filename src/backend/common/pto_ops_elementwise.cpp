@@ -1173,15 +1173,22 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   }
 
   // tile.rsqrt accepts 1 arg (basic) or 2 args (high-precision with tmp workspace).
-  // Both forms emit pto.trsqrt with the appropriate ins() arity. Per ISA, both
-  // inputs (when present) and the output must be row_major.
+  // Scratch selects the high-precision contract on both backends. A5 also needs
+  // an explicit algorithm selector: its scratch overload alone still uses DEFAULT.
+  // Per ISA, both inputs (when present) and the output must be row_major.
   if (ShouldRegister(exclude_ops, "tile.rsqrt")) {
     backend.RegisterOp("tile.rsqrt")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           size_t arity = op->args_.size();
           INTERNAL_CHECK_SPAN(arity == 1 || arity == 2, op->span_)
               << "tile.rsqrt requires 1 or 2 arguments, but got " << arity;
-          return MakeNaryCodegenPTO("pto.trsqrt", arity, op, codegen);
+          auto& pto_codegen = AsPto(codegen);
+          std::string code = "pto.trsqrt " + GenerateInsOutsClause(op, pto_codegen);
+          if (arity == 2) {
+            code += " {precisionType = #pto<rsqrt_precision high_precision>}";
+          }
+          pto_codegen.Emit(code);
+          return std::string{};
         })
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_input_layout(1, ir::TileLayout::row_major)
