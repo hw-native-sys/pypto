@@ -103,17 +103,41 @@ precompile workers and debug recompilation preserve the effective value.
 
 ## Runtime-valid default selection
 
-Runtime valid shapes are enabled for straight-line Vec load/store, allocation-backed
-`set_validshape` with an assigned result, and matching-shape elementwise recipes
-from the table above. Standalone setters retain Tile IR, since metadata version
-tracking requires an explicit SSA result.
-Valid expressions must match structurally across arithmetic operands and result;
-two `-1` descriptor dimensions alone do not prove matching runtime values.
-A forward SSA analysis rejects uses of old metadata versions after a setter,
-including ordinary aliases and windows cut from that version. A current version
-may have several consumers. User control flow with dynamic valid state, window
-setters, dynamic-valid relabels/assemble, and nested dynamic-valid windows retain
-Tile IR. Static control-flow support is unchanged.
+Runtime valid shapes are enabled for Vec load/store, `set_validshape` with an
+assigned result (including windows), and matching-shape elementwise recipes
+from the table above. Standalone setters retain Tile IR because conversion needs
+an explicit logical result. Valid expressions must match structurally across
+arithmetic operands and result; two `-1` descriptor dimensions alone do not prove
+matching runtime values.
+
+Each data consumer restores its allocation-backed operands' logical valid
+extents. An old SSA value therefore keeps its original valid rectangle after a
+setter creates another value over the same bytes. There is no cached metadata
+state across branches or loops. A window setter reconstructs an independent
+view from the original parent and offsets; it neither mutates the source view
+nor adds the offset a second time. Relabelled-window setters retain Tile IR.
+
+Structured If/For/While supports runtime-valid allocation-backed Tile carries
+whose valid expressions stay the same at entry, yields and results. Changing
+valid extents travel as ordinary scalar SSA: select or carry the extents, then
+apply `set_validshape` to canonical storage at the use site. Scalar swaps are
+simultaneous, and zero loop iterations preserve the initial scalar state.
+The DSL rejects reassignment of a Tile to a different valid-shape type; conversion
+does not invent a Buffer-valued phi or export a branch-local view. Window Tile
+carries, nested dynamic-valid windows and dynamic-valid relabels/assemble remain
+outside default selection.
+
+Native scalar swaps require PTOAS 0.69 or newer, which fixes
+[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622) by preserving
+parallel-copy semantics for loop yields. The repository's pinned PTOAS version
+includes this fix. Acceptance checks execute the generated kernels: correct
+Buffer IR and successful native compilation alone do not establish numerical
+correctness.
+
+For example, `narrowed = pl.tile.set_validshape(loaded, 16, cols)` can be stored
+before reading `loaded` again: the second read restores `loaded`'s original
+rectangle. For a window, a later setter may widen valid extents within the same
+physical window, provided the newly exposed data was initialized earlier.
 
 Allocations use two dynamic descriptor dimensions when metadata can change;
 windows retain their per-axis static/dynamic descriptors. PYPTO only merges a
@@ -132,6 +156,9 @@ must still fit the physical window, and reads must refer to initialized data.
 uses the public default JIT path across three planners, changing offsets and
 empty/partial/full valid rectangles within one compiled artifact. It checks
 untouched sentinels and the Buffer/native artifacts used for execution.
+`test_default_dynamic_buffer_state` adds old aliases, window setters, branch
+joins, For/While carries and changing scalar valid state, including zero
+iterations and simultaneous swaps, across FP16/FP32/INT32 and all three planners.
 
 ## Placement and API
 

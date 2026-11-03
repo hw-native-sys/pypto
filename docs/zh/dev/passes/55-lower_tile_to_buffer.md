@@ -78,13 +78,32 @@ False:       两种 kernel                 => Tile
 
 ## 运行时 valid 的默认选择
 
-默认支持直线区域中的 Vec load/store、结果被赋值的 allocation-backed `set_validshape`
-和上表中形状相同的逐元素配方。独立 setter 语句继续 Tile，因为元数据版本跟踪需要显式
-SSA 结果。算术输入与结果的 valid 表达式须结构相等；两个 descriptor
-维度都是 `-1` 不代表实际运行时值相等。前向 SSA 分析拒绝 setter 之后再次使用旧
-元数据版本，包括普通别名及从该版本切出的窗口；当前版本可以有多个消费者。
-带动态 valid 状态的用户控制流、窗口 setter、动态 valid 的 relabel/assemble、嵌套
-动态 valid 窗口继续 Tile。已有静态控制流支持不变。
+默认支持 Vec load/store、结果被赋值的 `set_validshape`（包括窗口），以及上表中
+形状相同的逐元素配方。独立 setter 语句继续 Tile，因为转换需要显式逻辑结果。
+算术输入与结果的 valid 表达式须结构相等；两个 descriptor 维度都是 `-1`
+不代表实际运行时值相等。
+
+每个数据消费者都会恢复其 allocation-backed 操作数的逻辑有效尺寸（valid extents）。
+因此 setter 在相同存储上创建新值后，旧 SSA 值仍保留原有效矩形；元数据状态不跨分支
+或循环缓存。窗口 setter 从原始父来源与偏移重建独立视图，既不修改原视图，也不重复
+累加偏移。经过 relabel 的窗口 setter 继续 Tile。
+
+结构化 If/For/While 支持 allocation-backed 的运行时 valid Tile carry，前提是入口、
+yield 与结果的 valid 表达式保持相同。变化的有效尺寸通过普通 scalar SSA 传递：
+选择或携带尺寸，在使用点对规范存储应用 `set_validshape`。标量交换同时生效，
+零次循环保留初始标量状态。DSL 拒绝将 Tile 重赋值为不同 valid-shape 类型；转换
+不创建 Buffer-valued phi，也不导出分支局部视图。窗口 Tile carry、嵌套动态 valid
+窗口及动态 valid 的 relabel/assemble 仍不在默认选择范围内。
+
+原生标量交换需要 PTOAS 0.69 或更新版本，其中
+[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622) 的修复保持了
+循环 yield 的并行拷贝（parallel-copy）语义。仓库固定的 PTOAS 版本已包含该修复。
+验收会执行生成的 kernel；仅有正确的 Buffer IR 和成功的 native 编译，仍不足以
+证明数值正确性。
+
+例如 `narrowed = pl.tile.set_validshape(loaded, 16, cols)` 可以先被 store，再读取
+`loaded`；第二次读取恢复 `loaded` 原来的有效矩形。对于窗口，后续 setter 可以在
+同一物理窗口内扩大有效区，但新增可读数据必须已在此前初始化。
 
 可变 allocation 使用双轴动态 descriptor，窗口保留逐轴静态/动态 descriptor。
 PYPTO 仅允许动态 allocation 与兼容的、覆盖完整容量的 typed root 合并。
@@ -99,6 +118,9 @@ PYPTO 仅允许动态 allocation 与兼容的、覆盖完整容量的 typed root
 `tests/st/runtime/ops/test_buffer_views.py::test_default_dynamic_buffer_windows`
 通过公开默认 JIT 入口覆盖三种 planner，在同一编译产物内改变偏移与空/部分/完整
 有效区，检查未写区 sentinel 及实际执行的 Buffer/native 产物。
+`test_default_dynamic_buffer_state` 进一步覆盖旧别名、窗口 setter、分支汇合、
+For/While carry 和变化的标量 valid 状态，包括零次迭代及同时交换，覆盖
+FP16/FP32/INT32 和三种 planner。
 
 ## 位置与 API
 

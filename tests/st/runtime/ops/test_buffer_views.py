@@ -580,5 +580,136 @@ def test_default_dynamic_buffer_windows(case_run, request):
             assert "pto.subview" in text
 
 
+@pl.jit.incore
+def _dynamic_state_kernel(
+    source: pl.Tensor,
+    out: pl.InOut[pl.Tensor],
+    row: pl.Scalar[pl.INDEX],
+    rows: pl.Scalar[pl.INDEX],
+    cols: pl.Scalar[pl.INDEX],
+    count: pl.Scalar[pl.INDEX],
+    base: pl.Scalar[pl.INDEX],
+):
+    whole = pl.load(source, [0, 0], [64, 64])
+    window = pl.tile.slice(whole, [16, 32], [row, 16])
+    narrowed = pl.tile.set_validshape(window, rows, cols)
+    out = pl.store(pl.add(narrowed, narrowed), [base, 0], out)
+    out = pl.store(pl.add(window, window), [base + 16, 0], out)
+    loaded = pl.load(source, [0, 0], [16, 32])
+    partial = pl.tile.set_validshape(loaded, rows, cols)
+    out = pl.store(pl.add(partial, partial), [base + 32, 0], out)
+    out = pl.store(pl.add(loaded, loaded), [base + 48, 0], out)
+
+    # A dynamic-valid Tile carry preserves its valid expressions. The same
+    # allocation may have different metadata after the old-alias reads above.
+    if count > 1:
+        selected = pl.yield_(pl.add(partial, partial))
+    else:
+        selected = pl.yield_(partial)
+    for _tile_index, (for_value,) in pl.range(count, init_values=(selected,)):
+        for_result = pl.yield_(pl.add(for_value, for_value))
+    for while_index, while_value in pl.while_(init_values=(0, for_result)):
+        pl.cond(while_index < count)
+        while_result_index, while_result = pl.yield_(while_index + 1, pl.add(while_value, while_value))
+    out = pl.store(while_result, [base + 64, 0], out)
+
+    # Changing valid extents travel as scalar SSA, including simultaneous
+    # swaps. Zero iterations must retain the initial scalar state.
+    for for_index, (for_width, for_other) in pl.range(count, init_values=(cols, 32)):
+        for_view = pl.tile.set_validshape(window, 16, for_width)
+        out = pl.store(for_view, [base + 96 + for_index * 16, 0], out)
+        final_for_width, final_for_other = pl.yield_(for_other, for_width)
+    final_for_view = pl.tile.set_validshape(window, 16, final_for_width)
+    out = pl.store(final_for_view, [base + 144, 0], out)
+    for state_index, state_width, state_other in pl.while_(init_values=(0, cols, 32)):
+        pl.cond(state_index < count)
+        state_view = pl.tile.set_validshape(window, 16, state_width)
+        out = pl.store(state_view, [base + 160 + state_index * 16, 0], out)
+        final_state_index, final_state_width, final_state_other = pl.yield_(
+            state_index + 1, state_other, state_width
+        )
+    final_state_view = pl.tile.set_validshape(window, 16, final_state_width)
+    out = pl.store(final_state_view, [base + 208, 0], out)
+    return pl.store(whole, [base + 256, 0], out)
+
+
+@pl.jit
+def _dynamic_state_entry(source: pl.Tensor, config: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    for index in pl.range(7):
+        rows = pl.tensor.read(config, [index, 0])
+        cols = pl.tensor.read(config, [index, 1])
+        count = pl.tensor.read(config, [index, 2])
+        row = index * 5
+        base = index * 320
+        out = _dynamic_state_kernel(source, out, row, rows, cols, count, base)
+    return out
+
+
+_STATE_CONFIG = torch.tensor(
+    [(0, 0, 0), (1, 1, 1), (7, 13, 2), (16, 32, 3), (16, 0, 2), (0, 32, 1), (0, 0, 0)],
+    dtype=torch.int64,
+)
+
+
+def _dynamic_state_golden(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    source = tensors["source"]
+    expected = tensors["out"].clone()
+    for index, (rows, cols, count) in enumerate(tensors["config"].tolist()):
+        base = index * 320
+        window = source[index * 5 : index * 5 + 16, 16:48]
+        expected[base : base + rows, :cols] = 2 * window[:rows, :cols]
+        expected[base + 16 : base + 32, :32] = 2 * window
+        expected[base + 32 : base + 32 + rows, :cols] = 2 * source[:rows, :cols]
+        expected[base + 48 : base + 64, :32] = 2 * source[:16, :32]
+        factor = (2 if count > 1 else 1) * 4**count
+        expected[base + 64 : base + 64 + rows, :cols] = factor * source[:rows, :cols]
+        for offset in (96, 160):
+            for iteration in range(count):
+                width = cols if iteration % 2 == 0 else 32
+                start = base + offset + iteration * 16
+                expected[start : start + 16, :width] = window[:, :width]
+        width = cols if count % 2 == 0 else 32
+        for offset in (144, 208):
+            expected[base + offset : base + offset + 16, :width] = window[:, :width]
+        expected[base + 256 : base + 320] = source
+    return {"out": expected}
+
+
+@st.cases(
+    *[
+        st.case(
+            _dynamic_state_entry,
+            (torch.arange(4096).reshape(64, 64).remainder(17) - 8).to(dtype),
+            _STATE_CONFIG,
+            torch.full((2240, 64), -777, dtype=dtype),
+            name=f"dynamic_state_{planner.name.lower()}_{str(dtype).removeprefix('torch.')}",
+            golden=_dynamic_state_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+        for dtype in (torch.float16, torch.float32, torch.int32)
+    ]
+)
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="Dynamic Buffer state rollout is limited to a2/a3.")
+def test_default_dynamic_buffer_state(case_run, request):
+    case_run.assert_passed()
+    if request.config.getoption("--precompile-workers") is not None:
+        assert case_run.work_dir is not None
+        program = ir.deserialize((case_run.work_dir / "buffer_ir.msgpack").read_bytes())
+        assert isinstance(program, ir.Program)
+        kernels = [f for f in program.functions.values() if ir.is_incore_type(f.func_type)]
+        assert len(kernels) == 1 and kernels[0].ir_stage == ir.FunctionIRStage.Buffer
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.BufferIR)
+        assert passes.PropertyVerifierRegistry.verify(properties, program) == []
+        sources = list((case_run.work_dir / "ptoas").glob("*.pto"))
+        assert len(sources) == 1
+        text = sources[0].read_text()
+        assert "pto.subview" in text and "pto.set_validshape" in text
+        assert "scf.if" in text and "scf.for" in text and "scf.while" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
