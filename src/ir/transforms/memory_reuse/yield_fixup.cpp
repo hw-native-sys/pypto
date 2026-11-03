@@ -185,7 +185,11 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
     return new_for;
   }
   StmtPtr VisitStmt_(const ForStmtPtr& op) override { return AlignLoop(op); }
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return AlignLoop(op); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    const auto* context = PassContext::Current();
+    if (context == nullptr || !context->GetEnableBufferIR()) return IRMutator::VisitStmt_(op);
+    return AlignLoop(op);
+  }
 };
 
 // Compact descriptor bindings for the carry-copy diagnostic. Copies are roots,
@@ -1510,7 +1514,12 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (!AsTensorTypeLike(visited->GetType()) && !As<TileType>(visited->GetType())) return visited;
     // Loop carries are mutable references to their initializer, including on
     // zero-trip loops. Preserve either its fixed storage or its dynamic handle.
-    if (auto type = BoundaryAliasType(visited->GetType(), visited->initValue_)) {
+    if (native_while_args_.count(op.get()) && As<TileType>(visited->GetType())) {
+      // The initializer supplies the first descriptor, not a permanent address.
+      visited = std::make_shared<IterArg>(visited->name_hint_,
+                                          CloneTypeWithMemRef(visited->GetType(), std::nullopt),
+                                          visited->initValue_, visited->span_);
+    } else if (auto type = BoundaryAliasType(visited->GetType(), visited->initValue_)) {
       visited = std::make_shared<IterArg>(visited->name_hint_, type, visited->initValue_, visited->span_);
     }
     if (IsUnsettled(AsVarLike(op->initValue_)) || IsUnsettled(AsVarLike(visited->initValue_))) {
@@ -1522,7 +1531,26 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override { return NormalizeLoopAliases(op); }
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return NormalizeLoopAliases(op); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    const auto* context = PassContext::Current();
+    if (context && context->GetEnableBufferIR()) return NormalizeLoopAliases(op);
+    for (const auto& arg : op->iter_args_) native_while_args_.insert(arg.get());
+    auto visited = As<WhileStmt>(IRMutator::VisitStmt_(op));
+    for (const auto& arg : op->iter_args_) native_while_args_.erase(arg.get());
+    auto result = MutableCopy(visited);
+    bool changed = false;
+    for (size_t i = 0; i < visited->return_vars_.size(); ++i) {
+      const auto& value = visited->return_vars_[i];
+      if (auto tile = As<TileType>(value->GetType()); tile && tile->memref_) {
+        auto replacement =
+            std::make_shared<Var>(value->name_hint_, CloneTypeWithMemRef(tile, std::nullopt), value->span_);
+        result->return_vars_[i] = replacement;
+        subst_[op->return_vars_[i]] = replacement;
+        changed = true;
+      }
+    }
+    return changed ? result : visited;
+  }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto visited = As<IfStmt>(IRMutator::VisitStmt_(op));
@@ -1577,6 +1605,8 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
  private:
+  std::set<const IterArg*> native_while_args_;
+
   TypePtr BoundaryAliasType(const TypePtr& type, const ExprPtr& source) {
     const auto target_tile = As<TileType>(type);
     const auto input_tile = source ? As<TileType>(source->GetType()) : nullptr;

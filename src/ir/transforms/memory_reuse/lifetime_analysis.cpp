@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <set>
 #include <string>
 #include <tuple>
@@ -115,7 +116,12 @@ class SelectionCollector : public IRVisitor {
     }
   }
   void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
-  void VisitStmt_(const WhileStmtPtr& op) override { Loop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& argument : op->iter_args_) {
+      if (As<TileType>(argument->GetType())) result.values.insert(argument.get());
+    }
+    Loop(op);
+  }
 
   TileSelectionInfo Finish() {
     std::vector<const Var*> pending(result.values.begin(), result.values.end());
@@ -197,16 +203,51 @@ class LifetimeAnalyzer : public IRVisitor {
       VisitStmt(func_body);
     }
 
-    // Definitions precede uses, including each If's region results. Propagate
-    // demands once backwards through direct bindings, not recursively per use.
-    // Map accesses cost O(log N); each binding edge is visited once.
-    for (auto it = binding_order_.rbegin(); it != binding_order_.rend(); ++it) {
-      const auto demand = var_raw_last_use_.find(*it);
-      if (demand == var_raw_last_use_.end()) continue;
-      for (const auto& source : storage_sources_.at(it->get())) {
-        auto& last = var_raw_last_use_[source];
-        last = std::max(last, demand->second);
+    // Propagate greatest use positions through descriptor bindings. Native
+    // While introduces backedges, so a reverse definition walk is insufficient.
+    // Processing demands in descending order finalizes each node once; every
+    // edge is relaxed at most once, for O((N + E) log N) time including cycles.
+    std::priority_queue<std::pair<int, VarPtr>> demands;
+    for (const auto& [value, order] : var_raw_last_use_) demands.emplace(order, value);
+    std::set<const Var*> finalized;
+    while (!demands.empty()) {
+      auto [order, value] = demands.top();
+      demands.pop();
+      if (!finalized.insert(value.get()).second) continue;
+      const auto sources = storage_sources_.find(value.get());
+      if (sources == storage_sources_.end()) continue;
+      for (const auto& source : sources->second) {
+        auto [last, inserted] = var_raw_last_use_.try_emplace(source, order);
+        if (inserted || last->second < order) {
+          last->second = order;
+          demands.emplace(order, source);
+        }
       }
+    }
+    // A backedge source can be consumed before its lexical definition on the
+    // next iteration. Its allocation must survive the entire While, including
+    // temporaries preceding that definition. Propagate the earliest header to
+    // every possible source, rather than assuming the initializer owns carry
+    // storage. A branch family is not exclusive across different iterations.
+    std::priority_queue<std::pair<int, VarPtr>, std::vector<std::pair<int, VarPtr>>,
+                        std::greater<std::pair<int, VarPtr>>>
+        headers;
+    for (const auto& [value, order] : while_headers_) headers.emplace(order, value);
+    finalized.clear();
+    while (!headers.empty()) {
+      const auto [order, value] = headers.top();
+      headers.pop();
+      if (!finalized.insert(value.get()).second) continue;
+      if (auto definition = var_def_order_.find(value); definition != var_def_order_.end()) {
+        definition->second = std::min(definition->second, order);
+        if (const auto binding = binding_points_.find(value.get());
+            binding != binding_points_.end() && binding->second >= order) {
+          var_family_ids_.erase(value.get());
+        }
+      }
+      const auto sources = storage_sources_.find(value.get());
+      if (sources == storage_sources_.end()) continue;
+      for (const auto& source : sources->second) headers.emplace(order, source);
     }
 
     // Phase 2: Apply loop-aware lifetime extension
@@ -372,7 +413,31 @@ class LifetimeAnalyzer : public IRVisitor {
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    ProcessLoopBody(op->iter_args_, op->body_);
+    if (!native_if_) {
+      ProcessLoopBody(op->iter_args_, op->body_);
+      CollectUsesFromExpr(op->condition_, current_order_);
+      RegisterReturnVars(op->iter_args_, op->return_vars_);
+      return;
+    }
+    const int start = current_order_++;
+    const auto yield = transform_utils::GetLastYieldStmt(op->body_);
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& argument = op->iter_args_[i];
+      CollectUsesFromExpr(argument->initValue_, start);
+      if (!As<TileType>(argument->GetType())) continue;
+      std::vector<VarPtr> sources;
+      if (auto initial = AsVarLike(argument->initValue_)) sources.push_back(initial);
+      if (yield && i < yield->value_.size()) {
+        if (auto next = AsVarLike(yield->value_[i])) sources.push_back(next);
+      }
+      RegisterStorageBinding(argument, std::move(sources), start, /*selection=*/true);
+      while_headers_.emplace_back(argument, start);
+    }
+    CollectUsesFromExpr(op->condition_, start);
+    VisitStmt(op->body_);
+    const int end = current_order_++;
+    loop_scopes_.push_back({start, end});
+    for (const auto& argument : op->iter_args_) RecordRawUse(argument, end);
     RegisterReturnVars(op->iter_args_, op->return_vars_);
   }
 
@@ -380,7 +445,7 @@ class LifetimeAnalyzer : public IRVisitor {
   int current_order_ = 0;
   bool native_if_;
   TileStorageSources storage_sources_;
-  std::vector<VarPtr> binding_order_;
+  std::vector<std::pair<VarPtr, int>> while_headers_;
   std::map<const Var*, int> binding_points_;
   std::set<const Var*> selection_aliases_;
 
@@ -391,7 +456,6 @@ class LifetimeAnalyzer : public IRVisitor {
     if (selection) selection_aliases_.insert(value.get());
     if (sources.empty()) return;
     storage_sources_.emplace(value.get(), std::move(sources));
-    binding_order_.push_back(value);
   }
 
   // Loop boundaries recorded during Phase 1

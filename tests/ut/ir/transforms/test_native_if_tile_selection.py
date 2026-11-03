@@ -23,6 +23,45 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 _PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 
 
+@pytest.mark.parametrize("scope", ["runtime", "split", "nested"])
+def test_init_memref_finds_branch_yields_inside_transparent_scopes(scope, ascend_backend):
+    """A wrapper must not hide the Tile source or expose an unrelated inner yield."""
+    program = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+               out: pl.Out[pl.Tensor[[4, 8], pl.FP32]]) -> pl.Tensor[[4, 8], pl.FP32]:
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        return pl.store(selected, [0, 0], out)
+""")
+
+    class WrapArms(ir.IRMutator):
+        def visit_if_stmt(self, op):
+            def wrap(body):
+                # The inner If's empty yield is unrelated to the outer result.
+                inner = ir.IfStmt(
+                    op.condition, ir.YieldStmt([], op.span), ir.YieldStmt([], op.span), [], op.span
+                )
+                body = ir.SeqStmts([inner, body], op.span)
+                if scope in ("split", "nested"):
+                    body = ir.SplitAivScopeStmt(ir.SplitMode.UP_DOWN, count=2, body=body, span=op.span)
+                if scope in ("runtime", "nested"):
+                    body = ir.RuntimeScopeStmt(manual=True, body=body, span=op.span)
+                return ir.SeqStmts([body], op.span)
+
+            return ir.IfStmt(op.condition, wrap(op.then_body), wrap(op.else_body), op.return_vars, op.span)
+
+    with passes.PassContext([], enable_buffer_ir=False):
+        initialized = passes.init_mem_ref()(WrapArms().visit_program(program))
+    _assert_dynamic_if_results(initialized)
+
+
 def _assert_dynamic_if_results(program):
     class Checker(ir.IRVisitor):
         def visit_if_stmt(self, op):
@@ -658,7 +697,10 @@ def _assert_private_carry_preserves_old_inputs(program, addressed, selected_init
 
 def _compile_native_loop(text, planner, tmp_path):
     binary = find_ptoas_binary()
-    assert binary is not None, "PTOAS is required for native loop compilation"
+    if binary is None:
+        # Ordinary unit-test environments need no compiler. The dedicated CI
+        # job uses --require-ptoas to enforce compilation with pinned PTOAS.
+        pytest.skip("PTOAS is unavailable")
     source = tmp_path / "native_loop.pto"
     source.write_text(text)
     compiled = subprocess.run(
@@ -707,24 +749,13 @@ class Before:
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize(
-    "loop",
-    [
-        "for",
-        pytest.param(
-            "while",
-            marks=pytest.mark.skip(
-                reason="Native While Tile carry writeback is deferred to a follow-up For/While PR."
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("loop", ["for", "while"])
 @pytest.mark.parametrize("boundary", ["initializer", "backedge"])
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_updating_loop_isolates_selected_or_observed_initializer(
     loop, boundary, planner, tmp_path, ascend_backend
 ):
-    """Both loop kinds copy selected or observed initializers into private carries."""
+    """For isolates its fixed carry; While forwards descriptors and preserves inputs."""
     select = """if flag > 0:
     selected = a
 else:
@@ -767,9 +798,13 @@ class Before:
         text = codegen.PTOCodegen().generate(
             lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
         )
-    _assert_private_carry_preserves_old_inputs(
-        lowered, planner != passes.MemoryPlanner.PTOAS, boundary == "initializer", saved_selection=False
-    )
+    if loop == "for":
+        _assert_private_carry_preserves_old_inputs(
+            lowered, planner != passes.MemoryPlanner.PTOAS, boundary == "initializer", saved_selection=False
+        )
+    else:
+        assert "tile.move(" not in lowered.as_python(), "descriptor carries need no entry/writeback copy"
+        assert "!pto.tile_buf" in next(line for line in text.splitlines() if "scf.while" in line)
     assert ("scf.for" if loop == "for" else "scf.while") in text, text
     _compile_native_loop(text, planner, tmp_path)
 
@@ -1219,6 +1254,84 @@ class Before:
         with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
             lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
             codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("selected_initial", [False, True])
+def test_native_while_carries_tile_descriptors_without_payload_copies(
+    planner, selected_initial, ascend_backend, tmp_path
+):
+    """Descriptor swaps preserve old inputs and carry the actual selected address."""
+    initial = (
+        """if flag > 0:
+            seed = pl.yield_(a)
+        else:
+            seed = pl.yield_(b)"""
+        if selected_initial
+        else "seed = a"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[8, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+               count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[12, 8], pl.FP32]]) -> pl.Tensor[[12, 8], pl.FP32]:
+        a = pl.load(x, [0, 0], [4, 8])
+        b = pl.load(x, [4, 0], [4, 8])
+        {initial}
+        for i, left, right in pl.while_(init_values=(0, seed, b)):
+            pl.cond(i < count)
+            final_i, final_left, final_right = pl.yield_(i + 1, right, left)
+        pl.store(final_left, [0, 0], out)
+        pl.store(final_right, [4, 0], out)
+        return pl.store(a, [8, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+        text = codegen.PTOCodegen().generate(
+            lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+        )
+    header = next(line for line in text.splitlines() if "scf.while" in line)
+    assert header.count("!pto.tile_buf") == 4, text
+    assert "tile.move(" not in lowered.as_python()
+    assert "pto.tmov" not in text
+    _compile_native_loop(text, planner, tmp_path)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_while_backedge_storage_survives_temporaries_before_its_definition(planner, ascend_backend):
+    """A lexical last-use interval misses the value retained from the preceding iteration."""
+    program = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[4, 8], pl.FP32], count: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[8, 8], pl.FP32]]) -> pl.Tensor[[8, 8], pl.FP32]:
+        initial = pl.load(x, [0, 0], [4, 8])
+        for i, current in pl.while_(init_values=(0, initial)):
+            pl.cond(i < count)
+            scratch = pl.tile.full([4, 8], pl.FP32, 1.0)
+            pl.store(scratch, [0, 0], out)
+            updated = pl.tile.recip(current)
+            final_i, result = pl.yield_(i + 1, updated)
+        return pl.store(result, [4, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+    tiles = {}
+
+    class Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, op):
+            if isinstance(op.var.type, ir.TileType):
+                tiles[op.var.name_hint.split("__")[0]] = op.var.type.memref
+            super().visit_assign_stmt(op)
+
+    Collector().visit_program(lowered)
+    scratch, updated = tiles["scratch"], tiles["updated"]
+    assert scratch is not None and updated is not None
+    assert not ir.MemRef.may_alias(scratch, updated), lowered.as_python()
 
 
 if __name__ == "__main__":

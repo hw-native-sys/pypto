@@ -960,8 +960,8 @@ class InitMemRefMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    const auto then_yield = FindYieldStmt(op->then_body_);
-    const auto else_yield = op->else_body_ ? FindYieldStmt(*op->else_body_) : nullptr;
+    const auto then_yield = transform_utils::GetLastYieldStmt(op->then_body_);
+    const auto else_yield = op->else_body_ ? transform_utils::GetLastYieldStmt(*op->else_body_) : nullptr;
     // Register only direct bindings, not transitive roots. The default visitor
     // visits both bodies before return_vars, so GetNewVar can read the already
     // updated yielded variables and cache each dynamic result exactly once.
@@ -1156,6 +1156,13 @@ class HasMemRefsVerifier : public IRVisitor {
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
+    // Native While carries select descriptors across iterations, including
+    // when the entry value itself has a fixed allocation.
+    for (const auto& arg : op->iter_args_) {
+      if (auto tile = As<TileType>(arg->GetType()); tile && !tile->memref_) {
+        buffer_less_.insert(arg.get());
+      }
+    }
     TrackDynamicCarries(op->iter_args_);
     IRVisitor::VisitStmt_(op);
     TrackDynamicResults(op->iter_args_, op->return_vars_);

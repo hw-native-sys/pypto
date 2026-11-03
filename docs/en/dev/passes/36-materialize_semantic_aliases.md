@@ -226,13 +226,18 @@ Alias normalization keeps native If results and their dependent descriptors
 without fixed MemRefs after producer rewrites. This also applies when both arms
 happen to refer to the same storage; their common memory space is still retained.
 
-Tile carries on the native path still use fixed buffers. For retains the
-existing input isolation, selected-source safety checks and necessary
-writebacks; choices that these rules cannot handle safely receive diagnostics.
-This does not reject every selected initializer or backedge. The native While
-visitor only recurses: general While writeback repair is not extended by this
-PR, and the affected carry cases belong in a follow-up PR. Descriptor-valued
-carry rotation remains outside the current lowering.
+Native While Tile carries are SSA descriptors passed through `scf.while`,
+`scf.condition` and `scf.yield`. Their iter_args and results have no fixed MemRef;
+entry does not copy a selected initializer into a permanent carry allocation.
+Swaps and fanout rebind descriptors simultaneously without payload writebacks.
+Scalars and registers also use SSA carries. Tensor and array backing references
+retain their existing in-place behavior. Initializer and yielded Tile descriptor
+types must match. Lifetime analysis follows both initializer and backedge
+sources, preserving backedge allocations across the entire loop iteration.
+
+Native For carries retain fixed buffers, input isolation, selected-source safety
+checks and required writebacks. Choices those rules cannot safely handle are
+diagnosed; this does not reject every selected initializer or backedge.
 
 Before inserting multiple For-carry writebacks, the existing yield fixup checks
 the original selected sources. A bounded source summary permits choices that read only
@@ -274,11 +279,9 @@ subview path and its PTOAS limitations.
 on the native Tile path, regardless of whether it also contains For/While loops
 and even when Buffer IR is globally enabled. Buffer lowering currently erases
 Tile region results and cannot represent this dynamic handle choice.
-The native Tile path keeps the existing For-carry writeback repair. Its native
-While visitor only recurses; this PR does not extend For's writeback, snapshot
-or copy-ordering algorithm to While. General loop repair belongs in a separate
-PR. Buffer IR retains its existing canonical loop fixups. These boundaries do
-not change the native Tile If routing rule.
+The native Tile path keeps the existing For-carry writeback repair and uses
+SSA Tile descriptors for While carries. Buffer IR retains its existing canonical
+loop fixups. These boundaries do not change the native Tile If routing rule.
 
 ### Staged Buffer IR pipeline
 

@@ -348,18 +348,7 @@ def _assert_fixed_tile_carry_storage(function, addressed):
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
-@pytest.mark.parametrize(
-    "kind",
-    [
-        "for",
-        pytest.param(
-            "while",
-            marks=pytest.mark.skip(
-                reason="Native While Tile carry writeback is deferred to a follow-up For/While PR."
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("kind", ["for", "while"])
 @pytest.mark.parametrize("enabled", [None, True, False])
 def test_default_control_flow_preserves_swaps_live_inputs_and_gm_carries(planner, kind, enabled):
     # A Tile-valued If keeps native selection even when its kernel contains a
@@ -371,7 +360,21 @@ def test_default_control_flow_preserves_swaps_live_inputs_and_gm_carries(planner
         assert _kernel(program).attrs["buffer_ir_selected"] is False
     # Torch executes logical SSA values; it cannot detect a missing native
     # writeback from a yielded Tile into the loop's fixed carry storage.
-    _assert_fixed_tile_carry_storage(_kernel(program), addressed=planner != passes.MemoryPlanner.PTOAS)
+    if kind == "for":
+        _assert_fixed_tile_carry_storage(_kernel(program), addressed=planner != passes.MemoryPlanner.PTOAS)
+    else:
+        assert "tile.move(" not in program.as_python()
+        loops = []
+
+        class Collector(ir.IRVisitor):
+            def visit_while_stmt(self, op):
+                loops.append(op)
+                super().visit_while_stmt(op)
+
+        Collector().visit_program(program)
+        assert len(loops) == 1
+        tiles = [arg for arg in loops[0].iter_args if isinstance(arg.type, ir.TileType)]
+        assert len(tiles) == 2 and all(arg.type.memref is None for arg in tiles)
     namespace = {}
     exec(torch_codegen(program), namespace)  # noqa: S102
     a = torch.linspace(-1, 1, 512).reshape(16, 32)

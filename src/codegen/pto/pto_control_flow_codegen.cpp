@@ -676,14 +676,13 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       << "WhileStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
       << op->return_vars_.size() << ")";
 
-  // Scalars and registers (including masks) are immutable SSA values and need
-  // iter_args/yield to carry each iteration's result. TileType and TensorType
-  // are mutable references written in-place via outs(), so they are mapped
-  // directly to their init values and excluded from iter_args/yield.
+  // Scalars, registers and Tile descriptors flow through SSA loop arguments.
+  // Tensor/array backing storage remains an in-place reference, as for If.
   std::vector<bool> is_ssa(op->iter_args_.size(), false);
   bool has_ssa_iter_args = false;
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType())) {
+    if (As<ScalarType>(op->iter_args_[i]->GetType()) || As<ir::RegType>(op->iter_args_[i]->GetType()) ||
+        As<TileType>(op->iter_args_[i]->GetType())) {
       is_ssa[i] = true;
       has_ssa_iter_args = true;
     }
@@ -755,7 +754,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     DecreaseIndent();
     EmitStructural("}");
   } else {
-    // scf.while with SSA value iter_args only
+    // Carry each Tile with its emitted descriptor type, including view geometry.
     std::vector<std::string> init_values;
     std::vector<std::string> before_arg_names;
     std::vector<std::string> after_arg_names;
@@ -773,7 +772,20 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       before_arg_names.push_back(NewTemp());
       after_arg_names.push_back(NewTemp());
 
-      iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
+      if (auto tile = As<TileType>(iter_arg->GetType())) {
+        const auto& initial = init_values.back();
+        auto type = GetSSATileBufType(initial);
+        INTERNAL_CHECK_SPAN(!type.empty(), op->span_)
+            << "Internal error: missing native While initializer descriptor type";
+        iter_arg_types.push_back(type);
+        const auto physical = GetSSATileType(initial);
+        for (const auto& name : {before_arg_names.back(), after_arg_names.back()}) {
+          RegisterTileBufType(name, type, physical ? physical : tile);
+          RegisterSelectedTileName(name);
+        }
+      } else {
+        iter_arg_types.push_back(GetValueCarryTypeString(iter_arg->GetType()));
+      }
     }
 
     // Register return_vars SSA names (SSA values only)
@@ -784,6 +796,11 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       std::string ret_name = NewTemp();
       BindVarToMlir(op->return_vars_[i], ret_name);
       return_var_names.push_back(ret_name);
+      if (auto tile = As<TileType>(op->return_vars_[i]->GetType())) {
+        const auto slot = return_var_names.size() - 1;
+        RegisterTileBufType(ret_name, iter_arg_types[slot], GetSSATileType(init_values[slot]));
+        RegisterSelectedTileName(ret_name);
+      }
     }
 
     // Lambda to register SSA value iter_args in fs_.var_to_mlir
@@ -833,7 +850,13 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     std::vector<std::string> ssa_yields;
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (is_ssa[i] && i < fs_.yield_buffer.size()) {
-        ssa_yields.push_back(fs_.yield_buffer[i]);
+        const auto& value = fs_.yield_buffer[i];
+        if (As<TileType>(op->iter_args_[i]->GetType())) {
+          CHECK_SPAN(GetSSATileBufType(value) == iter_arg_types[ssa_yields.size()], op->span_)
+              << "Native While Tile carry requires matching initializer and yielded descriptor types; "
+              << "got " << GetSSATileBufType(value) << " versus " << iter_arg_types[ssa_yields.size()];
+        }
+        ssa_yields.push_back(value);
       }
     }
 
@@ -842,7 +865,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       Emit("scf.yield " + JoinCommaSep(ssa_yields) + " : " + JoinCommaSep(iter_arg_types));
     }
     CHECK(ssa_yields.size() == iter_arg_types.size())
-        << "WhileStmt scalar yield count (" << ssa_yields.size() << ") must match scalar iter_args ("
+        << "WhileStmt SSA yield count (" << ssa_yields.size() << ") must match SSA iter_args ("
         << iter_arg_types.size() << ")";
     fs_.yield_buffer.clear();
 

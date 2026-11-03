@@ -271,7 +271,9 @@ def test_public_buffer_control_flow(case_run, request):
             function for function in program.functions.values() if ir.is_incore_type(function.func_type)
         ]
         kind = case_run.case.get_name().split("_")[1]
-        expected_stage = ir.FunctionIRStage.Functional if kind == "branch" else ir.FunctionIRStage.Buffer
+        expected_stage = (
+            ir.FunctionIRStage.Functional if kind in {"branch", "for", "while"} else ir.FunctionIRStage.Buffer
+        )
         assert len(kernels) == 1 and kernels[0].ir_stage == expected_stage
         sources = list((case_run.work_dir / "ptoas").glob("*.pto"))
         assert len(sources) == 1, "Expected the exact source of the one executed device kernel"
@@ -281,14 +283,18 @@ def test_public_buffer_control_flow(case_run, request):
         assert (" addr = " in text) == (case_run.case.memory_planner != passes.MemoryPlanner.PTOAS)
         headers = [line for line in text.splitlines() if "scf.for " in line or "scf.while " in line]
         assert len(headers) == {"branch": 0, "for": 1, "while": 1, "nested": 2, "fanout": 1}[kind]
-        assert all("tile_buf" not in header for header in headers)
+        assert all(("tile_buf" in header) == (kind == "while") for header in headers)
         assert ("scf.while " in text) == (kind == "while")
         if kind in {"branch", "for", "while"}:
             assert "scf.if " in text
-        if kind in {"for", "while", "fanout"}:
+        if kind in {"for", "fanout"}:
             # Final scalar inference types store-offset carries as INDEX.
             assert "-> (index, index)" in headers[0]
             assert "pto.tmov ins(" in text
+        elif kind == "while":
+            # SSA descriptors implement the parallel swap; no payload writeback
+            # may overwrite the old left/right values or the saved initializer.
+            assert "pto.tmov ins(" not in text
 
 
 if __name__ == "__main__":

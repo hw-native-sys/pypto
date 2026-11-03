@@ -170,10 +170,15 @@ Buffer IR 在 yield 修复前使用归一化，推迟对临时分支目标的别
 producer 改写后，别名归一化仍让原生 If 结果及其派生描述符保持无固定 MemRef。
 两支恰好指向同一存储时也统一如此，但保留共同的 memory space。
 
-原生 Tile carry 仍使用固定缓冲区。For 保留既有输入隔离、选中来源安全检查及
-必要写回；这些规则无法安全处理的选择才会诊断，并非所有选中 initializer 或
-回边都会拒绝。native While visitor 只递归访问，本 PR 不扩展其通用写回修复，
-相关 carry 用例留待后续独立 PR。描述符携带与轮转缓冲区尚不属于当前降低能力。
+原生 While 的 Tile carry 是通过 `scf.while`、`scf.condition` 和 `scf.yield`
+传递的 SSA 描述符。iter_arg 和结果没有固定 MemRef；入口不会把选中的初始值
+复制到固定 carry 分配。交换和扇出同时重绑定描述符，无需数据写回。标量和寄存器
+也使用 SSA carry；Tensor 和 Array 的底层引用保留已有原地更新行为。
+初始值与 yield 的 Tile 描述符类型必须匹配。生命周期分析同时跟踪初始来源和
+回边来源，使回边分配跨越完整循环迭代保持存活。
+
+原生 For carry 仍使用固定缓冲区，保留输入隔离、选中来源安全检查及必要写回；
+这些规则无法安全处理的选择才会诊断，并非所有选中 initializer 或回边都会拒绝。
 
 插入多个 For carry 写回前，既有 yield fixup 会检查原始选择来源。有界来源摘要允许仅
 读取自身目标或所有复制均不写入的存储。其他条件多副本边界会明确报错，避免
@@ -204,8 +209,7 @@ initializer 和 carry 的必需别名继续保持动态、没有 MemRef；此句
 `SelectBufferIRFunctions` 将所有包含 Tile 返回值 If 的函数保留在原生 Tile 路径，
 不再根据函数是否含 For/While 区分；全局启用 Buffer IR 时也适用。
 Buffer lowering 当前会消除 Tile 区域返回值，无法表达这种动态句柄选择。
-原生 Tile 路径保留既有 For carry 写回修复。native While visitor 只递归访问，
-本 PR 不将 For 的写回、快照和复制排序算法推广到 While；循环通用修复留待独立 PR。
+原生 Tile 路径保留既有 For carry 写回修复；While carry 使用 SSA Tile 描述符。
 Buffer IR 保留原有 canonical 循环修复。这些边界不改变 Tile If 一律走原生路径的规则。
 
 ### 分阶段启用的 Buffer IR 流水线

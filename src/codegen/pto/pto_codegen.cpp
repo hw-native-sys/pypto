@@ -132,7 +132,8 @@ class CheckNativeLoopSelections : public ir::IRVisitor {
     ir::IRVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const ForStmtPtr& op) override { Loop(op); }
-  void VisitStmt_(const WhileStmtPtr& op) override { Loop(op); }
+  // Native While carries the actual Tile descriptors through scf.while.
+  void VisitStmt_(const WhileStmtPtr& op) override { ir::IRVisitor::VisitStmt_(op); }
 
  private:
   ir::TileSelectionInfo info_;

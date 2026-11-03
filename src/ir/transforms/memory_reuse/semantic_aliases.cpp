@@ -879,7 +879,11 @@ class LoopInputIsolation : public IRVisitor {
         if (event.selected) selected_indexes_[event.memory].Activate(event.position, event.reverse);
       }
       if (auto for_loop = As<ForStmt>(loop)) PlanLoop(for_loop);
-      if (auto while_loop = As<WhileStmt>(loop)) PlanLoop(while_loop);
+      // Native While passes Tile descriptors, so entering it does not write
+      // the initializer. Fixed Buffer IR still needs its entry isolation.
+      if (!recurrence_only_) {
+        if (auto while_loop = As<WhileStmt>(loop)) PlanLoop(while_loop);
+      }
     }
   }
 
@@ -2962,6 +2966,20 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 
   StmtPtr new_body = func->body_;
   const auto* ctx = PassContext::Current();
+  class TileWhileFinder : public IRVisitor {
+   public:
+    bool found = false;
+    void VisitStmt_(const WhileStmtPtr& loop) override {
+      for (const auto& arg : loop->iter_args_) found |= As<TileType>(arg->GetType()) != nullptr;
+      IRVisitor::VisitStmt_(loop);
+    }
+  } tile_while;
+  tile_while.VisitStmt(new_body);
+  if ((ctx == nullptr || !ctx->GetEnableBufferIR()) && tile_while.found) {
+    // Remove provisional fixed While storage before isolation/retargeting.
+    // A native While rebinds descriptors; it does not copy into its entry Tile.
+    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
+  }
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
     SnapshotAssembleSources snapshots(func);
     new_body = snapshots.VisitStmt(new_body);
