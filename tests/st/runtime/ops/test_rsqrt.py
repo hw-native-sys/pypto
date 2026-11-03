@@ -32,9 +32,9 @@ from pypto.runtime.runner import RunConfig
 M = 16
 N = 16
 
-# rsqrt on hardware uses a Newton-Raphson approximation whose precision is looser
-# than torch.rsqrt; the high-precision path additionally involves a scratch-tile
-# refinement step.  Use relaxed tolerances similar to the qwen3 decode tests.
+# Keep the historical cross-platform smoke-test tolerances. The A5-specific
+# cases below separately enforce a strict ULP bound and an accuracy improvement
+# over the default algorithm.
 _RSQRT_RTOL = 1e-2
 _RSQRT_ATOL = 1e-2
 
@@ -53,29 +53,24 @@ def _relaxed_config() -> RunConfig:
 # ---------------------------------------------------------------------------
 
 
-@pl.program
-class TileRsqrtProgram:
-    """Tile-level rsqrt using the basic 1-operand form."""
+@pl.jit.incore
+def tile_rsqrt_kernel(
+    a: pl.Tensor[[M, N], pl.FP32],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    tile_a: pl.Tile[[M, N], pl.FP32] = pl.load(a, [0, 0], [M, N])
+    tile_c: pl.Tile[[M, N], pl.FP32] = pl.tile.rsqrt(tile_a)
+    out = pl.store(tile_c, [0, 0], out)
+    return out
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        tile_a: pl.Tile[[M, N], pl.FP32] = pl.load(a, [0, 0], [M, N])
-        tile_c: pl.Tile[[M, N], pl.FP32] = pl.tile.rsqrt(tile_a)
-        out = pl.store(tile_c, [0, 0], out)
-        return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        out = self.kernel(a, out)
-        return out
+@pl.jit
+def tile_rsqrt(
+    a: pl.Tensor[[M, N], pl.FP32],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    out = tile_rsqrt_kernel(a, out)
+    return out
 
 
 class TileRsqrtTest(PTOTestCase):
@@ -96,7 +91,7 @@ class TileRsqrtTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TileRsqrtProgram
+        return tile_rsqrt.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["out"][:] = torch.rsqrt(tensors["a"])
@@ -107,32 +102,25 @@ class TileRsqrtTest(PTOTestCase):
 # ---------------------------------------------------------------------------
 
 
-@pl.program
-class TileRsqrtHighPrecisionProgram:
-    """Tile-level rsqrt using the 2-operand high-precision form (tmp allocated by the user)."""
+@pl.jit.incore
+def tile_rsqrt_high_precision_kernel(
+    a: pl.Tensor[[M, N], pl.FP32],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    tile_a: pl.Tile[[M, N], pl.FP32] = pl.load(a, [0, 0], [M, N])
+    tmp: pl.Tile[[M, N], pl.FP32] = pl.tile.create([M, N], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    tile_c: pl.Tile[[M, N], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp)
+    out = pl.store(tile_c, [0, 0], out)
+    return out
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        tile_a: pl.Tile[[M, N], pl.FP32] = pl.load(a, [0, 0], [M, N])
-        tmp: pl.Tile[[M, N], pl.FP32] = pl.tile.create(
-            [M, N], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
-        tile_c: pl.Tile[[M, N], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp)
-        out = pl.store(tile_c, [0, 0], out)
-        return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        out = self.kernel(a, out)
-        return out
+@pl.jit
+def tile_rsqrt_high_precision(
+    a: pl.Tensor[[M, N], pl.FP32],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    out = tile_rsqrt_high_precision_kernel(a, out)
+    return out
 
 
 class TileRsqrtHighPrecisionTest(PTOTestCase):
@@ -153,7 +141,7 @@ class TileRsqrtHighPrecisionTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TileRsqrtHighPrecisionProgram
+        return tile_rsqrt_high_precision.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["out"][:] = torch.rsqrt(tensors["a"])
@@ -164,23 +152,18 @@ class TileRsqrtHighPrecisionTest(PTOTestCase):
 # ---------------------------------------------------------------------------
 
 
-@pl.program
-class TensorRsqrtProgram:
-    """Tensor-level rsqrt using the basic form (compiler lowers to 1-operand pto.trsqrt)."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        x: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
-        ):
-            y = pl.rsqrt(x)
-            out = pl.assemble(out, y, [0, 0])
-        return out
+@pl.jit
+def tensor_rsqrt(
+    x: pl.Tensor[[M, N], pl.FP32],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+    ):
+        y = pl.rsqrt(x)
+        out = pl.assemble(out, y, [0, 0])
+    return out
 
 
 class TensorRsqrtTest(PTOTestCase):
@@ -201,7 +184,7 @@ class TensorRsqrtTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TensorRsqrtProgram
+        return tensor_rsqrt.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["out"][:] = torch.rsqrt(tensors["x"])
@@ -212,23 +195,18 @@ class TensorRsqrtTest(PTOTestCase):
 # ---------------------------------------------------------------------------
 
 
-@pl.program
-class TensorRsqrtHighPrecisionProgram:
-    """Tensor-level rsqrt with high_precision=True (compiler inserts the scratch tile)."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        x: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
-        ):
-            y = pl.rsqrt(x, high_precision=True)
-            out = pl.assemble(out, y, [0, 0])
-        return out
+@pl.jit
+def tensor_rsqrt_high_precision(
+    x: pl.Tensor[[M, N], pl.FP32],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+    ):
+        y = pl.rsqrt(x, high_precision=True)
+        out = pl.assemble(out, y, [0, 0])
+    return out
 
 
 class TensorRsqrtHighPrecisionTest(PTOTestCase):
@@ -249,7 +227,7 @@ class TensorRsqrtHighPrecisionTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TensorRsqrtHighPrecisionProgram
+        return tensor_rsqrt_high_precision.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["out"][:] = torch.rsqrt(tensors["x"])
@@ -297,7 +275,7 @@ def _a5_tensor_rsqrt_precision(
 
 
 @pl.jit.incore
-def _a5_tile_rsqrt_precision(
+def _a5_tile_rsqrt_precision_kernel(
     x: pl.Tensor[[M, N], pl.FP32],
     precise: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     default: pl.Out[pl.Tensor[[M, N], pl.FP32]],
@@ -307,6 +285,17 @@ def _a5_tile_rsqrt_precision(
     precise = pl.store(pl.tile.rsqrt(a, tmp=tmp), [0, 0], precise)
     default = pl.store(pl.tile.rsqrt(a), [0, 0], default)
     return precise, default
+
+
+# The harness compiles a complete program: InCore supplies the device kernel,
+# while this entry generates the orchestration that submits it.
+@pl.jit
+def _a5_tile_rsqrt_precision(
+    x: pl.Tensor[[M, N], pl.FP32],
+    precise: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    default: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+    return _a5_tile_rsqrt_precision_kernel(x, precise, default)
 
 
 def _a5_rounding_inputs() -> torch.Tensor:

@@ -50,7 +50,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | Exponential, natural logarithm. For `log`, `high_precision=True` selects the slower, higher-precision PTO path on A5; on A2/A3 PTO-ISA ignores it and returns the default result, which compilation warns about |
-| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `high_precision=` is tensor-only and **raises** on a Tile — at tile level precision is selected by passing the scratch tile to `pl.tile.rsqrt(src, tmp)`. A5 also emits an explicit `RsqrtAlgorithm::HIGH_PRECISION` selector; scratch alone does not select its high-precision algorithm. |
+| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `high_precision=` is tensor-only and **raises** on a Tile — at tile level precision is selected by passing the scratch tile to `pl.tile.rsqrt(src, tmp)`. On A5, PyPTO emits the required `RsqrtAlgorithm::HIGH_PRECISION` selector for this call; the PTO-ISA scratch overload alone does not select that algorithm. |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | Trigonometric |
 
 ## Comparison and selection
