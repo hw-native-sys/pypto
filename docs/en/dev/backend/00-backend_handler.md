@@ -199,3 +199,20 @@ handler.get_extra_ptoas_flags()           # list[str]
 The runtime layer (`pypto.runtime.runner`, `pypto.ir.compiled_program`,
 `pypto.backend.pto_backend`) consumes these accessors instead of branching on
 `BackendType`, mirroring the C++ refactor.
+
+## Direct cast rules
+
+`GetTcvtAdjacency()` contains `TcvtRule` entries with source/destination dtypes
+and alternative `TcvtConditions`. `IsDirectCast(call, info)` performs the shared
+logical-shape, validity and mode checks, then evaluates that edge's layout,
+static-extent, stride, offset, alignment and hardware-limit conditions. Python
+exposes the boolean query as `handler.is_direct_cast(call)`. Requery after any
+geometry-changing transformation; the result is not a cached dtype fact.
+
+The successful rule also selects descriptor preparation and whether layout
+repair must preserve the current layout. Dense DN and direct packed-FP4-to-FP8
+conversions are table entries, not predicates maintained by individual passes.
+Ordinary unconstrained edges retain the existing backend layout-repair pipeline.
+Scratch synthesis and post-allocation address-overlap checks remain separate
+because they need planning information unavailable to a pure native-rule query.
+BFS validates the inferred IR of each candidate hop through the same query.

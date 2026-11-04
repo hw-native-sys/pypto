@@ -19,6 +19,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -35,7 +36,6 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
-#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -124,7 +124,10 @@ CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, Ti
 }
 
 bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
-  if (IsDensePackedFp4DnCast(call)) return false;
+  backend::DirectCastInfo cast_info;
+  if (backend::GetBackend()->GetHandler()->IsDirectCast(call, &cast_info) && cast_info.preserve_layout) {
+    return false;
+  }
   for (size_t i = 0; i < spec.input_layouts.size() && i < call->args_.size(); ++i) {
     const auto& required_layout = spec.input_layouts[i];
     if (!RequiresRowMajor(required_layout)) {
@@ -147,7 +150,10 @@ bool NeedsOutputRepair(const TileTypePtr& result_tile_type, const backend::Backe
 
 bool NeedsRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
                  const backend::BackendTileLayoutSpec& spec) {
-  if (IsDensePackedFp4DnCast(call)) return false;
+  backend::DirectCastInfo cast_info;
+  if (backend::GetBackend()->GetHandler()->IsDirectCast(call, &cast_info) && cast_info.preserve_layout) {
+    return false;
+  }
   return NeedsInputRepair(call, spec) || NeedsOutputRepair(result_tile_type, spec);
 }
 

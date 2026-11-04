@@ -35,6 +35,7 @@
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
@@ -144,6 +145,12 @@ void BindBackend(nb::module_& m) {
   // Per-backend behaviour dispatch. Passes / codegen / Python all consume this
   // interface rather than branching on BackendType.
   nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
+      .def(
+          "is_direct_cast",
+          [](const BackendHandler& handler, const pypto::ir::CallPtr& call) {
+            return handler.IsDirectCast(call);
+          },
+          nb::arg("call"), "Check native cast dtype, shape and layout conditions on the current IR")
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
       .def("has_hardware_loop_evidence", &BackendHandler::HasHardwareLoopEvidence, nb::arg("qualification"),

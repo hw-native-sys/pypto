@@ -75,7 +75,7 @@ const TcvtAdjacency& Ascend910BHandler::GetTcvtAdjacency() const {
     TcvtAdjacency t;
     auto add = [&t](DataType from, std::initializer_list<DataType> tos) {
       for (DataType to : tos) {
-        t.edges.emplace_back(from, to);
+        t.edges.push_back({from, to, {}});
       }
     };
     add(DataType::FP32, {DataType::FP16, DataType::BF16, DataType::INT16, DataType::INT32, DataType::INT64});

@@ -11,7 +11,10 @@
 
 #include "pypto/backend/950/backend_950_handler.h"
 
+#include <cstdint>
 #include <initializer_list>
+#include <limits>
+#include <utility>
 
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_handler.h"
@@ -82,7 +85,44 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     TcvtAdjacency t;
     auto add = [&t](DataType from, std::initializer_list<DataType> tos) {
       for (DataType to : tos) {
-        t.edges.emplace_back(from, to);
+        TcvtRule rule{from, to, {}};
+        if (from.IsPackedFp4() || to.IsPackedFp4()) {
+          TcvtConditions nd;
+          nd.layout = ir::TileLayout::row_major;
+          nd.unboxed = true;
+          TcvtConditions dn = nd;
+          dn.layout = ir::TileLayout::col_major;
+          dn.static_shape = true;
+          dn.full_valid = true;
+          dn.dense_stride = true;
+          dn.zero_start_offset = true;
+          dn.preserve_layout = true;
+          dn.descriptor = CastDescriptor::StaticPlannedAddress;
+          rule.alternatives = {nd, dn};
+        }
+        if (from == DataType::FP4E2M1X2 && to == DataType::FP8E4M3FN) {
+          // PTOAS v0.72 direct packed decode: ND only for this frontend path.
+          // All values/strides count byte carriers on the packed side.
+          TcvtConditions direct;
+          direct.layout = ir::TileLayout::row_major;
+          direct.unboxed = true;
+          direct.null_compact = true;
+          direct.static_shape = true;
+          direct.static_valid = true;
+          direct.dense_stride = true;
+          direct.zero_start_offset = true;
+          direct.vec_only = true;
+          direct.allow_empty_replay = true;
+          direct.source_col_alignment = 32;
+          direct.max_rows = std::numeric_limits<uint16_t>::max();
+          direct.max_columns = std::numeric_limits<int32_t>::max();
+          direct.max_byte_span = std::numeric_limits<int32_t>::max();
+          direct.source_register_bytes = 256;
+          direct.max_source_registers = std::numeric_limits<uint16_t>::max();
+          direct.descriptor = CastDescriptor::StaticValidShape;
+          rule.alternatives = {direct};
+        }
+        t.edges.push_back(std::move(rule));
       }
     };
     add(DataType::FP32, {DataType::FP16, DataType::BF16, DataType::INT16, DataType::INT32, DataType::INT64});

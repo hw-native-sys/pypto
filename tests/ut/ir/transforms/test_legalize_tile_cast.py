@@ -1058,5 +1058,22 @@ def test_native_direct_cast_empty_replay_is_not_expanded():
         _run(before, BackendType.Ascend910)
 
 
+def test_native_conditional_edge_is_not_a_lossy_bf16_to_fp8_shortcut():
+    """Both BF16->FP4 and FP4->FP8 can be native, but their composition loses values."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, source: pl.Tensor[[16, 64], pl.BF16], output: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]]
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            value = pl.load(source, [0, 0], [16, 64])
+            result = pl.cast(value, pl.FP8E4M3FN)
+            return pl.store(result, [0, 0], output)
+
+    after = _run(Before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -191,3 +191,15 @@ scratch；`Unknown` 表示缺少查询所需信息；`Unsupported` 表示候选�
 合成规格与显式操作数保持区分：调用者提供的 scratch 原样传递，包括 A5 接受的其他
 dtype 占位空间。本次迁移保留既有编译器检查，不增加 scratch 精确几何校验，不改变
 PTOAS 校验。生命周期和复用决策仍由现有内存分配与 IR workspace/alias 元数据处理。
+
+## 直接转换规则
+
+`GetTcvtAdjacency()` 保存 `TcvtRule`：源/目标 dtype 及备选 `TcvtConditions`。
+`IsDirectCast(call, info)` 先统一检查逻辑 shape、有效范围与模式，再检查对应边的布局、
+静态尺寸、步长、偏移、对齐及硬件范围约束。Python 布尔接口为
+`handler.is_direct_cast(call)`。几何变化后须重新查询，结果不能作为仅由 dtype 决定的缓存。
+
+命中的规则还指定描述符准备方式及是否保留当前布局。连续 DN 与直接 FP4→FP8
+均由规则表表达，各 pass 不再维护单独 predicate。普通无额外条件的边沿用既有后端布局修正。
+Scratch 合成和分配后的地址重叠检查仍由原流程负责，它们依赖纯规则查询时尚不存在的
+内存规划信息。BFS 为每个候选 hop 推导 IR 类型，并调用同一个查询。

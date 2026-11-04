@@ -6,11 +6,11 @@
 
 `LegalizeTileCast` 是函数级 Pass。对每条 `var = tile.cast(...)`：
 
-1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换表（转录自 pto-isa `tcvt`
+1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换规则表（转录自 pto-isa `tcvt`
    Supported Conversions）。本 Pass 自身不含任何架构知识，新增后端只需提供自己的表，
    无需改动此处；未配置 backend 时本 Pass 不做任何事。
-2. 已原生：原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
-3. 非原生：在邻接图上 BFS 求最短路径；等长路径优先「同字节转浮点 → 再调宽度」。
+2. 调用 `BackendHandler::IsDirectCast(call)`，检查当前类型、逻辑尺寸及规则中的实现条件；支持则原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
+3. 否则在邻接图上 BFS 求最短路径。每个候选 hop 均推导自己的类型并调用同一个 `IsDirectCast`，排除几何不合法的边；等长路径优先「同字节转浮点 → 再调宽度」。
 
 典型结果（A5）：
 
@@ -144,7 +144,7 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 
 其他行中的 `fp4` 代表任一打包格式。E2M1x2→E4M3FN 直接边仅在无分块行主序 ND Vec
 二维几何满足约束且有效行列数为静态时选用，
-不作为其他转换链的中间步骤。否则该类型对保留三步回退链及警告；成功选择直接转换时
+作为中间步骤时同样逐 hop 检查后端规则。条件不满足时保留三步回退链及警告；成功选择直接转换时
 不发出慢链警告。详见 [FP4 约束](../fp4.md#数值转换限制)。
 
 ### Ascend910 (a2a3)

@@ -6,12 +6,12 @@ Expands `tile.cast` `(src, dst)` pairs that the active `pto.tcvt` profile cannot
 
 For each `var = tile.cast(...)`:
 
-1. Ask the active `BackendHandler` for its native-conversion table via `GetTcvtAdjacency()`
+1. Ask the active `BackendHandler` for its native-conversion rules via `GetTcvtAdjacency()`
    (transcribed from pto-isa `tcvt` Supported Conversions). The pass holds no per-architecture
    knowledge of its own, so a new backend ships its own table and needs no change here.
    With no backend configured the pass is a no-op.
-2. Already native: leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
-3. Non-native: BFS for a shortest path; among equal-length paths prefer "same byte-width → float, then adjust width".
+2. Query `BackendHandler::IsDirectCast(call)` for the current dtype, logical extents, and registered implementation conditions. If supported, leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
+3. Otherwise, BFS for a shortest path. Each candidate hop gets its own inferred type and calls the same `IsDirectCast` query; invalid geometry is excluded. Among equal-length paths prefer "same byte-width → float, then adjust width".
 
 Typical A5 results: `INT32→FP16` → `INT32→FP32→FP16`; `FP16→BF16` → `FP16→FP32→BF16`.
 
@@ -169,7 +169,8 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 
 The `fp4` shorthand in the other rows denotes either packed format. The
 E2M1x2→E4M3FN direct edge is selected only for compatible unboxed row-major
-2D ND Vec geometry with static valid rows and columns. It is not used as an intermediate in other cast chains. Otherwise
+2D ND Vec geometry with static valid rows and columns. Every candidate use,
+including an intermediate hop, is checked against the same backend rule. Otherwise
 this pair retains its three-hop fallback and warning; successful direct casts
 emit no slow-chain warning. See [FP4 constraints](../fp4.md#numerical-cast-constraints).
 
