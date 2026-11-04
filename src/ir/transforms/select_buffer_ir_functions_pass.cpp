@@ -228,7 +228,7 @@ class BufferKernelSupport : public IRVisitor {
 
   void VisitStmt_(const EvalStmtPtr& eval) override {
     if (auto call = As<Call>(eval->expr_); call && IsOp(call, "tile.set_validshape")) {
-      // Metadata version tracking and lowering require an explicit SSA result.
+      // Conversion needs an explicit SSA result carrying the new logical valid shape.
       supported = false;
       return;
     }
@@ -285,6 +285,7 @@ class BufferKernelSupport : public IRVisitor {
     for (size_t i = 0; supported && i < yield->value_.size(); ++i) {
       CheckRegionType(region_->results[i]->GetType());
       VisitExpr(yield->value_[i]);
+      CheckRegionValid(yield->value_[i]->GetType(), region_->results[i]->GetType());
       // A region result cannot export a branch-local window handle. Window
       // carries require scalar metadata and explicit reconstruction first.
       supported &= !views_.IsWindow(yield->value_[i]);
@@ -334,8 +335,14 @@ class BufferKernelSupport : public IRVisitor {
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
                    !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
     } else if (IsOp(call, "tile.set_validshape")) {
-      supported &= call->args_.size() == 3 && call->kwargs_.empty() && !views_.IsWindow(call->args_[0]) &&
+      supported &= call->args_.size() == 3 && call->kwargs_.empty() &&
                    As<TileType>(call->GetType())->GetMemorySpace() == MemorySpace::Vec;
+      if (supported) {
+        const auto source = views_.Get(call->args_[0]);
+        // A setter reconstructs the original slice. Relabelled windows have no
+        // such coordinate recipe and need a separate typed-parent conversion.
+        supported &= !source.window || (source.root && source.slice);
+      }
     } else if (IsOp(call, "tile.slice") || IsOp(call, "tile.assemble")) {
       CheckWindowCall(call);
     } else if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) {
@@ -559,6 +566,16 @@ class BufferKernelSupport : public IRVisitor {
     CheckType(type);
   }
 
+  void CheckRegionValid(const TypePtr& source, const TypePtr& destination) {
+    const auto from = As<TileType>(source);
+    const auto to = As<TileType>(destination);
+    if (!from || !to || !(NeedsRuntimeBufferValid(from) || NeedsRuntimeBufferValid(to))) return;
+    // Canonical storage carries bytes, not a choice of valid expressions.
+    // Changing valid state must be carried explicitly as scalar SSA and used
+    // to reconstruct a view; silently inheriting either arm's metadata is wrong.
+    supported &= SameShape(ValidShape(from), ValidShape(to));
+  }
+
   struct Region {
     explicit Region(const std::vector<VarPtr>& results) : results(results), aliases(results.size()) {}
     const std::vector<VarPtr>& results;
@@ -605,6 +622,8 @@ class BufferKernelSupport : public IRVisitor {
       CheckRegionType(argument->GetType());
       CheckRegionType(loop->return_vars_[i]->GetType());
       VisitExpr(argument->initValue_);
+      CheckRegionValid(argument->initValue_->GetType(), argument->GetType());
+      CheckRegionValid(argument->GetType(), loop->return_vars_[i]->GetType());
       supported &= !views_.IsWindow(argument->initValue_);
       if (NeedsStableAlias(argument->GetType())) {
         const auto alias = StableAlias(argument->initValue_);

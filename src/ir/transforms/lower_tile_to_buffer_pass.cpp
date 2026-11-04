@@ -231,7 +231,10 @@ class StorageIndex : public IRVisitor {
     auto source = AsVarLike(value);
     if (auto call = As<Call>(value)) {
       if (IsOp(call, "tile.slice")) return true;
-      if (!IsOp(call, "tile.reshape") && !IsOp(call, "tile.reinterpret_view")) return false;
+      if (!IsOp(call, "tile.reshape") && !IsOp(call, "tile.reinterpret_view") &&
+          !IsOp(call, "tile.set_validshape")) {
+        return false;
+      }
       source = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
     }
     auto tile = source ? As<TileType>(source->GetType()) : nullptr;
@@ -692,6 +695,10 @@ class TileToBufferMutator : public IRMutator {
     if (As<TileType>(assign->var_->GetType())) {
       auto source = AsVarLike(assign->value_);
       if (source) {
+        const auto recipe = window_recipes_.find(As<TileType>(source->GetType()).get());
+        if (recipe != window_recipes_.end()) {
+          window_recipes_[As<TileType>(assign->var_->GetType()).get()] = recipe->second;
+        }
         const auto deferred = deferred_windows_.find(As<TileType>(source->GetType()).get());
         if (deferred != deferred_windows_.end()) {
           deferred_windows_[As<TileType>(assign->var_->GetType()).get()] = deferred->second;
@@ -872,8 +879,8 @@ class TileToBufferMutator : public IRMutator {
     return found->second;
   }
 
-  // The Tile's own valid extents: constants for a static descriptor, the
-  // runtime expressions otherwise. They equal the handle's current metadata.
+  // The logical Tile's valid extents, independent of the shared handle's
+  // current metadata. Data consumers restore this state before using its bytes.
   MakeTuplePtr Valid(const ExprPtr& tile) {
     const auto type = As<TileType>(tile->GetType());
     INTERNAL_CHECK_SPAN(type, tile->span_) << "Internal error: valid extents require a Tile operand";
@@ -891,19 +898,51 @@ class TileToBufferMutator : public IRMutator {
 
   StmtPtr LowerDefinition(const CallPtr& call, const VarPtr& result) {
     if (!guarded_valid_) return WithValidState(call, result, LowerCall(call, result));
-    if (result && IsOp(call, "tile.slice") && NeedsRuntimeBufferValid(result->GetType())) {
-      // Remember immutable scalar operands, not a branch-local Buffer handle.
-      // Empty windows are never constructed, even speculatively before a guard.
-      deferred_windows_[As<TileType>(result->GetType()).get()] = {call, result};
+    const auto result_type = result ? As<TileType>(result->GetType()) : nullptr;
+    if (result && IsOp(call, "tile.slice")) {
+      window_recipes_[result_type.get()] = call;
+      if (NeedsRuntimeBufferValid(result_type)) {
+        // Keep scalar operands, never a handle that could escape its guard.
+        deferred_windows_[result_type.get()] = {call, result};
+        return Empty(call->span_);
+      }
+    }
+    if (result && IsOp(call, "tile.set_validshape") && storage_.windows.count(result_type.get())) {
+      const auto source_type = As<TileType>(call->args_[0]->GetType());
+      const auto recipe = window_recipes_.find(source_type.get());
+      CHECK_SPAN(recipe != window_recipes_.end(), call->span_)
+          << "LowerTileToBuffer: window setter requires an unrelabelled slice source";
+      // Rebuild from the original parent and offsets, not from the narrowed
+      // view. Widening valid metadata must not accumulate its offset twice.
+      const auto original_slice = recipe->second;
+      window_recipes_[result_type.get()] = original_slice;
+      if (!NeedsRuntimeBufferValid(result_type)) {
+        // Static windows must also dominate slice, relabel and assemble uses.
+        return LowerCall(original_slice, result);
+      }
+      deferred_windows_[result_type.get()] = {original_slice, result};
       return Empty(call->span_);
     }
     const bool store = IsOp(call, "tile.store");
-    const bool data_operation =
-        store || IsOp(call, "tile.load") || backend::FindLogicalBufferElementwiseRecipe(call->op_->name_);
-    ExprPtr value = store ? call->args_[0] : ExprPtr(result);
-    if (!data_operation || !value || !NeedsRuntimeBufferValid(value->GetType())) {
+    const bool data_operation = store || IsOp(call, "tile.load") || IsOp(call, "tile.move") ||
+                                backend::FindLogicalBufferElementwiseRecipe(call->op_->name_);
+    if (!data_operation || (!store && !result)) {
       return WithValidState(call, result, LowerCall(call, result));
     }
+
+    // Restore metadata at every data use, including statically valid old aliases
+    // sharing a dynamic allocation. There is deliberately no cross-region cache:
+    // a branch or loop may have left that allocation in a different state.
+    std::vector<StmtPtr> states;
+    for (const auto& arg : call->args_) {
+      const auto tile = As<TileType>(arg->GetType());
+      if (!tile || storage_.windows.count(tile.get())) continue;
+      const auto handle = Handle(arg);
+      if (HasDynamicValid(As<BufferType>(handle->GetType()))) {
+        states.push_back(Operation("buffer.set_validshape", {handle, Valid(arg)}, call->span_));
+      }
+    }
+    ExprPtr value = store ? call->args_[0] : ExprPtr(result);
     const auto valid = Valid(value);
     ExprPtr condition;
     bool empty = false;
@@ -916,20 +955,23 @@ class TileToBufferMutator : public IRMutator {
       }
     }
     if (store && result) tensor_aliases_[result.get()] = VisitExpr(call->args_[2]);
-    if (empty) return WithValidState(call, result, Empty(call->span_));
-    use_windows_.clear();
-    use_definitions_.clear();
-    auto body = LowerCall(call, result);
-    if (!use_definitions_.empty()) {
-      use_definitions_.push_back(body);
-      body = std::make_shared<SeqStmts>(use_definitions_, call->span_);
+    StmtPtr body = Empty(call->span_);
+    if (!empty) {
+      use_windows_.clear();
+      use_definitions_.clear();
+      body = LowerCall(call, result);
+      if (!use_definitions_.empty()) {
+        use_definitions_.push_back(body);
+        body = std::make_shared<SeqStmts>(use_definitions_, call->span_);
+      }
+      if (condition) {
+        body = std::make_shared<IfStmt>(condition, body, std::nullopt, std::vector<VarPtr>{}, call->span_);
+      }
     }
-    if (condition) {
-      body = std::make_shared<IfStmt>(condition, body, std::nullopt, std::vector<VarPtr>{}, call->span_);
-    }
-    // Destination state must also be established on the empty path. The
-    // selector proves that setting it cannot invalidate a live input version.
-    return WithValidState(call, result, body);
+    // Matching-valid elementwise recipes permit in-place input/output handles.
+    // Establish output state even on an empty path, without touching its bytes.
+    states.push_back(WithValidState(call, result, body));
+    return std::make_shared<SeqStmts>(states, call->span_);
   }
 
   // A definition of a dynamic handle first states the valid extents it
@@ -1321,6 +1363,7 @@ class TileToBufferMutator : public IRMutator {
 
   const StorageIndex& storage_;
   bool guarded_valid_;
+  std::unordered_map<const TileType*, CallPtr> window_recipes_;
   std::unordered_map<const TileType*, std::pair<CallPtr, VarPtr>> deferred_windows_;
   std::unordered_map<const TileType*, VarPtr> use_windows_;
   std::vector<StmtPtr> use_definitions_;
