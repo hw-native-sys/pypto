@@ -7,13 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 runtime tests for host-prequantized MX matmul.
+"""A5 runtime tests for MXFP8 and native packed-FP4 matmul and accumulation.
 
-Native packed-FP4 matmul is intentionally outside the supported surface. The
-FP4×FP8 case uses packed FP4E2M1X2 carrier dimensions and explicitly casts its
-lhs to FP8E4M3FN before validating both
-``matmul_mx`` and ``matmul_mx_acc`` against an FP32 torch golden. A homogeneous
-MXFP8 case remains as the instruction baseline.
+The mixed FP4×FP8 case explicitly casts FP4 to FP8. Native FP4 cases retain
+both packed formats through GM loading, L0 placement, and MX instructions.
 """
 
 from typing import Any
@@ -21,6 +18,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
@@ -290,6 +288,97 @@ class TestMatmulMx:
         case = MatmulMxTestCase(lhs_dtype, rhs_dtype)
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
+
+
+def _native_fp4_entry(lhs_dtype, rhs_dtype):
+    @pl.jit(auto_scope=False)
+    def entry(
+        a: pl.Tensor[[M, K // 2], pl.UINT8],
+        a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[N, K // 2], pl.UINT8],
+        b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ):
+        a_fp4 = pl.reinterpret_view(a, lhs_dtype)
+        b_fp4 = pl.reinterpret_view(b, rhs_dtype)
+        with pl.spmd(1):
+            row = pl.tile.get_block_idx() * M
+            lhs_mat = pl.tile.load(a_fp4, [row, 0], [M, K // 2], target_memory=pl.MemorySpace.Mat)
+            rhs_nk = pl.tile.load(b_fp4, [0, 0], [N, K // 2], target_memory=pl.MemorySpace.Mat)
+            # Transpose the logical matrix without transposing packed bytes.
+            rhs_mat = pl.tile.transpose_view(rhs_nk)
+            lhs = pl.tile.move(lhs_mat, pl.MemorySpace.Left)
+            rhs = pl.tile.move(rhs_mat, pl.MemorySpace.Right)
+            sa = pl.tile.load(a_scale, [row, 0], [M, K // 32], target_memory=pl.MemorySpace.Mat)
+            sb = pl.tile.load(b_scale, [0, 0], [K // 32, N], target_memory=pl.MemorySpace.Mat)
+            sa_l0 = pl.tile.move(sa, pl.MemorySpace.LeftScale)
+            sb_l0 = pl.tile.move(sb, pl.MemorySpace.RightScale)
+            base = pl.matmul_mx(lhs, sa_l0, rhs, sb_l0)
+            pl.tile.store(base, [row, 0], out)
+            acc = pl.matmul_mx_acc(base, lhs, sa_l0, rhs, sb_l0)
+            pl.tile.store(acc, [row, 0], out_acc)
+        return out, out_acc
+
+    return entry
+
+
+def _native_fp4_specs():
+    gen = torch.Generator().manual_seed(71)
+    a = MatmulMxTestCase._make_fp4_data((M, K), gen).view(torch.uint8)
+    b = MatmulMxTestCase._make_fp4_data((N, K), gen).view(torch.uint8)
+    sa = _pack_a_scale(torch.randint(123, 130, (M, K // 32), generator=gen).to(torch.uint8))
+    sb = _pack_b_scale(torch.randint(123, 130, (K // 32, N), generator=gen).to(torch.uint8))
+    return [
+        TensorSpec("a", [M, K // 2], DataType.UINT8, init_value=a),
+        TensorSpec("a_scale", [M, K // 32], DataType.FP8E8M0, init_value=sa.view(torch.float8_e8m0fnu)),
+        TensorSpec("b", [N, K // 2], DataType.UINT8, init_value=b),
+        TensorSpec("b_scale", [K // 32, N], DataType.FP8E8M0, init_value=sb.view(torch.float8_e8m0fnu)),
+        TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        TensorSpec("out_acc", [M, N], DataType.FP32, is_output=True),
+    ]
+
+
+def _native_fp4_golden(lhs_dtype, rhs_dtype):
+    def decode(data, dtype):
+        raw = data.view(torch.uint8)
+        codes = torch.stack((raw & 15, raw >> 4), dim=-1).flatten(-2).long()
+        levels = (
+            [0, 0.5, 1, 1.5, 2, 3, 4, 6]
+            if dtype == pl.fp4e2m1x2
+            else [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75]
+        )
+        values = torch.tensor(levels + [-v for v in levels], dtype=torch.float64)
+        return values[codes]
+
+    def golden(tensors):
+        a = decode(tensors["a"], lhs_dtype)
+        b = decode(tensors["b"], rhs_dtype).T
+        sa = _unpack_a_scale(tensors["a_scale"].view(torch.uint8))
+        sb = _unpack_b_scale(tensors["b_scale"].view(torch.uint8))
+        base = _matmul_mx_golden(a, sa, b, sb)
+        return {"out": base, "out_acc": 2 * base}
+
+    return golden
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _native_fp4_entry(lhs, rhs),
+            tensors=_native_fp4_specs(),
+            name=f"native_mx_{lhs}_{rhs}",
+            golden=_native_fp4_golden(lhs, rhs),
+            rtol=0.0,
+            atol=0.0,
+        )
+        for lhs in (pl.fp4e2m1x2, pl.fp4e1m2x2)
+        for rhs in (pl.fp4e2m1x2, pl.fp4e1m2x2)
+    ]
+)
+def test_native_fp4_matmul_mx(case_run):
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

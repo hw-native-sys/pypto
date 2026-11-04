@@ -232,16 +232,47 @@ class TestMatmulMxTypes:
             ir.op.tile.matmul_mx(lhs, scale, rhs, scale, span)
 
     @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-    def test_rejects_native_mxfp4_and_requires_cast(self, dtype):
+    @pytest.mark.parametrize("resident", [False, True])
+    def test_native_mxfp4_uses_logical_geometry(self, dtype, resident):
         span = ir.Span.unknown()
-        fp4_operands = self._mx_operands(span, n=64, dtype=dtype)
-        with pytest.raises(ValueError, match=r"requires lhs dtype FP8E4M3FN.*PTOAS v0.67.*pl.cast"):
-            ir.op.tile.matmul_mx(*fp4_operands, span)
+        # ND A and DN B pack K; L0A/L0B instead pack M/N. Both describe
+        # the same logical [32,128] x [128,64], with a [24,48] valid result.
+        lhs_view = ir.TileView(
+            blayout=ir.TileLayout.col_major if resident else ir.TileLayout.row_major,
+            valid_shape=[12, 128] if resident else [24, 64],
+        )
+        rhs_view = ir.TileView(
+            blayout=ir.TileLayout.row_major if resident else ir.TileLayout.col_major,
+            valid_shape=[128, 24] if resident else [64, 48],
+        )
+        lhs = ir.Var("a", ir.TileType([16, 128] if resident else [32, 64], dtype, tile_view=lhs_view), span)
+        rhs = ir.Var("b", ir.TileType([128, 32] if resident else [64, 64], dtype, tile_view=rhs_view), span)
+        sa = _tile("sa", [32, 4], DataType.FP8E8M0, valid_shape=[24, 4])
+        sb = _tile("sb", [4, 64], DataType.FP8E8M0, valid_shape=[4, 48])
+        operands = (lhs, sa, rhs, sb)
+        call = ir.op.tile.matmul_mx(*operands, span)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.tile_view is not None
+        assert [d.value for d in call.type.shape if isinstance(d, ir.ConstInt)] == [32, 64]
+        assert [d.value for d in call.type.tile_view.valid_shape if isinstance(d, ir.ConstInt)] == [24, 48]
+        acc = ir.Var("acc", call.type, span)
+        bias = _tile("bias", [1, 64], DataType.FP32, valid_shape=[1, 48])
+        accumulated = ir.op.tile.matmul_mx_acc(acc, *operands, span)
+        biased = ir.op.tile.matmul_mx_bias(*operands, bias, span)
+        assert isinstance(accumulated.type, ir.TileType)
+        assert isinstance(biased.type, ir.TileType)
+        assert accumulated.type.dtype == DataType.FP32
+        assert biased.type.dtype == DataType.FP32
+        with pytest.raises(ValueError, match="lhs_scale physical rows"):
+            ir.op.tile.matmul_mx(lhs, _tile("raw_scale", [16, 4], DataType.FP8E8M0), rhs, sb, span)
 
-        lhs, lhs_scale, _, _ = self._mx_operands(span, n=64)
-        _, _, rhs_fp4, rhs_scale = self._mx_operands(span, n=64, dtype=dtype)
-        with pytest.raises(ValueError, match=r"requires rhs dtype FP8E4M3FN.*PTOAS v0.67.*pl.cast"):
-            ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp4, rhs_scale, span)
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    def test_rejects_mixed_fp4_fp8(self, dtype):
+        span = ir.Span.unknown()
+        lhs, lhs_scale, _, rhs_scale = self._mx_operands(span, n=64)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], dtype), span)
+        with pytest.raises(ValueError, match="mixed FP4 and FP8"):
+            ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
 
     def test_rejects_wrong_dtypes_and_alignment(self):
         span = ir.Span.unknown()
@@ -420,8 +451,12 @@ class TestTGetScaleAddr:
         assert call_type.memory_space == ir.MemorySpace.RightScale
 
         fp4_src = _tile("fp4_rb", [64, 32], DataType.FP4E2M1X2, memory=ir.MemorySpace.Right)
-        with pytest.raises(ValueError, match="requires src dtype FP8E4M3FN"):
+        with pytest.raises(ValueError, match="dst_scale physical cols=64"):
             ir.op.tile.tget_scale_addr(dst, fp4_src, span)
+        fp4_scale = _tile("fp4_scale", [2, 64], DataType.FP8E8M0, memory=ir.MemorySpace.RightScale)
+        fp4_bound = ir.op.tile.tget_scale_addr(fp4_scale, fp4_src, span)
+        assert isinstance(fp4_bound.type, ir.TileType)
+        assert fp4_bound.type.memory_space == ir.MemorySpace.RightScale
 
         with pytest.raises(ValueError, match="LeftScale↔Left|RightScale↔Right"):
             ir.op.tile.tget_scale_addr(

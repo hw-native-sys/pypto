@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Codegen smoke tests for MXFP8 matmul and explicit FP4-to-FP8 legalization."""
+"""Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
 import pypto.language as pl
 import pytest
@@ -47,6 +47,41 @@ def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
 
 
 class TestMxMatmulCodegen:
+    @pytest.mark.parametrize("dtype, token", [(pl.FP4E2M1X2, "f4E2M1x2"), (pl.FP4E1M2X2, "f4E1M2x2")])
+    def test_native_fp4_matmul_keeps_packed_operands(self, dtype, token):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 64], dtype],
+                sa: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 64], dtype],
+                sb: pl.Tensor[[4, 64], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[32, 64], pl.FP32],
+            ):
+                a_mat = pl.load(a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat)
+                b_mat = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                lhs = pl.move(a_mat, pl.MemorySpace.Left)
+                rhs = pl.move(pl.tile.transpose_view(b_mat), pl.MemorySpace.Right)
+                lhs_scale = pl.move(
+                    pl.load(sa, [0, 0], [32, 4], target_memory=pl.MemorySpace.Mat), pl.MemorySpace.LeftScale
+                )
+                rhs_scale = pl.move(
+                    pl.load(sb, [0, 0], [4, 64], target_memory=pl.MemorySpace.Mat), pl.MemorySpace.RightScale
+                )
+                base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                result = pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale)
+                pl.store(result, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tcvt" not in mlir
+        assert f"loc=left, dtype=!pto.{token}, rows=16, cols=128" in mlir
+        assert f"loc=right, dtype=!pto.{token}, rows=128, cols=32" in mlir
+        assert "loc=acc, dtype=f32, rows=32, cols=64" in mlir
+        assert "pto.tmatmul.mx.acc" in mlir
+        assert mlir.count("pto.tget_scale_addr") == 2
+
     def test_fp4_set_validshape_uses_physical_packed_extent(self):
         @pl.program
         class Program:
