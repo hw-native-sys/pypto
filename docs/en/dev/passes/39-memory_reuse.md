@@ -17,8 +17,8 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 
 **When to use**: This is the opportunistic reuse stage for
 `MemoryPlanner.PYPTO`. It runs after
-[`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) and before
-[`AllocateMemoryAddr`](38-allocate_memory_addr.md). `MemoryPlanner.DSA_RP`
+[`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md) and before
+[`AllocateMemoryAddr`](40-allocate_memory_addr.md). `MemoryPlanner.DSA_RP`
 skips it so independent buffers remain visible to the DSA-RP solver;
 `MemoryPlanner.PTOAS` skips it because ptoas owns lifetime reuse.
 Semantics-required loop-carry and in-place aliases are already materialized by
@@ -180,7 +180,7 @@ and the hardware must serialize work the scheduler could otherwise overlap.
 
 Referencing a declared `pl.MemRef("name")` in a tile annotation lets the author take an
 allocation out of the packer's hands. InitMemRef materializes it as a `tile.alloc(..., pinned=True)`
-(see [InitMemRef](35-init_memref.md#declared-allocations)), and this pass then treats it as
+(see [InitMemRef](37-init_memref.md#declared-allocations)), and this pass then treats it as
 closed: a pinned interval opens its own slot in the first-fit pack and that slot is
 skipped when placing every later candidate. (Isolation is a per-slot flag inside the
 packing loop rather than another `can_share` gate — `can_share` is the innermost step
@@ -230,7 +230,7 @@ MemoryReuse owns every buffer-coalescing decision, so it prevents the hazardous 
 
 Both classifications are keyed on `Var` identity, not on the presence of a MemRef. `InitMemRef` intentionally leaves TPOP results, their zero-copy views and plain SSA aliases without a MemRef because they use reserved pipe storage rather than the general allocation pool. The collector still recognizes these producers and follows buffer-aliasing view operations and plain aliases before classifying the consuming writer. Producing an independent value from a TPOP input does not make that output a TPOP alias.
 
-An operand takes one extra step when a value reaches the writer through a **loop carry**: an `IterArg` is never itself an `AssignStmt` def. For a carry with a MemRef, [`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) has fused the carry chain — init value, `IterArg`, yield value — onto one base, so the collector can additionally consult that base's taint. Reading operands with `AsVarLike` (never `As<Var>`, which does not match `IterArg`'s own `ObjectKind`) makes that carry visible.
+An operand takes one extra step when a value reaches the writer through a **loop carry**: an `IterArg` is never itself an `AssignStmt` def. For a carry with a MemRef, [`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md) has fused the carry chain — init value, `IterArg`, yield value — onto one base, so the collector can additionally consult that base's taint. Reading operands with `AsVarLike` (never `As<Var>`, which does not match `IterArg`'s own `ObjectKind`) makes that carry visible.
 
 A carry also breaks program order, so the collector walks the body **twice**. The producer that taints a carry's buffer may stand *after* the use it taints — `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p` reads a tpop value in `w` from iteration 1 onwards, but a single forward walk classifies `w` before it has seen `p`. A third traversal could add nothing: the base sets are complete after the first walk (a `tile.tpop_from_aic` def is order-independent, and a view shares its source's base), so only the `Var` sets grow in the second, and those propagate in program order within it. Both walks are O(N).
 

@@ -14,7 +14,7 @@ This pass performs five tasks:
 
 Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace). Variables without `memory_space` default to DDR.
 
-**Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred.
+**Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, SimtOutputsMaterialized.
 
 **Produces**: HasMemRefs, NormalizedStmtStructure.
 
@@ -84,7 +84,7 @@ relationships that the memory passes are about to analyze.
 author declared, where `<alloc>` is a `pl.MemRef("name")` referenced by variable (or the
 same one-argument form inline, which is what the printer emits). Tiles referencing the
 same allocation share it; `MemoryReuse` never packs anything else into it. This is manual reuse control — see
-[MemoryReuse](37-memory_reuse.md#declared-allocations) for why an author would want it.
+[MemoryReuse](39-memory_reuse.md#declared-allocations) for why an author would want it.
 
 **How the declaration reaches this pass.** The parser resolves a one-argument
 `pl.MemRef` to a `MemRef` whose `base_` Ptr is interned by name (so two annotations
@@ -142,7 +142,7 @@ bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
 
 A fourth rule — tiles bound to **one slot** must not be live at the same time — needs
 lifetime information and is therefore checked in
-[MemoryReuse](37-memory_reuse.md#declared-allocations). Tiles on *different* slots are
+[MemoryReuse](39-memory_reuse.md#declared-allocations). Tiles on *different* slots are
 meant to be live together; that is what a multi-slot declaration is for.
 
 ```python
@@ -328,3 +328,8 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - Tests tile.store result shares MemRef with output param
 - Tests accumulate op (matmul_acc) MemRef sharing with accumulator input
 - Tests ForStmt loop-carry MemRef relationships (initValue/iter_arg sharing, yield/return_var sharing)
+
+## SIMT storage
+
+Run `MaterializeSimtOutputs` first. Launch results share the corresponding
+writable operand's MemRef; borrowed SIMT helper parameters are not allocated.

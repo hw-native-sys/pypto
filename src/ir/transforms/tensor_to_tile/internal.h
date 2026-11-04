@@ -20,6 +20,7 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/call_shape_binding.h"
 
@@ -55,6 +56,8 @@ std::string MakeOutParamName(size_t index);
 
 // Scalar staging and access analysis share the same GM alias rules.
 StmtPtr CanonicalizeScalarUpdates(const FunctionPtr& func);
+/// Propagate SIMT GM reference updates into dispatchable kernel signatures.
+ProgramPtr PropagateSimtKernelDirections(const ProgramPtr& program);
 void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, const std::vector<VarPtr>& params,
                                          std::vector<ParamDirection>& param_directions);
 

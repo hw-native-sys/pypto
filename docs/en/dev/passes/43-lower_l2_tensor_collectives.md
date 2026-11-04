@@ -9,7 +9,7 @@ ordinary task inside the caller's own pipeline.
 
 Today it handles `pld.tensor.all_to_all_v` with a compile-time `core_num`.
 
-The HOST rail ([`LowerHostTensorCollectives`](48-lower_host_tensor_collectives.md))
+The HOST rail ([`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md))
 solves the same problem one level up, and differently: it fans the collective
 out into one `builtin.tensor.*` chip dispatch *per device*. Each such dispatch is
 a whole extra L2 orchestration task whose only job is to submit one AIV kernel,
@@ -32,15 +32,15 @@ L3 -> L2  consume task                             └── consume       (AIV 
 ```
 
 The position is load-bearing. The emitted call must reach
-[`DeriveCallDirections`](43-derive_call_directions.md) and
-[`AutoDeriveTaskDependencies`](44-auto_derive_task_dependencies.md) like any
+[`DeriveCallDirections`](45-derive_call_directions.md) and
+[`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md) like any
 other kernel call: those two passes are what turn the synthesized kernel's
 parameter directions into the TensorMap edges that order
 `compute -> collective -> consume`. Running the rewrite after them would leave
 the collective task unordered.
 
 It also runs before
-[`MaterializeDistTensorCtx`](49-materialize_dist_tensor_ctx.md), which appends
+[`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md), which appends
 the `CommCtx` arguments the kernel needs (see *ABI* below).
 
 ## Behavior
@@ -189,7 +189,7 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   expression* as `target`. It does **not** reject two distinct `pld.window()`
   views of one allocation — deduction runs when the Call is built, and
   `DistributedTensorType::window_buffer_` is not bound until
-  [`MaterializeCommDomainScopes`](47-materialize_comm_domain_scopes.md)
+  [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md)
   (pass 46). Whole-allocation distinctness is a **HOST-rail** guarantee:
   `LowerHostTensorCollectives` resolves each operand back to its `WindowBuffer`
   within the same `host_orch` body and runs `CheckPairwiseDistinctWindows` over

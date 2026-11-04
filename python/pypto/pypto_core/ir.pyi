@@ -3419,6 +3419,9 @@ class WriteChannel(enum.Enum):
     Scalar = ...
     """Scalar D-cache write path (tensor.write)."""
 
+    Simt = ...
+    """SIMT lane stores, separate from controller scalar stores and DMA."""
+
 def get_op_arg_effect(op_name: str, arg_index: int, **kwargs: Any) -> ArgEffect:
     """Effect an operator has on one positional argument.
 

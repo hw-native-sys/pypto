@@ -142,6 +142,20 @@ class LifetimeAnalyzer : public IRVisitor {
     CollectUsesFromExpr(op->expr_, order);
   }
 
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    const int order = current_order_++;
+    for (const auto& dim : op->block_dims_) CollectUsesFromExpr(dim, order);
+    for (const auto& arg : op->args_) CollectUsesFromExpr(arg, order);
+    for (const auto& result : op->results_) {
+      if (!As<TileType>(result->GetType())) continue;
+      // The seed and result share one allocation. Tracking both SSA values
+      // extends its lifetime through later consumers and loop backedges.
+      ordered_defs_.push_back(result);
+      var_def_order_[result] = order;
+      var_def_stmt_[result] = op;
+    }
+  }
+
   void VisitStmt_(const YieldStmtPtr& op) override { CollectUsesFromValues(op->value_); }
 
   void VisitStmt_(const ReturnStmtPtr& op) override { CollectUsesFromValues(op->value_); }

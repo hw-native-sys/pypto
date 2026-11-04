@@ -8,7 +8,7 @@
 
 目前支持 `pld.tensor.all_to_all_v`，且要求 `core_num` 为编译期常量。
 
-HOST 通路（[`LowerHostTensorCollectives`](48-lower_host_tensor_collectives.md)）
+HOST 通路（[`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md)）
 在上一层解决同一问题，做法不同：它把集合通信按设备扇出成**每个设备一次**
 `builtin.tensor.*` chip dispatch。每次这样的 dispatch 都是一个完整的 L2
 orchestration task，而它唯一的工作就是提交一个 AIV kernel，因此
@@ -31,12 +31,12 @@ L3 -> L2  consume task                             └── consume       (AIV 
 ```
 
 这个位置是必要条件而非偏好。改写后的调用必须像任何其他 kernel 调用一样经过
-[`DeriveCallDirections`](43-derive_call_directions.md) 和
-[`AutoDeriveTaskDependencies`](44-auto_derive_task_dependencies.md)：正是这两个
+[`DeriveCallDirections`](45-derive_call_directions.md) 和
+[`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md)：正是这两个
 pass 把合成 kernel 的参数方向转换成排序 `compute -> collective -> consume` 的
 TensorMap 依赖边。放在它们之后改写，会让该 collective task 失去顺序约束。
 
-它同样运行在 [`MaterializeDistTensorCtx`](49-materialize_dist_tensor_ctx.md)
+它同样运行在 [`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md)
 之前 —— 后者会补上 kernel 需要的 `CommCtx` 实参（见下文 *ABI*）。
 
 ## 行为
@@ -170,7 +170,7 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   向量、比 shape 更窄的 `valid_shape`，以及 `input` 与 `target` 是**同一个表达式**。
   它**不会**拒绝同一块 allocation 上的两个不同 `pld.window()` 视图 —— 类型推导在
   构造 Call 时就已运行，而 `DistributedTensorType::window_buffer_` 要到
-  [`MaterializeCommDomainScopes`](47-materialize_comm_domain_scopes.md)（pass 46）
+  [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md)（pass 46）
   才被绑定。整块 allocation 层面的互不相同是 **HOST 通路**的保证：
   `LowerHostTensorCollectives` 能在同一个 `host_orch` 函数体内把每个操作数溯源回
   其 `WindowBuffer`，并对五个操作数运行 `CheckPairwiseDistinctWindows`。本通路

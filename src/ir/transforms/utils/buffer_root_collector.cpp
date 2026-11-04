@@ -164,6 +164,17 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
   IRVisitor::VisitStmt_(assign);
 }
 
+void BufferRootCollector::VisitStmt_(const SimtLaunchStmtPtr& launch) {
+  // GM results are new dependency versions of the exact same reference. Tile
+  // results have value semantics and are materialized separately before planning.
+  for (size_t i = 0; i < launch->results_.size(); ++i) {
+    if (!AsTensorTypeLike(launch->results_[i]->GetType())) continue;
+    const auto& argument = launch->args_[launch->result_param_indices_[i]];
+    RecordRootCandidates(launch->results_[i], ResolveRootCandidates(argument), IsAmbiguous(argument));
+  }
+  IRVisitor::VisitStmt_(launch);
+}
+
 BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(const ExprPtr& expr) const {
   auto var = AsVarLike(expr);
   if (!var) return {};

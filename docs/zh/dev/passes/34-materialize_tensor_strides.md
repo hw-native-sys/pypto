@@ -21,7 +21,7 @@ PyPTO IR 上 `TensorType.tensor_view_` 当前可以处于两种等价形态：
 
 - `TensorViewCanonical` —— `PassPipeline` 在 Pass 之后自动用 registry 中的**严格模式** verifier 校验（拒绝 `view.has_value() && stride.empty()` —— 正是本 Pass 负责消除的状态）
 
-**默认 pipeline 中的位置**（自 RFC #1300 P6 起激活）：[`CanonicalizeIOOrder`](33-canonicalize_io_order.md) 与 [`InitMemRef`](35-init_memref.md) 之间。这是 codegen-prep 边界 —— 所有 layout-mutating pass（`ResolveBackendOpLayouts` / `ExpandMixedKernel` / `SplitVectorKernel`）已结束，`InitMemRef` 是第一个依赖显式 stride 的消费者。
+**默认 pipeline 中的位置**（自 RFC #1300 P6 起激活）：[`CanonicalizeIOOrder`](33-canonicalize_io_order.md) 与 [`InitMemRef`](37-init_memref.md) 之间。这是 codegen-prep 边界 —— 所有 layout-mutating pass（`ResolveBackendOpLayouts` / `ExpandMixedKernel` / `SplitVectorKernel`）已结束，`InitMemRef` 是第一个依赖显式 stride 的消费者。
 
 ## API
 
@@ -117,6 +117,6 @@ verifier 是配对复核，而不是唯一的强制点。验证本身可配置�
 ## 相关
 
 - [`CanonicalizeIOOrder`](33-canonicalize_io_order.md) —— 紧邻其前；产生本 Pass 消费的程序状态
-- [`InitMemRef`](35-init_memref.md) —— 第一个依赖显式 stride 的下游消费者
+- [`InitMemRef`](37-init_memref.md) —— 第一个依赖显式 stride 的下游消费者
 - [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h) —— 工具函数（`BuildLogicalStridesFromLayout` / `CheckCanonicalView` / `CanonicalizeView`）
 - RFC [#1300](https://github.com/hw-native-sys/pypto/issues/1300) —— IR Tensor Layout 自洽表示方案

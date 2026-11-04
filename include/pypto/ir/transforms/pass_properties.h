@@ -405,9 +405,17 @@ inline const PassProperties kSplitVectorKernelProperties{
 
 // -- Memory / codegen passes --------------------------------------------------
 
+inline const PassProperties kSpecializeSimtHelpersProperties{.required = {IRProperty::SSAForm},
+                                                             .produced = {IRProperty::SimtSpecialized}};
+
+inline const PassProperties kMaterializeSimtOutputsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::TileMemoryInferred},
+    .produced = {IRProperty::SimtOutputsMaterialized},
+    .invalidated = {IRProperty::HasMemRefs, IRProperty::AllocatedMemoryAddr}};
+
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred},
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::SimtOutputsMaterialized},
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 

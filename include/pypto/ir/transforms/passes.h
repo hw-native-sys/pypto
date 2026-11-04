@@ -149,6 +149,12 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
  */
 Pass InitMemRef();
 
+/// Initialize each writable SIMT Tile output while preserving GM reference semantics.
+Pass MaterializeSimtOutputs();
+
+/// Specialize SIMT helpers by dimensions and storage ABI, passing dynamic metadata explicitly.
+Pass SpecializeSimtHelpers();
+
 /**
  * @brief Create the semantic must-alias materialization pass
  *

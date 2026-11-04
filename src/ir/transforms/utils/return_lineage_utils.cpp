@@ -86,6 +86,16 @@ class BodyIndexCollector : public IRVisitor {
     if (assign->var_) var_def.emplace(assign->var_.get(), assign);
     IRVisitor::VisitStmt_(assign);
   }
+  void VisitStmt_(const SimtLaunchStmtPtr& launch) override {
+    for (size_t i = 0; i < launch->results_.size(); ++i) {
+      const auto& result = launch->results_[i];
+      if (!AsTensorTypeLike(result->GetType())) continue;
+      if (auto source = AsVarLike(launch->args_[launch->result_param_indices_[i]])) {
+        carry_src[result.get()] = source.get();
+      }
+    }
+    IRVisitor::VisitStmt_(launch);
+  }
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
     RecordCarries(for_stmt->iter_args_, for_stmt->return_vars_);
     IRVisitor::VisitStmt_(for_stmt);

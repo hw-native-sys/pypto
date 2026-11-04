@@ -242,6 +242,8 @@ class PassManager:
             # MaterializeTensorStrides fills empty stride slots on every
             # TensorView with packed canonical strides (RFC #1300 §2.4).
             passes.materialize_tensor_strides,
+            passes.materialize_simt_outputs,
+            passes.specialize_simt_helpers,
             passes.init_mem_ref,
             # MaterializeSemanticAliases forces loop-carried / in-place buffers to
             # share one MemRef (semantics-required aliasing). It always runs; only

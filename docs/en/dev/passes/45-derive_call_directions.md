@@ -54,6 +54,14 @@ The pass is a `ProgramPass`. It first rewrites Group/Spmd wrapper signatures pro
 
 ### 0. Wrapper direction materialization
 
+Before resolving wrappers, the pass traces GM writes from `SimtLaunchStmt` to
+enclosing kernel parameters and promotes those parameters to InOut. SIMT results
+keep their writable argument's tensor root, including through return
+canonicalization. Call and Submit sites then use the same ordinary direction
+and dependency rules. A SIMT launch also counts as a prior writer for subsequent
+calls. Functions without SIMT launches bypass this Functional-IR analysis,
+including previously lowered Buffer kernels.
+
 A Group/Spmd wrapper forwards its params 1:1 to an inner kernel call, but its own `param_directions_` can still read `In` for a param the inner kernel writes — the scope outliners infer directions from the body they extract, and later passes (`ExpandMixedKernel`, `SplitVectorKernel`) rebuild wrapper bodies around freshly split callees without revisiting the signature.
 
 `MaterializeWrapperDirections` calls `ComputeWrapperEffectiveDirections` (`include/pypto/ir/transforms/utils/wrapper_call_utils.h`) once for the whole program, then writes each result back into `Function::param_directions_`. For each wrapper that helper walks the inner calls, matches each arg to a wrapper param by `Var` pointer identity, and merges the inner callee's direction with the lattice `InOut` > `Out` > `In`. The merge starts from each wrapper's declared directions and only ever promotes, so it can never weaken a declared writer. Nested and *mutually recursive* wrappers are resolved by iterating that monotone transfer to its least fixed point over a worklist — so the result does not depend on the order wrappers are visited (`A → B → A` converges the same way whichever is seeded first). Each wrapper body is walked once, and each promotion moves one param one step up the lattice, bounding the loop by twice the total wrapper param count.

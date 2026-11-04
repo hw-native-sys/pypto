@@ -166,7 +166,7 @@ the shape `CanonicalizeTileSlice` (pass 19) rejects; see
 A **column** window spans the parent's full row extent, so the window's own
 compact geometry and the parent's coincide and the discarded stride cannot
 matter. `GetSliceAccumulatorGeometry` gives exactly this shape its NZ-exact byte
-offset (see [33-init_memref.md](35-init_memref.md)).
+offset (see [33-init_memref.md](37-init_memref.md)).
 
 ### What changes on the producer
 
@@ -510,3 +510,11 @@ The phase entry points and rewrite component interface are private to the transf
 | 3D+ | Flattened to 2D |
 
 Only InCore-type functions (InCore, AIC, AIV) are processed. Orchestration and Opaque functions are returned unchanged.
+
+## SIMT helpers
+
+The pass flattens ND Tile parameters and rewrites `simt.load`/`simt.store`
+indices together with caller launch operands/results. Leading coordinates
+collapse in row-major order. Initial support requires implicit packed layouts
+and positive static leading extents; explicit ND Tile views are rejected.
+GM Tensor indices retain their original rank.

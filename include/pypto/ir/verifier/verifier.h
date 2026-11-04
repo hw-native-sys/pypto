@@ -83,6 +83,8 @@ PropertyVerifierPtr CreateSSAPropertyVerifier();
 
 /// Verify canonical SIMT helper and launch contracts.
 PropertyVerifierPtr CreateSimtValidPropertyVerifier();
+PropertyVerifierPtr CreateSimtOutputsMaterializedPropertyVerifier();
+PropertyVerifierPtr CreateSimtSpecializedPropertyVerifier();
 
 /**
  * @brief Factory function for creating type check property verifier

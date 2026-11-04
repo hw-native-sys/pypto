@@ -206,8 +206,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-参见 [InitMemRef](../passes/35-init_memref.md#声明式分配) 与
-[MemoryReuse](../passes/37-memory_reuse.md#声明式分配)。
+参见 [InitMemRef](../passes/37-init_memref.md#声明式分配) 与
+[MemoryReuse](../passes/39-memory_reuse.md#声明式分配)。
 
 ### Tile 视图 (TileView)
 

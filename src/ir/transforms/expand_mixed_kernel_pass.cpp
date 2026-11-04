@@ -470,6 +470,9 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (call) result = ClassifyPlacedCall(call, placement);
+  } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+    result = CoreAffinity::VECTOR;
+    for (const auto& output : launch->results_) var_affinity[output.get()] = result;
   } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
     result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_defs, placement);
   } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {

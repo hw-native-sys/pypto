@@ -54,6 +54,12 @@ program_with_dirs = derive_pass(program)
 
 ### 0. Wrapper 方向物化（materialization）
 
+解析 wrapper 前，此 pass 将 `SimtLaunchStmt` 的 GM 写入追溯到外层核函数参数，
+并将相应参数提升为 InOut。SIMT 结果保留可写实参的 Tensor 根标识，返回值规范化
+也保留该关系。Call 和 Submit 调用点随后使用相同的普通方向及依赖规则。
+SIMT launch 也计入后续调用的先前写入者。没有 SIMT launch 的函数跳过此
+Functional IR 分析，包括已经 lowering 的 Buffer 核函数。
+
 Group/Spmd wrapper 把自己的形参 1:1 转发给内层 kernel 调用，但它自身的 `param_directions_` 对被内层 kernel 写入的形参仍可能标记为 `In`——scope outliner 只根据它抽取出的 body 推断方向，而后续 pass（`ExpandMixedKernel`、`SplitVectorKernel`）在围绕新拆分出的 callee 重建 wrapper body 时并不会回头修正签名。
 
 `MaterializeWrapperDirections` 对整个 program 调用一次 `ComputeWrapperEffectiveDirections`（`include/pypto/ir/transforms/utils/wrapper_call_utils.h`），再把每个结果写回 `Function::param_directions_`。对每个 wrapper，该辅助函数遍历其内层调用，用 `Var` 指针身份把每个实参匹配回 wrapper 形参，再按格 `InOut` > `Out` > `In` 归并内层 callee 的方向。归并从每个 wrapper 的声明方向起算且只会提升，因此绝不会削弱一个已声明的写者。嵌套乃至**相互递归**的 wrapper 通过对该单调传递函数在工作表上迭代求**最小不动点**来解决——因此结果不依赖 wrapper 的访问顺序（`A → B → A` 无论先从哪个起算都收敛到同一结果）。每个 wrapper body 只被遍历一次，且每次提升只让一个形参在格上上升一步，故循环次数被 wrapper 形参总数的两倍所界。

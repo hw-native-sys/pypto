@@ -75,6 +75,29 @@ control flow and SIMT builtins are allowed. `Out` parameters, ordinary calls or
 runtime submissions to helpers, and nested launches are rejected. Launch callers
 are AIV or pre-expansion InCore functions. A VMI register is not a supported storage operand;
 helpers borrow UB or GM storage instead.
+Launching inside an active VMI register scope is also rejected. Mixed-kernel
+expansion assigns SIMT launches to AIV rather than duplicating them across cores.
+
+## Compiler preparation
+
+The default pipeline now preserves storage semantics before memory planning:
+
+- [MaterializeSimtOutputs](../passes/35-materialize_simt_outputs.md) initializes
+  a dedicated copy for each writable Tile. Partial writes preserve untouched
+  elements and old Tile values remain readable across branches and loops.
+- [SpecializeSimtHelpers](../passes/36-specialize_simt_helpers.md) derives helper
+  variants from full block dimensions, types/layouts, and the target. Dynamic
+  metadata becomes scalar arguments; allocation addresses do not enter the key.
+- GM results retain the original tensor identity. `simt.store` uses the `Simt`
+  write channel, separate from scalar-controller and DMA stores. Kernel parameter
+  directions propagate as InOut to outer Call and Submit sites, where ordinary
+  task dependency analysis applies. Device statement scheduling preserves launch
+  order even when a later read uses the old GM handle.
+
+Known overlapping writable arguments are rejected before copying. Distinct GM
+arguments may still alias at runtime; guaranteeing nonoverlap remains the caller's
+responsibility. Helper parameters borrow storage and receive no independent
+allocations. SIMT kernels stay in Functional IR under automatic Buffer IR selection.
 
 ## Derived resources and implementation boundary
 
@@ -92,9 +115,7 @@ product of all three dimensions, and derives these limits:
 Users do not provide `simt_max_threads` or `simt_max_regs`. Other backends report
 SIMT resource inference as unsupported.
 
-This stage implements the canonical IR and its validation. Output materialization
-for live old Tile values, propagation into memory planning and outer call
-directions, resource specialization, PTOAS lowering, and device execution remain
-separate implementation stages. PTO codegen rejects SIMT explicitly until those
-stages are connected; successful IR verification does not establish executable
-kernel support.
+Canonical IR, validation, storage preparation, memory-planner integration, and
+resource specialization are implemented. PTOAS lowering and device execution
+remain separate stages. PTO codegen still rejects SIMT explicitly; successful
+pipeline verification does not establish executable kernel support.

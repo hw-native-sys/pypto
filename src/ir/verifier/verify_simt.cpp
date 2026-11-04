@@ -123,6 +123,11 @@ class SimtChecker : public IRVisitor {
     if (helper_ && !stmt->value_.empty()) Error("SIMT helpers must return void", stmt->span_);
     IRVisitor::VisitStmt_(stmt);
   }
+  void VisitStmt_(const RegScopeStmtPtr& stmt) override {
+    ++register_scope_depth_;
+    IRVisitor::VisitStmt_(stmt);
+    --register_scope_depth_;
+  }
   void VisitExpr_(const CallPtr& call) override {
     const auto symbol = As<GlobalVar>(call->op_);
     const auto callee = symbol ? program_->GetFunction(symbol->name_) : nullptr;
@@ -150,6 +155,9 @@ class SimtChecker : public IRVisitor {
     IRVisitor::VisitExpr_(submit);
   }
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override {
+    if (register_scope_depth_ != 0) {
+      Error("SIMT launch inside an active VMI register scope is not supported", launch->span_);
+    }
     if (function_->func_type_ != FunctionType::AIV && function_->func_type_ != FunctionType::InCore) {
       Error("SIMT launch requires an AIV or pre-expansion InCore caller", launch->span_);
     }
@@ -216,6 +224,7 @@ class SimtChecker : public IRVisitor {
   FunctionPtr function_;
   std::vector<Diagnostic>& diagnostics_;
   bool helper_;
+  size_t register_scope_depth_ = 0;
   std::unordered_set<const Expr*> parameters_;
 };
 

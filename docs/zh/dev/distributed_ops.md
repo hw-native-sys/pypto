@@ -396,7 +396,7 @@ CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的
 
 在托管 CHIP/L2 通路上，于 orchestration 中构建的操作数必须可证明为行主序，否则
 `LowerL2TensorCollectives` 会拒绝它（证明范围及原因见
-[pass 参考](passes/41-lower_l2_tensor_collectives.md#当前限制)）。作为兜底，orchestration
+[pass 参考](passes/43-lower_l2_tensor_collectives.md#当前限制)）。作为兜底，orchestration
 codegen 在其 `rt_submit_aiv_task` 之前为每个操作数生成一条 `is_contiguous` 检查。第一个不连续的
 操作数会锁存 `SIMPLER_ERROR_INVALID_ARGS` 并给出其名称
 （`__builtin_all_to_all_v__fp32: signal must be a contiguous row-major view`），
@@ -486,14 +486,14 @@ InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直�
 信息中指明 CHIP 路径。下文的 CHIP/L2 路径接受编译期的 `core_num`：它在降级时折叠出
 同一个 `B = CalAllToAllVBlocks(P, L)`，并在 `B > 1` 时把它作为启动规格
 （`core_num=B`、`sync_start`）附加到调用上。该路径暂不支持运行期 `core_num`——见
-[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md)。
+[`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md)。
 
 **CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP
 `Orchestration` 函数体中，而不是 `host_orch` 中。它会被改写成对合成 AIV kernel 的
 调用，该 kernel 由 HOST 路径使用的*同一份* builtin 模板渲染而来，因此链路行为完全
 一致，差别只在派发结构：该集合通信成为调用方自身 pipeline 中的一个 AIV task——不按
 设备扇出，也不产生嵌套 L2 dispatch——并通过普通 TensorMap 依赖与前后计算排序。参见
-[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md)。
+[`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md)。
 
 **HOST builtin**（`LowerHostTensorCollectives`）：同样的 5 参数调用，在
 `host_orch` 函数中发起时，会按设备下降为 `builtin.tensor.all_to_all_v`——
@@ -559,7 +559,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
-[`SynthesizeAllReduceSignals`](passes/46-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/48-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
@@ -759,14 +759,14 @@ peer 算术；而*远程*操作数
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/49-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
 分布式 codegen 将每个槽位的物理分配向上取整到 64 字节，并对补齐后的大小求和作为通信域窗口大小。
 `CommBufferSpec.count` 和 `DistributedTensor` 的 shape 保留逻辑范围。这使独立槽位位于不同的 A2/A3 数据缓存行：
 标量写入后的 DCCI 会写回整条 64 字节缓存行，不应覆盖相邻 signal 槽位的 credit。
 该补齐同时满足 32 字节远端传输的对齐和尾部空间要求。
-随后 [`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/50-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试

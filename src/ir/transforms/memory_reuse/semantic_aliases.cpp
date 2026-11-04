@@ -54,6 +54,7 @@
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 #include "src/ir/transforms/memory_reuse/storage.h"
+#include "src/ir/transforms/utils/simt_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -365,6 +366,26 @@ class DefMapVisitor : public IRVisitor {
       }
     }
     if (op->value_) VisitExpr(op->value_);
+  }
+
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (const auto& dim : op->block_dims_) VisitExpr(dim);
+    for (const auto& arg : op->args_) VisitExpr(arg);
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      if (!As<TileType>(op->results_[i]->GetType())) continue;
+      // A launch is a storage definition, but not an assignment producer that
+      // the retargeter may rewrite independently of its writable operand.
+      // Unknown producer kinds take the existing conservative copy path.
+      VarDef definition;
+      definition.definition_stmt = op;
+      definition.nearest_for = for_stack_.empty() ? nullptr : for_stack_.back();
+      definition.order = stmt_order.at(op.get());
+      defs[op->results_[i]] = definition;
+      writes[op.get()].insert(op->results_[i]);
+      if (auto source = AsVarLike(op->args_[op->result_param_indices_[i]])) {
+        writes[op.get()].insert(source);
+      }
+    }
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -1311,6 +1332,11 @@ class LoopInputIsolation : public IRVisitor {
     VisitStmt(branch->then_body_);
     if (branch->else_body_) VisitStmt(*branch->else_body_);
     for (const auto& result : branch->return_vars_) definitions_[result.get()] = ++order_;
+  }
+  void VisitStmt_(const SimtLaunchStmtPtr& launch) override {
+    for (const auto& dim : launch->block_dims_) VisitExpr(dim);
+    for (const auto& arg : launch->args_) VisitExpr(arg);
+    for (const auto& result : launch->results_) definitions_[result.get()] = current_;
   }
   void VisitStmt_(const ForStmtPtr& loop) override {
     VisitExpr(loop->start_);
@@ -2821,6 +2847,16 @@ class RetypeApplier : public IRMutator {
     return op;
   }
 
+  StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    auto result = As<SimtLaunchStmt>(IRMutator::VisitStmt_(op));
+    // The base visitor retypes launch results when an operand is reanchored.
+    // Keep this mutator's active map aligned with those final definitions.
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      var_substitution_[op->results_[i]] = result->results_[i];
+    }
+    return result;
+  }
+
   ExprPtr VisitExpr_(const IterArgPtr& op) override {
     // Check var_remap_ first.  IRMutator::VisitStmt_(ForStmtPtr) registers
     // OLD → NEW for each iter_arg whose pointer changed when we visited the
@@ -3054,7 +3090,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 
   // Orchestration bodies submit tasks and never hold TileType variables; a
   // Graph body is orchestration too, so it is skipped for the same reason.
-  if (IsOrchestrationLike(func->func_type_)) return func;
+  if (IsOrchestrationLike(func->func_type_) || func->func_type_ == FunctionType::SIMT) return func;
 
   StmtPtr new_body = func->body_;
   const auto* ctx = PassContext::Current();
@@ -3071,7 +3107,11 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   {
     const bool buffer_ir = ctx != nullptr && ctx->GetEnableBufferIR();
     LoopInputIsolation isolation;
-    isolation.Plan(new_body, func->params_, /*recurrence_only=*/!buffer_ir);
+    // SIMT output seeds preserve partial updates, but yield fixup can still
+    // copy them back into a loop's initializer. Isolate live old initializers
+    // on the Functional path too, before choosing the carry's storage.
+    isolation.Plan(new_body, func->params_,
+                   /*recurrence_only=*/!buffer_ir && !simt_detail::ContainsLaunch(new_body));
     if (!isolation.initializers.empty()) {
       RetypeApplier applier(std::move(isolation.rewrites), std::move(isolation.initializers),
                             std::move(isolation.entries));

@@ -13,16 +13,16 @@ carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来�
 - **机会别名（可选）：** 生命周期不冲突的两块独立 buffer *可以*共享存储以省内存,
   属于优化。
 
-本 pass 只处理**强制别名**。它从 [`MemoryReuse`](37-memory_reuse.md) 中拆出
+本 pass 只处理**强制别名**。它从 [`MemoryReuse`](39-memory_reuse.md) 中拆出
 （原来是那个 pass 的 "Step 0"），以便机会性的生命周期复用可以被独立跳过：
 
 - `MemoryPlanner.DSA_RP` 保留独立分配身份，交给进程内 DSA-RP 求解器放置。
 - `MemoryPlanner.PTOAS` 把生命周期复用和地址分配交给 ptoas。
 
-**使用时机**：在 [`InitMemRef`](35-init_memref.md)（创建 MemRef）之后、所选内存
+**使用时机**：在 [`InitMemRef`](37-init_memref.md)（创建 MemRef）之后、所选内存
 规划器之前运行。它总是运行。`PYPTO` 随后运行
-[`MemoryReuse`](37-memory_reuse.md)；`DSA_RP` 在
-[`AllocateMemoryAddr`](38-allocate_memory_addr.md) 中消费这些分配身份。
+[`MemoryReuse`](39-memory_reuse.md)；`DSA_RP` 在
+[`AllocateMemoryAddr`](40-allocate_memory_addr.md) 中消费这些分配身份。
 
 ## 逻辑 Tile 选择
 
@@ -163,7 +163,7 @@ yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始�
 控制流边界确定后，后续归一化遍历再修复整条链。Buffer IR 在索引旧值观测之前，
 以及隔离循环入口之后，也使用这一延迟形式，因为分支存储尚未确定；边界确定后的
 归一化无需延迟处理集合。yield 修复前后的归一化遍历见
-[MemoryReuse 算法步骤 6](37-memory_reuse.md#算法)。
+[MemoryReuse 算法步骤 6](39-memory_reuse.md#算法)。
 
 本 pass 跳过 orchestration 类函数，包括 graph body。其他函数即使 `Compute`
 没有返回重定向改写，仍会执行别名归一化，独立修复已有的类型漂移。
@@ -277,4 +277,4 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
 解决。未选中 kernel 和显式 Off 模式保持原有 Tile 行为。
 
 默认 Buffer 路径在存储合法化前选择完整支持的 kernel，详见
-[整函数选择](55-lower_tile_to_buffer.md#默认整函数选择)。
+[整函数选择](57-lower_tile_to_buffer.md#默认整函数选择)。
