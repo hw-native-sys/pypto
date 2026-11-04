@@ -176,7 +176,11 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span);
 
 // BFS over typed candidate hops. Empty means no admissible native chain.
 std::vector<DataType> FindCastChain(const AdjList& adj, const backend::BackendHandler& handler,
-                                    const ExprPtr& source, DataType to, int mode, const Span& span) {
+                                    const CallPtr& original) {
+  const auto& source = original->args_[0];
+  const auto to = As<TileType>(original->GetType())->dtype_;
+  const int mode = original->GetKwarg<int>("mode", kCastModeRound);
+  const auto& span = original->span_;
   const auto source_type = As<TileType>(source->GetType());
   INTERNAL_CHECK_SPAN(source_type, span) << "cast search requires a TileType source";
   const DataType from = source_type->dtype_;
@@ -233,7 +237,16 @@ std::vector<DataType> FindCastChain(const AdjList& adj, const backend::BackendHa
       // uniquely determines its carrier geometry for this search.
       ExprPtr candidate;
       try {
-        candidate = MakeCast(cur_info.value, nxt, mode, span);
+        if (nxt == to) {
+          // Validate the exact descriptor, attributes and scratch that the
+          // emitted terminal hop retains, rather than a re-inferred result.
+          auto args = original->args_;
+          args[0] = cur_info.value;
+          candidate = std::make_shared<Call>(original->op_, std::move(args), original->kwargs_,
+                                             original->attrs_, original->GetType(), original->span_);
+        } else {
+          candidate = MakeCast(cur_info.value, nxt, mode, span);
+        }
       } catch (const ValueError&) {
         continue;  // This candidate's dtype/packing contract is not admissible.
       } catch (const TypeError&) {
@@ -308,7 +321,7 @@ class LegalizeTileCastMutator : public IRMutator {
     const auto result_tile = As<TileType>(call->GetType());
     INTERNAL_CHECK_SPAN(result_tile, op->span_) << "tile.cast result must be TileType";
     DataType src = src_tile->dtype_;
-    DataType dst = call->GetKwarg<DataType>("target_type");
+    DataType dst = result_tile->dtype_;
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
     if (handler_.IsDirectCast(call)) {
@@ -316,7 +329,7 @@ class LegalizeTileCastMutator : public IRMutator {
     }
 
     MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
-    std::vector<DataType> chain = FindCastChain(adj_, handler_, call->args_[0], dst, mode, op->span_);
+    std::vector<DataType> chain = FindCastChain(adj_, handler_, call);
     CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)
         << "LegalizeTileCast: no lossless cast path from " << src.ToString() << " to " << dst.ToString()
         << "; the required BF16 intermediate can double-round. Cast to BF16 explicitly before FP4 "

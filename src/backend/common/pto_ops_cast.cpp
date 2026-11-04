@@ -253,7 +253,7 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
     return "";
   }
   const bool explicit_tmp = op->args_.size() == 2;
-  const OpScratchRequest request{src_type->dtype_, std::nullopt, op->GetKwarg<DataType>("target_type"),
+  const OpScratchRequest request{src_type->dtype_, std::nullopt, As<ir::TileType>(op->GetType())->dtype_,
                                  saturation_mode == static_cast<int>(ir::SaturationMode::kOn), src_type};
   // Synthesis geometry does not constrain caller-owned scratch. In particular,
   // rank-one sources with explicit tmp are emitted as PTO [1, N] tiles.

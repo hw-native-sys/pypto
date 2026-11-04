@@ -908,7 +908,7 @@ def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface, planner)
 
 
 @pytest.mark.parametrize(
-    "case", ["unaligned", "dynamic_valid", "dynamic_affine_valid", "row_limit", "strided"]
+    "case", ["unaligned", "dynamic_valid", "dynamic_affine_valid", "narrowed_result", "row_limit", "strided"]
 )
 def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
     """The dtype edge must not bypass direct TCVT's packed-axis restrictions."""
@@ -922,6 +922,11 @@ def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
     source_type = ir.TileType([rows, cols], pl.fp4e2m1x2, None, ir.TileView(valid_shape=valid, stride=stride))
     source = ir.Var("source", source_type, span)
     cast = ir.op.tile.cast(source, pl.FP8E4M3FN)
+    if case == "narrowed_result":
+        result_type = ir.TileType(
+            [rows, cols * 2], pl.FP8E4M3FN, None, ir.TileView(valid_shape=[8, cols * 2])
+        )
+        cast = ir.Call(cast.op, cast.args, cast.kwargs, result_type, span)
     decoded = ir.Var("decoded", cast.type, span)
     parameters = [source, valid_cols] if case in ("dynamic_valid", "dynamic_affine_valid") else [source]
     before = ir.Program(

@@ -185,7 +185,15 @@ bool BackendHandler::IsDirectCast(const ir::CallPtr& call, DirectCastInfo* detai
   int mode = 0;
   int saturation = 0;
   try {
-    target = call->GetKwarg<DataType>("target_type");
+    try {
+      target = call->GetKwarg<DataType>("target_type");
+    } catch (const TypeError&) {
+      const int code = call->GetKwarg<int>("target_type");
+      if (code < 0 || code > std::numeric_limits<uint8_t>::max()) {
+        return Reject(info, "cast target_type code is out of range");
+      }
+      target = DataType(static_cast<uint8_t>(code));
+    }
     mode = call->GetKwarg<int>("mode");
     saturation = call->GetKwarg<int>("saturation_mode", 0);
   } catch (const TypeError&) {

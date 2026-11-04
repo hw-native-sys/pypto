@@ -211,6 +211,21 @@ def test_direct_cast_queries_own_backend_without_global_configuration(
     assert handler.is_direct_cast(call) == expected
 
 
+@pytest.mark.parametrize("target_code", [pl.FP16.code(), pl.FP16.code() + 256, -1])
+def test_direct_cast_accepts_integer_target_dtype_codes(target_code):
+    """The native query accepts the same integer dtype form as cast inference."""
+    original = _direct_cast_query(pl.FP32, pl.FP16, [16, 32], [16, 32])
+    call = _ir_core.Call(
+        original.op,
+        original.args,
+        {"target_type": target_code, "mode": 2},
+        original.type,
+        original.span,
+    )
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    assert handler.is_direct_cast(call) == (target_code == pl.FP16.code())
+
+
 @pytest.mark.parametrize("target", [_backend_core.BackendType.Ascend950, _backend_core.BackendType.Ascend910])
 def test_direct_cast_requeries_changed_packed_geometry(target):
     handler = _backend_core.get_backend_instance(target).get_handler()
