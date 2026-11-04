@@ -31,7 +31,7 @@ for i in pl.range(64):
 
 ## 两个 pass 是互补关系，不是二选一
 
-两者都会执行，且按此顺序。本 pass 只接手能证明安全的循环并将其降级；**凡是它不接手的循环都保持 `ForKind::Pipeline`**，由 `LowerPipelineLoops` 照旧复制。不会因为本 pass 的存在而让任何循环失去乒乓——matmul L0 stage 循环、嵌套 pipeline、形状特殊的循环都仍然走复制路径。
+两者都会执行，且按此顺序。本 pass 只接手能证明安全的循环并将其降级；**凡是它不接手的循环都保持 `ForKind::Pipeline`**，由 `LowerPipelineLoops` 照旧复制。matmul L0 stage 循环、不支持的嵌套和形状特殊的循环仍走复制路径。开启软件流水选项后，也可处理下文所述的有界局部嵌套。
 
 这与 [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md) 的做法同构：它处理跨核 pipeline 循环，其余原样留下。
 
@@ -116,8 +116,60 @@ scratch 独立；最后的乘法可复用已最后使用的 KV-scale 槽。三�
 
 局部路径支持有效范围完整的二维平坦 Vec tile、2–4 个 stage、非负常量起点和正常量步长。
 动态边界使用受保护的预载与归一化循环；有溢出风险的路径保留原调度。
-嵌套流水、跨核 FIFO 操作、不支持的副作用、真正的数据递推和无法证明的
+不支持的嵌套、跨核 FIFO 操作、不支持的副作用、真正的数据递推和无法证明的
 别名关系会使整条循环回退。单层静态循环的次数小于预载距离时也保留既有路径。
+
+### 有界局部嵌套流水
+
+开启 `enable_software_pipeline=True` 后，Ascend 910B 也支持局部 Vec 嵌套流水。
+该 pass 特化（specialize）静态子循环迭代，保留一条外层循环。
+只有生产者 load 及其标量地址计算跨父迭代移动；计算和 store 保持原有顺序。
+
+```python
+import pypto.language as pl
+from pypto.runtime import RunConfig
+
+@pl.jit
+def nested_add(x: pl.Tensor[[8, 64], pl.FP32],
+               y: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for group in pl.pipeline(4, stage=3):
+            for page in pl.pipeline(2, stage=2):
+                row = group * 2 + page
+                value = pl.load(x, [row, 0], [1, 64])
+                pl.store(pl.add(value, 1.0), [row, 0], y)
+    return y
+
+nested_add.compile(config=RunConfig(enable_software_pipeline=True, codegen_only=True))
+```
+
+局部嵌套路径要求：
+
+- 每层使用 2 至 4 个 stage，最多四层子循环，整个嵌套最多展开 64 个迭代相位（phase）。
+  每个子循环的边界必须在祖先特化之前的原始 IR 中就是常量，起点非负、步长为正；
+  所有循环坐标使用 INDEX 类型。
+- 子循环结果不逃逸，不携带存活的 tensor、tile 或任务状态。若形状或视图元数据引用子循环状态，
+  则在状态清理前保留回退。原始子循环的初始值和 yield 均不得包含调用，即使结果没有被使用。
+  清理无用状态后，标量携带值只能 yield 变量或常量；复合更新应先赋给 SSA 变量再 yield，
+  以保持特化规模线性。未知副作用、通信和任务启动保留原循环并回退；
+  移动生产者时必须保留标量谓词。
+- 静态外层循环起点非负、步长为正常量，调度归一化为逻辑序号（ordinal）`t`，
+  源下标仍为 `start + t * step`。动态外层边界仍要求 `start=0`、`step=1`，
+  并能证明其上限不会使序号算术溢出。
+
+存储深度等于各层 stage 数的乘积，与子循环迭代次数无关。
+根循环有 `S` 个 stage 时，各层子迭代的余数组成混合进制存储分组号（bank），
+物理槽位为 `bank * S + (parent_ordinal % S)`。上例共有六个槽位：
+page 0 使用 `group % 3`，page 1 使用 `3 + group % 3`。
+代码生成使用现有 parent/subview 形式表示固定分组。若静态单次外层循环被简化消除，
+且软件流水 region 的所有槽位选择均为常量，则保留包含全部槽位的固定地址 parent。
+PTOAS multi-tile 的槽位数上限不适用于这一普通 parent tile。
+短子循环可能留下未使用的分组，因此预取距离（lookahead）受物理槽位实际再次使用的间隔限制。
+例如，两阶段父循环中的单次迭代四阶段子循环，只能提前预取一个父迭代。
+
+最终容量检查仍由既有 `MemoryReuse` 和 `AllocateMemoryAddr` 负责，包含中间 tile 和 workspace。
+存储超限时，该路径不会降低 stage 数或将 scratch 升格至 GM，也不增加 FIFO 下降或同步算法。
+关闭选项时保持既有行为；开启选项不保证加速。
 
 **性能限制：** 原版 PTOAS 可能对槽位互不重叠的动态 subview 仍插入保守同步。
 它不会移除必要同步，但可能阻止 MTE2 与向量计算重叠，见

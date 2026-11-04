@@ -983,7 +983,7 @@ class PTOCodegen : public CodegenBase {
   /// `pto.multi_tile_get`. Also used with fixed addresses by software pipelines.
   struct MultiBufferRegion {
     std::string region_ssa;       ///< The `%mb` handle the slots are taken from
-    std::string mtb_type_str;     ///< `!pto.multi_tile_buf<<slot>, count=N>`
+    std::string mtb_type_str;     ///< `!pto.multi_tile_buf<<slot>, count=N>`; empty for a parent
     std::string slot_type_str;    ///< The single-slot `!pto.tile_buf<...>` type
     std::string parent_type_str;  ///< Optional flat parent for ordinary slot subviews
     std::string flat_slot_type_str;
@@ -991,7 +991,10 @@ class PTOCodegen : public CodegenBase {
     std::string addr_ssa;       ///< Constant base address under the PyPTO planner
     std::string valid_row_ssa;  ///< valid_row operand (shared by every slot)
     std::string valid_col_ssa;  ///< valid_col operand (shared by every slot)
-    uint64_t count = 1;         ///< Slots per backend region, in [2, 16]
+    uint64_t count = 1;         ///< Slots per region; multi_tile_buf requires [2, 16]
+    /// Optional fixed banks, each holding `count` root-loop slots. Pair fields
+    /// are (region SSA, fixed base address SSA), ordered by the constant bank id.
+    std::vector<std::pair<std::string, std::string>> banks;
   };
 
   /**
@@ -1180,6 +1183,9 @@ class PTOCodegen : public CodegenBase {
     std::vector<const ir::Var*> multi_buffer_region_order;
     /// Slot remainders proven to have nonnegative operands in canonical loops.
     std::set<const ir::Expr*> unsigned_slot_remainders;
+    /// Original slot expression -> (fixed bank id, bank-local root remainder).
+    /// Only populated for verified schedules with INDEX arithmetic throughout.
+    std::map<const ir::Expr*, std::pair<uint64_t, ir::ExprPtr>> banked_slot_indices;
     /// Canonical (induction, offset, count) remainders in one statement region.
     std::map<std::tuple<const ir::Expr*, int64_t, int64_t>, std::string> slot_index_ssa;
 
@@ -1312,6 +1318,7 @@ class PTOCodegen : public CodegenBase {
       multi_buffer_regions.clear();
       multi_buffer_region_order.clear();
       unsigned_slot_remainders.clear();
+      banked_slot_indices.clear();
       slot_index_ssa.clear();
 
       tuple_element_index.clear();

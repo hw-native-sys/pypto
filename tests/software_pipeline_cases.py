@@ -41,6 +41,70 @@ def make_epilogue(trips: int = 65, dynamic: bool = False):
     return kernel
 
 
+def make_nested(
+    children: int = 2,
+    outer_stage: int = 3,
+    inner_stage: int = 2,
+    leaves: int = 0,
+    leaf_stage: int = 4,
+    guarded: bool = False,
+):
+    """Build bounded local nests; inactive groups and guarded rows retain their canaries."""
+    rows = 65 * children * max(leaves, 1)
+    if leaves:
+
+        @pl.jit
+        def nested_deep(
+            x: pl.Tensor[[rows, 64], pl.FP32],
+            groups: pl.Scalar[pl.INDEX],
+            y: pl.InOut[pl.Tensor[[rows, 64], pl.FP32]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                for g in pl.pipeline(pl.min(groups, 65), stage=outer_stage):
+                    for p in pl.pipeline(children, stage=inner_stage):
+                        if not guarded or (g + p) % 2 == 0:
+                            for q in pl.pipeline(leaves, stage=leaf_stage):
+                                row = (g * children + p) * leaves + q
+                                value = pl.load(x, [row, 0], [1, 64])
+                                pl.store(pl.add(value, 1.0), [row, 0], y)
+            return y
+
+        return nested_deep
+
+    @pl.jit
+    def nested_local(
+        x: pl.Tensor[[rows, 64], pl.FP32],
+        groups: pl.Scalar[pl.INDEX],
+        y: pl.InOut[pl.Tensor[[rows, 64], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for g in pl.pipeline(pl.min(groups, 65), stage=outer_stage):
+                for p in pl.pipeline(children, stage=inner_stage):
+                    row = g * children + p
+                    value = pl.load(x, [row, 0], [1, 64])
+                    pl.store(pl.add(value, 1.0), [row, 0], y)
+        return y
+
+    return nested_local
+
+
+def make_single_parent_nested():
+    """Keep 24 hierarchical slots after a static one-trip root is simplified."""
+
+    @pl.jit
+    def kernel(x: pl.Tensor[[6, 64], pl.FP32], y: pl.Out[pl.Tensor[[6, 64], pl.FP32]]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for group in pl.pipeline(1, stage=3):
+                for page in pl.pipeline(2, stage=2):
+                    for item in pl.pipeline(3, stage=4):
+                        row = (group * 2 + page) * 3 + item
+                        value = pl.load(x, [row, 0], [1, 64])
+                        pl.store(pl.add(value, 1.0), [row, 0], y)
+        return y
+
+    return kernel
+
+
 def make_scratch_pressure(rows: int = 44, total_rows: int = 36960):
     """Keep stages and total work fixed while varying the second phase's tile.
 

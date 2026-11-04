@@ -19,7 +19,12 @@ from pypto.backend import BackendType, pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.runtime import ExecutionMode, RunConfig
 
-from tests.software_pipeline_cases import make_epilogue, make_scratch_pressure
+from tests.software_pipeline_cases import (
+    make_epilogue,
+    make_nested,
+    make_scratch_pressure,
+    make_single_parent_nested,
+)
 
 pytestmark = [
     pytest.mark.ptoas_compile,
@@ -180,6 +185,96 @@ def test_retired_scratch_permits_larger_tiles_with_ptoas(tmp_path, rows):
     pto, _ = _single(make_scratch_pressure(rows, total_rows=1792), tmp_path)
     assert all(op in pto for op in ("pto.trowsum", "pto.tadds", "pto.tstore"))
     assert "pto.subview" in pto, "the first phase must retain its software slots"
+
+
+@pytest.mark.parametrize(
+    ("outer_stage", "children", "inner_stage", "leaves", "leaf_stage", "guarded"),
+    [
+        (3, 2, 2, 0, 4, False),
+        (3, 5, 2, 0, 4, False),
+        (3, 2, 3, 2, 4, False),
+        (2, 1, 4, 0, 4, False),
+        (3, 2, 2, 2, 2, True),
+        (3, 2, 2, 2, 4, True),
+    ],
+)
+def test_nested_versions_reach_ptoas_as_parent_buffer_views(
+    tmp_path, outer_stage, children, inner_stage, leaves, leaf_stage, guarded
+):
+    """Full slot products become disjoint root-stage banks, including products above sixteen."""
+    pto, cpp = _single(make_nested(children, outer_stage, inner_stage, leaves, leaf_stage, guarded), tmp_path)
+    assert "pto.alloc_multi_tile" not in pto and "pto.multi_tile_get" not in pto
+    assert "arith.remui" in pto and pto.count("scf.for") == 1
+    assert pto.count("pto.tstore ") == children * max(leaves, 1)
+    assert all(operation in cpp for operation in ("TLOAD(", "TADDS(", "TSTORE("))
+
+    # Each slot is one contiguous FP32 row. Child stages select banks while
+    # the root stage rotates their rows; child trip counts cannot size storage.
+    banks = re.findall(
+        rf"(%\w+) = pto\.alloc_tile addr = (%\w+) : !pto\.tile_buf<loc=vec, dtype=f32, "
+        rf"rows={outer_stage}, cols=64,",
+        pto,
+    )
+    expected_banks = inner_stage * (leaf_stage if leaves else 1)
+    assert len(banks) == expected_banks
+    constants = {name: int(value) for name, value in re.findall(r"(%\w+) = arith\.constant (\d+) : i64", pto)}
+    addresses = sorted(constants[address] for _, address in banks)
+    assert addresses == [addresses[0] + bank * outer_stage * 64 * 4 for bank in range(expected_banks)]
+    views = set(re.findall(r"pto\.subview (%\w+)\[", pto))
+    used_banks = views & {name for name, _ in banks}
+    expected_used = min(children, inner_stage) * (min(leaves, leaf_stage) if leaves else 1)
+    assert len(used_banks) == expected_used
+
+
+def test_static_single_parent_keeps_large_hierarchical_storage(tmp_path):
+    """A simplified one-trip root still owns all 24 declared storage versions."""
+
+    pto, cpp = _single(make_single_parent_nested(), tmp_path)
+    assert "rows=24, cols=64" in pto
+    assert pto.count("pto.tstore ") == 6
+    assert "pto.subview" in pto and "pto.alloc_multi_tile" not in pto
+    assert all(operation in cpp for operation in ("TLOAD(", "TADDS(", "TSTORE("))
+
+
+def test_nested_reduction_cannot_alias_input_or_workspace(tmp_path):
+    """Reduction outputs and scratch coexist with the nested input slots."""
+
+    @pl.jit
+    def kernel(x: pl.Tensor[[256, 16], pl.FP32], y: pl.Out[pl.Tensor[[256, 1], pl.FP32]]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for g in pl.pipeline(4, stage=3):
+                for p in pl.pipeline(2, stage=2):
+                    row = g * 64 + p * 32
+                    value = pl.load(x, [row, 0], [32, 16])
+                    scratch = pl.create_tile([32, 16], dtype=pl.FP32)
+                    result = pl.row_sum(value, scratch)
+                    pl.store(result, [row, 0], y)
+        return y
+
+    pto, _ = _single(kernel, tmp_path)
+    assert "pto.alloc_multi_tile" not in pto and "pto.subview" in pto
+    assert "rows=3, cols=512" in pto and "arith.remui" in pto
+    assert pto.count("pto.trowsum") == 2
+
+
+def test_nested_partial_result_view_keeps_compatible_storage(tmp_path):
+    """Keep the stored partial view compatible with its full slotted producer."""
+
+    @pl.jit
+    def kernel(x: pl.Tensor[[128, 64], pl.FP32], y: pl.Out[pl.Tensor[[128, 32], pl.FP32]]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for g in pl.pipeline(4, stage=3):
+                for p in pl.pipeline(2, stage=2):
+                    row = g * 32 + p * 16
+                    value = pl.load(x, [row, 0], [16, 64])
+                    result = pl.add(value, 1.0)
+                    pl.store(pl.slice(result, [16, 32], [0, 0]), [row, 0], y)
+        return y
+
+    pto, _ = _single(kernel, tmp_path)
+    assert "arith.remui" in pto and "pto.subview" in pto
+    assert "rows=3, cols=1024" in pto
+    assert pto.count("pto.tadds") == 2
 
 
 if __name__ == "__main__":

@@ -249,6 +249,10 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool SupportsRuntimeBoundLocalSoftwarePipeline() const { return false; }
 
+  /// Supports hierarchical local slots and guarded producer schedules. Backends
+  /// opt in after validating their slot encoding; this is independent of GM pipes.
+  [[nodiscard]] virtual bool SupportsNestedLocalSoftwarePipeline() const { return false; }
+
   /// Whether frontend pipes can size local consumer storage independently of
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.
   [[nodiscard]] virtual bool SupportsLocalPipeDepth() const { return false; }
