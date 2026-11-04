@@ -35,9 +35,9 @@ def kernel(
 不是张量 shape，也不是字节数。
 
 外部 Tile 和只读 Scalar 是隐式输入。寄存器与局部 Scalar 不能通过区域外使用、
-函数返回、循环结果、元组或向外部变量赋值逃逸。Tile 操作数必须源于区域外；
-`store` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
-包括 `store`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
+函数返回、循环结果、元组或向外部变量赋值逃逸；函数边界递归检查嵌套元组类型。Tile 操作数必须源于区域外；
+`store` 和 `scatter` 返回的 Tile 别名可以在区域外使用。每个操作的返回值都必须赋给变量，
+包括 `store` 和 `scatter`；裸 store 会被拒绝。`pl.hardware_loop()`（`HardwareLoopPolicy.Require`）
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
@@ -54,7 +54,7 @@ def kernel(
 | `pmode` | 非激活结果 lane 的处理策略。仅接受 `"zero"`，即非激活向量 lane 清零。 |
 
 签名中的 `*` 表示之后的参数只能按关键字传入。省略可选 mask 时所有 lane 参与。
-除转换和归约外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
+除转换、位重解释、直方图、归约、`expdif` 和字节 `gather` 外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
 lane 广播。DSL 数值字面量会归一化为要求的 scalar dtype；整数参数不接受 Python
 `bool`。原始 IR 和 Builder 操作数必须已具有要求的 dtype。
 
@@ -240,6 +240,77 @@ Z 为向零舍入。H 为 PTOAS 的特定 H 舍入模式，用于 FP32→FP16 �
 其余 dtype 转换对均拒绝，包括 BF16 转换。原始 IR/Builder 调用必须在要求舍入属性
 的转换中显式传入归一化后的 rounding；上表默认值由 DSL 封装提供。
 
+## 扩展 VMI 操作
+
+以下 API 位于 `pl.reg`，发射对应的 `pto.vmi.v*` 操作。除 `mula` 的 mask 可选外，
+其余操作均要求执行掩码。算术 `pmode` 为 `"zero"`；进借位操作和 `scatter` 不暴露
+`pmode` 参数。除表中特别说明外，向量输入的 dtype、符号性和 lane 数必须一致。
+已有 Scalar SSA 不会被隐式转换；`axpy`/`lrelu` 的 Python 标量字面量按向量 dtype 归一化。
+
+| API（位置参数） | VMI op | 结果和约束 |
+| --------------- | ------ | ---------- |
+| `expdif(x, max_value, mask)` | `vexpdif` | 融合 `exp(x - max_value)`；FP16/FP32 输入，始终返回 FP32 |
+| `axpy(x, acc, alpha, mask)` | `vaxpy` | 融合 `alpha * x + acc`；FP16/FP32，alpha 为标量 |
+| `mula(acc, lhs, rhs, mask=None)` | `vmula` | 融合 `acc + lhs * rhs`；FP16/BF16/FP32 或有符号/无符号 16/32 位整数 |
+| `lrelu(x, slope, mask)` | `vlrelu` | Leaky ReLU；FP16/FP32，slope 为标量 |
+| `prelu(x, alpha, mask)` | `vprelu` | PReLU；FP16/FP32，alpha 为逐 lane 向量 |
+| `mull(lhs, rhs, mask)` | `vmull` | 乘积的两个 32 位部分 `(low, high)`；INT32/UINT32，64/128/256 lanes |
+| `addc(lhs, rhs, mask)` | `vaddc` | `(result, carry)`；INT32/UINT32 |
+| `subc(lhs, rhs, mask)` | `vsubc` | `(result, not_borrow)`；INT32/UINT32 |
+| `addcs(lhs, rhs, carry_in, mask)` | `vaddcs` | `lhs + rhs + carry_in` 的 `(result, carry_out)`；INT32/UINT32 |
+| `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `lhs - rhs - (1 - carry_in)` 的 `(result, not_borrow_out)`；INT32/UINT32 |
+| `gather(tile, offsets, mask)` | `vgather` | 带掩码的索引 UB 读取；非活动结果 lane 为零 |
+| `scatter(tile, offsets, value, mask)` | `vscatter` | 带掩码的索引 UB 写入；返回目标 Tile 别名 |
+| `intlv(lhs, rhs, mask)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
+| `dintlv(lhs, rhs, mask)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
+
+未知索引或动态读取不会关闭同一分配上已知静态读取的初始化检查；调用者仍需保证
+未知读取自身的安全。
+
+双结果通过一个返回元组的 IR Call 和两个 SSA 结果表达。元组、其投影和进借位掩码
+都只能在定义它们的 RegScope 中使用。索引双结果前必须先绑定调用，例如
+`pair = pl.reg.mull(a, b, mask)`，再取 `low = pair[0]`；不支持直接写
+`pl.reg.mull(a, b, mask)[0]`。跨 `if` 合流或循环传递时，必须先拆包为独立
+寄存器，例如 `low, high = pl.reg.mull(a, b, mask)`；校验器拒绝元组类型的
+合流结果和循环携带值。`mull` 的两部分保留输入的符号性。
+减法的进位掩码以 **true 表示无借位**，与控制执行的 mask 是两个不同参数。
+`intlv`/`dintlv` 两个输出的非活动 lane 均为零。PTOAS 0.71 未降低其 mask，
+因此 codegen 在重排后显式选择零。BF16 通过 UINT16 位视图执行选择，保持活动值的位表示。
+
+```python
+# Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
+lo, carry = pl.reg.addc(lo_a, lo_b, mask)
+hi, carry_out = pl.reg.addcs(hi_a, hi_b, carry, mask)
+product_lo, product_hi = pl.reg.mull(lo_a, lo_b, mask)
+interleaved_lo, interleaved_hi = pl.reg.intlv(lo_a, lo_b, mask)
+a, b = pl.reg.dintlv(interleaved_lo, interleaved_hi, mask)
+```
+
+索引访存的 `offsets` 为 UINT16/UINT32 VecReg，lane 数必须与值/结果及 mask 一致。
+索引按**元素**计数，相对于 Tile view 的起点。8/16 位 Tile 元素使用 UINT16
+offsets，32 位 Tile 元素使用 UINT32 offsets，与 PTOAS 的物理索引路径保持一致。
+gather 将 INT8/UINT8 源数据分别零扩展为 INT16/UINT16，其余结果保持 Tile dtype。
+scatter 的值必须匹配 Tile dtype。已有的连续 Vec Tile 几何约束仍然适用。
+
+调用者负责保证活动索引不越界，且 gather 读取的元素已初始化。活动 scatter 索引
+必须互不相同。非活动 lane 不访问内存；scatter 保留所有未写入元素，也不扩大
+`valid_shape`。索引访存效果保留分配根和掩码，但区间端点未知；与动态 offset 一样，
+不构成静态初始化证明。VF helper 保守捕获整个 Tile：gather 为 `read`，scatter 为
+`readwrite`。不同 dtype 的捕获通过同一 UB 基址派生出的对应类型指针访问。
+
+索引 codegen 在每次 gather/scatter 前后发射 `VV_ALL` 屏障，临时处理
+[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 中已复现的
+scatter 到 gather 自动屏障缺失问题。VF 依赖分析由 PTOAS 负责，PyPTO 不再
+检查生成 LLVM 中的屏障覆盖情况。
+
+```python
+with pl.reg_scope():
+    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+    mask = pl.reg.active_mask(32, lanes=64)
+    values = pl.reg.gather(src, offsets, mask)
+    out = pl.reg.scatter(dst, offsets, values, mask)
+```
+
 ## IR Builder 与查询
 
 | API | 含义 |
@@ -259,3 +330,28 @@ Python 文本语法不接受区域元数据。打印带非空 `name_hint` 或 `a
 RegScope 会报错，避免丢失元数据；二进制序列化保留这些字段。空区域打印为 `pass`。
 以上 API 列表表示当前前端支持范围；PTOAS 中没有对应上述 API 的指令尚未通过
 `pl.reg` 暴露。
+
+## 位重解释、直方图与分组掩码
+
+| API | PTOAS 算子 | 契约 |
+| --- | ---------- | ---- |
+| `interpret_cast(value, *, dtype)` | `vinterpret_cast` | 保留所有位，不做数值转换。源和目标均支持 `T`；结果 lane 数为 `input_lanes * input_bits / output_bits`，必须整除。 |
+| `chist(acc, source, mask)` | `vchist` | `result[b] = acc[b] + count(active source <= b)`，按 65536 取模。 |
+| `dhist(acc, source, mask)` | `vdhist` | `result[b] = acc[b] + count(active source == b)`，按 65536 取模。 |
+| `create_group_mask(active_elems_per_group, *, num_groups, group_size)` | `create_group_mask` | 返回 `num_groups * group_size` lane 的 BOOL MaskReg；当 `i % group_size < active_elems_per_group` 时，第 `i` lane 有效。 |
+
+直方图的 `source` 为 UINT8 VecReg，掩码 lane 数必须与**源**一致。
+累加器与结果独立使用 128 或 256 lane 的 UINT16 VecReg，分别覆盖 bin 0–127 或 0–255。
+掩码不控制累加器 bin；空掩码保留原累加器值。两个算子均返回新寄存器值，不修改 `acc`。
+累积直方图的 bin 128–255 也包含小于 128 的源值计数。结果可通过 `pl.reg.store`
+原地写回已读取的累加器区域；PTOAS 根据访存与 SSA 数据依赖确定顺序。
+A5 回归覆盖两个直方图算子的 128/256-bin 原地更新，包括累加器溢出回绕。
+
+分组掩码的组数和组大小必须为正静态整数。每组活动数量为 INDEX 标量或整数字面量，
+范围为 `[0, group_size]`。支持动态数量，由调用者保证范围；常量数量会在构造时检查。
+这四个 API 均无 `pmode` 参数，自身不访问 UB 内存。
+
+PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费者使用
+32 位元素（b32 掩码粒度）。字节和半字消费者（包括直方图）必须使用常量活动数量；
+其他动态粒度会被 PTOAS lowering 拒绝。VF helper 支持混合 Tile dtype：
+从同一 UB 基址派生对应类型的指针，偏移按各 Tile 自身的元素位宽计算。

@@ -16,8 +16,8 @@ flowchart TD
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
   Helper --> LLVM[PTOAS VPTO LLVM and VF synchronization]
-  LLVM --> Admission[Validate supported synchronization contract]
-  Admission --> HelperObj[Bisheng device helper objects]
+  LLVM --> Symbols[Check helper external symbols]
+  Symbols --> HelperObj[Bisheng device helper objects]
   CallerObj --> Link[ld.lld: kernel_entry first]
   HelperObj --> Link
   Link --> ELF[Validate linked device ELF]
@@ -59,11 +59,16 @@ PyPTO adds no fixed `pipe_barrier(PIPE_ALL)` around the call. The normal kernel
 tail synchronization remains enabled. The boundary contract relies on A5 VF
 completion semantics and is restricted to AIV helpers.
 
-Before compiling LLVM to a device object, PyPTO validates the supported
-instruction subset, pointer provenance and existing barrier coverage. This
-check inserts no barriers. Unknown relationships or LLVM output forms fail
-with a diagnostic rather than silently executing. Masked accesses are checked
-over all 64 lanes, so this is not a mask-aware minimal-barrier optimizer.
+PTOAS owns VF dependency analysis and barrier placement, including ordering
+proved by SSA data dependencies. PyPTO passes its LLVM output to Bisheng without
+reconstructing memory dependencies or imposing an LLVM instruction whitelist.
+PTOAS/Bisheng diagnostics propagate to the caller. The separate external-symbol
+and device-image checks below enforce the helper packaging contract.
+
+Indexed gather/scatter currently retain explicit `VV_ALL` barriers as a
+workaround for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730).
+Remove that workaround only after the upstream fix passes numerical validation;
+removing the duplicate LLVM validator does not fix the indexed-memory issue.
 
 ## Device code and ABI
 
@@ -71,7 +76,7 @@ The LLVM pointer `ptr addrspace(6)`, PTO `!pto.ptr<f32, ub>` and the caller's
 `__ubuf__ float*` must describe the same UB address space and parameter ABI.
 Helper compilation retains `--cce-generic-addrspace=off` and uses the A5 vector
 device target. It emits a device object, not a host fat object. LLVM export
-and Bisheng compilation are separate to validate the helper before linking;
+and Bisheng compilation are separate to check external helper symbols before linking;
 all relevant flags participate in the binary cache identity.
 
 The runtime consumes raw code bytes. This path extracts only `.text`, so the
@@ -92,17 +97,19 @@ is position independent; helpers still have to obey the device-call ABI.
 | Property | Current support |
 | -------- | --------------- |
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
-| Scope | Straight-line register operations; static loops must be unrolled |
-| Memory | Contiguous FP32 accesses, 64 lanes, static offsets aligned to 32 bytes |
+| Scope | Straight-line register operations in the current VF emitter |
+| Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed Tile dtypes share one UB base |
 | Aliasing | Common UB base, static view displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
 | Packaging | Source artifact relocation, helper-aware binary cache |
 
-Grouped/peer functions, CPU simulation of device objects, Bridge calls,
-dynamic memory offsets, general helper control flow and other memory formats
-are not admitted. Diagnostic VMI generation supports a wider IR subset than
-this execution path. Extending admission requires corresponding compiler and
-hardware evidence; it must not weaken rejection of unknown relationships.
+Grouped/peer functions, CPU simulation of device objects, Bridge calls and
+general helper control flow remain outside the current executable frontend.
+Removing LLVM synchronization validation does not extend the VF emitter's
+control-flow support. Memory-mode and alignment constraints are checked by the
+frontend and toolchain; supported combinations require compiler and hardware
+coverage. See the [register operation reference](../language/06-register-operations.md)
+for dtype, mask and indexed-access contracts.
 
 ## Run the complete examples
 

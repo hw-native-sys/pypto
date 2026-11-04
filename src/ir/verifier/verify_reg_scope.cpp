@@ -111,15 +111,18 @@ class RegionChecker : public IRVisitor {
         }
       }
     }
-    if (!collecting_ && (As<RegType>(op->var_->GetType()) || As<RegType>(op->value_->GetType())) &&
+    if (!collecting_ &&
+        (ContainsRegionValue(op->var_->GetType(), false) ||
+         ContainsRegionValue(op->value_->GetType(), false)) &&
         !structural_equal(op->var_->GetType(), op->value_->GetType())) {
       Error("Register assignment dtype/kind/lane mismatch", op->span_);
     }
     if (collecting_ && region_ && As<TileType>(op->var_->GetType())) {
       auto call = As<Call>(op->value_);
-      if (!call || call->op_->name_ != "reg.store") {
-        Error("RegScope Tile inputs must originate outside the region; only reg.store returns Tile",
-              op->span_);
+      if (!IsOp(call, "reg.store") && !IsOp(call, "reg.scatter")) {
+        Error(
+            "RegScope Tile inputs must originate outside the region; only reg.store/reg.scatter return Tile",
+            op->span_);
       }
     }
     // LHS is a definition, not a use. Only inspect the RHS here.
@@ -138,6 +141,15 @@ class RegionChecker : public IRVisitor {
         (found == owners_.end() || !region_ || found->second != region_)) {
       Error("Reg must be defined and used within the same RegScope", op->span_);
     }
+  }
+  void VisitExpr_(const TupleGetItemExprPtr& op) override {
+    // Codegen resolves projections from the SSA results of an assigned pair.
+    // A nested call has no assignment to emit or bind those results first.
+    if (collecting_ && As<RegType>(op->GetType()) && !AsVarLike(op->tuple_)) {
+      Error("Register tuple projections require a bound tuple variable; bind the paired call before indexing",
+            op->span_);
+    }
+    IRVisitor::VisitExpr_(op);
   }
   void VisitExpr_(const CallPtr& op) override {
     if (!collecting_ && op->op_->name_.rfind("reg.", 0) == 0) {
@@ -169,7 +181,7 @@ class RegionChecker : public IRVisitor {
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
-      for (const auto& var : op->return_vars_) RecordLocal(var);
+      for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
     yield_region_ = previous;
@@ -191,8 +203,8 @@ class RegionChecker : public IRVisitor {
     yield_region_ = region_;
     if (collecting_) {
       owners_.emplace(op->loop_var_.get(), region_);
-      for (const auto& arg : op->iter_args_) RecordLocal(arg);
-      for (const auto& var : op->return_vars_) RecordLocal(var);
+      for (const auto& arg : op->iter_args_) RecordControlFlowValue(arg);
+      for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
     yield_region_ = previous;
@@ -204,8 +216,8 @@ class RegionChecker : public IRVisitor {
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
-      for (const auto& arg : op->iter_args_) RecordLocal(arg);
-      for (const auto& var : op->return_vars_) RecordLocal(var);
+      for (const auto& arg : op->iter_args_) RecordControlFlowValue(arg);
+      for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
     yield_region_ = previous;
@@ -243,7 +255,13 @@ class RegionChecker : public IRVisitor {
     return result;
   }
 
-  void RecordLocal(const VarPtr& var) {
+  void RecordControlFlowValue(const VarPtr& var) {
+    // Tuple aliases are only lowered within a straight-line block. SCF results
+    // and carries must expose individual registers, including nested tuples.
+    if (region_ && As<TupleType>(var->GetType()) && ContainsRegionValue(var->GetType(), false)) {
+      Error("Register tuples cannot cross control-flow joins or loop carries; unpack the tuple first",
+            var->span_);
+    }
     if (ContainsRegionValue(var->GetType(), true)) owners_.emplace(var.get(), region_);
   }
   template <typename T>

@@ -4477,7 +4477,7 @@ def returned_param_indices(func: Function, program: Program) -> list[int | None]
     ...
 
 def get_reg_memory_effect(call: Call) -> dict[str, Any]:
-    """Get target, root, access, begin/end (None if unknown), and mask."""
+    """Get load/store/gather/scatter effects; indexed begin/end are unknown."""
     ...
 
 def get_reg_op_spec(op_name: str) -> dict[str, Any]:

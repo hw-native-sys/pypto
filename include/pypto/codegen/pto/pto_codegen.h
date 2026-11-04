@@ -840,6 +840,9 @@ class PTOCodegen : public CodegenBase {
   /// Accessed Tile variable -> UB pointer SSA hoisted before pto.vecscope.
   /// Store-result aliases may share one pointer; cleared after each RegScope.
   std::map<const ir::Var*, std::string> reg_addresses_;
+  /// Tuple SSA values have no aggregate MLIR representation. Keep each result
+  /// independently addressable, including when only one projection is consumed.
+  std::map<const ir::Var*, std::vector<std::string>> reg_tuple_values_;
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
   bool separate_vf_ = false;

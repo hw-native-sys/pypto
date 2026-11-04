@@ -2341,6 +2341,50 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Build extended register ST artifacts
+        id: reg-extended-build
+        shell: bash
+        timeout-minutes: 125
+        # Compile without reserving an NPU. Execution below consumes these
+        # production artifacts and checks all 18 ops across 126 numerical cases.
+        run: |
+          source activate.sh
+          mkdir -p build
+          output=$(mktemp -d "$PWD/build/reg-extended-ci.XXXXXX")
+          echo "artifacts=$output" >> "$GITHUB_OUTPUT"
+          task-submit --no-device --timeout 7200 --max-time 1800 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 && \
+              python tests/st/runtime/vpto/test_reg_extended_onboard.py --build '$output'" \
+            2>&1 | tee "$output/build.log"
+
+      - name: reg-extended-tests-a5
+        shell: bash
+        timeout-minutes: 125
+        env:
+          REG_EXTENDED_OUTPUT: ${{ steps.reg-extended-build.outputs.artifacts }}
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 900 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 \
+                PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID=\$TASK_DEVICE \
+                PYPTO_VPTO_RUNTIME_OUTPUT='$REG_EXTENDED_OUTPUT' && \
+              python -m pytest tests/st/runtime/vpto/test_reg_extended_onboard.py \
+                --platform=a5 --device=\$TASK_DEVICE -v \
+                --junitxml='$REG_EXTENDED_OUTPUT/junit.xml'" \
+            2>&1 | tee "$REG_EXTENDED_OUTPUT/task-submit.log"
+
+      - name: Upload extended register A5 results
+        if: always() && steps.reg-extended-build.outputs.artifacts != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: reg-extended-a5-results
+          path: ${{ steps.reg-extended-build.outputs.artifacts }}
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Kill orphaned task-submit tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks

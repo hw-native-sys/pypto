@@ -898,7 +898,7 @@ void BindIR(nb::module_& m) {
         result["mask"] = nb::cast(effect.mask);
         return result;
       },
-      nb::arg("call"), "Get the schema memory interval in root element coordinates");
+      nb::arg("call"), "Get load/store/gather/scatter effects; indexed intervals are unknown");
   ir.def(
       "get_reg_op_spec",
       [](const std::string& name) {

@@ -28,7 +28,7 @@ from typing import Any, cast
 from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
 
-from . import _vpto, _vpto_sync
+from . import _vpto
 
 # `check_runtime_pin()` has to run before the simpler imports it guards, so the imports
 # below are deliberately not at the top of the file (E402 is ignored in pyproject.toml).
@@ -295,7 +295,6 @@ class KernelCompiler:
                 repr(_vpto.DEVICE_FLAGS),
                 repr(_vpto.CALLER_FLAGS),
                 repr(_vpto.LINK_SYMBOL_ORDER),
-                _vpto_sync.VERSION,
                 repr(self.sdk.ccec.get_compile_flags(core_type=core_type)),
             ),
         )
@@ -322,7 +321,8 @@ class KernelCompiler:
                     f"VPTO helper {source} is not self-contained: {', '.join(unsupported)}. "
                     "Bridge operations and external helper dependencies are not supported."
                 )
-            _vpto_sync.validate_sync_contract(llvm.read_text(), source)
+            # PTOAS owns VF dependency analysis, including ordering through SSA
+            # values. Do not re-infer synchronization from emitted LLVM text.
             self._run(
                 [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)],
                 obj,

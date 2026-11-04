@@ -27,6 +27,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from pypto.backend._ptoas_locate import find_ptoas_binary
 
 SOURCE = Path(__file__).resolve().parent
 ROOT = SOURCE.parents[3]
@@ -34,6 +35,13 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("PYPTO_RUN_VPTO_VF_VALIDATION") != "1",
     reason="Explicitly opt in to the installed A5 compiler toolchain",
 )
+
+
+def require_ptoas() -> str:
+    """Use the production compiler pin instead of an unrelated CANN PATH launcher."""
+    ptoas = find_ptoas_binary()
+    assert ptoas, "PTOAS must be available under PTOAS_ROOT, or on PATH when PTOAS_ROOT is unset"
+    return ptoas
 
 
 def run(
@@ -100,8 +108,7 @@ def compiled() -> tuple[Path, Path, list[str]]:
     ).resolve()
     output.mkdir(parents=True, exist_ok=True)
     cann = Path(os.environ["ASCEND_HOME_PATH"]).resolve()
-    ptoas = shutil.which("ptoas")
-    assert ptoas, "ptoas must be on PATH"
+    ptoas = require_ptoas()
     compiler = cann / "bin/bisheng"
     version = run(output, "ptoas-version", [ptoas, "--version"]).strip()
     (output / "environment.json").write_text(
@@ -291,8 +298,7 @@ def _standalone_numerics(
     shutil.copyfile(base / "wrapper.cpp", output / "wrapper.cpp")
     compiler = cann / "bin/bisheng"
     simulator = Path(os.environ.get("PYPTO_VPTO_SIM_LIB", cann / "tools/simulator/dav_3510/lib"))
-    ptoas = shutil.which("ptoas")
-    assert ptoas
+    ptoas = require_ptoas()
     includes = json.loads((base / "includes.json").read_text())
     run(
         output,

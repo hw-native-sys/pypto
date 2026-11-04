@@ -12,6 +12,7 @@
 #include <any>
 #include <cstddef>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -66,13 +67,16 @@ class ScopeOperands : public IRVisitor {
     if (As<RegType>(stmt->var_->GetType()) || As<ScalarType>(stmt->var_->GetType())) {
       locals.push_back(stmt->var_);
     }
-    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store")) {
+    if (auto call = As<Call>(stmt->value_); call && (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
     }
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) memory.push_back(call);
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+        IsOp(call, "reg.scatter")) {
+      memory.push_back(call);
+    }
     IRVisitor::VisitExpr_(call);
   }
   void VisitStmt_(const ForStmtPtr& stmt) override {
@@ -210,6 +214,7 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
   EmitStructural("}");
   inside_reg_scope_ = false;
   reg_addresses_.clear();
+  reg_tuple_values_.clear();
   for (const auto& local : operands.locals) fs_.var_to_mlir.erase(local.get());
 }
 
@@ -231,6 +236,50 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (auto reg = ir::As<ir::RegType>(expr->GetType())) return GetRegTypeString(reg);
     return GetTypeString(ir::As<ir::ScalarType>(expr->GetType())->dtype_);
   };
+  const bool indexed_read = ir::IsOp(call, "reg.gather");
+  if (indexed_read || ir::IsOp(call, "reg.scatter")) {
+    auto target = ir::AsVarLike(args[0]);
+    auto addr = reg_addresses_.find(target.get());
+    INTERNAL_CHECK_SPAN(addr != reg_addresses_.end(), call->span_)
+        << "Internal error: unprepared indexed register address";
+    auto tile = ir::As<ir::TileType>(args[0]->GetType());
+    const std::string element = RegisterElement(tile->dtype_);
+    const std::string ptr_type = "!pto.ptr<" + element + ", ub>";
+    auto pointer = addr->second;
+    // Index vectors are element offsets from the view, whereas tile_buf_addr
+    // denotes the allocation. Shift the base exactly once, without rewriting
+    // the user's index vector (which may have a narrower integer width).
+    if (tile->tile_view_ && tile->tile_view_->start_offset) {
+      auto origin = EmitArithOperand(tile->tile_view_->start_offset, "index");
+      auto adjusted = NewNamedTemp("reg_indexed_base");
+      Emit(adjusted + " = pto.addptr " + pointer + ", " + origin + " : <" + element + ", ub> -> <" + element +
+           ", ub>");
+      pointer = adjusted;
+    }
+    // Indexed footprints are unknown. PTOAS 0.71 does not insert all of
+    // their dependencies, so fence both sides against any surrounding UB
+    // access, including aliased Tile views and later contiguous stores.
+    Emit("pto.mem_bar \"VV_ALL\"");
+    if (indexed_read) {
+      auto name = NewNamedTemp(result->name_hint_);
+      Emit(name + " = " + spec->emitter + " " + pointer + ", " + GetExprAsCode(args[1]) + ", " +
+           GetExprAsCode(args[2]) + " {pmode = \"zero\"} : " + ptr_type + ", " + operand_type(args[1]) +
+           ", " + operand_type(args[2]) + " -> " +
+           GetRegTypeString(ir::As<ir::RegType>(validated->GetType())));
+      BindVarToMlir(result, name);
+    } else {
+      // Scatter is intrinsically mask-governed: inactive addresses retain their
+      // contents. Its PTOAS schema uses zero pmode, not vstore's merge attribute.
+      Emit(spec->emitter + " " + GetExprAsCode(args[2]) + ", " + pointer + ", " + GetExprAsCode(args[1]) +
+           ", " + GetExprAsCode(args[3]) + " : " + operand_type(args[2]) + ", " + ptr_type + ", " +
+           operand_type(args[1]) + ", " + operand_type(args[3]));
+      BindVarToMlir(result, GetExprAsCode(args[0]));
+      auto ctx = GetCommCtxSSAFor(target.get());
+      if (!ctx.empty()) RegisterCommCtxFor(result, ctx);
+    }
+    Emit("pto.mem_bar \"VV_ALL\"");
+    return true;
+  }
   const bool store = ir::IsOp(call, "reg.store");
   if (store || ir::IsOp(call, "reg.load")) {
     // Dynamic offsets pass directly to VMI; initialization analysis is an
@@ -273,6 +322,14 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     BindVarToMlir(result, name);
     return true;
   }
+  // PTOAS VMULL uniquely spells the signed form as signless i32 (and rejects
+  // si32). Bitwise reinterpretation bridges that ABI without changing PyPTO's
+  // signed register type or numerically converting either product half.
+  const bool signed_mull =
+      ir::IsOp(call, "reg.mull") && ir::As<ir::RegType>(args[0]->GetType())->dtype_ == DataType::INT32;
+  auto mull_type = [](const ir::RegTypePtr& type) {
+    return "!pto.vmi.vreg<" + std::to_string(type->shape_) + "xi32>";
+  };
   std::string operands, types, attrs;
   for (const auto& arg : args) {
     if (!operands.empty()) {
@@ -281,6 +338,15 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     }
     auto value = GetExprAsCode(arg);
     auto type = operand_type(arg);
+    if (signed_mull) {
+      if (auto reg = ir::As<ir::RegType>(arg->GetType()); reg && reg->kind_ == ir::RegKind::VecReg) {
+        auto typed = NewNamedTemp("mull_signed_input");
+        auto signless = mull_type(reg);
+        Emit(typed + " = pto.vmi.vinterpret_cast " + value + " : " + type + " -> " + signless);
+        value = typed;
+        type = signless;
+      }
+    }
     if (ir::IsOp(call, "reg.broadcast") || ir::IsOp(call, "reg.adds") || ir::IsOp(call, "reg.muls") ||
         ir::IsOp(call, "reg.maximums") || ir::IsOp(call, "reg.minimums") || ir::IsOp(call, "reg.compares")) {
       auto scalar = ir::As<ir::ScalarType>(arg->GetType());
@@ -296,6 +362,13 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     types += type;
   }
   if (ir::IsOp(call, "reg.full_mask")) operands = "\"PAT_ALL\"";
+  if (ir::IsOp(call, "reg.create_group_mask")) {
+    attrs = " {num_groups = " +
+            std::to_string(ir::GetRequiredKwarg<int>(call->kwargs_, "num_groups", "reg.create_group_mask")) +
+            ", group_size = " +
+            std::to_string(ir::GetRequiredKwarg<int>(call->kwargs_, "group_size", "reg.create_group_mask")) +
+            "}";
+  }
   if (ir::IsOp(call, "reg.index_gen")) {
     attrs = " {order = \"ASC\"}";
   }
@@ -322,16 +395,80 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (!attrs.empty()) attrs += "}";
   }
 
-  // Attribute-driven predication works for unary, binary and scalar families
-  // without confusing compare seeds or lane-permutation operands with masks.
+  // Only schemas with a pmode attribute may emit it. Carry operations have
+  // a mandatory governing mask but no pmode, unlike ordinary arithmetic.
   for (const auto& [key, value] : call->kwargs_) {
     if (key == "pmode") attrs = " {pmode = \"zero\"}";
     if (key == "reassoc" && std::any_cast<bool>(value)) attrs = " {reassoc}";
   }
+  if (auto tuple = ir::As<ir::TupleType>(validated->GetType())) {
+    std::vector<std::string> names;
+    std::string results, result_types;
+    for (size_t i = 0; i < tuple->types_.size(); ++i) {
+      auto type = ir::As<ir::RegType>(tuple->types_[i]);
+      INTERNAL_CHECK_SPAN(type, call->span_) << "Internal error: RegOp tuple must contain registers";
+      auto name = NewNamedTemp(result->name_hint_ + "_" + std::to_string(i));
+      if (i) {
+        results += ", ";
+        result_types += ", ";
+      }
+      results += name;
+      result_types += signed_mull ? mull_type(type) : GetRegTypeString(type);
+      names.push_back(name);
+    }
+    Emit(results + " = " + spec->emitter + " " + operands + attrs + " : " + types + " -> " + result_types);
+    if (signed_mull) {
+      for (size_t i = 0; i < names.size(); ++i) {
+        auto type = ir::As<ir::RegType>(tuple->types_[i]);
+        auto typed = NewNamedTemp("mull_signed_result");
+        Emit(typed + " = pto.vmi.vinterpret_cast " + names[i] + " : " + mull_type(type) + " -> " +
+             GetRegTypeString(type));
+        names[i] = typed;
+      }
+    }
+    if (ir::IsOp(call, "reg.intlv") || ir::IsOp(call, "reg.dintlv")) {
+      // PTOAS 0.71 emits unmasked interleave instructions even with pmode=zero.
+      // Enforce the public inactive-lane contract on both independent results.
+      auto type = ir::As<ir::RegType>(tuple->types_[0]);
+      const bool bfloat = type->dtype_ == DataType::BF16;
+      auto select_reg =
+          bfloat ? std::make_shared<ir::RegType>(type->shape_, DataType::UINT16, ir::RegKind::VecReg) : type;
+      const auto select_type = GetRegTypeString(select_reg);
+      const auto original_type = GetRegTypeString(type);
+      auto zero = NewNamedTemp("interleave_zero");
+      Emit(zero + " = \"pto.vmi.constant\"() {value = dense<" + (select_reg->dtype_.IsFloat() ? "0.0" : "0") +
+           "> : tensor<" + std::to_string(type->shape_) + "x" + RegisterElement(select_reg->dtype_) +
+           ">} : () -> " + select_type);
+      for (auto& value : names) {
+        if (bfloat) {
+          auto bits = NewNamedTemp("interleave_bits");
+          Emit(bits + " = pto.vmi.vinterpret_cast " + value + " : " + original_type + " -> " + select_type);
+          value = bits;
+        }
+        auto masked = NewNamedTemp("interleave_masked");
+        Emit(masked + " = pto.vmi.vsel " + GetExprAsCode(args.back()) + ", " + value + ", " + zero + " : " +
+             operand_type(args.back()) + ", " + select_type + ", " + select_type + " -> " + select_type);
+        value = masked;
+        if (bfloat) {
+          auto restored = NewNamedTemp("interleave_bfloat");
+          Emit(restored + " = pto.vmi.vinterpret_cast " + value + " : " + select_type + " -> " +
+               original_type);
+          value = restored;
+        }
+      }
+    }
+    reg_tuple_values_[result.get()] = std::move(names);
+    return true;
+  }
   auto name = NewNamedTemp(result->name_hint_);
   auto type = GetRegTypeString(ir::As<ir::RegType>(validated->GetType()));
-  Emit(name + " = " + spec->emitter + " " + operands + attrs + " : " +
-       (types.empty() ? type : types + " -> " + type));
+  if (ir::IsOp(call, "reg.axpy") || ir::IsOp(call, "reg.lrelu")) {
+    // These scalar-float VMI schemas provide only MLIR's generic assembly form.
+    Emit(name + " = \"" + spec->emitter + "\"(" + operands + ")" + attrs + " : (" + types + ") -> " + type);
+  } else {
+    Emit(name + " = " + spec->emitter + " " + operands + attrs + " : " +
+         (types.empty() ? type : types + " -> " + type));
+  }
   BindVarToMlir(result, name);
   return true;
 }

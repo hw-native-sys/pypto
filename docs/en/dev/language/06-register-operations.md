@@ -38,9 +38,10 @@ The optional third annotation field is the register kind; its default is
 
 External Tiles and read-only Scalars are implicit inputs. Registers and local
 Scalars cannot escape their defining region through later uses, function returns,
-loop results, tuples or assignments to outer variables. Tile operands must
-originate outside the region; `store` returns an alias usable after the region.
-Assign every operation result to a variable, including `store`; a bare store is
+loop results, tuples or assignments to outer variables. Nested tuple types are
+checked at function boundaries too. Tile operands must
+originate outside the region; `store` and `scatter` return aliases usable after the region.
+Assign every operation result to a variable, including `store` and `scatter`; a bare store is
 rejected. For loop APIs and hardware-loop policy, see [statements](01-statements.md).
 `pl.hardware_loop()` (`HardwareLoopPolicy.Require`) is restricted to this lexical
 scope, including when the loop has zero trips.
@@ -58,7 +59,7 @@ scope, including when the loop has zero trips.
 | `pmode` | Inactive-result policy. Only `"zero"` is accepted, so inactive vector lanes become zero. |
 
 `*` in a signature starts keyword-only parameters. Omitted optional masks mean
-all lanes participate. Except for conversion and reduction, results preserve the
+all lanes participate. Except for conversion, reinterpretation, histograms, reduction, `expdif` and byte `gather`, results preserve the
 input vector dtype and lanes. There is no implicit vector promotion or lane
 broadcasting. DSL numeric literals are normalized to the requested scalar dtype;
 Python `bool` is not accepted as an integer argument. Raw IR and Builder operands
@@ -261,6 +262,87 @@ attributes are omitted. Other dtype pairs are rejected, including BF16
 conversions. Raw IR/Builder calls must supply normalized rounding explicitly
 where required; the defaults above are supplied by the DSL wrapper.
 
+## Extended VMI operations
+
+These APIs live under `pl.reg` and emit the corresponding `pto.vmi.v*` operation.
+All require a governing mask except `mula`, whose mask is optional. Arithmetic
+`pmode` is `"zero"`; carry operations and `scatter` expose no `pmode` argument.
+Vector operands must agree in dtype, signedness and lane count unless explicitly
+specified below. Existing scalar SSA values are never implicitly cast; Python
+scalar literals for `axpy`/`lrelu` are normalized to the vector dtype.
+
+| API (positional arguments) | VMI op | Result and contract |
+| -------------------------- | ------ | ------------------- |
+| `expdif(x, max_value, mask)` | `vexpdif` | Fused `exp(x - max_value)`; FP16/FP32 inputs, always FP32 result |
+| `axpy(x, acc, alpha, mask)` | `vaxpy` | Fused `alpha * x + acc`; FP16/FP32, scalar alpha |
+| `mula(acc, lhs, rhs, mask=None)` | `vmula` | Fused `acc + lhs * rhs`; FP16/BF16/FP32 or signed/unsigned 16/32-bit integers |
+| `lrelu(x, slope, mask)` | `vlrelu` | Leaky ReLU; FP16/FP32, scalar slope |
+| `prelu(x, alpha, mask)` | `vprelu` | PReLU; FP16/FP32, per-lane alpha vector |
+| `mull(lhs, rhs, mask)` | `vmull` | `(low, high)` 32-bit product halves; INT32/UINT32, 64/128/256 lanes |
+| `addc(lhs, rhs, mask)` | `vaddc` | `(result, carry)`; INT32/UINT32 |
+| `subc(lhs, rhs, mask)` | `vsubc` | `(result, not_borrow)`; INT32/UINT32 |
+| `addcs(lhs, rhs, carry_in, mask)` | `vaddcs` | `(result, carry_out)` for `lhs + rhs + carry_in`; INT32/UINT32 |
+| `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `(result, not_borrow_out)` for `lhs - rhs - (1 - carry_in)`; INT32/UINT32 |
+| `gather(tile, offsets, mask)` | `vgather` | Masked indexed UB read; inactive result lanes are zero |
+| `scatter(tile, offsets, value, mask)` | `vscatter` | Masked indexed UB write; returns the destination Tile alias |
+| `intlv(lhs, rhs, mask)` | `vintlv` | `(low, high)` interleaved vectors; even lane count |
+| `dintlv(lhs, rhs, mask)` | `vdintlv` | `(even, odd)` deinterleaved vectors; even lane count |
+
+Unknown indexed or dynamic reads do not disable initialization checks for known
+static reads on the same allocation. Their own safety remains the caller's responsibility.
+
+Paired results use one tuple-producing IR Call and two SSA results. The tuple,
+its projections and all carry masks remain local to the defining RegScope.
+Bind a paired call before indexing it: use `pair = pl.reg.mull(a, b, mask)`
+followed by `low = pair[0]`. Direct `pl.reg.mull(a, b, mask)[0]` is rejected.
+Unpack paired results before carrying them through `if` joins or loops: pass
+individual registers (for example, `low, high = pl.reg.mull(a, b, mask)`),
+not the tuple itself. The verifier rejects tuple-valued joins and loop carries.
+`mull` preserves input signedness in both halves. Subtraction carry masks use
+**true for no borrow**; they are distinct from the execution mask.
+Both outputs of `intlv`/`dintlv` have zero in inactive lanes. Codegen explicitly
+selects zero after rearrangement because PTOAS 0.71 does not lower their mask.
+BF16 uses bitwise UINT16 views for this selection, preserving active values.
+
+```python
+# Inside a reg_scope, with matching UINT32 registers lo_a/lo_b/hi_a/hi_b:
+lo, carry = pl.reg.addc(lo_a, lo_b, mask)
+hi, carry_out = pl.reg.addcs(hi_a, hi_b, carry, mask)
+product_lo, product_hi = pl.reg.mull(lo_a, lo_b, mask)
+interleaved_lo, interleaved_hi = pl.reg.intlv(lo_a, lo_b, mask)
+a, b = pl.reg.dintlv(interleaved_lo, interleaved_hi, mask)
+```
+
+For indexed memory, `offsets` is a UINT16/UINT32 VecReg with the same lane count
+as the value/result and mask. Indices count **elements**, relative to the Tile
+view origin. Use UINT16 offsets for 8/16-bit Tile elements and UINT32 offsets
+for 32-bit Tile elements, matching the PTOAS physical indexed paths. INT8/UINT8
+gather sources are zero-extended to INT16/UINT16 respectively. Other gather results retain the
+Tile dtype. Scatter values must match the Tile dtype. The existing contiguous
+Vec Tile geometry restrictions still apply.
+
+The caller must ensure active indexed addresses are in bounds and gather reads
+initialized elements. Active scatter indices must be pairwise distinct.
+Inactive lanes perform no memory access, and scatter preserves every unwritten
+element without enlarging `valid_shape`. Indexed effects retain the allocation
+root and predicate but have unknown interval endpoints. Like dynamic offsets,
+they do not establish static initialization proofs. VF helpers capture the
+whole accessed Tile conservatively (`read` for gather, `readwrite` for scatter).
+Mixed-dtype captures use typed pointers derived from the same UB base.
+
+Indexed codegen emits a `VV_ALL` barrier before and after each gather/scatter
+as a workaround for the reproduced missing scatter-to-gather barrier in
+[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730). PTOAS owns
+VF dependency analysis; PyPTO does not recheck barrier coverage in emitted LLVM.
+
+```python
+with pl.reg_scope():
+    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+    mask = pl.reg.active_mask(32, lanes=64)
+    values = pl.reg.gather(src, offsets, mask)
+    out = pl.reg.scatter(dst, offsets, values, mask)
+```
+
 ## IR Builder and inspection
 
 | API | Meaning |
@@ -282,3 +364,34 @@ RegScope with nonempty `name_hint` or `attrs` raises an error to avoid losing
 metadata; binary serialization preserves those fields. Empty scopes print as
 `pass`. The API list above describes the supported frontend surface; PTOAS
 instructions without a corresponding listed API are not exposed through `pl.reg`.
+
+## Bit reinterpretation, histograms and grouped masks
+
+| API | PTOAS operation | Contract |
+| --- | --------------- | -------- |
+| `interpret_cast(value, *, dtype)` | `vinterpret_cast` | Preserve every bit, without numeric conversion. Source and destination use `T`; result lanes equal `input_lanes * input_bits / output_bits`, which must be integral. |
+| `chist(acc, source, mask)` | `vchist` | `result[b] = acc[b] + count(active source <= b)`, modulo 65536. |
+| `dhist(acc, source, mask)` | `vdhist` | `result[b] = acc[b] + count(active source == b)`, modulo 65536. |
+| `create_group_mask(active_elems_per_group, *, num_groups, group_size)` | `create_group_mask` | Return a BOOL MaskReg with `num_groups * group_size` lanes. Lane `i` is active iff `i % group_size < active_elems_per_group`. |
+
+Histogram `source` is a UINT8 VecReg; its governing mask has the **source**
+lane count. The independent accumulator and result are UINT16 VecRegs with
+128 or 256 bins, covering 0–127 or 0–255. The mask does not gate accumulator
+bins: an empty mask returns the accumulator unchanged. Both operations return
+new register values without mutating `acc`. Cumulative bins 128–255 include
+counts from values below 128 as well. Results can be stored back over the loaded
+accumulator with `pl.reg.store`; PTOAS determines ordering from memory and SSA
+dependencies. The A5 regression covers both histogram operations with in-place
+128/256-bin updates, including accumulator wraparound.
+
+Grouped-mask geometry consists of positive static integers. The active count
+is an INDEX scalar or integer literal in `[0, group_size]`; dynamic counts are
+supported and callers must keep them in range. Constant counts are validated.
+These four APIs have no `pmode` argument and access no UB memory themselves.
+
+PTOAS 0.70 restricts **dynamic** grouped masks to power-of-two `group_size`
+and 32-bit consumers (b32 mask granularity). Use constant active counts for
+byte/halfword consumers, including histograms. Other dynamic granularities
+are rejected by PTOAS lowering. VF helpers support mixed Tile dtypes through
+typed pointers derived from one shared UB base; offsets use each Tile's own
+element width.

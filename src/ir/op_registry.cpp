@@ -331,12 +331,15 @@ std::vector<std::pair<std::string, std::any>> NormalizeRegKwargs(
     return std::any_of(normalized.begin(), normalized.end(),
                        [&key](const auto& item) { return item.first == key; });
   };
-  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
-       op_name == "reg.minimum" || op_name == "reg.maximum") &&
-      !has_kwarg("pmode")) {
+  if (op_name.rfind("reg.", 0) != 0) return normalized;
+  const auto op = OpRegistry::GetInstance().GetOp(op_name);
+  // Every public register pmode currently defaults to zero. Drive this from
+  // the schema so DSL, Builder and raw IR construction cannot drift as new
+  // operations are added; carry ops have no pmode and remain attribute-free.
+  if (op->GetAttrs().count("pmode") && !has_kwarg("pmode")) {
     normalized.emplace_back("pmode", std::string("zero"));
   }
-  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
+  if (IsOp(op, "reg.index_gen") && !has_kwarg("order")) {
     normalized.emplace_back("order", std::string("ascending"));
   }
   return normalized;

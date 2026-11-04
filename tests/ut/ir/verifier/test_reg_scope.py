@@ -409,5 +409,44 @@ def test_tuple_cannot_hide_local_scalar_escape():
     assert any("escape" in d.message for d in verify(body))
 
 
+@pytest.mark.parametrize("control_flow", ["if", "for"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+def test_register_control_flow_requires_unpacked_values(control_flow, nested, packed):
+    r = register()
+    initial = r
+    statements: list[ir.Stmt] = [definition(r)]
+    if packed:
+        value = ir.MakeTuple([r], SPAN)
+        if nested:
+            value = ir.MakeTuple([value], SPAN)
+        initial = ir.Var("pair", value.type, SPAN)
+        statements.append(ir.AssignStmt(initial, value, SPAN))
+    result = ir.Var("result", initial.type, SPAN)
+    if control_flow == "if":
+        branch = ir.YieldStmt([initial], SPAN)
+        flow = ir.IfStmt(ir.ConstBool(True, SPAN), branch, branch, [result], SPAN)
+    else:
+        carry = ir.IterArg("carry", initial.type, initial, SPAN)
+        flow = ir.ForStmt(
+            scalar("i"),
+            integer(0),
+            integer(4),
+            integer(1),
+            [carry],
+            ir.YieldStmt([carry], SPAN),
+            [result],
+            SPAN,
+        )
+    statements.extend([flow, ir.EvalStmt(result, SPAN)])
+    diagnostics = verify(region(sequence(*statements)))
+    # Reject tuples before codegen can lose their components at an SCF join;
+    # carrying the unpacked register remains supported.
+    if packed:
+        assert any("unpack the tuple first" in d.message for d in diagnostics)
+    else:
+        assert diagnostics == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
